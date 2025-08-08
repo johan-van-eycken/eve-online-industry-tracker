@@ -1,9 +1,9 @@
 import streamlit as st
 from database import load_df
 
-st.set_page_config(page_title="EVE Online Dashboard", layout="wide")
+st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 
-st.title("EVE Online Dashboard")
+st.title("EVE Online Industry Tracker")
 
 tab1, tab2 = st.tabs(["Assets", "Wallet Transactions"])
 
