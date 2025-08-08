@@ -1,2 +1,2 @@
 # eve-online-industry-tracker
-AWS development test
+Python development test
