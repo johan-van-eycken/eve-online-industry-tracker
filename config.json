@@ -1,0 +1,6 @@
+{
+    "client_id": "84f5c62c020c46559d2b8615ea1eb146",
+    "client_secret": "Ycat3B99Uo0hwhnYCm9F1Yr5lEbXfrh3cWu0HJRho",
+    "callback_url": "http://localhost:8080/callback",
+    "refresh_token": null
+}
