@@ -1,120 +1,124 @@
+import logging
 import requests
-import json
-import socketserver
 import webbrowser
 from urllib.parse import urlencode
-from pathlib import Path
 from typing import Any, Dict
+from oauth import OAuthHandler, OAuthServer
+from config import ConfigManager
 
-CONFIG_FILE = Path("config.json")
-PORT = 8080
-REDIRECT_URI = f"http://localhost:{PORT}/callback"
-ESI_BASE = "https://esi.evetech.net/latest"
+class ESIClient:
+    def __init__(self):
+        self.cfg = ConfigManager()
+        self.port = self.cfg.get("port")
+        self.redirect_uri = self.cfg.get("redirect_uri")
+        self.esi_base = self.cfg.get("esi_base")
+        self.auth_url = self.cfg.get("auth_url")
+        self.token_url = self.cfg.get("token_url")
+        self.verify_url = self.cfg.get("verify_url")
+        self.user_agent = self.cfg.get("user_agent")
+        self.scope = self.cfg.get("scope")
+        self.client_id = self.cfg.get("client_id")
+        self.client_secret = self.cfg.get("client_secret")
+        self.token = None
+        self.character_info = None
+        self.character_id = None
+        self.character_name = None
 
-def load_config() -> Dict[str, Any]:
-    """Load configuration from config.json."""
-    if CONFIG_FILE.exists():
-        return json.loads(CONFIG_FILE.read_text())
-    else:
-        raise FileNotFoundError("config.json not found")
+    def login(self) -> Dict[str, Any]:
+        """
+        Authenticate and verify, returns character info dict.
+        """
+        self.token = self._get_access_token()
+        self.character_info = self._verify_token()
+        self.character_id = self.character_info["CharacterID"]
+        self.character_name = self.character_info["CharacterName"]
+        logging.info(f"Logged in as {self.character_name}")
+        return self.character_info
 
-def save_config(cfg: Dict[str, Any]) -> None:
-    """Save configuration to config.json."""
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=4))
-
-def get_authorization_code(client_id: str, scope: str) -> str:
-    """Start a local server and open browser for OAuth authorization code."""
-    from oauth import OAuthHandler  # Import here to avoid circular import
-    with socketserver.TCPServer(("localhost", PORT), OAuthHandler) as httpd:
-        params = {
-            "response_type": "code",
-            "redirect_uri": REDIRECT_URI,
-            "client_id": client_id,
-            "scope": scope,
-            "state": "eve_auth"
+    def esi_get(self, endpoint: str) -> Any:
+        """Perform an authenticated GET request to the ESI API."""
+        if not self.token:
+            logging.error("No access token available. Please login first.")
+            raise RuntimeError("No access token available. Please login first.")
+        url = self.esi_base + endpoint
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "User-Agent": self.user_agent
         }
-        auth_url = "https://login.eveonline.com/v2/oauth/authorize/?" + urlencode(params)
-        print("Opening browser for OAuth login...")
-        webbrowser.open(auth_url)
-        httpd.handle_request()  # blocks here until code received
-        return httpd.code
+        resp = None
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            resp_text = resp.text if resp is not None else ''
+            logging.error(f"Error fetching ESI data from {endpoint}: {e} ({resp_text})")
+            raise
 
-def get_access_token() -> str:
-    """Obtain a valid ESI access token, refreshing or authorizing as needed."""
-    cfg = load_config()
-    client_id = cfg["client_id"]
-    client_secret = cfg["client_secret"]
-    scope = "esi-assets.read_assets.v1 esi-wallet.read_character_wallet.v1"
-
-    try:
-        if not cfg.get("refresh_token"):
-            # Get authorization code via local server
-            code = get_authorization_code(client_id, scope)
-
-            # Exchange authorization code for tokens
+    def _get_access_token(self) -> str:
+        """Obtain a valid ESI access token, refreshing or authorizing as needed."""
+        try:
+            refresh_token = self.cfg.get("refresh_token")
+            if not refresh_token:
+                code = self._get_authorization_code()
+                token_resp = requests.post(
+                    self.token_url,
+                    auth=(self.client_id, self.client_secret),
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": self.redirect_uri,
+                    },
+                    timeout=10
+                )
+                token_resp.raise_for_status()
+                token_data = token_resp.json()
+                self.cfg.set("refresh_token", token_data["refresh_token"])
+                refresh_token = token_data["refresh_token"]
             token_resp = requests.post(
-                "https://login.eveonline.com/v2/oauth/token",
-                auth=(client_id, client_secret),
+                self.token_url,
+                auth=(self.client_id, self.client_secret),
                 data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": REDIRECT_URI,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
                 },
                 timeout=10
             )
             token_resp.raise_for_status()
             token_data = token_resp.json()
-            cfg["refresh_token"] = token_data["refresh_token"]
-            save_config(cfg)
-        else:
-            code = None
+            if token_data.get("refresh_token") and token_data["refresh_token"] != refresh_token:
+                self.cfg.set("refresh_token", token_data["refresh_token"])
+            return token_data["access_token"]
+        except requests.RequestException as e:
+            logging.error(f"Error obtaining access token: {e}")
+            raise
 
-        # Use refresh token to get access token
-        token_resp = requests.post(
-            "https://login.eveonline.com/v2/oauth/token",
-            auth=(client_id, client_secret),
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": cfg["refresh_token"],
-            },
-            timeout=10
-        )
-        token_resp.raise_for_status()
-        token_data = token_resp.json()
+    def _verify_token(self) -> Dict[str, Any]:
+        """Verify an ESI access token and return its payload."""
+        headers = {"Authorization": f"Bearer {self.token}"}
+        resp = None
+        try:
+            resp = requests.get(self.verify_url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            logging.error(f"Error verifying token: {e} ({resp.text if resp is not None else ''})")
+            raise
 
-        # Save refresh token if it changed
-        if token_data.get("refresh_token") and token_data["refresh_token"] != cfg.get("refresh_token"):
-            cfg["refresh_token"] = token_data["refresh_token"]
-            save_config(cfg)
-
-        return token_data["access_token"]
-    except requests.RequestException as e:
-        print(f"Error obtaining access token: {e}")
-        raise
-
-def verify_token(token: str) -> Dict[str, Any]:
-    """Verify an ESI access token and return its payload."""
-    url = "https://login.eveonline.com/oauth/verify"
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.RequestException as e:
-        print(f"Error verifying token: {e}")
-        raise
-
-def esi_get(endpoint: str, token: str) -> Any:
-    """Perform an authenticated GET request to the ESI API."""
-    url = ESI_BASE + endpoint  # build full URL
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "eve-online-industry-tracker/1.0"
-    }
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.RequestException as e:
-        print(f"Error fetching ESI data: {e}")
-        raise
+    def _get_authorization_code(self, state: str = "eve_auth") -> str:
+        """Start a local server and open browser for OAuth authorization code."""
+        with OAuthServer(("localhost", self.port), OAuthHandler) as httpd:
+            params = {
+                "response_type": "code",
+                "redirect_uri": self.redirect_uri,
+                "client_id": self.client_id,
+                "scope": self.scope,
+                "state": state
+            }
+            auth_url = self.auth_url + "?" + urlencode(params)
+            logging.info("Opening browser for OAuth login...")
+            webbrowser.open(auth_url)
+            httpd.handle_request()  # blocks here until code received
+            if httpd.code is None:
+                raise RuntimeError("Authorization code was not received.")
+            return httpd.code

@@ -1,23 +1,20 @@
 import logging
-from esi_api import get_access_token, esi_get, verify_token
+from esi_api import ESIClient
 from database import save_df
 import pandas as pd
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     try:
-        token = get_access_token()
-        verify = verify_token(token)
-        char_id = verify["CharacterID"]
-        logging.info(f"Logged in as {verify['CharacterName']}")
+        esi = ESIClient()
+        char_info = esi.login()
+        char_id = esi.character_id
 
-        # Get assets
-        assets = esi_get(f"/characters/{char_id}/assets/", token)
+        assets = esi.esi_get(f"/characters/{char_id}/assets/")
         assets_df = pd.DataFrame(assets)
         save_df(assets_df, "assets")
 
-        # Get wallet transactions
-        wallet = esi_get(f"/characters/{char_id}/wallet/transactions/", token)
+        wallet = esi.esi_get(f"/characters/{char_id}/wallet/transactions/")
         wallet_df = pd.DataFrame(wallet)
         save_df(wallet_df, "wallet_transactions")
 

@@ -1,7 +1,7 @@
 import pandas as pd
 from sqlalchemy import create_engine
 
-DB_FILE = "eve_data.db"
+DB_FILE = "database/eve_data.db"
 engine = create_engine(f"sqlite:///{DB_FILE}")
 
 def save_df(df, table_name):
