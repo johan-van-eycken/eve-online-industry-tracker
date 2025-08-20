@@ -3,9 +3,7 @@ import socketserver
 import threading
 import logging
 from urllib.parse import urlparse, parse_qs
-from typing import cast
-
-from typing import Optional
+from typing import cast, Optional
 
 class OAuthServer(socketserver.TCPServer):
     """Custom server to store OAuth code from OAuth2 redirect."""

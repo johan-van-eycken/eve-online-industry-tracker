@@ -1,6 +1,6 @@
 # project specific files
 database/*.db
-config/*.json
+config/secret.json
 
 
 # Byte-compiled / optimized / DLL files

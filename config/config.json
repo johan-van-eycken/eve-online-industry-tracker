@@ -1,0 +1,27 @@
+{
+  "characters": [
+    { "character_name": "Duke X1", "is_main": true },
+    { "character_name": "Knight X1", "is_main": false }
+  ],
+  "app": {
+    "port": 8080,
+    "redirect_uri": "http://localhost:8080/callback",
+    "user_agent": "eve-online-industry-tracker/1.0"
+  },
+  "esi": {
+    "base": "https://esi.evetech.net/latest",
+    "auth_url": "https://login.eveonline.com/v2/oauth/authorize/",
+    "token_url": "https://login.eveonline.com/v2/oauth/token",
+    "verify_url": "https://login.eveonline.com/oauth/verify"
+  },
+  "oauth": {
+    "client_id": "84f5c62c020c46559d2b8615ea1eb146"
+  },
+  "defaults": {
+    "scopes": [
+      "esi-assets.read_assets.v1",
+      "esi-wallet.read_character_wallet.v1"
+    ]
+  }
+}
+

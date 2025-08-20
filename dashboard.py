@@ -1,5 +1,5 @@
 import streamlit as st
-from database import load_df
+from classes.database_manager import load_df
 
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 
