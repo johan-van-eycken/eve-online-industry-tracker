@@ -1,6 +1,8 @@
 import logging
 import requests
 import webbrowser
+import time
+import random
 from urllib.parse import urlencode
 from typing import Optional, Any, Dict, Tuple
 
@@ -36,6 +38,7 @@ class ESIClient:
         self.character_info: Optional[Dict[str, Any]] = None
         self.token: Optional[str] = None
         self.refresh_token: Optional[str] = None
+        self.refresh_token: Optional[str] = None
         self.is_main = is_main
 
         # Init flow: login of register indien character nog niet gekend
@@ -61,13 +64,14 @@ class ESIClient:
     # Login helpers
     # ----------------------------
     def _login_with_refresh(self) -> None:
-        access_token, new_refresh_token = self._get_access_token(self.refresh_token)
+        access_token, new_refresh_token, expires_in = self._get_access_token(self.refresh_token)
         self.token = access_token
         self.refresh_token = new_refresh_token
+        self.token_expiry = time.time() + expires_in - 30  # refresh a bit early
         self.character_info = self._verify_token()
         self.character_id = self.character_info["CharacterID"]
 
-        # Refresh token updaten in DB indien gewijzigd
+        # Refresh token updaten indien gewijzigd
         existing = self.db.get_character(self.character_name)
         if existing and new_refresh_token != existing["refresh_token"]:
             logging.info(f"Updating refresh token for {self.character_name} in database.")
@@ -79,17 +83,18 @@ class ESIClient:
     # Nieuw character registreren
     # ---------------------------
     def register_new_character(self) -> None:
-        access_token, refresh_token = self._get_access_token()
+        access_token, refresh_token, expires_in = self._get_access_token()
         self.token = access_token
         self.refresh_token = refresh_token
+        self.token_expiry = time.time() + expires_in - 30
         self.character_info = self._verify_token()
         self.character_id = self.character_info["CharacterID"]
 
         # Schrijf character in DB
         self.db.add_or_update_character(
-            name=self.character_name,
-            char_id=self.character_id,
-            refresh_token=refresh_token,
+            name = self.character_name,
+            char_id = self.character_id,
+            refresh_token = refresh_token,
             scopes=self.scope.split(" "),
             is_main=self.is_main
         )
@@ -102,22 +107,59 @@ class ESIClient:
     # ----------------------------
     # Public ESI requests
     # ----------------------------
-    def esi_get(self, endpoint: str) -> Any:
+    def esi_get(self, endpoint: str, use_cache=True, max_retries: int = 5) -> Any:
         if not self.token:
             raise RuntimeError("No access token available. Please login first.")
+
+        # Refresh proactively if near expiry
+        if self.token_expiry and time.time() > self.token_expiry:
+            logging.info("Access token expired or near expiry, refreshing...")
+            self._login_with_refresh()
+
         url = self.esi_base + endpoint
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "User-Agent": self.user_agent
+            "User-Agent": self.user_agent,
+            "Accept-Language": "en"
         }
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
+
+        # Add ETag if available
+        etag = None
+        if use_cache:
+            etag = self.db.get_etag(endpoint)  # implement in DatabaseManager
+            if etag:
+                headers["If-None-Match"] = etag
+
+        retries = 0
+        while retries < max_retries:
+            resp = requests.get(url, headers=headers, timeout=15)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if "ETag" in resp.headers:
+                    self.db.save_cache(endpoint, resp.headers["ETag"], data)
+                return data
+
+            elif resp.status_code == 304:  # Not Modified → use cached
+                logging.info(f"Using cached data for {endpoint}")
+                return self.db.get_cached_response(endpoint)
+
+            elif resp.status_code in (420, 429, 500, 502, 503, 504):
+                wait = (2 ** retries) + random.uniform(0, 1)
+                logging.warning(f"ESI error {resp.status_code} on {endpoint}, retry {retries+1}/{max_retries} in {wait:.1f}s...")
+                time.sleep(wait)
+                retries += 1
+                continue
+
+            else:
+                resp.raise_for_status()
+
+        raise RuntimeError(f"ESI request failed after {max_retries} retries: {url}")
 
     # ----------------------------
     # OAuth helpers
     # ----------------------------
-    def _get_access_token(self, refresh_token: Optional[str] = None) -> Tuple[str, str]:
+    def _get_access_token(self, refresh_token: Optional[str] = None) -> Tuple[str, str, int]:
         if refresh_token:
             token_resp = requests.post(
                 self.token_url,
@@ -143,11 +185,13 @@ class ESIClient:
         token_data = token_resp.json()
         access_token: str = token_data.get("access_token")
         new_refresh_token: str = token_data.get("refresh_token", refresh_token)
+        expires_in: int = token_data.get("expires_in", 1200)  # default 20 min
+
         if not access_token:
             raise RuntimeError("Failed to retrieve access token from ESI.")
 
         logging.info("Access token retrieved successfully.")
-        return access_token, new_refresh_token
+        return access_token, new_refresh_token, expires_in
 
     def _verify_token(self) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.token}"}
@@ -160,8 +204,6 @@ class ESIClient:
         Start a local server and open browser for OAuth authorization code.
         Waits for a maximum timeout, then raises an error if no code is received.
         """
-        import time
-
         timeout_seconds = 60  # max wachten
         with OAuthServer(("localhost", self.port), OAuthHandler) as httpd:
             httpd.timeout = 1  # interne timeout voor handle_request (loopt per seconde)

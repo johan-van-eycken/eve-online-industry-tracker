@@ -53,6 +53,8 @@ def main():
         data = c.esi_get(f"/characters/{c.character_id}/")
         data["character_id"] = c.character_id
         data["image_url"] = f"https://images.evetech.net/characters/{c.character_id}/portrait?size=128"
+        data["wallet_balance"] = c.esi_get(f"/characters/{c.character_id}/wallet/")
+
         all_data.append(data)
 
     df = pd.DataFrame(all_data)

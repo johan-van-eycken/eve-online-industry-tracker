@@ -9,7 +9,7 @@
   "app": {
     "port": 8080,
     "redirect_uri": "http://localhost:8080/callback",
-    "user_agent": "eve-online-industry-tracker/1.0"
+    "user_agent": "eve-online-industry-tracker/1.0 (jveycken@gmail.com)"
   },
   "esi": {
     "base": "https://esi.evetech.net/latest",
