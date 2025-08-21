@@ -1,8 +1,11 @@
 # project specific files
-database/*.db
-database/data/*.csv
+
+# very important, contains sensitive information
 config/secret.json
 
+# database files
+database/*.db
+database/data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -1,4 +1,5 @@
 import json
+import time
 import pandas as pd
 from sqlalchemy import create_engine, text
 from typing import Optional, List, Dict, Any
@@ -13,7 +14,8 @@ class DatabaseManager:
     def __init__(self, db_file: str = DB_FILE):
         self.db_file = db_file
         self.engine = create_engine(f"sqlite:///{self.db_file}")
-    
+        self._initialize_cache_table()
+
     def list_tables(self) -> List[str]:
         """Lijst alle tabellen in de database."""
         with self.engine.begin() as conn:
@@ -26,7 +28,61 @@ class DatabaseManager:
 
     def load_df(self, table_name: str) -> pd.DataFrame:
         return pd.read_sql(f"SELECT * FROM {table_name}", self.engine)
+    
+    # ----------------------------
+    # ESI Cache
+    # ----------------------------
+    def _initialize_cache_table(self) -> None:
+        """Maak de cache-tabel voor ESI responses als die nog niet bestaat."""
+        with self.engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS esi_cache (
+                    endpoint TEXT PRIMARY KEY,
+                    etag TEXT,
+                    data TEXT,
+                    last_updated REAL
+                )
+            """))
+    
+    def get_etag(self, endpoint: str) -> Optional[str]:
+        """Geef de laatste ETag terug voor een endpoint (of None)."""
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT etag FROM esi_cache WHERE endpoint = :ep"),
+                {"ep": endpoint}
+            ).fetchone()
+            return row[0] if row else None
+    
+    def get_cached_response(self, endpoint: str) -> Optional[Dict[str, Any]]:
+        """Geef de cached response terug voor een endpoint (of None)."""
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT data FROM esi_cache WHERE endpoint = :ep"),
+                {"ep": endpoint}
+            ).fetchone()
+            if row:
+                try:
+                    return json.loads(row[0])
+                except json.JSONDecodeError:
+                    return None
+        return None
 
+    def save_cache(self, endpoint: str, etag: str, data: Dict[str, Any]) -> None:
+        """Sla response + ETag op in de cache."""
+        with self.engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO esi_cache (endpoint, etag, data, last_updated)
+                VALUES (:ep, :etag, :data, :ts)
+                ON CONFLICT(endpoint) DO UPDATE SET
+                    etag = excluded.etag,
+                    data = excluded.data,
+                    last_updated = excluded.last_updated
+            """), {
+                "ep": endpoint,
+                "etag": etag,
+                "data": json.dumps(data),
+                "ts": time.time()
+            })
 
 # ----------------------------
 # Characters Manager
