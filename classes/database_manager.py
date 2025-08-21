@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, text
 from typing import Optional, List, Dict, Any
 from classes.types import CharacterRow
 
-DB_FILE = "database/eve_data.db"
+DB_FILE = "database/eve_default.db"
 
 # ----------------------------
 # Algemeen Database Manager
@@ -13,9 +13,30 @@ class DatabaseManager:
     def __init__(self, db_file: str = DB_FILE):
         self.db_file = db_file
         self.engine = create_engine(f"sqlite:///{self.db_file}")
-        self._initialize_database()
+    
+    def list_tables(self) -> List[str]:
+        """Lijst alle tabellen in de database."""
+        with self.engine.begin() as conn:
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table';"))
+            return [row[0] for row in result.fetchall()]
 
-    def _initialize_database(self) -> None:
+    # DataFrame helper functies
+    def save_df(self, df: pd.DataFrame, table_name: str) -> None:
+        df.to_sql(table_name, self.engine, if_exists="replace", index=False)
+
+    def load_df(self, table_name: str) -> pd.DataFrame:
+        return pd.read_sql(f"SELECT * FROM {table_name}", self.engine)
+
+
+# ----------------------------
+# Characters Manager
+# ----------------------------
+class CharacterManager(DatabaseManager):
+    def __init__(self, db_file: str = DB_FILE):
+        super().__init__(db_file)
+        self._initialize_characters_table()
+
+    def _initialize_characters_table(self) -> None:
         """Maak alle nodige tabellen aan als ze nog niet bestaan."""
         with self.engine.begin() as conn:
             # Characters tabel
@@ -30,18 +51,6 @@ class DatabaseManager:
                 )
             """))
 
-    # DataFrame helper functies
-    def save_df(self, df: pd.DataFrame, table_name: str) -> None:
-        df.to_sql(table_name, self.engine, if_exists="replace", index=False)
-
-    def load_df(self, table_name: str) -> pd.DataFrame:
-        return pd.read_sql(f"SELECT * FROM {table_name}", self.engine)
-
-
-# ----------------------------
-# Characters Manager
-# ----------------------------
-class CharacterManager(DatabaseManager):
     def add_or_update_character(
         self,
         name: str,
