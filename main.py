@@ -1,7 +1,8 @@
 import logging
+import pandas as pd
 
 from classes.config_manager import ConfigManager
-from classes.database_manager import CharacterManager
+from classes.database_manager import DatabaseManager, CharacterManager
 from classes.esi import ESIClient
 
 
@@ -44,14 +45,22 @@ def main():
 
 
     # ---------------------------
-    # Test ESI call
+    # Character data
     # ---------------------------
-    test_data = {
-        c.character_name: c.esi_get(f"/characters/{c.character_id}/")
-        for c in esi_clients
-    }
-    logging.info(f"Test ESI call results: {test_data}")
+    db = DatabaseManager("database/eve_data.db")
+    all_data = []
+    for c in esi_clients:
+        data = c.esi_get(f"/characters/{c.character_id}/")
+        data["character_id"] = c.character_id
+        data["image_url"] = f"https://images.evetech.net/characters/{c.character_id}/portrait?size=128"
+        all_data.append(data)
 
+    df = pd.DataFrame(all_data)
+    cols = ["character_id", "name", "image_url"] + [c for c in df.columns if c not in ["character_id", "name", "image_url"]]
+    df = df[cols]
+    db.save_df(df, "characters") 
+
+    logging.info(f"Character data saved.")
 
 if __name__ == "__main__":
     main()

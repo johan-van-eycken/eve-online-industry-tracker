@@ -1,7 +1,10 @@
 {
   "characters": [
     { "character_name": "Duke X1", "is_main": true },
-    { "character_name": "Knight X1", "is_main": false }
+    { "character_name": "Knight X1", "is_main": false },
+    { "character_name": "Lord X1", "is_main": false },
+    { "character_name": "MyLady X1", "is_main": false },
+    { "character_name": "Baron X1", "is_main": false }
   ],
   "app": {
     "port": 8080,
