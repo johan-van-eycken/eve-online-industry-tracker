@@ -89,9 +89,9 @@ config/secret.json (fill in your EVE client secret)
 
 Usage
 Import EVE SDE
-
 Download, import, and cleanup:
 
+```bash
 # Download and extract
 python ./scripts/import_sde.py --download
 
@@ -100,10 +100,12 @@ python ./scripts/import_sde.py --import
 
 # Cleanup temporary files
 python ./scripts/import_sde.py --cleanup
+```
 
 Run Streamlit Dashboard
+```bash
 streamlit run dashboard.py
-
+```
 
 Navigate between Characters and Database Maintenance tabs.
 
@@ -113,23 +115,41 @@ Search database tables using SQL WHERE clauses.
 
 Project Structure
 .
+
 ├── config/
+
 │   ├── config.json
+
 │   ├── secret.json
+
 │   └── sde_tables.json      # list of SDE tables to import
+
 ├── database/
+
 │   ├── eve_data.db          # main project database
+
 │   └── eve_sde.db           # imported SDE database
+
 ├── scripts/
+
 │   └── import_sde.py
+
 ├── classes/
+
 │   ├── database_manager.py
+
 │   └── config_manager.py
+
 ├── utils/
+
 │   └── formatters.py
+
 ├── dashboard.py
+
 ├── requirements.txt
+
 └── README.md
+
 
 Notes
 
