@@ -14,13 +14,22 @@ class DatabaseManager:
     def __init__(self, db_file: str = DB_FILE):
         self.db_file = db_file
         self.engine = create_engine(f"sqlite:///{self.db_file}")
-        self._initialize_cache_table()
 
+    # Database helper functies
+    def get_db_name(self) -> str:
+        """Geeft de bestandsnaam van de database terug."""
+        return self.db_file.split("/")[-1]
+    
     def list_tables(self) -> List[str]:
         """Lijst alle tabellen in de database."""
         with self.engine.begin() as conn:
             result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table';"))
             return [row[0] for row in result.fetchall()]
+        
+    def drop_table(self, table_name: str) -> None:
+        """Verwijder een tabel uit de database."""
+        with self.engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
 
     # DataFrame helper functies
     def save_df(self, df: pd.DataFrame, table_name: str) -> None:
@@ -28,6 +37,16 @@ class DatabaseManager:
 
     def load_df(self, table_name: str) -> pd.DataFrame:
         return pd.read_sql(f"SELECT * FROM {table_name}", self.engine)
+
+
+# ----------------------------
+# Characters Manager
+# ----------------------------
+class CharacterManager(DatabaseManager):
+    def __init__(self, db_file: str = DB_FILE):
+        super().__init__(db_file)
+        self._initialize_cache_table()
+        self._initialize_characters_table()
     
     # ----------------------------
     # ESI Cache
@@ -84,14 +103,9 @@ class DatabaseManager:
                 "ts": time.time()
             })
 
-# ----------------------------
-# Characters Manager
-# ----------------------------
-class CharacterManager(DatabaseManager):
-    def __init__(self, db_file: str = DB_FILE):
-        super().__init__(db_file)
-        self._initialize_characters_table()
-
+    # ----------------------------
+    # Manage Authenticated Characters
+    # ----------------------------
     def _initialize_characters_table(self) -> None:
         """Maak alle nodige tabellen aan als ze nog niet bestaan."""
         with self.engine.begin() as conn:
