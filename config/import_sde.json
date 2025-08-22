@@ -1,4 +1,9 @@
-[
+{
+  "APP_VERSION": "v1.0.1",
+  "SDE_URL": "https://eve-static-data-export.s3-eu-west-1.amazonaws.com/tranquility/sde.zip",
+  "DEFAULT_DB_FILE": "database/eve_sde.db",
+  "DEFAULT_TMP_DIR": "database/data/tmp_sde",
+  "TABLES_TO_IMPORT": [
     "bloodlines",
     "blueprints",
     "categories",
@@ -14,4 +19,5 @@
     "invPositions",
     "invUniqueNames",
     "staStations"
-]
+  ]
+}
