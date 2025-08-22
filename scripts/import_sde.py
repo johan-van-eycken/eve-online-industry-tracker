@@ -17,27 +17,15 @@ from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
 
 # ----------------------------
-# Default values
-# ----------------------------
-APP_VERSION = "v1.0"
-SDE_URL = "https://eve-static-data-export.s3-eu-west-1.amazonaws.com/tranquility/sde.zip"
-DEFAULT_DB_FILE = "database/eve_sde.db"
-DEFAULT_TMP_DIR = "database/data/tmp_sde"
-DEFAULT_CONFIG_TABLES = "config/sde_tables.json"
-
-# ----------------------------
 # Helpers
 # ----------------------------
 def flatten_row(d):
-    """Flatten dicts recursively; lists/dicts to JSON strings."""
+    """Flatten row shallowly. Dicts/lists → JSON strings, scalars unchanged."""
     flat = {}
     for k, v in d.items():
-        if isinstance(v, dict):
-            nested = flatten_row(v)
-            for nk, nv in nested.items():
-                flat[f"{k}_{nk}"] = nv
-        elif isinstance(v, list):
-            flat[k] = json.dumps(v)
+        if isinstance(v, (dict, list)):
+            # keep full dict/list as JSON
+            flat[k] = json.dumps(v, ensure_ascii=False)
         else:
             flat[k] = v
     return flat
@@ -49,7 +37,7 @@ def sanitize_column_name(name: str) -> str:
 # ----------------------------
 # SDE download & extraction
 # ----------------------------
-def download_sde(url=SDE_URL, dest_dir=DEFAULT_TMP_DIR) -> str:
+def download_sde(url: str, dest_dir: str) -> str:
     os.makedirs(dest_dir, exist_ok=True)
     zip_path = os.path.join(dest_dir, "sde.zip")
 
@@ -90,7 +78,14 @@ def import_sde_to_sqlite(sde_dir: str, db_file: str, tables_to_import: list):
                         data = yaml.safe_load(f)
 
                     if isinstance(data, dict):
-                        data = [v for k, v in data.items()]
+                        new_data = []
+                        for k, v in data.items():
+                            if isinstance(v, dict):
+                                v = {"id": int(k), **v}
+                            else:
+                                v = {"id": int(k), "value": v}
+                            new_data.append(v)
+                        data = new_data
                     elif not isinstance(data, list):
                         data = []
 
@@ -109,10 +104,13 @@ def import_sde_to_sqlite(sde_dir: str, db_file: str, tables_to_import: list):
 # ----------------------------
 # Cleanup
 # ----------------------------
-def cleanup_temp(dest_dir=DEFAULT_TMP_DIR):
+def cleanup_temp(dest_dir: str):
     if os.path.exists(dest_dir):
         print(f"Cleaning up temporary folder {dest_dir} ...")
-        shutil.rmtree(dest_dir)
+        try:
+            shutil.rmtree(dest_dir)
+        except Exception as e:
+            print(f" !!! Failed to cleanup {dest_dir}: {e}")
         print("Cleanup done.")
     else:
         print(f"No temporary folder found at {dest_dir}")
@@ -121,17 +119,26 @@ def cleanup_temp(dest_dir=DEFAULT_TMP_DIR):
 # CLI
 # ----------------------------
 def main():
+    default_config_path = "config/import_sde.json"
+    cfg = ConfigManager(default_config_path)
+
+    # Load tables from config
+    if not os.path.exists(default_config_path):
+        raise FileNotFoundError(f"{default_config_path} not found.")
+
     parser = argparse.ArgumentParser(
-        description=f"EVE Online SDE Importer {APP_VERSION} (YAML -> SQLite)",
+        description=f"EVE Online SDE Importer {cfg.get("APP_VERSION")} (YAML -> SQLite)",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("--version", action="version", version=f"EVE Online SDE Importer {APP_VERSION}")
+    parser.add_argument("--version", action="version", version=f"EVE Online SDE Importer {cfg.get('APP_VERSION')}")
+    parser.add_argument("--all", action="store_true", help="Download, import, and cleanup in one go")
     parser.add_argument("--download", action="store_true", help="Download and extract the SDE")
     parser.add_argument("--import", dest="do_import", action="store_true", help="Import selected YAML tables into SQLite")
     parser.add_argument("--cleanup", action="store_true", help="Cleanup temporary SDE folder")
-    parser.add_argument("--db", default=DEFAULT_DB_FILE, help="SQLite database file path")
-    parser.add_argument("--tmp", default=DEFAULT_TMP_DIR, help="Temporary folder for SDE extraction")
-    parser.add_argument("--tables", default=DEFAULT_CONFIG_TABLES, help="JSON file listing tables to import")
+    parser.add_argument("--db", default=cfg.get("DEFAULT_DB_FILE"), help="SQLite database file path")
+    parser.add_argument("--tmp", default=cfg.get("DEFAULT_TMP_DIR"), help="Temporary folder for SDE extraction")
+    parser.add_argument("--tables", nargs="*", help="Tables to import (default: TABLES_TO_IMPORT from config)")
+
     args = parser.parse_args()
 
     # Show help if no arguments
@@ -139,26 +146,34 @@ def main():
         parser.print_help()
         return
 
-    # Load tables from config
-    if not os.path.exists(args.tables_config):
-        raise FileNotFoundError(f"{args.tables_config} not found.")
-    
-    tables_to_import = json.loads(open(args.tables_config, "r", encoding="utf-8").read())
+    if args.all:
+        args.download = True
+        args.do_import = True
+        args.cleanup = True
 
     sde_path = args.tmp
 
     if args.download:
-        sde_path = download_sde(dest_dir=args.tmp)
+        sde_path = download_sde(cfg.get("SDE_URL"), sde_path)
 
     if args.do_import:
         if not os.path.exists(sde_path):
-            print(f"Temporary SDE folder '{sde_path}' not found. Run --download first.")
+            print(f"Temporary SDE folder '{sde_path}' not found. Running --download first.")
+            sde_path = download_sde(cfg.get("SDE_URL"), sde_path)
+        
+        # Either CLI tables or config tables
+        if args.tables:
+            tables_to_import = args.tables
         else:
-            import_sde_to_sqlite(sde_path, db_file=args.db, tables_to_import=tables_to_import)
+            tables_to_import = cfg.get("TABLES_TO_IMPORT", [])
+
+        if not tables_to_import:
+            raise ValueError("No tables specified for import (check config or CLI args).")
+        
+        import_sde_to_sqlite(sde_path, db_file=args.db, tables_to_import=tables_to_import)
 
     if args.cleanup:
-        cleanup_temp(dest_dir=args.tmp)
-
+        cleanup_temp(sde_path)
 
 if __name__ == "__main__":
     main()
