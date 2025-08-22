@@ -3,9 +3,9 @@ import glob
 import os
 import pandas as pd
 from classes.database_manager import DatabaseManager
-from typing import Optional
+from typing import Optional, Tuple
 
-def render_table_viewer(db_folder: str = "database", row_limit: Optional[int] = 1000):
+def render_table_viewer(db_folder: str = "database", row_limit: Optional[int] = 1000) -> Optional[Tuple[DatabaseManager, Optional[str]]]:
     """
     Reusable table viewer for Streamlit.
 
@@ -44,7 +44,7 @@ def render_table_viewer(db_folder: str = "database", row_limit: Optional[int] = 
 
     if not tables:
         st.warning(f"No tables found in {os.path.basename(selected_db_file)}.")
-        return
+        return (db, None)
 
     selected_table = st.selectbox("Select a table to view", tables)
 
@@ -55,7 +55,7 @@ def render_table_viewer(db_folder: str = "database", row_limit: Optional[int] = 
     )
 
     if not selected_table:
-        return
+        return (db, None)
 
     try:
         query = f"SELECT * FROM {selected_table}"
@@ -68,3 +68,5 @@ def render_table_viewer(db_folder: str = "database", row_limit: Optional[int] = 
         st.dataframe(df)
     except Exception as e:
         st.error(f"Failed to load table/query: {e}")
+
+    return (db, selected_table)
