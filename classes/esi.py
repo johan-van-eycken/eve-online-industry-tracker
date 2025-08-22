@@ -126,7 +126,7 @@ class ESIClient:
         # Add ETag if available
         etag = None
         if use_cache:
-            etag = self.db.get_etag(endpoint)  # implement in DatabaseManager
+            etag = self.db.get_etag(endpoint)
             if etag:
                 headers["If-None-Match"] = etag
 
