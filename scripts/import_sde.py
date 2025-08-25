@@ -60,8 +60,8 @@ def download_sde(url: str, dest_dir: str) -> str:
 # ----------------------------
 # Import YAML SDE tables to SQLite
 # ----------------------------
-def import_sde_to_sqlite(sde_dir: str, db_file: str, tables_to_import: list):
-    db = DatabaseManager(db_file)
+def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
+    db = DatabaseManager(db_uri)
 
     for root, _, files in os.walk(sde_dir):
         for file in sorted(files):
@@ -99,7 +99,7 @@ def import_sde_to_sqlite(sde_dir: str, db_file: str, tables_to_import: list):
                 except Exception as e:
                     print(f" !!! Failed to import '{table_name}': {e}")
 
-    print(f"All selected SDE tables imported to {db_file}")
+    print(f"All selected SDE tables imported to {db_uri}")
 
 # ----------------------------
 # Cleanup

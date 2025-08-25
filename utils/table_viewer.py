@@ -2,9 +2,9 @@ import streamlit as st
 import glob
 import os
 import pandas as pd
-from classes.config_manager import ConfigManagerSingleton
+from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
-from typing import Optional, Tuple
+from typing import Optional, List, Tuple
 
 def render_table_viewer(row_limit: Optional[int] = 1000) -> Optional[Tuple[DatabaseManager, Optional[str]]]:
     """
@@ -13,33 +13,26 @@ def render_table_viewer(row_limit: Optional[int] = 1000) -> Optional[Tuple[Datab
     - db_folder: folder containing .db files
     - row_limit: max rows to display
     """
-    cfg = ConfigManagerSingleton()
-    db_folder = cfg.get("app").get("database_path", "database")
+    cfg = ConfigManager()
+    cfg_language = cfg.get("app")["language"]
 
     st.subheader("Database Table Viewer")
 
     # --- Database selection ---
-    db_files = glob.glob(os.path.join(db_folder, "*.db"))
+    databases: List[str] = []
+    databases.append(cfg.get("app").get("database_oauth_uri"))
+    databases.append(cfg.get("app").get("database_app_uri"))
+    databases.append(cfg.get("app").get("database_sde_uri"))
 
-    if st.button("Refresh Databases"):
-        db_files = glob.glob(os.path.join(db_folder, "*.db"))
-        st.success("Database list refreshed!")
-
-    if not db_files:
-        st.warning(f"No database files found in {db_folder}/")
-        return
-
-    selected_db_file = st.selectbox(
+    selected_db = st.selectbox(
         "Select a database",
-        db_files,
-        format_func=lambda x: os.path.basename(x)
+        databases
     )
 
-    if not selected_db_file:
+    if not selected_db:
         return
     
-    selected_db_name = os.path.basename(selected_db_file)
-    db = DatabaseManager(selected_db_name)
+    db = DatabaseManager(selected_db, cfg_language)
 
     # --- Table selection ---
     tables = db.list_tables()
@@ -48,7 +41,7 @@ def render_table_viewer(row_limit: Optional[int] = 1000) -> Optional[Tuple[Datab
         st.success("Table list refreshed!")
 
     if not tables:
-        st.warning(f"No tables found in {os.path.basename(selected_db_file)}.")
+        st.warning(f"No tables found in {selected_db}.")
         return (db, None)
 
     selected_table = st.selectbox("Select a table to view", tables)

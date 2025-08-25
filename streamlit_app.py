@@ -1,7 +1,7 @@
 import streamlit as st
-from classes.config_manager import ConfigManagerSingleton
+from classes.config_manager import ConfigManager
 
-cfg = ConfigManagerSingleton()
+cfg = ConfigManager()
 
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")

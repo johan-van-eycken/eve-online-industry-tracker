@@ -9,9 +9,9 @@
     "user_agent": "eve-online-industry-tracker/1.0 (jveycken@gmail.com)",
     "language": "en",
     "database_path": "database",
-    "db_characters": "eve_characters.db",
-    "db_app": "eve_data.db",
-    "db_sde": "eve_sde.db"
+    "database_oauth_uri": "sqlite:///database/eve_oauth.db",
+    "database_app_uri": "sqlite:///database/eve_app.db",
+    "database_sde_uri": "sqlite:///database/eve_sde.db"
   },
   "esi": {
     "base": "https://esi.evetech.net/latest",

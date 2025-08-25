@@ -13,9 +13,9 @@ class ConfigManager:
         "app": {
             "user_agent": "EVE Industry Tracker",
             "database_path": "database",
-            "db_characters": "eve_data.db",
-            "db_app": "eve_data.db",
-            "db_sde": "eve_sde.db",
+            "database_oauth_uri": "sqlite:///database/eve_oauth.db",
+            "database_app_uri": "sqlite:///database/eve_app.db",
+            "database_sde_uri": "sqlite:///database/eve_sde.db",
             "language": "en",
         },
         "esi": {
@@ -111,19 +111,3 @@ class ConfigManager:
     def all(self) -> Dict[str, Any]:
         """Return full config dictionary."""
         return self._config
-
-# Global singleton instance
-class ConfigManagerSingleton(ConfigManager):
-    _instance = None
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance.__initialized = False
-        return cls._instance
-
-    def __init__(self, base_path: str = "config/config.json", secret_path: str = "config/secret.json"):
-        if getattr(self, "_ConfigManagerSingleton__initialized", False):
-            return
-        super().__init__(base_path, secret_path)
-        self.__initialized = True
