@@ -1,6 +1,6 @@
 
 import logging
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
@@ -11,7 +11,7 @@ from classes.database_models import OAuthCharacter
 # Characters Manager
 # ----------------------------
 class CharacterManager():
-    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager, cfg_characters: List[str]):
+    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager, cfg_characters: List[Dict[str, Any]]):
         """
         Initialize the CharacterManager with database managers and character configurations.
 
@@ -102,12 +102,12 @@ class CharacterManager():
         if character_name:
             # Refresh wallet balance for a single character
             result = [
-                char.refresh_wallet()
+                char.refresh_wallet_balance()
                 for char in self.character_list
                 if char.character_name == character_name
             ]
             return result
 
         # Refresh wallet balances for all characters
-        result = [char.refresh_wallet() for char in self.character_list]
+        result = [char.refresh_wallet_balance() for char in self.character_list]
         return result
