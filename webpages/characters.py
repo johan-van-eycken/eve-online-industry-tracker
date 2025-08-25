@@ -1,11 +1,10 @@
 import streamlit as st
-import pandas as pd
 from classes.database_manager import DatabaseManager
 from utils.formatters import format_isk, format_date, format_date_into_age
 
 def render():
     st.subheader("Characters")
-    db = DatabaseManager("database/eve_data.db")
+    db = DatabaseManager("eve_data.db")
 
     try:
         df = db.load_df("characters")
@@ -17,6 +16,11 @@ def render():
         df["image_url"] = df["character_id"].apply(
             lambda cid: f"https://images.evetech.net/characters/{cid}/portrait?size=128"
         )
+
+    # Button refresh wallet balances
+    if st.button("Refresh Wallet Balances"):
+        
+        st.success("Character Wallet balances refreshed!")
 
     cards_per_row = 5
     for i in range(0, len(df), cards_per_row):
@@ -49,8 +53,8 @@ def render():
                                 Age: {format_date_into_age(row.get('birthday'))}<br>
                                 Gender: {row.get('gender', 'N/A')}<br>
                                 Corporation ID: {row.get('corporation_id', 'N/A')}<br>
-                                Bloodline ID: {row.get('bloodline_id', 'N/A')}<br>
-                                Race ID: {row.get('race_id', 'N/A')}<br>
+                                Race: {row.get('race', 'N/A')}<br>
+                                Bloodline: {row.get('bloodline', 'N/A')}<br>
                                 Security Status: {row.get('security_status', 'N/A'):.2f}
                             </div>
                         </div>

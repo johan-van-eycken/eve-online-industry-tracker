@@ -2,16 +2,20 @@ import streamlit as st
 import glob
 import os
 import pandas as pd
+from classes.config_manager import ConfigManagerSingleton
 from classes.database_manager import DatabaseManager
 from typing import Optional, Tuple
 
-def render_table_viewer(db_folder: str = "database", row_limit: Optional[int] = 1000) -> Optional[Tuple[DatabaseManager, Optional[str]]]:
+def render_table_viewer(row_limit: Optional[int] = 1000) -> Optional[Tuple[DatabaseManager, Optional[str]]]:
     """
     Reusable table viewer for Streamlit.
 
     - db_folder: folder containing .db files
     - row_limit: max rows to display
     """
+    cfg = ConfigManagerSingleton()
+    db_folder = cfg.get("app").get("database_path", "database")
+
     st.subheader("Database Table Viewer")
 
     # --- Database selection ---
@@ -33,8 +37,9 @@ def render_table_viewer(db_folder: str = "database", row_limit: Optional[int] = 
 
     if not selected_db_file:
         return
-
-    db = DatabaseManager(selected_db_file)
+    
+    selected_db_name = os.path.basename(selected_db_file)
+    db = DatabaseManager(selected_db_name)
 
     # --- Table selection ---
     tables = db.list_tables()

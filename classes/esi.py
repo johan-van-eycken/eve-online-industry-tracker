@@ -7,30 +7,30 @@ from urllib.parse import urlencode
 from typing import Optional, Any, Dict, Tuple
 
 from classes.oauth import OAuthHandler, OAuthServer
-from classes.config_manager import ConfigManager
-from classes.database_manager import CharacterManager
+from classes.config_manager import ConfigManagerSingleton
+from classes.database_manager import DatabaseManager
 
 
 class ESIClient:
-    def __init__(self, character_name: str, cfg: ConfigManager, db: CharacterManager, is_main: bool = False):
-        self.cfg = cfg
-        self.db = db
+    def __init__(self, character_name: str, is_main: bool = False):
+        self.cfg = ConfigManagerSingleton()
+        self.db = DatabaseManager(self.cfg.get("app").get("db_characters"))
 
         # App configuratie
-        self.port = cfg.get("app")["port"]
-        self.redirect_uri = cfg.get("app")["redirect_uri"]
-        self.user_agent = cfg.get("app")["user_agent"]
+        self.port = self.cfg.get("app")["port"]
+        self.redirect_uri = self.cfg.get("app")["redirect_uri"]
+        self.user_agent = self.cfg.get("app")["user_agent"]
 
         # ESI configuratie
-        self.esi_base = cfg.get("esi")["base"]
-        self.auth_url = cfg.get("esi")["auth_url"]
-        self.token_url = cfg.get("esi")["token_url"]
-        self.verify_url = cfg.get("esi")["verify_url"]
+        self.esi_base = self.cfg.get("esi")["base"]
+        self.auth_url = self.cfg.get("esi")["auth_url"]
+        self.token_url = self.cfg.get("esi")["token_url"]
+        self.verify_url = self.cfg.get("esi")["verify_url"]
 
         # OAuth configuratie
-        self.client_id = cfg.get("oauth")["client_id"]
-        self.scope = " ".join(cfg.get("defaults")["scopes"])
-        self.client_secret = cfg.get("client_secret")
+        self.client_id = self.cfg.get("oauth")["client_id"]
+        self.scope = " ".join(self.cfg.get("defaults")["scopes"])
+        self.client_secret = self.cfg.get("client_secret")
 
         # Character info
         self.character_name = character_name
