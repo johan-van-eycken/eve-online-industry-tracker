@@ -14,6 +14,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(ROOT_DIR)
 
 from classes.config_manager import ConfigManager
+from config.schemas import IMPORT_SDE_SCHEMA
 from classes.database_manager import DatabaseManager
 
 # ----------------------------
@@ -120,7 +121,7 @@ def cleanup_temp(dest_dir: str):
 # ----------------------------
 def main():
     default_config_path = "config/import_sde.json"
-    cfg = ConfigManager(default_config_path)
+    cfg = ConfigManager(base_path=default_config_path, schema=IMPORT_SDE_SCHEMA)
 
     # Load tables from config
     if not os.path.exists(default_config_path):
@@ -135,7 +136,7 @@ def main():
     parser.add_argument("--download", action="store_true", help="Download and extract the SDE")
     parser.add_argument("--import", dest="do_import", action="store_true", help="Import selected YAML tables into SQLite")
     parser.add_argument("--cleanup", action="store_true", help="Cleanup temporary SDE folder")
-    parser.add_argument("--db", default=cfg.get("DEFAULT_DB_FILE"), help="SQLite database file path")
+    parser.add_argument("--db", default=cfg.get("DEFAULT_DB_URI"), help="SQLite database file path")
     parser.add_argument("--tmp", default=cfg.get("DEFAULT_TMP_DIR"), help="Temporary folder for SDE extraction")
     parser.add_argument("--tables", nargs="*", help="Tables to import (default: TABLES_TO_IMPORT from config)")
 
@@ -170,7 +171,7 @@ def main():
         if not tables_to_import:
             raise ValueError("No tables specified for import (check config or CLI args).")
         
-        import_sde_to_sqlite(sde_path, db_file=args.db, tables_to_import=tables_to_import)
+        import_sde_to_sqlite(sde_path, db_uri=args.db, tables_to_import=tables_to_import)
 
     if args.cleanup:
         cleanup_temp(sde_path)
