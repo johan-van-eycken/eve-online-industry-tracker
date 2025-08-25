@@ -1,74 +1,64 @@
 import logging
-import pandas as pd
 
-from classes.config_manager import ConfigManagerSingleton
-from classes.database_manager import DatabaseManager, CharacterManager
-from classes.esi import ESIClient
+from classes.config_manager import ConfigManager
+from classes.character_manager import CharacterManager
+from classes.database_manager import DatabaseManager
+from classes.database_models import Base
 
+def initialize_oauth_schema(database_manager: DatabaseManager):
+    """Initialize the database schema for OAuth."""
+    logging.debug("Initializing database schema for OAuth...")
+    try:
+        Base.metadata.create_all(bind=database_manager.engine)
+    except Exception as e:
+        logging.error(f"Failed to initialize schema: {e}")
+        raise e
+    logging.debug("Database schema for OAuth initialized successfully.")
 
 def main():
     logging.basicConfig(level=logging.INFO)
 
-    # ---------------------------
-    # Configuraties laden
-    # ---------------------------
+    # Load Configurations
+    logging.info("Loading config...")
     try:
-        cfg = ConfigManagerSingleton()
+        cfg = ConfigManager()
+        cfg_language = cfg.get("app").get("language")
+        cfg_characters = cfg.get("characters")
+        if len(cfg_characters) == 0:
+            raise ValueError("No characters found in config!")
+        cfg_oauth_db_uri = cfg.get("app").get("database_oauth_uri")
+        cfg_app_db_uri = cfg.get("app").get("database_app_uri")
+        cfg_sde_db_uri = cfg.get("app").get("database_sde_uri")
     except Exception as e:
         logging.error(f"Failed to load config: {e}")
         return
+    logging.debug("Config loaded successfully.")
+
+    # Initialize Database Schema
+    try:
+        logging.debug(f"Database URI for OAuth: {cfg_oauth_db_uri}")
+        db_oauth = DatabaseManager(cfg_oauth_db_uri, cfg_language)
+        initialize_oauth_schema(db_oauth)
+    except Exception as e:
+        logging.error(f"Schema initialization failed. {e}")
+        return
+
+    # Initialize Character Manager
+    logging.info("Initializing characters...")
+    try:
+        db_app = DatabaseManager(cfg_app_db_uri, cfg_language)
+        db_sde = DatabaseManager(cfg_sde_db_uri, cfg_language)
+        char_manager = CharacterManager(cfg, db_oauth, db_app, db_sde, cfg_characters)
+    except ValueError as e:
+        logging.error(f"Error encountered: {e}")
+        return
+    except Exception as e:
+        logging.error(f"Failed to initialize characters: {e}")
+        return
+    logging.debug("Characters initialized successfully.")
     
-    # ---------------------------
-    # Characters ophalen uit config
-    # ---------------------------
-    characters = cfg.get("characters")
-    main_char_cfg = next((c for c in characters if c.get("is_main")), None)
-    if not main_char_cfg:
-        logging.warning("No main character defined, using first character in list.")
-        main_char_cfg = characters[0]
-
-    # ---------------------------
-    # ESI clients initialiseren
-    # ---------------------------
-    db_characters = CharacterManager(cfg.get("app").get("db_characters"))
-
-    # Main character
-    esi_main = ESIClient(main_char_cfg["character_name"], db_characters, is_main=True)
-    logging.info(f"Main character set: {esi_main.character_name} (ID: {esi_main.character_id})")
-    esi_clients.append(esi_main)
-
-    # Andere characters
-    for c in characters:
-        if c["character_name"] != esi_main.character_name:
-            client = ESIClient(c["character_name"], is_main=False)
-            esi_clients.append(client)
-            logging.info(f"Alt character loaded: {client.character_name} (ID: {client.character_id})")
-
-    # ---------------------------
-    # Character data
-    # ---------------------------
-
-    df_sde_races = db_sde.load_df("races")
-    df_sde_bloodlines = db_sde.load_df("bloodlines")
-
-    all_data = []
-    for c in esi_clients:
-        data = c.esi_get(f"/characters/{c.character_id}/")
-        data["character_id"] = c.character_id
-        data["image_url"] = f"https://images.evetech.net/characters/{c.character_id}/portrait?size=128"
-        data["wallet_balance"] = c.esi_get(f"/characters/{c.character_id}/wallet/")
-        # Lookup eve_sde names
-        race_name_lookup = df_sde_races.set_index('id')['nameID'].to_dict()
-        bloodline_name_lookup = df_sde_bloodlines.set_index('id')['nameID'].to_dict()
-        data["race"] = race_name_lookup.get(data['race_id'], "unknown")
-        data["bloodline"] = bloodline_name_lookup.get(data['bloodline_id'], "unknown")
-
-        all_data.append(data)
-
-    df = pd.DataFrame(all_data)
-    db_eve.save_df(df, "characters") 
-
-    logging.info(f"Character data saved.")
-
+    # Refresh wallet balances for all Characters
+    char_manager.refresh_wallet_balance()
+    
 if __name__ == "__main__":
     main()
