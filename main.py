@@ -1,6 +1,7 @@
 import logging
 
 from classes.config_manager import ConfigManager
+from config.schemas import CONFIG_SCHEMA
 from classes.character_manager import CharacterManager
 from classes.database_manager import DatabaseManager
 from classes.database_models import Base
@@ -21,7 +22,7 @@ def main():
     # Load Configurations
     logging.info("Loading config...")
     try:
-        cfg = ConfigManager()
+        cfg = ConfigManager(base_path="config/config.json", secret_path="config/secret.json", schema=CONFIG_SCHEMA)._config
         cfg_language = cfg.get("app").get("language")
         cfg_characters = cfg.get("characters")
         if len(cfg_characters) == 0:
