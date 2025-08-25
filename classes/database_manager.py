@@ -1,10 +1,9 @@
+import os
 import json
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, DDL
 from sqlalchemy.orm import sessionmaker
 from typing import Optional, List
-
-from classes.database_models import Base  # Import SQLAlchemy models like EsiCache, Character
 
 # ----------------------------
 # DatabaseManager
@@ -18,6 +17,13 @@ class DatabaseManager:
         self.engine = create_engine(self.db_uri)
         self.Session = sessionmaker(bind=self.engine)
         self.session = self.Session()
+
+    def get_db_name(self) -> str:
+        """ Return the database filename from the URI. Example: 'sqlite:///database/eve_app.db' -> 'eve_app.db' """
+        path = self.db_uri
+        if path.startswith("sqlite:///"):
+            path = path[10:] 
+        return os.path.basename(path)
 
     def save_df(self, df: pd.DataFrame, table_name: str) -> None:
         """Saves a dataframe to a table (using raw SQL for dataframes). Prefer ORM when possible."""
@@ -50,5 +56,6 @@ class DatabaseManager:
 
     def drop_table(self, table_name: str) -> None:
         """Drop a table from the database."""
+        stmt = DDL(f"DROP TABLE IF EXISTS {table_name}")
         with self.engine.begin() as conn:
-            conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+            conn.execute(stmt)

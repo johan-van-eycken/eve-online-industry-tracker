@@ -2,27 +2,26 @@ import streamlit as st
 import glob
 import os
 import pandas as pd
-from classes.config_manager import ConfigManager
+
 from classes.database_manager import DatabaseManager
 from typing import Optional, List, Tuple
 
-def render_table_viewer(row_limit: Optional[int] = 1000) -> Optional[Tuple[DatabaseManager, Optional[str]]]:
+def render_table_viewer(cfg, row_limit: Optional[int] = 1000) -> Optional[Tuple[DatabaseManager, Optional[str]]]:
     """
     Reusable table viewer for Streamlit.
 
     - db_folder: folder containing .db files
     - row_limit: max rows to display
     """
-    cfg = ConfigManager()
-    cfg_language = cfg.get("app")["language"]
+    cfg_language = cfg["app"]["language"]
 
     st.subheader("Database Table Viewer")
 
     # --- Database selection ---
     databases: List[str] = []
-    databases.append(cfg.get("app").get("database_oauth_uri"))
-    databases.append(cfg.get("app").get("database_app_uri"))
-    databases.append(cfg.get("app").get("database_sde_uri"))
+    databases.append(cfg["app"]["database_oauth_uri"])
+    databases.append(cfg["app"]["database_app_uri"])
+    databases.append(cfg["app"]["database_sde_uri"])
 
     selected_db = st.selectbox(
         "Select a database",

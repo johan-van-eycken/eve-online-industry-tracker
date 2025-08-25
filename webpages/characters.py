@@ -2,9 +2,9 @@ import streamlit as st
 from classes.database_manager import DatabaseManager
 from utils.formatters import format_isk, format_date, format_date_into_age
 
-def render():
+def render(cfg):
     st.subheader("Characters")
-    db = DatabaseManager("eve_data.db")
+    db = DatabaseManager(cfg["app"]["database_app_uri"])
 
     try:
         df = db.load_df("characters")
@@ -43,7 +43,7 @@ def render():
                     ">
                         <img src="{row['image_url']}" width="128" style="border-radius:8px; margin-bottom:10px; display:block; margin-left:auto; margin-right:auto;" />
                         <div style="font-size:16px; line-height:1.3; color:#f0f0f0;">
-                            <b style="font-size:20px;">{row['name']}</b><br>
+                            <b style="font-size:20px;">{row['character_name']}</b><br>
                             <br>
                             <b>Wallet Balance:<br>
                             {format_isk(row.get('wallet_balance'))}</b><br>

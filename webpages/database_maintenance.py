@@ -4,14 +4,14 @@ from utils.table_viewer import render_table_viewer
 from classes.database_manager import DatabaseManager
 from typing import Optional
 
-def render():
+def render(cfg):
     """
     Reusable table viewer for Streamlit.
     """
     db: Optional[DatabaseManager] = None
     selected_table: Optional[str] = None
     
-    result = render_table_viewer(row_limit=2000)
+    result = render_table_viewer(cfg, row_limit=2000)
     if result is not None:
         db, selected_table = result
 
