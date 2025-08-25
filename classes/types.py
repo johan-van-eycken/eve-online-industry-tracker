@@ -1,5 +1,6 @@
 from typing import TypedDict, NotRequired
 
+# TypeDict voor characters in de database
 class CharacterRow(TypedDict):
     character_name: str
     character_id: int

@@ -6,7 +6,12 @@
   "app": {
     "port": 8080,
     "redirect_uri": "http://localhost:8080/callback",
-    "user_agent": "eve-online-industry-tracker/1.0 (jveycken@gmail.com)"
+    "user_agent": "eve-online-industry-tracker/1.0 (jveycken@gmail.com)",
+    "language": "en",
+    "database_path": "database",
+    "db_characters": "eve_characters.db",
+    "db_app": "eve_data.db",
+    "db_sde": "eve_sde.db"
   },
   "esi": {
     "base": "https://esi.evetech.net/latest",
