@@ -58,7 +58,7 @@ class CharacterModel(BaseApp):
     description: Mapped[str] = mapped_column(String, nullable=True)
     security_status: Mapped[float] = mapped_column(Float, default=0.0)
     wallet_balance: Mapped[float] = mapped_column(Float, default=0.0)
-    skills: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)
+    skills: Mapped[str] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 # --------------------------

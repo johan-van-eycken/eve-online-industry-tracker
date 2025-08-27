@@ -12,13 +12,12 @@ def sync_app_database():
     logging.debug("Starting database sync for eve_app.db using Alembic...")
     try:
         alembic_cfg = Config("alembic.ini")
-        logging.info("Applying migrations to database using Alembic...")
-        command.upgrade(alembic_cfg, "head")  # Apply migrations
-        logging.info("Database migrations applied successfully.")
+        command.upgrade(alembic_cfg, "head", sql=False)  # Apply migrations
+        
     except Exception as e:
         logging.error("Error during database sync for eve_app.db.")
         raise e
-    logging.debug("Finished database sync.")
+    logging.debug("Database migrations applied successfully.")
 
 def initialize_eve_oauth_schema(database_manager: DatabaseManager):
     """Initialize the database schema for eve_oauth.db."""
@@ -28,20 +27,10 @@ def initialize_eve_oauth_schema(database_manager: DatabaseManager):
     except Exception as e:
         logging.error(f"Failed to initialize schema: {e}")
         raise e
-    logging.debug("Database schema for OAuth initialized successfully.")
-
-def initialize_eve_app_schema(database_manager: DatabaseManager):
-    """Initialize the database schema for eve_app.db"""
-    logging.debug(f"Initializing database schema for {database_manager.get_db_name()}...")
-    try:
-        BaseApp.metadata.create_all(bind=database_manager.engine)
-    except Exception as e:
-        logging.error(f"Failed to initialize schema: {e}")
-        raise e
-    logging.debug("Database schema for OAuth initialized successfully.")
+    logging.debug(f"Database schema for `{database_manager.get_db_name()}` initialized successfully.")
 
 def main():
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
     # Load Configurations
     logging.info("Loading config...")
@@ -68,21 +57,20 @@ def main():
         initialize_eve_oauth_schema(db_oauth)
 
         logging.debug(f"Database URI for App: {cfg_app_db_uri}")
+        # sync_app_database()
         db_app = DatabaseManager(cfg_app_db_uri, cfg_language)
-        initialize_eve_app_schema(db_app)
 
         logging.debug(f"Database URI for Sde: {cfg_sde_db_uri}")
         db_sde = DatabaseManager(cfg_sde_db_uri, cfg_language)
-
-        sync_app_database()
     except Exception as e:
-        logging.error(f"Database and schema initializations failed. {e}")
+        logging.error(f"Database and schema initializations failed. {e}", exc_info=True)
         return
 
     # Initialize Character Manager
     logging.info("Initializing characters...")
     try:
         char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, cfg_characters)
+        char_manager.refresh_all()
 
     except ValueError as e:
         logging.error(f"Error encountered: {e}")
