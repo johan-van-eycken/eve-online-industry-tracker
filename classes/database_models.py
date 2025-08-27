@@ -2,7 +2,7 @@ from typing import Optional, Any
 from datetime import datetime
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
-from sqlalchemy import DateTime, Integer, String, Text, Float, Boolean, JSON
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, Float, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
 
 # Base is the declarative base for SQLAlchamy models
@@ -58,6 +58,7 @@ class CharacterModel(BaseApp):
     description: Mapped[str] = mapped_column(String, nullable=True)
     security_status: Mapped[float] = mapped_column(Float, default=0.0)
     wallet_balance: Mapped[float] = mapped_column(Float, default=0.0)
+    skills: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 # --------------------------
@@ -87,3 +88,29 @@ class Races(BaseSde):
     nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     shipTypeID: Mapped[int] = mapped_column(Integer, nullable=True)
     skills: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
+
+class Types(BaseSde):
+    __tablename__ = "types"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    groupID: Mapped[int] = mapped_column(Integer, nullable=True)
+    mass: Mapped[int] = mapped_column(BigInteger, nullable=True)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
+    portionSize: Mapped[int] = mapped_column(Integer, nullable=True)
+    published: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    volume: Mapped[float] = mapped_column(Float, nullable=True)
+    radius: Mapped[int] = mapped_column(Integer, nullable=True)
+    description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
+
+class Groups(BaseSde):
+    __tablename__ = "groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    anchorable: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    anchored: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    categoryID: Mapped[int] = mapped_column(Integer, nullable=True)
+    fittableNonSingleton: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
+    published: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    useBasePrice: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    iconID: Mapped[int] = mapped_column(Integer, nullable=True)

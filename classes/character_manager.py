@@ -128,6 +128,20 @@ class CharacterManager():
             ]
             return result
 
-        # Refresh wallet balances for all characters
+        # Refresh profile data for all characters
         result = [char.refresh_profile() for char in self.character_list]
+        return result
+
+    def refresh_skills(self, character_name: Optional[str] = None) -> List[Dict]:
+        if character_name:
+            # Refresh skills for a single character
+            result = [
+                char.refresh_skills()
+                for char in self.character_list
+                if char.character_name == character_name
+            ]
+            return result
+        
+        # Refresh skills for all characters
+        result = [char.refresh_skills() for char in self.character_list]
         return result
