@@ -91,8 +91,28 @@ class CharacterManager():
                 logging.error(f"Failed to initialize character {char_cfg}. Missing key: {e}")
             except Exception as e:
                 logging.error(f"Error initializing character {char_cfg['character_name']}: {e}")
+
+    def refresh_all(self, character_name: Optional[str] = None) -> List[str]:
+        """ 
+        Refresh all character data for on or all characters.
+
+        :param charcter_name: Optionally specify a single character to refresh.
+        :return: JSON response containing all character data (profile, wallet_balance, skills, ...)
+        """
+        if character_name:
+            # Refresh profile data for a single character
+            result = [
+                char.refresh_all()
+                for char in self.character_list
+                if char.character_name == character_name
+            ]
+            return result
         
-    def refresh_wallet_balance(self, character_name: Optional[str] = None) -> List[Dict]:
+        # Refresh all data for all characters
+        result = [char.refresh_all() for char in self.character_list]
+        return result
+        
+    def refresh_wallet_balance(self, character_name: Optional[str] = None) -> List[str]:
         """
         Refresh wallet balances for one or all characters.
 
@@ -112,7 +132,7 @@ class CharacterManager():
         result = [char.refresh_wallet_balance() for char in self.character_list]
         return result
     
-    def refresh_profile(self, character_name: Optional[str] = None) -> List[Dict]:
+    def refresh_profile(self, character_name: Optional[str] = None) -> List[str]:
         """
         Refresh profiles for one or all characters.
 
@@ -132,7 +152,7 @@ class CharacterManager():
         result = [char.refresh_profile() for char in self.character_list]
         return result
 
-    def refresh_skills(self, character_name: Optional[str] = None) -> List[Dict]:
+    def refresh_skills(self, character_name: Optional[str] = None) -> List[str]:
         if character_name:
             # Refresh skills for a single character
             result = [

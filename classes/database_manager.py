@@ -12,9 +12,16 @@ class DatabaseManager:
     def __init__(self, db_uri: str, language: str = "en"):
         self.db_uri = db_uri
         self.language = language
+
+        # Engine kwargs
+        engine_kwargs = dict(echo=False, future=True)
+        
+        # SQLite doesn’t support INSERT ... RETURNING reliably → disable
+        if self.db_uri.startswith("sqlite"):
+            engine_kwargs["implicit_returning"] = False
         
         # Setup SQLAlchemy Engine and Session
-        self.engine = create_engine(self.db_uri)
+        self.engine = create_engine(self.db_uri, **engine_kwargs)
         self.Session = sessionmaker(bind=self.engine)
         self.session = self.Session()
 

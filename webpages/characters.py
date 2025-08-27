@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import json
 from classes.database_manager import DatabaseManager
 from utils.formatters import format_isk, format_date, format_date_into_age
 
@@ -46,6 +47,11 @@ def render(cfg):
                 if character_name and wallet_balance:
                     df.loc[df["character_name"] == character_name, "wallet_balance"] = wallet_balance
 
+    # By default no character tile selected
+    if "selected_character" not in st.session_state:
+        st.session_state.selected_character = None
+
+    # Clickable character tiles
     cards_per_row = 5
     for i in range(0, len(df), cards_per_row):
         cols = st.columns(cards_per_row)
@@ -57,14 +63,7 @@ def render(cfg):
             with col:
                 st.markdown(
                     f"""
-                    <div style="
-                        background-color: rgba(30,30,30,0.95);
-                        padding: 25px;
-                        border-radius: 12px;
-                        box-shadow: 2px 2px 10px rgba(0,0,0,0.6);
-                        text-align: center;
-                        margin-bottom: 10px;
-                    ">
+                    <div style="background-color: rgba(30,30,30,0.95); padding: 25px; border-radius: 12px; box-shadow: 2px 2px 10px rgba(0,0,0,0.6); text-align: center; margin-bottom: 10px;">
                         <img src="{row['image_url']}" width="128" style="border-radius:8px; margin-bottom:10px; display:block; margin-left:auto; margin-right:auto;" />
                         <div style="font-size:16px; line-height:1.3; color:#f0f0f0;">
                             <b style="font-size:20px;">{row['character_name']}</b><br>
@@ -86,3 +85,33 @@ def render(cfg):
                     """,
                     unsafe_allow_html=True
                 )
+
+    # Show skills if a character is selected
+    st.subheader(f"Character Skills")
+    # Dropdown to select character
+    char_options = df.set_index("character_id")["character_name"].to_dict()
+    selected_id = st.selectbox("Select character:", options=list(char_options.keys()), format_func=lambda x: char_options[x])
+
+    if selected_id:
+        char_row = df[df["character_id"] == selected_id].iloc[0]
+
+        if "skills" in char_row:
+            skills_data = json.loads(char_row["skills"])
+            total_sp = skills_data.get("total_skillpoints", 0)
+            unallocated_sp = skills_data.get("unallocated_skillpoints", 0)
+            
+            st.markdown(f"**Total SP:** {total_sp:,}")
+            st.markdown(f"**Unallocated SP:** {unallocated_sp:,}")
+
+            skill_groups = {}
+            for s in skills_data.get("skills", []):
+                skill_groups.setdefault(s["group_name"], []).append(s)
+
+            for group_name, skills in skill_groups.items():
+                with st.expander(group_name, expanded=True):
+                    for skill in skills:
+                        level = skill["trained_skill_level"]
+                        points = skill["skillpoints_in_skill"]
+                        # EVE-style progress bar (level/5)
+                        st.markdown(f"**{skill['skill_name']}** - Level {level} ({points:,} SP)")
+                        st.progress(level / 5)

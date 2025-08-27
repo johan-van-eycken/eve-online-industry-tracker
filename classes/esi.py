@@ -63,9 +63,9 @@ class ESIClient:
             else:
                 self.character_id = record.character_id
 
-            logging.info(f"Loaded existing tokens for {self.character_name} ({self.character_id}).")
+            logging.debug(f"Loaded existing tokens for {self.character_name} ({self.character_id}).")
         else:
-            logging.info(f"No token found for {self.character_name}. Registering new character.")
+            logging.debug(f"No token found for {self.character_name}. Registering new character.")
             self.register_new_character()
 
     # ------------------------------------------------------------------
@@ -82,18 +82,18 @@ class ESIClient:
             "state": state,
         }
         auth_url = f"{self.auth_url}?{urlencode(auth_params)}"
-        logging.info(f"Opening URL for EVE Online login: {auth_url}")
+        logging.debug(f"Opening URL for EVE Online login: {auth_url}")
         webbrowser.open(auth_url)
 
         with OAuthServer(("localhost", 8080), OAuthHandler) as httpd:
             httpd.timeout = timeout_seconds
-            logging.info("Waiting for authorization code...")
+            logging.debug("Waiting for authorization code...")
             start_time = time.time()
             while httpd.code is None:
                 httpd.handle_request()
                 if time.time() - start_time > timeout_seconds:
                     raise TimeoutError("Authorization code retrieval timed out.")
-            logging.info("Authorization code received.")
+            logging.debug("Authorization code received.")
             return httpd.code
     
     # ------------------------------------------------------------------
@@ -116,7 +116,7 @@ class ESIClient:
         access_token = token_data["access_token"]
         refresh_token = token_data["refresh_token"]
         expires_in = token_data["expires_in"]
-        logging.info("Access token and refresh token successfully retrieved.")
+        logging.debug("Access token and refresh token successfully retrieved.")
         return access_token, refresh_token, expires_in
 
     # ----------------------------
@@ -150,7 +150,7 @@ class ESIClient:
             record.token_expiry = self.token_expiry
             self.db_oauth.session.commit()
 
-        logging.info(f"Access token refreshed for {self.character_name}.")
+        logging.debug(f"Access token refreshed for {self.character_name}.")
     
     # ----------------------------
     # Verify Access Token
@@ -182,7 +182,7 @@ class ESIClient:
     # ------------------------------------------------------------------
     def register_new_character(self) -> None:
         """Register a new character and persist tokens to DB."""
-        logging.info("Starting character registration flow...")
+        logging.debug("Starting character registration flow...")
         authorization_code = self._get_authorization_code()
         access_token, refresh_token, expires_in = self.exchange_code_for_tokens(authorization_code)
 
@@ -209,7 +209,7 @@ class ESIClient:
 
         self.db_oauth.session.commit()
 
-        logging.info(f"Character {self.character_name} ({self.character_id}) registered and tokens saved.")
+        logging.debug(f"Character {self.character_name} ({self.character_id}) registered and tokens saved.")
     
     # ----------------------------
     # ESI API + Cache Helpers
@@ -235,7 +235,7 @@ class ESIClient:
             cache_entry = EsiCache(endpoint=endpoint, etag=etag, data=serialized_data, last_updated=int(time.time()))
             self.db_oauth.session.add(cache_entry)
         self.db_oauth.session.commit()
-        logging.info(f"Cache updated for {endpoint}.")
+        logging.debug(f"Cache updated for {endpoint}.")
     
     # ------------------------------
     # ESI API Calls (with Caching)
@@ -293,7 +293,7 @@ class ESIClient:
 
                 elif response.status_code == 304:
                     # Not modified, return cached data
-                    logging.info(f"Using cached data for endpoint {endpoint}.")
+                    logging.debug(f"Using cached data for endpoint {endpoint}.")
                     return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
 
                 elif response.status_code in (420, 429, 500, 502, 503, 504):
