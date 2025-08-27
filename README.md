@@ -115,18 +115,22 @@ Project Structure
 ```pgsql
 .
 ├── classes/
+│   ├── character_manager.py
+│   ├── character.py
 │   ├── config_manager.py
 │   ├── database_manager.py
+│   ├── database_models.py
 │   ├── esi.py
-│   ├── oauth.py
-│   └── types.py
+│   └── oauth.py
 ├── config/
 │   ├── config.json
 │   ├── secret.json
+│   ├── import_sde.json
+│   ├── schemas.py
 │   └── import_sde.json      # list of SDE tables to import
 ├── database/
-|   ├── eve_characters.db    # authenticated characters database
-|   ├── eve_data.db          # main app database
+|   ├── eve_oauth.db         # authenticated characters database
+|   ├── eve_app.db           # main app database
 │   └── eve_sde.db           # imported SDE database
 ├── scripts/
 │   └── import_sde.py
