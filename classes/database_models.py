@@ -69,11 +69,11 @@ class Bloodlines(BaseSde):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     charisma: Mapped[int] = mapped_column(Integer, nullable=False)
     corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
-    descriptionID: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    descriptionID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
     intelligence: Mapped[int] = mapped_column(Integer, nullable=False)
     memory: Mapped[int] = mapped_column(Integer, nullable=False)
-    nameID: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     perception: Mapped[int] = mapped_column(Integer, nullable=False)
     raceID: Mapped[int] = mapped_column(Integer, nullable=False)
     willpower: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -82,8 +82,8 @@ class Races(BaseSde):
     __tablename__ = "races"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    descriptionID: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    descriptionID: Mapped[str] = mapped_column(JSON, nullable=False)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
-    nameID: Mapped[int] = mapped_column(Integer, nullable=False)
+    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     shipTypeID: Mapped[int] = mapped_column(Integer, nullable=True)
-    skills: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)        # mapping of skillID -> value/level
+    skills: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
