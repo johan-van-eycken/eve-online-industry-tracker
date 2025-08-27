@@ -34,6 +34,10 @@ class ESIClient:
         self.token_url = self.cfg.get("esi")["token_url"]
         self.verify_url = self.cfg.get("esi")["verify_url"]
         self.auth_url = self.cfg.get("esi")["auth_url"]
+        self.esi_header_accept = self.cfg.get("esi").get("headers")["Accept"]
+        self.esi_header_acceptlanguage = self.cfg.get("esi").get("headers")["Accept-Language"]
+        self.esi_header_xcompatibilitydate = self.cfg.get("esi").get("headers")["X-Compatibility-Date"]
+        self.esi_header_xtenant = self.cfg.get("esi").get("headers")["X-Tenant"]
         self.client_id = self.cfg.get("oauth")["client_id"]
         self.client_secret = self.cfg.get("client_secret")
         self.user_agent = self.cfg.get("app")["user_agent"]
@@ -251,8 +255,12 @@ class ESIClient:
             self.refresh_access_token()  # Refresh token if no valid access token
         
         headers = {
+            "Accept": self.esi_header_accept,
+            "Accept-Language": self.esi_header_acceptlanguage,
             "Authorization": f"Bearer {self.access_token}",
             "User-Agent": self.user_agent,
+            "X-Compatibility-Date": self.esi_header_xcompatibilitydate,
+            "X-Tenant": self.esi_header_xtenant
         }
 
         # Check cache before making API calls
@@ -265,7 +273,10 @@ class ESIClient:
                 headers["If-None-Match"] = cache_entry.etag
 
         retries = 0
-        while retries < 5:
+
+        url = f"{self.esi_base_uri}{endpoint}"
+
+        while retries < 3:
             try:
                 url = f"{self.esi_base_uri}{endpoint}"
                 response = requests.get(url, headers=headers, timeout=15)
@@ -283,7 +294,7 @@ class ESIClient:
                 elif response.status_code == 304:
                     # Not modified, return cached data
                     logging.info(f"Using cached data for endpoint {endpoint}.")
-                    return cached_data
+                    return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
 
                 elif response.status_code in (420, 429, 500, 502, 503, 504):
                     wait = (2 ** retries) + random.uniform(0, 1)

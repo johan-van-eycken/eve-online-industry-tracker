@@ -1,6 +1,23 @@
 import streamlit as st
+import requests
 from classes.database_manager import DatabaseManager
 from utils.formatters import format_isk, format_date, format_date_into_age
+
+FLASK_API_URL= "http://localhost:5000"
+
+def refresh_wallet_balances():
+    """
+    Function to send a POST request to the Flask backend to refresh wallet balances.
+    """
+    try:
+        response = requests.post(f"{FLASK_API_URL}/refresh_wallet_balances", json={})
+        if response.status_code == 200:
+            st.success("Wallet balances refreshed successfully!")
+            return response.json()["data"]
+        else:
+            st.error(f"Failed to refresh wallet balances: {response.json().get('message', 'Unknown error')}")
+    except Exception as e:
+        st.error(f"Error connecting to backend: {e}")
 
 def render(cfg):
     st.subheader("Characters")
@@ -19,8 +36,15 @@ def render(cfg):
 
     # Button refresh wallet balances
     if st.button("Refresh Wallet Balances"):
-        
-        st.success("Character Wallet balances refreshed!")
+        refreshed_data = refresh_wallet_balances()  # Calls Flask backend
+        if refreshed_data:
+            # Assuming refreshed_data has the updated wallet balances; update your dataframe if necessary
+            for wallet_data in refreshed_data:
+                character_name = wallet_data.get("character_name")
+                wallet_balance = wallet_data.get("wallet_balance")
+
+                if character_name and wallet_balance:
+                    df.loc[df["character_name"] == character_name, "wallet_balance"] = wallet_balance
 
     cards_per_row = 5
     for i in range(0, len(df), cards_per_row):

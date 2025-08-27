@@ -13,6 +13,12 @@ CONFIG_SCHEMA = {
         "auth_url": "https://login.eveonline.com/v2/oauth/authorize/",
         "token_url": "https://login.eveonline.com/v2/oauth/token",
         "verify_url": "https://login.eveonline.com/oauth/verify",
+        "headers": {
+            "Accept": "application/json",  # Required
+            "Accept-Language": "en",  # Default language
+            "X-Compatibity-Date": "2025-08-26",  # Required compatibility date
+            "X-Tenant": "tranquility",  # Tenant identifier
+        },
     },
     "oauth": {"client_id": None},  # no default allowed
     "characters": [],  # must be a list

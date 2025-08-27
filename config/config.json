@@ -14,10 +14,16 @@
     "database_sde_uri": "sqlite:///database/eve_sde.db"
   },
   "esi": {
-    "base": "https://esi.evetech.net/latest",
+    "base": "https://esi.evetech.net",
     "auth_url": "https://login.eveonline.com/v2/oauth/authorize/",
     "token_url": "https://login.eveonline.com/v2/oauth/token",
-    "verify_url": "https://login.eveonline.com/oauth/verify"
+    "verify_url": "https://login.eveonline.com/oauth/verify",
+    "headers": {
+      "Accept": "application/json",
+      "Accept-Language": "en",
+      "X-Compatibility-Date": "2025-08-26",
+      "X-Tenant": "tranquility"
+    }
   },
   "oauth": {
     "client_id": "84f5c62c020c46559d2b8615ea1eb146"
@@ -25,7 +31,9 @@
   "defaults": {
     "scopes": [
       "esi-assets.read_assets.v1",
-      "esi-wallet.read_character_wallet.v1"
+      "esi-wallet.read_character_wallet.v1",
+      "esi-skills.read_skills.v1",
+      "esi-skills.read_skillqueue.v1"
     ]
   }
 }

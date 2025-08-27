@@ -121,14 +121,17 @@ def cleanup_temp(dest_dir: str):
 # ----------------------------
 def main():
     default_config_path = "config/import_sde.json"
-    cfg = ConfigManager(base_path=default_config_path, schema=IMPORT_SDE_SCHEMA)
+    try:
+        cfg = ConfigManager(base_path=default_config_path, schema=IMPORT_SDE_SCHEMA)
+    except Exception as e:
+        print(f" !!! Failed to initialize ConfigManager ({default_config_path}): {e}")
 
     # Load tables from config
     if not os.path.exists(default_config_path):
         raise FileNotFoundError(f"{default_config_path} not found.")
 
     parser = argparse.ArgumentParser(
-        description=f"EVE Online SDE Importer {cfg.get("APP_VERSION")} (YAML -> SQLite)",
+        description=f"EVE Online SDE Importer {cfg.get('APP_VERSION')} (YAML -> SQLite)",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("--version", action="version", version=f"EVE Online SDE Importer {cfg.get('APP_VERSION')}")

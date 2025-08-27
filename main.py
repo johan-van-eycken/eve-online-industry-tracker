@@ -1,10 +1,24 @@
 import logging
-
+from alembic.config import Config
+from alembic import command
 from classes.config_manager import ConfigManager
 from config.schemas import CONFIG_SCHEMA
 from classes.character_manager import CharacterManager
 from classes.database_manager import DatabaseManager
 from classes.database_models import BaseOauth, BaseApp
+
+def sync_app_database():
+    """Sync eve_app.db with all database models in classes/database_models.py"""
+    logging.debug("Starting database sync for eve_app.db using Alembic...")
+    try:
+        alembic_cfg = Config("alembic.ini")
+        logging.info("Applying migrations to database using Alembic...")
+        command.upgrade(alembic_cfg, "head")  # Apply migrations
+        logging.info("Database migrations applied successfully.")
+    except Exception as e:
+        logging.error("Error during database sync for eve_app.db.")
+        raise e
+    logging.debug("Finished database sync.")
 
 def initialize_eve_oauth_schema(database_manager: DatabaseManager):
     """Initialize the database schema for eve_oauth.db."""
@@ -27,7 +41,7 @@ def initialize_eve_app_schema(database_manager: DatabaseManager):
     logging.debug("Database schema for OAuth initialized successfully.")
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
 
     # Load Configurations
     logging.info("Loading config...")
@@ -47,6 +61,7 @@ def main():
     logging.debug("Config loaded successfully.")
 
     # Initialize Databases and Schemas
+    logging.info("Initializing databases...")
     try:
         logging.debug(f"Database URI for OAuth: {cfg_oauth_db_uri}")
         db_oauth = DatabaseManager(cfg_oauth_db_uri, cfg_language)
@@ -58,6 +73,8 @@ def main():
 
         logging.debug(f"Database URI for Sde: {cfg_sde_db_uri}")
         db_sde = DatabaseManager(cfg_sde_db_uri, cfg_language)
+
+        sync_app_database()
     except Exception as e:
         logging.error(f"Database and schema initializations failed. {e}")
         return
@@ -66,7 +83,7 @@ def main():
     logging.info("Initializing characters...")
     try:
         char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, cfg_characters)
-        char_manager.refresh_profile()
+
     except ValueError as e:
         logging.error(f"Error encountered: {e}")
         return

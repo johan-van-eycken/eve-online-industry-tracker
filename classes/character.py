@@ -1,13 +1,12 @@
 import logging
+import json
 from datetime import datetime
 from typing import Optional, Dict, Any
 
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
 from classes.esi import ESIClient
-from classes.database_models import CharacterModel, Bloodlines, Races
-
-
+from classes.database_models import CharacterModel, Bloodlines, Races, Types, Groups
 
 class Character:
     """Handles authentication and profile for an in-game character using ESIClient."""
@@ -47,6 +46,9 @@ class Character:
         # Wallet balance
         self.wallet_balance: Optional[float] = None
 
+        # Skills
+        self.skills: Optional[list] = None
+
         # Initialize ESI Client (handles token registration/refresh automatically)
         logging.debug(f"Initializing ESIClient for {self.character_name}...")
         self.esi_client = ESIClient(cfg, db_oauth, character_name, is_main, refresh_token)
@@ -54,15 +56,7 @@ class Character:
         logging.debug(f"ESIClient initialized for {self.character_name}.")
 
         if not self.load_character():
-            # Initialize character profile
-            logging.debug(f"Initializing characters profile for {self.character_name}...")
-            self.refresh_profile()
-            logging.debug(f"Character profile initialized for {self.character_name} - {self.character_id}")
-
-            # Initialize character's wallet balance
-            logging.debug(f"Initializing characters wallet balance for {self.character_name}...")
-            self.refresh_wallet_balance()
-            logging.debug(f"Characters wallet balance initialized for {self.character_name} - {self.wallet_balance}")
+            self.refresh_all()
         else:
             logging.debug(f"Character data loaded from database for {self.character_name} ({self.character_id})")
     
@@ -79,16 +73,13 @@ class Character:
             character_record = CharacterModel(character_name=self.character_name, character_id=self.character_id, is_main=self.is_main)
             self.db_app.session.add(character_record)
 
-        # Dynamically update all attributes in the runtime instance that match DB columns
-        for attr in [
-            "character_id", "character_name", "birthday", "bloodline_id",
-            "bloodline", "race_id", "race", "gender", "corporation_id",
-            "description", "security_status", "wallet_balance"
-        ]:
-            if hasattr(self, attr):
-                setattr(character_record, attr, getattr(self, attr))
+        # Dynamically update based on CharacterModel's columns
+        for column in CharacterModel.__tablename__.columns.keys():
+            if hasattr(self, column):
+                setattr(character_record, column, getattr(self, column))
 
         character_record.updated_at = datetime.utcnow()
+
         self.db_app.session.commit()
         logging.debug(f"Character '{self.character_name}' saved to database.")
 
@@ -104,21 +95,45 @@ class Character:
             logging.info(f"No database record found for character '{self.character_name}'.")
             return False
 
-        # Copy attributes from DB record to instance
-        for attr in [
-            "character_id", "character_name", "birthday", "bloodline_id",
-            "bloodline", "race_id", "race", "gender", "corporation_id",
-            "description", "security_status", "wallet_balance", "updated_at"
-        ]:
-            setattr(self, attr, getattr(character_record, attr))
+        # Dynamically use attributes from CharacterModel
+        for column in CharacterModel.__table__.columns.keys():
+            if hasattr(self, column):
+                setattr(self, column, getattr(character_record, column))
 
-        logging.info(f"Character '{self.character_name}' loaded from database.")
-        return True
+            logging.info(f"Character '{self.character_name}' loaded from database.")
+            return True
+
+    # -------------------
+    # Refresh All
+    # -------------------
+    def refresh_all(self) -> str:
+        """Refresh all data for the current character and return a JSON string."""
+        try:
+             # Call individual data refresh methods
+            profile_data = self.refresh_profile()
+            wallet_balance = self.refresh_wallet_balance()
+            skills = self.refresh_skills()
+
+            # Merge all dictionaries into one
+            combined_data = {
+                "character_name": self.character_name,
+                **profile_data,
+                **wallet_balance,
+                **skills
+            }
+
+            # Convert to JSON string
+            combined_json = json.dumps(combined_data, indent=4)
+
+            return combined_json
+
+        except Exception as e:
+            raise e
 
     # -------------------
     # Refresh Profile
     # -------------------
-    def refresh_profile(self) -> Dict[str, Any]:
+    def refresh_profile(self) -> str:
         """Fetch and update character profile data from ESI, saving data to `characters` table."""
         try:
             logging.info(f"Refreshing profile for {self.character_name}...")
@@ -144,16 +159,16 @@ class Character:
             self.save_character()
 
             logging.info(f"Profile data successfully updated for {self.character_name}.")
-            return {"character_name": self.character_name, "profile_data": profile_data}
+            return json.dumps(f"{'character_name': self.character_name, 'profile_data': profile_data}", indent=4)
         
         except Exception as e:
             logging.error(f"Failed to refresh profile for {self.character_name}. Error: {e}")
-            return {"character_name": self.character_name, "error": str(e)}
+            return json.dumps(f"{'character_name': self.character_name, 'error': str(e)}", indent=4)
 
     # -------------------
     # Refresh Wallet Balance
     # -------------------
-    def refresh_wallet_balance(self) -> Dict:
+    def refresh_wallet_balance(self) -> str:
         """
         Refresh the wallet balance for this character. Updates the `characters` table in the database.
 
@@ -161,15 +176,49 @@ class Character:
         """
         try:
             logging.info(f"Refreshing wallet balance for {self.character_name}...")
-            wallet_balance = self.esi_client.esi_get(f"/characters/{self.character_id}/wallet/")
-            self.wallet_balance = wallet_balance
+            self.wallet_balance = self.esi_client.esi_get(f"/characters/{self.character_id}/wallet/")
 
             # Save to database
             self.save_character()
 
             logging.info(f"Wallet balance successfully updated for {self.character_name}. Balance: {self.wallet_balance:.2f}")
-            return {"character_name": self.character_name, "wallet_balance": self.wallet_balance}
+            return json.dumps(f"{'character_name': self.character_name, 'wallet_balance': self.wallet_balance}", indent=4)
         
         except Exception as e:
             logging.error(f"Failed to refresh wallet balance for {self.character_name}. Error: {e}")
-            return {"character_name": self.character_name, "error": str(e)}
+            return json.dumps(f"{'character_name': self.character_name, 'error': str(e)}", indent=4)
+    
+    # -------------------
+    # Skillpoints
+    # -------------------
+    def refresh_skills(self) -> str:
+        try:
+            logging.info(f"Getting skills for {self.character_name}...")
+            skills = self.esi_client.esi_get(f"/characters/{self.character_id}/skills/")
+            skill_list = skills.get("skills", [])
+            
+            enriched_skills = []
+            for skill in skill_list:
+                 # Load additional details from the SDE database
+                type_entry = self.db_sde.session.query(Types).filter_by(id=skill["skill_id"]).first()
+                skill_name = type_entry.name[self.db_sde.language] if type_entry else "Unknown"
+                group_id = type_entry.groupID if type_entry else 0
+                group_entry = self.db_sde.session.query(Groups).filter_by(id=group_id).first()
+                group_name = group_entry.name[self.db_sde.language] if group_entry else "Unknown"
+                enriched_skills.append({**skill, "skill_name": skill_name, "group_id": group_id, "group_name": group_name})
+
+            self.skills = {
+                "total_skillpoints": skills.get("total_sp"),
+                "unallocated_skillpoints": skills.get("unallocated_sp"),
+                "skills": enriched_skills
+            }
+
+            # Save to database
+            self.save_character()
+
+            logging.info(f"Skills successfully updated for {self.character_name}. Total skill points: {self.skills['total_skillpoints']}")
+            return json.dumps(f"{'character_name': self.character_name, 'skills': self.skills}", indent=4)
+        
+        except Exception as e:
+            logging.error(f"Failed to refresh skills for {self.character_name}. Error: {e}")
+            return json.dumps(f"{'character_name': self.character_name, 'error': str(e)}", indent=4)
