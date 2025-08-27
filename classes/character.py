@@ -132,9 +132,9 @@ class Character:
             self.image_url = f"https://images.evetech.net/characters/{self.character_id}/portrait?size=128"
             self.birthday = profile_data["birthday"]
             self.bloodline_id = profile_data["bloodline_id"]
-            self.bloodline = bloodline_data.nameID if bloodline_data else None
+            self.bloodline = bloodline_data.nameID[self.db_sde.language] if bloodline_data else None
             self.race_id = profile_data["race_id"]
-            self.race = race_data.nameID if race_data else None
+            self.race = race_data.nameID[self.db_sde.language] if race_data else None
             self.gender = profile_data.get("gender")
             self.corporation_id = profile_data.get("corporation_id")
             self.description = profile_data.get("description")

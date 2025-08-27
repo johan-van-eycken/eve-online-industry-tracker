@@ -111,3 +111,23 @@ class CharacterManager():
         # Refresh wallet balances for all characters
         result = [char.refresh_wallet_balance() for char in self.character_list]
         return result
+    
+    def refresh_profile(self, character_name: Optional[str] = None) -> List[Dict]:
+        """
+        Refresh profiles for one or all characters.
+
+        :param character_name: Optionally specify a single character to refresh.
+        :return: JSON response containing profile data.
+        """
+        if character_name:
+            # refresh profile for a single character
+            result = [
+                char.refresh_profile()
+                for char in self.character_list
+                if char.character_name == character_name
+            ]
+            return result
+
+        # Refresh wallet balances for all characters
+        result = [char.refresh_profile() for char in self.character_list]
+        return result

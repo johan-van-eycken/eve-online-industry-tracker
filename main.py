@@ -46,7 +46,7 @@ def main():
         return
     logging.debug("Config loaded successfully.")
 
-    # Initialize Database Schemas
+    # Initialize Databases and Schemas
     try:
         logging.debug(f"Database URI for OAuth: {cfg_oauth_db_uri}")
         db_oauth = DatabaseManager(cfg_oauth_db_uri, cfg_language)
@@ -55,16 +55,18 @@ def main():
         logging.debug(f"Database URI for App: {cfg_app_db_uri}")
         db_app = DatabaseManager(cfg_app_db_uri, cfg_language)
         initialize_eve_app_schema(db_app)
+
+        logging.debug(f"Database URI for Sde: {cfg_sde_db_uri}")
+        db_sde = DatabaseManager(cfg_sde_db_uri, cfg_language)
     except Exception as e:
-        logging.error(f"Schema initialization failed. {e}")
+        logging.error(f"Database and schema initializations failed. {e}")
         return
 
     # Initialize Character Manager
     logging.info("Initializing characters...")
     try:
-        db_sde = DatabaseManager(cfg_sde_db_uri, cfg_language)
         char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, cfg_characters)
-
+        char_manager.refresh_profile()
     except ValueError as e:
         logging.error(f"Error encountered: {e}")
         return
