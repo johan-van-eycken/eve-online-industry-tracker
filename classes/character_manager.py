@@ -94,7 +94,7 @@ class CharacterManager():
 
     def refresh_all(self, character_name: Optional[str] = None) -> List[str]:
         """ 
-        Refresh all character data for on or all characters.
+        Refresh all character data for one or all characters.
 
         :param charcter_name: Optionally specify a single character to refresh.
         :return: JSON response containing all character data (profile, wallet_balance, skills, ...)

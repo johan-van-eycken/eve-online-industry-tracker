@@ -200,23 +200,55 @@ class Character:
     def refresh_skills(self) -> str:
         try:
             logging.debug(f"Getting skills for {self.character_name}...")
+            # All skill groups and all skills for the character from ESI
             skills = self.esi_client.esi_get(f"/characters/{self.character_id}/skills/")
             skill_list = skills.get("skills", [])
-            
-            enriched_skills = []
-            for skill in skill_list:
-                 # Load additional details from the SDE database
-                type_entry = self.db_sde.session.query(Types).filter_by(id=skill["skill_id"]).first()
-                skill_name = type_entry.name[self.db_sde.language] if type_entry else "Unknown"
-                group_id = type_entry.groupID if type_entry else 0
-                group_entry = self.db_sde.session.query(Groups).filter_by(id=group_id).first()
-                group_name = group_entry.name[self.db_sde.language] if group_entry else "Unknown"
-                enriched_skills.append({**skill, "skill_name": skill_name, "group_id": group_id, "group_name": group_name})
 
+            # Map character skills
+            character_skill_ids = {s["skill_id"]: s for s in skill_list} 
+            
+            # All skill groups (categoryID=16) and all skills for those groups from SDE
+            all_groups = self.db_sde.session.query(Groups).filter(Groups.categoryID == 16, Groups.published == 1).all()
+            all_skills = self.db_sde.session.query(Types).filter(Types.groupID.in_([g.id for g in all_groups]), Types.published == 1).all()
+            
+            group_map_names = {g.id: g.name[self.db_sde.language] for g in all_groups}
+            skill_map = {}
+            for t in all_skills:
+                group_name = group_map_names.get(t.groupID, "Unknown")
+                skill_map[t.id] = {
+                    "skill_id": t.id,
+                    "skill_name": t.name[self.db_sde.language],
+                    "skill_desc": t.description[self.db_sde.language],
+                    "group_id": t.groupID,
+                    "group_name":group_name
+                }
+
+            full_skill_list = []
+            for skill_id, sde_skill in skill_map.items():
+                if skill_id in character_skill_ids:
+                    # Character has skillbook or trained it
+                    s = character_skill_ids[skill_id]
+                    trained = s["trained_skill_level"] > 0
+                    full_skill_list.append({
+                        **sde_skill,
+                        "trained_skill_level": s.get("trained_skill_level", 0),
+                        "skillpoints_in_skill": s.get("skillpoints_in_skill", 0),
+                        "status": "trained" if trained else "available"
+                    })
+                else:
+                    # Character has not acquired this skill yet
+                    full_skill_list.append({
+                        **sde_skill,
+                        "trained_skill_level": 0,
+                        "skillpoints_in_skill": 0,
+                        "status": "unavailable"
+                    })
+
+            
             self.skills = {
                 "total_skillpoints": skills.get("total_sp"),
                 "unallocated_skillpoints": skills.get("unallocated_sp"),
-                "skills": enriched_skills
+                "skills": full_skill_list
             }
 
             # Save to database
