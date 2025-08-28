@@ -13,7 +13,26 @@ def refresh_wallet_balances():
     try:
         response = requests.post(f"{FLASK_API_URL}/refresh_wallet_balances", json={})
         if response.status_code == 200:
-            st.success("Wallet balances refreshed successfully!")
+            st.markdown(
+                """
+                <div class="success-msg">Wallet balances refreshed successfully!</div>
+                <style>
+                .success-msg {
+                    background-color: #1c4026;
+                    color: #e4ede6;
+                    padding: 15px;
+                    border-radius: 5px;
+                    animation: fadeout 3s forwards;
+                }
+                @keyframes fadeout {
+                    0% {opacity: 1;}
+                    70% {opacity: 1;}
+                    100% {opacity: 0;}
+                }
+                </style><br /><br />
+                """,
+                unsafe_allow_html=True
+            )
             return response.json()["data"]
         else:
             st.error(f"Failed to refresh wallet balances: {response.json().get('message', 'Unknown error')}")
@@ -21,6 +40,58 @@ def refresh_wallet_balances():
         st.error(f"Error connecting to backend: {e}")
 
 def render(cfg):
+    # -- Customer Style --
+    st.markdown("""
+        <style>
+        .tooltip {
+            position: relative;
+            display: inline-block;
+            cursor: pointer;
+            margin-bottom: 10px; /* equal spacing between rows */
+        }
+
+        .tooltip .tooltiptext {
+            visibility: hidden;
+            width: 240px;
+            background-color: #1e293b;
+            color: #f0f0f0;
+            text-align: left;
+            padding: 8px;
+            border-radius: 6px;
+            position: absolute;
+            z-index: 10;
+            bottom: 125%;
+            left: 50%;
+            transform: translateX(-50%);
+            opacity: 0;
+            transition: opacity 0.3s;
+            font-size: 13px;
+            line-height: 1.3;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        }
+
+        /* Remove default margins for all children inside tooltip */
+        .tooltip .tooltiptext * {
+            margin: 0;
+            padding: 0;
+            font-size: 13px;
+            line-height: 1.3;
+        }
+
+        /* Level/SP line with flex */
+        .tooltip .tooltiptext .level-sp {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 5px;
+        }
+
+        .tooltip:hover .tooltiptext {
+            visibility: visible;
+            opacity: 1;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
     st.subheader("Characters")
     db = DatabaseManager(cfg["app"]["database_app_uri"])
 
@@ -41,6 +112,9 @@ def render(cfg):
         if refreshed_data:
             # Assuming refreshed_data has the updated wallet balances; update your dataframe if necessary
             for wallet_data in refreshed_data:
+                if isinstance(wallet_data, str):
+                    wallet_data = json.loads(wallet_data)
+                
                 character_name = wallet_data.get("character_name")
                 wallet_balance = wallet_data.get("wallet_balance")
 
@@ -88,30 +162,114 @@ def render(cfg):
 
     # Show skills if a character is selected
     st.subheader(f"Character Skills")
-    # Dropdown to select character
+
+        # Dropdown to select character
     char_options = df.set_index("character_id")["character_name"].to_dict()
-    selected_id = st.selectbox("Select character:", options=list(char_options.keys()), format_func=lambda x: char_options[x])
+    selected_id = st.selectbox(
+        "Select character:",
+        options=list(char_options.keys()),
+        format_func=lambda x: char_options[x]
+    )
 
-    if selected_id:
-        char_row = df[df["character_id"] == selected_id].iloc[0]
+    if not selected_id:
+        return
 
-        if "skills" in char_row:
-            skills_data = json.loads(char_row["skills"])
-            total_sp = skills_data.get("total_skillpoints", 0)
-            unallocated_sp = skills_data.get("unallocated_skillpoints", 0)
-            
-            st.markdown(f"**Total SP:** {total_sp:,}")
-            st.markdown(f"**Unallocated SP:** {unallocated_sp:,}")
+    char_row = df[df["character_id"] == selected_id].iloc[0]
 
-            skill_groups = {}
-            for s in skills_data.get("skills", []):
-                skill_groups.setdefault(s["group_name"], []).append(s)
+    if "skills" not in char_row:
+        st.info("No skills data available for this character.")
+        return
 
-            for group_name, skills in skill_groups.items():
-                with st.expander(group_name, expanded=True):
-                    for skill in skills:
-                        level = skill["trained_skill_level"]
-                        points = skill["skillpoints_in_skill"]
-                        # EVE-style progress bar (level/5)
-                        st.markdown(f"**{skill['skill_name']}** - Level {level} ({points:,} SP)")
-                        st.progress(level / 5)
+    skills_data = json.loads(char_row["skills"])
+    total_sp = skills_data.get("total_skillpoints", 0)
+    unallocated_sp = skills_data.get("unallocated_skillpoints", 0)
+
+    # Summary
+    st.markdown(
+        f"""
+        **{total_sp:,}** Total Skill Points.
+        """
+    )
+    st.markdown(
+        f"""
+        **{unallocated_sp:,}** Unallocated Skill Points.
+        """
+    )
+
+    # Build dictionary of skills grouped by group_name
+    skill_groups = {}
+    for s in skills_data.get("skills", []):
+        skill_groups.setdefault(s["group_name"], []).append(s)
+
+    st.divider()
+
+    def split_list_top_down(lst, n_cols):
+        """
+        Split lst into n_cols columns, filling each column top-down.
+        Returns a list of lists, one per column.
+        """
+        n_rows = (len(lst) + n_cols - 1) // n_cols  # ceil division
+        return [lst[i * n_rows : (i + 1) * n_rows] for i in range(n_cols)]
+
+    # Sorted group names
+    group_names = sorted(skill_groups.keys())  # alphabetical
+    n_cols = 3
+    cols = st.columns(n_cols)
+
+    # Split top-down into columns
+    col_splits = split_list_top_down(group_names, n_cols)
+
+    for col, group_list in zip(cols, col_splits):
+        for group_name in group_list:
+            col.button(
+                group_name,
+                key=f"group_{group_name}",
+                use_container_width=True,
+                on_click=lambda g=group_name: setattr(st.session_state, "selected_group", g),
+            )
+
+    st.divider()
+
+    # Show skills of selected group
+    if "selected_group" in st.session_state:
+        group_name = st.session_state.selected_group
+        skills = sorted(skill_groups[group_name], key=lambda s: s["skill_name"])
+
+        st.markdown(f"### {group_name}")
+
+        # Split alphabetically into 2 columns (down first, then across)
+        col1, col2 = st.columns(2)
+        col_splits = split_list_top_down(skills, 2)
+
+        for col, skill_list in zip([col1, col2], col_splits):
+            for skill in skill_list:
+                name = skill["skill_name"]
+                desc = skill["skill_desc"]
+                points = skill["skillpoints_in_skill"]
+                level = skill["trained_skill_level"]
+                
+                rom_level = "0"
+                if level == 1: rom_level = "I"
+                elif level == 2: rom_level = "II"
+                elif level == 3: rom_level = "III"
+                elif level == 4: rom_level = "IV"
+                elif level == 5: rom_level = "V"
+
+                # Render level boxes on one line
+                boxes = " ".join(
+                    ["🟦" if l < level else "⬜" for l in range(5)]
+                )
+
+                col.markdown(
+                    f"""<div class="tooltip">
+                            <span>{boxes} &nbsp;&nbsp;{name}</span>
+                            <span class="tooltiptext">
+                                {desc}
+                                <div class="level-sp">
+                                    <span>Level {rom_level}</span>
+                                    <span>{points:,} SP</span>
+                                </div>
+                            </span>
+                        </div>""",
+                    unsafe_allow_html=True,
+                )

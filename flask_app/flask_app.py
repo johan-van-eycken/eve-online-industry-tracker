@@ -37,8 +37,7 @@ def refresh_wallet_balances():
     Accepts an optional 'character_name' parameter to refresh a specific character.
     """
     try:
-        character_name = request.json.get("character_name")  # Optional: specify a single character
-        refreshed_data = char_manager.refresh_wallet_balance(character_name)
+        refreshed_data = char_manager.refresh_wallet_balance()
         return jsonify({
             "status": "success",
             "data": refreshed_data
