@@ -1,68 +1,86 @@
 import logging
-import pandas as pd
-
+from alembic.config import Config
+from alembic import command
 from classes.config_manager import ConfigManager
-from classes.database_manager import DatabaseManager, CharacterManager
-from classes.esi import ESIClient
+from config.schemas import CONFIG_SCHEMA
+from classes.character_manager import CharacterManager
+from classes.database_manager import DatabaseManager
+from classes.database_models import BaseOauth, BaseApp
 
+def sync_app_database():
+    """Sync eve_app.db with all database models in classes/database_models.py"""
+    logging.debug("Starting database sync for eve_app.db using Alembic...")
+    try:
+        alembic_cfg = Config("alembic.ini")
+        command.upgrade(alembic_cfg, "head", sql=False)  # Apply migrations
+        
+    except Exception as e:
+        logging.error("Error during database sync for eve_app.db.")
+        raise e
+    logging.debug("Database migrations applied successfully.")
+
+def initialize_eve_oauth_schema(database_manager: DatabaseManager):
+    """Initialize the database schema for eve_oauth.db."""
+    logging.debug(f"Initializing database schema for {database_manager.get_db_name()}...")
+    try:
+        BaseOauth.metadata.create_all(bind=database_manager.engine)
+    except Exception as e:
+        logging.error(f"Failed to initialize schema: {e}")
+        raise e
+    logging.debug(f"Database schema for `{database_manager.get_db_name()}` initialized successfully.")
 
 def main():
     logging.basicConfig(level=logging.INFO)
 
-    # Config en DB laden
-    cfg = ConfigManager("config/config.json")
-    db = CharacterManager("database/eve_characters.db")
+    # Load Configurations
+    logging.info("Loading config...")
+    try:
+        cfgManager = ConfigManager(base_path="config/config.json", secret_path="config/secret.json", schema=CONFIG_SCHEMA)
+        cfg = cfgManager.all()
+        cfg_language = cfg["app"]["language"]
+        cfg_characters = cfg["characters"]
+        if len(cfg_characters) == 0:
+            raise ValueError("No characters found in config!")
+        cfg_oauth_db_uri = cfg["app"]["database_oauth_uri"]
+        cfg_app_db_uri = cfg["app"]["database_app_uri"]
+        cfg_sde_db_uri = cfg["app"]["database_sde_uri"]
+    except Exception as e:
+        logging.error(f"Failed to load config: {e}")
+        return
+    logging.debug("Config loaded successfully.")
 
-    # ---------------------------
-    # Characters ophalen uit config
-    # ---------------------------
-    characters = cfg.get("characters", [])
-    if not characters:
-        logging.error("No characters defined in config!")
+    # Initialize Databases and Schemas
+    logging.info("Initializing databases...")
+    try:
+        logging.debug(f"Database URI for OAuth: {cfg_oauth_db_uri}")
+        db_oauth = DatabaseManager(cfg_oauth_db_uri, cfg_language)
+        initialize_eve_oauth_schema(db_oauth)
+
+        logging.debug(f"Database URI for App: {cfg_app_db_uri}")
+        # sync_app_database()
+        db_app = DatabaseManager(cfg_app_db_uri, cfg_language)
+
+        logging.debug(f"Database URI for Sde: {cfg_sde_db_uri}")
+        db_sde = DatabaseManager(cfg_sde_db_uri, cfg_language)
+    except Exception as e:
+        logging.error(f"Database and schema initializations failed. {e}", exc_info=True)
+        return
+
+    # Initialize Character Manager
+    logging.info("Initializing characters...")
+    try:
+        char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, cfg_characters)
+        char_manager.refresh_all()
+
+    except ValueError as e:
+        logging.error(f"Error encountered: {e}")
         return
     
-    main_char_cfg = next((c for c in characters if c.get("is_main")), None)
-    if not main_char_cfg:
-        logging.warning("No main character defined, using first character in list.")
-        main_char_cfg = characters[0]
-
-    # ---------------------------
-    # ESI clients initialiseren
-    # ---------------------------
-    esi_clients = []
-
-    # Main character
-    esi_main = ESIClient(main_char_cfg["character_name"], cfg, db, is_main=True)
-    logging.info(f"Main character set: {esi_main.character_name} (ID: {esi_main.character_id})")
-    esi_clients.append(esi_main)
-
-    # Andere characters
-    for c in characters:
-        if c["character_name"] != esi_main.character_name:
-            client = ESIClient(c["character_name"], cfg, db, is_main=False)
-            esi_clients.append(client)
-            logging.info(f"Alt character loaded: {client.character_name} (ID: {client.character_id})")
-
-
-    # ---------------------------
-    # Character data
-    # ---------------------------
-    db = DatabaseManager("database/eve_data.db")
-    all_data = []
-    for c in esi_clients:
-        data = c.esi_get(f"/characters/{c.character_id}/")
-        data["character_id"] = c.character_id
-        data["image_url"] = f"https://images.evetech.net/characters/{c.character_id}/portrait?size=128"
-        data["wallet_balance"] = c.esi_get(f"/characters/{c.character_id}/wallet/")
-
-        all_data.append(data)
-
-    df = pd.DataFrame(all_data)
-    cols = ["character_id", "name", "image_url"] + [c for c in df.columns if c not in ["character_id", "name", "image_url"]]
-    df = df[cols]
-    db.save_df(df, "characters") 
-
-    logging.info(f"Character data saved.")
-
+    except Exception as e:
+        logging.error(f"Failed to initialize characters: {e}")
+        return
+    
+    logging.debug("Characters initialized successfully.")
+    
 if __name__ == "__main__":
     main()

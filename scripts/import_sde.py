@@ -14,6 +14,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(ROOT_DIR)
 
 from classes.config_manager import ConfigManager
+from config.schemas import IMPORT_SDE_SCHEMA
 from classes.database_manager import DatabaseManager
 
 # ----------------------------
@@ -60,8 +61,8 @@ def download_sde(url: str, dest_dir: str) -> str:
 # ----------------------------
 # Import YAML SDE tables to SQLite
 # ----------------------------
-def import_sde_to_sqlite(sde_dir: str, db_file: str, tables_to_import: list):
-    db = DatabaseManager(db_file)
+def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
+    db = DatabaseManager(db_uri)
 
     for root, _, files in os.walk(sde_dir):
         for file in sorted(files):
@@ -99,7 +100,7 @@ def import_sde_to_sqlite(sde_dir: str, db_file: str, tables_to_import: list):
                 except Exception as e:
                     print(f" !!! Failed to import '{table_name}': {e}")
 
-    print(f"All selected SDE tables imported to {db_file}")
+    print(f"All selected SDE tables imported to {db_uri}")
 
 # ----------------------------
 # Cleanup
@@ -120,14 +121,17 @@ def cleanup_temp(dest_dir: str):
 # ----------------------------
 def main():
     default_config_path = "config/import_sde.json"
-    cfg = ConfigManager(default_config_path)
+    try:
+        cfg = ConfigManager(base_path=default_config_path, schema=IMPORT_SDE_SCHEMA)
+    except Exception as e:
+        print(f" !!! Failed to initialize ConfigManager ({default_config_path}): {e}")
 
     # Load tables from config
     if not os.path.exists(default_config_path):
         raise FileNotFoundError(f"{default_config_path} not found.")
 
     parser = argparse.ArgumentParser(
-        description=f"EVE Online SDE Importer {cfg.get("APP_VERSION")} (YAML -> SQLite)",
+        description=f"EVE Online SDE Importer {cfg.get('APP_VERSION')} (YAML -> SQLite)",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("--version", action="version", version=f"EVE Online SDE Importer {cfg.get('APP_VERSION')}")
@@ -135,7 +139,7 @@ def main():
     parser.add_argument("--download", action="store_true", help="Download and extract the SDE")
     parser.add_argument("--import", dest="do_import", action="store_true", help="Import selected YAML tables into SQLite")
     parser.add_argument("--cleanup", action="store_true", help="Cleanup temporary SDE folder")
-    parser.add_argument("--db", default=cfg.get("DEFAULT_DB_FILE"), help="SQLite database file path")
+    parser.add_argument("--db", default=cfg.get("DEFAULT_DB_URI"), help="SQLite database file path")
     parser.add_argument("--tmp", default=cfg.get("DEFAULT_TMP_DIR"), help="Temporary folder for SDE extraction")
     parser.add_argument("--tables", nargs="*", help="Tables to import (default: TABLES_TO_IMPORT from config)")
 
@@ -170,7 +174,7 @@ def main():
         if not tables_to_import:
             raise ValueError("No tables specified for import (check config or CLI args).")
         
-        import_sde_to_sqlite(sde_path, db_file=args.db, tables_to_import=tables_to_import)
+        import_sde_to_sqlite(sde_path, db_uri=args.db, tables_to_import=tables_to_import)
 
     if args.cleanup:
         cleanup_temp(sde_path)
