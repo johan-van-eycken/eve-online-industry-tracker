@@ -146,7 +146,6 @@ Features:
 ├── config/
 │   ├── config.json
 │   ├── secret.json
-│   ├── import_sde.json
 │   ├── schemas.py
 │   └── import_sde.json      # list of SDE tables to import
 ├── database/
