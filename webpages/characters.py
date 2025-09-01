@@ -160,116 +160,146 @@ def render(cfg):
                     unsafe_allow_html=True
                 )
 
-    # Show skills if a character is selected
-    st.subheader(f"Character Skills")
-
-        # Dropdown to select character
-    char_options = df.set_index("character_id")["character_name"].to_dict()
-    selected_id = st.selectbox(
-        "Select character:",
-        options=list(char_options.keys()),
-        format_func=lambda x: char_options[x]
-    )
-
-    if not selected_id:
-        return
-
-    char_row = df[df["character_id"] == selected_id].iloc[0]
-
-    if "skills" not in char_row:
-        st.info("No skills data available for this character.")
-        return
-
-    skills_data = json.loads(char_row["skills"])
-    total_sp = skills_data.get("total_skillpoints", 0)
-    unallocated_sp = skills_data.get("unallocated_skillpoints", 0)
-
-    # Summary
-    st.markdown(
-        f"""
-        **{total_sp:,}** Total Skill Points.
-        """
-    )
-    st.markdown(
-        f"""
-        **{unallocated_sp:,}** Unallocated Skill Points.
-        """
-    )
-
-    # Build dictionary of skills grouped by group_name
-    skill_groups = {}
-    for s in skills_data.get("skills", []):
-        skill_groups.setdefault(s["group_name"], []).append(s)
-
     st.divider()
 
-    def split_list_top_down(lst, n_cols):
-        """
-        Split lst into n_cols columns, filling each column top-down.
-        Returns a list of lists, one per column.
-        """
-        n_rows = (len(lst) + n_cols - 1) // n_cols  # ceil division
-        return [lst[i * n_rows : (i + 1) * n_rows] for i in range(n_cols)]
+    # --- Split into 2 main columns ---
+    left_col, right_col = st.columns([2,1])  # 2/3 and 1/3 width
 
-    # Sorted group names
-    group_names = sorted(skill_groups.keys())  # alphabetical
-    n_cols = 3
-    cols = st.columns(n_cols)
+    # ================= LEFT COLUMN (Skills) =================
+    with left_col:
+        # Show skills if a character is selected
+        st.subheader(f"Character Skills")
 
-    # Split top-down into columns
-    col_splits = split_list_top_down(group_names, n_cols)
+            # Dropdown to select character
+        char_options = df.set_index("character_id")["character_name"].to_dict()
+        selected_id = st.selectbox(
+            "Select character:",
+            options=list(char_options.keys()),
+            format_func=lambda x: char_options[x]
+        )
 
-    for col, group_list in zip(cols, col_splits):
-        for group_name in group_list:
-            col.button(
-                group_name,
-                key=f"group_{group_name}",
-                use_container_width=True,
-                on_click=lambda g=group_name: setattr(st.session_state, "selected_group", g),
-            )
+        if not selected_id:
+            return
 
-    st.divider()
+        char_row = df[df["character_id"] == selected_id].iloc[0]
 
-    # Show skills of selected group
-    if "selected_group" in st.session_state:
-        group_name = st.session_state.selected_group
-        skills = sorted(skill_groups[group_name], key=lambda s: s["skill_name"])
+        if "skills" not in char_row:
+            st.info("No skills data available for this character.")
+            return
 
-        st.markdown(f"### {group_name}")
+        skills_data = json.loads(char_row["skills"])
+        total_sp = skills_data.get("total_skillpoints", 0)
+        unallocated_sp = skills_data.get("unallocated_skillpoints", 0)
 
-        # Split alphabetically into 2 columns (down first, then across)
-        col1, col2 = st.columns(2)
-        col_splits = split_list_top_down(skills, 2)
+        # Summary
+        st.markdown(
+            f"""
+            **{total_sp:,}** Total Skill Points.
+            """
+        )
+        st.markdown(
+            f"""
+            **{unallocated_sp:,}** Unallocated Skill Points.
+            """
+        )
 
-        for col, skill_list in zip([col1, col2], col_splits):
-            for skill in skill_list:
-                name = skill["skill_name"]
-                desc = skill["skill_desc"]
-                points = skill["skillpoints_in_skill"]
-                level = skill["trained_skill_level"]
-                
-                rom_level = "0"
-                if level == 1: rom_level = "I"
-                elif level == 2: rom_level = "II"
-                elif level == 3: rom_level = "III"
-                elif level == 4: rom_level = "IV"
-                elif level == 5: rom_level = "V"
 
-                # Render level boxes on one line
-                boxes = " ".join(
-                    ["🟦" if l < level else "⬜" for l in range(5)]
+
+        # Build dictionary of skills grouped by group_name
+        skill_groups = {}
+        for s in skills_data.get("skills", []):
+            skill_groups.setdefault(s["group_name"], []).append(s)
+
+        st.divider()
+
+        def split_list_top_down(lst, n_cols):
+            """
+            Split lst into n_cols columns, filling each column top-down.
+            Returns a list of lists, one per column.
+            """
+            n_rows = (len(lst) + n_cols - 1) // n_cols  # ceil division
+            return [lst[i * n_rows : (i + 1) * n_rows] for i in range(n_cols)]
+
+        # Sorted group names
+        group_names = sorted(skill_groups.keys())  # alphabetical
+        n_cols = 3
+        cols = st.columns(n_cols)
+
+        # Split top-down into columns
+        col_splits = split_list_top_down(group_names, n_cols)
+
+        for col, group_list in zip(cols, col_splits):
+            for group_name in group_list:
+                col.button(
+                    group_name,
+                    key=f"group_{group_name}",
+                    use_container_width=True,
+                    on_click=lambda g=group_name: setattr(st.session_state, "selected_group", g),
                 )
 
-                col.markdown(
-                    f"""<div class="tooltip">
-                            <span>{boxes} &nbsp;&nbsp;{name}</span>
-                            <span class="tooltiptext">
-                                {desc}
-                                <div class="level-sp">
-                                    <span>Level {rom_level}</span>
-                                    <span>{points:,} SP</span>
-                                </div>
-                            </span>
-                        </div>""",
+        st.divider()
+
+        # Show skills of selected group
+        if "selected_group" in st.session_state:
+            group_name = st.session_state.selected_group
+            skills = sorted(skill_groups[group_name], key=lambda s: s["skill_name"])
+
+            st.markdown(f"### {group_name}")
+
+            # Split alphabetically into 2 columns (down first, then across)
+            col1, col2 = st.columns(2)
+            col_splits = split_list_top_down(skills, 2)
+
+            for col, skill_list in zip([col1, col2], col_splits):
+                for skill in skill_list:
+                    name = skill["skill_name"]
+                    desc = skill["skill_desc"]
+                    points = skill["skillpoints_in_skill"]
+                    level = skill["trained_skill_level"]
+                    rom_level = ["0","I","II","III","IV","V"][level] if isinstance(level, int) and level <= 5 else str(level)
+
+                    # Render level boxes on one line
+                    boxes = " ".join(
+                        ["🟦" if l < level else "⬜" for l in range(5)]
+                    )
+
+                    col.markdown(
+                        f"""<div class="tooltip">
+                                <span>{boxes} &nbsp;&nbsp;{name}</span>
+                                <span class="tooltiptext">
+                                    {desc}
+                                    <div class="level-sp">
+                                        <span>Level {rom_level}</span>
+                                        <span>{points:,} SP</span>
+                                    </div>
+                                </span>
+                            </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+# ================= RIGHT COLUMN (Skill Queue) =================
+    with right_col:
+        st.subheader("Skill Queue")
+
+        skill_queue = skills_data.get("skill_queue", [])
+        skill_queue = sorted(skill_queue, key=lambda q: q.get("queue_position", 0))
+        # skill_queue = json.loads(char_row["skill_queue"])
+        if not skill_queue:
+            st.info("Skill queue is empty.")
+        else:
+            for q in skill_queue:
+                skill_name = q.get("skill_name", "Unknown Skill")
+                level = q.get("finished_level", "?")
+                start_time = format_date(q.get("start_time"))
+                end_time = format_date(q.get("finish_time"))
+
+                rom_level = ["0","I","II","III","IV","V"][level] if isinstance(level, int) and level <= 5 else str(level)
+
+                st.markdown(
+                    f"""
+                    <div style="background-color: rgba(40,40,40,0.9); padding: 12px; border-radius: 8px; margin-bottom: 8px;">
+                        <b>{skill_name} → Level {rom_level}</b>
+                    </div>
+                    """,
                     unsafe_allow_html=True,
                 )

@@ -200,12 +200,16 @@ class Character:
     def refresh_skills(self) -> str:
         try:
             logging.debug(f"Getting skills for {self.character_name}...")
-            # All skill groups and all skills for the character from ESI
+            # All trained skills for the character from ESI
             skills = self.esi_client.esi_get(f"/characters/{self.character_id}/skills/")
             skill_list = skills.get("skills", [])
 
-            # Map character skills
+            # Current skill queue for the character from ESI
+            skill_queue = self.esi_client.esi_get(f"/characters/{self.character_id}/skillqueue/")
+
+            # Map character skills and skill queue
             character_skill_ids = {s["skill_id"]: s for s in skill_list} 
+            character_skill_queue_ids = {s["skill_id"]: s for s in skill_queue}
             
             # All skill groups (categoryID=16) and all skills for those groups from SDE
             all_groups = self.db_sde.session.query(Groups).filter(Groups.categoryID == 16, Groups.published == 1).all()
@@ -222,6 +226,22 @@ class Character:
                     "group_id": t.groupID,
                     "group_name":group_name
                 }
+            
+            enriched_skill_queue = []
+            for skill_id, sde_skill in skill_map.items():
+                if skill_id in character_skill_queue_ids:
+                    # Character has skill in training queue
+                    s = character_skill_queue_ids[skill_id]
+                    enriched_skill_queue.append({
+                        **sde_skill,
+                        "start_date" : s.get("start_date"),
+                        "finish_date" : s.get("finish_date"),
+                        "finished_level": s.get("finished_level", 0),
+                        "level_start_sp": s.get("level_start_sp", 0),
+                        "level_end_sp": s.get("level_end_sp", 0),
+                        "queue_position": s.get("queue_position", 0),
+                        "training_start_sp": s.get("training_start_sp", 0)
+                    })
 
             full_skill_list = []
             for skill_id, sde_skill in skill_map.items():
@@ -248,7 +268,8 @@ class Character:
             self.skills = {
                 "total_skillpoints": skills.get("total_sp"),
                 "unallocated_skillpoints": skills.get("unallocated_sp"),
-                "skills": full_skill_list
+                "skills": full_skill_list,
+                "skill_queue": enriched_skill_queue
             }
 
             # Save to database
