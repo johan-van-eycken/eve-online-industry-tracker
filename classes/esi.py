@@ -14,10 +14,11 @@ from classes.oauth import OAuthHandler, OAuthServer
 
 
 class ESIClient:
-    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, refresh_token: Optional[str] = None):
+    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, is_corp_director: bool, refresh_token: Optional[str] = None):
         self.cfg = cfg
         self.character_name = character_name
         self.is_main = is_main
+        self.is_corp_director = is_corp_director
         self.db_oauth = db_oauth
 
         # Verified Character
@@ -41,7 +42,12 @@ class ESIClient:
         self.client_id = self.cfg.get("oauth")["client_id"]
         self.client_secret = self.cfg.get("client_secret")
         self.user_agent = self.cfg.get("app")["user_agent"]
-        self.scopes = " ".join(self.cfg.get("defaults")["scopes"])
+        
+        # Assign correct scopes
+        all_scopes = set(self.cfg.get("defaults")["scopes"])
+        if is_corp_director:
+            all_scopes.update(self.cfg.get("defaults")["scopes_corp_director"])
+        self.scopes = " ".join(sorted(all_scopes))
 
         # Load tokens from DB if character exists
         self._load_tokens_from_db()

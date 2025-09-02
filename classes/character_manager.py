@@ -1,7 +1,5 @@
-
 import logging
-from typing import Optional, List, Dict, Any
-from sqlalchemy.orm import Session
+from typing import Optional, List
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
 from classes.character import Character
@@ -11,26 +9,36 @@ from classes.database_models import OAuthCharacter
 # Characters Manager
 # ----------------------------
 class CharacterManager():
-    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager, cfg_characters: List[Dict[str, Any]]):
+    def __init__(self, 
+                 cfgManager: ConfigManager,
+                 db_oauth: DatabaseManager,
+                 db_app: DatabaseManager,
+                 db_sde: DatabaseManager,
+                 corporation_id: Optional[int] = None,
+                 char_manager_all: Optional["CharacterManager"] = None
+            ):
         """
         Initialize the CharacterManager with database managers and character configurations.
-
-        :param cfg: Configuration manager
-        :param db_oauth: DatabaseManager for OAuth operations
-        :param db_app: DatabaseManager for app-specific tables
-        :param db_sde: DatabaseManager for static data export (SDE) assets
-        :param cfg_characters: List of character configurations (name, is_main, tokens, etc.)
         """
-        self.cfg = cfg
+        self.cfgManager = cfgManager
+        self.cfg = cfgManager.all()
+        self.cfg_characters = self.cfg["characters"]
+
         self.db_oauth = db_oauth
         self.db_app = db_app
         self.db_sde = db_sde
-        self.cfg_characters = cfg_characters
-        self.character_list: List[Character] = []
-
+        
         # Initialize Characters
-        self._validate_cfg_characters()
-        self._initialize_characters()
+        if corporation_id is None and char_manager_all is None:
+            self.character_list: List[Character] = []
+            self._validate_cfg_characters()
+            self._initialize_characters()
+        elif corporation_id is not None and char_manager_all is not None:
+            # Use already-loaded characters from char_manager_all filtered by corp
+            self.character_list = [
+                char for char in char_manager_all.character_list
+                if char.corporation_id == corporation_id
+            ]
 
     # ----------------------------
     # Manage Authenticated Characters
@@ -63,13 +71,18 @@ class CharacterManager():
             logging.warning("No main character found in the configuration. Using the first character in the list as main.")
             self.cfg_characters[0]["is_main"] = True # Set first character as main, if none specified.
 
+        cfg_corp_director = next((c for c in self.cfg_characters if c.get("is_corp_director", False)), None)
+        if not cfg_corp_director:
+            raise ValueError("No Corporation Director found in the configuration. Unable to continue the application.")
+
         # Initialize characters
         for char_cfg in self.cfg_characters:
             character_name = char_cfg["character_name"]
             character_is_main = char_cfg.get("is_main", False)
+            character_is_corp_director = char_cfg.get("is_corp_director", False)
             try:
                 # Check for existing refresh token in the database
-                logging.debug(f"Starting initialization for {character_name}{' as main' if character_is_main else ' '}...")
+                logging.debug(f"Starting initialization for {character_name}{' as main' if character_is_main else ''}...")
                 existing_token = self._get_existing_token(character_name)
                 if not existing_token:
                     logging.debug(f"Found no existing_token for {character_name}.")
@@ -77,12 +90,13 @@ class CharacterManager():
                     logging.debug(f"Found existing_token for {character_name} : {existing_token}.")
                 
                 char = Character(
-                    self.cfg,
+                    self.cfgManager,
                     self.db_oauth,
                     self.db_app,
                     self.db_sde,
                     character_name,
                     character_is_main,
+                    character_is_corp_director,
                     existing_token
                 )
                 self.character_list.append(char)
