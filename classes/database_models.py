@@ -48,6 +48,7 @@ class CharacterModel(BaseApp):
     character_name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     character_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
     is_main: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_corp_director: Mapped[bool] = mapped_column(Boolean, default=False)
     birthday: Mapped[str] = mapped_column(String, nullable=True)
     gender: Mapped[str] = mapped_column(String, nullable=True)
     bloodline_id: Mapped[int] = mapped_column(Integer, nullable=True)

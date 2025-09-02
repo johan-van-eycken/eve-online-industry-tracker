@@ -13,20 +13,23 @@ class Character:
 
 
     def __init__(self, 
-                 cfg: ConfigManager, 
-                 db_oauth: DatabaseManager, 
-                 db_app: DatabaseManager, 
-                 db_sde: DatabaseManager, 
+                 cfgManager: ConfigManager, 
+                 db_oauth: DatabaseManager,
+                 db_app: DatabaseManager,
+                 db_sde: DatabaseManager,
                  character_name: str, 
                  is_main: bool = False,
+                 is_corp_director: bool = False,
                  refresh_token: Optional[str] = None
         ):
-        self.cfg = cfg
+        self.cfgManager = cfgManager
+        self.cfg = cfgManager.all()
         self.db_oauth = db_oauth
         self.db_app = db_app
         self.db_sde = db_sde
         self.character_name = character_name
         self.is_main = is_main
+        self.is_corp_director = is_corp_director
         self.refresh_token = refresh_token
         
         # Runtime properties
@@ -51,7 +54,7 @@ class Character:
 
         # Initialize ESI Client (handles token registration/refresh automatically)
         logging.debug(f"Initializing ESIClient for {self.character_name}...")
-        self.esi_client = ESIClient(cfg, db_oauth, character_name, is_main, refresh_token)
+        self.esi_client = ESIClient(cfgManager, self.db_oauth, self.character_name, self.is_main, self.is_corp_director, self.refresh_token)
         self.character_id = self.esi_client.character_id
         logging.debug(f"ESIClient initialized for {self.character_name}.")
 
@@ -70,7 +73,12 @@ class Character:
 
         if not character_record:
             # Create new record if it doesn't exist
-            character_record = CharacterModel(character_name=self.character_name, character_id=self.character_id, is_main=self.is_main)
+            character_record = CharacterModel(
+                character_name=self.character_name, 
+                character_id=self.character_id, 
+                is_main=self.is_main, 
+                is_corp_director=self.is_corp_director
+            )
             self.db_app.session.add(character_record)
 
         # Dynamically update based on CharacterModel's columns
@@ -116,9 +124,12 @@ class Character:
         """Refresh all data for the current character and return a JSON string."""
         try:
              # Call individual data refresh methods
-            profile_data = json.loads(self.refresh_profile())
-            wallet_balance = json.loads(self.refresh_wallet_balance())
-            skills = json.loads(self.refresh_skills())
+            profile_data = json.loads(self.refresh_profile(False))
+            wallet_balance = json.loads(self.refresh_wallet_balance(False))
+            skills = json.loads(self.refresh_skills(False))
+
+            # Safe character
+            self.save_character()
 
             # Merge all dictionaries into one
             combined_data = {
@@ -139,7 +150,7 @@ class Character:
     # -------------------
     # Refresh Profile
     # -------------------
-    def refresh_profile(self) -> str:
+    def refresh_profile(self, safe_character_fl: bool = True) -> str:
         """Fetch and update character profile data from ESI, saving data to `characters` table."""
         try:
             logging.debug(f"Refreshing profile for {self.character_name}...")
@@ -162,7 +173,8 @@ class Character:
             self.security_status = profile_data.get("security_status")
 
             # Save to database
-            self.save_character()
+            if safe_character_fl == True:
+                self.save_character()
 
             logging.debug(f"Profile data successfully updated for {self.character_name}.")
             return json.dumps({'character_name': self.character_name, 'profile_data': profile_data}, indent=4)
@@ -174,7 +186,7 @@ class Character:
     # -------------------
     # Refresh Wallet Balance
     # -------------------
-    def refresh_wallet_balance(self) -> str:
+    def refresh_wallet_balance(self, safe_character_fl: bool = True) -> str:
         """
         Refresh the wallet balance for this character. Updates the `characters` table in the database.
 
@@ -185,7 +197,8 @@ class Character:
             self.wallet_balance = self.esi_client.esi_get(f"/characters/{self.character_id}/wallet/")
 
             # Save to database
-            self.save_character()
+            if safe_character_fl == True:
+                self.save_character()   
 
             logging.debug(f"Wallet balance successfully updated for {self.character_name}. Balance: {self.wallet_balance:.2f}")
             return json.dumps({'character_name': self.character_name, 'wallet_balance': self.wallet_balance}, indent=4)
@@ -197,7 +210,7 @@ class Character:
     # -------------------
     # Skillpoints
     # -------------------
-    def refresh_skills(self) -> str:
+    def refresh_skills(self, save_character_fl: bool = True) -> str:
         try:
             logging.debug(f"Getting skills for {self.character_name}...")
             # All trained skills for the character from ESI
@@ -273,7 +286,8 @@ class Character:
             }
 
             # Save to database
-            self.save_character()
+            if save_character_fl == True:
+                self.save_character()
 
             logging.debug(f"Skills successfully updated for {self.character_name}. Total skill points: {self.skills['total_skillpoints']}")
             return json.dumps({'character_name': self.character_name, 'skills': self.skills}, indent=4)
