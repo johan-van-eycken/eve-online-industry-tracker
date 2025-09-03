@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from dateutil import parser
 from typing import Optional
 
 def format_isk(value: Optional[float]) -> str:
@@ -45,4 +46,7 @@ def format_date(iso_date: Optional[str]) -> str:
     except Exception:
         return "N/A"
 
-    
+def parse_datetime(dt_str):
+    if dt_str is None:
+        return None
+    return parser.isoparse(dt_str)
