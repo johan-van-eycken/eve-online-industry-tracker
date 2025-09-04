@@ -106,6 +106,20 @@ class CharacterManager():
             except Exception as e:
                 logging.error(f"Error initializing character {char_cfg['character_name']}: {e}")
 
+    def get_main_character(self) -> Optional[Character]:
+        """Get the main character."""
+        for char in self.character_list:
+            if char.is_main:
+                return char
+        return None
+    
+    def get_corp_director(self) -> Optional[Character]:
+        """Get the corporation director character."""
+        for char in self.character_list:
+            if char.is_corp_director:
+                return char
+        return None
+
     def refresh_all(self, character_name: Optional[str] = None) -> List[str]:
         """ 
         Refresh all character data for one or all characters.

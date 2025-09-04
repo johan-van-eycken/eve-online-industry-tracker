@@ -121,11 +121,7 @@ def render(cfg):
                 if character_name and wallet_balance:
                     df.loc[df["character_name"] == character_name, "wallet_balance"] = wallet_balance
 
-    # By default no character tile selected
-    if "selected_character" not in st.session_state:
-        st.session_state.selected_character = None
-
-    # Clickable character tiles
+    # Character tiles
     cards_per_row = 5
     for i in range(0, len(df), cards_per_row):
         cols = st.columns(cards_per_row)
