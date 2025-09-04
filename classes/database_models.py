@@ -112,6 +112,16 @@ class StructureModel(BaseApp):
     services: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+class MemberModel(BaseApp):
+    __tablename__ = "corporation_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    character_name: Mapped[str] = mapped_column(String, nullable=False)
+    titles: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)  # List of titles
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
 # --------------------------
 # SDE
 # --------------------------
