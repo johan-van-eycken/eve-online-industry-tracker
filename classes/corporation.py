@@ -2,11 +2,12 @@ import logging
 import json
 import utils.formatters as fmt
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
-from classes.database_models import CorporationModel, StructureModel, Types, Groups, Categories
+from classes.database_models import CorporationModel, StructureModel, MemberModel
+from classes.database_models import Types, Groups, Categories
 from classes.character import Character
 from classes.character_manager import CharacterManager
 
@@ -29,7 +30,6 @@ class Corporation:
         self.db_sde = db_sde
         self.corporation_id = corporation_id
         self.char_manager = char_manager
-        self.structures: List[StructureModel] = []
 
         # Default ESI character
         self.default_esi_character: Character = self.char_manager.get_corp_director()
@@ -58,12 +58,13 @@ class Corporation:
         self.war_eligible: Optional[bool] = None
         self.image_url: Optional[str] = None
 
-        if not self.load_corporation():
-            self.refresh_corporation_data()
-        else:
-            logging.debug(f"Corporation data loaded from database for {self.corporation_name} ({self.corporation_id})")
-        
+        self.structures: List[StructureModel] = []
+        self.members: List[MemberModel] = []
+
+        # Refresh all Corporation data on init
+        self.refresh_corporation_data()
         self.refresh_structures()
+        self.refresh_members()
 
     # -------------------
     # Safe Corporation
@@ -82,6 +83,8 @@ class Corporation:
 
         # Dynamically update based on CorporationModel's columns
         for column in CorporationModel.__table__.columns.keys():
+            if column == "id":
+                continue
             if hasattr(self, column):
                 value = getattr(self, column)
                 setattr(corporation_record, column, value)
@@ -99,6 +102,8 @@ class Corporation:
             if existing_structure:
                 # Update existing structure
                 for column in StructureModel.__table__.columns.keys():
+                    if column == "id":
+                        continue
                     if hasattr(structure, column):
                         value = getattr(structure, column)
                         setattr(existing_structure, column, value)
@@ -110,6 +115,28 @@ class Corporation:
 
         self.db_app.session.commit()
         logging.debug(f"Corporation structures saved to database.")
+
+    def save_corporation_members(self, corporation_members: List[MemberModel]) -> None:
+        """Safe the corporation members to the database."""
+        for member in corporation_members:
+            existing_member = self.db_app.session.query(MemberModel).filter_by(character_id=member.character_id).first()
+
+            if existing_member:
+                # Update existing member
+                for column in MemberModel.__table__.columns.keys():
+                    if column == "id":
+                        continue
+                    if hasattr(member, column):
+                        value = getattr(member, column)
+                        setattr(existing_member, column, value)
+                
+                existing_member.updated_at = datetime.utcnow()
+            else:
+                # Add new member
+                self.db_app.session.add(member)
+        
+        self.db_app.session.commit()
+        logging.debug(f"Corporation members saved to database.")
 
     # -------------------
     # Load Corporation
@@ -129,6 +156,32 @@ class Corporation:
                 setattr(self, column, getattr(corporation_record, column))
 
         logging.debug(f"Corporation '{self.corporation_name}' loaded from database.")
+        return True
+    
+    def load_corporation_structures(self) -> bool:
+        """Load corporation structures from the database into the instance. Returns True if found."""
+        
+        structures = self.db_app.session.query(StructureModel).filter_by(corporation_id=self.corporation_id).all()
+        if not structures:
+            logging.debug(f"No structures found for corporation '{self.corporation_name}' in database.")
+            return False
+        
+        self.structures = structures
+        
+        logging.debug(f"Loaded {len(self.structures)} structures for corporation '{self.corporation_name}' from database.")
+        return True
+    
+    def load_corporation_members(self) -> bool:
+        """Load corporation members from the database into the instance. Returns True if found."""
+        
+        members = self.db_app.session.query(MemberModel).filter_by(corporation_id=self.corporation_id).all()
+        if not members:
+            logging.debug(f"No members found for corporation '{self.corporation_name}' in database.")
+            return False
+        
+        self.members = members
+        
+        logging.debug(f"Loaded {len(self.members)} members for corporation '{self.corporation_name}' from database.")
         return True
     
     # -------------------
@@ -160,7 +213,7 @@ class Corporation:
                 self.save_corporation()
 
             logging.debug(f"Corporation data successfully updated for {self.corporation_name}.")
-            return json.dumps({'corporation_name': self.corporation_name, 'profile_data': corp_data}, indent=4)
+            return json.dumps({'corporation_name': self.corporation_name, 'corporation_data': corp_data}, indent=4)
 
         except Exception as e:
             logging.error(f"Failed to refresh corporation data for {self.corporation_name}. Error: {e}")
@@ -169,12 +222,13 @@ class Corporation:
     # -------------------
     # Refresh Corporation structures
     # -------------------
-    def refresh_structures(self, safe_structures_fl: bool = True) -> List[dict]:
+    def refresh_structures(self, safe_structures_fl: bool = True) -> str:
         """Refresh the structures of the corporation from the SDE."""
         try:
             logging.debug(f"Refreshing structures for {self.corporation_name}...")
             structures_data = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/structures/")
-            self.structures: List[StructureModel] = []
+            
+            self.structures = []
             for structure in structures_data:
                 # Load additional details from ESI
                 system_data = self.default_esi_character.esi_client.esi_get(f"/universe/systems/{structure.get('system_id')}/")
@@ -219,9 +273,64 @@ class Corporation:
             if safe_structures_fl == True:
                 self.save_corporation_structures(self.structures)
 
+            structure_list_summary = [s.structure_name for s in self.structures]
             logging.debug(f"Corporation structures successfully updated for {self.corporation_name}.")
-            return self.structures
-
+            return json.dumps({'corporation_name': self.corporation_name, 'structures': structure_list_summary}, indent=4)
         except Exception as e:
             logging.error(f"Failed to refresh corporation structures for {self.corporation_name}. Error: {e}")
-            return []
+            return json.dumps({'corporation_name': self.corporation_name, 'structures': {}}, indent=4)
+
+    # -------------------
+    # Refresh Corporation members and member roles
+    # -------------------
+    def refresh_members(self, save_members_fl: bool = True) -> str:
+        """Refresh the member list of the corporation from ESI."""
+        try:
+            logging.debug(f"Refreshing members for {self.corporation_name}...")
+            members = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/members/")
+            member_roles = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/members/titles/")
+            corporation_titles = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/titles/")
+
+            self.members = []    
+            for character_id in members:
+                character = self.char_manager.get_character_by_id(character_id)
+                if not character:
+                    logging.debug(f"Character ID {character_id} not found in character manager. Skipping.")
+                    continue
+                
+                titles: List[Dict[str, str]] = []
+
+                # Zoek de juiste entry in member_roles gebaseerd op character_id
+                member_role_entry = next(
+                    (role for role in member_roles if role["character_id"] == character_id), 
+                    None
+                )
+
+                if member_role_entry and "titles" in member_role_entry:
+                    for title_id in member_role_entry["titles"]:
+                        title = {
+                            "title_id": title_id,
+                            "title_name": next(
+                                (corp_title["name"] for corp_title in corporation_titles if corp_title["title_id"] == title_id),
+                                "Unknown"
+                            )
+                        }
+                        titles.append(title)
+
+                self.members.append(MemberModel(
+                    corporation_id = self.corporation_id,
+                    character_id = character_id,
+                    character_name = character.character_name,
+                    titles = titles
+                ))
+            
+            if save_members_fl == True:
+                self.save_corporation_members(self.members)
+
+            members_summary = [m.character_name for m in self.members]
+            logging.debug(f"Corporation members successfully updated for {self.corporation_name}. Total members: {len(members_summary)}")
+            return json.dumps({'corporation_name': self.corporation_name, 'members': members_summary}, indent=4)
+
+        except Exception as e:
+            logging.error(f"Failed to refresh corporation members for {self.corporation_name}. Error: {e}")
+            return json.dumps({'corporation_name': self.corporation_name, 'members': []}, indent=4)

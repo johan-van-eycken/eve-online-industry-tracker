@@ -120,6 +120,20 @@ class CharacterManager():
                 return char
         return None
 
+    def get_character_by_name(self, character_name: str) -> Optional[Character]:
+        """Get a character by their name."""
+        for char in self.character_list:
+            if char.character_name == character_name:
+                return char
+        return None
+    
+    def get_character_by_id(self, character_id: int) -> Optional[Character]:
+        """Get a character by their EVE ID."""
+        for char in self.character_list:
+            if char.character_id == character_id:
+                return char
+        return None 
+
     def refresh_all(self, character_name: Optional[str] = None) -> List[str]:
         """ 
         Refresh all character data for one or all characters.
