@@ -27,7 +27,7 @@ def initialize_eve_app_schema(database_manager: DatabaseManager):
     logging.debug(f"Database schema for `{database_manager.get_db_name()}` initialized successfully.")
 
 def main():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
     # Load Configurations
     logging.info("Loading config...")

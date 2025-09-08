@@ -49,6 +49,7 @@
       "esi-corporations.read_starbases.v1",
       "esi-corporations.read_structures.v1",
       "esi-corporations.read_titles.v1",
+      "esi-corporations.read_standings.v1",
       "esi-wallet.read_corporation_wallets.v1"
     ]
   }

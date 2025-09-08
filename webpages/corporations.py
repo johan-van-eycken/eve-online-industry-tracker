@@ -1,6 +1,6 @@
 import streamlit as st
 from classes.database_manager import DatabaseManager
-from utils.formatters import format_datetime, format_date, format_date_countdown
+from utils.formatters import format_datetime, format_date_countdown, format_isk
 import pandas as pd
 import json
 
@@ -114,18 +114,36 @@ def render(cfg):
             tax_rate_str = f"{tax_rate*100:.2f}%" if tax_rate is not None else "N/A"
             war_eligible = row.get("war_eligible")
             war_eligible_str = "Yes" if war_eligible else "No"
+
+            # --- Extract Master Wallet balance ---
+            master_wallet_balance = None
+            wallets_raw = row.get("wallets", None)
+            if wallets_raw:
+                try:
+                    wallets = json.loads(wallets_raw) if isinstance(wallets_raw, str) else wallets_raw
+                    master_wallet = next((w for w in wallets if str(w.get("division")) == "1"), None)
+                    if master_wallet:
+                        master_wallet_balance = master_wallet.get("balance", 0.0)
+                except Exception:
+                    master_wallet_balance = None
+            # fallback if not found
+            if master_wallet_balance is None:
+                master_wallet_balance = 0.0
+
             with col:
                 st.markdown(
                     f"""
                     <div style="background-color: rgba(30,30,30,0.95); padding: 20px; border-radius: 10px; box-shadow: 2px 2px 10px rgba(0,0,0,0.5); text-align: center; margin-bottom: 10px;">
                         <img src="{row['logo_url']}" width="96" style="border-radius:8px; margin-bottom:10px;" />
                         <div style="font-size:16px; color:#f0f0f0;">
-                            <b style="font-size:18px;">{row.get('corporation_name', 'Unknown')}</b><br>
+                            <b style="font-size:18px;">{row.get('corporation_name', 'Unknown')}</b>&nbsp;
                             <span style="color:#aaa;">[{row.get('ticker', '')}]</span><br>
-                            <span>CEO: {ceo_name}</span><br>
-                            <span>Members: {row.get('member_count', 'N/A')}</span><br>
-                            <span>Tax Rate: {tax_rate_str}</span><br>
-                            <span>War Eligible: {war_eligible_str}</span><br>
+                            CEO: {ceo_name}<br>
+                            Members: {row.get('member_count', 'N/A')}<br>
+                            Tax Rate: {tax_rate_str}<br>
+                            War Eligible: {war_eligible_str}<br><br>
+                            <b>Master Wallet Balance:</b><br>
+                            <b>{format_isk(master_wallet_balance)}</b>
                         </div>
                     </div>
                     """,
@@ -156,6 +174,9 @@ def render(cfg):
             df_members["corporation_id"] = df_members["corporation_id"].astype(int)
             df_members["character_id"] = df_members["character_id"].astype(int)
             ceo_id = int(df[df["corporation_id"] == selected_id]["ceo_id"].iloc[0])
+
+            df_chars = db.load_df("characters")
+            wallet_lookup = df_chars.set_index("character_id")["wallet_balance"].to_dict()
 
             df_members = df_members[df_members["corporation_id"] == int(selected_id)]
             if df_members.empty:
@@ -197,6 +218,7 @@ def render(cfg):
                         crown = "👑 " if is_ceo else ""
                         div_class = "tile-member ceo" if is_ceo else "tile-member"
                         ceo_label_html = '<div class="ceo-label">CEO</div>' if is_ceo else '<div class="member-label">MEMBER</div>'
+                        wallet_balance = wallet_lookup.get(member['character_id'], 0.0)
                         with col:
                             st.markdown(
                                 f"""
@@ -206,7 +228,10 @@ def render(cfg):
                                     <div style="font-size:15px; color:#f0f0f0;">
                                         <b>{crown}{member['character_name']}</b><br>
                                         <span style="color:#aaa;">ID: {member['character_id']}</span><br>
-                                        <span style="font-size:13px;">{titles_str}</span>
+                                        <span style="font-size:13px;">{titles_str}</span><br>
+                                        <br>
+                                        <span><b> Wallet Balance:</b><br>
+                                            {format_isk(wallet_balance)}
                                     </div>
                                 </div>
                                 """,
@@ -252,7 +277,7 @@ def render(cfg):
                                         <span>Location: {struct.get('system_name', '')} - {struct.get('region_name', '')}</span><br>
                                         <span>Type: {struct.get('type_name', '')} - {struct.get('group_name', '')}</span><br>
                                         <span>Status: {struct.get('state', '')}</span><br><br>
-                                        <span>Fuel Expires: {struct.get('fuel_expires')[:19]} ({format_date(struct.get('fuel_expires')[:19])})</span><br><br>
+                                        <span>Fuel Expires: {format_datetime(struct.get('fuel_expires'))} ({format_date_countdown(struct.get('fuel_expires'))})</span><br><br>
                                     </div>
                                 </div>
                                 """,
