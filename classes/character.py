@@ -1,7 +1,7 @@
 import logging
 import json
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, List, Dict, Any
 
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
@@ -46,11 +46,10 @@ class Character:
         self.security_status: Optional[float] = None
         self.updated_at: Optional[datetime] = None
         
-        # Wallet balance
+        # Additional properties
         self.wallet_balance: Optional[float] = None
-
-        # Skills
         self.skills: Optional[Dict[str, Any]] = None
+        self.standings: Optional[List[Dict[str, str]]] = None
 
         # Initialize ESI Client (handles token registration/refresh automatically)
         logging.debug(f"Initializing ESIClient for {self.character_name}...")
@@ -89,6 +88,9 @@ class Character:
                     value = json.dumps(value)  # convert dict → string
                 setattr(character_record, column, value)
         
+            if hasattr(self, "standings"):
+                character_record.standings = json.dumps(self.standings)
+
         character_record.updated_at = datetime.utcnow()
 
         self.db_app.session.commit()
@@ -110,6 +112,8 @@ class Character:
         for column in CharacterModel.__table__.columns.keys():
             if hasattr(self, column):
                 if column == "skills" and getattr(character_record, column):
+                    setattr(self, column, json.loads(getattr(character_record, column)))
+                elif column == "standings" and getattr(character_record, column):
                     setattr(self, column, json.loads(getattr(character_record, column)))
                 else:
                     setattr(self, column, getattr(character_record, column))
@@ -155,10 +159,22 @@ class Character:
         try:
             logging.debug(f"Refreshing profile for {self.character_name}...")
             profile_data = self.esi_client.esi_get(f"/characters/{self.character_id}/")
+            standings_data = self.esi_client.esi_get(f"/characters/{self.character_id}/standings/")
 
             # Load additional details from the SDE database
             race_data = self.db_sde.session.query(Races).filter_by(id=profile_data.get("race_id")).first()
             bloodline_data = self.db_sde.session.query(Bloodlines).filter_by(id=profile_data.get("bloodline_id")).first()
+            faction_data = self.db_sde.load_df("factions")
+            npccorp_data = self.db_sde.load_df("npcCorporations")
+
+            # Lookup tables
+            def get_name(nameID, language):
+                if isinstance(nameID, dict):
+                    return nameID.get(language, next(iter(nameID.values()), "Unknown"))
+                return nameID
+
+            faction_lookup = {row['id']: get_name(row['nameID'], self.cfg["app"]["language"]) for _, row in faction_data.iterrows()}
+            npccorp_lookup = {row['id']: get_name(row['nameID'], self.cfg["app"]["language"]) for _, row in npccorp_data.iterrows()}
 
             # Update runtime properties
             self.image_url = f"https://images.evetech.net/characters/{self.character_id}/portrait?size=128"
@@ -171,6 +187,23 @@ class Character:
             self.corporation_id = profile_data.get("corporation_id")
             self.description = profile_data.get("description")
             self.security_status = profile_data.get("security_status")
+
+            # Additional properties
+            self.standings = []
+            for s in standings_data:
+                entry = {
+                    "from_id": str(s.get("from_id")),
+                    "from_type": s.get("from_type"),
+                    "standing": str(s.get("standing"))
+                }
+                # Add name if available
+                if s.get("from_type") == "faction":
+                    entry["name"] = faction_lookup.get(s.get("from_id"), "Unknown Faction")
+                elif s.get("from_type") == "npc_corp":
+                    entry["name"] = npccorp_lookup.get(s.get("from_id"), "Unknown Corporation")
+                else:
+                    entry["name"] = ""
+                self.standings.append(entry)
 
             # Save to database
             if safe_character_fl == True:

@@ -1,12 +1,12 @@
 import logging
 import json
-import utils.formatters as fmt
 from datetime import datetime
 from typing import Optional, List, Dict
 
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
 from classes.database_models import CorporationModel, StructureModel, MemberModel
+from classes.database_models import Factions, NpcCorporations
 from classes.database_models import Types, Groups, Categories
 from classes.character import Character
 from classes.character_manager import CharacterManager
@@ -57,6 +57,8 @@ class Corporation:
         self.url: Optional[str] = None
         self.war_eligible: Optional[bool] = None
         self.image_url: Optional[str] = None
+        self.wallets: List[Dict[str, str]] = []
+        self.standings: List[Dict[str, str]] = []
 
         self.structures: List[StructureModel] = []
         self.members: List[MemberModel] = []
@@ -88,6 +90,11 @@ class Corporation:
             if hasattr(self, column):
                 value = getattr(self, column)
                 setattr(corporation_record, column, value)
+
+        if hasattr(self, "wallets"):
+            corporation_record.wallets = json.dumps(self.wallets)
+        if hasattr(self, "standings"):
+            corporation_record.standings = json.dumps(self.standings)
 
         corporation_record.updated_at = datetime.utcnow()
 
@@ -192,8 +199,40 @@ class Corporation:
         try:
             logging.debug(f"Refreshing profile for {self.corporation_name}...")
             corp_data = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/")
+            corp_divisions = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/divisions/")
+            corp_wallets = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/wallets/")
+            corp_standings = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/standings/")
+
+            # Convert String responses to JSON if necessary
+            if isinstance(corp_wallets, str):
+                corp_wallets = json.loads(corp_wallets)
+            if isinstance(corp_divisions, str):
+                corp_divisions = json.loads(corp_divisions)
+            if isinstance(corp_standings, str):
+                corp_standings = json.loads(corp_standings)
+
+            # Load additional details from the SDE database
+            faction_data = self.db_sde.load_df("factions")
+            npccorp_data = self.db_sde.load_df("npcCorporations")
+
+            # Lookup tables
+            def get_name(nameID, language):
+                if isinstance(nameID, dict):
+                    return nameID.get(language, next(iter(nameID.values()), "Unknown"))
+                return nameID
+
+            faction_lookup = {row['id']: get_name(row['nameID'], self.cfg["app"]["language"]) for _, row in faction_data.iterrows()}
+            npccorp_lookup = {row['id']: get_name(row['nameID'], self.cfg["app"]["language"]) for _, row in npccorp_data.iterrows()}
+            divisions_lookup = {
+                d["division"]: (
+                    "Master Wallet" if d["division"] == 1 else d.get("name", f"Division {d['division']}")
+                )
+                for d in corp_divisions.get("wallet", [])
+            }
+
 
             # Update runtime properties
+            logging.debug
             self.image_url = f"https://images.evetech.net/corporations/{self.corporation_id}/portrait?size=128"
             self.corporation_name = corp_data.get("name")
             self.creator_id = corp_data.get("creator_id")
@@ -207,6 +246,29 @@ class Corporation:
             self.ticker = corp_data.get("ticker")
             self.url = corp_data.get("url")
             self.war_eligible = corp_data.get("war_eligible")
+            self.wallets = [
+                {
+                    "division": str(w.get("division")),
+                    "division_name": divisions_lookup.get(w.get("division"), f"Division {w.get('division')}"),
+                    "balance": str(w.get("balance"))
+                }
+                for w in corp_wallets
+            ]
+            self.standings = []
+            for s in corp_standings:
+                entry = {
+                    "from_id": str(s.get("from_id")),
+                    "from_type": s.get("from_type"),
+                    "standing": str(s.get("standing"))
+                }
+                # Add name if available
+                if s.get("from_type") == "faction":
+                    entry["name"] = faction_lookup.get(s.get("from_id"), "Unknown Faction")
+                elif s.get("from_type") == "npc_corp":
+                    entry["name"] = npccorp_lookup.get(s.get("from_id"), "Unknown Corporation")
+                else:
+                    entry["name"] = ""
+                self.standings.append(entry)
 
             # Save to database
             if safe_corporation_fl == True:
@@ -259,12 +321,12 @@ class Corporation:
                     category_id = group_data.categoryID,
                     category_name = category_data.name[self.db_sde.language],
                     state = structure.get("state"),
-                    state_timer_end = fmt.parse_datetime(structure.get("state_timer_end")),
-                    state_timer_start = fmt.parse_datetime(structure.get("state_timer_start")),
-                    unachors_at = fmt.parse_datetime(structure.get("unanchors_at")),
-                    fuel_expires = fmt.parse_datetime(structure.get("fuel_expires")),
+                    state_timer_end = structure.get("state_timer_end"),
+                    state_timer_start = structure.get("state_timer_start"),
+                    unachors_at = structure.get("unanchors_at"),
+                    fuel_expires = structure.get("fuel_expires"),
                     reinforce_hour = structure.get("reinforce_hour"),
-                    next_reinforce_apply = fmt.parse_datetime(structure.get("next_reinforce_apply")),
+                    next_reinforce_apply = structure.get("next_reinforce_apply"),
                     next_reinforce_hour = structure.get("next_reinforce_hour"),
                     acl_profile_id = structure.get("profile_id"),
                     services = structure.get("services", {})

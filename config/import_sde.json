@@ -4,6 +4,7 @@
   "DEFAULT_DB_URI": "sqlite:///database/eve_sde.db",
   "DEFAULT_TMP_DIR": "database/data/tmp_sde",
   "TABLES_TO_IMPORT": [
+    "agents",
     "bloodlines",
     "blueprints",
     "categories",
@@ -11,6 +12,7 @@
     "groups",
     "marketGroups",
     "metaGroups",
+    "npcCorporations",
     "races",
     "types",
     "invFlags",

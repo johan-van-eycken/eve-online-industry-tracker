@@ -5,10 +5,11 @@ from typing import Optional
 
 def format_isk(value: Optional[float]) -> str:
     """Format ISK balance in EVE style: ISK 1.234.567.890,00"""
-    if not value:
+    if value is None or value == "":
         value = 0.0
     
     try:
+        value = float(value)
         return "ISK {:,.2f}".format(value).replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return "N/A"
