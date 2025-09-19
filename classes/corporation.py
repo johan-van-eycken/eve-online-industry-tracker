@@ -6,7 +6,6 @@ from typing import Optional, List, Dict
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
 from classes.database_models import CorporationModel, StructureModel, MemberModel
-from classes.database_models import Factions, NpcCorporations
 from classes.database_models import Types, Groups, Categories
 from classes.character import Character
 from classes.character_manager import CharacterManager
