@@ -172,7 +172,7 @@ def render(cfg):
         return
 
     # Tabs voor Character Details
-    tab_skills, journal_tab = st.tabs(["Skills", "Wallet Journal"])
+    tab_skills, journal_tab, transactions_tab = st.tabs(["Skills", "Wallet Journal", "Wallet Transactions"])
 
     # --- CHARACTER SKILLS TAB ---
     with tab_skills:
@@ -304,7 +304,7 @@ def render(cfg):
                         unsafe_allow_html=True,
                     )
 
-    # --- CHARACTER SKILLS TAB ---
+    # --- CHARACTER JOURNAL TAB ---
     with journal_tab:
         st.subheader("Wallet Journal")
 
@@ -315,6 +315,22 @@ def render(cfg):
             st.stop()
 
         # Display wallet journal entries
+        st.dataframe(
+            df[df["character_id"] == selected_id].sort_values(by="date", ascending=False),
+            use_container_width=True
+        )
+    
+    # --- CHARACTER TRANSACTIONS TAB ---
+    with transactions_tab:
+        st.subheader("Wallet Transactions")
+
+        try:
+            df = db.load_df("character_wallet_transactions")
+        except Exception:
+            st.warning("No character wallet transactions data found. Run main.py first.")
+            st.stop()
+
+        # Display wallet transactions entries
         st.dataframe(
             df[df["character_id"] == selected_id].sort_values(by="date", ascending=False),
             use_container_width=True

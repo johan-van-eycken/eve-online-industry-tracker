@@ -6,8 +6,8 @@ from typing import Optional, List, Dict, Any
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
 from classes.esi import ESIClient
-from classes.database_models import CharacterModel, CharacterWalletJournalModel
-from classes.database_models import NpcCorporations, Bloodlines, Races, Types, Groups
+from classes.database_models import CharacterModel, CharacterWalletJournalModel, CharacterWalletTransactionsModel
+from classes.database_models import NpcCorporations, Bloodlines, Races, Types, Groups, Categories
 
 class Character:
     """Handles authentication and profile for an in-game character using ESIClient."""
@@ -52,6 +52,7 @@ class Character:
         self.skills: Optional[Dict[str, Any]] = None
         self.standings: Optional[List[Dict[str, str]]] = None
         self.wallet_journal: Optional[List[Dict[str, Any]]] = None
+        self.wallet_transactions: Optional[List[Dict[str, Any]]] = None
 
         # Initialize ESI Client (handles token registration/refresh automatically)
         logging.debug(f"Initializing ESIClient for {self.character_name}...")
@@ -108,14 +109,6 @@ class Character:
         if not character_record:
             logging.debug(f"No database record found for character '{self.character_name}'.")
             return False
-        
-        character_wallet_journal = (self.db_app.session.query(CharacterWalletJournalModel).filter_by(character_id=self.character_id).all())
-
-        # Assign loaded entries to self.wallet_journal for runtime access
-        self.wallet_journal = [
-            {col: getattr(entry, col) for col in CharacterWalletJournalModel.__table__.columns.keys()}
-            for entry in character_wallet_journal
-        ]
 
         # Dynamically use attributes from CharacterModel
         for column in CharacterModel.__table__.columns.keys():
@@ -127,8 +120,21 @@ class Character:
                 else:
                     setattr(self, column, getattr(character_record, column))
 
-        # Remove blocking: allow character loading even if no wallet journal entries exist
-        logging.debug(f"Character '{self.character_name}' loaded from database. Wallet journal entries: {len(self.wallet_journal)}")
+        # Assign loaded entries to self.wallet_journal for runtime access
+        character_wallet_journal = (self.db_app.session.query(CharacterWalletJournalModel).filter_by(character_id=self.character_id).all())
+        self.wallet_journal = [
+            {col: getattr(entry, col) for col in CharacterWalletJournalModel.__table__.columns.keys()}
+            for entry in character_wallet_journal
+        ]
+
+        # Assign loaded entries to self.wallet_transactions for runtime access
+        character_wallet_transactions = (self.db_app.session.query(CharacterWalletTransactionsModel).filter_by(character_id=self.character_id).all())
+        self.wallet_transactions = [
+            {col: getattr(entry, col) for col in CharacterWalletTransactionsModel.__table__.columns.keys()}
+            for entry in character_wallet_transactions
+        ]
+
+        logging.debug(f"Character '{self.character_name}' loaded from database. Wallet journal entries: {len(self.wallet_journal)} Transaction entries: {len(self.wallet_transactions)}.")
         return True
 
     # -------------------
@@ -140,9 +146,24 @@ class Character:
             logging.debug(f"No wallet journal entries to save for {self.character_name}.")
             return
 
+        new_journal_entries = []
+        for entry in journal_entries:
+            entry_wallet_journal_id = entry.get("id")
+            if entry_wallet_journal_id is None:
+                continue  # Skip entries without an ID
+
+            existing_entry = (
+                self.db_app.session.query(CharacterWalletJournalModel)
+                .filter_by(character_id=self.character_id, wallet_journal_id=entry_wallet_journal_id)
+                .first()
+            )
+            if existing_entry:
+                continue  # Skip if already exists
+            new_journal_entries.append(entry)
+
         # Step 1: Collect unique party IDs
         party_ids = set()
-        for entry in journal_entries:
+        for entry in new_journal_entries:
             for key in ("first_party_id", "second_party_id", "tax_receiver_id"):
                 pid = entry.get(key)
                 if pid:
@@ -175,19 +196,7 @@ class Character:
 
         # Step 3: Assign names to journal entries
         new_entries = []
-        for entry in journal_entries:
-            entry_wallet_journal_id = entry.get("id")
-            if entry_wallet_journal_id is None:
-                continue  # Skip entries without an ID
-
-            existing_entry = (
-                self.db_app.session.query(CharacterWalletJournalModel)
-                .filter_by(character_id=self.character_id, wallet_journal_id=entry_wallet_journal_id)
-                .first()
-            )
-            if existing_entry:
-                continue  # Skip if already exists
-
+        for entry in new_journal_entries:
             for key, name_key in [
                 ("first_party_id", "first_party_name"),
                 ("second_party_id", "second_party_name"),
@@ -198,7 +207,7 @@ class Character:
 
             new_entry = CharacterWalletJournalModel(
                 character_id=self.character_id,
-                wallet_journal_id=entry_wallet_journal_id,
+                wallet_journal_id=entry.get("id", None),
                 amount=entry.get("amount", 0.0),
                 balance=entry.get("balance", 0.0),
                 context_id=entry.get("context_id", None),
@@ -225,6 +234,107 @@ class Character:
             logging.debug(f"No new wallet journal entries to save for {self.character_name}.")
 
     # -------------------
+    # Save Wallet Transactions
+    # -------------------
+    def save_wallet_transactions(self, transactions: List[Dict[str, Any]]) -> None:
+        """Save wallet transactions to the database."""
+        if not transactions:
+            logging.debug(f"No wallet transactions to save for {self.character_name}.")
+            return
+
+        new_transaction_entries = []
+        for entry in transactions:
+            entry_transaction_id = entry.get("transaction_id")
+            if entry_transaction_id is None:
+                continue  # Skip entries without an ID
+
+            existing_entry = (
+                self.db_app.session.query(CharacterWalletTransactionsModel)
+                .filter_by(character_id=self.character_id, transaction_id=entry_transaction_id)
+                .first()
+            )
+            if existing_entry:
+                continue  # Skip if already exists
+            new_transaction_entries.append(entry)
+
+        # Step 1: Collect unique client IDs
+        client_ids = set()
+        for entry in new_transaction_entries:
+            cid = entry.get("client_id")
+            if cid:
+                client_ids.add(cid)
+
+        # Step 2: Lookup names for each unique ID
+        client_names = {}
+        for cid in client_ids:
+            name = None
+            id_type = self.esi_client.get_id_type(cid)
+            if id_type == "character":
+                data = self.esi_client.esi_get(f"/characters/{cid}/")
+                if data and "name" in data:
+                    name = data["name"]
+            elif id_type == "alliance":
+                data = self.esi_client.esi_get(f"/alliances/{cid}/")
+                if data and "name" in data:
+                    name = data["name"]
+            elif id_type == "corporation":
+                data = self.esi_client.esi_get(f"/corporations/{cid}/")
+                if data and "name" in data:
+                    name = data["name"]
+            elif id_type == "npc_corporation":
+                npc_corp = self.db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
+                name = npc_corp.nameID[self.db_sde.language] if npc_corp else None
+            else:
+                continue  # Unknown type, skip
+
+            client_names[cid] = name
+
+        # Step 3: Assign names to transaction entries
+        new_entries = []
+        for entry in new_transaction_entries:
+            cid = entry.get("client_id")
+            entry["client_name"] = client_names.get(cid)
+
+            type_id = entry.get("type_id")
+            type = self.db_sde.session.query(Types).filter_by(id=type_id).first()
+            entry["type_name"] = type.name[self.db_sde.language] if type else None
+            group = self.db_sde.session.query(Groups).filter_by(id=type.groupID).first() if type else None
+            entry["type_group_id"] = group.id if group else None
+            entry["type_group_name"] = group.name[self.db_sde.language] if group else None
+            category = self.db_sde.session.query(Categories).filter_by(id=group.categoryID).first() if group else None
+            entry["type_category_id"] = category.id if category else None
+            entry["type_category_name"] = category.name[self.db_sde.language] if category else None
+
+            new_entry = CharacterWalletTransactionsModel(
+                character_id=self.character_id,
+                transaction_id=entry.get("transaction_id", None),
+                client_id=entry.get("client_id", None),
+                client_name=entry.get("client_name", None),
+                date=entry.get("date"),
+                is_buy=entry.get("is_buy", False),
+                is_personal=entry.get("is_personal", False),
+                journal_ref_id=entry.get("journal_ref_id", None),
+                location_id=entry.get("location_id", None),
+                quantity=entry.get("quantity", 0),
+                type_id=entry.get("type_id", None),
+                type_name=entry.get("type_name", None),
+                type_group_id=entry.get("type_group_id", None),
+                type_group_name=entry.get("type_group_name", None),
+                type_category_id=entry.get("type_category_id", None),
+                type_category_name=entry.get("type_category_name", None),
+                unit_price=entry.get("unit_price", 0.0),
+                total_price=entry.get("unit_price", 0.0)*entry.get("quantity", 1)
+            )
+            new_entries.append(new_entry)
+        
+        if new_entries:
+            self.db_app.session.bulk_save_objects(new_entries)
+            self.db_app.session.commit()
+            logging.debug(f"Bulk wallet transactions saved ({len(new_entries)}) for {self.character_name}.")
+        else:
+            logging.debug(f"No new wallet transactions to save for {self.character_name}.")
+
+    # -------------------
     # Refresh All
     # -------------------
     def refresh_all(self) -> str:
@@ -235,6 +345,7 @@ class Character:
             wallet_balance = json.loads(self.refresh_wallet_balance(False))
             skills = json.loads(self.refresh_skills(False))
             wallet_journal = json.loads(self.refresh_wallet_journal())
+            wallet_transactions = json.loads(self.refresh_wallet_transactions())
 
             # Safe character
             self.save_character()
@@ -245,7 +356,8 @@ class Character:
                 **profile_data,
                 **wallet_balance,
                 **skills,
-                **wallet_journal
+                **wallet_journal,
+                **wallet_transactions
             }
 
             # Convert to JSON string
@@ -358,6 +470,21 @@ class Character:
         
         except Exception as e:
             logging.error(f"Failed to refresh wallet journal for {self.character_name}. Error: {e}")
+            return json.dumps({'character_name': self.character_name, 'error': str(e)}, indent=4)
+    
+    # -------------------
+    # Refresh Wallet Transactions
+    # -------------------
+    def refresh_wallet_transactions(self) -> str:
+        try:
+            logging.debug(f"Getting wallet transactions for {self.character_name}...")
+            transactions = self.esi_client.esi_get(f"/characters/{self.character_id}/wallet/transactions/")
+            self.save_wallet_transactions(transactions)
+
+            return json.dumps({'character_name': self.character_name, 'wallet_transactions': transactions}, indent=4)
+        
+        except Exception as e:
+            logging.error(f"Failed to refresh wallet transactions for {self.character_name}. Error: {e}")
             return json.dumps({'character_name': self.character_name, 'error': str(e)}, indent=4)
 
     # -------------------

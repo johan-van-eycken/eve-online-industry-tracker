@@ -221,3 +221,17 @@ class CharacterManager():
         # Refresh wallet journal for all characters
         result = [char.refresh_wallet_journal() for char in self.character_list]
         return result
+    
+    def refresh_wallet_transactions(self, character_name: Optional[str] = None) -> List[str]:
+        if character_name:
+            # Refresh wallet transactions for a single character
+            result = [
+                char.refresh_wallet_transactions()
+                for char in self.character_list
+                if char.character_name == character_name
+            ]
+            return result
+        
+        # Refresh wallet transactions for all characters
+        result = [char.refresh_wallet_transactions() for char in self.character_list]
+        return result
