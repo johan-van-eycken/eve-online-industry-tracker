@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, List
 
 from classes.config_manager import ConfigManager
@@ -59,3 +60,17 @@ class CorporationManager:
             if corp.corporation_id == corporation_id:
                 return corp
         return None
+
+    def refresh_all_corporations(self, corporation_data_fl: bool = True, members_fl: bool = True, structures_fl: bool = True) -> None:
+        """Refresh data for all corporations managed by this CorporationManager."""
+        try:
+            for corp in self.corporations:
+                if corporation_data_fl:
+                    corp.refresh_corporation_data()
+                if members_fl:
+                    corp.refresh_members()
+                if structures_fl:
+                    corp.refresh_structures()
+        except Exception as e:
+            logging.error(f"Error refreshing corporations: {e}")
+            raise

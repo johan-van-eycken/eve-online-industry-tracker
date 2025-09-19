@@ -62,6 +62,29 @@ class CharacterModel(BaseApp):
     standings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+class CharacterWalletJournalModel(BaseApp):
+    __tablename__ = "character_wallet_journal"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    wallet_journal_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    balance: Mapped[float] = mapped_column(Float, nullable=False)
+    context_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    context_id_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    date: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ref_type: Mapped[str] = mapped_column(String, nullable=False)
+    first_party_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    first_party_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    second_party_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    second_party_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    tax: Mapped[float] = mapped_column(Float, nullable=True)
+    tax_receiver_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    tax_receiver_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
 class CorporationModel(BaseApp):
     __tablename__ = "corporations"
 
@@ -231,7 +254,7 @@ class NpcCorporations(BaseSde):
     solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
     stationID: Mapped[int] = mapped_column(Integer, nullable=False)
     taxRate: Mapped[float] = mapped_column(Float, nullable=False)
-    ticketName: Mapped[str] = mapped_column(String, nullable=False)
+    tickerName: Mapped[str] = mapped_column(String, nullable=False)
     uniqueName: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 class Factions(BaseSde):
