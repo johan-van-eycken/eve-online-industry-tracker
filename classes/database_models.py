@@ -85,6 +85,29 @@ class CharacterWalletJournalModel(BaseApp):
     tax_receiver_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+class CharacterWalletTransactionsModel(BaseApp):
+    __tablename__ = "character_wallet_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    transaction_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    client_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    client_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    date: Mapped[str] = mapped_column(String, nullable=True)
+    is_buy: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    is_personal: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    journal_ref_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    unit_price: Mapped[float] = mapped_column(Float, nullable=True)
+    total_price: Mapped[float] = mapped_column(Float, nullable=True)
+
 class CorporationModel(BaseApp):
     __tablename__ = "corporations"
 
