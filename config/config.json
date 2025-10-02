@@ -1,7 +1,7 @@
 {
   "characters": [
-    { "character_name": "Duke X1", "is_main": true },
-    { "character_name": "Knight X1", "is_main": false }
+    { "character_name": "Duke X1", "is_main": true, "is_corp_director": true },
+    { "character_name": "Knight X1", "is_main": false, "is_corp_director": false }
   ],
   "app": {
     "port": 8080,
@@ -31,10 +31,26 @@
   "defaults": {
     "scopes": [
       "esi-assets.read_assets.v1",
-      "esi-wallet.read_character_wallet.v1",
+      "esi-characters.read_blueprints.v1",
+      "esi-characters.read_corporation_roles.v1",
+      "esi-characters.read_standings.v1",
+      "esi-characters.read_titles.v1",
       "esi-skills.read_skills.v1",
-      "esi-skills.read_skillqueue.v1"
+      "esi-skills.read_skillqueue.v1",
+      "esi-wallet.read_character_wallet.v1"
+    ],
+    "scopes_corp_director": [
+      "esi-assets.read_corporation_assets.v1",
+      "esi-corporations.read_blueprints.v1",
+      "esi-corporations.read_corporation_membership.v1",
+      "esi-corporations.read_divisions.v1",
+      "esi-corporations.read_facilities.v1",
+      "esi-corporations.track_members.v1",
+      "esi-corporations.read_starbases.v1",
+      "esi-corporations.read_structures.v1",
+      "esi-corporations.read_titles.v1",
+      "esi-corporations.read_standings.v1",
+      "esi-wallet.read_corporation_wallets.v1"
     ]
   }
 }
-

@@ -23,6 +23,7 @@ CONFIG_SCHEMA = {
     "oauth": {"client_id": None},  # no default allowed
     "characters": [],  # must be a list
     "client_secret": None,  # required from secret.json
+    "defaults": {"scopes": [], "scopes_corp_director": []}
 }
 
 IMPORT_SDE_SCHEMA = {
