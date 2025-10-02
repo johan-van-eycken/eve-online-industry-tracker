@@ -14,7 +14,7 @@ BaseSde = declarative_base()
 # --------------------------
 # OAuth
 # --------------------------
-# Define the ESI Cache table as an ORM model
+# Define the ESI Cache table
 class EsiCache(BaseOauth):
     __tablename__ = "esi_cache"
 
@@ -23,7 +23,7 @@ class EsiCache(BaseOauth):
     data: Mapped[str] = mapped_column(Text) # JSON data
     last_updated: Mapped[float] = mapped_column(Float)
 
-# Define the OAuthCharacters table as an ORM model
+# Define the OAuthCharacters table
 class OAuthCharacter(BaseOauth):
     __tablename__ = "oauth_characters"
 
@@ -40,7 +40,6 @@ class OAuthCharacter(BaseOauth):
 # --------------------------
 # App
 # --------------------------
-# Define the Characters table as on ORM model
 class CharacterModel(BaseApp):
     __tablename__ = "characters"
 
@@ -48,6 +47,7 @@ class CharacterModel(BaseApp):
     character_name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     character_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
     is_main: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_corp_director: Mapped[bool] = mapped_column(Boolean, default=False)
     birthday: Mapped[str] = mapped_column(String, nullable=True)
     gender: Mapped[str] = mapped_column(String, nullable=True)
     bloodline_id: Mapped[int] = mapped_column(Integer, nullable=True)
@@ -59,6 +59,116 @@ class CharacterModel(BaseApp):
     security_status: Mapped[float] = mapped_column(Float, default=0.0)
     wallet_balance: Mapped[float] = mapped_column(Float, default=0.0)
     skills: Mapped[str] = mapped_column(Text, nullable=True)
+    standings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+class CharacterWalletJournalModel(BaseApp):
+    __tablename__ = "character_wallet_journal"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    wallet_journal_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    balance: Mapped[float] = mapped_column(Float, nullable=False)
+    context_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    context_id_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    date: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ref_type: Mapped[str] = mapped_column(String, nullable=False)
+    first_party_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    first_party_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    second_party_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    second_party_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    tax: Mapped[float] = mapped_column(Float, nullable=True)
+    tax_receiver_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    tax_receiver_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+class CharacterWalletTransactionsModel(BaseApp):
+    __tablename__ = "character_wallet_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    transaction_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    client_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    client_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    date: Mapped[str] = mapped_column(String, nullable=True)
+    is_buy: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    is_personal: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    journal_ref_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    unit_price: Mapped[float] = mapped_column(Float, nullable=True)
+    total_price: Mapped[float] = mapped_column(Float, nullable=True)
+
+class CorporationModel(BaseApp):
+    __tablename__ = "corporations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    corporation_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ticker: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    member_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    creator_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    ceo_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    home_station_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    shares: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    tax_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    war_eligible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    wallets: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
+    standings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+class StructureModel(BaseApp):
+    __tablename__ = "corporation_structures"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    structure_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    structure_name: Mapped[str] = mapped_column(String, nullable=True)
+    system_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    system_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    system_security: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    constellation_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    constellation_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    region_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    region_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    state: Mapped[str] = mapped_column(String, nullable=True)
+    state_timer_end: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    state_timer_start: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    unachors_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    fuel_expires: Mapped[str] = mapped_column(String, nullable=True)
+    reinforce_hour: Mapped[int] = mapped_column(Integer, nullable=True)
+    next_reinforce_apply: Mapped[str] = mapped_column(String, nullable=True)
+    next_reinforce_hour: Mapped[int] = mapped_column(Integer, nullable=True)
+    acl_profile_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    services: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+class MemberModel(BaseApp):
+    __tablename__ = "corporation_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    character_name: Mapped[str] = mapped_column(String, nullable=False)
+    titles: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)  # List of titles
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 # --------------------------
@@ -114,3 +224,75 @@ class Groups(BaseSde):
     published: Mapped[bool] = mapped_column(Boolean, nullable=True)
     useBasePrice: Mapped[bool] = mapped_column(Boolean, nullable=True)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
+
+class Categories(BaseSde):
+    __tablename__ = "categories"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    iconID: Mapped[int] = mapped_column(Integer, nullable=True)
+    published: Mapped[bool] = mapped_column(Boolean, nullable=True)
+
+class Agents(BaseSde):
+    __tablename__ = "agents"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
+    divisionID: Mapped[int] = mapped_column(Integer, nullable=False)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    locationID: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    agentTypeID: Mapped[int] = mapped_column(Integer, nullable=False)
+    isLocator: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+class NpcCorporations(BaseSde):
+    __tablename__ = "npcCorporations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    allowedMemberRaces: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    ceoID: Mapped[int] = mapped_column(Integer, nullable=False)
+    corporationTrades: Mapped[dict[int, float]] = mapped_column(JSON, nullable=True)
+    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    descriptionID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    divisions: Mapped[str] = mapped_column(JSON, nullable=False)
+    enemyID: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    extent: Mapped[str] = mapped_column(String, nullable=False)
+    factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    friendID: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    hasPlayerPersonnelManager: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    iconID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    initialPrice: Mapped[int] = mapped_column(Integer, nullable=False)
+    investors: Mapped[Optional[list[dict[int, int]]]] = mapped_column(JSON, nullable=False)
+    lpOfferTables: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    mainActivityID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    memberLimit: Mapped[int] = mapped_column(Integer, nullable=False)
+    minSecurity: Mapped[float] = mapped_column(Float, nullable=False)
+    minimumJoinStanding: Mapped[float] = mapped_column(Float, nullable=False)
+    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    publicShares: Mapped[int] = mapped_column(Integer, nullable=False)
+    raceID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    sendCharTerminationMessage: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    shares: Mapped[int] = mapped_column(Integer, nullable=False)
+    size: Mapped[str] = mapped_column(String, nullable=False)
+    sizeFactor: Mapped[float] = mapped_column(Float, nullable=False)
+    solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
+    stationID: Mapped[int] = mapped_column(Integer, nullable=False)
+    taxRate: Mapped[float] = mapped_column(Float, nullable=False)
+    tickerName: Mapped[str] = mapped_column(String, nullable=False)
+    uniqueName: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+class Factions(BaseSde):
+    __tablename__ = "factions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
+    descriptionID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    flatLogo: Mapped[str] = mapped_column(String, nullable=True)
+    flatLogoWithName: Mapped[str] = mapped_column(String, nullable=True)
+    iconID: Mapped[int] = mapped_column(Integer, nullable=True)
+    memberRaces: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    militiaCorporationID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    shortDescriptionID: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=False)
+    sizeFactor: Mapped[float] = mapped_column(Float, nullable=False)
+    solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
+    uniqueName: Mapped[bool] = mapped_column(Boolean, nullable=False)

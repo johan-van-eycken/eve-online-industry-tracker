@@ -14,10 +14,11 @@ from classes.oauth import OAuthHandler, OAuthServer
 
 
 class ESIClient:
-    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, refresh_token: Optional[str] = None):
+    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, character_name: str, is_main: bool, is_corp_director: bool, refresh_token: Optional[str] = None):
         self.cfg = cfg
         self.character_name = character_name
         self.is_main = is_main
+        self.is_corp_director = is_corp_director
         self.db_oauth = db_oauth
 
         # Verified Character
@@ -41,7 +42,12 @@ class ESIClient:
         self.client_id = self.cfg.get("oauth")["client_id"]
         self.client_secret = self.cfg.get("client_secret")
         self.user_agent = self.cfg.get("app")["user_agent"]
-        self.scopes = " ".join(self.cfg.get("defaults")["scopes"])
+        
+        # Assign correct scopes
+        all_scopes = set(self.cfg.get("defaults")["scopes"])
+        if is_corp_director:
+            all_scopes.update(self.cfg.get("defaults")["scopes_corp_director"])
+        self.scopes = " ".join(sorted(all_scopes))
 
         # Load tokens from DB if character exists
         self._load_tokens_from_db()
@@ -295,6 +301,10 @@ class ESIClient:
                     # Not modified, return cached data
                     logging.debug(f"Using cached data for endpoint {endpoint}.")
                     return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                
+                elif response.status_code == 404:
+                    logging.warning(f"ESI endpoint not found: {endpoint} - {response.text}")
+                    return None
 
                 elif response.status_code in (420, 429, 500, 502, 503, 504):
                     wait = (2 ** retries) + random.uniform(0, 1)
@@ -312,3 +322,50 @@ class ESIClient:
                 time.sleep(2 ** retries)
 
         raise RuntimeError(f"ESI GET request failed for endpoint {endpoint} after retries.")
+    
+    def get_id_type(self, entity_id: int) -> Optional[str]:
+        """Get the type of an entity by its ID."""
+        if 500000 <= entity_id <= 599999:
+            return "faction"
+        elif 1000000 <= entity_id <= 1999999:
+            return "npc_corporation"
+        elif 3000000 <= entity_id <= 3999999:
+            return "npc_character"
+        elif 900000 <= entity_id <= 999999:
+            return "universe"
+        elif 1000000 <= entity_id <= 1999999:
+            return "region"
+        elif 2000000 <= entity_id <= 2999999:
+            return "constellation"
+        elif 3000000 <= entity_id <= 3999999:
+            return "solar_system"
+        elif 40000000 <= entity_id <= 49999999:
+            return "celestial"
+        elif 50000000 <= entity_id <= 59999999:
+            return "stargate"
+        elif 60000000 <= entity_id <= 69999999:
+            return "station"
+        elif 70000000 <= entity_id <= 79999999:
+            return "asteroid"
+        elif 80000000 <= entity_id <= 80099999:
+            return "control_bunker"
+        elif 81000000 <= entity_id <= 81999999:
+            return "wis_promenade"
+        elif 82000000 <= entity_id <= 84999999:
+            return "planetary_district"
+        elif 90000000 <= entity_id <= 97999999:
+            return "character" # 2010-2016
+        elif 98000000 <= entity_id <= 98999999:
+            return "corporation" # post 2010
+        elif 99000000 <= entity_id <= 99999999:
+            return "alliance" # post 2010
+        elif 100000000 <= entity_id <= 2099999999:
+            return "character_corp_alliance" # pre 2010
+        elif 2100000000 <= entity_id <= 2111999999:
+            return "character" # dust post 2016
+        elif 2112000000 <= entity_id <= 2129999999:
+            return "character" # post 2016
+        elif entity_id >= 1000000000000:
+            return "spawned_item"
+        else:
+            return "unknown"

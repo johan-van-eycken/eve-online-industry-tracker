@@ -1,11 +1,13 @@
 import streamlit as st
+import pandas as pd
 import requests
 import json
 from classes.database_manager import DatabaseManager
 from utils.formatters import format_isk, format_date, format_date_into_age
 
-FLASK_API_URL= "http://localhost:5000"
+FLASK_API_URL = "http://localhost:5000"
 
+# Function to refresh wallet balances
 def refresh_wallet_balances():
     """
     Function to send a POST request to the Flask backend to refresh wallet balances.
@@ -39,15 +41,16 @@ def refresh_wallet_balances():
     except Exception as e:
         st.error(f"Error connecting to backend: {e}")
 
+
 def render(cfg):
-    # -- Customer Style --
+    # -- Custom Style --
     st.markdown("""
         <style>
         .tooltip {
             position: relative;
             display: inline-block;
             cursor: pointer;
-            margin-bottom: 10px; /* equal spacing between rows */
+            margin-bottom: 10px;
         }
 
         .tooltip .tooltiptext {
@@ -69,6 +72,17 @@ def render(cfg):
             line-height: 1.3;
             box-shadow: 0 2px 8px rgba(0,0,0,0.5);
         }
+        
+        /* Adjusted tooltip alignement for Summarised Wallet aggregations */
+        .wallet-summary .tooltip .tooltiptext {
+            white-space: nowrap;  /* keep everything on one line */
+            min-width: 280px;     /* wider to avoid wrapping */
+        }
+
+        .wallet-summary .tooltip .tooltiptext div {
+            display: flex;
+            justify-content: space-between;
+        }
 
         /* Remove default margins for all children inside tooltip */
         .tooltip .tooltiptext * {
@@ -76,13 +90,6 @@ def render(cfg):
             padding: 0;
             font-size: 13px;
             line-height: 1.3;
-        }
-
-        /* Level/SP line with flex */
-        .tooltip .tooltiptext .level-sp {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 5px;
         }
 
         .tooltip:hover .tooltiptext {
@@ -101,31 +108,27 @@ def render(cfg):
         st.warning("No character data found. Run main.py first.")
         st.stop()
 
+    # Add character portraits
     if "image_url" not in df.columns:
         df["image_url"] = df["character_id"].apply(
             lambda cid: f"https://images.evetech.net/characters/{cid}/portrait?size=128"
         )
 
-    # Button refresh wallet balances
+    # Button to refresh wallet balances
     if st.button("Refresh Wallet Balances"):
         refreshed_data = refresh_wallet_balances()  # Calls Flask backend
         if refreshed_data:
-            # Assuming refreshed_data has the updated wallet balances; update your dataframe if necessary
             for wallet_data in refreshed_data:
                 if isinstance(wallet_data, str):
                     wallet_data = json.loads(wallet_data)
-                
+
                 character_name = wallet_data.get("character_name")
                 wallet_balance = wallet_data.get("wallet_balance")
 
                 if character_name and wallet_balance:
                     df.loc[df["character_name"] == character_name, "wallet_balance"] = wallet_balance
 
-    # By default no character tile selected
-    if "selected_character" not in st.session_state:
-        st.session_state.selected_character = None
-
-    # Clickable character tiles
+    # Character tiles
     cards_per_row = 5
     for i in range(0, len(df), cards_per_row):
         cols = st.columns(cards_per_row)
@@ -162,144 +165,244 @@ def render(cfg):
 
     st.divider()
 
-    # --- Split into 2 main columns ---
-    left_col, right_col = st.columns([2,1])  # 2/3 and 1/3 width
+    def build_tooltip(breakdown, category, formatter=format_isk, join_labels=True):
+        """
+        Builds a tooltip string with category left, ISK right.
+        breakdown: grouped Series with MultiIndex or dict-like.
+        category: 'Income' or 'Expenses'
+        formatter: function to format ISK values
+        join_labels: whether to join multiple index levels with '/'
+        """
+        if category not in breakdown.index.get_level_values(0):
+            return ""
+        
+        items = breakdown.loc[category].abs().sort_values(ascending=False)
 
-    # ================= LEFT COLUMN (Skills) =================
-    with left_col:
-        # Show skills if a character is selected
-        st.subheader(f"Character Skills")
+        tooltip_lines = []
+        if isinstance(items.index, pd.MultiIndex):
+            for idx, val in items.items():
+                label = " / ".join(str(x) for x in idx) if join_labels else str(idx[-1])
+                tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
+        else:
+            for label, val in items.items():
+                tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
 
-            # Dropdown to select character
-        char_options = df.set_index("character_id")["character_name"].to_dict()
-        selected_id = st.selectbox(
-            "Select character:",
-            options=list(char_options.keys()),
-            format_func=lambda x: char_options[x]
-        )
+        return "".join(tooltip_lines)
 
-        if not selected_id:
-            return
+    st.subheader("Character Details")
 
-        char_row = df[df["character_id"] == selected_id].iloc[0]
+    # Dropdown to select character
+    char_options = df.set_index("character_id")["character_name"].to_dict()
+    selected_id = st.selectbox(
+        "Select character:",
+        options=list(char_options.keys()),
+        format_func=lambda x: char_options[x]
+    )
 
-        if "skills" not in char_row:
-            st.info("No skills data available for this character.")
-            return
+    if not selected_id:
+        return
 
-        skills_data = json.loads(char_row["skills"])
-        total_sp = skills_data.get("total_skillpoints", 0)
-        unallocated_sp = skills_data.get("unallocated_skillpoints", 0)
+    # Tabs for Character Details
+    tab_skills, journal_tab, transactions_tab = st.tabs(["Skills", "Wallet Journal", "Wallet Transactions"])
 
-        # Summary
-        st.markdown(
-            f"""
-            **{total_sp:,}** Total Skill Points.
-            """
-        )
-        st.markdown(
-            f"""
-            **{unallocated_sp:,}** Unallocated Skill Points.
-            """
-        )
+    # --- CHARACTER SKILLS TAB ---
+    with tab_skills:
+        # --- Split into 2 main columns ---
+        left_col, right_col = st.columns([2,1])  # 2/3 and 1/3 width
 
+        # ================= LEFT COLUMN (Skills) =================
+        with left_col:
+            # Show skills if a character is selected
+            st.subheader(f"Character Skills")
 
+            char_row = df[df["character_id"] == selected_id].iloc[0]
 
-        # Build dictionary of skills grouped by group_name
-        skill_groups = {}
-        for s in skills_data.get("skills", []):
-            skill_groups.setdefault(s["group_name"], []).append(s)
+            if "skills" not in char_row:
+                st.info("No skills data available for this character.")
+                return
 
-        st.divider()
+            skills_data = json.loads(char_row["skills"])
+            total_sp = skills_data.get("total_skillpoints", 0)
+            unallocated_sp = skills_data.get("unallocated_skillpoints", 0)
 
-        def split_list_top_down(lst, n_cols):
-            """
-            Split lst into n_cols columns, filling each column top-down.
-            Returns a list of lists, one per column.
-            """
-            n_rows = (len(lst) + n_cols - 1) // n_cols  # ceil division
-            return [lst[i * n_rows : (i + 1) * n_rows] for i in range(n_cols)]
+            # Summary
+            st.markdown(
+                f"""
+                **{total_sp:,}** Total Skill Points.
+                """
+            )
+            st.markdown(
+                f"""
+                **{unallocated_sp:,}** Unallocated Skill Points.
+                """
+            )
+            st.divider()
 
-        # Sorted group names
-        group_names = sorted(skill_groups.keys())  # alphabetical
-        n_cols = 3
-        cols = st.columns(n_cols)
+            # Build dictionary of skills grouped by group_name
+            skill_groups = {}
+            for s in skills_data.get("skills", []):
+                skill_groups.setdefault(s["group_name"], []).append(s)
 
-        # Split top-down into columns
-        col_splits = split_list_top_down(group_names, n_cols)
+            def split_list_top_down(lst, n_cols):
+                """
+                Split lst into n_cols columns, filling each column top-down.
+                Returns a list of lists, one per column.
+                """
+                n_rows = (len(lst) + n_cols - 1) // n_cols  # ceil division
+                return [lst[i * n_rows : (i + 1) * n_rows] for i in range(n_cols)]
 
-        for col, group_list in zip(cols, col_splits):
-            for group_name in group_list:
-                col.button(
-                    group_name,
-                    key=f"group_{group_name}",
-                    use_container_width=True,
-                    on_click=lambda g=group_name: setattr(st.session_state, "selected_group", g),
-                )
+            # Sorted group names
+            group_names = sorted(skill_groups.keys())  # alphabetical
+            n_cols = 3
+            cols = st.columns(n_cols)
 
-        st.divider()
+            # Split top-down into columns
+            col_splits = split_list_top_down(group_names, n_cols)
 
-        # Show skills of selected group
-        if "selected_group" in st.session_state:
-            group_name = st.session_state.selected_group
-            skills = sorted(skill_groups[group_name], key=lambda s: s["skill_name"])
-
-            st.markdown(f"### {group_name}")
-
-            # Split alphabetically into 2 columns (down first, then across)
-            col1, col2 = st.columns(2)
-            col_splits = split_list_top_down(skills, 2)
-
-            for col, skill_list in zip([col1, col2], col_splits):
-                for skill in skill_list:
-                    name = skill["skill_name"]
-                    desc = skill["skill_desc"]
-                    points = skill["skillpoints_in_skill"]
-                    level = skill["trained_skill_level"]
-                    rom_level = ["0","I","II","III","IV","V"][level] if isinstance(level, int) and level <= 5 else str(level)
-
-                    # Render level boxes on one line
-                    boxes = " ".join(
-                        ["🟦" if l < level else "⬜" for l in range(5)]
+            for col, group_list in zip(cols, col_splits):
+                for group_name in group_list:
+                    col.button(
+                        group_name,
+                        key=f"group_{group_name}",
+                        use_container_width=True,
+                        on_click=lambda g=group_name: setattr(st.session_state, "selected_group", g),
                     )
 
-                    col.markdown(
-                        f"""<div class="tooltip">
-                                <span>{boxes} &nbsp;&nbsp;{name}</span>
-                                <span class="tooltiptext">
-                                    {desc}
-                                    <div class="level-sp">
-                                        <span>Level {rom_level}</span>
-                                        <span>{points:,} SP</span>
-                                    </div>
-                                </span>
-                            </div>""",
+            st.divider()
+
+            # Show skills of selected group
+            if "selected_group" in st.session_state:
+                group_name = st.session_state.selected_group
+                skills = sorted(skill_groups[group_name], key=lambda s: s["skill_name"])
+
+                st.markdown(f"### {group_name}")
+
+                # Split alphabetically into 2 columns (down first, then across)
+                col1, col2 = st.columns(2)
+                col_splits = split_list_top_down(skills, 2)
+
+                for col, skill_list in zip([col1, col2], col_splits):
+                    for skill in skill_list:
+                        name = skill["skill_name"]
+                        desc = skill["skill_desc"]
+                        points = skill["skillpoints_in_skill"]
+                        level = skill["trained_skill_level"]
+                        rom_level = ["0","I","II","III","IV","V"][level] if isinstance(level, int) and level <= 5 else str(level)
+
+                        # Render level boxes on one line
+                        boxes = " ".join(
+                            ["🟦" if l < level else "⬜" for l in range(5)]
+                        )
+
+                        col.markdown(
+                            f"""<div class="tooltip">
+                                    <span>{boxes} &nbsp;&nbsp;{name}</span>
+                                    <span class="tooltiptext">
+                                        {desc}
+                                        <div class="level-sp">
+                                            <span>Level {rom_level}</span>
+                                            <span>{points:,} SP</span>
+                                        </div>
+                                    </span>
+                                </div>""",
+                            unsafe_allow_html=True,
+                        )
+
+        # ================= RIGHT COLUMN (Skill Queue) =================
+        with right_col:
+            st.subheader("Skill Queue")
+
+            skill_queue = skills_data.get("skill_queue", [])
+            skill_queue = sorted(skill_queue, key=lambda q: q.get("queue_position", 0))
+            # skill_queue = json.loads(char_row["skill_queue"])
+            if not skill_queue:
+                st.info("Skill queue is empty.")
+            else:
+                for q in skill_queue:
+                    skill_name = q.get("skill_name", "Unknown Skill")
+                    level = q.get("finished_level", "?")
+                    start_time = format_date(q.get("start_time"))
+                    end_time = format_date(q.get("finish_time"))
+
+                    rom_level = ["0","I","II","III","IV","V"][level] if isinstance(level, int) and level <= 5 else str(level)
+
+                    st.markdown(
+                        f"""
+                        <div style="background-color: rgba(40,40,40,0.9); padding: 12px; border-radius: 8px; margin-bottom: 8px;">
+                            <b>{skill_name} → Level {rom_level}</b>
+                        </div>
+                        """,
                         unsafe_allow_html=True,
                     )
 
-# ================= RIGHT COLUMN (Skill Queue) =================
-    with right_col:
-        st.subheader("Skill Queue")
+    # --- CHARACTER JOURNAL TAB ---
+    with journal_tab:
+        st.subheader("Wallet Journal")
 
-        skill_queue = skills_data.get("skill_queue", [])
-        skill_queue = sorted(skill_queue, key=lambda q: q.get("queue_position", 0))
-        # skill_queue = json.loads(char_row["skill_queue"])
-        if not skill_queue:
-            st.info("Skill queue is empty.")
-        else:
-            for q in skill_queue:
-                skill_name = q.get("skill_name", "Unknown Skill")
-                level = q.get("finished_level", "?")
-                start_time = format_date(q.get("start_time"))
-                end_time = format_date(q.get("finish_time"))
+        try:
+            journal_df = db.load_df("character_wallet_journal")
+            journal_df = journal_df[journal_df["character_id"] == selected_id]
 
-                rom_level = ["0","I","II","III","IV","V"][level] if isinstance(level, int) and level <= 5 else str(level)
+            journal_df["category"] = journal_df["amount"].apply(lambda x: "Income" if x > 0 else "Expenses")
+            aggregated_journal = journal_df.groupby("category")["amount"].sum()
+            journal_breakdown = journal_df.groupby(["category", "ref_type"])["amount"].sum()
 
-                st.markdown(
-                    f"""
-                    <div style="background-color: rgba(40,40,40,0.9); padding: 12px; border-radius: 8px; margin-bottom: 8px;">
-                        <b>{skill_name} → Level {rom_level}</b>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            journal_income_tooltip = build_tooltip(journal_breakdown, "Income")
+            journal_expense_tooltip = build_tooltip(journal_breakdown, "Expenses")
+
+            st.markdown(f"""
+            <div class="wallet-summary">
+            <div class="tooltip">
+                Total Income: {format_isk(aggregated_journal.get("Income", 0))}
+                <span class="tooltiptext">{journal_income_tooltip}</span>
+            </div><br />
+            <div class="tooltip">
+                Total Expenses: {format_isk(-aggregated_journal.get("Expenses", 0))}
+                <span class="tooltiptext">{journal_expense_tooltip}</span>
+            </div>
+            </div><br />
+            """, unsafe_allow_html=True)
+
+            # Display wallet transaction entries
+            st.dataframe(journal_df.sort_values(by="date", ascending=False), use_container_width=True)
+
+        except Exception as e:
+            st.warning(f"No wallet journal data found. {e}")
+            return
+
+    # --- WALLET TRANSACTIONS TAB ---
+    with transactions_tab:
+        st.subheader("Wallet Transactions")
+
+        try:
+            transactions_df = db.load_df("character_wallet_transactions")
+            transactions_df = transactions_df[transactions_df["character_id"] == selected_id]
+
+            transactions_df["category"] = transactions_df.apply(
+                lambda row: "Income" if row["is_buy"] == 0 else "Expenses", axis=1
+            )
+            aggregated_transactions = transactions_df.groupby("category")["total_price"].sum()
+            tx_breakdown = transactions_df.groupby(["category", "type_category_name"])["total_price"].sum()
+
+            tx_income_tooltip = build_tooltip(tx_breakdown, "Income", join_labels=False)
+            tx_expense_tooltip = build_tooltip(tx_breakdown, "Expenses", join_labels=False)
+
+            st.markdown(f"""
+            <div class="wallet-summary">
+            <div class="tooltip">
+                Total Income: {format_isk(aggregated_transactions.get("Income", 0))}
+                <span class="tooltiptext">{tx_income_tooltip}</span>
+            </div><br />
+            <div class="tooltip">
+                Total Expenses: {format_isk(-aggregated_transactions.get("Expenses", 0))}
+                <span class="tooltiptext">{tx_expense_tooltip}</span>
+            </div>
+            </div><br />
+            """, unsafe_allow_html=True)
+
+        except Exception:
+            st.warning("No wallet transactions data available.")
+            st.stop()
+
+        # Display wallet transaction entries
+        st.dataframe(transactions_df.sort_values(by="date", ascending=False), use_container_width=True)

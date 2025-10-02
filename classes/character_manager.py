@@ -1,7 +1,5 @@
-
 import logging
-from typing import Optional, List, Dict, Any
-from sqlalchemy.orm import Session
+from typing import Optional, List
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
 from classes.character import Character
@@ -11,26 +9,36 @@ from classes.database_models import OAuthCharacter
 # Characters Manager
 # ----------------------------
 class CharacterManager():
-    def __init__(self, cfg: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager, cfg_characters: List[Dict[str, Any]]):
+    def __init__(self, 
+                 cfgManager: ConfigManager,
+                 db_oauth: DatabaseManager,
+                 db_app: DatabaseManager,
+                 db_sde: DatabaseManager,
+                 corporation_id: Optional[int] = None,
+                 char_manager_all: Optional["CharacterManager"] = None
+            ):
         """
         Initialize the CharacterManager with database managers and character configurations.
-
-        :param cfg: Configuration manager
-        :param db_oauth: DatabaseManager for OAuth operations
-        :param db_app: DatabaseManager for app-specific tables
-        :param db_sde: DatabaseManager for static data export (SDE) assets
-        :param cfg_characters: List of character configurations (name, is_main, tokens, etc.)
         """
-        self.cfg = cfg
+        self.cfgManager = cfgManager
+        self.cfg = cfgManager.all()
+        self.cfg_characters = self.cfg["characters"]
+
         self.db_oauth = db_oauth
         self.db_app = db_app
         self.db_sde = db_sde
-        self.cfg_characters = cfg_characters
-        self.character_list: List[Character] = []
-
+        
         # Initialize Characters
-        self._validate_cfg_characters()
-        self._initialize_characters()
+        if corporation_id is None and char_manager_all is None:
+            self.character_list: List[Character] = []
+            self._validate_cfg_characters()
+            self._initialize_characters()
+        elif corporation_id is not None and char_manager_all is not None:
+            # Use already-loaded characters from char_manager_all filtered by corp
+            self.character_list = [
+                char for char in char_manager_all.character_list
+                if char.corporation_id == corporation_id
+            ]
 
     # ----------------------------
     # Manage Authenticated Characters
@@ -63,13 +71,18 @@ class CharacterManager():
             logging.warning("No main character found in the configuration. Using the first character in the list as main.")
             self.cfg_characters[0]["is_main"] = True # Set first character as main, if none specified.
 
+        cfg_corp_director = next((c for c in self.cfg_characters if c.get("is_corp_director", False)), None)
+        if not cfg_corp_director:
+            raise ValueError("No Corporation Director found in the configuration. Unable to continue the application.")
+
         # Initialize characters
         for char_cfg in self.cfg_characters:
             character_name = char_cfg["character_name"]
             character_is_main = char_cfg.get("is_main", False)
+            character_is_corp_director = char_cfg.get("is_corp_director", False)
             try:
                 # Check for existing refresh token in the database
-                logging.debug(f"Starting initialization for {character_name}{' as main' if character_is_main else ' '}...")
+                logging.debug(f"Starting initialization for {character_name}{' as main' if character_is_main else ''}...")
                 existing_token = self._get_existing_token(character_name)
                 if not existing_token:
                     logging.debug(f"Found no existing_token for {character_name}.")
@@ -77,12 +90,13 @@ class CharacterManager():
                     logging.debug(f"Found existing_token for {character_name} : {existing_token}.")
                 
                 char = Character(
-                    self.cfg,
+                    self.cfgManager,
                     self.db_oauth,
                     self.db_app,
                     self.db_sde,
                     character_name,
                     character_is_main,
+                    character_is_corp_director,
                     existing_token
                 )
                 self.character_list.append(char)
@@ -91,6 +105,34 @@ class CharacterManager():
                 logging.error(f"Failed to initialize character {char_cfg}. Missing key: {e}")
             except Exception as e:
                 logging.error(f"Error initializing character {char_cfg['character_name']}: {e}")
+
+    def get_main_character(self) -> Optional[Character]:
+        """Get the main character."""
+        for char in self.character_list:
+            if char.is_main:
+                return char
+        return None
+    
+    def get_corp_director(self) -> Optional[Character]:
+        """Get the corporation director character."""
+        for char in self.character_list:
+            if char.is_corp_director:
+                return char
+        return None
+
+    def get_character_by_name(self, character_name: str) -> Optional[Character]:
+        """Get a character by their name."""
+        for char in self.character_list:
+            if char.character_name == character_name:
+                return char
+        return None
+    
+    def get_character_by_id(self, character_id: int) -> Optional[Character]:
+        """Get a character by their EVE ID."""
+        for char in self.character_list:
+            if char.character_id == character_id:
+                return char
+        return None 
 
     def refresh_all(self, character_name: Optional[str] = None) -> List[str]:
         """ 
@@ -164,4 +206,32 @@ class CharacterManager():
         
         # Refresh skills for all characters
         result = [char.refresh_skills() for char in self.character_list]
+        return result
+    
+    def refresh_wallet_journal(self, character_name: Optional[str] = None) -> List[str]:
+        if character_name:
+            # Refresh wallet journal for a single character
+            result = [
+                char.refresh_wallet_journal()
+                for char in self.character_list
+                if char.character_name == character_name
+            ]
+            return result
+        
+        # Refresh wallet journal for all characters
+        result = [char.refresh_wallet_journal() for char in self.character_list]
+        return result
+    
+    def refresh_wallet_transactions(self, character_name: Optional[str] = None) -> List[str]:
+        if character_name:
+            # Refresh wallet transactions for a single character
+            result = [
+                char.refresh_wallet_transactions()
+                for char in self.character_list
+                if char.character_name == character_name
+            ]
+            return result
+        
+        # Refresh wallet transactions for all characters
+        result = [char.refresh_wallet_transactions() for char in self.character_list]
         return result
