@@ -2,10 +2,15 @@ import streamlit as st
 import pandas as pd
 import requests
 import json
+import os
 from classes.database_manager import DatabaseManager
 from utils.formatters import format_isk, format_date, format_date_into_age
 
-FLASK_API_URL = "http://localhost:5000"
+# Read environment variables for Flask host and port
+FLASK_HOST = os.getenv("FLASK_HOST", "localhost")
+FLASK_PORT = os.getenv("FLASK_PORT", "5000")
+
+FLASK_API_URL = f"http://{FLASK_HOST}:{FLASK_PORT}"
 
 # Function to refresh wallet balances
 def refresh_wallet_balances():

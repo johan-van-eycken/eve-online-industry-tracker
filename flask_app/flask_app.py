@@ -25,10 +25,16 @@ try:
     db_app = DatabaseManager(cfg["app"]["database_app_uri"])
     db_sde = DatabaseManager(cfg["app"]["database_sde_uri"])
 
-    char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, char_manager_all=cfg["characters"])
+    char_manager_all = CharacterManager(cfgManager, db_oauth, db_app, db_sde)
+    main_character = char_manager_all.get_main_character()
+    if not main_character:
+        raise ValueError("No main character defined in configuration.")
+    
 except Exception as e:
     logging.error(f"Failed to initialize Flask app: {e}")
     raise e
+
+
 
 @app.route('/refresh_wallet_balances', methods=['POST'])
 def refresh_wallet_balances():
@@ -48,6 +54,12 @@ def refresh_wallet_balances():
             "status": "error",
             "message": str(e)
         }), 500
+
+@app.route('/restart', methods=['POST'])
+def restart():
+    # Respond before exiting
+    os._exit(0)  # This will terminate the Flask process, main.py will relaunch it
+    return "Restarting...", 200
 
 @app.route("/shutdown", methods=["POST"])
 def shutdown():
