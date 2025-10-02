@@ -1,11 +1,13 @@
 import streamlit as st
+import pandas as pd
 import requests
 import json
 from classes.database_manager import DatabaseManager
 from utils.formatters import format_isk, format_date, format_date_into_age
 
-FLASK_API_URL= "http://localhost:5000"
+FLASK_API_URL = "http://localhost:5000"
 
+# Function to refresh wallet balances
 def refresh_wallet_balances():
     """
     Function to send a POST request to the Flask backend to refresh wallet balances.
@@ -39,8 +41,9 @@ def refresh_wallet_balances():
     except Exception as e:
         st.error(f"Error connecting to backend: {e}")
 
+
 def render(cfg):
-    # -- Customer Style --
+    # -- Custom Style --
     st.markdown("""
         <style>
         .tooltip {
@@ -69,6 +72,17 @@ def render(cfg):
             line-height: 1.3;
             box-shadow: 0 2px 8px rgba(0,0,0,0.5);
         }
+        
+        /* Adjusted tooltip alignement for Summarised Wallet aggregations */
+        .wallet-summary .tooltip .tooltiptext {
+            white-space: nowrap;  /* keep everything on one line */
+            min-width: 280px;     /* wider to avoid wrapping */
+        }
+
+        .wallet-summary .tooltip .tooltiptext div {
+            display: flex;
+            justify-content: space-between;
+        }
 
         /* Remove default margins for all children inside tooltip */
         .tooltip .tooltiptext * {
@@ -76,13 +90,6 @@ def render(cfg):
             padding: 0;
             font-size: 13px;
             line-height: 1.3;
-        }
-
-        /* Level/SP line with flex */
-        .tooltip .tooltiptext .level-sp {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 5px;
         }
 
         .tooltip:hover .tooltiptext {
@@ -101,20 +108,20 @@ def render(cfg):
         st.warning("No character data found. Run main.py first.")
         st.stop()
 
+    # Add character portraits
     if "image_url" not in df.columns:
         df["image_url"] = df["character_id"].apply(
             lambda cid: f"https://images.evetech.net/characters/{cid}/portrait?size=128"
         )
 
-    # Button refresh wallet balances
+    # Button to refresh wallet balances
     if st.button("Refresh Wallet Balances"):
         refreshed_data = refresh_wallet_balances()  # Calls Flask backend
         if refreshed_data:
-            # Assuming refreshed_data has the updated wallet balances; update your dataframe if necessary
             for wallet_data in refreshed_data:
                 if isinstance(wallet_data, str):
                     wallet_data = json.loads(wallet_data)
-                
+
                 character_name = wallet_data.get("character_name")
                 wallet_balance = wallet_data.get("wallet_balance")
 
@@ -158,6 +165,30 @@ def render(cfg):
 
     st.divider()
 
+    def build_tooltip(breakdown, category, formatter=format_isk, join_labels=True):
+        """
+        Builds a tooltip string with category left, ISK right.
+        breakdown: grouped Series with MultiIndex or dict-like.
+        category: 'Income' or 'Expenses'
+        formatter: function to format ISK values
+        join_labels: whether to join multiple index levels with '/'
+        """
+        if category not in breakdown.index.get_level_values(0):
+            return ""
+        
+        items = breakdown.loc[category].abs().sort_values(ascending=False)
+
+        tooltip_lines = []
+        if isinstance(items.index, pd.MultiIndex):
+            for idx, val in items.items():
+                label = " / ".join(str(x) for x in idx) if join_labels else str(idx[-1])
+                tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
+        else:
+            for label, val in items.items():
+                tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
+
+        return "".join(tooltip_lines)
+
     st.subheader("Character Details")
 
     # Dropdown to select character
@@ -171,7 +202,7 @@ def render(cfg):
     if not selected_id:
         return
 
-    # Tabs voor Character Details
+    # Tabs for Character Details
     tab_skills, journal_tab, transactions_tab = st.tabs(["Skills", "Wallet Journal", "Wallet Transactions"])
 
     # --- CHARACTER SKILLS TAB ---
@@ -309,29 +340,69 @@ def render(cfg):
         st.subheader("Wallet Journal")
 
         try:
-            df = db.load_df("character_wallet_journal")
-        except Exception:
-            st.warning("No character wallet journal data found. Run main.py first.")
-            st.stop()
+            journal_df = db.load_df("character_wallet_journal")
+            journal_df = journal_df[journal_df["character_id"] == selected_id]
 
-        # Display wallet journal entries
-        st.dataframe(
-            df[df["character_id"] == selected_id].sort_values(by="date", ascending=False),
-            use_container_width=True
-        )
-    
-    # --- CHARACTER TRANSACTIONS TAB ---
+            journal_df["category"] = journal_df["amount"].apply(lambda x: "Income" if x > 0 else "Expenses")
+            aggregated_journal = journal_df.groupby("category")["amount"].sum()
+            journal_breakdown = journal_df.groupby(["category", "ref_type"])["amount"].sum()
+
+            journal_income_tooltip = build_tooltip(journal_breakdown, "Income")
+            journal_expense_tooltip = build_tooltip(journal_breakdown, "Expenses")
+
+            st.markdown(f"""
+            <div class="wallet-summary">
+            <div class="tooltip">
+                Total Income: {format_isk(aggregated_journal.get("Income", 0))}
+                <span class="tooltiptext">{journal_income_tooltip}</span>
+            </div><br />
+            <div class="tooltip">
+                Total Expenses: {format_isk(-aggregated_journal.get("Expenses", 0))}
+                <span class="tooltiptext">{journal_expense_tooltip}</span>
+            </div>
+            </div><br />
+            """, unsafe_allow_html=True)
+
+            # Display wallet transaction entries
+            st.dataframe(journal_df.sort_values(by="date", ascending=False), use_container_width=True)
+
+        except Exception as e:
+            st.warning(f"No wallet journal data found. {e}")
+            return
+
+    # --- WALLET TRANSACTIONS TAB ---
     with transactions_tab:
         st.subheader("Wallet Transactions")
 
         try:
-            df = db.load_df("character_wallet_transactions")
+            transactions_df = db.load_df("character_wallet_transactions")
+            transactions_df = transactions_df[transactions_df["character_id"] == selected_id]
+
+            transactions_df["category"] = transactions_df.apply(
+                lambda row: "Income" if row["is_buy"] == 0 else "Expenses", axis=1
+            )
+            aggregated_transactions = transactions_df.groupby("category")["total_price"].sum()
+            tx_breakdown = transactions_df.groupby(["category", "type_category_name"])["total_price"].sum()
+
+            tx_income_tooltip = build_tooltip(tx_breakdown, "Income", join_labels=False)
+            tx_expense_tooltip = build_tooltip(tx_breakdown, "Expenses", join_labels=False)
+
+            st.markdown(f"""
+            <div class="wallet-summary">
+            <div class="tooltip">
+                Total Income: {format_isk(aggregated_transactions.get("Income", 0))}
+                <span class="tooltiptext">{tx_income_tooltip}</span>
+            </div><br />
+            <div class="tooltip">
+                Total Expenses: {format_isk(-aggregated_transactions.get("Expenses", 0))}
+                <span class="tooltiptext">{tx_expense_tooltip}</span>
+            </div>
+            </div><br />
+            """, unsafe_allow_html=True)
+
         except Exception:
-            st.warning("No character wallet transactions data found. Run main.py first.")
+            st.warning("No wallet transactions data available.")
             st.stop()
 
-        # Display wallet transactions entries
-        st.dataframe(
-            df[df["character_id"] == selected_id].sort_values(by="date", ascending=False),
-            use_container_width=True
-        )
+        # Display wallet transaction entries
+        st.dataframe(transactions_df.sort_values(by="date", ascending=False), use_container_width=True)
