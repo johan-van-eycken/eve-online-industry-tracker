@@ -1,5 +1,5 @@
 import logging
-import threading
+import multiprocessing
 import subprocess
 import requests
 import sys
@@ -14,8 +14,11 @@ from classes.corporation_manager import CorporationManager
 
 FLASK_HOST = 'localhost'
 FLASK_PORT = 5000
-STREAMLIT_HOST = 'localhost'
-STREAMLIT_PORT = 8501
+
+# Add environment variables for Flask app
+os.environ["FLASK_ENV"] = "development"
+os.environ["FLASK_PORT"] = str(FLASK_PORT)
+os.environ["FLASK_HOST"] = FLASK_HOST
 
 # Start the backend Flask app in a separate thread
 def run_flask():
@@ -127,31 +130,34 @@ def main():
     corps_initialized = len(corp_manager.corporation_ids)
     logging.info(f"All done. Characters: {chars_initialized}, Corporations: {corps_initialized}")
 
-    # Start Flask and Streamlit in separate threads
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
     streamlit_proc = run_streamlit()
 
+    flask_proc = None
     try:
-        while flask_thread.is_alive() and streamlit_proc.poll() is None:
+        while True:
+            if flask_proc is None or not flask_proc.is_alive():
+                logging.info("Starting Flask app...")
+                flask_proc = multiprocessing.Process(target=run_flask)
+                flask_proc.start()
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Interrupt received, shutting down...")
+        # Shutdown Flask
         try:
             requests.post(f"http://{FLASK_HOST}:{FLASK_PORT}/shutdown")
         except Exception as e:
-            print(f"Could not shutdown Flask gracefully: {e}")
-        # Gracefully shutdown Streamlit
+            logging.warning(f"Could not shutdown Flask gracefully: {e}")
+        # Shutdown Streamlit
         if streamlit_proc.poll() is None:
             streamlit_proc.terminate()
             try:
                 streamlit_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 streamlit_proc.kill()
-        flask_thread.join(timeout=5)
+        if flask_proc.is_alive():
+            flask_proc.terminate()
+            flask_proc.join(timeout=5)
         os._exit(0)
-        sys.exit(0)
 
 if __name__ == "__main__":
     main()
