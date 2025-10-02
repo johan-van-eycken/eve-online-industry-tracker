@@ -25,7 +25,7 @@ try:
     db_app = DatabaseManager(cfg["app"]["database_app_uri"])
     db_sde = DatabaseManager(cfg["app"]["database_sde_uri"])
 
-    char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, cfg["characters"])
+    char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, char_manager_all=cfg["characters"])
 except Exception as e:
     logging.error(f"Failed to initialize Flask app: {e}")
     raise e
@@ -49,5 +49,13 @@ def refresh_wallet_balances():
             "message": str(e)
         }), 500
 
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    func = request.environ.get('werkzeug.server.shutdown')
+    if func is None:
+        raise RuntimeError('Not running with the Werkzeug Server')
+    func()
+    return 'Server shutting down...'
+
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="localhost", port=5000, debug=True)

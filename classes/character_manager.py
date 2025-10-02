@@ -29,8 +29,8 @@ class CharacterManager():
         self.db_sde = db_sde
         
         # Initialize Characters
+        self.character_list: List[Character] = []
         if corporation_id is None and char_manager_all is None:
-            self.character_list: List[Character] = []
             self._validate_cfg_characters()
             self._initialize_characters()
         elif corporation_id is not None and char_manager_all is not None:

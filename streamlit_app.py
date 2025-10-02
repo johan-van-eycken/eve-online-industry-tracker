@@ -12,7 +12,7 @@ except Exception as e:
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")
 
-menu = ["Characters", "Corporations", "Database Maintenance"]
+menu = ["Characters", "Corporations", "Ore Calculator", "Database Maintenance"]
 choice = st.sidebar.selectbox("Navigation", menu)
 
 if choice == "Characters":
@@ -20,6 +20,9 @@ if choice == "Characters":
     render(cfg)
 elif choice == "Corporations":
     from webpages.corporations import render
+    render(cfg)
+elif choice == "Ore Calculator":
+    from webpages.ore_calculator import render
     render(cfg)
 elif choice == "Database Maintenance":
     from webpages.database_maintenance import render
