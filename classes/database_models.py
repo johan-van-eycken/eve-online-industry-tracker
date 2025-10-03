@@ -211,6 +211,19 @@ class Types(BaseSde):
     volume: Mapped[float] = mapped_column(Float, nullable=True)
     radius: Mapped[int] = mapped_column(Integer, nullable=True)
     description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
+    graphicID: Mapped[int] = mapped_column(Integer, nullable=True)
+    iconID: Mapped[int] = mapped_column(Integer, nullable=True)
+    raceID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sofFactionName: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    basePrice: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    marketGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    capacity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    metaGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    variationParentTypeID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    masteries: Mapped[Optional[dict[int, int]]] = mapped_column(JSON, nullable=True)
+    traits: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    sofMaterialSetID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 class Groups(BaseSde):
     __tablename__ = "groups"
@@ -296,3 +309,19 @@ class Factions(BaseSde):
     sizeFactor: Mapped[float] = mapped_column(Float, nullable=False)
     solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
     uniqueName: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+class MarketGroups(BaseSde):
+    __tablename__ = "marketGroups"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    descriptionID: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+    iconID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    nameID: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+    parentGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    hasTypes: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+class TypeMaterials(BaseSde):
+    __tablename__ = "typeMaterials"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    materials: Mapped[list[dict[str, int]]] = mapped_column(JSON, nullable=False)

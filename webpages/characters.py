@@ -9,7 +9,6 @@ from utils.formatters import format_isk, format_date, format_date_into_age
 # Read environment variables for Flask host and port
 FLASK_HOST = os.getenv("FLASK_HOST", "localhost")
 FLASK_PORT = os.getenv("FLASK_PORT", "5000")
-
 FLASK_API_URL = f"http://{FLASK_HOST}:{FLASK_PORT}"
 
 # Function to refresh wallet balances

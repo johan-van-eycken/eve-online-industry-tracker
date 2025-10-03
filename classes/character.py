@@ -12,7 +12,6 @@ from classes.database_models import NpcCorporations, Bloodlines, Races, Types, G
 class Character:
     """Handles authentication and profile for an in-game character using ESIClient."""
 
-
     def __init__(self, 
                  cfgManager: ConfigManager, 
                  db_oauth: DatabaseManager,
@@ -53,6 +52,7 @@ class Character:
         self.standings: Optional[List[Dict[str, str]]] = None
         self.wallet_journal: Optional[List[Dict[str, Any]]] = None
         self.wallet_transactions: Optional[List[Dict[str, Any]]] = None
+        self.reprocessing_skills: Optional[Dict[str, int]] = None  # skill name → trained level
 
         # Initialize ESI Client (handles token registration/refresh automatically)
         logging.debug(f"Initializing ESIClient for {self.character_name}...")
@@ -490,6 +490,50 @@ class Character:
     # -------------------
     # Skillpoints
     # -------------------
+    def extract_reprocessing_skills(self):
+        """Extract reprocessing-related skills and levels from self.skills."""
+        if not self.skills or "skills" not in self.skills:
+            return {}
+
+        try:
+            logging.debug(f"Extracting reprocessing skills for {self.character_name}...")
+
+            # Find all relevant skill groups
+            skill_groups = self.db_sde.session.query(Groups).filter(
+                Groups.categoryID == 16,  # Skills category
+                Groups.published == 1,
+                Groups.name[self.db_sde.language].ilike("%Processing%")
+            ).all()
+
+            # Get all skill type IDs in these groups
+            skill_ids = set()
+            skills_in_groups = self.db_sde.session.query(Types).filter(
+                Types.groupID.in_([g.id for g in skill_groups]),
+                Types.published == 1,
+                Types.name[self.db_sde.language].ilike("%Processing%")
+            ).all()
+            for skill in skills_in_groups:
+                skill_ids.add(skill.id)
+
+            # Build mapping: skill ID → skill name
+            skill_map = {}
+            all_skills = self.db_sde.session.query(Types).filter(Types.id.in_(list(skill_ids))).all()
+            for skill in all_skills:
+                skill_map[skill.id] = skill.name[self.db_sde.language]
+
+            # Extract trained levels
+            self.reprocessing_skills = {}
+            for skill in self.skills["skills"]:
+                skill_id = skill.get("skill_id")
+                if skill_id in skill_map:
+                    self.reprocessing_skills[skill_map[skill_id]] = skill.get("trained_skill_level", 0)
+
+            logging.debug(f"Reprocessing skills successfully updated for {self.character_name}.")
+            return self.reprocessing_skills
+        except Exception as e:
+            logging.error(f"Failed to refresh reprocessing skills for {self.character_name}. Error: {e}")
+            return json.dumps({'character_name': self.character_name, 'error': f"Failed to refresh reprocessing skills: {str(e)}"}, indent=4)
+
     def refresh_skills(self, save_character_fl: bool = True) -> str:
         try:
             logging.debug(f"Getting skills for {self.character_name}...")
@@ -564,6 +608,8 @@ class Character:
                 "skills": full_skill_list,
                 "skill_queue": enriched_skill_queue
             }
+            # Extract reprocessing skills after updating self.skills
+            self.reprocessing_skills = self.extract_reprocessing_skills()
 
             # Save to database
             if save_character_fl == True:
