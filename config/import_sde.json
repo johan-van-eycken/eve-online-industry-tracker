@@ -15,6 +15,7 @@
     "npcCorporations",
     "races",
     "types",
+    "typeMaterials",
     "invFlags",
     "invItems",
     "invNames",

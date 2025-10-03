@@ -37,7 +37,8 @@
       "esi-characters.read_titles.v1",
       "esi-skills.read_skills.v1",
       "esi-skills.read_skillqueue.v1",
-      "esi-wallet.read_character_wallet.v1"
+      "esi-wallet.read_character_wallet.v1",
+      "esi-markets.structure_markets.v1"
     ],
     "scopes_corp_director": [
       "esi-assets.read_corporation_assets.v1",
