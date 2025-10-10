@@ -78,4 +78,4 @@ elif choice_nav == "Corporations":
     render(cfg)
 elif choice_nav == "Ore Calculator":
     from webpages.ore_calculator import render
-    render(cfg, char_manager_all)
+    render(char_manager_all)

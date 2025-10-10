@@ -1,143 +1,113 @@
 import json
-from typing import List, Optional, Dict, Any
-from classes.database_models import Groups, Types, TypeMaterials
+import re
+from classes.database_models import Categories, Groups, Types, TypeMaterials
 
 _db_sde = None
+_language = None
 
-def init_sde(db):
-    global _db_sde
+def sde_adapter(db):
+    global _db_sde, _language
     _db_sde = db
+    _language = db.language or "en"
+
+def _ensure():
+    if _db_sde is None:
+        raise RuntimeError("SDE DB not initialized. Call init_sde(db_sde) first.")
+    if _language is None:
+        raise RuntimeError("Language not set in SDE adapter.")  
 
 # -------- helpers --------
-def _parse_localized(raw, lang="en"):
+def _parse_localized(raw):
     if raw is None:
         return ""
     if isinstance(raw, dict):
-        return raw.get(lang) or next(iter(raw.values()), "")
+        text = raw.get(_language) or next(iter(raw.values()), "")
     if isinstance(raw, str):
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
-                return data.get(lang) or next(iter(data.values()), raw)
+                text = data.get(_language) or next(iter(data.values()), raw)
             return raw
         except json.JSONDecodeError:
             return raw
-    return str(raw)
+    
+    # Clean HTML tags if any
+    clean = re.sub(r'<[^>]+>', '', text).replace('\r\n', '<br>').strip()
 
-def _resolve_type_names(session, type_ids: List[int], lang="en") -> Dict[int, str]:
-    if not type_ids:
-        return {}
-    rows = session.query(Types.id, Types.name).filter(Types.id.in_(type_ids)).all()
-    return {tid: (_parse_localized(nm, lang) or str(tid)) for tid, nm in rows}
+    return clean
 
 # -------- ores --------
-def get_all_ores(ore_ids: Optional[List[int]] = None, lang: str = "en"):
-    if _db_sde is None:
-        raise RuntimeError("SDE DB not initialized. Call init_sde(db_sde) first.")
-    session = _db_sde.session
+def get_all_ores():
+    _ensure()
 
-    groups = session.query(Groups).filter(
-        Groups.published == 1,
-        Groups.categoryID == 25
-    ).all()
+    groups = _db_sde.session.query(Groups).filter(Groups.published == 1, Groups.categoryID == 25).all()
     if not groups:
         return []
     group_ids = [g.id for g in groups]
 
-    type_q = session.query(Types).filter(
-        Types.published == 1,
-        Types.groupID.in_(group_ids)
-    )
-    if ore_ids:
-        type_q = type_q.filter(Types.id.in_(ore_ids))
-    ore_types = type_q.all()
-    if not ore_types:
+    type_q = _db_sde.session.query(Types).filter(Types.published == 1, Types.groupID.in_(group_ids)).all()
+    if not type_q:
         return []
-    type_ids = [t.id for t in ore_types]
-
-    # Detect denormalized JSON materials (column 'materials') vs normalized
-    sample = session.query(TypeMaterials).filter(TypeMaterials.id.in_(type_ids)).first()
-    json_mode = bool(sample and getattr(sample, "materials", None))
-
-    mats_by_type: Dict[int, List[Dict[str, Any]]] = {}
-    material_ids = set()
-
-    if json_mode:
-        rows = session.query(TypeMaterials).filter(TypeMaterials.id.in_(type_ids)).all()
-        for r in rows:
-            raw = r.materials
-            if isinstance(raw, str):
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    parsed = []
-            elif isinstance(raw, list):
-                parsed = raw
-            else:
-                parsed = []
-            for entry in parsed:
-                mid = entry.get("materialTypeID")
-                qty = entry.get("quantity")
-                if mid is None or qty is None:
-                    continue
-                material_ids.add(mid)
-                mats_by_type.setdefault(r.id, []).append({
-                    "materialTypeID": mid,
-                    "quantity": qty
-                })
-    else:
-        rows = session.query(TypeMaterials).filter(TypeMaterials.id.in_(type_ids)).all()
-        for r in rows:
-            mid = r.materialTypeID
-            qty = r.quantity
-            material_ids.add(mid)
-            mats_by_type.setdefault(r.id, []).append({
-                "materialTypeID": mid,
-                "quantity": qty
-            })
-
-    mat_name_map = _resolve_type_names(session, list(material_ids), lang=lang)
-
-    # Attach materialName
-    for tid, mats in mats_by_type.items():
-        for m in mats:
-            m["materialName"] = mat_name_map.get(m["materialTypeID"], str(m["materialTypeID"]))
 
     ores = []
-    for t in ore_types:
-        portion = getattr(t, "portionSize", None) or 100
-        ores.append({
+    for t in type_q:
+        type_group = _db_sde.session.query(Groups).filter(Groups.id == t.groupID).first()
+        type_category = _db_sde.session.query(Categories).filter(Categories.id == type_group.categoryID).first()
+        type_mat_q = _db_sde.session.query(TypeMaterials).filter(TypeMaterials.id == t.id).all()
+
+        ore = {
             "id": t.id,
-            "name": _parse_localized(t.name, lang) or str(t.id),
-            "ore_price": 0.0,
-            "portionSize": portion,
-            "volume": getattr(t, "volume", 0.1) or 0.1,  # ADD volume so UI can show ore m3
-            "materials": mats_by_type.get(t.id, [])
-        })
+            "name": _parse_localized(t.name) or str(t.id),
+            "volume": t.volume,
+            "portionSize": t.portionSize,
+            "description": _parse_localized(t.description),
+            "iconID": t.iconID,
+            "groupID": t.groupID,
+            "groupName": _parse_localized(type_group.name),
+            "categoryID": type_group.categoryID,
+            "categoryName": _parse_localized(type_category.name),
+            "materials": []
+        }
+        for tm in type_mat_q:
+            for mat in tm.materials:
+                mat_type = _db_sde.session.query(Types).filter(Types.id == mat["materialTypeID"]).first()
+                mat_group = _db_sde.session.query(Groups).filter(Groups.id == mat_type.groupID).first()
+                mat_category = _db_sde.session.query(Categories).filter(Categories.id == mat_group.categoryID).first()
+
+                ore["materials"].append({
+                    "id": mat["materialTypeID"],
+                    "name": _parse_localized(mat_type.name),
+                    "volume": mat_type.volume,
+                    "portionSize": mat_type.portionSize,
+                    "description": _parse_localized(mat_type.description),
+                    "iconId": mat_type.iconID,
+                    "groupID": mat_type.groupID,
+                    "groupName": _parse_localized(mat_group.name),
+                    "categoryID": mat_group.categoryID,
+                    "categoryName": _parse_localized(mat_category.name),
+                    "quantity": mat["quantity"]
+                })
+
+        ores.append(ore)
     return ores
 
-# -------- minerals --------
-def get_mineral_list(lang: str = "en"):
+# -------- materials --------
+def get_all_materials():
     """
-    Returns list of base minerals (groupID=18) with metadata.
+    Returns list of base materials (groupID=18) with metadata.
     """
-    if _db_sde is None:
-        raise RuntimeError("SDE DB not initialized. Call init_sde(db_sde) first.")
-    session = _db_sde.session
+    _ensure()
 
     # Query full Types rows (need name etc.)
-    mineral_rows = session.query(Types).filter(
-        Types.published == 1,
-        Types.groupID == 18
-    ).all()
+    material_rows = _db_sde.session.query(Types).filter(Types.published == 1, Types.groupID == 18, Types.metaGroupID == None).all()
 
     out = []
-    for t in mineral_rows:
+    for t in material_rows:
         out.append({
             "id": t.id,
-            "name": _parse_localized(t.name, lang) or str(t.id),
+            "name": _parse_localized(t.name) or str(t.id),
             "volume": getattr(t, "volume", 0.01),
             "basePrice": getattr(t, "basePrice", 0.0)
         })
-    out.sort(key=lambda r: r["name"])
+    out.sort(key=lambda r: r["id"])
     return out

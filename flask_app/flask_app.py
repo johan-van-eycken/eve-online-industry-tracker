@@ -1,7 +1,11 @@
+from unittest import result
 from flask import Flask, request, jsonify
 import logging
 import os
 import sys
+import traceback
+
+from flask_app.data.char_adapter import char_adapter
 
 # Add project root to sys.path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -15,10 +19,16 @@ from classes.character_manager import CharacterManager
 # New service/data layers
 from flask_app.services.yield_calc import compute_yields
 from flask_app.services.optimizer import optimize_ore_tiered
-from flask_app.data.sde_adapter import get_all_ores, get_mineral_list
-from flask_app.data.character_repo import get_character_skills, get_implants_for_character
-from flask_app.data.facility_repo import get_facility
-from flask_app.data.esi_adapter import get_ore_prices, get_mineral_prices  # ADD get_mineral_prices import
+from flask_app.data.sde_adapter import get_all_ores, get_all_materials
+from flask_app.data.char_adapter import get_character_skills, get_character_implants
+from flask_app.data.facility_repo import get_facility, get_all_facilities
+from flask_app.data.esi_adapter import get_ore_prices, get_material_prices  # ADD get_material_prices import
+
+from utils.ore_calculator_core import filter_viable_ores
+
+REGION_ID = 10000002  # The Forge (Jita)
+STATION_ID = 60003760  # Jita 4-4
+MATERIALS = None
 
 #--------------------------------------------------------------------------------------------------
 # Initialize configuration and managers
@@ -41,102 +51,27 @@ except Exception as e:
     logging.error(f"Failed to initialize Flask app: {e}")
     raise e
 
-from flask_app.data import sde_adapter
-sde_adapter.init_sde(db_sde)
+from flask_app.data.sde_adapter import sde_adapter
+sde_adapter(db_sde)
+
 from flask_app.data.esi_adapter import esi_adapter
 esi_adapter(main_character)
 
 #--------------------------------------------------------------------------------------------------
-# Helper functions
-#--------------------------------------------------------------------------------------------------
-# Serialize SQLAlchemy objects to dicts
-def serialize_type(type):
-    return {
-        "id": type.id,
-        "groupID": type.groupID,
-        "name": type.name.get('en') if type.name else None,
-        "portionSize": type.portionSize,
-        "volume": type.volume,
-        "mass": type.mass,
-        "published": type.published,
-        "description": type.description.get('en') if type.description else None,
-        "graphicID": type.graphicID,
-        "iconID": type.iconID,
-        "basePrice": type.basePrice,
-        "marketGroupID": type.marketGroupID
-    }
-
-def get_esi_prices(main_character, type_ids):
-    try:
-        prices = main_character.esi_client.esi_get("/latest/markets/prices/")
-
-        # Map type_id to average price
-        price_map = {item["type_id"]: item.get("average_price", item.get("adjusted_price", 0)) for item in prices if item["type_id"] in type_ids}
-        return price_map
-    except Exception as e:
-        logging.error(f"Error retrieving market prices: {e}")
-        return {}
-
-def get_jita_sell_price(type_id):
-    region_id = 10000002  # The Forge (Jita)
-    station_id = 60003760  # Jita 4-4
-    try:
-        orders = main_character.esi_client.esi_get(f"/latest/markets/{region_id}/orders/?type_id={type_id}&order_type=sell")
-
-        # Filter for sell orders in Jita 4-4
-        jita_orders = [o for o in orders if not o["is_buy_order"] and o["location_id"] == station_id]
-        if not jita_orders:
-            return None  # No sell orders in Jita 4-4
-        lowest_price = min(o["price"] for o in jita_orders)
-        return lowest_price
-    except Exception as e:
-        logging.error(f"Error fetching Jita sell price for type_id {type_id}: {e}")
-        return None
-
-def get_jita_depth_price(type_id, required_qty):
-    region_id = 10000002  # The Forge (Jita)
-    station_id = 60003760  # Jita 4-4
-    try:
-        orders = main_character.esi_client.esi_get(
-            f"/latest/markets/{region_id}/orders/?type_id={type_id}&order_type=sell"
-        )
-        # Filter for sell orders in Jita 4-4
-        jita_orders = [o for o in orders if not o["is_buy_order"] and o["location_id"] == station_id]
-        if not jita_orders:
-            return None  # No sell orders in Jita 4-4
-
-        # Sort by price ascending
-        sorted_orders = sorted(jita_orders, key=lambda o: o["price"])
-        qty_accum = 0
-        total_cost = 0
-        for o in sorted_orders:
-            take_qty = min(o["volume_remain"], required_qty - qty_accum)
-            total_cost += take_qty * o["price"]
-            qty_accum += take_qty
-            if qty_accum >= required_qty:
-                break
-        if qty_accum < required_qty or qty_accum == 0:
-            return None  # Not enough volume available
-        avg_price = total_cost / qty_accum
-        return avg_price
-    except Exception as e:
-        logging.error(f"Error fetching Jita depth price for type_id {type_id}: {e}")
-        return None
-
-#--------------------------------------------------------------------------------------------------
 # Flask Endpoints
 #--------------------------------------------------------------------------------------------------
+# ADMINISTRATOR endpoints
 @app.route('/restart', methods=['POST'])
 def restart():
     # Respond before exiting
     os._exit(0)  # This will terminate the Flask process, main.py will relaunch it
     return "Restarting...", 200
 
+# Characters endpoints
 @app.route('/refresh_wallet_balances', methods=['POST'])
 def refresh_wallet_balances():
     """
-    Endpoint to refresh wallet balances for characters.
-    Accepts an optional 'character_name' parameter to refresh a specific character.
+    Endpoint to refresh wallet balances for all characters.
     """
     try:
         refreshed_data = char_manager_all.refresh_wallet_balance()
@@ -151,112 +86,18 @@ def refresh_wallet_balances():
             "message": str(e)
         }), 500
 
-@app.route("/market/prices", methods=["POST"])
-def market_prices():
+# Ore Calculator endpoints
+@app.route("/facilities", methods=["GET"])
+def facilities():
     """
-    Body (optional):
-    {
-      "minerals": ["Tritanium", ...] OR [{id:..., name:...}, ...],
-      "ores": [ore_id, ...]
-    }
-    Returns:
-    {
-      "minerals": {
-         <mineral_name>: {
-             "orders": [ {price, volume_remain, min_volume, order_id}, ... ],
-             "best_price": <float or null>,
-             "total_volume": <int>
-         }, ...
-      },
-      "ores": {
-         <ore_id>: [ {price, volume_remain, min_volume, order_id}, ... ]
-      }
-    }
+    Get all facilities.
     """
     try:
-        payload = request.get_json(force=True) or {}
-        minerals_payload = payload.get("minerals")
-
-        # Build full mineral reference list from SDE (id + name)
-        mineral_ref = get_mineral_list()   # [{id, name, ...}]
-        name_to_ref = {m["name"]: m for m in mineral_ref}
-        id_to_ref = {m["id"]: m for m in mineral_ref}
-
-        # Determine which minerals to price
-        if not minerals_payload:
-            selected_refs = mineral_ref
-        else:
-            if isinstance(minerals_payload[0], dict):
-                # Expect dicts with id or name
-                selected_refs = []
-                for d in minerals_payload:
-                    if "id" in d:
-                        r = id_to_ref.get(d["id"])
-                        if r: selected_refs.append(r)
-                    elif "name" in d:
-                        r = name_to_ref.get(d["name"])
-                        if r: selected_refs.append(r)
-                # Fallback: ignore unknown
-            else:
-                # List of names
-                selected_refs = [name_to_ref[n] for n in minerals_payload if n in name_to_ref]
-
-        mineral_ids = [m["id"] for m in selected_refs]
-
-        # Fetch full order ladders for minerals (same function as ores)
-        mineral_orders_by_id = get_mineral_prices(mineral_ids)  # {id: [orders]}
-        # Reshape keyed by mineral name
-        minerals_out = {}
-        for mid, orders in mineral_orders_by_id.items():
-            ref = id_to_ref.get(mid)
-            if not ref:
-                continue
-            # Ensure orders are sorted asc price
-            orders_sorted = sorted(orders, key=lambda o: o["price"])
-            best_price = orders_sorted[0]["price"] if orders_sorted else None
-            total_depth_units = sum(o.get("volume_remain", 0) for o in orders_sorted)
-            minerals_out[ref["name"]] = {
-                "orders": orders_sorted,
-                "best_price": best_price,
-                "market_depth_units": total_depth_units,
-                "unit_volume": ref.get("volume", 0.01)  # real per-unit volume
-            }
-
-        ore_ids = payload.get("ores")
-        ore_prices = get_ore_prices(ore_ids) if ore_ids else {}
-
-        return jsonify({"minerals": minerals_out, "ores": ore_prices})
+        facilities = get_all_facilities()
+        return jsonify(facilities), 200
     except Exception as e:
-        logging.error(f"/market/prices error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/reprocessing/yield", methods=["POST"])
-def reprocessing_yield():
-    """
-    Body: {
-      "character_id": int,
-      "facility_id": int
-    }
-    """
-    try:
-        payload = request.get_json(force=True) or {}
-        character_id = payload["character_id"]
-        facility_id = payload["facility_id"]
-
-        char_skills = get_character_skills(character_id)
-        implants = get_implants_for_character(character_id)
-        facility = get_facility(facility_id)
-        ores = get_all_ores()
-
-        enriched = compute_yields(ores, char_skills, facility, implants)
-        return jsonify({"ores": enriched})
-    except KeyError as ke:
-        return jsonify({"error": f"Missing field {ke}"}), 400
-    except Exception as e:
-        logging.error(e, exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
-BASE_MINERALS = {"Tritanium","Pyerite","Mexallon","Isogen","Nocxium","Zydrine","Megacyte"}
+        logging.error(f"Error in /facilities: {e}")
+        return jsonify({"error": str(e), "facilities": []}), 500
 
 @app.route("/optimize", methods=["POST"])
 def optimize():
@@ -266,10 +107,7 @@ def optimize():
       "character_id": int,
       "facility_id": int,
       "ore_ids": [optional],
-      "mode": "min_cost",
-      "resale": { "Tritanium": price, ... } (optional),
-      "surplus_penalty": float (optional),
-      "cost_slack": float (optional)
+      "mode": "min_cost"
     }
     """
     try:
@@ -277,77 +115,188 @@ def optimize():
         demands = payload["demands"]
         character_id = payload["character_id"]
         facility_id = payload["facility_id"]
-        ore_ids = payload.get("ore_ids")
         mode = payload.get("mode", "min_cost")
-        resale = payload.get("resale")
-        surplus_penalty = float(payload.get("surplus_penalty", 0.0))
-        cost_slack = float(payload.get("cost_slack", 0.05))
+        opt_only_compressed = payload.get("only_compressed", False)
 
-        exclude_moon = payload.get("exclude_moon_ores", False)
-        max_ores = payload.get("max_ores")    # int or None
-        sparsity_penalty = payload.get("sparsity_penalty", 0.0)
-
-        # Data
-        char_skills = get_character_skills(character_id)
-        implants = get_implants_for_character(character_id)
+        # 1. Get character skills
+        character = char_manager_all.get_character_by_id(character_id)
+        if not character:
+            return jsonify({"error": f"Character ID {character_id} not found"}), 400
+        
+        char_adapter(character)
+        skills = get_character_skills()
+        implants = get_character_implants()
+        
+        # 2. Get facility
         facility = get_facility(facility_id)
-        ores_raw = get_all_ores(ore_ids)
-        yields = compute_yields(ores_raw, char_skills, facility, implants)
 
-        # Prepare ores list
-        ores_for_opt = []
-        minerals = set()
-        for o in yields:
-            minerals.update(o["batch_yields"].keys())
-            ores_for_opt.append({
-                "id": o["id"],
-                "name": o["name"],
-                "portionSize": o["portionSize"],
-                "batch_yields": o["batch_yields"]
-            })
+        # 3. Get all ores and compute yields
+        ores = get_all_ores()
+        ore_yields = compute_yields(ores, skills, facility, implants)
 
-        # Filter ores if exclude_moon
-        if exclude_moon:
-            filtered = []
-            for o in yields:
-                mats = o.get("batch_yields", {})
-                # If any produced mineral not in base set -> treat as moon ore and skip
-                if any(m not in BASE_MINERALS for m in mats.keys()):
-                    continue
-                filtered.append(o)
-            yields = filtered
+        # 4. Keep ores that yield only a subset of the requested materials (no extra materials)
+        req_mats = set(demands.keys())
+        ore_yields = [
+            o for o in ore_yields
+            if set(o["batch_yields"].keys()).issubset(req_mats)
+            and len(o["batch_yields"].keys()) > 0
+        ]
 
-        # Build order book & call optimizer (replace previous call)
-        order_book = get_ore_prices([o["id"] for o in yields])
+        # 5. Fetch market prices for the required materials and ores
+        materials = get_all_materials()
+        req_mat_ids = [m['id'] for m in materials if m['name'] in req_mats]
+        raw_req_mat_prices = get_material_prices(req_mat_ids)
+        req_mat_prices = {
+            m: raw_req_mat_prices.get(m, [{}])[0].get("price", None)
+            for m in req_mat_ids
+            if m in raw_req_mat_prices and raw_req_mat_prices[m]
+        }
+
+        # --- ADD THIS BLOCK: Calculate tiered_total_cost ---
+        # Map material name to price for easy lookup
+        mat_name_to_price = {}
+        for m in materials:
+            if m['name'] in req_mats:
+                mat_name_to_price[m['name']] = req_mat_prices.get(m['id'], None)
+
+        tiered_total_cost = 0.0
+        for mat, qty in demands.items():
+            price = None
+            # Try to get price by name or by id
+            if mat in mat_name_to_price:
+                price = mat_name_to_price[mat]
+            else:
+                # fallback: try to get by id if mat is id
+                price = req_mat_prices.get(mat, None)
+            if price is not None:
+                tiered_total_cost += qty * price
+
+        # 6. Viability filtering: Ensure at least one material is cheaper than market price
+        # viable_ores = filter_viable_ores(ore_yields, req_mat_prices, skills, facility["base_yield"], batch_size=1, strict=False, slack=0.5)
+        viable_ores = [
+            o for o in ore_yields
+            if any(m in req_mats for m in o["batch_yields"].keys())
+            and len(o["batch_yields"].keys()) > 0
+        ]
+        if opt_only_compressed:
+            viable_compressed_ores = [o for o in viable_ores if "Compressed" in o["name"]]
+            viable_ores = viable_compressed_ores
+            
+
+        # 7. Build order book for optimizer
+        ore_ids = [o["id"] for o in viable_ores]
+        processed_ore_prices = get_ore_prices(ore_ids)
+        order_book = {oid: processed_ore_prices.get(oid, []) for oid in ore_ids}
+
+        # 8. Run optimizer
         result = optimize_ore_tiered(
             demands=demands,
-            ores=[{
-                "id": o["id"],
-                "name": o["name"],
-                "portionSize": o["portionSize"],
-                "batch_yields": o["batch_yields"]
-            } for o in yields],
-            minerals=list(BASE_MINERALS),
+            ores=viable_ores,
+            materials=req_mats,
             order_book=order_book,
-            resale=resale,
-            surplus_penalty=surplus_penalty,
-            max_ores=max_ores,
-            sparsity_penalty=sparsity_penalty
+            max_ore_types=len(req_mats)
         )
+        # Compute total ore volume and yielded materials
+        total_ore_volume = 0
+        total_yielded_materials = {mat: 0 for mat in req_mats}
+
+        for ore_sol in result.get("solution", []):
+            total_ore_volume += ore_sol["ore_units"]
+            # Find the ore yield info
+            ore_yield = next((o for o in ore_yields if o["id"] == ore_sol["ore_id"]), None)
+            if ore_yield:
+                for mat, qty_per_batch in ore_yield["batch_yields"].items():
+                    total_yielded_materials[mat] += qty_per_batch * ore_sol["batches"]
+        
+        result["ore_yields"] = ore_yields
+        result["total_ore_volume"] = total_ore_volume
+        result["total_yielded_materials"] = total_yielded_materials
+        result["tiered_total_cost"] = tiered_total_cost
+
+        total_ore_volume_m3 = 0
+        for ore_sol in result.get("solution", []):
+            ore_yield = next((o for o in ore_yields if o["id"] == ore_sol["ore_id"]), None)
+            if ore_yield:
+                total_ore_volume_m3 += ore_sol["batches"] * ore_yield["batch_volume"]
+        result["total_ore_volume_m3"] = total_ore_volume_m3
+
+        # Build mineral_volumes dict before using it
+        mineral_volumes = {m['name']: m['volume'] for m in materials if m['name'] in req_mats}
+
+        raw_comparator = []
+        for mat, qty in demands.items():
+            price = None
+            # Try to get price by name or by id
+            if mat in mat_name_to_price:
+                price = mat_name_to_price[mat]
+            else:
+                price = req_mat_prices.get(mat, None)
+            volume_per_unit = mineral_volumes.get(mat, 0)
+            total_volume = qty * volume_per_unit
+            if price is not None:
+                raw_comparator.append({
+                    "Mineral": mat,
+                    "Quantity": qty,
+                    "Unit Price": price,
+                    "Total Cost": qty * price,
+                    "Total Volume": total_volume
+                })
+
+        total_raw_volume = sum(qty * mineral_volumes.get(mat, 0) for mat, qty in demands.items())
+        result["total_raw_volume"] = total_raw_volume
+
+        # Demand coverage details
+        demand_coverage = {}
+        for mat in demands:
+            demand_coverage[mat] = {
+                "demand": demands[mat],
+                "yielded": total_yielded_materials.get(mat, 0),
+                "surplus": result["surplus"].get(mat, 0),
+                "shortfall": max(0, demands[mat] - total_yielded_materials.get(mat, 0))
+            }
+        result["demand_coverage"] = demand_coverage
+
+        # Raw material comparator and surplus initialization
+        result["raw_comparator"] = raw_comparator
+        result["surplus"] = result.get("surplus", {})
+        
+        # After you have total_yielded_materials and demands
+        surplus = {}
+        for mat, demand in demands.items():
+            yielded = total_yielded_materials.get(mat, 0)
+            surplus[mat] = max(0, yielded - demand)
+
+        result["surplus"] = surplus
+
         return jsonify(result), (200 if result.get("status") == "ok" else 400)
     except KeyError as ke:
+        print("Error in /optimize:", traceback.format_exc())
         return jsonify({"error": f"Missing field {ke}"}), 400
     except Exception as e:
+        print("Error in /optimize:", traceback.format_exc())
         logging.error(e, exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-@app.route("/minerals", methods=["GET"])
-def minerals():
+@app.route("/materials", methods=["GET"])
+def materials():
+    global MATERIALS
     try:
-        data = get_mineral_list()
-        return jsonify({"minerals": data})
+        if MATERIALS is None:
+            MATERIALS = get_all_materials()
+        return jsonify({"materials": MATERIALS})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print("Error in /materials:", traceback.format_exc())
+        return jsonify({"error": str(e), "materials": []}), 500
+
+@app.route("/ores", methods=["GET"])
+def ores():
+    try:
+        ores = get_all_ores()
+        return ores
+    except Exception as e:
+        print("Error in /ores:", traceback.format_exc())
+        return jsonify({"error": str(e), "ores": []}), 500
+
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)
