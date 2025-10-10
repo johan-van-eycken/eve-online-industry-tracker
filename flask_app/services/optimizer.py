@@ -4,16 +4,13 @@ from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, LpInteger, 
 def optimize_ore_tiered(
     demands,
     ores,
-    minerals,
+    materials,
     order_book,
-    resale=None,
-    surplus_penalty=0.0,
-    max_ores=None,              # NEW: hard cap on distinct ores
-    sparsity_penalty=0.0        # NEW: cost added per ore used
+    max_ore_types=None  # <-- add this parameter
 ):
     """
-    demands: { mineral_name: qty }
-    ores: list[{ id, name, portionSize, batch_yields }]
+    demands: { material_name: qty }
+    ores: list[{ id, name, batch_size, batch_yields }]
     order_book: { ore_id: [ {price, volume_remain, ...}, ... ] } (sell orders asc price)
     Decision vars:
        z_{o,k} = integer number of batches bought from order k of ore o
@@ -21,7 +18,7 @@ def optimize_ore_tiered(
        For each order tier: 0 <= z_{o,k} <= max_batches_{o,k}
        Mineral coverage: sum_o,k z_{o,k} * batch_yields_o[m] - s_m >= demand_m
     Cost:
-       sum_o,k z_{o,k} * portionSize_o * price_{o,k}  (+ surplus penalty or - resale)
+       sum_o,k z_{o,k} * batch_size_o * price_{o,k}
     """
     prob = LpProblem("TieredOreOptimization", LpMinimize)
 
@@ -35,21 +32,21 @@ def optimize_ore_tiered(
     tier_vars = {}
     for o in ores:
         oid = o["id"]
-        portion = o["portionSize"]
+        batch_size = o["batch_size"]
         tiers = order_book.get(oid, [])
         tier_vars[oid] = []
-        # skip ores with zero yields across all demanded minerals
+        # skip ores with zero yields across all demanded materials
         if all(o["batch_yields"].get(m, 0) == 0 for m in demands.keys()):
             continue
         for idx, tier in enumerate(tiers):
-            max_batches = int(tier["volume_remain"] // portion) if portion > 0 else 0
+            max_batches = int(tier["volume_remain"] // batch_size) if batch_size > 0 else 0
             if max_batches <= 0:
                 continue
             var = LpVariable(f"z_{oid}_{idx}", lowBound=0, upBound=max_batches, cat=LpInteger)
             tier_vars[oid].append({
                 "var": var,
                 "price": tier["price"],
-                "portionSize": portion,
+                "batch_size": batch_size,
                 "order_id": tier["order_id"],
                 "max_batches": max_batches
             })
@@ -57,13 +54,13 @@ def optimize_ore_tiered(
             prob += var <= max_batches * y[oid]
 
     # Surplus variables
-    s = {m: LpVariable(f"s_{m}", lowBound=0) for m in minerals}
+    s = {m: LpVariable(f"s_{m}", lowBound=0) for m in materials}
 
     # Coverage constraints
-    # Build quick lookup: yields[ore_id][mineral]
+    # Build quick lookup: yields[ore_id][material]
     yield_map = {o["id"]: o["batch_yields"] for o in ores}
 
-    for m in minerals:
+    for m in materials:
         prob += (
             lpSum(tv["var"] * yield_map[oid].get(m, 0)
                   for oid, tvs in tier_vars.items()
@@ -71,30 +68,23 @@ def optimize_ore_tiered(
             - s[m] >= demands.get(m, 0)
         )
 
-    # Max distinct ores (hard cap)
-    if max_ores is not None and max_ores > 0:
-        prob += lpSum(y.values()) <= max_ores
-
-    # Objective
+   # Objective
     cost_terms = []
     for oid, tvs in tier_vars.items():
         for tv in tvs:
-            cost_terms.append(tv["var"] * tv["portionSize"] * tv["price"])
+            cost_terms.append(tv["var"] * tv["batch_size"] * tv["price"])
 
     base_cost = lpSum(cost_terms)
 
     # Surplus handling
-    if resale:
-        resale_value = lpSum(s[m] * resale.get(m, 0) for m in minerals)
-        objective = base_cost - resale_value
-    else:
-        objective = base_cost + surplus_penalty * lpSum(s[m] for m in minerals)
-
-    # Add sparsity penalty (soft encouragement to use fewer ores)
-    if sparsity_penalty > 0:
-        objective += sparsity_penalty * lpSum(y.values())
-
+    penalty = 1e-6
+    objective = base_cost + penalty * lpSum(s[m] for m in materials)
     prob += objective
+
+    # Add max ore types constraint if requested
+    if max_ore_types is not None:
+        prob += lpSum(y[oid] for oid in y) <= max_ore_types
+
     # Choose CBC solver with relative gap + time limit (fallback if older PuLP)
     try:
         solver = PULP_CBC_CMD(msg=True, gapRel=0.001, timeLimit=30)  # 0.1% relative gap
@@ -113,7 +103,7 @@ def optimize_ore_tiered(
         oid = o["id"]
         if oid not in tier_vars:
             continue
-        portion = o["portionSize"]
+        batch_size = o["batch_size"]
         batches_total = 0
         ore_units_total = 0
         cost_total = 0.0
@@ -122,7 +112,7 @@ def optimize_ore_tiered(
             val = tv["var"].value()
             if val and val > 0:
                 val_int = int(val)
-                ore_units = val_int * portion
+                ore_units = val_int * batch_size
                 tier_cost = ore_units * tv["price"]
                 batches_total += val_int
                 ore_units_total += ore_units
@@ -138,7 +128,7 @@ def optimize_ore_tiered(
             per_ore[oid] = {
                 "ore_id": oid,
                 "ore_name": o["name"],
-                "portionSize": portion,
+                "batch_size": batch_size,
                 "batches": batches_total,
                 "ore_units": ore_units_total,
                 "cost": cost_total,
@@ -148,8 +138,7 @@ def optimize_ore_tiered(
             }
 
     total_cost = sum(o["cost"] for o in per_ore.values())
-    surplus_out = {m: s[m].value() for m in minerals}
-    distinct_used = sum(int(yv.value() or 0) for yv in y.values())
+    surplus_out = {m: s[m].value() for m in materials}
 
     return {
         "status": "ok",
@@ -157,14 +146,13 @@ def optimize_ore_tiered(
         "solution": list(per_ore.values()),
         "surplus": surplus_out,
         "pricing_mode": "tiered_orders",
-        "distinct_ores": distinct_used
     }
 
 def _prune_and_merge_order_book(order_book, ores, demands, safety_factor=1.05):
     """
     order_book: { ore_id: [ {price, volume_remain, ...}, ... ] } (sorted asc price)
     Returns reduced order_book.
-    - Keeps only enough cumulative volume (in ore units) to cover mineral demands * safety_factor
+    - Keeps only enough cumulative volume (in ore units) to cover material demands * safety_factor
       using a heuristic upper bound (ignores yields, just ore volume proxy).
     - Merges consecutive tiers with identical price for same ore.
     """
