@@ -3,17 +3,45 @@ import logging
 import requests
 import os
 from classes.config_manager import ConfigManager
+from classes.database_manager import DatabaseManager
+from classes.character_manager import CharacterManager
 from config.schemas import CONFIG_SCHEMA
 
 # Read environment variables for Flask host and port
 FLASK_HOST = os.getenv("FLASK_HOST", "localhost")
 FLASK_PORT = os.getenv("FLASK_PORT", "5000")
 
+# Load Configurations
 try:
-    cfg = ConfigManager(base_path="config/config.json", schema=CONFIG_SCHEMA, secret_path="config/secret.json").all()
+    cfgManager = ConfigManager(base_path="config/config.json", secret_path="config/secret.json", schema=CONFIG_SCHEMA)
+    cfg = cfgManager.all()
+    cfg_language = cfg["app"]["language"]
+    cfg_characters = cfg["characters"]
+    if len(cfg_characters) == 0:
+        raise ValueError("No characters found in config!")
+    cfg_oauth_db_uri = cfg["app"]["database_oauth_uri"]
+    cfg_app_db_uri = cfg["app"]["database_app_uri"]
+    cfg_sde_db_uri = cfg["app"]["database_sde_uri"]
 except Exception as e:
-    logging.error(f"Failed to initialize schema: {e}")
-    raise e
+    logging.error(f"Failed to load config: {e}")
+    raise ValueError(f"Failed to load config: {e}")
+
+# Initialize Databases and Schemas
+try:
+    db_oauth = DatabaseManager(cfg_oauth_db_uri, cfg_language)
+    db_app = DatabaseManager(cfg_app_db_uri, cfg_language)
+    db_sde = DatabaseManager(cfg_sde_db_uri, cfg_language)
+except Exception as e:
+    logging.error(f"Database initializations failed. {e}", exc_info=True)
+    raise ValueError(f"Database initializations failed. {e}")
+
+# Initialize Character Manager
+try:
+    char_manager_all = CharacterManager(cfgManager, db_oauth, db_app, db_sde)
+    char_manager_all.refresh_all()
+except Exception as e:
+    logging.error(f"Failed to initialize characters: {e}")
+    raise ValueError(f"Failed to initialize characters: {e}")
 
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")
@@ -50,4 +78,4 @@ elif choice_nav == "Corporations":
     render(cfg)
 elif choice_nav == "Ore Calculator":
     from webpages.ore_calculator import render
-    render(cfg)
+    render(char_manager_all)
