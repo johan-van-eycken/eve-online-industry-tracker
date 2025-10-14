@@ -231,35 +231,47 @@ class ESIClient:
         return None
 
     def save_to_cache(self, endpoint: str, etag: Optional[str], data: Dict[str, Any]) -> None:
-        cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == endpoint).first()
-        serialized_data = json.dumps(data)
-        if cache_entry:
-            cache_entry.etag = etag
-            cache_entry.data = serialized_data
-            cache_entry.last_updated = int(time.time())
-        else:
-            cache_entry = EsiCache(endpoint=endpoint, etag=etag, data=serialized_data, last_updated=int(time.time()))
-            self.db_oauth.session.add(cache_entry)
-        self.db_oauth.session.commit()
-        logging.debug(f"Cache updated for {endpoint}.")
+        try:
+            cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == endpoint).first()
+            serialized_data = json.dumps(data)
+            if cache_entry:
+                cache_entry.etag = etag
+                cache_entry.data = serialized_data
+                cache_entry.last_updated = int(time.time())
+            else:
+                cache_entry = EsiCache(endpoint=endpoint, etag=etag, data=serialized_data, last_updated=int(time.time()))
+                self.db_oauth.session.add(cache_entry)
+            self.db_oauth.session.commit()
+            logging.debug(f"Cache updated for {endpoint}.")
+        except Exception as e:
+            logging.error(f"Error saving cache for {endpoint}: {e}")
+            self.db_oauth.session.rollback()
     
     # ------------------------------
     # ESI API Calls (with Caching)
     # -----------------------------
-    def esi_get(self, endpoint: str, use_cache: bool = True) -> Any:
+    def esi_get(self, endpoint: str, params: dict | None = None, use_cache: bool = True) -> Any:
         """
-        Issue a GET request to the ESI API with caching support.
+        Issue a GET request to the ESI API with optional query params and caching.
 
         Args:
-            endpoint (str): The ESI endpoint to access.
-            use_cache (bool): Whether to use cached data if available.
+            endpoint (str): ESI path starting with '/' (e.g. '/markets/10000002/orders/')
+            params (dict|None): Query parameters (e.g. {"order_type":"sell","type_id":34})
+            use_cache (bool): Whether to use (and store) cached data keyed by endpoint+params.
 
         Returns:
-            JSON response data or cached data.
+            Parsed JSON response or cached data.
         """
         if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
-            self.refresh_access_token()  # Refresh token if no valid access token
-        
+            self.refresh_access_token()
+
+        # Build URL + cache key
+        query = ""
+        if params:
+            # Sort params for deterministic cache key
+            query = "?" + urlencode(sorted(params.items()), doseq=True)
+        cache_key = f"{endpoint}{query}"
+
         headers = {
             "Accept": self.esi_header_accept,
             "Accept-Language": self.esi_header_acceptlanguage,
@@ -269,59 +281,44 @@ class ESIClient:
             "X-Tenant": self.esi_header_xtenant
         }
 
-        # Check cache before making API calls
         etag: Optional[str] = None
         cached_data: Optional[Dict[str, Any]] = None
         if use_cache:
-            cached_data = self.get_cached_data(endpoint)
-            cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == endpoint).first()
-            if cache_entry and cache_entry.etag:  # Use ETag for conditional requests
+            cached_data = self.get_cached_data(cache_key)
+            cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == cache_key).first()
+            if cache_entry and cache_entry.etag:
                 headers["If-None-Match"] = cache_entry.etag
 
         retries = 0
-
-        url = f"{self.esi_base_uri}{endpoint}"
+        url = f"{self.esi_base_uri}{endpoint}{query}"
 
         while retries < 3:
             try:
-                url = f"{self.esi_base_uri}{endpoint}"
                 response = requests.get(url, headers=headers, timeout=15)
-
                 if response.status_code == 200:
-                    # Response updated; save new data to the cache
-                    etag = response.headers.get("ETag", None)
-                    self.save_to_cache(endpoint, etag, response.json())
-                    if hasattr(response, "json"):
-                        return response.json()
-                    else:
-                        logging.error(f"Unexpected response type: {type(response)}")
-                        raise RuntimeError("Expected HTTP response with .json() method.")
-
+                    etag = response.headers.get("ETag")
+                    data_json = response.json()
+                    self.save_to_cache(cache_key, etag, data_json)
+                    return data_json
                 elif response.status_code == 304:
-                    # Not modified, return cached data
-                    logging.debug(f"Using cached data for endpoint {endpoint}.")
                     return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
-                
                 elif response.status_code == 404:
-                    logging.warning(f"ESI endpoint not found: {endpoint} - {response.text}")
+                    logging.warning(f"ESI 404: {url}")
                     return None
-
                 elif response.status_code in (420, 429, 500, 502, 503, 504):
                     wait = (2 ** retries) + random.uniform(0, 1)
-                    logging.warning(f"ESI error {response.status_code} on {endpoint}, retrying in {wait:.1f}s...")
+                    logging.warning(f"ESI {response.status_code} on {url}, retrying in {wait:.1f}s...")
                     time.sleep(wait)
                     retries += 1
                     continue
-
                 else:
                     response.raise_for_status()
-
             except requests.RequestException as e:
-                logging.error(f"Failed ESI request to {endpoint}: {e}")
+                logging.error(f"ESI request error {url}: {e}")
                 retries += 1
                 time.sleep(2 ** retries)
 
-        raise RuntimeError(f"ESI GET request failed for endpoint {endpoint} after retries.")
+        raise RuntimeError(f"ESI GET failed after retries: {url}")
     
     def get_id_type(self, entity_id: int) -> Optional[str]:
         """Get the type of an entity by its ID."""
