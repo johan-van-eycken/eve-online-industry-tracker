@@ -7,6 +7,22 @@ FLASK_HOST = os.getenv("FLASK_HOST", "localhost")
 FLASK_PORT = os.getenv("FLASK_PORT", "5000")
 API_BASE = f"http://{FLASK_HOST}:{FLASK_PORT}"
 
+#-- Cached API calls --
+@st.cache_data(ttl=3600)
+def get_all_materials():
+    try:
+        r = requests.get(f"{API_BASE}/materials")
+        r.raise_for_status()
+        return [m["name"] for m in r.json().get("materials", [])]
+    except Exception as e:
+        st.error(f"Error fetching materials: {e}")
+        return []
+
+@st.cache_data(ttl=3600)
+def get_all_facilities():
+    return api_get("/facilities") or []
+
+#-- API Helpers --
 def api_post(path, payload):
     r = requests.post(f"{API_BASE}{path}", json=payload)
     if r.status_code != 200:
@@ -21,18 +37,11 @@ def api_get(path):
         return None
     return r.json()
 
+#-- Main Render Function --
 def render(char_manager_all):
     st.header("Ore Calculator (MILP Version)")
 
-    # Fetch all materials from backend
-    all_materials = []
-    try:
-        r = requests.get(f"{API_BASE}/materials")
-        r.raise_for_status()
-        all_materials = [m["name"] for m in r.json().get("materials", [])]
-    except Exception as e:
-        st.error(f"Error fetching materials: {e}")
-
+    all_materials = get_all_materials()
     st.write("All Minerals: " + ", ".join(all_materials))
 
     left, right = st.columns([1, 2])
@@ -48,7 +57,19 @@ def render(char_manager_all):
             format_func=lambda x: chars_map[x],
             key="opt_character_id"
         )
-        all_facilities = api_get("/facilities") or []
+        all_implants = {
+            0: "None",
+            1: "Zainou 'Beancounter' Reprocessing RX-801",
+            2: "Zainou 'Beancounter' Reprocessing RX-802",
+            4: "Zainou 'Beancounter' Reprocessing RX-804"
+        }
+        implant_pct = st.selectbox(
+            "Reprocessing Implants",
+            options=list(all_implants.keys()),
+            format_func=lambda ipct: all_implants[ipct],
+            key="opt_implant_pct"
+        )
+        all_facilities = get_all_facilities()
         facility_options = {f["id"]: f["name"] for f in all_facilities}
         facility_id = st.selectbox(
             "Facility",
@@ -58,16 +79,18 @@ def render(char_manager_all):
         )
 
         mode = st.selectbox("Mode", ["min_cost"], key="opt_mode")
-        show_yield_table = st.checkbox("Show per-ore batch yields (debug)", value=False, key="dbg_yields")
-        show_coverage_debug = st.checkbox("Show coverage & surplus breakdown (debug)", value=False, key="dbg_coverage")
-        show_formula = st.checkbox("Show reprocessing formula details", value=False, key="dbg_formula")
+        with st.expander("Debug Options"):
+            show_yield_table = st.checkbox("Show per-ore batch yields (debug)", value=False, key="dbg_yields")
+            show_coverage_debug = st.checkbox("Show coverage & surplus breakdown (debug)", value=False, key="dbg_coverage")
+            show_formula = st.checkbox("Show reprocessing formula details", value=False, key="dbg_formula")
         only_compressed = st.checkbox("Only use compressed ores", value=False, key="opt_only_compressed")
 
     with left:
         st.subheader("Material Requirements")
-        demands = {m: st.number_input(m, min_value=0, value=0, step=1000, key=f"req_{m}") for m in all_materials}
-
-        if st.button("Optimize", key="opt_btn"):
+        with st.form("ore_calc_form"):
+            demands = {m: st.number_input(m, min_value=0, value=0, step=1000, key=f"req_{m}") for m in all_materials}
+            submitted = st.form_submit_button("Optimize")
+        if submitted:
             clean_demands = {k: v for k, v in demands.items() if v > 0}
             if not clean_demands:
                 st.warning("Enter at least one non-zero demand.")
@@ -80,6 +103,7 @@ def render(char_manager_all):
                 opt_resp = api_post("/optimize", {
                     "demands": clean_demands,
                     "character_id": character_id,
+                    "implant_pct": implant_pct,
                     "facility_id": facility_id,
                     "mode": mode,
                     "only_compressed": only_compressed,
@@ -88,8 +112,6 @@ def render(char_manager_all):
                 status_box.error("Optimization failed.")
                 return
             status_box.success("Optimization complete.")
-
-            st.write(opt_resp)
 
             solution = opt_resp["solution"]
             if not solution:
@@ -146,19 +168,23 @@ def render(char_manager_all):
                     columns=["Mineral", "Surplus Units", "Resale (80%) ISK" if resale_toggle else "Value (0)"]
                 )
 
-            ore_total_volume = df_ore_summary["Volume (m3)"].sum() if not df_ore_summary.empty and df_ore_summary["Volume (m3)"].notna().any() else None
-            total_cost = opt_resp["total_cost"]
             tiered_total_cost = opt_resp.get("tiered_total_cost", 0.0)
-            savings = tiered_total_cost - total_cost
+            total_cost_with_reprocessing = opt_resp.get("total_cost_with_reprocessing", opt_resp["total_cost"])
+            savings = tiered_total_cost - total_cost_with_reprocessing
             savings_pct = (savings / tiered_total_cost * 100) if tiered_total_cost > 0 else 0
 
             st.session_state["opt_display"] = {
-                "total_cost": total_cost,
+                "total_cost": opt_resp["total_cost"],
+                "total_cost_with_reprocessing": total_cost_with_reprocessing,
                 "tiered_total_cost": tiered_total_cost,
                 "savings": savings,
                 "savings_pct": savings_pct,
-                "ore_total_volume": ore_total_volume,
+                "ore_total_volume": df_ore_summary["Volume (m3)"].sum(),
+                "total_ore_volume_m3": opt_resp.get("total_ore_volume_m3", 0.0),
                 "raw_total_volume": opt_resp.get("raw_total_volume", 0.0),
+                "total_raw_volume": opt_resp.get("total_raw_volume", 0.0),
+                "reprocessing_fee": opt_resp.get("reprocessing_fee", 0.0),
+                "total_yielded_materials": opt_resp.get("total_yielded_materials", {}),
                 "df_solution": df_sol,
                 "df_ore_summary": df_ore_summary,
                 "df_raw": raw_df,
@@ -170,6 +196,7 @@ def render(char_manager_all):
                 "show_formula": show_formula,
                 "ore_yields": opt_resp.get("ore_yields", []),
                 "req_mat_prices": opt_resp.get("req_mat_prices", {}),
+                "demand_coverage": opt_resp.get("demand_coverage", {}),
             }
             st.session_state["last_opt_resp"] = opt_resp  # <-- store the last response
 
@@ -177,21 +204,23 @@ def render(char_manager_all):
     # OUTPUT (full width area)
     # -------------------------
     opt_display = st.session_state.get("opt_display")
-    opt_resp = st.session_state.get("last_opt_resp")  # <-- always get from session_state
+    opt_resp = st.session_state.get("last_opt_resp")
 
     if not opt_display or not opt_resp:
         return
 
     st.markdown("---")
     st.subheader("Cost & Volume Comparison")
-    ore_cost = opt_display["total_cost"]
+    total_cost_with_reprocessing = opt_display["total_cost_with_reprocessing"]
     tiered_cost = opt_display["tiered_total_cost"]
-    ore_volume_m3 = opt_resp.get("total_ore_volume_m3", 0.0)
-    raw_volume_m3 = opt_resp.get("total_raw_volume", 0.0)
+    ore_volume_m3 = opt_display.get("total_ore_volume_m3", 0.0)
+    raw_volume_m3 = opt_display.get("total_raw_volume", 0.0)
+    reprocessing_fee = opt_display.get("reprocessing_fee", 0.0)
 
     colc1, colc2, colc3 = st.columns(3)
-    colc1.metric("Ore Solution Cost (ISK)", f"{ore_cost:,.2f}", help="Total ISK spent on ores to fulfill your mineral demands.")
+    colc1.metric("Total Cost incl. Reprocessing (ISK)", f"{total_cost_with_reprocessing:,.2f}", help="Total cost including ore purchase and reprocessing fee.")
     colc1.metric("Ore Volume (m³)", f"{ore_volume_m3:,.2f}" if ore_volume_m3 is not None else "N/A", help="Estimated total ore volume to purchase.")
+    colc1.metric("Reprocessing Fee (ISK)", f"{reprocessing_fee:,.2f}", help="ISK fee charged by the facility for reprocessing.")
 
     colc2.metric("Direct Minerals Cost (ISK)", f"{tiered_cost:,.2f}", help="Total ISK if you buy all minerals directly from the market.")
     colc2.metric("Direct Minerals Volume (m³)", f"{raw_volume_m3:,.2f}" if raw_volume_m3 is not None else "N/A", help="Total volume of minerals if you buy everything directly from the market.")
@@ -200,9 +229,9 @@ def render(char_manager_all):
     colc3.metric("Savings Volume (m³)", f"{(raw_volume_m3 - ore_volume_m3):,.2f}" if ore_volume_m3 is not None else "N/A", help="Volume difference between direct minerals and optimized ore solution.")
 
     # Show total yielded minerals if available
-    if "total_yielded_materials" in opt_resp:
+    if "total_yielded_materials" in opt_display and opt_display["total_yielded_materials"]:
         st.caption("Total Yielded Materials: " + ", ".join(
-            f"{mat}: {qty:,.0f}" for mat, qty in opt_resp["total_yielded_materials"].items()
+            f"{mat}: {qty:,.0f}" for mat, qty in opt_display["total_yielded_materials"].items()
         ))
 
     # Side-by-side: Optimized Ore Solution / Raw Minerals comparator

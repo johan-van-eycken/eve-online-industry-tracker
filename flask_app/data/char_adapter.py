@@ -12,8 +12,8 @@ def get_character_skills():
     _ensure()
     return _character.reprocessing_skills or _character.extract_reprocessing_skills()
 
-def get_character_implants():
+def get_character_implants(implant_pct: int):
     _ensure()
     return [
-        {"slot": 7, "group": "reprocessing", "bonus": 0.04}
+        {"slot": 7, "group": "reprocessing", "bonus": (implant_pct / 100)}
     ]
