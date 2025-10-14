@@ -105,6 +105,7 @@ def optimize():
     Body: {
       "demands": { "Tritanium": qty, ... },
       "character_id": int,
+      "implant_pct": int,
       "facility_id": int,
       "ore_ids": [optional],
       "mode": "min_cost"
@@ -114,6 +115,7 @@ def optimize():
         payload = request.get_json(force=True) or {}
         demands = payload["demands"]
         character_id = payload["character_id"]
+        implant_pct = payload.get("implant_pct", 0)
         facility_id = payload["facility_id"]
         mode = payload.get("mode", "min_cost")
         opt_only_compressed = payload.get("only_compressed", False)
@@ -125,7 +127,7 @@ def optimize():
         
         char_adapter(character)
         skills = get_character_skills()
-        implants = get_character_implants()
+        implants = get_character_implants(implant_pct)
         
         # 2. Get facility
         facility = get_facility(facility_id)
@@ -267,6 +269,22 @@ def optimize():
             surplus[mat] = max(0, yielded - demand)
 
         result["surplus"] = surplus
+
+        # --- Reprocessing fee calculation ---
+        reprocessing_tax_rate = facility.get("tax", 0.0)  # e.g., 0.01 for 1%
+        yielded_value = 0.0
+        for mat, qty in total_yielded_materials.items():
+            price = None
+            if mat in mat_name_to_price:
+                price = mat_name_to_price[mat]
+            else:
+                price = req_mat_prices.get(mat, None)
+            if price is not None:
+                yielded_value += qty * price
+
+        reprocessing_fee = yielded_value * reprocessing_tax_rate
+        result["reprocessing_fee"] = reprocessing_fee
+        result["total_cost_with_reprocessing"] = result.get("total_cost", 0.0) + reprocessing_fee
 
         return jsonify(result), (200 if result.get("status") == "ok" else 400)
     except KeyError as ke:
