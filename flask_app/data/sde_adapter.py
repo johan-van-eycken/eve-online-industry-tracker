@@ -1,6 +1,6 @@
 import json
 import re
-from classes.database_models import Categories, Groups, Types, TypeMaterials
+from classes.database_models import Categories, Groups, Types, TypeMaterials, StaStation
 
 _db_sde = None
 _language = None
@@ -111,3 +111,36 @@ def get_all_materials():
         })
     out.sort(key=lambda r: r["id"])
     return out
+
+def get_station_info(station_id):
+    """
+    Returns station info for given station_id.
+    """
+    _ensure()
+
+    station_type = _db_sde.session.query(StaStation).filter(StaStation.stationID == station_id).first()
+    if not station_type:
+        return None
+
+    station_info = {
+        "constellation_id": station_type.constellationID,
+        "corporation_id": station_type.corporationID,
+        "docking_cost_per_volume": station_type.dockingCostPerVolume,
+        "max_ship_volume_dockable": station_type.maxShipVolumeDockable,
+        "office_rental_cost": station_type.officeRentalCost,
+        "operation_id": station_type.operationID,
+        "reprocessing_efficiency": station_type.reprocessingEfficiency,
+        "reprocessing_hangar_flag": station_type.reprocessingHangarFlag,
+        "reprocessing_stations_take": station_type.reprocessingStationsTake,
+        "security": station_type.security,
+        "solar_system_id": station_type.solarSystemID,
+        "station_id": station_type.stationID,
+        "station_name": station_type.stationName,
+        "station_type_id": station_type.stationTypeID,
+        "position": {
+            "x": station_type.x,
+            "y": station_type.y,
+            "z": station_type.z
+        }
+    }
+    return station_info

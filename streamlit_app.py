@@ -5,6 +5,7 @@ import os
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
 from classes.character_manager import CharacterManager
+from classes.corporation_manager import CorporationManager
 from config.schemas import CONFIG_SCHEMA
 
 # Read environment variables for Flask host and port
@@ -46,7 +47,7 @@ except Exception as e:
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")
 
-menu_nav = ["Characters", "Corporations", "Ore Calculator"]
+menu_nav = ["Characters", "Corporations", "Market Orders", "Ore Calculator"]
 menu_admin = ["", "Database Maintenance", "Restart Flask App"]
 
 choice_nav = st.sidebar.selectbox("Navigation", menu_nav)
@@ -79,3 +80,6 @@ elif choice_nav == "Corporations":
 elif choice_nav == "Ore Calculator":
     from webpages.ore_calculator import render
     render(char_manager_all)
+elif choice_nav == "Market Orders":
+    from webpages.marketorders import render
+    render()

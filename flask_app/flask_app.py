@@ -1,8 +1,9 @@
-from unittest import result
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
 import logging
 import os
 import sys
+import json
 import traceback
 
 from flask_app.data.char_adapter import char_adapter
@@ -15,14 +16,16 @@ from config.schemas import CONFIG_SCHEMA
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
 from classes.character_manager import CharacterManager
+from classes.corporation_manager import CorporationManager
 
 # New service/data layers
 from flask_app.services.yield_calc import compute_yields
 from flask_app.services.optimizer import optimize_ore_tiered
-from flask_app.data.sde_adapter import get_all_ores, get_all_materials
+from flask_app.data.sde_adapter import get_all_ores, get_all_materials, get_station_info
 from flask_app.data.char_adapter import get_character_skills, get_character_implants
 from flask_app.data.facility_repo import get_facility, get_all_facilities
-from flask_app.data.esi_adapter import get_ore_prices, get_material_prices  # ADD get_material_prices import
+from flask_app.data.esi_adapter import get_ore_prices, get_material_prices, \
+    get_type_sellprices, get_type_buyprices, get_region_info
 
 from utils.ore_calculator_core import filter_viable_ores
 
@@ -46,7 +49,9 @@ try:
     char_manager_all = CharacterManager(cfgManager, db_oauth, db_app, db_sde)
     main_character = char_manager_all.get_main_character()
     if not main_character:
-        raise ValueError("No main character defined in configuration.")    
+        raise ValueError("No main character defined in configuration.")
+    
+    corp_manager_all = CorporationManager(cfgManager, db_oauth, db_app, db_sde, char_manager_all)
 except Exception as e:
     logging.error(f"Failed to initialize Flask app: {e}")
     raise e
@@ -315,6 +320,120 @@ def ores():
         print("Error in /ores:", traceback.format_exc())
         return jsonify({"error": str(e), "ores": []}), 500
 
+# Market Orders endpoints
+@app.route("/refresh_market_orders", methods=["GET"])
+def refresh_market_orders():
+    try:
+        refreshed_data = char_manager_all.refresh_market_orders()
+        now = datetime.now(timezone.utc)
+        station_cache = {}
+        region_cache = {}
+        refreshed_orders = []
+        for character in refreshed_data:
+            # Character name lookup
+            if isinstance(character, str):
+                character = json.loads(character)
+            character_name = character.get("character_name")
+            for order in character.get("market_orders", []):
+                # Cache station lookup
+                location_id = order['location_id']
+                if location_id in station_cache:
+                    station = station_cache[location_id]
+                else:
+                    station = get_station_info(location_id)
+                    station_cache[location_id] = station
+
+                # Cache region lookup
+                region_id = order['region_id']
+                if region_id in region_cache:
+                    region = region_cache[region_id]
+                else:
+                    region = get_region_info(region_id)
+                    region_cache[region_id] = region
+
+                owner = ""
+                if order['is_corporation']:
+                    owner = corp_manager_all.get_corporation_name_by_character_id(order['character_id'])
+                else:
+                    owner = character_name
+                
+                # Calculate expires_in
+                issued_dt = datetime.fromisoformat(order['issued'].replace("Z", "+00:00"))
+                expires_dt = issued_dt + timedelta(days=order['duration'])
+                expires_in = expires_dt - now
+                # Format as days/hours
+                if expires_in.total_seconds() > 0:
+                    days = expires_in.days
+                    hours = expires_in.seconds // 3600
+                    mins = expires_in.seconds % 3600 // 60
+                    expires_in = f"{days}d {hours}h {mins}m"
+                else:
+                    expires_in = "Expired"
+
+                price_difference = 0
+                price_status = "⚪N/A"
+                if order['is_buy_order']:
+                    order_book = get_type_buyprices([order['type_id']])
+                    prices_list = []
+                    if isinstance(order_book, dict):
+                        prices_list = order_book.get(order['type_id'], [])
+                    if prices_list and all(isinstance(o, dict) for o in prices_list):
+                        highest_price = max(o["price"] for o in prices_list if "price" in o)
+                        price_difference = order['price'] - highest_price
+                        price_status = "🟢Best price" if price_difference > 0 else "🔴Undercut"
+                else:
+                    order_book = get_type_sellprices([order['type_id']])
+                    prices_list = []
+                    if isinstance(order_book, dict):
+                        prices_list = order_book.get(order['type_id'], [])
+                    if prices_list and all(isinstance(o, dict) for o in prices_list):
+                        lowest_price = min(o["price"] for o in prices_list if "price" in o)
+                        price_difference = order['price'] - lowest_price
+                        price_status = "🔴Undercut" if price_difference > 0 else "🟢Best price"
+
+                refreshed_orders.append({
+                    "Owner": owner,
+                    "Type ID": order['type_id'],
+                    "Type": order['type_name'],
+                    "Price": order['price'],
+                    "Price Status": price_status,
+                    "Price Difference": price_difference,
+                    "Volume": str(order['volume_remain']) + '/' + str(order['volume_total']),
+                    "Total Price": order['price'] * order['volume_remain'],
+                    "Range": order['range'],
+                    "Min. Volume": order['min_volume'],
+                    "Expires In": expires_in,
+                    "Escrow Remaining": order.get('escrow', 0),
+                    "Station": station.get('station_name', location_id),
+                    "Region": region.get('name', region_id),
+                    "is_buy_order": order['is_buy_order']
+                })
+
+        return jsonify({
+            "status": "success",
+            "data": refreshed_orders
+        }), 200
+    except Exception as e:
+        print("Error in /refresh_market_orders:", traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/station/<int:station_id>", methods=["GET"])
+def station(station_id):
+    try:
+        station = get_station_info(station_id)
+        return station
+    except Exception as e:
+        print("Error in /station:", traceback.format_exc())
+        return jsonify({"error": str(e), "station": []}), 500
+
+@app.route("/region/<int:region_id>", methods=["GET"])
+def region(region_id):
+    try:
+        region = get_region_info(region_id)
+        return region
+    except Exception as e:
+        print("Error in /region:", traceback.format_exc())
+        return jsonify({"error": str(e), "region": []}), 500
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)
