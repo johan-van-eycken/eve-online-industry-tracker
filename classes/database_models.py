@@ -108,6 +108,31 @@ class CharacterWalletTransactionsModel(BaseApp):
     unit_price: Mapped[float] = mapped_column(Float, nullable=True)
     total_price: Mapped[float] = mapped_column(Float, nullable=True)
 
+class CharacterMarketOrdersModel(BaseApp):
+    __tablename__ = "character_market_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    order_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    location_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    region_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_corporation: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    is_buy_order: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    escrow: Mapped[float] = mapped_column(Float, nullable=True)
+    volume_total: Mapped[int] = mapped_column(Integer, nullable=False)
+    volume_remain: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration: Mapped[int] = mapped_column(Integer, nullable=False)
+    issued: Mapped[str] = mapped_column(String, nullable=False)
+    min_volume: Mapped[int] = mapped_column(Integer, nullable=True)
+    range: Mapped[str] = mapped_column(String, nullable=True)
+
 class CorporationModel(BaseApp):
     __tablename__ = "corporations"
 
@@ -325,3 +350,25 @@ class TypeMaterials(BaseSde):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     materials: Mapped[list[dict[str, int]]] = mapped_column(JSON, nullable=False)
+
+class StaStation(BaseSde):
+    __tablename__ = "staStations"
+
+    constellationID: Mapped[int] = mapped_column(Integer, nullable=False)
+    corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
+    dockingCostPerVolume: Mapped[float] = mapped_column(Float, nullable=False)
+    maxShipVolumeDockable: Mapped[float] = mapped_column(Float, nullable=False)
+    officeRentalCost: Mapped[int] = mapped_column(Integer, nullable=False)
+    operationID: Mapped[int] = mapped_column(Integer, nullable=False)
+    regionID: Mapped[int] = mapped_column(Integer, nullable=False)
+    reprocessingEfficiency: Mapped[float] = mapped_column(Float, nullable=False)
+    reprocessingHangarFlag: Mapped[int] = mapped_column(Integer, nullable=False)
+    reprocessingStationsTake: Mapped[float] = mapped_column(Float, nullable=False)
+    security: Mapped[float] = mapped_column(Float, nullable=False)
+    solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
+    stationID: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    stationName: Mapped[str] = mapped_column(String, nullable=False)
+    stationTypeID: Mapped[int] = mapped_column(Integer, nullable=False)
+    x: Mapped[float] = mapped_column(Float, nullable=False)
+    y: Mapped[float] = mapped_column(Float, nullable=False)
+    z: Mapped[float] = mapped_column(Float, nullable=False)

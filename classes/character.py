@@ -6,7 +6,8 @@ from typing import Optional, List, Dict, Any
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
 from classes.esi import ESIClient
-from classes.database_models import CharacterModel, CharacterWalletJournalModel, CharacterWalletTransactionsModel
+from classes.database_models import CharacterModel, CharacterWalletJournalModel \
+    , CharacterWalletTransactionsModel, CharacterMarketOrdersModel
 from classes.database_models import NpcCorporations, Bloodlines, Races, Types, Groups, Categories
 
 class Character:
@@ -52,7 +53,8 @@ class Character:
         self.standings: Optional[List[Dict[str, str]]] = None
         self.wallet_journal: Optional[List[Dict[str, Any]]] = None
         self.wallet_transactions: Optional[List[Dict[str, Any]]] = None
-        self.reprocessing_skills: Optional[Dict[str, int]] = None  # skill name → trained level
+        self.reprocessing_skills: Optional[Dict[str, int]] = None
+        self.market_orders: Optional[List[Dict[str, Any]]] = None
 
         # Initialize ESI Client (handles token registration/refresh automatically)
         logging.debug(f"Initializing ESIClient for {self.character_name}...")
@@ -134,6 +136,13 @@ class Character:
             for entry in character_wallet_transactions
         ]
 
+        # Assign loaded entries to self.market_orders for runtime access
+        character_market_orders = (self.db_app.session.query(CharacterMarketOrdersModel).filter_by(character_id=self.character_id).all())
+        self.market_orders = [
+            {col: getattr(entry, col) for col in CharacterMarketOrdersModel.__table__.columns.keys()}
+            for entry in character_market_orders
+        ]
+
         logging.debug(f"Character '{self.character_name}' loaded from database. Wallet journal entries: {len(self.wallet_journal)} Transaction entries: {len(self.wallet_transactions)}.")
         return True
 
@@ -146,90 +155,15 @@ class Character:
             logging.debug(f"No wallet journal entries to save for {self.character_name}.")
             return
 
-        new_journal_entries = []
+        self.wallet_journal = []
         for entry in journal_entries:
-            entry_wallet_journal_id = entry.get("id")
-            if entry_wallet_journal_id is None:
-                continue  # Skip entries without an ID
+            new_entry = CharacterWalletJournalModel(**entry)
+            self.wallet_journal.append(new_entry)
 
-            existing_entry = (
-                self.db_app.session.query(CharacterWalletJournalModel)
-                .filter_by(character_id=self.character_id, wallet_journal_id=entry_wallet_journal_id)
-                .first()
-            )
-            if existing_entry:
-                continue  # Skip if already exists
-            new_journal_entries.append(entry)
-
-        # Step 1: Collect unique party IDs
-        party_ids = set()
-        for entry in new_journal_entries:
-            for key in ("first_party_id", "second_party_id", "tax_receiver_id"):
-                pid = entry.get(key)
-                if pid:
-                    party_ids.add(pid)
-
-        # Step 2: Lookup names for each unique ID
-        party_names = {}
-        for pid in party_ids:
-            name = None
-            id_type = self.esi_client.get_id_type(pid)
-            if id_type == "character":
-                data = self.esi_client.esi_get(f"/characters/{pid}/")
-                if data and "name" in data:
-                    name = data["name"]
-            elif id_type == "alliance":
-                data = self.esi_client.esi_get(f"/alliances/{pid}/")
-                if data and "name" in data:
-                    name = data["name"]
-            elif id_type == "corporation":
-                data = self.esi_client.esi_get(f"/corporations/{pid}/")
-                if data and "name" in data:
-                    name = data["name"]
-            elif id_type == "npc_corporation":
-                npc_corp = self.db_sde.session.query(NpcCorporations).filter_by(id=pid).first()
-                name = npc_corp.nameID[self.db_sde.language] if npc_corp else None
-            else:
-                continue  # Unknown type, skip
-
-            party_names[pid] = name
-
-        # Step 3: Assign names to journal entries
-        new_entries = []
-        for entry in new_journal_entries:
-            for key, name_key in [
-                ("first_party_id", "first_party_name"),
-                ("second_party_id", "second_party_name"),
-                ("tax_receiver_id", "tax_receiver_name"),
-            ]:
-                pid = entry.get(key)
-                entry[name_key] = party_names.get(pid)
-
-            new_entry = CharacterWalletJournalModel(
-                character_id=self.character_id,
-                wallet_journal_id=entry.get("id", None),
-                amount=entry.get("amount", 0.0),
-                balance=entry.get("balance", 0.0),
-                context_id=entry.get("context_id", None),
-                context_id_type=entry.get("context_id_type", None),
-                date=entry.get("date"),
-                description=entry.get("description", None),
-                reason=entry.get("reason", None),
-                ref_type=entry.get("ref_type", None),
-                tax=entry.get("tax", 0.0),
-                tax_receiver_id=entry.get("tax_receiver_id", None),
-                tax_receiver_name=entry.get("tax_receiver_name", None),
-                first_party_id=entry.get("first_party_id", None),
-                first_party_name=entry.get("first_party_name", None),
-                second_party_id=entry.get("second_party_id", None),
-                second_party_name=entry.get("second_party_name", None)
-            )
-            new_entries.append(new_entry)
-        
-        if new_entries:
-            self.db_app.session.bulk_save_objects(new_entries)
+        if self.wallet_journal:
+            self.db_app.session.bulk_save_objects(self.wallet_journal)
             self.db_app.session.commit()
-            logging.debug(f"Bulk wallet journal entries saved ({len(new_entries)}) for {self.character_name}.")
+            logging.debug(f"Bulk wallet journal entries saved ({len(self.wallet_journal)}) for {self.character_name}.")
         else:
             logging.debug(f"No new wallet journal entries to save for {self.character_name}.")
 
@@ -242,97 +176,41 @@ class Character:
             logging.debug(f"No wallet transactions to save for {self.character_name}.")
             return
 
-        new_transaction_entries = []
-        for entry in transactions:
-            entry_transaction_id = entry.get("transaction_id")
-            if entry_transaction_id is None:
-                continue  # Skip entries without an ID
-
-            existing_entry = (
-                self.db_app.session.query(CharacterWalletTransactionsModel)
-                .filter_by(character_id=self.character_id, transaction_id=entry_transaction_id)
-                .first()
-            )
-            if existing_entry:
-                continue  # Skip if already exists
-            new_transaction_entries.append(entry)
-
-        # Step 1: Collect unique client IDs
-        client_ids = set()
-        for entry in new_transaction_entries:
-            cid = entry.get("client_id")
-            if cid:
-                client_ids.add(cid)
-
-        # Step 2: Lookup names for each unique ID
-        client_names = {}
-        for cid in client_ids:
-            name = None
-            id_type = self.esi_client.get_id_type(cid)
-            if id_type == "character":
-                data = self.esi_client.esi_get(f"/characters/{cid}/")
-                if data and "name" in data:
-                    name = data["name"]
-            elif id_type == "alliance":
-                data = self.esi_client.esi_get(f"/alliances/{cid}/")
-                if data and "name" in data:
-                    name = data["name"]
-            elif id_type == "corporation":
-                data = self.esi_client.esi_get(f"/corporations/{cid}/")
-                if data and "name" in data:
-                    name = data["name"]
-            elif id_type == "npc_corporation":
-                npc_corp = self.db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
-                name = npc_corp.nameID[self.db_sde.language] if npc_corp else None
-            else:
-                continue  # Unknown type, skip
-
-            client_names[cid] = name
-
-        # Step 3: Assign names to transaction entries
-        new_entries = []
-        for entry in new_transaction_entries:
-            cid = entry.get("client_id")
-            entry["client_name"] = client_names.get(cid)
-
-            type_id = entry.get("type_id")
-            type = self.db_sde.session.query(Types).filter_by(id=type_id).first()
-            entry["type_name"] = type.name[self.db_sde.language] if type else None
-            group = self.db_sde.session.query(Groups).filter_by(id=type.groupID).first() if type else None
-            entry["type_group_id"] = group.id if group else None
-            entry["type_group_name"] = group.name[self.db_sde.language] if group else None
-            category = self.db_sde.session.query(Categories).filter_by(id=group.categoryID).first() if group else None
-            entry["type_category_id"] = category.id if category else None
-            entry["type_category_name"] = category.name[self.db_sde.language] if category else None
-
-            new_entry = CharacterWalletTransactionsModel(
-                character_id=self.character_id,
-                transaction_id=entry.get("transaction_id", None),
-                client_id=entry.get("client_id", None),
-                client_name=entry.get("client_name", None),
-                date=entry.get("date"),
-                is_buy=entry.get("is_buy", False),
-                is_personal=entry.get("is_personal", False),
-                journal_ref_id=entry.get("journal_ref_id", None),
-                location_id=entry.get("location_id", None),
-                quantity=entry.get("quantity", 0),
-                type_id=entry.get("type_id", None),
-                type_name=entry.get("type_name", None),
-                type_group_id=entry.get("type_group_id", None),
-                type_group_name=entry.get("type_group_name", None),
-                type_category_id=entry.get("type_category_id", None),
-                type_category_name=entry.get("type_category_name", None),
-                unit_price=entry.get("unit_price", 0.0),
-                total_price=entry.get("unit_price", 0.0)*entry.get("quantity", 1)
-            )
-            new_entries.append(new_entry)
+        self.wallet_transactions = []
+        for transaction in transactions:
+            new_trans = CharacterWalletTransactionsModel(**transaction)
+            self.wallet_transactions.append(new_trans)
         
-        if new_entries:
-            self.db_app.session.bulk_save_objects(new_entries)
+        if self.wallet_transactions:
+            self.db_app.session.bulk_save_objects(self.wallet_transactions)
             self.db_app.session.commit()
-            logging.debug(f"Bulk wallet transactions saved ({len(new_entries)}) for {self.character_name}.")
+            logging.debug(f"Bulk wallet transactions saved ({len(self.wallet_transactions)}) for {self.character_name}.")
         else:
             logging.debug(f"No new wallet transactions to save for {self.character_name}.")
+
+    # -------------------
+    # Save Market Orders
+    # -------------------
+    def save_market_orders(self, order_list: List[Dict[str, Any]]) -> None:
+        """Save market orders to the database."""
+        if not order_list:
+            logging.debug(f"No market orders to save for {self.character_name}.")
+            return
+
+        self.market_orders = []
+        for order in order_list:
+            new_order = CharacterMarketOrdersModel(**order)
+            self.market_orders.append(new_order)
+
+        if self.market_orders:
+            # Delete existing orders for this character and add new ones
+            self.db_app.session.query(CharacterMarketOrdersModel).filter_by(character_id=self.character_id).delete()
+            self.db_app.session.bulk_save_objects(self.market_orders)
+            self.db_app.session.commit()
+        else:
+            logging.debug(f"No new market orders to save for {self.character_name}.")
+
+        logging.debug(f"Market orders saved ({len(self.market_orders)}) for {self.character_name}.")
 
     # -------------------
     # Refresh All
@@ -346,6 +224,7 @@ class Character:
             skills = json.loads(self.refresh_skills(False))
             wallet_journal = json.loads(self.refresh_wallet_journal())
             wallet_transactions = json.loads(self.refresh_wallet_transactions())
+            market_orders = json.loads(self.refresh_market_orders())
 
             # Safe character
             self.save_character()
@@ -357,7 +236,8 @@ class Character:
                 **wallet_balance,
                 **skills,
                 **wallet_journal,
-                **wallet_transactions
+                **wallet_transactions,
+                **market_orders
             }
 
             # Convert to JSON string
@@ -460,14 +340,96 @@ class Character:
     # -------------------
     # Refresh Wallet Journal
     # -------------------
-    def refresh_wallet_journal(self) -> str:
+    def refresh_wallet_journal(self, save_wallet_journal_fl: bool = True) -> str:
         try:
             logging.debug(f"Getting wallet journal for {self.character_name}...")
             journal_entries = self.esi_client.esi_get(f"/characters/{self.character_id}/wallet/journal/")
-            self.save_wallet_journal(journal_entries);
 
-            return json.dumps({'character_name': self.character_name, 'wallet_journal': journal_entries}, indent=4)
-        
+            new_journal_entries = []
+            for entry in journal_entries:
+                entry_wallet_journal_id = entry.get("id")
+                if entry_wallet_journal_id is None:
+                    continue  # Skip entries without an ID
+
+                existing_entry = (
+                    self.db_app.session.query(CharacterWalletJournalModel)
+                    .filter_by(character_id=self.character_id, wallet_journal_id=entry_wallet_journal_id)
+                    .first()
+                )
+                if existing_entry:
+                    continue  # Skip if already exists
+                new_journal_entries.append(entry)
+
+            # Step 1: Collect unique party IDs
+            party_ids = set()
+            for entry in new_journal_entries:
+                for key in ("first_party_id", "second_party_id", "tax_receiver_id"):
+                    pid = entry.get(key)
+                    if pid:
+                        party_ids.add(pid)
+
+            # Step 2: Lookup names for each unique ID
+            party_names = {}
+            for pid in party_ids:
+                name = None
+                id_type = self.esi_client.get_id_type(pid)
+                if id_type == "character":
+                    data = self.esi_client.esi_get(f"/characters/{pid}/")
+                    if data and "name" in data:
+                        name = data["name"]
+                elif id_type == "alliance":
+                    data = self.esi_client.esi_get(f"/alliances/{pid}/")
+                    if data and "name" in data:
+                        name = data["name"]
+                elif id_type == "corporation":
+                    data = self.esi_client.esi_get(f"/corporations/{pid}/")
+                    if data and "name" in data:
+                        name = data["name"]
+                elif id_type == "npc_corporation":
+                    npc_corp = self.db_sde.session.query(NpcCorporations).filter_by(id=pid).first()
+                    name = npc_corp.nameID[self.db_sde.language] if npc_corp else None
+                else:
+                    continue  # Unknown type, skip
+
+                party_names[pid] = name
+
+            # Step 3: Assign names to journal entries
+            new_entries = []
+            for entry in new_journal_entries:
+                for key, name_key in [
+                    ("first_party_id", "first_party_name"),
+                    ("second_party_id", "second_party_name"),
+                    ("tax_receiver_id", "tax_receiver_name"),
+                ]:
+                    pid = entry.get(key)
+                    entry[name_key] = party_names.get(pid)
+
+                new_entry = {
+                    "character_id": self.character_id,
+                    "wallet_journal_id": entry.get("id", None),
+                    "amount": entry.get("amount", 0.0),
+                    "balance": entry.get("balance", 0.0),
+                    "context_id": entry.get("context_id", None),
+                    "context_id_type": entry.get("context_id_type", None),
+                    "date": entry.get("date"),
+                    "description": entry.get("description", None),
+                    "reason": entry.get("reason", None),
+                    "ref_type": entry.get("ref_type", None),
+                    "tax": entry.get("tax", 0.0),
+                    "tax_receiver_id": entry.get("tax_receiver_id", None),
+                    "tax_receiver_name": entry.get("tax_receiver_name", None),
+                    "first_party_id": entry.get("first_party_id", None),
+                    "first_party_name": entry.get("first_party_name", None),
+                    "second_party_id": entry.get("second_party_id", None),
+                    "second_party_name": entry.get("second_party_name", None)
+                }
+                new_entries.append(new_entry)
+
+            if save_wallet_journal_fl:
+                self.save_wallet_journal(new_entries)
+
+            return json.dumps({'character_name': self.character_name, 'wallet_journal_new': new_entries}, indent=4)
+
         except Exception as e:
             logging.error(f"Failed to refresh wallet journal for {self.character_name}. Error: {e}")
             return json.dumps({'character_name': self.character_name, 'error': str(e)}, indent=4)
@@ -475,13 +437,100 @@ class Character:
     # -------------------
     # Refresh Wallet Transactions
     # -------------------
-    def refresh_wallet_transactions(self) -> str:
+    def refresh_wallet_transactions(self, save_wallet_transaction_fl: bool=True) -> str:
         try:
             logging.debug(f"Getting wallet transactions for {self.character_name}...")
             transactions = self.esi_client.esi_get(f"/characters/{self.character_id}/wallet/transactions/")
-            self.save_wallet_transactions(transactions)
 
-            return json.dumps({'character_name': self.character_name, 'wallet_transactions': transactions}, indent=4)
+            new_transaction_entries = []
+            for entry in transactions:
+                entry_transaction_id = entry.get("transaction_id")
+                if entry_transaction_id is None:
+                    continue  # Skip entries without an ID
+
+                existing_entry = (
+                    self.db_app.session.query(CharacterWalletTransactionsModel)
+                    .filter_by(character_id=self.character_id, transaction_id=entry_transaction_id)
+                    .first()
+                )
+                if existing_entry:
+                    continue  # Skip if already exists
+                new_transaction_entries.append(entry)
+
+            # Step 1: Collect unique client IDs
+            client_ids = set()
+            for entry in new_transaction_entries:
+                cid = entry.get("client_id")
+                if cid:
+                    client_ids.add(cid)
+
+            # Step 2: Lookup names for each unique ID
+            client_names = {}
+            for cid in client_ids:
+                name = None
+                id_type = self.esi_client.get_id_type(cid)
+                if id_type == "character":
+                    data = self.esi_client.esi_get(f"/characters/{cid}/")
+                    if data and "name" in data:
+                        name = data["name"]
+                elif id_type == "alliance":
+                    data = self.esi_client.esi_get(f"/alliances/{cid}/")
+                    if data and "name" in data:
+                        name = data["name"]
+                elif id_type == "corporation":
+                    data = self.esi_client.esi_get(f"/corporations/{cid}/")
+                    if data and "name" in data:
+                        name = data["name"]
+                elif id_type == "npc_corporation":
+                    npc_corp = self.db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
+                    name = npc_corp.nameID[self.db_sde.language] if npc_corp else None
+                else:
+                    continue  # Unknown type, skip
+
+                client_names[cid] = name
+
+            # Step 3: Assign names to transaction entries
+            new_entries = []
+            for entry in new_transaction_entries:
+                cid = entry.get("client_id")
+                entry["client_name"] = client_names.get(cid)
+
+                type_id = entry.get("type_id")
+                type = self.db_sde.session.query(Types).filter_by(id=type_id).first()
+                entry["type_name"] = type.name[self.db_sde.language] if type else None
+                group = self.db_sde.session.query(Groups).filter_by(id=type.groupID).first() if type else None
+                entry["type_group_id"] = group.id if group else None
+                entry["type_group_name"] = group.name[self.db_sde.language] if group else None
+                category = self.db_sde.session.query(Categories).filter_by(id=group.categoryID).first() if group else None
+                entry["type_category_id"] = category.id if category else None
+                entry["type_category_name"] = category.name[self.db_sde.language] if category else None
+
+                new_entry = {
+                    "character_id": self.character_id,
+                    "transaction_id": entry.get("transaction_id", None),
+                    "client_id": entry.get("client_id", None),
+                    "client_name": entry.get("client_name", None),
+                    "date": entry.get("date"),
+                    "is_buy": entry.get("is_buy", False),
+                    "is_personal": entry.get("is_personal", False),
+                    "journal_ref_id": entry.get("journal_ref_id", None),
+                    "location_id": entry.get("location_id", None),
+                    "quantity": entry.get("quantity", 0),
+                    "type_id": entry.get("type_id", None),
+                    "type_name": entry.get("type_name", None),
+                    "type_group_id": entry.get("type_group_id", None),
+                    "type_group_name": entry.get("type_group_name", None),
+                    "type_category_id": entry.get("type_category_id", None),
+                    "type_category_name": entry.get("type_category_name", None),
+                    "unit_price": entry.get("unit_price", 0.0),
+                    "total_price": entry.get("unit_price", 0.0) * entry.get("quantity", 1)
+                }
+                new_entries.append(new_entry)
+
+            if save_wallet_transaction_fl:
+                self.save_wallet_transactions(new_entries)
+
+            return json.dumps({'character_name': self.character_name, 'wallet_transactions_new': new_entries}, indent=4)
         
         except Exception as e:
             logging.error(f"Failed to refresh wallet transactions for {self.character_name}. Error: {e}")
@@ -490,10 +539,10 @@ class Character:
     # -------------------
     # Skillpoints
     # -------------------
-    def extract_reprocessing_skills(self):
+    def extract_reprocessing_skills(self) -> str:
         """Extract reprocessing-related skills and levels from self.skills."""
         if not self.skills or "skills" not in self.skills:
-            return {}
+            self.refresh_skills()
 
         try:
             logging.debug(f"Extracting reprocessing skills for {self.character_name}...")
@@ -620,4 +669,50 @@ class Character:
         
         except Exception as e:
             logging.error(f"Failed to refresh skills for {self.character_name}. Error: {e}")
+            return json.dumps({'character_name': self.character_name, 'error': str(e)}, indent=4)
+    
+    # -------------------
+    # Market Orders
+    # -------------------
+    def refresh_market_orders(self, safe_market_orders_fl=True) -> str:
+        try:
+            logging.debug(f"Getting market orders for {self.character_name}...")
+            order_list = self.esi_client.esi_get(f"/characters/{self.character_id}/orders/")
+
+            orders = []
+            for order in order_list:
+                type = self.db_sde.session.query(Types).filter_by(id=order.get("type_id")).first()
+                type_group = self.db_sde.session.query(Groups).filter_by(id=type.groupID).first() if type else None
+                type_category = self.db_sde.session.query(Categories).filter_by(id=type_group.categoryID).first() if type_group else None
+                new_order = {
+                    "character_id": self.character_id,
+                    "order_id": order.get("order_id", None),
+                    "type_id": order.get("type_id", None),
+                    "type_name": type.name[self.db_sde.language] if type else None,
+                    "type_group_id": type.groupID if type else None,
+                    "type_group_name": type_group.name[self.db_sde.language] if type_group else None,
+                    "type_category_id": type_group.categoryID if type_group else None,
+                    "type_category_name": type_category.name[self.db_sde.language] if type_category else None,
+                    "location_id": order.get("location_id", None),
+                    "region_id": order.get("region_id", None),
+                    "is_corporation": order.get("is_corporation", False),
+                    "price": order.get("price", 0.0),
+                    "is_buy_order": order.get("is_buy_order", False),
+                    "escrow": order.get("escrow", 0.0),
+                    "volume_total": order.get("volume_total", 0),
+                    "volume_remain": order.get("volume_remain", 0),
+                    "duration": order.get("duration", 0),
+                    "issued": order.get("issued", None),
+                    "min_volume": order.get("min_volume", 0),
+                    "range": order.get("range", None)
+                }
+                orders.append(new_order)
+
+            if safe_market_orders_fl == True:
+                self.save_market_orders(orders)
+
+            return json.dumps({'character_name': self.character_name, 'market_orders': orders}, indent=4)
+        
+        except Exception as e:
+            logging.error(f"Failed to refresh market orders for {self.character_name}. Error: {e}")
             return json.dumps({'character_name': self.character_name, 'error': str(e)}, indent=4)

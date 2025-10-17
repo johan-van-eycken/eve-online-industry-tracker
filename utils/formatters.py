@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dateutil import parser
 from typing import Optional
 
@@ -13,6 +13,16 @@ def format_isk(value: Optional[float]) -> str:
         return "ISK {:,.2f}".format(value).replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return "N/A"
+
+def format_isk_short(value):
+    if value >= 1_000_000_000:
+        return f"{value/1_000_000_000:.2f}b"
+    elif value >= 1_000_000:
+        return f"{value/1_000_000:.2f}m"
+    elif value >= 1_000:
+        return f"{value/1_000:.2f}k"
+    else:
+        return f"{value:.2f}"
 
 def format_date_into_age(iso_date: Optional[str]) -> str:
     """Convert ISO8601 (%Y-%m-%dT%H:%M:%SZ) date into Age in years, months, days."""
@@ -91,3 +101,16 @@ def parse_datetime(dt_str):
     if dt_str is None:
         return None
     return parser.isoparse(dt_str)
+
+def format_expires_in(row, now):
+    # Calculate expiration datetime
+    issued = row["Issued"]
+    duration_minutes = int(row["duration"] * 1440)
+    expires_at = issued + timedelta(minutes=duration_minutes)
+    remaining = expires_at - now
+    if remaining.total_seconds() < 0:
+        return "Expired"
+    days = remaining.days
+    hours, rem = divmod(remaining.seconds, 3600)
+    minutes = rem // 60
+    return f"{days}d {hours}h {minutes}m"

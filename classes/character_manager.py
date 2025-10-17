@@ -134,6 +134,10 @@ class CharacterManager():
                 return char
         return None 
 
+    def get_all_characters(self) -> List[Character]:
+        """Get all characters."""
+        return self.character_list
+
     def refresh_all(self, character_name: Optional[str] = None) -> List[str]:
         """ 
         Refresh all character data for one or all characters.
@@ -234,4 +238,18 @@ class CharacterManager():
         
         # Refresh wallet transactions for all characters
         result = [char.refresh_wallet_transactions() for char in self.character_list]
+        return result
+    
+    def refresh_market_orders(self, character_name: Optional[str] = None) -> List[str]:
+        if character_name:
+            # Refresh market orders for a single character
+            result = [
+                char.refresh_market_orders()
+                for char in self.character_list
+                if char.character_name == character_name
+            ]
+            return result
+        
+        # Refresh market orders for all characters
+        result = [char.refresh_market_orders() for char in self.character_list]
         return result

@@ -1,19 +1,13 @@
 import streamlit as st
-import requests
 import pandas as pd
-import os
-
-FLASK_HOST = os.getenv("FLASK_HOST", "localhost")
-FLASK_PORT = os.getenv("FLASK_PORT", "5000")
-API_BASE = f"http://{FLASK_HOST}:{FLASK_PORT}"
+from utils.flask_api import api_get, api_post
 
 #-- Cached API calls --
 @st.cache_data(ttl=3600)
 def get_all_materials():
     try:
-        r = requests.get(f"{API_BASE}/materials")
-        r.raise_for_status()
-        return [m["name"] for m in r.json().get("materials", [])]
+        r = api_get("/materials")
+        return [m["name"] for m in r.get("materials", [])]
     except Exception as e:
         st.error(f"Error fetching materials: {e}")
         return []
@@ -21,21 +15,6 @@ def get_all_materials():
 @st.cache_data(ttl=3600)
 def get_all_facilities():
     return api_get("/facilities") or []
-
-#-- API Helpers --
-def api_post(path, payload):
-    r = requests.post(f"{API_BASE}{path}", json=payload)
-    if r.status_code != 200:
-        st.error(f"{path} failed: {r.text}")
-        return None
-    return r.json()
-
-def api_get(path):
-    r = requests.get(f"{API_BASE}{path}")
-    if r.status_code != 200:
-        st.error(f"{path} failed: {r.text}")
-        return None
-    return r.json()
 
 #-- Main Render Function --
 def render(char_manager_all):

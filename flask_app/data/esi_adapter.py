@@ -6,9 +6,11 @@ _region_id = None
 _station_id = None
 
 # Cache structures
-_TYPE_ORDERS_CACHE = {}          # { type_id: (timestamp, [orders]) }
-_TYPE_ORDERS_CACHE_TTL = 120     # seconds
-_RATE_LIMIT_SLEEP = 0.2          # polite delay between page fetches
+_TYPE_SELLORDERS_CACHE = {}          # { type_id: (timestamp, [orders]) }
+_TYPE_SELLORDERS_CACHE_TTL = 300     # seconds (5 minutes)
+_TYPE_BUYORDERS_CACHE = {}           # { type_id: (timestamp, [orders]) }
+_TYPE_BUYORDERS_CACHE_TTL = 300      # seconds (5 minutes)
+_RATE_LIMIT_SLEEP = 0.2              # polite delay between page fetches
 
 # Default The Forge: Jita IV - Moon 4 - Caldari Navy Assembly Plant
 def esi_adapter(character, region_id=10000002, station_id=60003760):
@@ -25,7 +27,7 @@ def _ensure():
     if not _station_id:
         raise RuntimeError("Station ID not set.")
 
-def _fetch_region_sell_orders(type_ids):
+def _fetch_region_sell_orders(type_ids, region_id=_region_id):
     """
     Fetch sell orders for the given type_ids (list of ints) in the configured region,
     filtered to the configured station. Aggregates paginated results per type_id.
@@ -44,8 +46,8 @@ def _fetch_region_sell_orders(type_ids):
             raise ValueError(f"Invalid type_id: {type_id}")
 
         # Cache hit?
-        cached = _TYPE_ORDERS_CACHE.get(type_id)
-        if cached and (now - cached[0] < _TYPE_ORDERS_CACHE_TTL):
+        cached = _TYPE_SELLORDERS_CACHE.get(type_id)
+        if cached and (now - cached[0] < _TYPE_SELLORDERS_CACHE_TTL):
             all_orders.extend(cached[1])
             continue
 
@@ -57,7 +59,7 @@ def _fetch_region_sell_orders(type_ids):
                 # Expect esi_get to optionally return (data, headers) if return_headers=True is supported.
                 # Fallback: if only list returned, assume single page.
                 result = _esi_client.esi_get(
-                    f"/markets/{_region_id}/orders",
+                    f"/markets/{region_id}/orders",
                     params={"order_type": "sell", "type_id": type_id, "page": page},
                     return_headers=True
                 )
@@ -73,10 +75,9 @@ def _fetch_region_sell_orders(type_ids):
             if not isinstance(data, list):
                 break
 
-            # Filter: same station & sell orders only (is_buy_order == False)
+            # Filter: sell orders only (is_buy_order == False)
             for order in data:
-                if (order.get("is_buy_order") is False and
-                        order.get("location_id") == _station_id):
+                if (order.get("is_buy_order") is False):
                     collected.append(order)
 
             total_pages = int(headers.get("X-Pages", "1"))
@@ -86,12 +87,77 @@ def _fetch_region_sell_orders(type_ids):
             time.sleep(_RATE_LIMIT_SLEEP)  # polite pacing
 
         # Store in cache
-        _TYPE_ORDERS_CACHE[type_id] = (now, collected)
+        _TYPE_SELLORDERS_CACHE[type_id] = (now, collected)
         all_orders.extend(collected)
 
     return all_orders
 
-def get_order_book(type_ids):
+def _fetch_region_buy_orders(type_ids, region_id=_region_id):
+    """
+    Fetch buy orders for the given type_ids (list of ints) in the configured region,
+    filtered to the configured station. Aggregates paginated results per type_id.
+    Uses a simple per-type cache to reduce ESI calls.
+    Returns: list of order dicts (already filtered to station & buy side).
+    """
+    _ensure()
+    if not type_ids:
+        return []
+
+    now = time.time()
+    all_orders = []
+
+    for type_id in type_ids:
+        if not isinstance(type_id, int) or type_id <= 0:
+            raise ValueError(f"Invalid type_id: {type_id}")
+
+        # Cache hit?
+        cached = _TYPE_BUYORDERS_CACHE.get(type_id)
+        if cached and (now - cached[0] < _TYPE_BUYORDERS_CACHE_TTL):
+            all_orders.extend(cached[1])
+            continue
+
+        # Fetch all pages for this type_id
+        page = 1
+        collected = []
+        while True:
+            try:
+                # Expect esi_get to optionally return (data, headers) if return_headers=True is supported.
+                # Fallback: if only list returned, assume single page.
+                result = _esi_client.esi_get(
+                    f"/markets/{region_id}/orders",
+                    params={"order_type": "buy", "type_id": type_id, "page": page},
+                    return_headers=True
+                )
+            except TypeError:
+                # Client does not support return_headers -> single page only
+                result = (_esi_client.esi_get(
+                    f"/markets/{_region_id}/orders?order_type=buy&type_id={type_id}&page={page}"
+                ), {"X-Pages": "1"})
+            except Exception as e:
+                raise RuntimeError(f"ESI request failed (type_id={type_id}, page={page}): {e}")
+
+            data, headers = result
+            if not isinstance(data, list):
+                break
+
+            # Filter: buy orders only (is_buy_order == True)
+            for order in data:
+                if (order.get("is_buy_order") is True):
+                    collected.append(order)
+
+            total_pages = int(headers.get("X-Pages", "1"))
+            if page >= total_pages:
+                break
+            page += 1
+            time.sleep(_RATE_LIMIT_SLEEP)  # polite pacing
+
+        # Store in cache
+        _TYPE_BUYORDERS_CACHE[type_id] = (now, collected)
+        all_orders.extend(collected)
+
+    return all_orders
+
+def get_sell_order_book(type_ids, region_id=_region_id):
     """
     Returns: { type_id: [ {price, volume_remain, min_volume, order_id}, ... ] } sorted by ascending price.
     """
@@ -99,7 +165,35 @@ def get_order_book(type_ids):
     if not type_ids:
         return {}
 
-    orders = _fetch_region_sell_orders(type_ids)
+    orders = _fetch_region_sell_orders(type_ids, region_id)
+    book = defaultdict(list)
+    target = set(type_ids)
+
+    for order in orders:
+        tid = order.get("type_id")
+        if tid not in target:
+            continue
+        book[tid].append({
+            "price": order.get("price"),
+            "volume_remain": order.get("volume_remain", 0),
+            "min_volume": order.get("min_volume", 1),
+            "order_id": order.get("order_id")
+        })
+
+    # Sort each list by price
+    for tid in book:
+        book[tid].sort(key=lambda r: r["price"])
+    return dict(book)
+
+def get_buy_order_book(type_ids, region_id=_region_id):
+    """
+    Returns: { type_id: [ {price, volume_remain, min_volume, order_id}, ... ] } sorted by ascending price.
+    """
+    _ensure()
+    if not type_ids:
+        return {}
+
+    orders = _fetch_region_buy_orders(type_ids, region_id)
     book = defaultdict(list)
     target = set(type_ids)
 
@@ -122,9 +216,33 @@ def get_order_book(type_ids):
 def get_ore_prices(ore_ids):
     if not isinstance(ore_ids, list) or not ore_ids:
         return {}
-    return get_order_book(ore_ids)
+    return get_sell_order_book(ore_ids)
 
 def get_material_prices(material_ids):
     if not isinstance(material_ids, list) or not material_ids:
         return {}
-    return get_order_book(material_ids)
+    return get_sell_order_book(material_ids)
+
+def get_type_sellprices(type_ids, region_id=_region_id):
+    if not isinstance(type_ids, list) or not type_ids:
+        return {}
+    return get_sell_order_book(type_ids, region_id)
+
+def get_type_buyprices(type_ids, region_id=_region_id):
+    if not isinstance(type_ids, list) or not type_ids:
+        return {}
+    return get_buy_order_book(type_ids, region_id)
+
+def get_region_info(region_id: int):
+    """
+    Returns metadata about the given region_id.
+    """
+    if not region_id or not isinstance(region_id, int):
+        return {}
+    
+    _ensure()
+    try:
+        region = _esi_client.esi_get(f"/universe/regions/{region_id}/")
+        return region
+    except Exception as e:
+        raise RuntimeError(f"ESI request failed for region {region_id}: {e}")

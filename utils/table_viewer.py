@@ -1,6 +1,4 @@
 import streamlit as st
-import glob
-import os
 import pandas as pd
 
 from classes.database_manager import DatabaseManager

@@ -61,6 +61,25 @@ class CorporationManager:
                 return corp
         return None
 
+    def get_corporation_name_by_character_id(self, character_id: int) -> Optional[str]:
+        """
+        Retrieve the corporation name for a given character_id.
+        Returns None if not found.
+        """
+        # Find the character object
+        character = next(
+            (char for char in self.char_manager_all.character_list if char.character_id == character_id),
+            None
+        )
+        if not character or character.corporation_id is None:
+            return None
+
+        # Find the corporation object
+        corp = self.get_corporation(character.corporation_id)
+        if corp and corp.corporation_name:
+            return corp.corporation_name
+        return None
+
     def refresh_all_corporations(self, corporation_data_fl: bool = True, members_fl: bool = True, structures_fl: bool = True) -> None:
         """Refresh data for all corporations managed by this CorporationManager."""
         try:
