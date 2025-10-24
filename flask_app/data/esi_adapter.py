@@ -28,12 +28,6 @@ def _ensure():
         raise RuntimeError("Station ID not set.")
 
 def _fetch_region_sell_orders(type_ids, region_id=_region_id):
-    """
-    Fetch sell orders for the given type_ids (list of ints) in the configured region,
-    filtered to the configured station. Aggregates paginated results per type_id.
-    Uses a simple per-type cache to reduce ESI calls.
-    Returns: list of order dicts (already filtered to station & sell side).
-    """
     _ensure()
     if not type_ids:
         return []
@@ -51,40 +45,18 @@ def _fetch_region_sell_orders(type_ids, region_id=_region_id):
             all_orders.extend(cached[1])
             continue
 
-        # Fetch all pages for this type_id
-        page = 1
-        collected = []
-        while True:
-            try:
-                # Expect esi_get to optionally return (data, headers) if return_headers=True is supported.
-                # Fallback: if only list returned, assume single page.
-                result = _esi_client.esi_get(
-                    f"/markets/{region_id}/orders",
-                    params={"order_type": "sell", "type_id": type_id, "page": page},
-                    return_headers=True
-                )
-            except TypeError:
-                # Client does not support return_headers -> single page only
-                result = (_esi_client.esi_get(
-                    f"/markets/{_region_id}/orders?order_type=sell&type_id={type_id}&page={page}"
-                ), {"X-Pages": "1"})
-            except Exception as e:
-                raise RuntimeError(f"ESI request failed (type_id={type_id}, page={page}): {e}")
+        # Fetch all pages for this type_id using built-in pagination
+        try:
+            data = _esi_client.esi_get(
+                f"/markets/{region_id}/orders",
+                params={"order_type": "sell", "type_id": type_id},
+                paginate=True
+            )
+        except Exception as e:
+            raise RuntimeError(f"ESI request failed (type_id={type_id}): {e}")
 
-            data, headers = result
-            if not isinstance(data, list):
-                break
-
-            # Filter: sell orders only (is_buy_order == False)
-            for order in data:
-                if (order.get("is_buy_order") is False):
-                    collected.append(order)
-
-            total_pages = int(headers.get("X-Pages", "1"))
-            if page >= total_pages:
-                break
-            page += 1
-            time.sleep(_RATE_LIMIT_SLEEP)  # polite pacing
+        # Filter: sell orders only (is_buy_order == False)
+        collected = [order for order in data if order.get("is_buy_order") is False]
 
         # Store in cache
         _TYPE_SELLORDERS_CACHE[type_id] = (now, collected)
@@ -93,12 +65,6 @@ def _fetch_region_sell_orders(type_ids, region_id=_region_id):
     return all_orders
 
 def _fetch_region_buy_orders(type_ids, region_id=_region_id):
-    """
-    Fetch buy orders for the given type_ids (list of ints) in the configured region,
-    filtered to the configured station. Aggregates paginated results per type_id.
-    Uses a simple per-type cache to reduce ESI calls.
-    Returns: list of order dicts (already filtered to station & buy side).
-    """
     _ensure()
     if not type_ids:
         return []
@@ -116,40 +82,18 @@ def _fetch_region_buy_orders(type_ids, region_id=_region_id):
             all_orders.extend(cached[1])
             continue
 
-        # Fetch all pages for this type_id
-        page = 1
-        collected = []
-        while True:
-            try:
-                # Expect esi_get to optionally return (data, headers) if return_headers=True is supported.
-                # Fallback: if only list returned, assume single page.
-                result = _esi_client.esi_get(
-                    f"/markets/{region_id}/orders",
-                    params={"order_type": "buy", "type_id": type_id, "page": page},
-                    return_headers=True
-                )
-            except TypeError:
-                # Client does not support return_headers -> single page only
-                result = (_esi_client.esi_get(
-                    f"/markets/{_region_id}/orders?order_type=buy&type_id={type_id}&page={page}"
-                ), {"X-Pages": "1"})
-            except Exception as e:
-                raise RuntimeError(f"ESI request failed (type_id={type_id}, page={page}): {e}")
+        # Fetch all pages for this type_id using built-in pagination
+        try:
+            data = _esi_client.esi_get(
+                f"/markets/{region_id}/orders",
+                params={"order_type": "buy", "type_id": type_id},
+                paginate=True
+            )
+        except Exception as e:
+            raise RuntimeError(f"ESI request failed (type_id={type_id}): {e}")
 
-            data, headers = result
-            if not isinstance(data, list):
-                break
-
-            # Filter: buy orders only (is_buy_order == True)
-            for order in data:
-                if (order.get("is_buy_order") is True):
-                    collected.append(order)
-
-            total_pages = int(headers.get("X-Pages", "1"))
-            if page >= total_pages:
-                break
-            page += 1
-            time.sleep(_RATE_LIMIT_SLEEP)  # polite pacing
+        # Filter: sell orders only (is_buy_order == False)
+        collected = [order for order in data if order.get("is_buy_order") is True]
 
         # Store in cache
         _TYPE_BUYORDERS_CACHE[type_id] = (now, collected)

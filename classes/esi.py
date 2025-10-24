@@ -250,17 +250,11 @@ class ESIClient:
     # ------------------------------
     # ESI API Calls (with Caching)
     # -----------------------------
-    def esi_get(self, endpoint: str, params: dict | None = None, use_cache: bool = True) -> Any:
+    def esi_get(self, endpoint: str, params: dict | None = None, use_cache: bool = True, paginate: bool = False, return_headers: bool = False) -> Any:
         """
         Issue a GET request to the ESI API with optional query params and caching.
-
-        Args:
-            endpoint (str): ESI path starting with '/' (e.g. '/markets/10000002/orders/')
-            params (dict|None): Query parameters (e.g. {"order_type":"sell","type_id":34})
-            use_cache (bool): Whether to use (and store) cached data keyed by endpoint+params.
-
-        Returns:
-            Parsed JSON response or cached data.
+        If paginate=True, will fetch all pages and return a combined list.
+        If return_headers=True, returns (data, headers) for the last page.
         """
         if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
             self.refresh_access_token()
@@ -268,7 +262,6 @@ class ESIClient:
         # Build URL + cache key
         query = ""
         if params:
-            # Sort params for deterministic cache key
             query = "?" + urlencode(sorted(params.items()), doseq=True)
         cache_key = f"{endpoint}{query}"
 
@@ -292,6 +285,52 @@ class ESIClient:
         retries = 0
         url = f"{self.esi_base_uri}{endpoint}{query}"
 
+        # Pagination logic
+        if paginate:
+            all_data = []
+            page = 1
+            last_headers = {}
+            while True:
+                paged_params = dict(params) if params else {}
+                paged_params["page"] = page
+                paged_query = "?" + urlencode(sorted(paged_params.items()), doseq=True)
+                paged_url = f"{self.esi_base_uri}{endpoint}{paged_query}"
+                try:
+                    response = requests.get(paged_url, headers=headers, timeout=15)
+                    if response.status_code == 200:
+                        etag = response.headers.get("ETag")
+                        data_json = response.json()
+                        all_data.extend(data_json if isinstance(data_json, list) else [data_json])
+                        last_headers = response.headers
+                        total_pages = int(response.headers.get("X-Pages", "1"))
+                        if page >= total_pages:
+                            break
+                        page += 1
+                        time.sleep(0.2)  # polite pacing
+                    elif response.status_code == 304:
+                        return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                    elif response.status_code == 404:
+                        logging.warning(f"ESI 404: {paged_url}")
+                        return None
+                    elif response.status_code in (420, 429, 500, 502, 503, 504):
+                        wait = (2 ** retries) + random.uniform(0, 1)
+                        logging.warning(f"ESI {response.status_code} on {paged_url}, retrying in {wait:.1f}s...")
+                        time.sleep(wait)
+                        retries += 1
+                        continue
+                    else:
+                        response.raise_for_status()
+                except requests.RequestException as e:
+                    logging.error(f"ESI request error {paged_url}: {e}")
+                    retries += 1
+                    time.sleep(2 ** retries)
+                    if retries >= 3:
+                        raise RuntimeError(f"ESI GET failed after retries: {paged_url}")
+            if return_headers:
+                return all_data, last_headers
+            return all_data
+
+        # Non-paginated (original logic)
         while retries < 3:
             try:
                 response = requests.get(url, headers=headers, timeout=15)
@@ -299,6 +338,8 @@ class ESIClient:
                     etag = response.headers.get("ETag")
                     data_json = response.json()
                     self.save_to_cache(cache_key, etag, data_json)
+                    if return_headers:
+                        return data_json, response.headers
                     return data_json
                 elif response.status_code == 304:
                     return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
