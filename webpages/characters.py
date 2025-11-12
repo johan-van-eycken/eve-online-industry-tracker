@@ -1,24 +1,20 @@
 import streamlit as st
 import pandas as pd
-import requests
 import json
-import os
-from classes.database_manager import DatabaseManager
-from utils.formatters import format_isk, format_date, format_date_into_age
+import requests
 
-# Read environment variables for Flask host and port
-FLASK_HOST = os.getenv("FLASK_HOST", "localhost")
-FLASK_PORT = os.getenv("FLASK_PORT", "5000")
-FLASK_API_URL = f"http://{FLASK_HOST}:{FLASK_PORT}"
+from utils.app_init import load_config, init_db_app
+from utils.flask_api import api_get
+from utils.formatters import format_isk, format_date, format_date_into_age
 
 # Function to refresh wallet balances
 def refresh_wallet_balances():
     """
-    Function to send a POST request to the Flask backend to refresh wallet balances.
+    Function to send a GET request to the Flask backend to refresh wallet balances.
     """
     try:
-        response = requests.post(f"{FLASK_API_URL}/refresh_wallet_balances", json={})
-        if response.status_code == 200:
+        response = api_get("/refresh_wallet_balances")
+        if response.get("status") == "success":
             st.markdown(
                 """
                 <div class="success-msg">Wallet balances refreshed successfully!</div>
@@ -39,14 +35,14 @@ def refresh_wallet_balances():
                 """,
                 unsafe_allow_html=True
             )
-            return response.json()["data"]
+            return response["data"]
         else:
-            st.error(f"Failed to refresh wallet balances: {response.json().get('message', 'Unknown error')}")
+            st.error(f"Failed to refresh wallet balances: {response.get('message', 'Unknown error')}")
     except Exception as e:
         st.error(f"Error connecting to backend: {e}")
 
 
-def render(cfg):
+def render():
     # -- Custom Style --
     st.markdown("""
         <style>
@@ -104,7 +100,13 @@ def render(cfg):
         """, unsafe_allow_html=True)
 
     st.subheader("Characters")
-    db = DatabaseManager(cfg["app"]["database_app_uri"])
+
+    try:
+        cfgManager = load_config()
+        db = init_db_app(cfgManager)
+    except Exception as e:
+        st.error(f"Failed to load database: {e}")
+        st.stop()
 
     try:
         df = db.load_df("characters")
@@ -207,7 +209,7 @@ def render(cfg):
         return
 
     # Tabs for Character Details
-    tab_skills, journal_tab, transactions_tab = st.tabs(["Skills", "Wallet Journal", "Wallet Transactions"])
+    tab_skills, journal_tab, transactions_tab, assets_tab = st.tabs(["Skills", "Wallet Journal", "Wallet Transactions", "Assets"])
 
     # --- CHARACTER SKILLS TAB ---
     with tab_skills:
@@ -318,7 +320,7 @@ def render(cfg):
 
             skill_queue = skills_data.get("skill_queue", [])
             skill_queue = sorted(skill_queue, key=lambda q: q.get("queue_position", 0))
-            # skill_queue = json.loads(char_row["skill_queue"])
+            
             if not skill_queue:
                 st.info("Skill queue is empty.")
             else:
@@ -410,3 +412,192 @@ def render(cfg):
 
         # Display wallet transaction entries
         st.dataframe(transactions_df.sort_values(by="date", ascending=False), use_container_width=True)
+    
+    # --- CHARACTER ASSETS TAB ---
+    with assets_tab:
+        st.subheader("Assets")
+
+        # Button to refresh wallet balances
+        if st.button("Refresh Assets"):
+            refreshed_data = api_get("/refresh_assets")
+            if refreshed_data:
+                st.success("Assets refreshed successfully.")
+            else:
+                st.error("Failed to refresh assets.")
+
+        # Load and filter character assets
+        try:
+            assets_df = db.load_df("character_assets")
+            assets_df = assets_df[assets_df["character_id"] == selected_id]
+        except Exception:
+            st.warning("No character assets data available.")
+            st.stop()
+        
+        # Display character assets
+        # st.dataframe(assets_df.sort_values(by="type_name"), use_container_width=True)
+
+        # Mark containers and ships
+        assets_df["is_container"] = (assets_df["type_id"] == 17366) & (assets_df["is_singleton"] == True)
+        assets_df["is_ship"] = (assets_df["type_category_id"] == 6) & (assets_df["is_singleton"] == True)
+
+        # Get unique station IDs where assets are in the Hangar
+        location_ids = assets_df.loc[assets_df["location_flag"] == "Hangar", "location_id"].unique()
+
+        @st.cache_data(ttl=3600)  # Cache for 3600 seconds (1 hour)
+        def get_location_info_cached(loc_id):
+            try:
+                location_info = api_get(f"/location_info/{loc_id}")
+                location_name = str(loc_id)
+                if location_info.get("status") == "success":
+                    if location_info.get("station"):
+                        location_name = location_info["station"].get("station_name")
+                    elif location_info.get("structure"):
+                        location_name = location_info["structure"].get("name")
+                    elif location_info.get("region"):
+                        location_name = location_info["region"].get("name")
+                return location_name
+            except Exception:
+                return str(loc_id)
+
+        # For each location, fetch and assign its name using the API
+        for loc_id in location_ids:
+            location_name = get_location_info_cached(loc_id)
+            assets_df.loc[assets_df["location_id"] == loc_id, "location_name"] = location_name
+
+        # Build a mapping of location_id to location_name for dropdown display
+        location_names = {
+            location_id: assets_df[assets_df["location_id"] == location_id]["location_name"].iloc[0]
+            if "location_name" in assets_df.columns else str(location_id)
+            for location_id in location_ids
+        }
+
+        # Sort location_ids by their names alphabetically
+        sorted_location_ids = sorted(location_names.keys(), key=lambda x: location_names[x].lower())
+
+        # Dropdown to select location (sorted)
+        selected_location_id = st.selectbox(
+            "Select a Location:",
+            options=sorted_location_ids,
+            format_func=lambda x: location_names[x]
+        )
+
+        st.divider()
+
+        def make_arrow_compatible(df):
+            for col in df.select_dtypes(include=["object"]).columns:
+                df[col] = df[col].astype(str)
+            return df
+
+        def add_item_images(df):
+            df = df.copy()
+            # Determine image variation for each row
+            def get_variation(row):
+                if "type_category_name" in row and row["type_category_name"] == "Blueprint":
+                    if "is_blueprint_copy" in row and row["is_blueprint_copy"]:
+                        return "bpc"
+                    else:
+                        return "bp"
+                elif "type_category_name" in row and row["type_category_name"] == "Permanent SKIN":
+                    return "skins"
+                else:
+                    return "icon"
+            
+            df["image_variation"] = df.apply(get_variation, axis=1)
+            df["image_url"] = df.apply(
+                lambda row: f'https://images.evetech.net/types/{row["type_id"]}/{row["image_variation"]}?size=32',
+                axis=1
+            )
+            return df
+
+        if selected_location_id:
+            # Show containers as expanders
+            containers = assets_df[
+                (assets_df["location_id"] == selected_location_id) &
+                (assets_df["is_container"])
+            ].sort_values(by="container_name")
+            
+            st.markdown("**Containers:**")
+            if containers.empty:
+                with st.expander("No containers found at this location."):
+                    st.info("No containers found at this location.")
+            else:
+                for _, container in containers.iterrows():
+                    items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
+                    # calculate total average price
+                    total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
+                    
+                    label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
+                    with st.expander(label):
+                        # Calculate used and max capacity
+                        used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
+                        max_capacity = container.get("type_capacity", None)
+                        if max_capacity and max_capacity > 0:
+                            percent_full = min(used_volume / max_capacity, 1.0)
+                            st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
+                        else:
+                            st.info("No capacity information available for this container.")
+
+                        if not items_in_container.empty:
+                            df = add_item_images(items_in_container)
+                            df["total_volume"] = df["type_volume"] * df["quantity"]
+                            df["total_average_price"] = df["type_average_price"] * df["quantity"]
+                            display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
+                            df_display = df[display_columns].sort_values(by="type_name")
+                            column_config = {
+                                "image_url": st.column_config.ImageColumn("", width="auto"),
+                                "type_name": st.column_config.TextColumn("Name", width="auto"),
+                                "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
+                                "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
+                                "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                                "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
+                                "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
+                                "type_group_name": st.column_config.TextColumn("Group", width="auto"),
+                                "type_category_name": st.column_config.TextColumn("Category", width="auto"),
+                            }
+                            st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                        else:
+                            st.info("No items in this container.")
+
+            st.divider()
+
+            # Show hangar items
+            hangar_items = assets_df[
+                (assets_df["location_id"] == selected_location_id) &
+                ~(assets_df["is_container"] | assets_df["is_ship"])
+            ]
+            if hangar_items.empty:
+                st.markdown("**Hangar Items:**")
+                st.info("No hangar items found at this location.")
+            else:
+                total_average_price = (hangar_items["type_average_price"] * hangar_items["quantity"]).sum()
+                st.markdown(f"**Hangar Items:** (Items: {hangar_items['type_name'].nunique()} - Total Volume: {hangar_items['type_volume'].dot(hangar_items['quantity']):,.2f} m³ - Total Value: {total_average_price:,.2f} ISK)")
+                df = add_item_images(hangar_items)
+                df["total_volume"] = df["type_volume"] * df["quantity"]
+                df["total_average_price"] = df["type_average_price"] * df["quantity"]
+                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume","type_average_price","total_average_price","type_group_name","type_category_name"]
+                df_display = df[display_columns].sort_values(by="type_name")
+                column_config = {
+                    "image_url": st.column_config.ImageColumn("", width="auto"),
+                    "type_name": st.column_config.TextColumn("Name", width="auto"),
+                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
+                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
+                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
+                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
+                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
+                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
+                }
+                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+            st.divider()
+            
+            # Show ships at this location
+            ships = assets_df[
+                (assets_df["location_id"] == selected_location_id) &
+                (assets_df["is_ship"])
+            ].sort_values(by="ship_name")
+            st.markdown("**Ships:**")
+            if ships.empty:
+                with st.expander("No ships found at this location."):
+                    st.info("No ships found at this location.")
+            else:
+                st.dataframe(make_arrow_compatible(ships.sort_values(by="type_name")), use_container_width=True)

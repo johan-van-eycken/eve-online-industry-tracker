@@ -3,6 +3,7 @@
   "SDE_URL": "https://eve-static-data-export.s3-eu-west-1.amazonaws.com/tranquility/sde.zip",
   "DEFAULT_DB_URI": "sqlite:///database/eve_sde.db",
   "DEFAULT_TMP_DIR": "database/data/tmp_sde",
+  "REPACKAGED_JSON_PATH": "database/data/static_data/repackaged_volumes.json",
   "TABLES_TO_IMPORT": [
     "agents",
     "bloodlines",

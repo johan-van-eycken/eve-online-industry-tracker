@@ -1,34 +1,40 @@
+import logging
 import time
 from collections import defaultdict
 
-_esi_client = None
-_region_id = None
-_station_id = None
+logging.basicConfig(level=logging.INFO)
 
+_esi_client = None
+_region_id = 10000002
+_station_id = 60003760
+
+# Default The Forge: Jita IV - Moon 4 - Caldari Navy Assembly Plant
 # Cache structures
 _TYPE_SELLORDERS_CACHE = {}          # { type_id: (timestamp, [orders]) }
 _TYPE_SELLORDERS_CACHE_TTL = 300     # seconds (5 minutes)
 _TYPE_BUYORDERS_CACHE = {}           # { type_id: (timestamp, [orders]) }
 _TYPE_BUYORDERS_CACHE_TTL = 300      # seconds (5 minutes)
-_RATE_LIMIT_SLEEP = 0.2              # polite delay between page fetches
 
 # Default The Forge: Jita IV - Moon 4 - Caldari Navy Assembly Plant
-def esi_adapter(character, region_id=10000002, station_id=60003760):
+def esi_adapter(character, region_id=_region_id, station_id=_station_id):
     global _esi_client, _station_id, _region_id
     _esi_client = character.esi_client
     _station_id = station_id
     _region_id = region_id
 
 def _ensure():
-    if not _esi_client:
+    if not _esi_client or _esi_client is None:
         raise RuntimeError("ESI client not initialized. Call esi_adapter(character) first.")
-    if not _region_id:
+    if not _region_id or _region_id is None:
         raise RuntimeError("Region ID not set.")
-    if not _station_id:
+    if not _station_id or _station_id is None:
         raise RuntimeError("Station ID not set.")
 
 def _fetch_region_sell_orders(type_ids, region_id=_region_id):
+    logging.info(f"_fetch_region_sell_orders({type_ids}, region_id={region_id})")
     _ensure()
+    logging.info(f"after _ensure(): region_id={region_id}, station_id={_station_id}")
+
     if not type_ids:
         return []
 
@@ -190,3 +196,19 @@ def get_region_info(region_id: int):
         return region
     except Exception as e:
         raise RuntimeError(f"ESI request failed for region {region_id}: {e}")
+
+def get_structure_info(structure_id: int):
+    """
+    Returns metadata about the given structure_id.
+    """
+    if not structure_id or not isinstance(structure_id, int):
+        raise ValueError("structure_id must be a valid integer.")
+    elif _esi_client.get_id_type(structure_id) != "structure":
+        raise ValueError(f"ID {structure_id} is not a structure ID.")
+    
+    _ensure()
+    try:
+        structure = _esi_client.esi_get(f"/universe/structures/{structure_id}/")
+        return structure
+    except Exception as e:
+        raise RuntimeError(f"ESI request failed for structure {structure_id}: {e}")

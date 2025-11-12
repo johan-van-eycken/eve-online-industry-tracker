@@ -1,12 +1,12 @@
 import streamlit as st
-from classes.database_manager import DatabaseManager
-from utils.formatters import format_datetime, format_date_countdown, format_isk
 import pandas as pd
 import json
 
-def render(cfg):
-    st.subheader("Corporations")
-    # Voeg je CSS toe aan de pagina
+from utils.app_init import load_config, init_db_app
+from utils.formatters import format_datetime, format_date_countdown, format_isk
+
+def render():
+    # -- Custom Style --
     st.markdown("""
     <style>
     .tile-member {
@@ -80,7 +80,14 @@ def render(cfg):
     </style>
     """, unsafe_allow_html=True)
 
-    db = DatabaseManager(cfg["app"]["database_app_uri"])
+    st.subheader("Corporations")
+
+    try:
+        cfgManager = load_config()
+        db = init_db_app(cfgManager)
+    except Exception as e:
+        st.error(f"Failed to load database: {e}")
+        st.stop()
 
     try:
         df = db.load_df("corporations")
@@ -245,43 +252,41 @@ def render(cfg):
         try:
             df_struct = db.load_df("corporation_structures")
             df_struct = df_struct[df_struct["corporation_id"] == selected_id]
-            if df_struct.empty:
-                st.info("No structures found for this corporation.")
-            else:
-                cards_per_row = 3
-                for i in range(0, len(df_struct), cards_per_row):
-                    cols = st.columns(cards_per_row)
-                    for j, col in enumerate(cols):
-                        if i + j >= len(df_struct):
-                            break
-                        struct = df_struct.iloc[i + j]
-                        # Structure afbeelding
-                        type_id = struct.get('type_id', '')
-                        type_img_url = f"https://images.evetech.net/types/{type_id}/icon?size=128" if type_id else ""
-                    
-                        with col:
-                            fuel_expires_str = format_datetime(struct.get('fuel_expires'))
-                            st.markdown(
-                                f"""
-                                <div class="tile-structure">
-                                    <div class="tooltip">
-                                        <img src="{type_img_url}" width="128" style="border-radius:8px; margin-bottom:8px;" />
-                                        <div class="tooltiptext">
-                                            <span>{struct.get('type_description', '')}</span><br><br>
-                                            {struct.get('services', '')}
-                                        </div>
-                                    </div>
-                                    <div style="font-size:15px; color:#f0f0f0;">
-                                        <b>{struct.get('structure_name', 'Unknown')}</b><br>
-                                        <span style="color:#aaa;">ID: {struct.get('structure_id', '')}</span><br>
-                                        <span>Location: {struct.get('system_name', '')} - {struct.get('region_name', '')}</span><br>
-                                        <span>Type: {struct.get('type_name', '')} - {struct.get('group_name', '')}</span><br>
-                                        <span>Status: {struct.get('state', '')}</span><br><br>
-                                        <span>Fuel Expires: {format_datetime(struct.get('fuel_expires'))} ({format_date_countdown(struct.get('fuel_expires'))})</span><br><br>
+            
+            cards_per_row = 3
+            for i in range(0, len(df_struct), cards_per_row):
+                cols = st.columns(cards_per_row)
+                for j, col in enumerate(cols):
+                    if i + j >= len(df_struct):
+                        break
+                    struct = df_struct.iloc[i + j]
+                    # Structure afbeelding
+                    type_id = struct.get('type_id', '')
+                    type_img_url = f"https://images.evetech.net/types/{type_id}/icon?size=128" if type_id else ""
+                
+                    with col:
+                        fuel_expires_str = format_datetime(struct.get('fuel_expires'))
+                        st.markdown(
+                            f"""
+                            <div class="tile-structure">
+                                <div class="tooltip">
+                                    <img src="{type_img_url}" width="128" style="border-radius:8px; margin-bottom:8px;" />
+                                    <div class="tooltiptext">
+                                        <span>{struct.get('type_description', '')}</span><br><br>
+                                        {struct.get('services', '')}
                                     </div>
                                 </div>
-                                """,
-                                unsafe_allow_html=True
-                            )
+                                <div style="font-size:15px; color:#f0f0f0;">
+                                    <b>{struct.get('structure_name', 'Unknown')}</b><br>
+                                    <span style="color:#aaa;">ID: {struct.get('structure_id', '')}</span><br>
+                                    <span>Location: {struct.get('system_name', '')} - {struct.get('region_name', '')}</span><br>
+                                    <span>Type: {struct.get('type_name', '')} - {struct.get('group_name', '')}</span><br>
+                                    <span>Status: {struct.get('state', '')}</span><br><br>
+                                    <span>Fuel Expires: {format_datetime(struct.get('fuel_expires'))} ({format_date_countdown(struct.get('fuel_expires'))})</span><br><br>
+                                </div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
         except Exception:
             st.info("No structures found for this corporation.")

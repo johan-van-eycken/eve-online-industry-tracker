@@ -133,6 +133,34 @@ class CharacterMarketOrdersModel(BaseApp):
     min_volume: Mapped[int] = mapped_column(Integer, nullable=True)
     range: Mapped[str] = mapped_column(String, nullable=True)
 
+class CharacterAssetsModel(BaseApp):
+    __tablename__ = "character_assets"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_default_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_capacity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    container_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ship_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    location_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    location_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    location_flag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    is_singleton: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_blueprint_copy: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_adjusted_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_average_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
 class CorporationModel(BaseApp):
     __tablename__ = "corporations"
 
@@ -152,6 +180,34 @@ class CorporationModel(BaseApp):
     wallets: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
     standings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+class CorporationAssetsModel(BaseApp):
+    __tablename__ = "corporation_assets"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_default_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_capacity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    container_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ship_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    location_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    location_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    location_flag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    is_singleton: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_blueprint_copy: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_adjusted_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    type_average_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 class StructureModel(BaseApp):
     __tablename__ = "corporation_structures"
@@ -249,6 +305,7 @@ class Types(BaseSde):
     masteries: Mapped[Optional[dict[int, int]]] = mapped_column(JSON, nullable=True)
     traits: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     sofMaterialSetID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 class Groups(BaseSde):
     __tablename__ = "groups"
@@ -262,6 +319,7 @@ class Groups(BaseSde):
     published: Mapped[bool] = mapped_column(Boolean, nullable=True)
     useBasePrice: Mapped[bool] = mapped_column(Boolean, nullable=True)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
+    repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 class Categories(BaseSde):
     __tablename__ = "categories"

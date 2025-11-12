@@ -6,86 +6,101 @@ import sys
 import json
 import traceback
 
-from flask_app.data.char_adapter import char_adapter
-
 # Add project root to sys.path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(ROOT_DIR)
 
-from config.schemas import CONFIG_SCHEMA
-from classes.config_manager import ConfigManager
-from classes.database_manager import DatabaseManager
-from classes.character_manager import CharacterManager
-from classes.corporation_manager import CorporationManager
+# App initialization imports
+from utils.app_init import load_config, init_db_managers, init_char_manager, init_corp_manager
 
-# New service/data layers
+# Flask app imports
 from flask_app.services.yield_calc import compute_yields
 from flask_app.services.optimizer import optimize_ore_tiered
-from flask_app.data.sde_adapter import get_all_ores, get_all_materials, get_station_info
-from flask_app.data.char_adapter import get_character_skills, get_character_implants
+from flask_app.data.sde_adapter import sde_adapter, get_all_ores, get_all_materials, get_station_info
+from flask_app.data.char_adapter import char_adapter, get_character_skills, get_character_implants
 from flask_app.data.facility_repo import get_facility, get_all_facilities
-from flask_app.data.esi_adapter import get_ore_prices, get_material_prices, \
-    get_type_sellprices, get_type_buyprices, get_region_info
+from flask_app.data.esi_adapter import esi_adapter, get_ore_prices, get_material_prices, \
+    get_type_sellprices, get_type_buyprices, get_region_info, get_structure_info
 
 from utils.ore_calculator_core import filter_viable_ores
 
-REGION_ID = 10000002  # The Forge (Jita)
-STATION_ID = 60003760  # Jita 4-4
 MATERIALS = None
 
 #--------------------------------------------------------------------------------------------------
 # Initialize configuration and managers
 #--------------------------------------------------------------------------------------------------
-app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+
+app = Flask(__name__)
 try:
-    cfgManager = ConfigManager(base_path="config/config.json", schema=CONFIG_SCHEMA, secret_path="config/secret.json")
-    cfg = cfgManager.all()
+    # Main app initializations
+    logging.info("Loading config...")
+    cfgManager = load_config()
+    logging.info("Initializing databases...")
+    db_oauth, db_app, db_sde = init_db_managers(cfgManager, refresh_metadata=True)
+    logging.info("Initializing characters...")
+    char_manager = init_char_manager(cfgManager, db_oauth, db_app, db_sde)
+    char_manager.refresh_all()
+    main_character = char_manager.get_main_character()
+    logging.info("Initializing corporations...")
+    corp_manager = init_corp_manager(cfgManager, db_oauth, db_app, db_sde, char_manager)
+    corp_manager.refresh_all()
 
-    db_oauth = DatabaseManager(cfg["app"]["database_oauth_uri"])
-    db_app = DatabaseManager(cfg["app"]["database_app_uri"])
-    db_sde = DatabaseManager(cfg["app"]["database_sde_uri"])
+    # Flask Specific: Initialize data adapters
+    logging.info("Initializing data adapters...")
+    sde_adapter(db_sde)
+    esi_adapter(main_character)
 
-    char_manager_all = CharacterManager(cfgManager, db_oauth, db_app, db_sde)
-    main_character = char_manager_all.get_main_character()
-    if not main_character:
-        raise ValueError("No main character defined in configuration.")
-    
-    corp_manager_all = CorporationManager(cfgManager, db_oauth, db_app, db_sde, char_manager_all)
+    # Log summary
+    chars_initialized = len(char_manager.character_list)
+    corps_initialized = len(corp_manager.corporation_ids)
+    logging.info(f"All done. Characters: {chars_initialized}, Corporations: {corps_initialized}")
 except Exception as e:
-    logging.error(f"Failed to initialize Flask app: {e}")
+    logging.error(f"Failed to initialize application: {e}", exc_info=True)
     raise e
-
-from flask_app.data.sde_adapter import sde_adapter
-sde_adapter(db_sde)
-
-from flask_app.data.esi_adapter import esi_adapter
-esi_adapter(main_character)
 
 #--------------------------------------------------------------------------------------------------
 # Flask Endpoints
 #--------------------------------------------------------------------------------------------------
 # ADMINISTRATOR endpoints
-@app.route('/restart', methods=['POST'])
-def restart():
+@app.route('/shutdown', methods=['GET'])
+def shutdown():
     # Respond before exiting
-    os._exit(0)  # This will terminate the Flask process, main.py will relaunch it
-    return "Restarting...", 200
+    os._exit(0)  # This will terminate the Flask process
+    return "Shutting down...", 200
 
 # Characters endpoints
-@app.route('/refresh_wallet_balances', methods=['POST'])
+@app.route('/refresh_wallet_balances', methods=['GET'])
 def refresh_wallet_balances():
     """
     Endpoint to refresh wallet balances for all characters.
     """
     try:
-        refreshed_data = char_manager_all.refresh_wallet_balance()
+        refreshed_data = char_manager.refresh_wallet_balance()
         return jsonify({
             "status": "success",
             "data": refreshed_data
         }), 200
     except Exception as e:
         logging.error(f"Error refreshing wallet balances: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/refresh_assets', methods=['GET'])
+def refresh_assets():
+    """
+    Endpoint to refresh assets for all characters.
+    """
+    try:
+        refreshed_data = char_manager.refresh_assets()
+        return jsonify({
+            "status": "success",
+            "data": refreshed_data
+        }), 200
+    except Exception as e:
+        logging.error(f"Error refreshing assets: {e}")
         return jsonify({
             "status": "error",
             "message": str(e)
@@ -126,7 +141,7 @@ def optimize():
         opt_only_compressed = payload.get("only_compressed", False)
 
         # 1. Get character skills
-        character = char_manager_all.get_character_by_id(character_id)
+        character = char_manager.get_character_by_id(character_id)
         if not character:
             return jsonify({"error": f"Character ID {character_id} not found"}), 400
         
@@ -324,7 +339,7 @@ def ores():
 @app.route("/refresh_market_orders", methods=["GET"])
 def refresh_market_orders():
     try:
-        refreshed_data = char_manager_all.refresh_market_orders()
+        refreshed_data = char_manager.refresh_market_orders()
         now = datetime.now(timezone.utc)
         station_cache = {}
         region_cache = {}
@@ -353,7 +368,7 @@ def refresh_market_orders():
 
                 owner = ""
                 if order['is_corporation']:
-                    owner = corp_manager_all.get_corporation_name_by_character_id(order['character_id'])
+                    owner = corp_manager.get_corporation_name_by_character_id(order['character_id'])
                 else:
                     owner = character_name
                 
@@ -415,25 +430,41 @@ def refresh_market_orders():
         }), 200
     except Exception as e:
         print("Error in /refresh_market_orders:", traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "failure", "error": str(e)}), 500
 
-@app.route("/station/<int:station_id>", methods=["GET"])
-def station(station_id):
+@app.route("/location_info/<int:location_id>", methods=["GET"])
+def location(location_id):
+    # Try station lookup first
     try:
-        station = get_station_info(station_id)
-        return station
+        location_info = get_station_info(location_id)
+        return jsonify({"status": "success", "station": location_info}), 200
+    except ValueError:
+        pass  # Do nothing, try structure next
     except Exception as e:
-        print("Error in /station:", traceback.format_exc())
-        return jsonify({"error": str(e), "station": []}), 500
+        print("Error in /location:", traceback.format_exc())
+        return jsonify({"status": "failure", "error": "Error in get_station_info: " + str(e)}), 500
 
-@app.route("/region/<int:region_id>", methods=["GET"])
-def region(region_id):
+    # Try structure lookup if station fails
     try:
-        region = get_region_info(region_id)
-        return region
+        location_info = get_structure_info(location_id)
+        return jsonify({"status": "success", "structure": location_info}), 200
+    except ValueError:
+        pass  # Do nothing if both fail
     except Exception as e:
-        print("Error in /region:", traceback.format_exc())
-        return jsonify({"error": str(e), "region": []}), 500
+        print("Error in /location:", traceback.format_exc())
+        return jsonify({"status": "failure", "error": "Error in get_structure_info: " + str(e)}), 500
+
+    # Try region lookup as last resort
+    try:
+        location_info = get_region_info(location_id)
+        return jsonify({"status": "success", "region": location_info}), 200
+    except ValueError:
+        pass  # Do nothing if all fail
+    except Exception as e:
+        print("Error in /location:", traceback.format_exc())
+        return jsonify({"status": "failure", "error": "Error in get_region_info: " + str(e)}), 500
+
+    return jsonify({"status": "failure", "error": f"Location ID {location_id} not found as station, structure, or region."}), 404
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)

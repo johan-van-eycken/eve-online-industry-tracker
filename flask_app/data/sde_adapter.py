@@ -117,10 +117,14 @@ def get_station_info(station_id):
     Returns station info for given station_id.
     """
     _ensure()
+    if not station_id or station_id is None:
+        raise ValueError(f"Invalid station_id provided ({station_id}).")
+    elif not (60000000 <= station_id <= 69999999):
+        raise ValueError(f"Station ID {station_id} is not a valid NPC station ID.")
 
     station_type = _db_sde.session.query(StaStation).filter(StaStation.stationID == station_id).first()
     if not station_type:
-        return None
+        raise ValueError(f"Station ID {station_id} not found in SDE.")
 
     station_info = {
         "constellation_id": station_type.constellationID,
