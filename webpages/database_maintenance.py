@@ -1,15 +1,23 @@
 import streamlit as st
-
-from utils.table_viewer import render_table_viewer
-from classes.database_manager import DatabaseManager
 from typing import Optional
 
-def render(cfg):
+from utils.app_init import load_config
+from utils.table_viewer import render_table_viewer
+from classes.database_manager import DatabaseManager
+
+def render():
     """
     Reusable table viewer for Streamlit.
     """
     db: Optional[DatabaseManager] = None
     selected_table: Optional[str] = None
+
+    try:
+        cfgManager = load_config()
+        cfg = cfgManager.all()
+    except Exception as e:
+        st.error(f"Failed to load config: {e}")
+        st.stop()
     
     result = render_table_viewer(cfg, row_limit=2000)
     if result is not None:

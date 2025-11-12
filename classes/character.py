@@ -1,5 +1,6 @@
 import logging
 import json
+import traceback
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -7,7 +8,7 @@ from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
 from classes.esi import ESIClient
 from classes.database_models import CharacterModel, CharacterWalletJournalModel \
-    , CharacterWalletTransactionsModel, CharacterMarketOrdersModel
+    , CharacterWalletTransactionsModel, CharacterMarketOrdersModel, CharacterAssetsModel
 from classes.database_models import NpcCorporations, Bloodlines, Races, Types, Groups, Categories
 
 class Character:
@@ -55,6 +56,7 @@ class Character:
         self.wallet_transactions: Optional[List[Dict[str, Any]]] = None
         self.reprocessing_skills: Optional[Dict[str, int]] = None
         self.market_orders: Optional[List[Dict[str, Any]]] = None
+        self.assets: Optional[List[Dict[str, Any]]] = None
 
         # Initialize ESI Client (handles token registration/refresh automatically)
         logging.debug(f"Initializing ESIClient for {self.character_name}...")
@@ -143,7 +145,18 @@ class Character:
             for entry in character_market_orders
         ]
 
-        logging.debug(f"Character '{self.character_name}' loaded from database. Wallet journal entries: {len(self.wallet_journal)} Transaction entries: {len(self.wallet_transactions)}.")
+        # Assign loaded entries to self.assets for runtime access
+        character_assets = (self.db_app.session.query(CharacterAssetsModel).filter_by(character_id=self.character_id).all())
+        self.assets = [
+            {col: getattr(entry, col) for col in CharacterAssetsModel.__table__.columns.keys()}
+            for entry in character_assets
+        ]
+
+        logging.debug(f"Character '{self.character_name}' loaded from database.")
+        logging.debug(f"- Wallet journal entries loaded: {len(self.wallet_journal)}")
+        logging.debug(f"- Wallet transactions loaded: {len(self.wallet_transactions)}")
+        logging.debug(f"- Market orders loaded: {len(self.market_orders)}")
+        logging.debug(f"- Assets loaded: {len(self.assets)}")
         return True
 
     # -------------------
@@ -213,6 +226,30 @@ class Character:
         logging.debug(f"Market orders saved ({len(self.market_orders)}) for {self.character_name}.")
 
     # -------------------
+    # Save Assets
+    # -------------------
+    def save_assets(self, asset_list: List[Dict[str, Any]]) -> None:
+        """Save assets to the database."""
+        if not asset_list:
+            logging.debug(f"No assets to save for {self.character_name}.")
+            return
+
+        self.assets = []
+        for asset in asset_list:
+            new_asset = CharacterAssetsModel(**asset)
+            self.assets.append(new_asset)
+        
+        if self.assets:
+            # Delete existing assets for this character and add new ones
+            self.db_app.session.query(CharacterAssetsModel).filter_by(character_id=self.character_id).delete()
+            self.db_app.session.bulk_save_objects(self.assets)
+            self.db_app.session.commit()
+        else:
+            logging.debug(f"No new assets to save for {self.character_name}.")
+
+        logging.debug(f"Assets saved ({len(self.assets)}) for {self.character_name}.")
+    
+    # -------------------
     # Refresh All
     # -------------------
     def refresh_all(self) -> str:
@@ -225,6 +262,7 @@ class Character:
             wallet_journal = json.loads(self.refresh_wallet_journal())
             wallet_transactions = json.loads(self.refresh_wallet_transactions())
             market_orders = json.loads(self.refresh_market_orders())
+            assets = json.loads(self.refresh_assets())
 
             # Safe character
             self.save_character()
@@ -237,7 +275,8 @@ class Character:
                 **skills,
                 **wallet_journal,
                 **wallet_transactions,
-                **market_orders
+                **market_orders,
+                **assets
             }
 
             # Convert to JSON string
@@ -680,19 +719,26 @@ class Character:
             order_list = self.esi_client.esi_get(f"/characters/{self.character_id}/orders/")
 
             orders = []
+            type_ids = set(order.get("type_id") for order in order_list)
+            type_data_map = {t.id: t for t in self.db_sde.session.query(Types).filter(Types.id.in_(type_ids)).all()}
+            group_ids = set(t.groupID for t in type_data_map.values())
+            group_data_map = {g.id: g for g in self.db_sde.session.query(Groups).filter(Groups.id.in_(group_ids)).all()}
+            category_ids = set(g.categoryID for g in group_data_map.values())
+            category_data_map = {c.id: c for c in self.db_sde.session.query(Categories).filter(Categories.id.in_(category_ids)).all()}
             for order in order_list:
-                type = self.db_sde.session.query(Types).filter_by(id=order.get("type_id")).first()
-                type_group = self.db_sde.session.query(Groups).filter_by(id=type.groupID).first() if type else None
-                type_category = self.db_sde.session.query(Categories).filter_by(id=type_group.categoryID).first() if type_group else None
+                type_id = order.get("type_id")
+                type_data = type_data_map.get(type_id)
+                group_data = group_data_map.get(type_data.groupID) if type_data else None
+                category_data = category_data_map.get(group_data.categoryID) if group_data else None
                 new_order = {
                     "character_id": self.character_id,
                     "order_id": order.get("order_id", None),
                     "type_id": order.get("type_id", None),
-                    "type_name": type.name[self.db_sde.language] if type else None,
-                    "type_group_id": type.groupID if type else None,
-                    "type_group_name": type_group.name[self.db_sde.language] if type_group else None,
-                    "type_category_id": type_group.categoryID if type_group else None,
-                    "type_category_name": type_category.name[self.db_sde.language] if type_category else None,
+                    "type_name": type_data.name[self.db_sde.language] if type_data else None,
+                    "type_group_id": type_data.groupID if type_data else None,
+                    "type_group_name": group_data.name[self.db_sde.language] if group_data else None,
+                    "type_category_id": group_data.categoryID if group_data else None,
+                    "type_category_name": category_data.name[self.db_sde.language] if category_data else None,
                     "location_id": order.get("location_id", None),
                     "region_id": order.get("region_id", None),
                     "is_corporation": order.get("is_corporation", False),
@@ -716,3 +762,131 @@ class Character:
         except Exception as e:
             logging.error(f"Failed to refresh market orders for {self.character_name}. Error: {e}")
             return json.dumps({'character_name': self.character_name, 'error': str(e)}, indent=4)
+        
+    # -------------------
+    # Assets
+    # -------------------
+    def refresh_assets(self, save_assets_fl: bool = True) -> str:
+        """
+        Refresh the asset list of the character from ESI and enrich with SDE and container custom names.
+        Returns:
+            str: JSON string with refreshed asset list.
+        """
+        try:
+            logging.debug(f"Getting assets for {self.character_name}...")
+            assets = self.esi_client.esi_get(f"/characters/{self.character_id}/assets/", paginate=True)
+            market_prices = self.esi_client.esi_get(f"/markets/prices/")
+
+            asset_list = []
+            type_ids = set(asset.get("type_id") for asset in assets)
+            type_data_map = {t.id: t for t in self.db_sde.session.query(Types).filter(Types.id.in_(type_ids)).all()}
+            group_ids = set(t.groupID for t in type_data_map.values())
+            group_data_map = {g.id: g for g in self.db_sde.session.query(Groups).filter(Groups.id.in_(group_ids)).all()}
+            category_ids = set(g.categoryID for g in group_data_map.values())
+            category_data_map = {c.id: c for c in self.db_sde.session.query(Categories).filter(Categories.id.in_(category_ids)).all()}
+            for asset in assets:
+                type_id = asset.get("type_id")
+                type_data = type_data_map.get(type_id)
+                type_adjusted_price = next((item.get("adjusted_price", 0.0) for item in market_prices if item.get("type_id") == type_id), 0.0)
+                type_average_price = next((item.get("average_price", 0.0) for item in market_prices if item.get("type_id") == type_id), 0.0)
+                group_data = group_data_map.get(type_data.groupID) if type_data else None
+                category_data = category_data_map.get(group_data.categoryID) if group_data else None
+
+                # --- Calculate actual volume ---
+                sde_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
+                repackaged_volume = None
+
+                # Check type repackaged_volume
+                if type_data and hasattr(type_data, "repackaged_volume") and type_data.repackaged_volume:
+                    repackaged_volume = type_data.repackaged_volume
+                # If not, check group repackaged_volume
+                elif group_data and hasattr(group_data, "repackaged_volume") and group_data.repackaged_volume:
+                    repackaged_volume = group_data.repackaged_volume
+
+                # Use repackaged_volume if repackaged, else normal volume
+                if asset.get("is_singleton", False) == False and repackaged_volume is not None:
+                    actual_volume = repackaged_volume
+                else:
+                    actual_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
+
+                asset_entry = {
+                    "character_id": self.character_id,
+                    "item_id": asset.get("item_id"),
+                    "type_id": type_id,
+                    "type_name": getattr(type_data, "name", {}).get(self.db_sde.language, "") if type_data else "",
+                    "type_default_volume": sde_volume,
+                    "type_repackaged_volume": repackaged_volume,
+                    "type_volume": actual_volume,
+                    "type_capacity": getattr(type_data, "capacity", None) if type_data else None,
+                    "type_description": getattr(type_data, "description", {}).get(self.db_sde.language, "") if type_data and getattr(type_data, "description", None) else "",
+                    "container_name": None,
+                    "ship_name": None,
+                    "type_group_id": getattr(type_data, "groupID", None) if type_data else None,
+                    "type_group_name": getattr(group_data, "name", {}).get(self.db_sde.language, "") if group_data else "",
+                    "type_category_id": getattr(group_data, "categoryID", None) if group_data else None,
+                    "type_category_name": getattr(category_data, "name", {}).get(self.db_sde.language, "") if category_data else "",
+                    "location_id": asset.get("location_id"),
+                    "location_type": asset.get("location_type"),
+                    "location_flag": asset.get("location_flag"),
+                    "is_singleton": asset.get("is_singleton"),
+                    "is_blueprint_copy": asset.get("is_blueprint_copy", False),
+                    "quantity": asset.get("quantity", 0),
+                    "type_adjusted_price": type_adjusted_price,
+                    "type_average_price": type_average_price
+                }
+                asset_list.append(asset_entry)
+            
+            # Fetch custom names for containers (type_id == 17366 and is_singleton == True)
+            container_ids = [a["item_id"] for a in asset_list if a.get("type_id") == 17366 and a.get("is_singleton") == True]
+            container_names = {}
+            if container_ids:
+                names_response = self.esi_client.esi_post(
+                    f"/characters/{self.character_id}/assets/names",
+                    json=container_ids
+                )
+                if names_response and isinstance(names_response, list):
+                    container_names = {c["item_id"]: c["name"] for c in names_response}
+
+            for asset in asset_list:
+                if asset.get("item_id") in container_names:
+                    asset["container_name"] = container_names[asset["item_id"]]
+            
+            # Fetch custom names for ships (type_category_id == 6 and is_singleton == True)
+            ship_ids = [a["item_id"] for a in asset_list if a.get("type_category_id") == 6 and a.get("is_singleton") == True]
+            ship_names = {}
+            if ship_ids:
+                names_response = self.esi_client.esi_post(
+                    f"/characters/{self.character_id}/assets/names",
+                    json=ship_ids
+                )
+                if names_response and isinstance(names_response, list):
+                    ship_names = {s["item_id"]: s["name"] for s in names_response}
+
+            for asset in asset_list:
+                if asset.get("item_id") in ship_names:
+                    asset["ship_name"] = ship_names[asset["item_id"]]
+            
+            # Lookup for all containers and ships by item_id
+            container_lookup = {a["item_id"]: a for a in asset_list if a.get("type_id") == 17366 and a.get("is_singleton")}
+            ship_lookup = {a["item_id"]: a for a in asset_list if a.get("type_category_id") == 6 and a.get("is_singleton")}
+
+            for asset in asset_list:
+                # Assign container_name for non-containers
+                if not (asset.get("type_id") == 17366 and asset.get("is_singleton")):
+                    container = container_lookup.get(asset.get("location_id"))
+                    if container:
+                        asset["container_name"] = container.get("container_name")
+                # Assign ship_name for non-ships (modules, etc.)
+                if not (asset.get("type_category_id") == 6 and asset.get("is_singleton")):
+                    ship = ship_lookup.get(asset.get("location_id"))
+                    if ship:
+                        asset["ship_name"] = ship.get("ship_name")
+
+            if save_assets_fl:
+                self.save_assets(asset_list)
+
+            logging.debug(f"Assets successfully updated for {self.character_name}. Total assets: {len(asset_list)}")
+            return json.dumps({'character_name': self.character_name, 'assets': asset_list}, indent=4)
+        except Exception as e:
+            logging.error(f"Failed to refresh assets for {self.character_name}. Error: {e}\n{traceback.format_exc()}")
+            return json.dumps({'character_name': self.character_name, 'assets': [], 'error': str(e)}, indent=4)

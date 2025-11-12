@@ -35,6 +35,19 @@ def sanitize_column_name(name: str) -> str:
     """Sanitize SQL column name to avoid conflicts with quotes."""
     return name.replace("-", "_").replace(" ", "_")
 
+def load_repackaged_volumes(json_path):
+    """Load repackaged volumes from JSON file."""
+    if not os.path.exists(json_path):
+        return {}, {}
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    repackaged = data.get("repackaged_volumes", {})
+    groups = repackaged.get("groups", {})
+    items = repackaged.get("items", {})
+    groups = {int(k): v.get("repackaged_volume") for k, v in groups.items()}
+    items = {int(k): v.get("repackaged_volume") for k, v in items.items()}
+    return groups, items
+
 # ----------------------------
 # SDE download & extraction
 # ----------------------------
@@ -61,8 +74,11 @@ def download_sde(url: str, dest_dir: str) -> str:
 # ----------------------------
 # Import YAML SDE tables to SQLite
 # ----------------------------
-def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
+def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list, repackaged_json_path: str):
     db = DatabaseManager(db_uri)
+
+    # Load repackaged volumes once
+    repackaged_groups, repackaged_items = load_repackaged_volumes(repackaged_json_path)
 
     for root, _, files in os.walk(sde_dir):
         for file in sorted(files):
@@ -94,6 +110,12 @@ def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
                     df = pd.DataFrame(data)
                     df = df.loc[:, ~df.columns.duplicated()]
                     df.columns = [sanitize_column_name(c) for c in df.columns]
+
+                    # Add repackaged_volume column if items or groups table
+                    if table_name == "types" and "id" in df.columns:
+                        df["repackaged_volume"] = df["id"].map(repackaged_items)
+                    elif table_name == "groups" and "id" in df.columns:
+                        df["repackaged_volume"] = df["id"].map(repackaged_groups)
 
                     db.save_df(df, table_name)
                     print(f" -> Imported {len(df)} rows into '{table_name}'")
@@ -164,6 +186,10 @@ def main():
         if not os.path.exists(sde_path):
             print(f"Temporary SDE folder '{sde_path}' not found. Running --download first.")
             sde_path = download_sde(cfg.get("SDE_URL"), sde_path)
+
+        repackaged_json_path = cfg.get("REPACKAGED_JSON_PATH")
+        if not os.path.exists(repackaged_json_path):
+            raise FileNotFoundError(f"Data file '{repackaged_json_path}' not found.")
         
         # Either CLI tables or config tables
         if args.tables:
@@ -173,8 +199,8 @@ def main():
 
         if not tables_to_import:
             raise ValueError("No tables specified for import (check config or CLI args).")
-        
-        import_sde_to_sqlite(sde_path, db_uri=args.db, tables_to_import=tables_to_import)
+
+        import_sde_to_sqlite(sde_path, db_uri=args.db, tables_to_import=tables_to_import, repackaged_json_path=repackaged_json_path)
 
     if args.cleanup:
         cleanup_temp(sde_path)

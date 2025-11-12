@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+
+from utils.app_init import load_config, init_db_app
 from utils.flask_api import api_get, api_post
 
 #-- Cached API calls --
@@ -27,8 +29,22 @@ def render(char_manager_all):
 
     with right:
         st.subheader("Optimizer Options")
+        try:
+            cfgManager = load_config()
+            db = init_db_app(cfgManager)
+        except Exception as e:
+            st.error(f"Failed to load database: {e}")
+            st.stop()
+
+        try:
+            df = db.load_df("characters")
+        except Exception:
+            st.warning("No character data found. Run main.py first.")
+            st.stop()
+
         chars_map = {c.character_id: c.character_name for c in char_manager_all.character_list}
-        main_id = getattr(char_manager_all.get_main_character(), "character_id", None)
+        chars_map = dict(zip(df["character_id"], df["character_name"]))
+        main_id = df.loc[df["is_main"] == True, "character_id"].iloc[0] if "is_main" in df.columns and df["is_main"].any() else None
         character_id = st.selectbox(
             "Select Character",
             list(chars_map.keys()),

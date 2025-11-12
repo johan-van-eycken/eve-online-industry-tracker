@@ -1,7 +1,7 @@
-from turtle import right
 import streamlit as st
 import pandas as pd
-from utils.flask_api import api_get, api_post
+
+from utils.flask_api import api_get
 from utils.formatters import format_isk_short
 
 #-- Cached API calls --

@@ -340,7 +340,7 @@ class ESIClient:
                     self.save_to_cache(cache_key, etag, data_json)
                     if return_headers:
                         return data_json, response.headers
-                    return data_json
+                    return data_json  # <-- Add this!
                 elif response.status_code == 304:
                     return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
                 elif response.status_code == 404:
@@ -360,6 +360,112 @@ class ESIClient:
                 time.sleep(2 ** retries)
 
         raise RuntimeError(f"ESI GET failed after retries: {url}")
+    
+    def esi_post(self, endpoint: str, json: dict = None, headers: dict = None, use_cache: bool = False, paginate: bool = False, return_headers: bool = False, timeout: int = 15) -> Any:
+        """
+        Issue a POST request to the ESI API with caching.
+        If paginate=True, will fetch all pages and return a combined list.
+        If return_headers=True, returns (data, headers) for the last page.
+        """
+        if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
+            self.refresh_access_token()
+        if headers is None:
+            headers = {
+                "Accept": self.esi_header_accept,
+                "Accept-Language": self.esi_header_acceptlanguage,
+                "Authorization": f"Bearer {self.access_token}",
+                "User-Agent": self.user_agent,
+                "X-Compatibility-Date": self.esi_header_xcompatibilitydate,
+                "X-Tenant": self.esi_header_xtenant
+            }
+        url = f"{self.esi_base_uri}{endpoint}"
+
+        # Build cache key
+        cache_key = f"{endpoint}:{json}" if json else endpoint
+        etag: Optional[str] = None
+        cached_data: Optional[Dict[str, Any]] = None
+        if use_cache:
+            cached_data = self.get_cached_data(cache_key)
+            cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == cache_key).first()
+            if cache_entry and cache_entry.etag:
+                headers["If-None-Match"] = cache_entry.etag
+
+        retries = 0
+
+        # Pagination logic
+        if paginate:
+            all_data = []
+            page = 1
+            last_headers = {}
+            while True:
+                paged_json = dict(json) if json else {}
+                paged_json["page"] = page
+                try:
+                    response = requests.post(url, headers=headers, json=paged_json, timeout=timeout)
+                    if response.status_code == 200:
+                        etag = response.headers.get("ETag")
+                        data_json = response.json()
+                        all_data.extend(data_json if isinstance(data_json, list) else [data_json])
+                        last_headers = response.headers
+                        total_pages = int(response.headers.get("X-Pages", "1"))
+                        if page >= total_pages:
+                            break
+                        page += 1
+                        time.sleep(0.2)
+                    elif response.status_code == 304:
+                        return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                    elif response.status_code == 404:
+                        logging.warning(f"ESI POST 404: {url}")
+                        return None
+                    elif response.status_code in (420, 429, 500, 502, 503, 504):
+                        wait = (2 ** retries) + random.uniform(0, 1)
+                        logging.warning(f"ESI POST {response.status_code} on {url}, retrying in {wait:.1f}s...")
+                        time.sleep(wait)
+                        retries += 1
+                        continue
+                    else:
+                        response.raise_for_status()
+                except requests.RequestException as e:
+                    logging.error(f"ESI POST request error {url}: {e}")
+                    retries += 1
+                    time.sleep(2 ** retries)
+                    if retries >= 3:
+                        raise RuntimeError(f"ESI POST failed after retries: {url}")
+       
+        while retries < 3:
+            try:
+                response = requests.post(url, headers=headers, json=json, timeout=timeout)
+                logging.debug(f"ESI POST {url} responded with status {response.status_code}")
+                logging.debug(f"ESI POST Request Headers: {response.request.headers}")
+                logging.debug(f"ESI POST Request Body: {response.request.body}")
+                logging.debug(f"ESI POST Response Headers: {response.headers}")
+                logging.debug(f"ESI POST Response Body: {response.text}")
+                if response.status_code == 200:
+                    etag = response.headers.get("ETag")
+                    data_json = response.json()
+                    self.save_to_cache(cache_key, etag, data_json)
+                    if return_headers:
+                        return data_json, response.headers
+                    return data_json
+                elif response.status_code == 304:
+                    return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                elif response.status_code == 404:
+                    logging.warning(f"ESI POST 404: {url}")
+                    return None
+                elif response.status_code in (420, 429, 500, 502, 503, 504):
+                    wait = (2 ** retries) + random.uniform(0, 1)
+                    logging.warning(f"ESI POST {response.status_code} on {url}, retrying in {wait:.1f}s...")
+                    time.sleep(wait)
+                    retries += 1
+                    continue
+                else:
+                    response.raise_for_status()
+            except requests.RequestException as e:
+                logging.error(f"ESI POST request error {url}: {e}")
+                retries += 1
+                time.sleep(2 ** retries)
+
+        raise RuntimeError(f"ESI POST failed after retries: {url}")
     
     def get_id_type(self, entity_id: int) -> Optional[str]:
         """Get the type of an entity by its ID."""
@@ -403,7 +509,7 @@ class ESIClient:
             return "character" # dust post 2016
         elif 2112000000 <= entity_id <= 2129999999:
             return "character" # post 2016
-        elif entity_id >= 1000000000000:
+        elif 1000000000000 <= entity_id < 1020000000000:
             return "spawned_item"
-        else:
-            return "unknown"
+        elif entity_id >= 1020000000000: # Upwell structures (player owned)
+            return "structure"
