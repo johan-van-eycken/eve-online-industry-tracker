@@ -1,0 +1,272 @@
+{
+    "repackaged_volumes": {
+        "groups": {
+            "25": {
+                "name": "Frigate",
+                "repackaged_volume": 2500.0
+            },
+            "26": {
+                "name": "Cruiser",
+                "repackaged_volume": 10000.0
+            },
+            "27": {
+                "name": "Battleship",
+                "repackaged_volume": 50000.0
+            },
+            "28": {
+                "name": "Hauler",
+                "repackaged_volume": 20000.0
+            },
+            "29": {
+                "name": "Capsule",
+                "repackaged_volume": 500.0
+            },
+            "30": {
+                "name": "Titan",
+                "repackaged_volume": 10000000.0
+            },
+            "31": {
+                "name": "Shuttle",
+                "repackaged_volume": 500.0
+            },
+            "237": {
+                "name": "Corvette",
+                "repackaged_volume": 2500.0
+            },
+            "324": {
+                "name": "Assault Frigate",
+                "repackaged_volume": 2500.0
+            },
+            "358": {
+                "name": "Heavy Assault Cruiser",
+                "repackaged_volume": 5000.0
+            },
+            "380": {
+                "name": "Deep Space Transport",
+                "repackaged_volume": 20000.0
+            },
+            "381": {
+                "name": "Elite Battleship",
+                "repackaged_volume": 50000.0
+            },
+            "419": {
+                "name": "Combat Battlecruiser",
+                "repackaged_volume": 15000.0
+            },
+            "420": {
+                "name": "Destroyer",
+                "repackaged_volume": 5000.0
+            },
+            "463": {
+                "name": "Mining Barge",
+                "repackaged_volume": 3750.0
+            },
+            "485": {
+                "name": "Dreadnought",
+                "repackaged_volume": 1300000.0
+            },
+            "540": {
+                "name": "Command Ship",
+                "repackaged_volume": 15000.0
+            },
+            "541": {
+                "name": "Interdictor",
+                "repackaged_volume": 5000.0
+            },
+            "543": {
+                "name": "Exhumer",
+                "repackaged_volume": 3750.0
+            },
+            "547": {
+                "name": "Carrier",
+                "repackaged_volume": 1300000.0
+            },
+            "659": {
+                "name": "Supercarrier",
+                "repackaged_volume": 1300000.0
+            },
+            "830": {
+                "name": "Covert Ops",
+                "repackaged_volume": 2500.0
+            },
+            "831": {
+                "name": "Interceptor",
+                "repackaged_volume": 2500.0
+            },
+            "832": {
+                "name": "Logistics",
+                "repackaged_volume": 2500.0
+            },
+            "833": {
+                "name": "Force Recon Ship",
+                "repackaged_volume": 10000.0
+            },
+            "834": {
+                "name": "Stealth Bomber",
+                "repackaged_volume": 2500.0
+            },
+            "883": {
+                "name": "Capital Industrial Ship",
+                "repackaged_volume": 1300000.0
+            },
+            "893": {
+                "name": "Electronic Attack Ships",
+                "repackaged_volume": 2500.0
+            },
+            "894": {
+                "name": "Heavy Interdiction Cruiser",
+                "repackaged_volume": 10000.0
+            },
+            "898": {
+                "name": "Black Ops",
+                "repackaged_volume": 50000.0
+            },
+            "900" : {
+                "name": "Marauder",
+                "repackaged_volume": 50000.0
+            },
+            "902": {
+                "name": "Jump Freighter",
+                "repackaged_volume": 1300000.0
+            },
+            "906": {
+                "name": "Combat Recon Ship",
+                "repackaged_volume": 10000.0
+            },
+            "941": {
+                "name": "Industrial Command Ship",
+                "repackaged_volume": 500000.0
+            },
+            "963": {
+                "name": "Strategic Cruiser",
+                "repackaged_volume": 5000.0
+            },
+            "1022": {
+                "name": "Prototype Exploration Ship",
+                "repackaged_volume": 500.0
+            },
+            "1201": {
+                "name": "Attack Battlecruiser",
+                "repackaged_volume": 15000.0
+            },
+            "1202": {
+                "name": "Blockade Runner",
+                "repackaged_volume": 20000.0
+            },
+            "1283": {
+                "name": "Expedition Frigate",
+                "repackaged_volume": 2500.0
+            },
+            "1305": {
+                "name": "Tactical Destroyer",
+                "repackaged_volume": 5000.0
+            },
+            "1527": {
+                "name": "Logistics Frigate",
+                "repackaged_volume": 2500.0
+            },
+            "1534": {
+                "name": "Command Destroyer",
+                "repackaged_volume": 5000.0
+            },
+            "1538": {
+                "name": "Force Auxiliary",
+                "repackaged_volume": 130000000.0
+            },
+            "1972": {
+                "name": "Flag Cruiser",
+                "repackaged_volume": 10000.0
+            },
+            "2001": {
+                "name": "Citizen Ships",
+                "repackaged_volume": 300.0
+            },
+            "4594": {
+                "name": "Lander Dreadnought",
+                "repackaged_volume": 130000000.0
+            }
+        },
+        "items": {
+            "33003": {
+                "name": "Enormous Freight Container",
+                "repackaged_volume": 2500.0
+            },
+            "24445": {
+                "name": "Giant Freight Container",
+                "repackaged_volume": 1200.0
+            },
+            "11489": {
+                "name": "Giant Secure Container",
+                "repackaged_volume": 300.0
+            },
+            "33005": {
+                "name": "Huge Freight Container",
+                "repackaged_volume": 500.0
+            },
+            "11488": {
+                "name": "Huge Secure Container",
+                "repackaged_volume": 150.0
+            },
+            "17365": {
+                "name": "Large Audit Log Secure Container",
+                "repackaged_volume": 65.0
+            },
+            "33007": {
+                "name": "Large Freight Container",
+                "repackaged_volume": 100.0
+            },
+            "3465": {
+                "name": "Large Secure Container",
+                "repackaged_volume": 65.0
+            },
+            "3296": {
+                "name": "Large Standard Container",
+                "repackaged_volume": 65.0
+            },
+            "17364": {
+                "name": "Medium Audit Log Secure Container",
+                "repackaged_volume": 33.0
+            },
+            "33009": {
+                "name": "Medium Freight Container",
+                "repackaged_volume": 50.0
+            },
+            "3466": {
+                "name": "Medium Secure Container",
+                "repackaged_volume": 33.0
+            },
+            "3293": {
+                "name": "Medium Standard Container",
+                "repackaged_volume": 33.0
+            },
+            "17363": {
+                "name": "Small Audit Log Secure Container",
+                "repackaged_volume": 10.0
+            },
+            "33011": {
+                "name": "Small Freight Container",
+                "repackaged_volume": 10.0
+            },
+            "3467": {
+                "name": "Small Secure Container",
+                "repackaged_volume": 10.0
+            },
+            "3297": {
+                "name": "Small Standard Container",
+                "repackaged_volume": 10.0
+            },
+            "17366": {
+                "name": "Station Container",
+                "repackaged_volume": 10000.0
+            },
+            "17367": {
+                "name": "Station Vault Container",
+                "repackaged_volume": 50000.0
+            },
+            "17368": {
+                "name": "Station Warehouse Container",
+                "repackaged_volume": 100000.0
+            }
+        }
+    }
+}

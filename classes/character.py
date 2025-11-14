@@ -9,7 +9,8 @@ from classes.config_manager import ConfigManager
 from classes.esi import ESIClient
 from classes.database_models import CharacterModel, CharacterWalletJournalModel \
     , CharacterWalletTransactionsModel, CharacterMarketOrdersModel, CharacterAssetsModel
-from classes.database_models import NpcCorporations, Bloodlines, Races, Types, Groups, Categories
+from classes.database_models import NpcCorporations, Bloodlines, Races, Types \
+    , Groups, Categories, Factions
 
 class Character:
     """Handles authentication and profile for an in-game character using ESIClient."""
@@ -784,6 +785,10 @@ class Character:
             group_data_map = {g.id: g for g in self.db_sde.session.query(Groups).filter(Groups.id.in_(group_ids)).all()}
             category_ids = set(g.categoryID for g in group_data_map.values())
             category_data_map = {c.id: c for c in self.db_sde.session.query(Categories).filter(Categories.id.in_(category_ids)).all()}
+            race_ids = set(t.raceID for t in type_data_map.values() if hasattr(t, "raceID") and t.raceID is not None)
+            race_data_map = {r.id: r for r in self.db_sde.session.query(Races).filter(Races.id.in_(race_ids)).all()}
+            faction_ids = set(t.factionID for t in type_data_map.values() if hasattr(t, "factionID") and t.factionID is not None)
+            faction_data_map = {f.id: f for f in self.db_sde.session.query(Factions).filter(Factions.id.in_(faction_ids)).all()}
             for asset in assets:
                 type_id = asset.get("type_id")
                 type_data = type_data_map.get(type_id)
@@ -791,6 +796,8 @@ class Character:
                 type_average_price = next((item.get("average_price", 0.0) for item in market_prices if item.get("type_id") == type_id), 0.0)
                 group_data = group_data_map.get(type_data.groupID) if type_data else None
                 category_data = category_data_map.get(group_data.categoryID) if group_data else None
+                race_data = race_data_map.get(type_data.raceID) if type_data and hasattr(type_data, "raceID") else None
+                faction_data = faction_data_map.get(type_data.factionID) if type_data and hasattr(type_data, "factionID") else None
 
                 # --- Calculate actual volume ---
                 sde_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
@@ -825,6 +832,14 @@ class Character:
                     "type_group_name": getattr(group_data, "name", {}).get(self.db_sde.language, "") if group_data else "",
                     "type_category_id": getattr(group_data, "categoryID", None) if group_data else None,
                     "type_category_name": getattr(category_data, "name", {}).get(self.db_sde.language, "") if category_data else "",
+                    "type_meta_group_id": getattr(type_data, "metaGroupID", None) if type_data else None,
+                    "type_race_id": getattr(type_data, "raceID", None) if type_data else None,
+                    "type_race_name": getattr(race_data, "nameID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "nameID", None) else "",
+                    "type_race_description": getattr(race_data, "descriptionID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "descriptionID", None) else "",
+                    "type_faction_id": getattr(type_data, "factionID", None) if type_data else None,
+                    "type_faction_name": getattr(faction_data, "nameID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "nameID", None) else "",
+                    "type_faction_description": getattr(faction_data, "descriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "descriptionID", None) else "",
+                    "type_faction_short_description": getattr(faction_data, "shortDescriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "shortDescriptionID", None) else "",
                     "location_id": asset.get("location_id"),
                     "location_type": asset.get("location_type"),
                     "location_flag": asset.get("location_flag"),

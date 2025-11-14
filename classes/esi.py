@@ -309,12 +309,15 @@ class ESIClient:
                         time.sleep(0.2)  # polite pacing
                     elif response.status_code == 304:
                         return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                    elif response.status_code == 403:
+                        logging.warning(f"ESI GET 403 Forbidden: {paged_url}")
+                        return None
                     elif response.status_code == 404:
-                        logging.warning(f"ESI 404: {paged_url}")
+                        logging.warning(f"ESI GET 404 Not Found: {paged_url}")
                         return None
                     elif response.status_code in (420, 429, 500, 502, 503, 504):
                         wait = (2 ** retries) + random.uniform(0, 1)
-                        logging.warning(f"ESI {response.status_code} on {paged_url}, retrying in {wait:.1f}s...")
+                        logging.warning(f"ESI GET {response.status_code} on {paged_url}, retrying in {wait:.1f}s...")
                         time.sleep(wait)
                         retries += 1
                         continue
@@ -343,12 +346,15 @@ class ESIClient:
                     return data_json  # <-- Add this!
                 elif response.status_code == 304:
                     return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                elif response.status_code == 403:
+                    logging.warning(f"ESI 403 GET Forbidden: {url}")
+                    return None
                 elif response.status_code == 404:
-                    logging.warning(f"ESI 404: {url}")
+                    logging.warning(f"ESI 404 GET Not Found: {url}")
                     return None
                 elif response.status_code in (420, 429, 500, 502, 503, 504):
                     wait = (2 ** retries) + random.uniform(0, 1)
-                    logging.warning(f"ESI {response.status_code} on {url}, retrying in {wait:.1f}s...")
+                    logging.warning(f"ESI GET{response.status_code} on {url}, retrying in {wait:.1f}s...")
                     time.sleep(wait)
                     retries += 1
                     continue
@@ -414,8 +420,11 @@ class ESIClient:
                         time.sleep(0.2)
                     elif response.status_code == 304:
                         return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                    elif response.status_code == 403:
+                        logging.warning(f"ESI POST 403 Forbidden: {url}")
+                        return None
                     elif response.status_code == 404:
-                        logging.warning(f"ESI POST 404: {url}")
+                        logging.warning(f"ESI POST 404 Not Found: {url}")
                         return None
                     elif response.status_code in (420, 429, 500, 502, 503, 504):
                         wait = (2 ** retries) + random.uniform(0, 1)
@@ -449,8 +458,11 @@ class ESIClient:
                     return data_json
                 elif response.status_code == 304:
                     return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                elif response.status_code == 403:
+                    logging.warning(f"ESI POST 403 Forbidden: {url}")
+                    return None
                 elif response.status_code == 404:
-                    logging.warning(f"ESI POST 404: {url}")
+                    logging.warning(f"ESI POST 404 Not Found: {url}")
                     return None
                 elif response.status_code in (420, 429, 500, 502, 503, 504):
                     wait = (2 ** retries) + random.uniform(0, 1)

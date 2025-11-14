@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 import json
-import traceback
 
 # Add project root to sys.path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -16,14 +15,15 @@ from utils.app_init import load_config, init_db_managers, init_char_manager, ini
 # Flask app imports
 from flask_app.services.yield_calc import compute_yields
 from flask_app.services.optimizer import optimize_ore_tiered
-from flask_app.data.sde_adapter import sde_adapter, get_all_ores, get_all_materials, get_station_info
+from flask_app.data.sde_adapter import sde_adapter, get_all_ores, get_all_materials
 from flask_app.data.char_adapter import char_adapter, get_character_skills, get_character_implants
 from flask_app.data.facility_repo import get_facility, get_all_facilities
 from flask_app.data.esi_adapter import esi_adapter, get_ore_prices, get_material_prices, \
-    get_type_sellprices, get_type_buyprices, get_region_info, get_structure_info
+    get_type_sellprices, get_type_buyprices, get_location_info
 
 from utils.ore_calculator_core import filter_viable_ores
 
+INIT_STATE = None
 MATERIALS = None
 
 #--------------------------------------------------------------------------------------------------
@@ -32,22 +32,28 @@ MATERIALS = None
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
+INIT_STATE = "Starting Initialization"
 try:
     # Main app initializations
     logging.info("Loading config...")
+    INIT_STATE = "Loading Config"
     cfgManager = load_config()
     logging.info("Initializing databases...")
+    INIT_STATE = "Initializing Databases"
     db_oauth, db_app, db_sde = init_db_managers(cfgManager, refresh_metadata=True)
     logging.info("Initializing characters...")
+    INIT_STATE = "Initializing Characters"
     char_manager = init_char_manager(cfgManager, db_oauth, db_app, db_sde)
     char_manager.refresh_all()
     main_character = char_manager.get_main_character()
     logging.info("Initializing corporations...")
+    INIT_STATE = "Initializing Corporations"
     corp_manager = init_corp_manager(cfgManager, db_oauth, db_app, db_sde, char_manager)
     corp_manager.refresh_all()
 
     # Flask Specific: Initialize data adapters
     logging.info("Initializing data adapters...")
+    INIT_STATE = "Initializing Data Adapters"
     sde_adapter(db_sde)
     esi_adapter(main_character)
 
@@ -55,19 +61,32 @@ try:
     chars_initialized = len(char_manager.character_list)
     corps_initialized = len(corp_manager.corporation_ids)
     logging.info(f"All done. Characters: {chars_initialized}, Corporations: {corps_initialized}")
+    INIT_STATE = "Ready"
 except Exception as e:
     logging.error(f"Failed to initialize application: {e}", exc_info=True)
+    INIT_STATE = f"Initialization Failed at step: {INIT_STATE}"
     raise e
 
 #--------------------------------------------------------------------------------------------------
 # Flask Endpoints
 #--------------------------------------------------------------------------------------------------
 # ADMINISTRATOR endpoints
+@app.route('/health', methods=['GET'])
+def health_check():
+    if INIT_STATE != "Ready":
+        return jsonify({"status": "not_ready", "init_state": INIT_STATE}), 500
+    return jsonify({"status": "OK"}), 200
+
 @app.route('/shutdown', methods=['GET'])
 def shutdown():
     # Respond before exiting
     os._exit(0)  # This will terminate the Flask process
-    return "Shutting down...", 200
+    return jsonify({"status": "Shutting down..."}), 200
+
+# Static Data endpoints
+@app.route('/static/<path:filename>', methods=['GET'])
+def get_static_file(filename):
+    return app.send_static_file(filename)
 
 # Characters endpoints
 @app.route('/refresh_wallet_balances', methods=['GET'])
@@ -77,16 +96,10 @@ def refresh_wallet_balances():
     """
     try:
         refreshed_data = char_manager.refresh_wallet_balance()
-        return jsonify({
-            "status": "success",
-            "data": refreshed_data
-        }), 200
+        return jsonify({"status": "success", "data": refreshed_data}), 200
     except Exception as e:
         logging.error(f"Error refreshing wallet balances: {e}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/refresh_wallet_balances`: " + str(e)}), 500
 
 @app.route('/refresh_assets', methods=['GET'])
 def refresh_assets():
@@ -95,16 +108,10 @@ def refresh_assets():
     """
     try:
         refreshed_data = char_manager.refresh_assets()
-        return jsonify({
-            "status": "success",
-            "data": refreshed_data
-        }), 200
+        return jsonify({"status": "success", "data": refreshed_data}), 200
     except Exception as e:
         logging.error(f"Error refreshing assets: {e}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/refresh_assets`: " + str(e)}), 500
 
 # Ore Calculator endpoints
 @app.route("/facilities", methods=["GET"])
@@ -114,10 +121,9 @@ def facilities():
     """
     try:
         facilities = get_all_facilities()
-        return jsonify(facilities), 200
+        return jsonify({"status": "success", "data": facilities}), 200
     except Exception as e:
-        logging.error(f"Error in /facilities: {e}")
-        return jsonify({"error": str(e), "facilities": []}), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/facilities`: " + str(e)}), 500
 
 @app.route("/optimize", methods=["POST"])
 def optimize():
@@ -143,7 +149,7 @@ def optimize():
         # 1. Get character skills
         character = char_manager.get_character_by_id(character_id)
         if not character:
-            return jsonify({"error": f"Character ID {character_id} not found"}), 400
+            return jsonify({"status": "error", "message": f"Error in POST Method `/optimize`: Character ID {character_id} not found"}), 400
         
         char_adapter(character)
         skills = get_character_skills()
@@ -306,25 +312,21 @@ def optimize():
         result["reprocessing_fee"] = reprocessing_fee
         result["total_cost_with_reprocessing"] = result.get("total_cost", 0.0) + reprocessing_fee
 
-        return jsonify(result), (200 if result.get("status") == "ok" else 400)
+        return jsonify({"status": "success", "data": result}), 200
     except KeyError as ke:
-        print("Error in /optimize:", traceback.format_exc())
-        return jsonify({"error": f"Missing field {ke}"}), 400
+        return jsonify({"status": "error", "message": f"Error in POST Method `/optimize`: Missing field {ke}"}), 400
     except Exception as e:
-        print("Error in /optimize:", traceback.format_exc())
-        logging.error(e, exc_info=True)
-        return jsonify({"error": str(e)}), 500
-
+        return jsonify({"status": "error", "message": f"Error in POST Method `/optimize`: " + str(e)}), 500
+                       
 @app.route("/materials", methods=["GET"])
 def materials():
     global MATERIALS
     try:
         if MATERIALS is None:
             MATERIALS = get_all_materials()
-        return jsonify({"materials": MATERIALS})
+        return jsonify({"status": "success", "materials": MATERIALS})
     except Exception as e:
-        print("Error in /materials:", traceback.format_exc())
-        return jsonify({"error": str(e), "materials": []}), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/materials`: " + str(e), "data": []}), 500
 
 @app.route("/ores", methods=["GET"])
 def ores():
@@ -332,8 +334,7 @@ def ores():
         ores = get_all_ores()
         return ores
     except Exception as e:
-        print("Error in /ores:", traceback.format_exc())
-        return jsonify({"error": str(e), "ores": []}), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/ores`: " + str(e), "data": []}), 500
 
 # Market Orders endpoints
 @app.route("/refresh_market_orders", methods=["GET"])
@@ -355,7 +356,7 @@ def refresh_market_orders():
                 if location_id in station_cache:
                     station = station_cache[location_id]
                 else:
-                    station = get_station_info(location_id)
+                    station = get_location_info(location_id)
                     station_cache[location_id] = station
 
                 # Cache region lookup
@@ -363,7 +364,7 @@ def refresh_market_orders():
                 if region_id in region_cache:
                     region = region_cache[region_id]
                 else:
-                    region = get_region_info(region_id)
+                    region = get_location_info(region_id)
                     region_cache[region_id] = region
 
                 owner = ""
@@ -424,47 +425,30 @@ def refresh_market_orders():
                     "is_buy_order": order['is_buy_order']
                 })
 
-        return jsonify({
-            "status": "success",
-            "data": refreshed_orders
-        }), 200
+        return jsonify({"status": "success", "data": refreshed_orders}), 200
     except Exception as e:
-        print("Error in /refresh_market_orders:", traceback.format_exc())
-        return jsonify({"status": "failure", "error": str(e)}), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/refresh_market_orders`: " + str(e)}), 500
 
-@app.route("/location_info/<int:location_id>", methods=["GET"])
+@app.route("/location/<int:location_id>", methods=["GET"])
 def location(location_id):
-    # Try station lookup first
     try:
-        location_info = get_station_info(location_id)
-        return jsonify({"status": "success", "station": location_info}), 200
-    except ValueError:
-        pass  # Do nothing, try structure next
+        location_info = get_location_info(location_id)
+        return jsonify({"status": "success", "data": location_info}), 200
     except Exception as e:
-        print("Error in /location:", traceback.format_exc())
-        return jsonify({"status": "failure", "error": "Error in get_station_info: " + str(e)}), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/location/{location_id}`: " + str(e)}), 500
 
-    # Try structure lookup if station fails
+@app.route('/locations', methods=['POST'])
+def locations():
     try:
-        location_info = get_structure_info(location_id)
-        return jsonify({"status": "success", "structure": location_info}), 200
-    except ValueError:
-        pass  # Do nothing if both fail
+        data = request.get_json()
+        location_ids = data.get("location_ids", [])
+        result = {}
+        for locaction_id in location_ids:
+            info = get_location_info(locaction_id)
+            result[str(locaction_id)] = info
+        return jsonify({"status": "success", "data": result}), 200
     except Exception as e:
-        print("Error in /location:", traceback.format_exc())
-        return jsonify({"status": "failure", "error": "Error in get_structure_info: " + str(e)}), 500
-
-    # Try region lookup as last resort
-    try:
-        location_info = get_region_info(location_id)
-        return jsonify({"status": "success", "region": location_info}), 200
-    except ValueError:
-        pass  # Do nothing if all fail
-    except Exception as e:
-        print("Error in /location:", traceback.format_exc())
-        return jsonify({"status": "failure", "error": "Error in get_region_info: " + str(e)}), 500
-
-    return jsonify({"status": "failure", "error": f"Location ID {location_id} not found as station, structure, or region."}), 404
+        return jsonify({"status": "error", "message": "Error in POST Method `/locations`: " + str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)

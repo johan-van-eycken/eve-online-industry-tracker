@@ -6,8 +6,8 @@ from typing import Optional, List, Dict
 
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
-from classes.database_models import CharacterMarketOrdersModel, CorporationModel, StructureModel, MemberModel, CorporationAssetsModel
-from classes.database_models import Types, Groups, Categories
+from classes.database_models import CorporationModel, StructureModel, MemberModel, CorporationAssetsModel
+from classes.database_models import Types, Groups, Categories, Factions, Races
 from classes.character import Character
 from classes.character_manager import CharacterManager
 
@@ -388,27 +388,55 @@ class Corporation:
         try:
             logging.debug(f"Refreshing assets for {self.corporation_name}...")
             assets = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/assets/")
-            if isinstance(assets, str):
-                assets = json.loads(assets)
+            market_prices = self.default_esi_character.esi_client.esi_get(f"/markets/prices/")
+
             asset_list = []
-            # Batch SDE queries for type/group/category enrichment
             type_ids = set(asset.get("type_id") for asset in assets)
             type_data_map = {t.id: t for t in self.db_sde.session.query(Types).filter(Types.id.in_(type_ids)).all()}
             group_ids = set(t.groupID for t in type_data_map.values())
             group_data_map = {g.id: g for g in self.db_sde.session.query(Groups).filter(Groups.id.in_(group_ids)).all()}
             category_ids = set(g.categoryID for g in group_data_map.values())
             category_data_map = {c.id: c for c in self.db_sde.session.query(Categories).filter(Categories.id.in_(category_ids)).all()}
+            race_ids = set(t.raceID for t in type_data_map.values() if hasattr(t, "raceID") and t.raceID is not None)
+            race_data_map = {r.id: r for r in self.db_sde.session.query(Races).filter(Races.id.in_(race_ids)).all()}
+            faction_ids = set(t.factionID for t in type_data_map.values() if hasattr(t, "factionID") and t.factionID is not None)
+            faction_data_map = {f.id: f for f in self.db_sde.session.query(Factions).filter(Factions.id.in_(faction_ids)).all()}
             for asset in assets:
                 type_id = asset.get("type_id")
                 type_data = type_data_map.get(type_id)
+                type_adjusted_price = next((item.get("adjusted_price", 0.0) for item in market_prices if item.get("type_id") == type_id), 0.0)
+                type_average_price = next((item.get("average_price", 0.0) for item in market_prices if item.get("type_id") == type_id), 0.0)
                 group_data = group_data_map.get(type_data.groupID) if type_data else None
                 category_data = category_data_map.get(group_data.categoryID) if group_data else None
+                race_data = race_data_map.get(type_data.raceID) if type_data and hasattr(type_data, "raceID") else None
+                faction_data = faction_data_map.get(type_data.factionID) if type_data and hasattr(type_data, "factionID") else None
+
+                # --- Calculate actual volume ---
+                sde_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
+                repackaged_volume = None
+
+                # Check type repackaged_volume
+                if type_data and hasattr(type_data, "repackaged_volume") and type_data.repackaged_volume:
+                    repackaged_volume = type_data.repackaged_volume
+                # If not, check group repackaged_volume
+                elif group_data and hasattr(group_data, "repackaged_volume") and group_data.repackaged_volume:
+                    repackaged_volume = group_data.repackaged_volume
+
+                # Use repackaged_volume if repackaged, else normal volume
+                if asset.get("is_singleton", False) == False and repackaged_volume is not None:
+                    actual_volume = repackaged_volume
+                else:
+                    actual_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
+
                 asset_entry = {
                     "corporation_id": self.corporation_id,
                     "item_id": asset.get("item_id"),
                     "type_id": type_id,
                     "type_name": getattr(type_data, "name", {}).get(self.db_sde.language, "") if type_data else "",
-                    "type_volume": getattr(type_data, "volume", 0.0) if type_data else 0.0,
+                    "type_default_volume": sde_volume,
+                    "type_repackaged_volume": repackaged_volume,
+                    "type_volume": actual_volume,
+                    "type_capacity": getattr(type_data, "capacity", None) if type_data else None,
                     "type_description": getattr(type_data, "description", {}).get(self.db_sde.language, "") if type_data and getattr(type_data, "description", None) else "",
                     "container_name": None,
                     "ship_name": None,
@@ -416,12 +444,22 @@ class Corporation:
                     "type_group_name": getattr(group_data, "name", {}).get(self.db_sde.language, "") if group_data else "",
                     "type_category_id": getattr(group_data, "categoryID", None) if group_data else None,
                     "type_category_name": getattr(category_data, "name", {}).get(self.db_sde.language, "") if category_data else "",
+                    "type_meta_group_id": getattr(type_data, "metaGroupID", None) if type_data else None,
+                    "type_race_id": getattr(type_data, "raceID", None) if type_data else None,
+                    "type_race_name": getattr(race_data, "nameID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "nameID", None) else "",
+                    "type_race_description": getattr(race_data, "descriptionID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "descriptionID", None) else "",
+                    "type_faction_id": getattr(type_data, "factionID", None) if type_data else None,
+                    "type_faction_name": getattr(faction_data, "nameID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "nameID", None) else "",
+                    "type_faction_description": getattr(faction_data, "descriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "descriptionID", None) else "",
+                    "type_faction_short_description": getattr(faction_data, "shortDescriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "shortDescriptionID", None) else "",
                     "location_id": asset.get("location_id"),
                     "location_type": asset.get("location_type"),
                     "location_flag": asset.get("location_flag"),
                     "is_singleton": asset.get("is_singleton"),
                     "is_blueprint_copy": asset.get("is_blueprint_copy", False),
-                    "quantity": asset.get("quantity", 0)
+                    "quantity": asset.get("quantity", 0),
+                    "type_adjusted_price": type_adjusted_price,
+                    "type_average_price": type_average_price
                 }
                 asset_list.append(asset_entry)
             
@@ -435,6 +473,7 @@ class Corporation:
                 )
                 if names_response and isinstance(names_response, list):
                     container_names = {c["item_id"]: c["name"] for c in names_response}
+            
             for asset in asset_list:
                 if asset.get("item_id") in container_names:
                     asset["container_name"] = container_names[asset["item_id"]]
@@ -449,6 +488,7 @@ class Corporation:
                 )
                 if names_response and isinstance(names_response, list):
                     ship_names = {s["item_id"]: s["name"] for s in names_response}
+            
             for asset in asset_list:
                 if asset.get("item_id") in ship_names:
                     asset["ship_name"] = ship_names[asset["item_id"]]
