@@ -183,32 +183,45 @@ def get_type_buyprices(type_ids, region_id=_region_id):
         return {}
     return get_buy_order_book(type_ids, region_id)
 
-def get_region_info(region_id: int):
+def get_location_type(location_id: int):
     """
-    Returns metadata about the given region_id.
+    Returns the type of the given location_id.
+    Possible return values: "station", "structure", or None if unknown.
     """
-    if not region_id or not isinstance(region_id, int):
+    if not location_id or not isinstance(location_id, int):
+        return None
+    
+    _ensure()
+    id_type = _esi_client.get_id_type(location_id)
+    if id_type == "station":
+        return "station"
+    elif id_type == "structure":
+        return "structure"
+    elif id_type == "region":
+        return "region"
+    else:
+        return None
+
+def get_location_info(location_id: int):
+    """
+    Returns metadata about the given location_id.
+    """
+    if not location_id or not isinstance(location_id, int):
         return {}
     
     _ensure()
+    id_type = get_location_type(location_id)
     try:
-        region = _esi_client.esi_get(f"/universe/regions/{region_id}/")
-        return region
+        if id_type == "station":
+            station = _esi_client.esi_get(f"/universe/stations/{location_id}/")
+            return station
+        elif id_type == "structure":
+            structure = _esi_client.esi_get(f"/universe/structures/{location_id}/")
+            return structure
+        elif id_type == "region":
+            region = _esi_client.esi_get(f"/universe/regions/{location_id}/")
+            return region
+        else:
+            return {}
     except Exception as e:
-        raise RuntimeError(f"ESI request failed for region {region_id}: {e}")
-
-def get_structure_info(structure_id: int):
-    """
-    Returns metadata about the given structure_id.
-    """
-    if not structure_id or not isinstance(structure_id, int):
-        raise ValueError("structure_id must be a valid integer.")
-    elif _esi_client.get_id_type(structure_id) != "structure":
-        raise ValueError(f"ID {structure_id} is not a structure ID.")
-    
-    _ensure()
-    try:
-        structure = _esi_client.esi_get(f"/universe/structures/{structure_id}/")
-        return structure
-    except Exception as e:
-        raise RuntimeError(f"ESI request failed for structure {structure_id}: {e}")
+        raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
