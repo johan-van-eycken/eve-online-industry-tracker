@@ -1,7 +1,6 @@
 import logging
 import json
 from typing import Optional, List, Dict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager

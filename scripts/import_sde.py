@@ -3,9 +3,9 @@ import os
 import sys
 import zipfile
 import shutil
-import requests
-import pandas as pd
-import yaml
+import requests # pyright: ignore[reportMissingModuleSource]
+import pandas as pd # pyright: ignore[reportMissingModuleSource]
+import yaml # pyright: ignore[reportMissingModuleSource]
 import argparse
 import json
 

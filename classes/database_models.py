@@ -1,9 +1,9 @@
 from typing import Optional, Any
 from datetime import datetime
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql import func
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, Float, Boolean, JSON
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import Mapped, mapped_column # pyright: ignore[reportMissingImports]
+from sqlalchemy.sql import func # pyright: ignore[reportMissingImports]
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, Float, Boolean, JSON # pyright: ignore[reportMissingImports]
+from sqlalchemy.ext.declarative import declarative_base # pyright: ignore[reportMissingImports]
 
 # Base is the declarative base for SQLAlchamy models
 BaseOauth = declarative_base()

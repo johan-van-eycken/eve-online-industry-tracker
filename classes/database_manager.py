@@ -1,8 +1,8 @@
 import os
 import json
-import pandas as pd
-from sqlalchemy import create_engine, text, DDL
-from sqlalchemy.orm import sessionmaker
+import pandas as pd # pyright: ignore[reportMissingModuleSource]
+from sqlalchemy import create_engine, text, DDL # pyright: ignore[reportMissingImports]
+from sqlalchemy.orm import sessionmaker # pyright: ignore[reportMissingImports]
 from typing import Optional, List
 
 # ----------------------------

@@ -1,5 +1,5 @@
 import logging
-import requests
+import requests # pyright: ignore[reportMissingModuleSource]
 import webbrowser
 import time
 import random
