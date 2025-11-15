@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify # pyright: ignore[reportMissingImports]
 import logging
 import os
+import signal
 import sys
 import json
 
@@ -77,11 +78,27 @@ def health_check():
         return jsonify({"status": "not_ready", "init_state": INIT_STATE}), 500
     return jsonify({"status": "OK"}), 200
 
-@app.route('/shutdown', methods=['GET'])
+@app.route('/shutdown', methods=['GET', 'POST'])
 def shutdown():
-    # Respond before exiting
-    os._exit(0)  # This will terminate the Flask process
-    return jsonify({"status": "Shutting down..."}), 200
+    """Shutdown the Flask server"""
+    try:
+        logging.info("Shutdown request received")
+        
+        # For Windows
+        if os.name == 'nt':
+            os.kill(os.getpid(), signal.SIGTERM)
+        else:
+            # For Unix-like systems
+            func = request.environ.get('werkzeug.server.shutdown')
+            if func is None:
+                os.kill(os.getpid(), signal.SIGTERM)
+            else:
+                func()
+        
+        return jsonify({"status": "success", "message": "Server shutting down..."}), 200
+    except Exception as e:
+        logging.error(f"Error during shutdown: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # Static Data endpoints
 @app.route('/static/<path:filename>', methods=['GET'])
@@ -449,6 +466,14 @@ def locations():
         return jsonify({"status": "success", "data": result}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": "Error in POST Method `/locations`: " + str(e)}), 500
+
+@app.route('/industry_builder/<int:character_id>', methods=['GET'])
+def industry_builder(character_id):
+    try:
+        industry_data = []
+        return jsonify({"status": "success", "data": industry_data}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/industry_builder/{character_id}`: " + str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)
