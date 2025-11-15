@@ -1,5 +1,5 @@
-import streamlit as st
-import requests
+import streamlit as st # pyright: ignore[reportMissingImports]
+import requests # pyright: ignore[reportMissingModuleSource]
 import os
 
 FLASK_HOST = os.getenv("FLASK_HOST", "localhost")

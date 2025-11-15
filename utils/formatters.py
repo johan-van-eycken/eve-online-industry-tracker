@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone, timedelta
-from dateutil import parser
+from dateutil import parser # pyright: ignore[reportMissingModuleSource]
 from typing import Optional
 
 def format_isk(value: Optional[float]) -> str:

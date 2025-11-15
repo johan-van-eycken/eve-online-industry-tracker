@@ -1,5 +1,5 @@
-import streamlit as st
-import pandas as pd
+import streamlit as st # pyright: ignore[reportMissingImports]
+import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 
 from utils.flask_api import api_get
 from utils.formatters import format_isk_short

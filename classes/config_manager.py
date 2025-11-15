@@ -1,4 +1,3 @@
-# config_manager.py
 import json
 import logging
 from pathlib import Path

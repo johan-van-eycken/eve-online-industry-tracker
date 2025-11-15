@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify # pyright: ignore[reportMissingImports]
 import logging
 import os
 import sys

@@ -1,5 +1,5 @@
-import streamlit as st
-import pandas as pd
+import streamlit as st # pyright: ignore[reportMissingImports]
+import pandas as pd # pyright: ignore[reportMissingModuleSource]
 
 from classes.database_manager import DatabaseManager
 from typing import Optional, List, Tuple

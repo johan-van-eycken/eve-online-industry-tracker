@@ -1,5 +1,5 @@
-import streamlit as st
-import requests
+import streamlit as st # pyright: ignore[reportMissingImports]
+import requests # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 
 # Flask backend
 from utils.flask_api import api_get
