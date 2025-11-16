@@ -1,3 +1,6 @@
+"""
+Adapter for retrieving ESI data from API calls.
+"""
 import logging
 import time
 from collections import defaultdict

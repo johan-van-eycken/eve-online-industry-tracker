@@ -165,6 +165,9 @@ class CharacterAssetsModel(BaseApp):
     location_flag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_singleton: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_blueprint_copy: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    blueprint_runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    blueprint_time_efficiency: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    blueprint_material_efficiency: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     type_adjusted_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_average_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -221,6 +224,9 @@ class CorporationAssetsModel(BaseApp):
     location_flag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_singleton: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_blueprint_copy: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    blueprint_runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    blueprint_time_efficiency: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    blueprint_material_efficiency: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     type_adjusted_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_average_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -446,3 +452,11 @@ class StaStation(BaseSde):
     x: Mapped[float] = mapped_column(Float, nullable=False)
     y: Mapped[float] = mapped_column(Float, nullable=False)
     z: Mapped[float] = mapped_column(Float, nullable=False)
+
+class Blueprints(BaseSde):
+    __tablename__ = "blueprints"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    blueprintTypeID: Mapped[int] = mapped_column(Integer, nullable=False)
+    maxProductionLimit: Mapped[int] = mapped_column(Integer, nullable=False)
+    activities: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)

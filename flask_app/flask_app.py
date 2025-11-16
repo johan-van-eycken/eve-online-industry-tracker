@@ -17,6 +17,7 @@ from utils.app_init import load_config, init_db_managers, init_char_manager, ini
 from flask_app.services.yield_calc import compute_yields
 from flask_app.services.optimizer import optimize_ore_tiered
 from flask_app.data.sde_adapter import sde_adapter, get_all_ores, get_all_materials
+from flask_app.data.app_adapter import app_adapter, get_blueprint_assets
 from flask_app.data.char_adapter import char_adapter, get_character_skills, get_character_implants
 from flask_app.data.facility_repo import get_facility, get_all_facilities
 from flask_app.data.esi_adapter import esi_adapter, get_ore_prices, get_material_prices, \
@@ -56,6 +57,7 @@ try:
     logging.info("Initializing data adapters...")
     INIT_STATE = "Initializing Data Adapters"
     sde_adapter(db_sde)
+    app_adapter(db_app)
     esi_adapter(main_character)
 
     # Log summary
@@ -467,13 +469,14 @@ def locations():
     except Exception as e:
         return jsonify({"status": "error", "message": "Error in POST Method `/locations`: " + str(e)}), 500
 
-@app.route('/industry_builder/<int:character_id>', methods=['GET'])
-def industry_builder(character_id):
+@app.route('/industry_builder_data', methods=['GET'])
+def industry_builder():
     try:
-        industry_data = []
-        return jsonify({"status": "success", "data": industry_data}), 200
+        all_blueprints = get_blueprint_assets()
+
+        return jsonify({"status": "success", "data": all_blueprints}), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Error in GET Method `/industry_builder/{character_id}`: " + str(e)}), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/industry_builder_data`: " + str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)
