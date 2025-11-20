@@ -441,7 +441,12 @@ def refresh_market_orders():
                     "Escrow Remaining": order.get('escrow', 0),
                     "Station": station.get('station_name', location_id),
                     "Region": region.get('name', region_id),
-                    "is_buy_order": order['is_buy_order']
+                    "is_buy_order": order['is_buy_order'],
+                    "type_group_id": order.get('type_group_id', -1),
+                    "type_group_name": order.get('type_group_name', 'Unknown'),
+                    "type_category_id": order.get('type_category_id', -1),
+                    "type_category_name": order.get('type_category_name', 'Unknown'),
+                    "is_blueprint_copy": False
                 })
 
         return jsonify({"status": "success", "data": refreshed_orders}), 200
