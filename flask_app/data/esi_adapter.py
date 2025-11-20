@@ -34,9 +34,7 @@ def _ensure():
         raise RuntimeError("Station ID not set.")
 
 def _fetch_region_sell_orders(type_ids, region_id=_region_id):
-    logging.info(f"_fetch_region_sell_orders({type_ids}, region_id={region_id})")
     _ensure()
-    logging.info(f"after _ensure(): region_id={region_id}, station_id={_station_id}")
 
     if not type_ids:
         return []
