@@ -39,8 +39,6 @@ def render():
     except Exception as e:
         st.error(f"Error fetching market orders: {str(e)}")
         return
-    
-    st.write(all_orders)
 
     # Split into sell and buy orders
     sell_orders = []
