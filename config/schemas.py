@@ -28,8 +28,20 @@ CONFIG_SCHEMA = {
 
 IMPORT_SDE_SCHEMA = {
     "APP_VERSION": None,
+    "SDE_VERSION": None,
     "SDE_URL": None,
     "DEFAULT_DB_URI": "sqlite:///database/eve_sde.db",
     "DEFAULT_TMP_DIR": "database/data/tmp_sde",
     "TABLES_TO_IMPORT": [],
+}
+
+SDE_VERSION_SCHEMA = {
+    "table": "sde_version",
+    "columns": [
+        {"name": "id", "type": "INTEGER PRIMARY KEY AUTOINCREMENT"},
+        {"name": "build_number", "type": "INTEGER NOT NULL UNIQUE"},
+        {"name": "release_date", "type": "TEXT NOT NULL"},
+        {"name": "imported_at", "type": "TEXT NOT NULL"},
+        {"name": "is_current", "type": "INTEGER DEFAULT 0"},
+    ]
 }
