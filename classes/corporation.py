@@ -228,12 +228,12 @@ class Corporation:
                 corp_standings = json.loads(corp_standings)
             faction_data = self.db_sde.load_df("factions")
             npccorp_data = self.db_sde.load_df("npcCorporations")
-            def get_name(nameID, language):
-                if isinstance(nameID, dict):
-                    return nameID.get(language, next(iter(nameID.values()), "Unknown"))
-                return nameID
-            faction_lookup = {row["id"]: get_name(row["nameID"], self.cfg["app"]["language"]) for _, row in faction_data.iterrows()}
-            npccorp_lookup = {row["id"]: get_name(row["nameID"], self.cfg["app"]["language"]) for _, row in npccorp_data.iterrows()}
+            def get_name(name, language):
+                if isinstance(name, dict):
+                    return name.get(language, next(iter(name.values()), "Unknown"))
+                return name
+            faction_lookup = {row["id"]: get_name(row["name"], self.cfg["app"]["language"]) for _, row in faction_data.iterrows()}
+            npccorp_lookup = {row["id"]: get_name(row["name"], self.cfg["app"]["language"]) for _, row in npccorp_data.iterrows()}
             divisions_lookup = {
                 d["division"]: (
                     "Master Wallet" if d["division"] == 1 else d.get("name", f"Division {d['division']}")
@@ -449,11 +449,11 @@ class Corporation:
                     "type_category_name": getattr(category_data, "name", {}).get(self.db_sde.language, "") if category_data else "",
                     "type_meta_group_id": getattr(type_data, "metaGroupID", None) if type_data else None,
                     "type_race_id": getattr(type_data, "raceID", None) if type_data else None,
-                    "type_race_name": getattr(race_data, "nameID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "nameID", None) else "",
-                    "type_race_description": getattr(race_data, "descriptionID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "descriptionID", None) else "",
+                    "type_race_name": getattr(race_data, "name", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "name", None) else "",
+                    "type_race_description": getattr(race_data, "description", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "description", None) else "",
                     "type_faction_id": getattr(type_data, "factionID", None) if type_data else None,
-                    "type_faction_name": getattr(faction_data, "nameID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "nameID", None) else "",
-                    "type_faction_description": getattr(faction_data, "descriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "descriptionID", None) else "",
+                    "type_faction_name": getattr(faction_data, "name", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "name", None) else "",
+                    "type_faction_description": getattr(faction_data, "description", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "description", None) else "",
                     "type_faction_short_description": getattr(faction_data, "shortDescriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "shortDescriptionID", None) else "",
                     "location_id": asset.get("location_id"),
                     "location_type": asset.get("location_type"),

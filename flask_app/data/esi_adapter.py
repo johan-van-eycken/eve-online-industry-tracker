@@ -8,15 +8,18 @@ from collections import defaultdict
 logging.basicConfig(level=logging.INFO)
 
 _esi_client = None
+
+# Default The Forge: Jita IV - Moon 4 - Caldari Navy Assembly Plant
 _region_id = 10000002
 _station_id = 60003760
 
-# Default The Forge: Jita IV - Moon 4 - Caldari Navy Assembly Plant
 # Cache structures
 _TYPE_SELLORDERS_CACHE = {}          # { type_id: (timestamp, [orders]) }
 _TYPE_SELLORDERS_CACHE_TTL = 300     # seconds (5 minutes)
 _TYPE_BUYORDERS_CACHE = {}           # { type_id: (timestamp, [orders]) }
 _TYPE_BUYORDERS_CACHE_TTL = 300      # seconds (5 minutes)
+_MARKET_PRICES_CACHE = None          # (timestamp, [prices])
+_MARKET_PRICES_CACHE_TTL = 3600      # seconds (1 hour)
 
 # Default The Forge: Jita IV - Moon 4 - Caldari Navy Assembly Plant
 def esi_adapter(character, region_id=_region_id, station_id=_station_id):
@@ -99,7 +102,7 @@ def _fetch_region_buy_orders(type_ids, region_id=_region_id):
         except Exception as e:
             raise RuntimeError(f"ESI request failed (type_id={type_id}): {e}")
 
-        # Filter: sell orders only (is_buy_order == False)
+        # Filter: buy orders only (is_buy_order == True)
         collected = [order for order in data if order.get("is_buy_order") is True]
 
         # Store in cache
@@ -226,3 +229,29 @@ def get_location_info(location_id: int):
             return {}
     except Exception as e:
         raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
+    
+def get_market_prices():
+    """
+    Returns market prices for all items (cached for 1 hour).
+    - adjusted_price: used for calculating manufacturing costs.
+    - average_price: used for calculating sell prices.
+    """
+    global _MARKET_PRICES_CACHE
+
+    _ensure()
+    now = time.time()
+    
+    # Cache hit?
+    if _MARKET_PRICES_CACHE and (now - _MARKET_PRICES_CACHE[0] < _MARKET_PRICES_CACHE_TTL):
+        return _MARKET_PRICES_CACHE[1]
+
+    # Fetch fresh data
+    try:
+        market_prices = _esi_client.esi_get("/markets/prices/", paginate=True)
+    except Exception as e:
+        raise RuntimeError(f"ESI request failed: {e}")
+
+    # Store in cache
+    _MARKET_PRICES_CACHE = (now, market_prices)
+
+    return market_prices

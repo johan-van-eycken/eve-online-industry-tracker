@@ -1,10 +1,16 @@
 """
 Adapter for retrieving application data from the local database.
 """
+from datetime import datetime
 from typing import Any, Dict, List
 
-from classes.database_models import CharacterAssetsModel, CorporationAssetsModel
+from classes.database_models import (
+    CharacterModel, CharacterAssetsModel,
+    CorporationModel, CorporationAssetsModel,
+    IndustryProfilesModel
+)
 from flask_app.data.sde_adapter import get_blueprint_manufacturing_data
+from flask_app.data.esi_adapter import get_market_prices
 
 _db_app = None
 
@@ -91,7 +97,7 @@ def _extract_manufacturing_data(bp_info: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_blueprint_assets() -> List[Dict[str, Any]]:
-    """Get all blueprints with manufacturing data, enriched with ownership information."""
+    """Get all blueprints with manufacturing data, enriched with ownership information and prices."""
     _ensure()
 
     # Get owned blueprints first
@@ -105,6 +111,18 @@ def get_blueprint_assets() -> List[Dict[str, Any]]:
         .filter(CorporationAssetsModel.type_category_name == "Blueprint")
         .all()
     )
+    # Build owner name lookups
+    char_ids = {bp.character_id for bp in char_blueprints}
+    corp_ids = {bp.corporation_id for bp in corp_blueprints}
+
+    char_name_map = {}
+    if char_ids:
+        characters = (_db_app.session.query(CharacterModel).filter(CharacterModel.character_id.in_(char_ids)).all())
+        char_name_map = {char.character_id: char.character_name for char in characters}
+    corp_name_map = {}
+    if corp_ids:
+        corporations = (_db_app.session.query(CorporationModel).filter(CorporationModel.corporation_id.in_(corp_ids)).all())
+        corp_name_map = {corp.corporation_id: corp.corporation_name for corp in corporations}
 
     # Convert to dicts and normalize
     owned_blueprints = []
@@ -113,12 +131,14 @@ def get_blueprint_assets() -> List[Dict[str, Any]]:
     for bp in char_blueprints:
         bp_dict = _normalize_asset_dict(_model_to_dict(bp), "character")
         bp_dict["owned"] = True
+        bp_dict["owner_name"] = char_name_map.get(bp.character_id, "Unknown")
         owned_blueprints.append(bp_dict)
         owned_type_ids.add(bp_dict["type_id"])
 
     for bp in corp_blueprints:
         bp_dict = _normalize_asset_dict(_model_to_dict(bp), "corporation")
         bp_dict["owned"] = True
+        bp_dict["owner_name"] = corp_name_map.get(bp.corporation_id, "Unknown")
         owned_blueprints.append(bp_dict)
         owned_type_ids.add(bp_dict["type_id"])
 
@@ -150,6 +170,7 @@ def get_blueprint_assets() -> List[Dict[str, Any]]:
                 "type_category_id": all_blueprint_data.get(type_id, {}).get("category_id", None),
                 "type_category_name": all_blueprint_data.get(type_id, {}).get("category_name", None),
                 "owner_id": None,
+                "owner_name": None,
                 "location_id": None,
                 "item_id": None,
                 "is_singleton": True,
@@ -168,4 +189,108 @@ def get_blueprint_assets() -> List[Dict[str, Any]]:
 
             result.append(bp)
 
+    # Fetch market prices for all involved items
+    market_prices = get_market_prices()
+    price_dict = {
+        item["type_id"]: {
+            "adjusted_price": item.get("adjusted_price"),
+            "average_price": item.get("average_price"),
+        }
+        for item in market_prices
+        if "type_id" in item
+    }
+
+    # Add prices for materials and products
+    for bp in result:
+        for mat in bp.get("materials", []):
+            mat_type_id = mat.get("type_id")
+            if mat_type_id in price_dict:
+                mat["adjusted_price"] = price_dict[mat_type_id].get("adjusted_price")
+                mat["average_price"] = price_dict[mat_type_id].get("average_price")
+            else:
+                mat["adjusted_price"] = None
+                mat["average_price"] = None
+
+        for prod in bp.get("products", []):
+            prod_type_id = prod.get("type_id")
+            if prod_type_id in price_dict:
+                prod["adjusted_price"] = price_dict[prod_type_id].get("adjusted_price")
+                prod["average_price"] = price_dict[prod_type_id].get("average_price")
+            else:
+                prod["adjusted_price"] = None
+                prod["average_price"] = None
+
     return result
+
+def get_industry_profiles(character_id:int) -> List[Dict[str, Any]]:
+    """Get all industry profiles for a character."""
+    _ensure()
+    profiles = _db_app.session.query(IndustryProfilesModel).filter(
+        IndustryProfilesModel.character_id == character_id
+    ).all()
+    return [_model_to_dict(profile) for profile in profiles]
+
+def add_industry_profile(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Add a new industry profile."""
+    _ensure()
+    profile = IndustryProfilesModel(
+        character_id=data["character_id"],
+        profile_name=data["profile_name"],
+        is_default=data.get("is_default", False),
+        region_id=data.get("region_id"),
+        system_id=data.get("system_id"),
+        facility_id=data.get("facility_id"),
+        facility_type=data.get("facility_type"),
+        facility_tax=data.get("facility_tax"),
+        material_efficiency_bonus=data.get("material_efficiency_bonus"),
+        time_efficiency_bonus=data.get("time_efficiency_bonus"),
+        rig_slot0_type_id=data.get("rig_slot0_type_id"),
+        rig_slot1_type_id=data.get("rig_slot1_type_id"),
+        rig_slot2_type_id=data.get("rig_slot2_type_id")
+    )
+    _db_app.session.add(profile)
+    _db_app.session.commit()
+
+    return profile.id
+
+def edit_industry_profile(profile_id: int, data: Dict[str, Any]) -> None:
+    """Edit an existing industry profile."""
+    _ensure()
+    profile = _db_app.session.query(IndustryProfilesModel).filter(
+        IndustryProfilesModel.id == profile_id
+    ).first()
+    if not profile:
+        raise ValueError(f"Industry profile with id {profile_id} not found.")
+
+    # If this is set as default, unset all other defaults for this character
+    if data.get("is_default", False):
+        _db_app.session.query(IndustryProfilesModel).filter(
+            IndustryProfilesModel.character_id == profile.character_id,
+            IndustryProfilesModel.id != profile_id
+        ).update({"is_default": False})
+
+    # Update fields
+    for field in [
+        "profile_name", "is_default", "region_id", "system_id", "facility_id",
+        "facility_type", "facility_tax", "material_efficiency_bonus", "time_efficiency_bonus",
+        "rig_slot0_type_id", "rig_slot1_type_id", "rig_slot2_type_id"
+    ]:
+        if field in data:
+            setattr(profile, field, data[field])
+    
+    profile.updated_at = datetime.now()
+    _db_app.session.commit()
+    return profile_id
+
+def remove_industry_profile(profile_id: int) -> None:
+    """Remove an industry profile."""
+    _ensure()
+    profile = _db_app.session.query(IndustryProfilesModel).filter(
+        IndustryProfilesModel.id == profile_id
+    ).first()
+    if not profile:
+        raise ValueError(f"Industry profile with id {profile_id} not found.")
+
+    _db_app.session.delete(profile)
+    _db_app.session.commit()
+    return

@@ -16,8 +16,10 @@ from utils.app_init import load_config, init_db_managers, init_char_manager, ini
 # Flask app imports
 from flask_app.services.yield_calc import compute_yields
 from flask_app.services.optimizer import optimize_ore_tiered
-from flask_app.data.sde_adapter import sde_adapter, get_all_ores, get_all_materials
-from flask_app.data.app_adapter import app_adapter, get_blueprint_assets
+from flask_app.data.sde_adapter import sde_adapter, get_all_ores \
+    , get_all_materials, get_solar_systems, get_npc_stations
+from flask_app.data.app_adapter import app_adapter, get_blueprint_assets \
+    , get_industry_profiles, add_industry_profile, edit_industry_profile, remove_industry_profile
 from flask_app.data.char_adapter import char_adapter, get_character_skills, get_character_implants
 from flask_app.data.facility_repo import get_facility, get_all_facilities
 from flask_app.data.esi_adapter import esi_adapter, get_ore_prices, get_material_prices, \
@@ -474,14 +476,147 @@ def locations():
     except Exception as e:
         return jsonify({"status": "error", "message": "Error in POST Method `/locations`: " + str(e)}), 500
 
-@app.route('/industry_builder_data', methods=['GET'])
-def industry_builder():
+# Industry Builder endpoints
+@app.route('/industry_builder_data/<int:character_id>', methods=['GET'])
+def industry_builder(character_id):
     try:
+        character = char_manager.get_character_by_id(character_id)
+        if not character:
+            return jsonify({"status": "error", "message": f"Error in GET Method `/industry_builder_data/{character_id}`: Character ID {character_id} not found"}), 400
+
+        # Retrieve all blueprints and manufacturing data
         all_blueprints = get_blueprint_assets()
+
+        # Filter blueprints by character_id if provided
+        if character_id:
+            all_blueprints = [bp for bp in all_blueprints if bp.get("owner_id") == character_id]
+
+        # Skill requirements check
+        char_skills = character.skills.get("skills", []) or []
+        for bp in all_blueprints:
+            required_skills = bp.get("required_skills", [])
+            skill_requirements_met = True
+            
+            for skill in required_skills:
+                skill_type_id = skill.get("type_id")
+                required_level = skill.get("level", 0)
+                char_skill = next(
+                    (s for s in char_skills if s["skill_id"] == skill_type_id), None
+                )
+                char_level = char_skill["trained_skill_level"] if char_skill else 0
+                
+                # Add individual skill requirement met flag
+                skill["character_level"] = char_level
+                skill["skill_requirement_met"] = char_level >= required_level
+                
+                if char_level < required_level:
+                    skill_requirements_met = False
+            
+            bp["skill_requirements_met"] = skill_requirements_met
+
+        # Build cost and value analysis for each blueprint
+        for bp in all_blueprints:
+            total_material_cost = 0.0
+            total_product_value = 0.0
+            
+            # Material Efficiency (fixed field name)
+            me_level = bp.get("blueprint_material_efficiency", 0) or 0
+            me_reduction = 1.0 - (me_level * 0.01)
+
+            # Calculate total material cost with ME applied
+            # Use adjusted_price for materials (industry cost calculation)
+            for mat in bp.get("materials", []):
+                base_qty = mat.get("quantity", 0)
+                adjusted_qty = int(base_qty * me_reduction)
+                mat_price = mat.get("adjusted_price", 0.0) or 0.0
+                total_material_cost += adjusted_qty * mat_price
+
+                # Store adjusted quantity for frontend display
+                mat["adjusted_quantity"] = adjusted_qty
+            
+            bp["total_material_cost"] = total_material_cost
+
+            # Calculate total product value
+            # Use average_price for products (market sell price)
+            for prod in bp.get("products", []):
+                prod_qty = prod.get("quantity", 0)
+                prod_price = prod.get("average_price", 0.0) or 0.0
+                total_product_value += prod_qty * prod_price
+            
+            bp["total_product_value"] = total_product_value
+
+            # Profit margin
+            bp["profit_margin"] = total_product_value - total_material_cost
+            
+            # Store ME info for frontend
+            bp["me_reduction_factor"] = me_reduction
+            bp["me_savings_percentage"] = me_level
 
         return jsonify({"status": "success", "data": all_blueprints}), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Error in GET Method `/industry_builder_data`: " + str(e)}), 500
+        return jsonify({"status": "error", "message": f"Error in GET Method `/industry_builder_data/{character_id}`: " + str(e)}), 500
+
+# Industry Profiles endpoints
+@app.route('/solar_systems', methods=['GET'])
+def solar_systems():
+    try:
+        solar_systems = get_solar_systems()
+        return jsonify({"status": "success", "data": solar_systems}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/solar_systems`: " + str(e)}), 500
+
+@app.route('/npc_stations/<int:system_id>', methods=['GET'])
+def npc_stations(system_id):
+    if not system_id:
+        return jsonify({"status": "error", "message": "System ID is required to fetch NPC stations."}), 400
+    try:
+        npc_stations = get_npc_stations(system_id)
+        return jsonify({"status": "success", "data": npc_stations}), 200
+    except ValueError as ve:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/npc_stations/{system_id}`: " + str(ve)}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/npc_stations/{system_id}`: " + str(e)}), 500
+
+@app.route('/industry_profiles/<int:character_id>', methods=['GET'])
+def industry_profiles(character_id):
+    try:
+        profiles = get_industry_profiles(character_id)
+        return jsonify({"status": "success", "data": profiles}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/industry_profiles/{character_id}`: " + str(e)}), 500
+
+@app.route('/industry_profiles', methods=['POST'])
+def create_industry_profile():
+    try:
+        data = request.get_json()
+        character_id = data.get("character_id")
+
+        if not character_id:
+            return jsonify({"status": "error", "message": "Character ID is required to create an industry profile."}), 400
+
+        profile_id = add_industry_profile(data)
+        return jsonify({"status": "success", "data": {"id": profile_id}}), 201
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in POST Method `/industry_profiles`: " + str(e)}), 500
+
+@app.route('/industry_profiles/<int:profile_id>', methods=['PUT'])
+def update_industry_profile(profile_id):
+    try:
+        data = request.json
+        edit_industry_profile(profile_id, data)
+        return jsonify({"status": "success", "message": "Industry profile updated successfully."}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in PUT Method `/industry_profiles/{profile_id}`: " + str(e)}), 500
+
+@app.route('/industry_profiles/<int:profile_id>', methods=['DELETE'])
+def delete_industry_profile(profile_id):
+    try:
+        remove_industry_profile(profile_id)
+        return jsonify({"status": "success", "message": "Industry profile deleted successfully."}), 200
+    except ValueError as ve:
+        return jsonify({"status": "error", "message": f"Error in DELETE Method `/industry_profiles/{profile_id}`: " + str(ve)}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in DELETE Method `/industry_profiles/{profile_id}`: " + str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="localhost", port=5000, debug=True)

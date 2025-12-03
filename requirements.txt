@@ -8,6 +8,7 @@ alembic==1.16.4
 matplotlib==3.7.1
 scipy==1.15.3
 pulp==3.3.0
+tqdm==4.66.1
 
 # pip install --upgrade pip setuptools wheel
 # pip install -r requirements.txt

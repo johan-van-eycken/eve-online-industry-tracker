@@ -274,6 +274,29 @@ class MemberModel(BaseApp):
     titles: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)  # List of titles
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+class IndustryProfilesModel(BaseApp):
+    __tablename__ = "industry_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    profile_name: Mapped[str] = mapped_column(String, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    region_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    system_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    facility_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    facility_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    facility_tax: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    material_efficiency_bonus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    time_efficiency_bonus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rig_slot0_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    rig_slot1_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    rig_slot2_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    def __repr__(self) -> str:
+        return f"<IndustryProfile(id={self.id}, profile_name='{self.profile_name}', character_id={self.character_id})>"
+
 # --------------------------
 # SDE
 # --------------------------
@@ -283,11 +306,11 @@ class Bloodlines(BaseSde):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     charisma: Mapped[int] = mapped_column(Integer, nullable=False)
     corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
-    descriptionID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
     intelligence: Mapped[int] = mapped_column(Integer, nullable=False)
     memory: Mapped[int] = mapped_column(Integer, nullable=False)
-    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     perception: Mapped[int] = mapped_column(Integer, nullable=False)
     raceID: Mapped[int] = mapped_column(Integer, nullable=False)
     willpower: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -296,9 +319,9 @@ class Races(BaseSde):
     __tablename__ = "races"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    descriptionID: Mapped[str] = mapped_column(JSON, nullable=False)
+    description: Mapped[str] = mapped_column(JSON, nullable=False)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
-    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     shipTypeID: Mapped[int] = mapped_column(Integer, nullable=True)
     skills: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
 
@@ -315,18 +338,15 @@ class Types(BaseSde):
     radius: Mapped[int] = mapped_column(Integer, nullable=True)
     description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
     graphicID: Mapped[int] = mapped_column(Integer, nullable=True)
+    soundID: Mapped[int] = mapped_column(Integer, nullable=True)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
     raceID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    sofFactionName: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     basePrice: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     marketGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     capacity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     metaGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     variationParentTypeID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    masteries: Mapped[Optional[dict[int, int]]] = mapped_column(JSON, nullable=True)
-    traits: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
-    sofMaterialSetID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 class Groups(BaseSde):
@@ -351,66 +371,71 @@ class Categories(BaseSde):
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
     published: Mapped[bool] = mapped_column(Boolean, nullable=True)
 
-class Agents(BaseSde):
-    __tablename__ = "agents"
+class AgentsInSpace(BaseSde):
+    __tablename__ = "agentsInSpace"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
-    divisionID: Mapped[int] = mapped_column(Integer, nullable=False)
-    level: Mapped[int] = mapped_column(Integer, nullable=False)
-    locationID: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    agentTypeID: Mapped[int] = mapped_column(Integer, nullable=False)
-    isLocator: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    dungeonID: Mapped[int] = mapped_column(Integer, nullable=False)
+    solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
+    spawnPointID: Mapped[int] = mapped_column(Integer, nullable=False)
+    typeID: Mapped[int] = mapped_column(Integer, nullable=False)
+
+class AgentTypes(BaseSde):
+    __tablename__ = "agentTypes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
 
 class NpcCorporations(BaseSde):
     __tablename__ = "npcCorporations"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    allowedMemberRaces: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
     ceoID: Mapped[int] = mapped_column(Integer, nullable=False)
-    corporationTrades: Mapped[dict[int, float]] = mapped_column(JSON, nullable=True)
     deleted: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    descriptionID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
-    divisions: Mapped[str] = mapped_column(JSON, nullable=False)
-    enemyID: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     extent: Mapped[str] = mapped_column(String, nullable=False)
-    factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    friendID: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
     hasPlayerPersonnelManager: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    iconID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
     initialPrice: Mapped[int] = mapped_column(Integer, nullable=False)
-    investors: Mapped[Optional[list[dict[int, int]]]] = mapped_column(JSON, nullable=False)
-    lpOfferTables: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
-    mainActivityID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
     memberLimit: Mapped[int] = mapped_column(Integer, nullable=False)
     minSecurity: Mapped[float] = mapped_column(Float, nullable=False)
     minimumJoinStanding: Mapped[float] = mapped_column(Float, nullable=False)
-    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
-    publicShares: Mapped[int] = mapped_column(Integer, nullable=False)
-    raceID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     sendCharTerminationMessage: Mapped[bool] = mapped_column(Boolean, nullable=False)
     shares: Mapped[int] = mapped_column(Integer, nullable=False)
     size: Mapped[str] = mapped_column(String, nullable=False)
-    sizeFactor: Mapped[float] = mapped_column(Float, nullable=False)
-    solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
     stationID: Mapped[int] = mapped_column(Integer, nullable=False)
     taxRate: Mapped[float] = mapped_column(Float, nullable=False)
     tickerName: Mapped[str] = mapped_column(String, nullable=False)
     uniqueName: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    allowedMemberRaces: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    corporationTrades: Mapped[dict[int, float]] = mapped_column(JSON, nullable=True)
+    divisions: Mapped[str] = mapped_column(JSON, nullable=False)
+    enemyID: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    friendID: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    iconID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    investors: Mapped[Optional[list[dict[int, int]]]] = mapped_column(JSON, nullable=False)
+    lpOfferTables: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
+    mainActivityID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    raceID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    sizeFactor: Mapped[float] = mapped_column(Float, nullable=False)  
+    solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
+    secondaryActivityID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
+    exchangeRates: Mapped[dict[int, float]] = mapped_column(JSON, nullable=True)
 
 class Factions(BaseSde):
     __tablename__ = "factions"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
-    descriptionID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     flatLogo: Mapped[str] = mapped_column(String, nullable=True)
     flatLogoWithName: Mapped[str] = mapped_column(String, nullable=True)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
     memberRaces: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=False)
     militiaCorporationID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    nameID: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
-    shortDescriptionID: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=False)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    shortDescription: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=False)
     sizeFactor: Mapped[float] = mapped_column(Float, nullable=False)
     solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
     uniqueName: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -419,9 +444,9 @@ class MarketGroups(BaseSde):
     __tablename__ = "marketGroups"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    descriptionID: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+    description: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
     iconID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    nameID: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+    name: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
     parentGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     hasTypes: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
@@ -431,27 +456,22 @@ class TypeMaterials(BaseSde):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     materials: Mapped[list[dict[str, int]]] = mapped_column(JSON, nullable=False)
 
-class StaStation(BaseSde):
-    __tablename__ = "staStations"
+class NpcStations(BaseSde):
+    __tablename__ = "npcStations"
 
-    constellationID: Mapped[int] = mapped_column(Integer, nullable=False)
-    corporationID: Mapped[int] = mapped_column(Integer, nullable=False)
-    dockingCostPerVolume: Mapped[float] = mapped_column(Float, nullable=False)
-    maxShipVolumeDockable: Mapped[float] = mapped_column(Float, nullable=False)
-    officeRentalCost: Mapped[int] = mapped_column(Integer, nullable=False)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    celestialIndex: Mapped[int] = mapped_column(Integer, nullable=False)
     operationID: Mapped[int] = mapped_column(Integer, nullable=False)
-    regionID: Mapped[int] = mapped_column(Integer, nullable=False)
+    orbitID: Mapped[int] = mapped_column(Integer, nullable=False)
+    orbitIndex: Mapped[int] = mapped_column(Integer, nullable=False)
+    ownerID: Mapped[int] = mapped_column(Integer, nullable=False)
+    position: Mapped[dict[str, float]] = mapped_column(JSON, nullable=False)
     reprocessingEfficiency: Mapped[float] = mapped_column(Float, nullable=False)
-    reprocessingHangarFlag: Mapped[int] = mapped_column(Integer, nullable=False)
+    reprocessingHangarFlag: Mapped[str] = mapped_column(String, nullable=False)
     reprocessingStationsTake: Mapped[float] = mapped_column(Float, nullable=False)
-    security: Mapped[float] = mapped_column(Float, nullable=False)
     solarSystemID: Mapped[int] = mapped_column(Integer, nullable=False)
-    stationID: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
-    stationName: Mapped[str] = mapped_column(String, nullable=False)
-    stationTypeID: Mapped[int] = mapped_column(Integer, nullable=False)
-    x: Mapped[float] = mapped_column(Float, nullable=False)
-    y: Mapped[float] = mapped_column(Float, nullable=False)
-    z: Mapped[float] = mapped_column(Float, nullable=False)
+    typeID: Mapped[int] = mapped_column(Integer, nullable=False)
+    useOperationName: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 class Blueprints(BaseSde):
     __tablename__ = "blueprints"
@@ -460,3 +480,78 @@ class Blueprints(BaseSde):
     blueprintTypeID: Mapped[int] = mapped_column(Integer, nullable=False)
     maxProductionLimit: Mapped[int] = mapped_column(Integer, nullable=False)
     activities: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+class MapConstellations(BaseSde):
+    __tablename__ = "mapConstellations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    position: Mapped[dict[str, float]] = mapped_column(JSON, nullable=False)
+    regionID: Mapped[int] = mapped_column(Integer, nullable=False)
+    solarSystemIDs: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
+    wormholeClassID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+class MapRegions(BaseSde):
+    __tablename__ = "mapRegions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    constellationIDs: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
+    description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    nebulaID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    position: Mapped[dict[str, float]] = mapped_column(JSON, nullable=False)
+    wormholeClassID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+class MapSolarSystems(BaseSde):
+    __tablename__ = "mapSolarSystems"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    border: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    constellationID: Mapped[int] = mapped_column(Integer, nullable=False)
+    hub: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    international: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    luminosity: Mapped[float] = mapped_column(Float, nullable=False)
+    name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    planetIDs: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
+    position: Mapped[dict[str, float]] = mapped_column(JSON, nullable=False)
+    position2D: Mapped[dict[str, float]] = mapped_column(JSON, nullable=False)
+    radius: Mapped[float] = mapped_column(Float, nullable=False)
+    regionID: Mapped[int] = mapped_column(Integer, nullable=False)
+    regional: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    securityClass: Mapped[str] = mapped_column(String, nullable=False)
+    securityStatus: Mapped[float] = mapped_column(Float, nullable=False)
+    starID: Mapped[int] = mapped_column(Integer, nullable=False)
+    stargateIDs: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
+    corridor: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    fringe: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    wormholeClassID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    visualEffect: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    disallowedAnchorCategories: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
+    disallowedAnchorGroups: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
+    factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+class StationOperations(BaseSde):
+    __tablename__ = "stationOperations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    activityID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    border: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    corridor: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    description: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+    fringe: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    hub: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    manufacturingFactor: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    operationName: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+    ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    researchFactor: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    services: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
+    stationTypes: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+class StationServices(BaseSde):
+    __tablename__ = "stationServices"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    serviceName: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    description: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
