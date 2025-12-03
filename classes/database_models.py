@@ -250,12 +250,12 @@ class StructureModel(BaseApp):
     state_timer_end: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     state_timer_start: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     unachors_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    fuel_expires: Mapped[str] = mapped_column(String, nullable=True)
-    reinforce_hour: Mapped[int] = mapped_column(Integer, nullable=True)
-    next_reinforce_apply: Mapped[str] = mapped_column(String, nullable=True)
-    next_reinforce_hour: Mapped[int] = mapped_column(Integer, nullable=True)
-    acl_profile_id: Mapped[int] = mapped_column(Integer, nullable=True)
-    services: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
+    fuel_expires: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    reinforce_hour: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    next_reinforce_apply: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    next_reinforce_hour: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    acl_profile_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    services: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 class MemberModel(BaseApp):
