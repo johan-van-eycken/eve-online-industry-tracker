@@ -3,9 +3,13 @@ Adapter for retrieving Static Data Export data from the local database.
 """
 import json
 import re
-from typing import Any, Dict, List
+from typing import Dict, List
 
-from classes.database_models import Blueprints, Categories, Groups, TypeMaterials, Types
+from classes.database_models import (
+    Blueprints, Categories, Groups, TypeMaterials, Types
+    , MapSolarSystems, MapRegions, MapConstellations, Factions
+    , NpcStations, NpcCorporations, StationOperations, StationServices
+)
 
 _db_sde = None
 _language = None
@@ -140,10 +144,11 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
     if not blueprints:
         return {}
 
-    # Get all blueprint, material and product type IDs for batch lookup
+    # Get all blueprint, material, product and skill type IDs for batch lookup
     blueprint_type_ids = set()
     material_type_ids = set()
     product_type_ids = set()
+    skill_type_ids = set()
 
     for bp in blueprints:
         blueprint_type_ids.add(bp.blueprintTypeID)
@@ -155,9 +160,12 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
 
         for prod in manufacturing.get("products", []):
             product_type_ids.add(prod["typeID"])
+        
+        for skill in manufacturing.get("skills", []):
+            skill_type_ids.add(skill["typeID"])
 
     # Batch fetch type, group, and category data
-    all_type_ids = material_type_ids | product_type_ids | blueprint_type_ids
+    all_type_ids = material_type_ids | product_type_ids | blueprint_type_ids | skill_type_ids
     types = _db_sde.session.query(Types).filter(Types.id.in_(all_type_ids)).all()
     type_data_map = {t.id: t for t in types}
     group_ids = {t.groupID for t in types if hasattr(t, "groupID")}
@@ -206,6 +214,24 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
                     "quantity": prod["quantity"],
                 }
             )
+        
+        skills = []
+        for skill in manufacturing.get("skills", []):
+            type_id = skill.get("typeID", None)
+            type_data = type_data_map.get(type_id)
+            group_data = group_data_map.get(type_data.groupID) if type_data else None
+            category_data = category_data_map.get(group_data.categoryID) if group_data else None
+            skills.append(
+                {
+                    "type_id": skill["typeID"],
+                    "type_name": _parse_localized(type_data.name) if type_data else "",
+                    "group_id": type_data.groupID if type_data else None,
+                    "group_name": _parse_localized(group_data.name) if group_data else "",
+                    "category_id": group_data.categoryID if group_data else None,
+                    "category_name": _parse_localized(category_data.name) if category_data else "",
+                    "level": skill["level"],
+                }
+            )
 
         type_id = bp.blueprintTypeID
         type_data = type_data_map.get(type_id)
@@ -225,7 +251,7 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
                 "time": manufacturing.get("time", 0),
                 "materials": materials,
                 "products": products,
-                "skills": manufacturing.get("skills", []),
+                "skills": skills,
             },
             "research_time": activities.get("research_time", {}).get("time", 0),
             "research_material": activities.get("research_material", {}).get("time", 0),
@@ -233,3 +259,102 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
         }
 
     return result
+
+
+def get_solar_systems() -> List[dict]:
+    """
+    Returns list of solar systems with metadata.
+    """
+    _ensure()
+
+    solar_systems_q = _db_sde.session.query(MapSolarSystems).all()
+    region_ids = {ss.regionID for ss in solar_systems_q}
+    constellation_ids = {ss.constellationID for ss in solar_systems_q}
+    regions_q = _db_sde.session.query(MapRegions).filter(MapRegions.id.in_(region_ids)).all()
+    region_map = {r.id: r for r in regions_q}
+    constellations_q = _db_sde.session.query(MapConstellations).filter(MapConstellations.id.in_(constellation_ids)).all()
+    constellation_map = {c.id: c for c in constellations_q}
+    faction_ids = {c.factionID for c in constellations_q if c.factionID is not None}
+    factions_q = _db_sde.session.query(Factions).filter(Factions.id.in_(faction_ids)).all()
+    faction_map = {f.id: f for f in factions_q}
+
+    solar_systems = []
+    for ss in solar_systems_q:
+        region = region_map.get(ss.regionID)
+        solar_systems.append(
+            {
+                "id": ss.id,
+                "name": _parse_localized(ss.name) or str(ss.id),
+                "security_status": ss.securityStatus,
+                "region_id": ss.regionID,
+                "region_name": _parse_localized(region.name) if region else "",
+                "region_description": _parse_localized(region.description) if region else "",
+                "constellation_id": ss.constellationID,
+                "constellation_name": _parse_localized(constellation_map.get(ss.constellationID).name) if constellation_map.get(ss.constellationID) else "",
+                "faction_id": constellation_map.get(ss.constellationID).factionID if constellation_map.get(ss.constellationID) else None,
+                "faction_name": _parse_localized(faction_map.get(constellation_map.get(ss.constellationID).factionID).name) if constellation_map.get(ss.constellationID) and faction_map.get(constellation_map.get(ss.constellationID).factionID) else "",
+            }
+        )
+    return solar_systems
+
+def get_npc_stations(system_id: int) -> List[dict]:
+    """
+    Returns list of NPC stations with metadata.
+    """
+    if not system_id:
+        raise ValueError("System ID is required to fetch NPC stations.")
+
+    _ensure()
+
+    stations_q = _db_sde.session.query(NpcStations).filter(NpcStations.solarSystemID == system_id).all()
+    owner_ids = {st.ownerID for st in stations_q}
+    corporations_q = _db_sde.session.query(NpcCorporations).filter(NpcCorporations.id.in_(owner_ids)).all()
+    corporation_map = {c.id: c for c in corporations_q}
+    operation_ids = {st.operationID for st in stations_q if st.operationID is not None}
+    operations_q = _db_sde.session.query(StationOperations).filter(StationOperations.id.in_(operation_ids)).all()
+    operation_map = {o.id: o for o in operations_q}
+    services_q = _db_sde.session.query(StationServices).all()
+    services_map = {s.id: s for s in services_q}
+
+    stations = []
+    for st in stations_q:
+        corporation = corporation_map.get(st.ownerID)
+        station_name = _parse_localized(corporation.name) if corporation else ""
+        operation = operation_map.get(st.operationID)
+
+        if st.useOperationName and st.operationID:
+            operation_name = _parse_localized(operation.operationName) if operation else ""
+            if operation_name:
+                station_name += " " + operation_name
+
+        service_ids = operation.services if operation else []
+        services = []
+        for service_id in service_ids:
+            service = services_map.get(service_id)
+            if service:
+                service_name = _parse_localized(service.serviceName)
+                services.append(
+                    {
+                        "service_id": service_id,
+                        "service_name": service_name or "",
+                    }
+                )
+
+        stations.append(
+            {
+                "station_id": st.id,
+                "station_name": station_name,
+                "type_id": st.typeID,
+                "system_id": st.solarSystemID,
+                "owner_id": st.ownerID,
+                "operation_id": st.operationID,
+                "reprocessing_efficiency": st.reprocessingEfficiency,
+                "reprocessing_hangar_flag": st.reprocessingHangarFlag,
+                "reprocessing_stations_take": st.reprocessingStationsTake,
+                "services": services,
+                "ratio": operation.ratio if operation else None,
+                "manufacturing_factor": operation.manufacturingFactor if operation else None,
+                "research_factor": operation.researchFactor if operation else None,
+            }
+        )
+    return stations

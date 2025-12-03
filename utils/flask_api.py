@@ -20,3 +20,17 @@ def api_get(path):
         st.error(f"{path} failed: {r.text}")
         return None
     return r.json()
+
+def api_put(path, payload):
+    r = requests.put(f"{API_BASE}{path}", json=payload)
+    if r.status_code != 200:
+        st.error(f"{path} failed: {r.text}")
+        return None
+    return r.json()
+
+def api_delete(path):
+    r = requests.delete(f"{API_BASE}{path}")
+    if r.status_code != 200:
+        st.error(f"{path} failed: {r.text}")
+        return None
+    return r.json()

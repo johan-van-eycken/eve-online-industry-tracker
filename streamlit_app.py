@@ -7,7 +7,7 @@ from utils.flask_api import api_get
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")
 
-menu_nav = ["Characters", "Corporations", "Market Orders", "Industry Builder", "Ore Calculator"]
+menu_nav = ["Characters", "Corporations", "Market Orders", "Industry Builder", "Ore Calculator", "Settings"]
 menu_admin = ["", "Database Maintenance", "Restart Flask App"]
 
 choice_nav = st.sidebar.selectbox("Navigation", menu_nav)
@@ -48,4 +48,7 @@ elif choice_nav == "Ore Calculator":
     render()
 elif choice_nav == "Market Orders":
     from webpages.marketorders import render
+    render()
+elif choice_nav == "Settings":
+    from webpages.industry_profiles import render
     render()

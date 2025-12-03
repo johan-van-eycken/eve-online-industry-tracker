@@ -9,6 +9,7 @@ import yaml  # pyright: ignore[reportMissingModuleSource]
 import argparse
 import json
 from datetime import datetime
+from tqdm import tqdm
 
 # Add project root to sys.path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -179,9 +180,13 @@ def download_sde(url: str, dest_dir: str) -> str:
         print("Downloading SDE...")
         r = requests.get(url, stream=True)
         r.raise_for_status()
-        with open(zip_path, "wb") as f:
+        total_size = int(r.headers.get('content-length', 0))
+        with open(zip_path, "wb") as f, tqdm(
+            total=total_size, unit='B', unit_scale=True, desc="Download SDE"
+        ) as pbar:
             for chunk in r.iter_content(1024 * 1024):
                 f.write(chunk)
+                pbar.update(len(chunk))
     else:
         print("SDE already downloaded.")
 
@@ -199,53 +204,65 @@ def import_sde_to_sqlite(
     sde_dir: str, db_uri: str, tables_to_import: list, repackaged_json_path: str
 ):
     db = DatabaseManager(db_uri)
-
-    # Load repackaged volumes once
     repackaged_groups, repackaged_items = load_repackaged_volumes(repackaged_json_path)
 
+    table_files = []
     for root, _, files in os.walk(sde_dir):
         for file in sorted(files):
             table_name = os.path.splitext(file)[0]
+            if table_name in tables_to_import and file.endswith((".yaml", ".yml")):
+                table_files.append((table_name, os.path.join(root, file)))
 
-            if table_name not in tables_to_import:
-                continue
+    tqdm.write("\n=== SDE Import ===")
+    tqdm.write(f"Importing {len(table_files)} tables...\n")
 
-            if file.endswith((".yaml", ".yml")):
-                yaml_path = os.path.join(root, file)
-                print(f"Importing table '{table_name}' ...")
-                try:
-                    with open(yaml_path, "r", encoding="utf-8") as f:
-                        data = yaml.safe_load(f)
+    import_summary = []
 
-                    if isinstance(data, dict):
-                        new_data = []
-                        for k, v in data.items():
-                            if isinstance(v, dict):
-                                v = {"id": int(k), **v}
-                            else:
-                                v = {"id": int(k), "value": v}
-                            new_data.append(v)
-                        data = new_data
-                    elif not isinstance(data, list):
-                        data = []
+    with tqdm(total=len(table_files), desc="Overall Progress", unit="table") as overall_pbar:
+        for table_name, yaml_path in table_files:
+            data = None
+            try:
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
 
-                    data = [flatten_row(row) for row in data]
-                    df = pd.DataFrame(data)
-                    df = df.loc[:, ~df.columns.duplicated()]
-                    df.columns = [sanitize_column_name(c) for c in df.columns]
+                if isinstance(data, dict):
+                    items = list(data.items())
+                    new_data = []
+                    for k, v in items:
+                        if isinstance(v, dict):
+                            v = {"id": int(k), **v}
+                        else:
+                            v = {"id": int(k), "value": v}
+                        new_data.append(v)
+                    data = new_data
+                elif not isinstance(data, list):
+                    data = []
 
-                    # Add repackaged_volume column if items or groups table
-                    if table_name == "types" and "id" in df.columns:
-                        df["repackaged_volume"] = df["id"].map(repackaged_items)
-                    elif table_name == "groups" and "id" in df.columns:
-                        df["repackaged_volume"] = df["id"].map(repackaged_groups)
+                data_flat = [flatten_row(row) for row in data]
+                df = pd.DataFrame(data_flat)
+                df = df.loc[:, ~df.columns.duplicated()]
+                df.columns = [sanitize_column_name(c) for c in df.columns]
 
-                    db.save_df(df, table_name)
-                    print(f" -> Imported {len(df)} rows into '{table_name}'")
-                except Exception as e:
-                    print(f" !!! Failed to import '{table_name}': {e}")
+                if table_name == "types" and "id" in df.columns:
+                    df["repackaged_volume"] = df["id"].map(repackaged_items)
+                elif table_name == "groups" and "id" in df.columns:
+                    df["repackaged_volume"] = df["id"].map(repackaged_groups)
 
-    print(f"All selected SDE tables imported to {db_uri}")
+                db.save_df(df, table_name)
+                tqdm.write(f"{table_name:<25} | {len(df):>8} rows imported")
+                import_summary.append((table_name, len(df)))
+            except Exception as e:
+                tqdm.write(f"{table_name:<25} | ERROR: {e}")
+                import_summary.append((table_name, "ERROR"))
+            overall_pbar.update(1)
+
+    tqdm.write("\n=== Import Summary ===")
+    tqdm.write(f"{'Table':<25} | {'Rows Imported':>12}")
+    tqdm.write("-" * 40)
+    for name, count in import_summary:
+        tqdm.write(f"{name:<25} | {str(count):>12}")
+
+    tqdm.write(f"\nAll selected SDE tables imported to {db_uri}\n")
 
 
 # ----------------------------
@@ -254,6 +271,23 @@ def import_sde_to_sqlite(
 def cleanup_temp(dest_dir: str):
     if os.path.exists(dest_dir):
         print(f"Cleaning up temporary folder {dest_dir} ...")
+        # Count files for progress bar
+        files_to_delete = []
+        for root, dirs, files in os.walk(dest_dir):
+            for file in files:
+                files_to_delete.append(os.path.join(root, file))
+            for d in dirs:
+                files_to_delete.append(os.path.join(root, d))
+        with tqdm(total=len(files_to_delete), desc="Cleanup", unit="file") as pbar:
+            for path in files_to_delete:
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                    elif os.path.isdir(path):
+                        shutil.rmtree(path)
+                except Exception as e:
+                    tqdm.write(f"Failed to delete {path}: {e}")
+                pbar.update(1)
         try:
             shutil.rmtree(dest_dir)
         except Exception as e:
