@@ -305,21 +305,21 @@ class Character:
             npccorp_data = self.db_sde.load_df("npcCorporations")
 
             # Lookup tables
-            def get_name(nameID, language):
-                if isinstance(nameID, dict):
-                    return nameID.get(language, next(iter(nameID.values()), "Unknown"))
-                return nameID
+            def get_name(name, language):
+                if isinstance(name, dict):
+                    return name.get(language, next(iter(name.values()), "Unknown"))
+                return name
 
-            faction_lookup = {row['id']: get_name(row['nameID'], self.cfg["app"]["language"]) for _, row in faction_data.iterrows()}
-            npccorp_lookup = {row['id']: get_name(row['nameID'], self.cfg["app"]["language"]) for _, row in npccorp_data.iterrows()}
+            faction_lookup = {row['id']: get_name(row['name'], self.cfg["app"]["language"]) for _, row in faction_data.iterrows()}
+            npccorp_lookup = {row['id']: get_name(row['name'], self.cfg["app"]["language"]) for _, row in npccorp_data.iterrows()}
 
             # Update runtime properties
             self.image_url = f"https://images.evetech.net/characters/{self.character_id}/portrait?size=128"
             self.birthday = profile_data["birthday"]
             self.bloodline_id = profile_data["bloodline_id"]
-            self.bloodline = bloodline_data.nameID[self.db_sde.language] if bloodline_data else None
+            self.bloodline = bloodline_data.name[self.db_sde.language] if bloodline_data else None
             self.race_id = profile_data["race_id"]
-            self.race = race_data.nameID[self.db_sde.language] if race_data else None
+            self.race = race_data.name[self.db_sde.language] if race_data else None
             self.gender = profile_data.get("gender")
             self.corporation_id = profile_data.get("corporation_id")
             self.description = profile_data.get("description")
@@ -427,7 +427,7 @@ class Character:
                         name = data["name"]
                 elif id_type == "npc_corporation":
                     npc_corp = self.db_sde.session.query(NpcCorporations).filter_by(id=pid).first()
-                    name = npc_corp.nameID[self.db_sde.language] if npc_corp else None
+                    name = npc_corp.name[self.db_sde.language] if npc_corp else None
                 else:
                     continue  # Unknown type, skip
 
@@ -523,7 +523,7 @@ class Character:
                         name = data["name"]
                 elif id_type == "npc_corporation":
                     npc_corp = self.db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
-                    name = npc_corp.nameID[self.db_sde.language] if npc_corp else None
+                    name = npc_corp.name[self.db_sde.language] if npc_corp else None
                 else:
                     continue  # Unknown type, skip
 
@@ -834,12 +834,12 @@ class Character:
                     "type_category_name": getattr(category_data, "name", {}).get(self.db_sde.language, "") if category_data else "",
                     "type_meta_group_id": getattr(type_data, "metaGroupID", None) if type_data else None,
                     "type_race_id": getattr(type_data, "raceID", None) if type_data else None,
-                    "type_race_name": getattr(race_data, "nameID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "nameID", None) else "",
-                    "type_race_description": getattr(race_data, "descriptionID", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "descriptionID", None) else "",
+                    "type_race_name": getattr(race_data, "name", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "name", None) else "",
+                    "type_race_description": getattr(race_data, "description", {}).get(self.db_sde.language, "") if race_data and getattr(race_data, "description", None) else "",
                     "type_faction_id": getattr(type_data, "factionID", None) if type_data else None,
-                    "type_faction_name": getattr(faction_data, "nameID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "nameID", None) else "",
-                    "type_faction_description": getattr(faction_data, "descriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "descriptionID", None) else "",
-                    "type_faction_short_description": getattr(faction_data, "shortDescriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "shortDescriptionID", None) else "",
+                    "type_faction_name": getattr(faction_data, "name", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "name", None) else "",
+                    "type_faction_description": getattr(faction_data, "description", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "description", None) else "",
+                    "type_faction_short_description": getattr(faction_data, "shortDescription", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "shortDescription", None) else "",
                     "location_id": asset.get("location_id"),
                     "location_type": asset.get("location_type"),
                     "location_flag": asset.get("location_flag"),
