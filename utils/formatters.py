@@ -1,6 +1,4 @@
-import logging
-from datetime import datetime, timezone, timedelta
-from dateutil import parser
+from datetime import datetime, timezone
 from typing import Optional
 
 def format_isk(value: Optional[float]) -> str:
@@ -71,7 +69,6 @@ def format_date(iso_date: Optional[str]) -> str:
     try:
         # Parse the input (e.g. "2023-07-17T07:17:18Z")
         dt = datetime.strptime(iso_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        today = datetime.now(timezone.utc)
 
         # Basic date string
         formatted_date = dt.strftime("%d-%m-%Y")
@@ -81,36 +78,16 @@ def format_date(iso_date: Optional[str]) -> str:
         return "N/A"
 
 def format_datetime(iso_date: Optional[str]) -> str:
-    """Convert ISO8601 (%Y-%m-%dT%H:%M:%SZ) date to dd-mm-yyyy HH:MM."""
+    """Convert ISO8601 (%Y-%m-%dT%H:%M:%SZ) date to dd-mm-yyyy HH:MM:SS."""
     if not iso_date:
         return "N/A"
     try:
         # Parse the input (e.g. "2023-07-17T07:17:18Z")
         dt = datetime.strptime(iso_date, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        today = datetime.now(timezone.utc)
 
         # Basic date string
         formatted_date = dt.strftime("%d-%m-%Y %H:%M:%S")
 
         return f"{formatted_date}"
-    
     except Exception:
         return "N/A"
-
-def parse_datetime(dt_str):
-    if dt_str is None:
-        return None
-    return parser.isoparse(dt_str)
-
-def format_expires_in(row, now):
-    # Calculate expiration datetime
-    issued = row["Issued"]
-    duration_minutes = int(row["duration"] * 1440)
-    expires_at = issued + timedelta(minutes=duration_minutes)
-    remaining = expires_at - now
-    if remaining.total_seconds() < 0:
-        return "Expired"
-    days = remaining.days
-    hours, rem = divmod(remaining.seconds, 3600)
-    minutes = rem // 60
-    return f"{days}d {hours}h {minutes}m"
