@@ -319,14 +319,6 @@ def render():
                 st.error(f"Error fetching location info from backend: {e}")
                 return {}
 
-        # Button to refresh assets
-        if st.button("Refresh Assets"):
-            refreshed_data = api_get("/refresh_assets")
-            if refreshed_data:
-                st.success("Assets refreshed successfully.")
-            else:
-                st.error("Failed to refresh assets.")
-
         # Load and filter corporation assets
         try:
             assets_df = db.load_df("corporation_assets")
@@ -335,25 +327,11 @@ def render():
             st.warning("No corporation assets data available.")
             st.stop()
 
-        # Mark containers, AssetSafety wraps, ships and OfficeFolders
-        assets_df["is_container"] = (assets_df["type_id"] == 17366) & (assets_df["is_singleton"] == True)
-        assets_df['is_asset_safety_wrap'] = (assets_df['type_id'] == 60) & (assets_df['is_singleton'] == True)
-        assets_df["is_ship"] = (assets_df["type_category_id"] == 6)
-        assets_df["is_office_folder"] = (assets_df["type_id"] == 27)
+        # Filter Structures
+        assets_df = assets_df[assets_df["location_type"] != "solar_system"]
 
-        # Get all Asset Safety Wrap item_ids
-        assetsafety_wrap_ids = assets_df[assets_df["is_asset_safety_wrap"]]["item_id"].unique()
-
-        # Get All OfficeFolder item_ids
-        office_folder_ids = assets_df[assets_df["is_office_folder"]]["item_id"].unique()
-
-        # Get unique station IDs - Exclude those inside Asset Safety Wraps
-        location_flags = ["CorpDeliveries", "OfficeFolder", "AssetSafety", "CorpSAG1", "CorpSAG2", "CorpSAG3", "CorpSAG4", "CorpSAG5", "CorpSAG6", "CorpSAG7"]
-        location_ids = assets_df[
-            assets_df["location_flag"].isin(location_flags) &
-            ~assets_df["location_id"].isin(assetsafety_wrap_ids) &
-            ~assets_df["location_id"].isin(office_folder_ids)
-        ]["location_id"].unique()
+        # Get unique station IDs
+        location_ids = assets_df["top_location_id"].unique()
         location_info_map = get_location_info_cached(location_ids)
 
         # For each location, fetch and assign its name using the API
@@ -373,12 +351,46 @@ def render():
         # Sort location_ids by their names alphabetically
         sorted_location_ids = sorted(location_names.keys(), key=lambda x: location_names[x].lower())
 
-        # Dropdown to select location (sorted)
-        selected_location_id = st.selectbox(
-            "Select a Location:",
-            options=sorted_location_ids,
-            format_func=lambda x: location_names[x]
-        )
+        col1, col2 = st.columns([4,1])
+        with col1:
+            # Precompile asset map for dropdown
+            asset_map = {
+                f"{row['type_name']}": row['item_id']
+                for _, row in assets_df.iterrows()
+            }
+            dropdown_options = ["Find asset by name:"] + sorted(list(asset_map.keys()))
+            selected_asset_label = st.selectbox(
+                "Find asset by name:",
+                options=dropdown_options,
+                label_visibility="collapsed"
+            )
+
+            selected_location_id = None
+            selected_asset_id = None
+            if selected_asset_label != "Find asset by name:":
+                selected_asset_id = asset_map[selected_asset_label]
+                selected_asset_row = assets_df[assets_df["item_id"] == selected_asset_id].iloc[0]
+                selected_location_id = selected_asset_row["top_location_id"]
+            
+            if selected_location_id is not None and selected_location_id in sorted_location_ids:
+                loc_index = sorted_location_ids.index(selected_location_id)
+            else:
+                loc_index = 0
+            
+            selected_location_id = st.selectbox(
+                "Select a Location:",
+                options=sorted_location_ids,
+                format_func=lambda x: location_names[x],
+                index=loc_index,
+            )
+        with col2:
+            # Button to refresh assets
+            if st.button("Refresh Assets"):
+                refreshed_data = api_get("/refresh_assets")
+                if refreshed_data:
+                    st.success("Assets refreshed successfully.")
+                else:
+                    st.error("Failed to refresh assets.")
 
         st.divider()
 
@@ -472,10 +484,13 @@ def render():
                     # Then show containers and their items
                     for _, container in division_containers.iterrows():
                         items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
+                        is_selected = selected_asset_id in items_in_container["item_id"].values
                         if not items_in_container.empty:
                             total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                            label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                            with st.expander(label):
+                            with st.expander(
+                                f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)",
+                                expanded=is_selected
+                            ):
                                 used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
                                 max_capacity = container.get("type_capacity", None)
                                 if max_capacity and max_capacity > 0:
