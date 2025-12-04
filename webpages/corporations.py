@@ -146,6 +146,7 @@ def render():
                         <div style="font-size:16px; color:#f0f0f0;">
                             <b style="font-size:18px;">{row.get('corporation_name', 'Unknown')}</b>&nbsp;
                             <span style="color:#aaa;">[{row.get('ticker', '')}]</span><br>
+                            <b style="font-size:14px; color:#888;">(ID: {row.get('corporation_id', '')})</b><br>
                             CEO: {ceo_name}<br>
                             Members: {row.get('member_count', 'N/A')}<br>
                             Tax Rate: {tax_rate_str}<br>
@@ -252,15 +253,26 @@ def render():
     with structures_tab:
         try:
             df_struct = db.load_df("corporation_structures")
-            df_struct = df_struct[df_struct["corporation_id"] == selected_id]
-            
+        except Exception as e:
+            st.error(f"Failed to load corporation structures: {e}")
+            st.exception(e)  # Shows the full stack trace in Streamlit
+            st.stop()
+        
+        try:
+            # Ensure types match for filtering
+            df_struct["corporation_id"] = df_struct["corporation_id"].astype(int)
+            selected_id_int = int(selected_id)
+
+            df_struct_filtered = df_struct[df_struct["corporation_id"] == selected_id_int]
+
+            # Now continue with rendering cards using df_struct_filtered
             cards_per_row = 3
-            for i in range(0, len(df_struct), cards_per_row):
+            for i in range(0, len(df_struct_filtered), cards_per_row):
                 cols = st.columns(cards_per_row)
                 for j, col in enumerate(cols):
-                    if i + j >= len(df_struct):
+                    if i + j >= len(df_struct_filtered):
                         break
-                    struct = df_struct.iloc[i + j]
+                    struct = df_struct_filtered.iloc[i + j]
                     # Structure afbeelding
                     type_id = struct.get('type_id', '')
                     type_img_url = f"https://images.evetech.net/types/{type_id}/icon?size=128" if type_id else ""
@@ -286,11 +298,12 @@ def render():
                                     <span>Fuel Expires: {format_datetime(struct.get('fuel_expires'))} ({format_date_countdown(struct.get('fuel_expires'))})</span><br><br>
                                 </div>
                             </div>
-                            """,
+                        """,
                             unsafe_allow_html=True
                         )
-        except Exception:
+        except Exception as e:
             st.info("No structures found for this corporation.")
+            st.error(str(e))
         
     # --- CORPORATION ASSETS TAB ---
     with assets_tab:
@@ -306,14 +319,6 @@ def render():
                 st.error(f"Error fetching location info from backend: {e}")
                 return {}
 
-        # Button to refresh assets
-        if st.button("Refresh Assets"):
-            refreshed_data = api_get("/refresh_assets")
-            if refreshed_data:
-                st.success("Assets refreshed successfully.")
-            else:
-                st.error("Failed to refresh assets.")
-
         # Load and filter corporation assets
         try:
             assets_df = db.load_df("corporation_assets")
@@ -322,20 +327,11 @@ def render():
             st.warning("No corporation assets data available.")
             st.stop()
 
-        # Mark containers, AssetSafety wraps and ships
-        assets_df["is_container"] = (assets_df["type_id"] == 17366) & (assets_df["is_singleton"] == True)
-        assets_df['is_asset_safety_wrap'] = (assets_df['type_id'] == 60) & (assets_df['is_singleton'] == True)
-        assets_df["is_ship"] = (assets_df["type_category_id"] == 6)
+        # Filter Structures
+        assets_df = assets_df[assets_df["location_type"] != "solar_system"]
 
-        # Get all Asset Safety Wrap item_ids
-        assetsafety_wrap_ids = assets_df[assets_df["is_asset_safety_wrap"]]["item_id"].unique()
-
-        # Get unique station IDs - Exclude those inside Asset Safety Wraps
-        location_flags = ["CorpDeliveries", "OfficeFolder", "AssetSafety", "CorpSAG1", "CorpSAG2", "CorpSAG3", "CorpSAG4", "CorpSAG5", "CorpSAG6", "CorpSAG7"]
-        location_ids = assets_df[
-            assets_df["location_flag"].isin(location_flags) &
-            ~assets_df["location_id"].isin(assetsafety_wrap_ids)
-        ]["location_id"].unique()
+        # Get unique station IDs
+        location_ids = assets_df["top_location_id"].unique()
         location_info_map = get_location_info_cached(location_ids)
 
         # For each location, fetch and assign its name using the API
@@ -355,12 +351,46 @@ def render():
         # Sort location_ids by their names alphabetically
         sorted_location_ids = sorted(location_names.keys(), key=lambda x: location_names[x].lower())
 
-        # Dropdown to select location (sorted)
-        selected_location_id = st.selectbox(
-            "Select a Location:",
-            options=sorted_location_ids,
-            format_func=lambda x: location_names[x]
-        )
+        col1, col2 = st.columns([4,1])
+        with col1:
+            # Precompile asset map for dropdown
+            asset_map = {
+                f"{row['type_name']}": row['item_id']
+                for _, row in assets_df.iterrows()
+            }
+            dropdown_options = ["Find asset by name:"] + sorted(list(asset_map.keys()))
+            selected_asset_label = st.selectbox(
+                "Find asset by name:",
+                options=dropdown_options,
+                label_visibility="collapsed"
+            )
+
+            selected_location_id = None
+            selected_asset_id = None
+            if selected_asset_label != "Find asset by name:":
+                selected_asset_id = asset_map[selected_asset_label]
+                selected_asset_row = assets_df[assets_df["item_id"] == selected_asset_id].iloc[0]
+                selected_location_id = selected_asset_row["top_location_id"]
+            
+            if selected_location_id is not None and selected_location_id in sorted_location_ids:
+                loc_index = sorted_location_ids.index(selected_location_id)
+            else:
+                loc_index = 0
+            
+            selected_location_id = st.selectbox(
+                "Select a Location:",
+                options=sorted_location_ids,
+                format_func=lambda x: location_names[x],
+                index=loc_index,
+            )
+        with col2:
+            # Button to refresh assets
+            if st.button("Refresh Assets"):
+                refreshed_data = api_get("/refresh_assets")
+                if refreshed_data:
+                    st.success("Assets refreshed successfully.")
+                else:
+                    st.error("Failed to refresh assets.")
 
         st.divider()
 
@@ -386,359 +416,125 @@ def render():
             return df
 
         if selected_location_id:
-            # Show containers as expanders
+            # Find OfficeFolder item_ids for the selected location
+            office_folder_item_ids = assets_df[
+                (assets_df["location_flag"] == "OfficeFolder") &
+                (assets_df["location_id"] == selected_location_id)
+            ]["item_id"].unique()
+
+            # Containers are either directly at the location or inside its OfficeFolder
+            division_flags = ["CorpSAG1", "CorpSAG2", "CorpSAG3", "CorpSAG4", "CorpSAG5", "CorpSAG6", "CorpSAG7"]
             containers = assets_df[
-                (assets_df["location_id"] == selected_location_id) &
-                (assets_df["is_container"])
+                (
+                    (assets_df["location_id"] == selected_location_id) |
+                    (assets_df["location_id"].isin(office_folder_item_ids))
+                ) &
+                (assets_df["is_container"]) &
+                (assets_df["location_flag"].isin(division_flags))
             ].sort_values(by="container_name")
 
-            office_flags = ["CorpSAG1", "CorpSAG2", "CorpSAG3", "CorpSAG4", "CorpSAG5", "CorpSAG6", "CorpSAG7"]
-            office_locations = assets_df[assets_df["location_flag"].isin(office_flags)]["location_id"].unique()
-            assetsafety_locations = assets_df[assets_df["location_flag"] == "AssetSafety"]["location_id"].unique()
-
-            if selected_location_id in office_locations:
-                st.markdown("*1st Division*")
-                if containers.filter(containers["location_flag"] == "CorpSAG1").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "CorpSAG1").iterrows():
+            # For each division, show containers and items
+            for division_flag, division_label in zip(division_flags, [
+                "*1st Division*",
+                "*2nd Division*",
+                "*3rd Division*",
+                "*4th Division*",
+                "*5th Division*",
+                "*6th Division*",
+                "*7th Division*",
+            ]):
+                division_containers = containers[containers["location_flag"] == division_flag]
+                # Items directly in the division folder (not in a container)
+                direct_items = assets_df[
+                    (
+                        (assets_df["location_id"] == selected_location_id) |
+                        (assets_df["location_id"].isin(office_folder_item_ids))
+                    ) &
+                    (assets_df["location_flag"] == division_flag) &
+                    (~assets_df["is_container"])
+                ]
+                has_items = not direct_items.empty
+                for _, container in division_containers.iterrows():
+                    items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
+                    if not items_in_container.empty:
+                        has_items = True
+                        break
+                if has_items:
+                    st.markdown(division_label)
+                    # Show direct items first
+                    if not direct_items.empty:
+                        st.markdown("Direct items in division:")
+                        df = add_item_images(direct_items)
+                        df["total_volume"] = df["type_volume"] * df["quantity"]
+                        df["total_average_price"] = df["type_average_price"] * df["quantity"]
+                        display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
+                        df_display = df[display_columns].sort_values(by="type_name")
+                        column_config = {
+                            "image_url": st.column_config.ImageColumn("", width="auto"),
+                            "type_name": st.column_config.TextColumn("Name", width="auto"),
+                            "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
+                            "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
+                            "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                            "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
+                            "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
+                            "type_group_name": st.column_config.TextColumn("Group", width="auto"),
+                            "type_category_name": st.column_config.TextColumn("Category", width="auto"),
+                        }
+                        st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                    # Then show containers and their items
+                    for _, container in division_containers.iterrows():
                         items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
+                        is_selected = selected_asset_id in items_in_container["item_id"].values
+                        if not items_in_container.empty:
+                            total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
+                            with st.expander(
+                                f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)",
+                                expanded=is_selected
+                            ):
+                                used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
+                                max_capacity = container.get("type_capacity", None)
+                                if max_capacity and max_capacity > 0:
+                                    percent_full = min(used_volume / max_capacity, 1.0)
+                                    st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
+                                else:
+                                    st.info("No capacity information available for this container.")
 
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
-                
-                st.markdown("*2nd Division*")
-                if containers.filter(containers["location_flag"] == "CorpSAG2").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "CorpSAG2").iterrows():
-                        items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
-
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
-
-                st.markdown("*3th Division*")
-                if containers.filter(containers["location_flag"] == "CorpSAG3").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "CorpSAG3").iterrows():
-                        items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
-
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
-
-
-                st.markdown("*4th Division*")
-                if containers.filter(containers["location_flag"] == "CorpSAG4").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "CorpSAG4").iterrows():
-                        items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
-
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
-
-
-                st.markdown("*5th Division*")
-                if containers.filter(containers["location_flag"] == "CorpSAG5").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "CorpSAG5").iterrows():
-                        items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
-
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
-                
-                st.markdown("*6th Division*")
-                if containers.filter(containers["location_flag"] == "CorpSAG6").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "CorpSAG6").iterrows():
-                        items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
-
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
-
-                st.markdown("*7th Division*")
-                if containers.filter(containers["location_flag"] == "CorpSAG7").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "CorpSAG7").iterrows():
-                        items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
-
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
-
-                st.markdown("Office Folder")
-                if containers.filter(containers["location_flag"] == "OfficeFolder").empty:
-                    with st.expander("No containers found at this location."):
-                        st.info("No containers found at this location.")
-                else:
-                    for _, container in containers.filter(containers["location_flag"] == "OfficeFolder").iterrows():
-                        items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
-                        # calculate total average price
-                        total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
-                        
-                        label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                        with st.expander(label):
-                            # Calculate used and max capacity
-                            used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
-                            max_capacity = container.get("type_capacity", None)
-                            if max_capacity and max_capacity > 0:
-                                percent_full = min(used_volume / max_capacity, 1.0)
-                                st.progress(percent_full, text=f"{used_volume:,.2f} / {max_capacity:,.2f} m³ used")
-                            else:
-                                st.info("No capacity information available for this container.")
-
-                            if not items_in_container.empty:
-                                df = add_item_images(items_in_container)
-                                df["total_volume"] = df["type_volume"] * df["quantity"]
-                                df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
-                            else:
-                                st.info("No items in this container.")
+                                if not items_in_container.empty:
+                                    df = add_item_images(items_in_container)
+                                    df["total_volume"] = df["type_volume"] * df["quantity"]
+                                    df["total_average_price"] = df["type_average_price"] * df["quantity"]
+                                    display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
+                                    df_display = df[display_columns].sort_values(by="type_name")
+                                    column_config = {
+                                        "image_url": st.column_config.ImageColumn("", width="auto"),
+                                        "type_name": st.column_config.TextColumn("Name", width="auto"),
+                                        "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
+                                        "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
+                                        "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                                        "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
+                                        "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
+                                        "type_group_name": st.column_config.TextColumn("Group", width="auto"),
+                                        "type_category_name": st.column_config.TextColumn("Category", width="auto"),
+                                    }
+                                    st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                                else:
+                                    st.info("No items in this container.")
 
             st.markdown("**Corporation Deliveries:**")
+            # Exclude these flags from Corporation Deliveries
+            exclude_flags = [
+                "RigSlot0", "RigSlot1", "RigSlot2",
+                "ServiceSlot0", "ServiceSlot1", "ServiceSlot2"
+            ]
+
+            # Corporation Deliveries (excluding OfficeFolder, containers, ships, asset safety wraps, and excluded flags)
             deliveries_items = assets_df[
                 (assets_df["location_id"] == selected_location_id) &
-                ~(assets_df["is_container"] | assets_df["is_ship"] | assets_df["is_asset_safety_wrap"])
+                ~(assets_df["is_container"] |
+                assets_df["is_ship"] |
+                assets_df["is_asset_safety_wrap"] |
+                assets_df["is_office_folder"]) &
+                (~assets_df["location_flag"].isin(exclude_flags + ["StructureFuel", "QuantumCoreRoom"]))
             ]
             if deliveries_items.empty:
                 with st.expander("No corporation deliveries found at this location."):
@@ -765,6 +561,65 @@ def render():
                 st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
             st.divider()
 
+            # Structure Fuel section
+            structure_fuel_items = assets_df[
+                (assets_df["location_id"] == selected_location_id) &
+                (assets_df["location_flag"] == "StructureFuel")
+            ]
+            if not structure_fuel_items.empty:
+                st.markdown("**Structure Fuel:**")
+                total_fuel_value = (structure_fuel_items["type_average_price"] * structure_fuel_items["quantity"]).sum()
+                st.markdown(f"Items: {structure_fuel_items['type_name'].nunique()} - Total Volume: {structure_fuel_items['type_volume'].dot(structure_fuel_items['quantity']):,.2f} m³ - Total Value: {total_fuel_value:,.2f} ISK")
+                df = add_item_images(structure_fuel_items)
+                df["total_volume"] = df["type_volume"] * df["quantity"]
+                df["total_average_price"] = df["type_average_price"] * df["quantity"]
+                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume","type_average_price","total_average_price","type_group_name","type_category_name"]
+                df_display = df[display_columns].sort_values(by="type_name")
+                column_config = {
+                    "image_url": st.column_config.ImageColumn("", width="auto"),
+                    "type_name": st.column_config.TextColumn("Name", width="auto"),
+                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
+                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
+                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
+                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
+                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
+                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
+                }
+                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                st.divider()
+
+            # Quantum Core Room section
+            quantum_core_items = assets_df[
+                (assets_df["location_id"] == selected_location_id) &
+                (assets_df["location_flag"] == "QuantumCoreRoom")
+            ]
+            if not quantum_core_items.empty:
+                st.markdown("**Quantum Core Room:**")
+                total_core_value = (quantum_core_items["type_average_price"] * quantum_core_items["quantity"]).sum()
+                st.markdown(f"Items: {quantum_core_items['type_name'].nunique()} - Total Volume: {quantum_core_items['type_volume'].dot(quantum_core_items['quantity']):,.2f} m³ - Total Value: {total_core_value:,.2f} ISK")
+                df = add_item_images(quantum_core_items)
+                df["total_volume"] = df["type_volume"] * df["quantity"]
+                df["total_average_price"] = df["type_average_price"] * df["quantity"]
+                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume","type_average_price","total_average_price","type_group_name","type_category_name"]
+                df_display = df[display_columns].sort_values(by="type_name")
+                column_config = {
+                    "image_url": st.column_config.ImageColumn("", width="auto"),
+                    "type_name": st.column_config.TextColumn("Name", width="auto"),
+                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
+                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
+                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
+                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
+                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
+                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
+                }
+                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                st.divider()
+
+            # Get all locations that contain asset safety wraps
+            assetsafety_locations = assets_df[assets_df["is_asset_safety_wrap"]]["location_id"].unique()
+            
             if selected_location_id in assetsafety_locations:
                 st.markdown("**Asset Safety:**")
                 if assets_df[assets_df["is_asset_safety_wrap"]].empty:

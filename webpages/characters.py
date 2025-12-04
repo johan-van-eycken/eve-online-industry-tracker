@@ -436,14 +436,6 @@ def render():
                 st.error(f"Error fetching location info from backend: {e}")
                 return {}
 
-        # Button to refresh assets
-        if st.button("Refresh Assets"):
-            refreshed_data = api_get("/refresh_assets")
-            if refreshed_data:
-                st.success("Assets refreshed successfully.")
-            else:
-                st.error("Failed to refresh assets.")
-
         # Load and filter character assets
         try:
             assets_df = db.load_df("character_assets")
@@ -452,25 +444,17 @@ def render():
             st.warning("No character assets data available.")
             st.stop()
 
-        # Mark containers and ships
-        assets_df["is_container"] = (assets_df["type_id"] == 17366) & (assets_df["is_singleton"] == True)
-        assets_df['is_asset_safety_wrap'] = (assets_df['type_id'] == 60) & (assets_df['is_singleton'] == True)
-        assets_df["is_ship"] = (assets_df["type_category_id"] == 6)
+        # Filter Structures
+        assets_df = assets_df[assets_df["location_type"] != "solar_system"]
 
-        # Get all Asset Safety Wrap item_ids
-        assetsafety_wrap_ids = assets_df[assets_df["is_asset_safety_wrap"]]["item_id"].unique()
-
-        # Get unique station IDs where assets are in the Hangar
-        location_ids = assets_df[
-            (assets_df["location_flag"] == "Hangar") &
-            (~assets_df["location_id"].isin(assetsafety_wrap_ids))
-        ]["location_id"].unique()
+        # Get unique station IDs
+        location_ids = assets_df["top_location_id"].unique()
         location_info_map = get_location_info_cached(location_ids)
 
         # For each location, fetch and assign its name using the API
         location_data = location_info_map.get("data", {})
         for loc_id in location_ids:
-            location_info = location_data.get(str(loc_id), {})
+            location_info = location_data.get(str(loc_id)) or {}
             location_name = location_info.get("name", str(loc_id))
             assets_df.loc[assets_df["location_id"] == loc_id, "location_name"] = location_name
 
@@ -483,14 +467,47 @@ def render():
 
         # Sort location_ids by their names alphabetically
         sorted_location_ids = sorted(location_names.keys(), key=lambda x: location_names[x].lower())
-        
 
-        # Dropdown to select location (sorted)
-        selected_location_id = st.selectbox(
-            "Select a Location:",
-            options=sorted_location_ids,
-            format_func=lambda x: location_names[x]
-        )
+        col1, col2 = st.columns([4,1])
+        with col1:
+            # Precompile asset map for dropdown
+            asset_map = {
+                f"{row['type_name']}": row['item_id']
+                for _, row in assets_df.iterrows()
+            }
+            dropdown_options = ["Find asset by name:"] + sorted(list(asset_map.keys()))
+            selected_asset_label = st.selectbox(
+                "Find asset by name:",
+                options=dropdown_options,
+                label_visibility="collapsed"
+            )
+
+            selected_location_id = None
+            selected_asset_id = None
+            if selected_asset_label != "Find asset by name:":
+                selected_asset_id = asset_map[selected_asset_label]
+                selected_asset_row = assets_df[assets_df["item_id"] == selected_asset_id].iloc[0]
+                selected_location_id = selected_asset_row["top_location_id"]
+            
+            if selected_location_id is not None and selected_location_id in sorted_location_ids:
+                loc_index = sorted_location_ids.index(selected_location_id)
+            else:
+                loc_index = 0
+            
+            selected_location_id = st.selectbox(
+                "Select a Location:",
+                options=sorted_location_ids,
+                format_func=lambda x: location_names[x],
+                index=loc_index,
+            )
+        with col2:
+            # Button to refresh assets
+            if st.button("Refresh Assets"):
+                refreshed_data = api_get("/refresh_assets")
+                if refreshed_data:
+                    st.success("Assets refreshed successfully.")
+                else:
+                    st.error("Failed to refresh assets.")
 
         st.divider()
 
@@ -531,11 +548,14 @@ def render():
             else:
                 for _, container in containers.iterrows():
                     items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
+                    is_selected = selected_asset_id in items_in_container["item_id"].values
                     # calculate total average price
                     total_average_price = (items_in_container["type_average_price"] * items_in_container["quantity"]).sum()
                     
-                    label = f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)"
-                    with st.expander(label):
+                    with st.expander(
+                        f"{container['container_name']} ({items_in_container['type_name'].nunique()} unique items, Total Value: {total_average_price:,.2f} ISK)",
+                        expanded=is_selected
+                    ):
                         # Calculate used and max capacity
                         used_volume = (items_in_container["type_volume"] * items_in_container["quantity"]).sum()
                         max_capacity = container.get("type_capacity", None)
@@ -573,7 +593,11 @@ def render():
                 (assets_df["location_id"] == selected_location_id) &
                 ~(assets_df["is_container"] | assets_df["is_ship"])
             ]
-            st.markdown("**Hangar Items:**")
+            is_selected_hangar = selected_asset_id in hangar_items["item_id"].values
+            if is_selected_hangar:
+                st.markdown("<span style='font-weight: bold; font-color: #b91c1c'>Hangar Items:</span>", unsafe_allow_html=True)
+            else:
+                st.markdown("<span style='font-weight: bold;'>Hangar Items:</span>", unsafe_allow_html=True)
             if hangar_items.empty:
                 with st.expander("No hangar items found at this location."):
                     st.info("No hangar items found at this location.")
