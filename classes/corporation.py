@@ -454,10 +454,11 @@ class Corporation:
                     "type_faction_id": getattr(type_data, "factionID", None) if type_data else None,
                     "type_faction_name": getattr(faction_data, "name", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "name", None) else "",
                     "type_faction_description": getattr(faction_data, "description", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "description", None) else "",
-                    "type_faction_short_description": getattr(faction_data, "shortDescriptionID", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "shortDescriptionID", None) else "",
+                    "type_faction_short_description": getattr(faction_data, "shortDescription", {}).get(self.db_sde.language, "") if faction_data and getattr(faction_data, "shortDescription", None) else "",
                     "location_id": asset.get("location_id"),
                     "location_type": asset.get("location_type"),
                     "location_flag": asset.get("location_flag"),
+                    "top_location_id": None,
                     "is_singleton": asset.get("is_singleton"),
                     "is_blueprint_copy": asset.get("is_blueprint_copy", False),
                     "blueprint_runs": blueprint_data.get("runs") if blueprint_data else None,
@@ -465,7 +466,11 @@ class Corporation:
                     "blueprint_material_efficiency": blueprint_data.get("material_efficiency") if blueprint_data else None,
                     "quantity": asset.get("quantity", 0),
                     "type_adjusted_price": type_adjusted_price,
-                    "type_average_price": type_average_price
+                    "type_average_price": type_average_price,
+                    "is_container": type_id == 17366 and asset.get("is_singleton", False) == True,
+                    "is_asset_safety_wrap": type_id == 60 and asset.get("is_singleton", False) == True,
+                    "is_ship": group_data.categoryID == 6 if group_data else False,
+                    "is_office_folder": type_id == 27
                 }
                 asset_list.append(asset_entry)
             
@@ -500,20 +505,47 @@ class Corporation:
                     asset["ship_name"] = ship_names[asset["item_id"]]
             
             # Lookup for all containers and ships by item_id
-            container_lookup = {a["item_id"]: a for a in asset_list if a.get("type_id") == 17366 and a.get("is_singleton")}
-            ship_lookup = {a["item_id"]: a for a in asset_list if a.get("type_category_id") == 6 and a.get("is_singleton")}
+            container_lookup = {a["item_id"]: a for a in asset_list if a.get("is_container")}
+            ship_lookup = {a["item_id"]: a for a in asset_list if a.get("is_ship")}
 
             for asset in asset_list:
                 # Assign container_name for non-containers
-                if not (asset.get("type_id") == 17366 and asset.get("is_singleton")):
+                if not (asset.get("is_container")) and not (asset.get("is_office_folder")):
                     container = container_lookup.get(asset.get("location_id"))
                     if container:
                         asset["container_name"] = container.get("container_name")
                 # Assign ship_name for non-ships (modules, etc.)
-                if not (asset.get("type_category_id") == 6 and asset.get("is_singleton")):
+                if not (asset.get("is_ship")):
                     ship = ship_lookup.get(asset.get("location_id"))
                     if ship:
                         asset["ship_name"] = ship.get("ship_name")
+
+            # Calculate top_location_id for each asset
+            location_flags = ["CorpDeliveries", "OfficeFolder", "AssetSafety","CorpSAG1", "CorpSAG2", "CorpSAG3", "CorpSAG4","CorpSAG5", "CorpSAG6", "CorpSAG7"]
+            assetsafety_wrap_ids = {a["item_id"] for a in asset_list if a.get("is_asset_safety_wrap")}
+            office_folder_ids = {a["item_id"] for a in asset_list if a.get("is_office_folder")}
+            parent_location_map = {a["item_id"]: a["location_id"] for a in asset_list}
+            valid_top_location_ids = {a["location_id"] for a in asset_list
+                if a.get("location_flag") in location_flags
+                    and a.get("location_id") not in assetsafety_wrap_ids
+                    and a.get("location_id") not in office_folder_ids
+            }
+
+            def resolve_top_location_id(item):
+                loc_id = item["location_id"]
+                while loc_id in parent_location_map:
+                    # Stop if we've reached a valid top-level location
+                    if loc_id in valid_top_location_ids:
+                        break
+                    parent_id = parent_location_map[loc_id]
+                    if parent_id == loc_id:
+                        break
+                    loc_id = parent_id
+                return loc_id
+
+            # Assign top_location_id for each asset
+            for asset in asset_list:
+                asset["top_location_id"] = resolve_top_location_id(asset)
 
             if save_assets_fl:
                 self.save_corporation_assets(asset_list)
