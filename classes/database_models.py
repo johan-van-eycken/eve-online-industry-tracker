@@ -163,11 +163,16 @@ class CharacterAssetsModel(BaseApp):
     location_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     location_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     location_flag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    top_location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     is_singleton: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_blueprint_copy: Mapped[bool] = mapped_column(Boolean, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     type_adjusted_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_average_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    is_container: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_asset_safety_wrap: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_ship: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_office_folder: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 class CorporationModel(BaseApp):
     __tablename__ = "corporations"
@@ -219,11 +224,16 @@ class CorporationAssetsModel(BaseApp):
     location_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     location_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     location_flag: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    top_location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     is_singleton: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_blueprint_copy: Mapped[bool] = mapped_column(Boolean, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     type_adjusted_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_average_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    is_container: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    is_asset_safety_wrap: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    is_ship: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    is_office_folder: Mapped[bool] = mapped_column(Boolean, nullable=True)
 
 class StructureModel(BaseApp):
     __tablename__ = "corporation_structures"
@@ -377,7 +387,6 @@ class NpcCorporations(BaseSde):
     minSecurity: Mapped[float] = mapped_column(Float, nullable=False)
     minimumJoinStanding: Mapped[float] = mapped_column(Float, nullable=False)
     name: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
-    publicShares: Mapped[int] = mapped_column(Integer, nullable=False)
     raceID: Mapped[Optional[int]] = mapped_column(Integer, nullable=False)
     sendCharTerminationMessage: Mapped[bool] = mapped_column(Boolean, nullable=False)
     shares: Mapped[int] = mapped_column(Integer, nullable=False)
