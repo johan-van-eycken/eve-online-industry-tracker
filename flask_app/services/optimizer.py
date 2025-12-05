@@ -1,5 +1,4 @@
-from math import floor
-from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, LpInteger, PULP_CBC_CMD, LpBinary
+from pulp import LpProblem, LpMinimize, LpVariable, lpSum, LpStatus, LpInteger, PULP_CBC_CMD, LpBinary # pyright: ignore[reportMissingImports]
 
 def optimize_ore_tiered(
     demands,

@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st # pyright: ignore[reportMissingImports]
 from typing import Optional
 
 from utils.app_init import load_config

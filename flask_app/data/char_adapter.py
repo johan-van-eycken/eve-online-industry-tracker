@@ -1,3 +1,6 @@
+"""
+Adapter for accessing Character data directly.
+"""
 _character = None
 
 def char_adapter(character):
@@ -17,3 +20,7 @@ def get_character_implants(implant_pct: int):
     return [
         {"slot": 7, "group": "reprocessing", "bonus": (implant_pct / 100)}
     ]
+
+def get_character_assets():
+    _ensure()
+    return _character.assets or []

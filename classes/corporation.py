@@ -6,7 +6,7 @@ from typing import Optional, List, Dict
 
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
-from classes.database_models import CorporationModel, StructureModel, MemberModel, CorporationAssetsModel
+from classes.database_models import CorporationModel, CorporationStructuresModel, MemberModel, CorporationAssetsModel
 from classes.database_models import Types, Groups, Categories, Factions, Races
 from classes.character import Character
 from classes.character_manager import CharacterManager
@@ -60,7 +60,7 @@ class Corporation:
         self.wallets: List[Dict[str, str]] = []
         self.standings: List[Dict[str, str]] = []
 
-        self.structures: List[StructureModel] = []
+        self.structures: List[CorporationStructuresModel] = []
         self.members: List[MemberModel] = []
         self.assets: List[CorporationAssetsModel] = []
 
@@ -90,12 +90,12 @@ class Corporation:
         self.db_app.session.commit()
         logging.debug(f"Corporation '{self.corporation_name}' saved to database.")
 
-    def save_corporation_structures(self, corporation_structures: List[StructureModel]) -> None:
+    def save_corporation_structures(self, corporation_structures: List[CorporationStructuresModel]) -> None:
         """Save the corporation structures to the database."""
         for structure in corporation_structures:
-            existing_structure = self.db_app.session.query(StructureModel).filter_by(structure_id=structure.structure_id).first()
+            existing_structure = self.db_app.session.query(CorporationStructuresModel).filter_by(structure_id=structure.structure_id).first()
             if existing_structure:
-                for column in StructureModel.__table__.columns.keys():
+                for column in CorporationStructuresModel.__table__.columns.keys():
                     if column == "id":
                         continue
                     if hasattr(structure, column):
@@ -155,7 +155,7 @@ class Corporation:
 
     def load_corporation_structures(self) -> bool:
         """Load corporation structures from the database into the instance. Returns True if found."""
-        structures = self.db_app.session.query(StructureModel).filter_by(corporation_id=self.corporation_id).all()
+        structures = self.db_app.session.query(CorporationStructuresModel).filter_by(corporation_id=self.corporation_id).all()
         if not structures:
             logging.debug(f"No structures found for corporation '{self.corporation_name}' in database.")
             return False
@@ -300,7 +300,7 @@ class Corporation:
                 type_data = self.db_sde.session.query(Types).filter_by(id=structure.get("type_id")).first()
                 group_data = self.db_sde.session.query(Groups).filter_by(id=type_data.groupID).first()
                 category_data = self.db_sde.session.query(Categories).filter_by(id=group_data.categoryID).first()
-                self.structures.append(StructureModel(
+                self.structures.append(CorporationStructuresModel(
                     corporation_id=structure.get("corporation_id"),
                     structure_id=structure.get("structure_id"),
                     structure_name=structure.get("name", "Unknown"),
@@ -388,6 +388,7 @@ class Corporation:
         try:
             logging.debug(f"Refreshing assets for {self.corporation_name}...")
             assets = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/assets/")
+            blueprints = self.default_esi_character.esi_client.esi_get(f"/corporations/{self.corporation_id}/blueprints/", paginate=True)
             market_prices = self.default_esi_character.esi_client.esi_get(f"/markets/prices/")
 
             asset_list = []
@@ -401,6 +402,7 @@ class Corporation:
             race_data_map = {r.id: r for r in self.db_sde.session.query(Races).filter(Races.id.in_(race_ids)).all()}
             faction_ids = set(t.factionID for t in type_data_map.values() if hasattr(t, "factionID") and t.factionID is not None)
             faction_data_map = {f.id: f for f in self.db_sde.session.query(Factions).filter(Factions.id.in_(faction_ids)).all()}
+            blueprint_data_map = {bp["item_id"]: bp for bp in blueprints}
             for asset in assets:
                 type_id = asset.get("type_id")
                 type_data = type_data_map.get(type_id)
@@ -410,6 +412,7 @@ class Corporation:
                 category_data = category_data_map.get(group_data.categoryID) if group_data else None
                 race_data = race_data_map.get(type_data.raceID) if type_data and hasattr(type_data, "raceID") else None
                 faction_data = faction_data_map.get(type_data.factionID) if type_data and hasattr(type_data, "factionID") else None
+                blueprint_data = blueprint_data_map.get(asset.get("item_id"))
 
                 # --- Calculate actual volume ---
                 sde_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
@@ -458,6 +461,9 @@ class Corporation:
                     "top_location_id": None,
                     "is_singleton": asset.get("is_singleton"),
                     "is_blueprint_copy": asset.get("is_blueprint_copy", False),
+                    "blueprint_runs": blueprint_data.get("runs") if blueprint_data else None,
+                    "blueprint_time_efficiency": blueprint_data.get("time_efficiency") if blueprint_data else None,
+                    "blueprint_material_efficiency": blueprint_data.get("material_efficiency") if blueprint_data else None,
                     "quantity": asset.get("quantity", 0),
                     "type_adjusted_price": type_adjusted_price,
                     "type_average_price": type_average_price,
