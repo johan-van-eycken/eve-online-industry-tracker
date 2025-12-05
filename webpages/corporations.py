@@ -1,5 +1,5 @@
-import streamlit as st
-import pandas as pd
+import streamlit as st # pyright: ignore[reportMissingImports]
+import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
 
 from utils.app_init import load_config, init_db_app

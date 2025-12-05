@@ -769,13 +769,14 @@ class Character:
     # -------------------
     def refresh_assets(self, save_assets_fl: bool = True) -> str:
         """
-        Refresh the asset list of the character from ESI and enrich with SDE and container custom names.
+        Refresh the asset list of the character from ESI and enrich with SDE and custom names.
         Returns:
             str: JSON string with refreshed asset list.
         """
         try:
             logging.debug(f"Getting assets for {self.character_name}...")
             assets = self.esi_client.esi_get(f"/characters/{self.character_id}/assets/", paginate=True)
+            blueprints = self.esi_client.esi_get(f"/characters/{self.character_id}/blueprints/", paginate=True)
             market_prices = self.esi_client.esi_get(f"/markets/prices/")
 
             asset_list = []
@@ -789,6 +790,7 @@ class Character:
             race_data_map = {r.id: r for r in self.db_sde.session.query(Races).filter(Races.id.in_(race_ids)).all()}
             faction_ids = set(t.factionID for t in type_data_map.values() if hasattr(t, "factionID") and t.factionID is not None)
             faction_data_map = {f.id: f for f in self.db_sde.session.query(Factions).filter(Factions.id.in_(faction_ids)).all()}
+            blueprint_data_map = {bp["item_id"]: bp for bp in blueprints}
             for asset in assets:
                 type_id = asset.get("type_id")
                 type_data = type_data_map.get(type_id)
@@ -798,7 +800,8 @@ class Character:
                 category_data = category_data_map.get(group_data.categoryID) if group_data else None
                 race_data = race_data_map.get(type_data.raceID) if type_data and hasattr(type_data, "raceID") else None
                 faction_data = faction_data_map.get(type_data.factionID) if type_data and hasattr(type_data, "factionID") else None
-
+                blueprint_data = blueprint_data_map.get(asset.get("item_id"))
+                
                 # --- Calculate actual volume ---
                 sde_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
                 repackaged_volume = None
@@ -846,6 +849,9 @@ class Character:
                     "top_location_id": None,
                     "is_singleton": asset.get("is_singleton"),
                     "is_blueprint_copy": asset.get("is_blueprint_copy", False),
+                    "blueprint_runs": blueprint_data.get("runs") if blueprint_data else None,
+                    "blueprint_time_efficiency": blueprint_data.get("time_efficiency") if blueprint_data else None,
+                    "blueprint_material_efficiency": blueprint_data.get("material_efficiency") if blueprint_data else None,
                     "quantity": asset.get("quantity", 0),
                     "type_adjusted_price": type_adjusted_price,
                     "type_average_price": type_average_price,
