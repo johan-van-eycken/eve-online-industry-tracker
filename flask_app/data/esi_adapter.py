@@ -190,21 +190,12 @@ def get_type_buyprices(type_ids, region_id=_region_id):
 def get_location_type(location_id: int):
     """
     Returns the type of the given location_id.
-    Possible return values: "station", "structure", or None if unknown.
     """
     if not location_id or not isinstance(location_id, int):
         return None
     
     _ensure()
-    id_type = _esi_client.get_id_type(location_id)
-    if id_type == "station":
-        return "station"
-    elif id_type == "structure":
-        return "structure"
-    elif id_type == "region":
-        return "region"
-    else:
-        return None
+    return _esi_client.get_id_type(location_id)
 
 def get_location_info(location_id: int):
     """
@@ -225,6 +216,9 @@ def get_location_info(location_id: int):
         elif id_type == "region":
             region = _esi_client.esi_get(f"/universe/regions/{location_id}/")
             return region
+        elif id_type == "solar_system":
+            solar_system = _esi_client.esi_get(f"/universe/systems/{location_id}/")
+            return solar_system
         else:
             return {}
     except Exception as e:
@@ -255,3 +249,24 @@ def get_market_prices():
     _MARKET_PRICES_CACHE = (now, market_prices)
 
     return market_prices
+
+def get_public_structures(system_id: int, filter: str="manufacturing_basic"):
+    """
+    Returns a list of public structures in the given system.
+    """
+    if not system_id or not isinstance(system_id, int):
+        raise ValueError("System ID is required to fetch public structures.")
+    if filter is not None and filter not in ("manufacturing_basic", "market"):
+        raise ValueError("Invalid filter value. Must be one of: None, manufacturing_basic, market.")
+    
+    _ensure()
+    try:
+        public_structure_ids = _esi_client.esi_get(f"/universe/structures/", params={"filter": filter})
+        public_structures_in_system = []
+        for structure_id in public_structure_ids:
+            structure_data = _esi_client.esi_get(f"/universe/structures/{structure_id}/")
+            if isinstance(structure_data, dict) and structure_data.get("solar_system_id") == system_id:
+                public_structures_in_system.append(structure_data)
+        return public_structures_in_system
+    except Exception as e:
+        raise RuntimeError(f"ESI request failed for system {system_id}: {e}")

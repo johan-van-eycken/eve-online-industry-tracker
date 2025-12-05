@@ -17,13 +17,14 @@ from utils.app_init import load_config, init_db_managers, init_char_manager, ini
 from flask_app.services.yield_calc import compute_yields
 from flask_app.services.optimizer import optimize_ore_tiered
 from flask_app.data.sde_adapter import sde_adapter, get_all_ores \
-    , get_all_materials, get_solar_systems, get_npc_stations
+    , get_all_materials, get_solar_systems, get_npc_stations, get_type_data
 from flask_app.data.app_adapter import app_adapter, get_blueprint_assets \
-    , get_industry_profiles, add_industry_profile, edit_industry_profile, remove_industry_profile
+    , get_industry_profiles, add_industry_profile, edit_industry_profile, remove_industry_profile \
+    , get_corporation_structures
 from flask_app.data.char_adapter import char_adapter, get_character_skills, get_character_implants
 from flask_app.data.facility_repo import get_facility, get_all_facilities
 from flask_app.data.esi_adapter import esi_adapter, get_ore_prices, get_material_prices, \
-    get_type_sellprices, get_type_buyprices, get_location_info
+    get_type_sellprices, get_type_buyprices, get_location_info, get_public_structures
 
 from utils.ore_calculator_core import filter_viable_ores
 
@@ -125,11 +126,12 @@ def refresh_wallet_balances():
 @app.route('/refresh_assets', methods=['GET'])
 def refresh_assets():
     """
-    Endpoint to refresh assets for all characters.
+    Endpoint to refresh assets for all characters and corporations.
     """
     try:
-        refreshed_data = char_manager.refresh_assets()
-        return jsonify({"status": "success", "data": refreshed_data}), 200
+        char_refreshed_data = char_manager.refresh_assets()
+        corp_refreshed_data = corp_manager.refresh_assets()
+        return jsonify({"status": "success", "data": {"characters": char_refreshed_data, "corporations": corp_refreshed_data}}), 200
     except Exception as e:
         logging.error(f"Error refreshing assets: {e}")
         return jsonify({"status": "error", "message": f"Error in GET Method `/refresh_assets`: " + str(e)}), 500
@@ -576,6 +578,34 @@ def npc_stations(system_id):
         return jsonify({"status": "error", "message": f"Error in GET Method `/npc_stations/{system_id}`: " + str(ve)}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": f"Error in GET Method `/npc_stations/{system_id}`: " + str(e)}), 500
+
+@app.route('/public_structures/<int:system_id>', methods=['GET'])
+def structures(system_id):
+    if not system_id:
+        return jsonify({"status": "error", "message": "System ID is required to fetch public structures."}), 400
+    try:
+        public_structures = get_public_structures(system_id=system_id, filter="manufacturing_basic")
+        type_ids = list({s["type_id"] for s in public_structures if "type_id" in s})
+        type_map = get_type_data(type_ids)
+        enriched_structures = [
+            {**s, **type_map.get(s["type_id"], {})} for s in public_structures
+        ]
+        
+        return jsonify({"status": "success", "data": enriched_structures}), 200
+    except ValueError as ve:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/public_structures/{system_id}`: " + str(ve)}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/public_structures/{system_id}`: " + str(e)}), 500
+
+@app.route('/corporation_structures/<int:character_id>', methods=['GET'])
+def corporation_structures(character_id):
+    if not character_id:
+        return jsonify({"status": "error", "message": "Character ID is required to fetch corporation structures."}), 400
+    try:
+        structures = get_corporation_structures(character_id, corporation_id)
+        return jsonify({"status": "success", "data": structures}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error in GET Method `/corporation_structures/{character_id}/{corporation_id}`: " + str(e)}), 500
 
 @app.route('/industry_profiles/<int:character_id>', methods=['GET'])
 def industry_profiles(character_id):

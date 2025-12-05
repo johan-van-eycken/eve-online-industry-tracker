@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from classes.database_models import (
     Blueprints, Categories, Groups, TypeMaterials, Types
-    , MapSolarSystems, MapRegions, MapConstellations, Factions
+    , MapSolarSystems, MapRegions, MapConstellations, Factions, Races
     , NpcStations, NpcCorporations, StationOperations, StationServices
 )
 
@@ -164,14 +164,9 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
         for skill in manufacturing.get("skills", []):
             skill_type_ids.add(skill["typeID"])
 
-    # Batch fetch type, group, and category data
+    # Batch fetch all type data
     all_type_ids = material_type_ids | product_type_ids | blueprint_type_ids | skill_type_ids
-    types = _db_sde.session.query(Types).filter(Types.id.in_(all_type_ids)).all()
-    type_data_map = {t.id: t for t in types}
-    group_ids = {t.groupID for t in types if hasattr(t, "groupID")}
-    group_data_map = {g.id: g for g in _db_sde.session.query(Groups).filter(Groups.id.in_(group_ids)).all()}
-    category_ids = {g.categoryID for g in group_data_map.values() if hasattr(g, "categoryID")}
-    category_data_map = {c.id: c for c in _db_sde.session.query(Categories).filter(Categories.id.in_(category_ids)).all()}
+    type_data_map = {t.id: t for t in get_type_data(list(all_type_ids))}
 
     # Build result
     result = {}
@@ -183,16 +178,14 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
         for mat in manufacturing.get("materials", []):
             type_id = mat.get("typeID", None)
             type_data = type_data_map.get(type_id)
-            group_data = group_data_map.get(type_data.groupID) if type_data else None
-            category_data = category_data_map.get(group_data.categoryID) if group_data else None
             materials.append(
                 {
-                    "type_id": mat["typeID"],
-                    "type_name": _parse_localized(type_data.name) if type_data else "",
-                    "group_id": type_data.groupID if type_data else None,
-                    "group_name": _parse_localized(group_data.name) if group_data else "",
-                    "category_id": group_data.categoryID if group_data else None,
-                    "category_name": _parse_localized(category_data.name) if category_data else "",
+                    "type_id": type_id,
+                    "type_name": type_data.name if type_data else "",
+                    "group_id": type_data.group_id if type_data else None,
+                    "group_name": type_data.group_name if type_data else "",
+                    "category_id": type_data.category_id if type_data else None,
+                    "category_name": type_data.category_name if type_data else "",
                     "quantity": mat["quantity"],
                 }
             )
@@ -201,16 +194,14 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
         for prod in manufacturing.get("products", []):
             type_id = prod.get("typeID", None)
             type_data = type_data_map.get(type_id)
-            group_data = group_data_map.get(type_data.groupID) if type_data else None
-            category_data = category_data_map.get(group_data.categoryID) if group_data else None
             products.append(
                 {
-                    "type_id": prod["typeID"],
-                    "type_name": _parse_localized(type_data.name) if type_data else "",
-                    "group_id": type_data.groupID if type_data else None,
-                    "group_name": _parse_localized(group_data.name) if group_data else "",
-                    "category_id": group_data.categoryID if group_data else None,
-                    "category_name": _parse_localized(category_data.name) if category_data else "",
+                    "type_id": type_id,
+                    "type_name": type_data.name if type_data else "",
+                    "group_id": type_data.group_id if type_data else None,
+                    "group_name": type_data.group_name if type_data else "",
+                    "category_id": type_data.category_id if type_data else None,
+                    "category_name": type_data.category_name if type_data else "",
                     "quantity": prod["quantity"],
                 }
             )
@@ -219,34 +210,28 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
         for skill in manufacturing.get("skills", []):
             type_id = skill.get("typeID", None)
             type_data = type_data_map.get(type_id)
-            group_data = group_data_map.get(type_data.groupID) if type_data else None
-            category_data = category_data_map.get(group_data.categoryID) if group_data else None
             skills.append(
                 {
-                    "type_id": skill["typeID"],
-                    "type_name": _parse_localized(type_data.name) if type_data else "",
-                    "group_id": type_data.groupID if type_data else None,
-                    "group_name": _parse_localized(group_data.name) if group_data else "",
-                    "category_id": group_data.categoryID if group_data else None,
-                    "category_name": _parse_localized(category_data.name) if category_data else "",
+                    "type_id": type_id,
+                    "type_name": type_data.name if type_data else "",
+                    "group_id": type_data.group_id if type_data else None,
+                    "group_name": type_data.group_name if type_data else "",
+                    "category_id": type_data.category_id if type_data else None,
+                    "category_name": type_data.category_name if type_data else "",
                     "level": skill["level"],
                 }
             )
 
         type_id = bp.blueprintTypeID
         type_data = type_data_map.get(type_id)
-        group_id = type_data.groupID if type_data else None
-        group_data = group_data_map.get(group_id) if group_id else None
-        category_id = group_data.categoryID if group_data else None
-        category_data = category_data_map.get(category_id) if category_id else None
         result[bp.blueprintTypeID] = {
-            "type_id": bp.blueprintTypeID,
-            "type_name": _parse_localized(type_data.name) if type_data else "Unknown Blueprint",
-            "type_meta_group_id": type_data.metaGroupID if type_data else None,
-            "group_id": type_data.groupID if type_data else None,
-            "group_name": _parse_localized(group_data.name) if group_data else "Unknown Group",
-            "category_id": group_data.categoryID if group_data else None,
-            "category_name": _parse_localized(category_data.name) if category_data else "Unknown Category",
+            "type_id": type_id,
+            "type_name": type_data.name if type_data else "",
+            "type_meta_group_id": type_data.meta_group_id if type_data else None,
+            "group_id": type_data.group_id if type_data else None,
+            "group_name": type_data.group_name if type_data else "",
+            "category_id": type_data.category_id if type_data else None,
+            "category_name": type_data.category_name if type_data else "",
             "manufacturing": {
                 "time": manufacturing.get("time", 0),
                 "materials": materials,
@@ -260,7 +245,7 @@ def get_blueprint_manufacturing_data() -> Dict[int, Dict]:
 
     return result
 
-
+# -------- solar systems --------
 def get_solar_systems() -> List[dict]:
     """
     Returns list of solar systems with metadata.
@@ -297,6 +282,7 @@ def get_solar_systems() -> List[dict]:
         )
     return solar_systems
 
+# -------- NPC stations --------
 def get_npc_stations(system_id: int) -> List[dict]:
     """
     Returns list of NPC stations with metadata.
@@ -358,3 +344,71 @@ def get_npc_stations(system_id: int) -> List[dict]:
             }
         )
     return stations
+
+# -------- type data --------
+def get_type_data(type_ids: List[int]) -> Dict[int, Dict]:
+    """
+    Returns type metadata for the given list of type IDs.
+    """
+    if not type_ids:
+        return {}
+
+    _ensure()
+
+    types_q = _db_sde.session.query(Types).filter(Types.id.in_(type_ids)).all()
+    group_ids = {t.groupID for t in types_q if hasattr(t, "groupID")}
+    group_data_map = {g.id: g for g in _db_sde.session.query(Groups).filter(Groups.id.in_(group_ids)).all()}
+    category_ids = {g.categoryID for g in group_data_map.values() if hasattr(g, "categoryID")}
+    category_data_map = {c.id: c for c in _db_sde.session.query(Categories).filter(Categories.id.in_(category_ids)).all()}
+    race_ids = {t.raceID for t in types_q if hasattr(t, "raceID") and t.raceID is not None}
+    race_data_map = {r.id: r for r in _db_sde.session.query(Races).filter(Races.id.in_(race_ids)).all()}
+    faction_ids = {t.factionID for t in types_q if hasattr(t, "factionID") and t.factionID is not None}
+    faction_data_map = {f.id: f for f in _db_sde.session.query(Factions).filter(Factions.id.in_(faction_ids)).all()}
+
+    result = {}
+    for t in types_q:
+        group = group_data_map.get(t.groupID)
+        category = category_data_map.get(group.categoryID) if group else None
+        race = race_data_map.get(t.raceID) if t.raceID is not None else None
+        faction = faction_data_map.get(t.factionID) if t.factionID is not None else None
+        result[t.id] = {
+            "type_id": t.id,
+            "type_name": _parse_localized(t.name) or str(t.id),
+            "volume": t.volume,
+            "repackaged_volume": t.repackagedVolume,
+            "radius": t.radius,
+            "portion_size": t.portionSize,
+            "description": _parse_localized(t.description),
+            "base_price": t.basePrice,
+            "icon_id": t.iconID,
+            "meta_group_id": t.metaGroupID,
+            "group_id": t.groupID,
+            "group_name": _parse_localized(group.name) if group else "",
+            "group_icon_id": group.iconID if group else None,
+            "group_anchorable": group.anchorable if group else None,
+            "group_anchored": group.anchored if group else None,
+            "group_use_base_price": group.useBasePrice if group else None,
+            "group_fittable_non_singleton": group.fittableNonSingleton if group else None,
+            "group_repackaged_volume": group.repackagedVolume if group else None,
+            "category_id": group.categoryID if group else None,
+            "category_name": _parse_localized(category.name) if category else "",
+            "category_icon_id": category.iconID if category else None,
+            "race_id": t.raceID,
+            "race_name": _parse_localized(race.name) if race else "",
+            "race_description": _parse_localized(race.description) if race else "",
+            "race_icon_id": race.iconID if race else None,
+            "race_ship_type_id": race.shipTypeID if race else None,
+            "race_skills": race.skills if race else None,
+            "faction_id": t.factionID,
+            "faction_name": _parse_localized(faction.name) if faction else "",
+            "faction_description": _parse_localized(faction.description) if faction else "",
+            "faction_short_description": _parse_localized(faction.shortDescription) if faction else "",
+            "faction_flat_logo": faction.factionFlatLogo if faction else None,
+            "faction_logo_with_name": faction.factionLogoWithName if faction else None,
+            "faction_member_races": faction.memberRaces if faction else None,
+            "faction_corporation_id": faction.corporationID if faction else None,
+            "faction_militia_corporation_id": faction.militiaCorporationID if faction else None,
+            "faction_solar_system_id": faction.solarSystemID if faction else None,
+        }
+
+    return result

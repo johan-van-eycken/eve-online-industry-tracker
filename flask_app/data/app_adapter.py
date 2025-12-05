@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from classes.database_models import (
     CharacterModel, CharacterAssetsModel,
-    CorporationModel, CorporationAssetsModel,
+    CorporationModel, CorporationAssetsModel, CorporationStructuresModel,
     IndustryProfilesModel
 )
 from flask_app.data.sde_adapter import get_blueprint_manufacturing_data
@@ -221,6 +221,14 @@ def get_blueprint_assets() -> List[Dict[str, Any]]:
                 prod["average_price"] = None
 
     return result
+
+def get_corporation_structures(corporation_id:int) -> List[Dict[str, Any]]:
+    """Get all corporation structures for a corporation."""
+    _ensure()
+    structures = _db_app.session.query(CorporationStructuresModel).filter(
+        CorporationStructuresModel.corporation_id == corporation_id
+    ).all()
+    return [_model_to_dict(structure) for structure in structures]
 
 def get_industry_profiles(character_id:int) -> List[Dict[str, Any]]:
     """Get all industry profiles for a character."""
