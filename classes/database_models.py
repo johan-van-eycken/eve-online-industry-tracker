@@ -241,7 +241,7 @@ class CorporationAssetsModel(BaseApp):
     is_ship: Mapped[bool] = mapped_column(Boolean, nullable=True)
     is_office_folder: Mapped[bool] = mapped_column(Boolean, nullable=True)
 
-class StructureModel(BaseApp):
+class CorporationStructuresModel(BaseApp):
     __tablename__ = "corporation_structures"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)

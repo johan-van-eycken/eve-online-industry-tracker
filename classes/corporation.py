@@ -6,7 +6,7 @@ from typing import Optional, List, Dict
 
 from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
-from classes.database_models import CorporationModel, StructureModel, MemberModel, CorporationAssetsModel
+from classes.database_models import CorporationModel, CorporationStructuresModel, MemberModel, CorporationAssetsModel
 from classes.database_models import Types, Groups, Categories, Factions, Races
 from classes.character import Character
 from classes.character_manager import CharacterManager
@@ -60,7 +60,7 @@ class Corporation:
         self.wallets: List[Dict[str, str]] = []
         self.standings: List[Dict[str, str]] = []
 
-        self.structures: List[StructureModel] = []
+        self.structures: List[CorporationStructuresModel] = []
         self.members: List[MemberModel] = []
         self.assets: List[CorporationAssetsModel] = []
 
@@ -90,12 +90,12 @@ class Corporation:
         self.db_app.session.commit()
         logging.debug(f"Corporation '{self.corporation_name}' saved to database.")
 
-    def save_corporation_structures(self, corporation_structures: List[StructureModel]) -> None:
+    def save_corporation_structures(self, corporation_structures: List[CorporationStructuresModel]) -> None:
         """Save the corporation structures to the database."""
         for structure in corporation_structures:
-            existing_structure = self.db_app.session.query(StructureModel).filter_by(structure_id=structure.structure_id).first()
+            existing_structure = self.db_app.session.query(CorporationStructuresModel).filter_by(structure_id=structure.structure_id).first()
             if existing_structure:
-                for column in StructureModel.__table__.columns.keys():
+                for column in CorporationStructuresModel.__table__.columns.keys():
                     if column == "id":
                         continue
                     if hasattr(structure, column):
@@ -155,7 +155,7 @@ class Corporation:
 
     def load_corporation_structures(self) -> bool:
         """Load corporation structures from the database into the instance. Returns True if found."""
-        structures = self.db_app.session.query(StructureModel).filter_by(corporation_id=self.corporation_id).all()
+        structures = self.db_app.session.query(CorporationStructuresModel).filter_by(corporation_id=self.corporation_id).all()
         if not structures:
             logging.debug(f"No structures found for corporation '{self.corporation_name}' in database.")
             return False
@@ -300,7 +300,7 @@ class Corporation:
                 type_data = self.db_sde.session.query(Types).filter_by(id=structure.get("type_id")).first()
                 group_data = self.db_sde.session.query(Groups).filter_by(id=type_data.groupID).first()
                 category_data = self.db_sde.session.query(Categories).filter_by(id=group_data.categoryID).first()
-                self.structures.append(StructureModel(
+                self.structures.append(CorporationStructuresModel(
                     corporation_id=structure.get("corporation_id"),
                     structure_id=structure.get("structure_id"),
                     structure_name=structure.get("name", "Unknown"),
