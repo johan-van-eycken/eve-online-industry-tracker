@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eve-online-industry-tracker"
+version = "0.1.0"
+description = "Python tools + Flask/Streamlit app to track EVE Online industry data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "jveyc"}]
+
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = [
+  "classes*",
+  "utils*",
+  "flask_app*",
+  "webpages*",
+  "config*",
+]
