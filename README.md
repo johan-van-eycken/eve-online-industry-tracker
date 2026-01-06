@@ -68,19 +68,49 @@ cd eve-online-industry-tracker
 
 2. Create a virtual environment and install dependencies:
 
-```bash
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-venv\Scripts\activate     # Windows
+Recommended: use a local `.venv` (isolated from global Python).
 
-pip install -r requirements.txt
+Windows (PowerShell):
+
+```powershell
+./scripts/setup_venv.ps1
+./.venv/Scripts/Activate.ps1
+```
+
+Manual setup (cross-platform):
+
+```bash
+python -m venv .venv
+
+# Linux/macOS
+source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
+
+python -m pip install -r requirements.txt
+
+# Needed for editable installs (provides the 'bdist_wheel' command):
+python -m pip install wheel
+
+# This repository uses a `src/` layout, so install in editable mode:
+python -m pip install -e . --no-build-isolation
+```
+
+If pip fails with `SSLCertVerificationError`, you likely need to configure your
+corporate proxy / trust store (or use an internal PyPI mirror). As a pragmatic
+fallback (less isolated, but works without downloading), you can create the venv
+with system site-packages:
+
+```bash
+python -m venv --system-site-packages .venv
 ```
 
 3. Ensure config files exist:
 
 ```txt
 config/config.json
-config/secret.json (fill in your EVE client secret)
+config/secret.json (fill in your EVE client secret; you can also put your character list here)
 config/import_sde.json (list of SDE tables to import)
 ```
 
@@ -123,8 +153,26 @@ streamlit run streamlit_app.py
 Serve the Flask API:
 
 ```bash
-python flask_app/flask_app.py
+python -m flask_app
 ```
+
+### Runtime settings (env vars)
+
+The backend behavior is controlled via environment variables:
+
+- `FLASK_HOST` (default: `localhost`)
+- `FLASK_PORT` (default: `5000`)
+- `FLASK_DEBUG` (default: `false`)
+- `FLASK_REFRESH_METADATA` (default: `true`) – controls DB metadata creation on startup
+- `FLASK_API_REQUEST_TIMEOUT` (default: `10`) – seconds for UI → API requests
+- `FLASK_HEALTH_POLL_TIMEOUT` (default: `120`) – seconds to wait for backend readiness in `main.py`
+- `FLASK_HEALTH_REQUEST_TIMEOUT` (default: `2`) – per-request timeout for `/health`
+- `LOG_LEVEL` (default: `INFO` for `python -m flask_app`, `DEBUG` for `python main.py`)
+
+The app configuration file locations are also configurable:
+
+- `APP_CONFIG_PATH` (default: `config/config.json`)
+- `APP_SECRET_PATH` (default: `config/secret.json`)
 
 Features:
 
@@ -135,34 +183,22 @@ Features:
 
 ```plaintext
 .
-├── classes/
-│   ├── character_manager.py
-│   ├── character.py
-│   ├── config_manager.py
-│   ├── database_manager.py
-│   ├── database_models.py
-│   ├── esi.py
-│   └── oauth.py
+├── src/
+│   ├── classes/
+│   ├── config/
+│   ├── flask_app/
+│   ├── utils/
+│   └── webpages/
 ├── config/
 │   ├── config.json
-│   ├── secret.json
-│   ├── schemas.py
+│   ├── secret.json          # gitignored (secrets + optional character list)
 │   └── import_sde.json      # list of SDE tables to import
 ├── database/
-│   ├── eve_oauth.db         # authenticated characters database
-│   ├── eve_app.db           # main app database
-│   └── eve_sde.db           # imported SDE database
-├── flask_app/
-│   ├── flask_app.py         # Flask API for backend logic
-│   └── __init__.py          # Optional package initialization
+│   ├── eve_oauth.db
+│   ├── eve_app.db
+│   └── eve_sde.db
 ├── scripts/
 │   └── import_sde.py
-├── utils/
-│   ├── formatters.py
-│   └── table_viewer.py
-├── webpages/
-│   ├── characters.py
-│   └── database_maintenance.py
 ├── main.py
 ├── README.md
 ├── requirements.txt

@@ -3,14 +3,37 @@ import multiprocessing
 import subprocess
 import time
 
-from utils.flask_api import FLASK_HOST, FLASK_PORT, api_get
+import requests
+
+from flask_app.settings import (
+    flask_debug,
+    flask_host,
+    flask_port,
+    health_poll_timeout_seconds,
+    health_request_timeout_seconds,
+    refresh_metadata_on_startup,
+)
+from utils.logging_setup import configure_logging
 
 
 def run_flask():
     """Start the Flask app"""
-    from flask_app.flask_app import app
+    from flask_app.app import create_app
+    from flask_app.bootstrap import start_background_initialization
 
-    app.run(host=FLASK_HOST, port=FLASK_PORT)
+    app = create_app()
+
+    # Initialization can be slow (DB/ESI refresh). Start it in the background so
+    # the server becomes reachable quickly and /health can report progress.
+    start_background_initialization(refresh_metadata=refresh_metadata_on_startup())
+
+    # Avoid Werkzeug reloader when running under multiprocessing.
+    app.run(
+        host=flask_host(),
+        port=flask_port(),
+        debug=flask_debug(),
+        use_reloader=False,
+    )
 
 
 def run_streamlit():
@@ -18,25 +41,43 @@ def run_streamlit():
     return subprocess.Popen(["streamlit", "run", "streamlit_app.py"])
 
 
-def wait_for_flask_ready(timeout=120):
+def wait_for_flask_ready(flask_proc: multiprocessing.Process | None = None, timeout=120):
     """Wait for Flask to become ready"""
     start = time.time()
     while time.time() - start < timeout:
+        if flask_proc is not None and not flask_proc.is_alive():
+            raise RuntimeError(
+                f"Flask process exited early (exitcode={flask_proc.exitcode})."
+            )
         try:
-            flask_health = api_get("/health")
-            if flask_health and flask_health.get("status") == "OK":
-                logging.info("Flask is ready!")
-                return True
-        except Exception:
-            pass
+            r = requests.get(
+                f"http://{flask_host()}:{flask_port()}/health",
+                timeout=health_request_timeout_seconds(),
+            )
+
+            # Flask reachable: either ready (200) or still initializing (503).
+            if r.status_code == 200:
+                payload = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                if payload.get("status") == "OK":
+                    logging.info("Flask is ready!")
+                    return True
+            elif r.status_code == 503:
+                try:
+                    payload = r.json()
+                    logging.info(
+                        "Flask not ready yet: %s",
+                        payload.get("init_state", "unknown"),
+                    )
+                except Exception:
+                    logging.info("Flask not ready yet (503)")
+        except requests.RequestException as e:
+            logging.debug("Flask not reachable yet: %s", e)
         time.sleep(1)
     raise RuntimeError("Flask did not become ready in time.")
 
 
 def main():
-    logging.basicConfig(
-        level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
+    configure_logging(default_level="DEBUG")
 
     flask_proc = None
     streamlit_proc = None
@@ -48,7 +89,7 @@ def main():
         flask_proc.start()
 
         logging.info("Waiting for Flask to become ready...")
-        wait_for_flask_ready(timeout=120)
+        wait_for_flask_ready(flask_proc=flask_proc, timeout=health_poll_timeout_seconds())
 
         # Only start Streamlit after Flask is fully ready
         logging.info("Starting Streamlit app...")
@@ -67,7 +108,7 @@ def main():
                 flask_proc.start()
 
                 logging.info("Waiting for Flask to become ready...")
-                wait_for_flask_ready(timeout=120)
+                wait_for_flask_ready(flask_proc=flask_proc, timeout=health_poll_timeout_seconds())
 
             # Check if Streamlit died (optional)
             if streamlit_proc.poll() is not None:
@@ -79,7 +120,10 @@ def main():
 
         # Shutdown Flask gracefully
         try:
-            api_get("/shutdown")
+            requests.get(
+                f"http://{flask_host()}:{flask_port()}/shutdown",
+                timeout=2,
+            )
             logging.info("Flask shutdown signal sent.")
         except Exception as e:
             logging.warning(f"Could not shutdown Flask gracefully: {e}")

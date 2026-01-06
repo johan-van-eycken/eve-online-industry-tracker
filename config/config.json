@@ -1,8 +1,4 @@
 {
-  "characters": [
-    { "character_name": "Duke X1", "is_main": true, "is_corp_director": true },
-    { "character_name": "Knight X1", "is_main": false, "is_corp_director": false }
-  ],
   "app": {
     "port": 8080,
     "redirect_uri": "http://localhost:8080/callback",
