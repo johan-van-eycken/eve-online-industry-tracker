@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import random
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from classes.esi import ESIClient
@@ -23,6 +25,7 @@ class ESIService:
         station_id: int = DEFAULT_STATION_ID,
         type_orders_cache_ttl_seconds: int = 300,
         market_prices_cache_ttl_seconds: int = 3600,
+        public_structures_cache_ttl_seconds: int = 600,
     ):
         self._esi_client = esi_client
         self._region_id = region_id
@@ -30,11 +33,14 @@ class ESIService:
 
         self._type_orders_cache_ttl_seconds = type_orders_cache_ttl_seconds
         self._market_prices_cache_ttl_seconds = market_prices_cache_ttl_seconds
+        self._public_structures_cache_ttl_seconds = public_structures_cache_ttl_seconds
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}
         # (timestamp, [prices])
         self._market_prices_cache: Optional[tuple] = None
+        # { (system_id, filter): (timestamp, [structures]) }
+        self._public_structures_cache: Dict[tuple, tuple] = {}
 
     def set_market_context(self, *, region_id: Optional[int] = None, station_id: Optional[int] = None) -> None:
         if region_id is not None:
@@ -196,19 +202,193 @@ class ESIService:
         self._market_prices_cache = (now, market_prices)
         return market_prices
 
-    def get_public_structures(self, system_id: int, filter: str = "manufacturing_basic") -> List[Dict[str, Any]]:
+    def get_industry_facilities(self) -> List[Dict[str, Any]]:
+        """Return public industry facilities.
+
+        This endpoint is much more suitable for quickly locating manufacturing
+        structures per solar system than scanning /universe/structures.
+        """
+        try:
+            data = self._esi_client.esi_get("/industry/facilities/")
+        except Exception as e:
+            raise RuntimeError(f"ESI request failed: {e}")
+        return list(data) if isinstance(data, list) else []
+
+    def resolve_universe_names(self, ids: List[int]) -> Dict[int, str]:
+        """Resolve universe IDs to names using /universe/names/ (batched)."""
+        if not ids:
+            return {}
+
+        out: Dict[int, str] = {}
+        # Keep payload sizes reasonable.
+        chunk_size = 500
+        for i in range(0, len(ids), chunk_size):
+            chunk = ids[i : i + chunk_size]
+            try:
+                resp = self._esi_client.esi_post("/universe/names/", json=chunk, timeout=15)
+            except Exception:
+                continue
+
+            if not isinstance(resp, list):
+                continue
+            for item in resp:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                name = item.get("name")
+                if isinstance(item_id, int) and isinstance(name, str):
+                    out[item_id] = name
+
+        return out
+
+
+    def list_universe_structure_ids(self, *, filter: Optional[str] = None) -> List[int]:
+        """List structure IDs from /universe/structures.
+
+        Note: ESI returns only structures your character has access to.
+        """
+        if filter is not None and filter not in ("manufacturing_basic", "market"):
+            raise ValueError("Invalid filter value. Must be one of: None, manufacturing_basic, market.")
+
+        params = {"filter": filter} if filter is not None else None
+        data = self._esi_client.esi_get("/universe/structures/", params=params, use_cache=False)
+        if data is None:
+            raise RuntimeError(
+                "ESI returned no data for /universe/structures (likely 403 Forbidden). "
+                "Your character may be missing the scope 'esi-universe.read_structures.v1' or has no access."
+            )
+        if not isinstance(data, list):
+            return []
+        out = []
+        for x in data:
+            try:
+                out.append(int(x))
+            except Exception:
+                continue
+        return out
+
+    def get_public_structures(
+        self,
+        system_id: int,
+        filter: Optional[str] = "manufacturing_basic",
+        *,
+        max_structure_ids_to_scan: int = 250,
+        max_workers: int = 20,
+        time_budget_seconds: float = 8.0,
+        max_results: int = 50,
+    ) -> List[Dict[str, Any]]:
         if not system_id or not isinstance(system_id, int):
             raise ValueError("System ID is required to fetch public structures.")
         if filter is not None and filter not in ("manufacturing_basic", "market"):
             raise ValueError("Invalid filter value. Must be one of: None, manufacturing_basic, market.")
 
+        cache_key = (system_id, filter)
+        now = time.time()
+        cached = self._public_structures_cache.get(cache_key)
+        if cached and (now - cached[0] < self._public_structures_cache_ttl_seconds):
+            return cached[1]
+
+        started_at = time.time()
+
         try:
-            public_structure_ids = self._esi_client.esi_get("/universe/structures/", params={"filter": filter})
-            public_structures_in_system: List[Dict[str, Any]] = []
-            for structure_id in public_structure_ids:
-                structure_data = self._esi_client.esi_get(f"/universe/structures/{structure_id}/")
-                if isinstance(structure_data, dict) and structure_data.get("solar_system_id") == system_id:
-                    public_structures_in_system.append(structure_data)
-            return public_structures_in_system
+            params = {"filter": filter} if filter is not None else None
+            public_structure_ids = self._esi_client.esi_get("/universe/structures/", params=params)
+
+            # ESIClient returns None on 403/404; distinguish that from an empty list.
+            if public_structure_ids is None:
+                raise RuntimeError(
+                    "ESI returned no data for /universe/structures (likely 403 Forbidden). "
+                    "Your character may be missing the scope 'esi-universe.read_structures.v1' or has no access."
+                )
+
+            if not public_structure_ids:
+                self._public_structures_cache[cache_key] = (now, [])
+                return []
+
+            # This endpoint can return a *lot* of IDs. Scanning all of them is not viable
+            # for an interactive UI; instead we scan a bounded subset concurrently and
+            # enforce a time budget so the request returns promptly.
+            #
+            # Important: don't only take the first N IDs; that biases results and can
+            # systematically miss systems. Use a sample across the full list.
+            all_ids = list(public_structure_ids)
+            scan_cap = max(0, int(max_structure_ids_to_scan))
+            if scan_cap <= 0:
+                self._public_structures_cache[cache_key] = (now, [])
+                return []
+            if len(all_ids) <= scan_cap:
+                ids_to_scan = all_ids
+            else:
+                # Seed by system_id so repeated refreshes for the same system are stable-ish,
+                # but still provide coverage across the global ID list.
+                rng = random.Random(system_id)
+                ids_to_scan = rng.sample(all_ids, scan_cap)
+
+            def fetch_one(structure_id: int) -> Optional[Dict[str, Any]]:
+                try:
+                    # Disable DB-backed caching here; ESIClient cache uses a shared SQLAlchemy
+                    # session which is not thread-safe under ThreadPoolExecutor.
+                    structure_data = self._esi_client.esi_get(
+                        f"/universe/structures/{structure_id}/",
+                        use_cache=False,
+                    )
+                    if isinstance(structure_data, dict) and structure_data.get("solar_system_id") == system_id:
+                        # Normalize keys to match NPC stations output shape.
+                        return {
+                            "station_id": structure_id,
+                            "station_name": structure_data.get("name"),
+                            "system_id": structure_data.get("solar_system_id"),
+                            "owner_id": structure_data.get("owner_id"),
+                            "type_id": structure_data.get("type_id"),
+                            "services": structure_data.get("services"),
+                        }
+                except Exception:
+                    return None
+                return None
+
+            results: List[Dict[str, Any]] = []
+            max_workers = max(1, int(max_workers))
+            max_results = max(1, int(max_results))
+
+            # Submit progressively so large scan caps don't create thousands of in-flight requests.
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                it = iter(ids_to_scan)
+                in_flight = set()
+
+                # Fill initial workers.
+                for _ in range(max_workers):
+                    try:
+                        sid = next(it)
+                    except StopIteration:
+                        break
+                    in_flight.add(executor.submit(fetch_one, sid))
+
+                while in_flight:
+                    remaining = time_budget_seconds - (time.time() - started_at)
+                    if remaining <= 0:
+                        break
+
+                    done, in_flight = wait(in_flight, timeout=min(0.25, remaining), return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        try:
+                            item = fut.result()
+                        except Exception:
+                            item = None
+                        if item:
+                            results.append(item)
+                            if len(results) >= max_results:
+                                in_flight.clear()
+                                break
+
+                        # Keep the pool full.
+                        if len(results) < max_results and (time.time() - started_at) <= time_budget_seconds:
+                            try:
+                                sid = next(it)
+                            except StopIteration:
+                                continue
+                            in_flight.add(executor.submit(fetch_one, sid))
+
+            self._public_structures_cache[cache_key] = (now, results)
+            return results
         except Exception as e:
             raise RuntimeError(f"ESI request failed for system {system_id}: {e}")

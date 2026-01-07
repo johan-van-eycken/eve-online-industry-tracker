@@ -291,6 +291,31 @@ class CorporationMemberModel(BaseApp):
     titles: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=True)  # List of titles
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+
+class PublicStructuresModel(BaseApp):
+    __tablename__ = "public_structures"
+
+    # Uses the EVE structure_id as the primary key.
+    structure_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    system_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    owner_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    structure_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    services: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class PublicStructuresScanStateModel(BaseApp):
+    __tablename__ = "public_structures_scan_state"
+
+    # Singleton row (id=1) storing the resume cursor for the global scanner.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    cursor: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
 class IndustryProfilesModel(BaseApp):
     __tablename__ = "industry_profiles"
 

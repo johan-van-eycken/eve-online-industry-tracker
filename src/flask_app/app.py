@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from flask import Flask
 
+from werkzeug.exceptions import HTTPException
+
 from flask_app.db import close_request_sessions
+from flask_app.http import error
 
 from flask_app.routes.admin import admin_bp
 from flask_app.routes.characters import characters_bp
@@ -17,6 +20,14 @@ def create_app() -> Flask:
 
     # Ensure DB sessions created during a request are always closed.
     app.teardown_appcontext(close_request_sessions)
+
+    @app.errorhandler(HTTPException)
+    def _handle_http_exception(e: HTTPException):
+        return error(message=e.description, status_code=e.code or 500)
+
+    @app.errorhandler(404)
+    def _handle_not_found(_):
+        return error(message="Not found", status_code=404)
 
     # Blueprints
     app.register_blueprint(admin_bp)

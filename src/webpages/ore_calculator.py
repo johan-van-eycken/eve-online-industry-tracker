@@ -250,17 +250,17 @@ def render():
                 "batch_size": "Batch Size", "ore_units": "Ore Units", "cost": "Total Cost (ISK)",
                 "unit_price": "Unit Price (ISK)"
             }),
-            use_container_width=True
+            width="stretch"
         )
         st.caption("Each row shows an ore type selected by the optimizer. 'Ore Units' = Batches × Batch Size.")
 
         st.markdown("**Ores Purchase Summary**")
-        st.dataframe(opt_display["df_ore_summary"], use_container_width=True)
+        st.dataframe(opt_display["df_ore_summary"], width="stretch")
         st.caption("Summary of all ores purchased, including total volume.")
 
     with raw_col:
         st.subheader("Raw Minerals (Direct Market Purchase)")
-        st.dataframe(opt_display["df_raw"], use_container_width=True)
+        st.dataframe(opt_display["df_raw"], width="stretch")
         st.caption("Minerals required if you buy everything directly from the market.")
 
     # Optional debug sections
@@ -277,7 +277,7 @@ def render():
                     "Yield per Batch": qty
                 })
         if df_yields:
-            st.dataframe(pd.DataFrame(df_yields), use_container_width=True)
+            st.dataframe(pd.DataFrame(df_yields), width="stretch")
         else:
             st.info("No yield data available.")
 
@@ -295,7 +295,7 @@ def render():
                 "surplus": "Surplus",
                 "shortfall": "Shortfall"
             })
-            st.dataframe(df_coverage.style.format("{:,.2f}"), use_container_width=True)
+            st.dataframe(df_coverage.style.format("{:,.2f}"), width="stretch")
             st.caption("Shows for each mineral: demand, actual yield, surplus (overproduction), and any shortfall.")
 
     if opt_display["show_formula"]:

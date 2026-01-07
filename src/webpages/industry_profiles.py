@@ -4,6 +4,13 @@ import pandas as pd
 from utils.app_init import load_config, init_db_app
 from utils.flask_api import cached_api_get, api_get, api_post, api_put, api_delete
 
+
+def _rerun() -> None:
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
 def render():
     st.subheader("Industry Profiles")
 
@@ -67,7 +74,7 @@ def render():
                         delete_response = api_delete(f"/industry_profiles/{profile['id']}")
                         if delete_response.get("status") == "success":
                             st.success("Profile deleted")
-                            st.experimental_rerun()
+                            _rerun()
                         else:
                             st.error(f"Error: {delete_response.get('message')}")
     else:
@@ -119,21 +126,21 @@ def render():
     # Fetch NPC stations
     try:
         npc_stations_response = cached_api_get(f"/npc_stations/{selected_system_id}")
-        public_structures = cached_api_get(f"/public_structures/{selected_system_id}")
         try:
-            df_struct = db.query("corporation_structures", params={"system_id": selected_system_id})
+            public_structures = cached_api_get(f"/public_structures/{selected_system_id}")
         except Exception as e:
-            st.error(f"Failed to load corporation structures: {e}")
-            st.stop()
+            st.warning(f"Public structures unavailable: {e}")
+            public_structures = {"status": "success", "data": []}
         
         if npc_stations_response is None or npc_stations_response.get("status") != "success":
             e = npc_stations_response.get("message") if npc_stations_response else "API connection failed"
             st.error(f"Failed to load NPC stations: {e}")
             st.stop()
+
         if public_structures is None or public_structures.get("status") != "success":
             e = public_structures.get("message") if public_structures else "API connection failed"
-            st.error(f"Failed to load public structures: {e}")
-            st.stop()
+            st.warning(f"Public structures unavailable: {e}")
+            public_structures = {"status": "success", "data": []}
         
         stations = npc_stations_response.get("data", [])
         stations.extend(public_structures.get("data", []))
@@ -232,7 +239,7 @@ def render():
             step=0.1,
         )
 
-    if st.button("Create Profile", type="primary", use_container_width=True):
+    if st.button("Create Profile", type="primary", width="stretch"):
         location_id = None
         location_name = None
         location_type = "structure"
@@ -264,6 +271,6 @@ def render():
 
         if create_response.get("status") == "success":
             st.success("Profile created successfully!")
-            st.experimental_rerun()
+            _rerun()
         else:
             st.error(f"Error: {create_response.get('message')}")
