@@ -5,6 +5,13 @@ from utils.flask_api import api_get
 from utils.formatters import format_isk_short
 
 
+def _rerun() -> None:
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
+
 # -- Cached API calls --
 @st.cache_data(ttl=3600)
 def get_all_orders():
@@ -99,7 +106,7 @@ def render():
             st.write("<br>", unsafe_allow_html=True)
             if st.button("Refresh Market Orders"):
                 st.cache_data.clear()
-                st.experimental_rerun()
+                _rerun()
         with filler:
             st.write("")
 
@@ -116,7 +123,7 @@ def render():
         # Sell Orders
         st.dataframe(
             df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Icon": st.column_config.ImageColumn("", width="small"),
@@ -156,7 +163,7 @@ def render():
         # Buy Orders
         st.dataframe(
             df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Icon": st.column_config.ImageColumn("", width="small"),

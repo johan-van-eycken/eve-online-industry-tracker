@@ -335,14 +335,16 @@ def render():
         for loc_id in location_ids:
             location_info = location_data.get(str(loc_id)) or {}
             location_name = location_info.get("name", str(loc_id))
-            assets_df.loc[assets_df["location_id"] == loc_id, "location_name"] = location_name
+            assets_df.loc[assets_df["top_location_id"] == loc_id, "location_name"] = location_name
 
-        # Build a mapping of location_id to location_name for dropdown display
-        location_names = {
-            location_id: assets_df[assets_df["location_id"] == location_id]["location_name"].iloc[0]
-            if "location_name" in assets_df.columns else str(location_id)
-            for location_id in location_ids
-        }
+        # Build a mapping of top_location_id to location_name for dropdown display
+        location_names = {}
+        for location_id in location_ids:
+            if "location_name" in assets_df.columns:
+                subset = assets_df[assets_df["top_location_id"] == location_id]["location_name"].dropna()
+                location_names[location_id] = subset.iloc[0] if not subset.empty else str(location_id)
+            else:
+                location_names[location_id] = str(location_id)
 
         # Sort location_ids by their names alphabetically
         sorted_location_ids = sorted(location_names.keys(), key=lambda x: location_names[x].lower())
@@ -466,7 +468,7 @@ def render():
                             "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                             "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                         }
-                        st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                        st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                     # Then show containers and their items
                     for _, container in division_containers.iterrows():
                         items_in_container = assets_df[assets_df["location_id"] == container["item_id"]]
@@ -502,7 +504,7 @@ def render():
                                         "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                                         "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                                     }
-                                    st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                                    st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                                 else:
                                     st.info("No items in this container.")
 
@@ -544,7 +546,7 @@ def render():
                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                 }
-                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
             st.divider()
 
             # Structure Fuel section
@@ -572,7 +574,7 @@ def render():
                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                 }
-                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                 st.divider()
 
             # Quantum Core Room section
@@ -600,7 +602,7 @@ def render():
                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                 }
-                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                 st.divider()
 
             # Get all locations that contain asset safety wraps
@@ -641,7 +643,7 @@ def render():
                                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                                 }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                             else:
                                 st.info("No items in this container.")
                 st.divider()

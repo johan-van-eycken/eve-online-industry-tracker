@@ -4,6 +4,14 @@ import logging
 import threading
 
 from flask_app.state import state
+from flask_app.settings import (
+    public_structures_startup_scan_batch_size,
+    public_structures_startup_scan_enabled,
+    public_structures_startup_scan_max_workers,
+    public_structures_startup_scan_pause_seconds,
+    public_structures_startup_scan_scan_cap,
+    public_structures_startup_scan_time_budget_seconds,
+)
 
 # App initialization imports
 from utils.app_init import (
@@ -14,6 +22,8 @@ from utils.app_init import (
 )
 
 from classes.esi_service import ESIService
+
+from flask_app.services.public_structures_cache_service import trigger_global_public_structures_scan
 
 
 def initialize_application(*, refresh_metadata: bool = True) -> None:
@@ -58,6 +68,17 @@ def initialize_application(*, refresh_metadata: bool = True) -> None:
         main_character = state.char_manager.get_main_character()
         state.esi_service = ESIService(main_character.esi_client)
         # Adapters no longer keep module-level globals; they read from state + request-scoped sessions.
+
+        # Start background global scan to populate public_structures. This is best-effort and
+        # bounded by conservative limits so it doesn't block readiness.
+        if public_structures_startup_scan_enabled():
+            trigger_global_public_structures_scan(
+                scan_cap=public_structures_startup_scan_scan_cap(),
+                max_workers=public_structures_startup_scan_max_workers(),
+                time_budget_seconds=float(public_structures_startup_scan_time_budget_seconds()),
+                batch_size=public_structures_startup_scan_batch_size(),
+                pause_seconds=float(public_structures_startup_scan_pause_seconds()),
+            )
 
         chars_initialized = len(state.char_manager._character_list)
         corps_initialized = len(state.corp_manager._corporation_ids)

@@ -13,6 +13,11 @@ from flask_app.services.sde_context import ensure_sde_ready, get_language
 from flask_app.services.sde_locations_service import get_solar_systems, get_npc_stations
 from flask_app.services.sde_types_service import get_type_data
 from flask_app.services.industry_builder_service import enrich_blueprints_for_character
+from flask_app.settings import public_structures_cache_ttl_seconds
+from flask_app.services.public_structures_cache_service import (
+    get_cached_public_structures,
+    trigger_refresh_public_structures_for_system,
+)
 
 
 industry_bp = Blueprint("industry", __name__)
@@ -85,14 +90,24 @@ def structures(system_id: int):
                 ),
                 status_code=503,
             )
-        public_structures = state.esi_service.get_public_structures(system_id=system_id, filter="manufacturing_basic")
-        type_ids = list({s["type_id"] for s in public_structures if "type_id" in s})
+
+        ttl_seconds = public_structures_cache_ttl_seconds()
+        public_structures, is_fresh = get_cached_public_structures(system_id, ttl_seconds=ttl_seconds)
+        refreshing = False
+        if not is_fresh:
+            refreshing = trigger_refresh_public_structures_for_system(system_id)
+
+        type_ids = list({s["type_id"] for s in public_structures if s.get("type_id") is not None})
         ensure_sde_ready()
         session = get_db_sde_session()
         language = get_language()
         type_map = get_type_data(session, language, type_ids)
-        enriched_structures = [{**s, **type_map.get(s["type_id"], {})} for s in public_structures]
-        return ok(data=enriched_structures)
+        enriched_structures = []
+        for s in public_structures:
+            type_id = s.get("type_id")
+            extra = type_map.get(int(type_id), {}) if type_id is not None else {}
+            enriched_structures.append({**s, **extra})
+        return ok(data=enriched_structures, meta={"refreshing": refreshing, "cache_fresh": is_fresh})
     except ValueError as ve:
         return error(message=f"Error in GET Method `/public_structures/{system_id}`: " + str(ve), status_code=404)
     except Exception as e:

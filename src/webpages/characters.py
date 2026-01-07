@@ -229,7 +229,7 @@ def render():
                     col.button(
                         group_name,
                         key=f"group_{group_name}",
-                        use_container_width=True,
+                        width="stretch",
                         on_click=lambda g=group_name: setattr(st.session_state, "selected_group", g),
                     )
 
@@ -325,7 +325,7 @@ def render():
             """, unsafe_allow_html=True)
 
             # Display wallet transaction entries
-            st.dataframe(journal_df.sort_values(by="date", ascending=False), use_container_width=True)
+            st.dataframe(journal_df.sort_values(by="date", ascending=False), width="stretch")
 
         except Exception as e:
             st.warning(f"No wallet journal data found. {e}")
@@ -366,7 +366,7 @@ def render():
             st.stop()
 
         # Display wallet transaction entries
-        st.dataframe(transactions_df.sort_values(by="date", ascending=False), use_container_width=True)
+        st.dataframe(transactions_df.sort_values(by="date", ascending=False), width="stretch")
     
     # --- CHARACTER ASSETS TAB ---
     with assets_tab:
@@ -406,14 +406,17 @@ def render():
         for loc_id in location_ids:
             location_info = location_data.get(str(loc_id)) or {}
             location_name = location_info.get("name", str(loc_id))
-            assets_df.loc[assets_df["location_id"] == loc_id, "location_name"] = location_name
+            assets_df.loc[assets_df["top_location_id"] == loc_id, "location_name"] = location_name
 
         # Build a mapping of location_id to location_name for dropdown display
-        location_names = {
-            location_id: assets_df[assets_df["location_id"] == location_id]["location_name"].iloc[0]
-            if "location_name" in assets_df.columns else str(location_id)
-            for location_id in location_ids
-        }
+        location_names = {}
+        for location_id in location_ids:
+            if "location_name" not in assets_df.columns:
+                location_names[location_id] = str(location_id)
+                continue
+
+            subset = assets_df[assets_df["top_location_id"] == location_id]["location_name"].dropna()
+            location_names[location_id] = subset.iloc[0] if not subset.empty else str(location_id)
 
         # Sort location_ids by their names alphabetically
         sorted_location_ids = sorted(location_names.keys(), key=lambda x: location_names[x].lower())
@@ -522,7 +525,7 @@ def render():
                                 "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                                 "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                             }
-                            st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                            st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                         else:
                             st.info("No items in this container.")
 
@@ -560,7 +563,7 @@ def render():
                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                 }
-                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
             st.divider()
 
             if selected_location_id in assetsafety_locations:
@@ -598,7 +601,7 @@ def render():
                                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                                 }
-                                st.dataframe(df_display, use_container_width=True, column_config=column_config, hide_index=True)
+                                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                             else:
                                 st.info("No items in this container.")
                 st.divider()
