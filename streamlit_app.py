@@ -7,11 +7,7 @@ from utils.flask_api import api_get, api_post
 
 
 def _rerun() -> None:
-    # Streamlit renamed rerun APIs across versions.
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        st.experimental_rerun()
+    st.rerun()
 
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")

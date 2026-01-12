@@ -5,6 +5,11 @@ import json
 from utils.flask_api import cached_api_get, api_get, api_post
 from utils.formatters import format_isk, format_date, format_date_into_age
 
+
+@st.cache_data(ttl=60)
+def _get_character_oauth_metadata() -> dict | None:
+    return api_get("/characters/oauth")
+
 def render():
     # -- Custom Style --
     st.markdown("""
@@ -191,7 +196,9 @@ def render():
         return
 
     # Tabs for Character Details
-    tab_skills, journal_tab, transactions_tab, assets_tab = st.tabs(["Skills", "Wallet Journal", "Wallet Transactions", "Assets"])
+    tab_skills, journal_tab, transactions_tab, assets_tab, tab_settings = st.tabs(
+        ["Skills", "Wallet Journal", "Wallet Transactions", "Assets", "Settings"]
+    )
 
     # --- CHARACTER SKILLS TAB ---
     with tab_skills:
@@ -367,6 +374,64 @@ def render():
 
         # Display wallet transaction entries
         st.dataframe(transactions_df.sort_values(by="date", ascending=False), width="stretch")
+
+    # --- CHARACTER SETTINGS / AUTH TAB ---
+    with tab_settings:
+        st.subheader("SSO / OAuth")
+        st.caption("Shows what the backend has stored for this character. Tokens are not displayed.")
+
+        meta = _get_character_oauth_metadata()
+        if meta is None or meta.get("status") != "success":
+            st.warning(
+                "OAuth metadata unavailable. "
+                + (meta.get("message") if isinstance(meta, dict) else "")
+            )
+        else:
+            rows = meta.get("data", []) or []
+            target = None
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                # Prefer ID match, fall back to name.
+                if r.get("character_id") == selected_id:
+                    target = r
+                    break
+            if target is None:
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    if str(r.get("character_name") or "") == str(char_row.get("character_name") or ""):
+                        target = r
+                        break
+
+            if target is None:
+                st.info("No OAuth record found for this character yet.")
+                st.write(
+                    "If this is a new character, the backend will open the EVE SSO login flow when it first needs tokens."
+                )
+            else:
+                expires_in = target.get("expires_in_seconds")
+                if isinstance(expires_in, (int, float)):
+                    expires_label = f"{int(expires_in)}s"
+                else:
+                    expires_label = "N/A"
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Has refresh token", "yes" if target.get("has_refresh_token") else "no")
+                c2.metric("Has access token", "yes" if target.get("has_access_token") else "no")
+                c3.metric("Access token expires in", expires_label)
+
+                scopes_raw = str(target.get("scopes") or "").strip()
+                scopes = [s for s in scopes_raw.split() if s]
+                st.markdown("**Scopes**")
+                if scopes:
+                    st.code("\n".join(scopes), language="text")
+                else:
+                    st.write("(none stored)")
+
+        if st.button("Refresh OAuth status"):
+            _get_character_oauth_metadata.clear()
+            st.rerun()
     
     # --- CHARACTER ASSETS TAB ---
     with assets_tab:
