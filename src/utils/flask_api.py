@@ -23,8 +23,9 @@ def api_post(path, payload):
         return None
     return r.json()
 
-def cached_api_get(path):
-    r = requests.get(f"{api_base()}{path}", timeout=api_request_timeout_seconds())
+def cached_api_get(path, timeout_seconds=None):
+    timeout = api_request_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    r = requests.get(f"{api_base()}{path}", timeout=timeout)
     if not (200 <= r.status_code < 300):
         if st is not None:
             st.error(f"{path} failed: {r.text}")
@@ -33,8 +34,9 @@ def cached_api_get(path):
         return None
     return r.json()
 
-def api_get(path):
-    r = requests.get(f"{api_base()}{path}", timeout=api_request_timeout_seconds())
+def api_get(path, timeout_seconds=None):
+    timeout = api_request_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    r = requests.get(f"{api_base()}{path}", timeout=timeout)
     if not (200 <= r.status_code < 300):
         if st is not None:
             st.error(f"{path} failed: {r.text}")

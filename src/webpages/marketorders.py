@@ -6,10 +6,7 @@ from utils.formatters import format_isk_short
 
 
 def _rerun() -> None:
-    if hasattr(st, "rerun"):
-        st.rerun()
-    else:
-        st.experimental_rerun()
+    st.rerun()
 
 
 # -- Cached API calls --

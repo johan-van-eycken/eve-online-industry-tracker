@@ -26,6 +26,7 @@ class ESIService:
         type_orders_cache_ttl_seconds: int = 300,
         market_prices_cache_ttl_seconds: int = 3600,
         public_structures_cache_ttl_seconds: int = 600,
+        industry_facilities_cache_ttl_seconds: int = 6 * 3600,
     ):
         self._esi_client = esi_client
         self._region_id = region_id
@@ -34,6 +35,7 @@ class ESIService:
         self._type_orders_cache_ttl_seconds = type_orders_cache_ttl_seconds
         self._market_prices_cache_ttl_seconds = market_prices_cache_ttl_seconds
         self._public_structures_cache_ttl_seconds = public_structures_cache_ttl_seconds
+        self._industry_facilities_cache_ttl_seconds = industry_facilities_cache_ttl_seconds
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}
@@ -41,6 +43,8 @@ class ESIService:
         self._market_prices_cache: Optional[tuple] = None
         # { (system_id, filter): (timestamp, [structures]) }
         self._public_structures_cache: Dict[tuple, tuple] = {}
+        # (timestamp, [facilities])
+        self._industry_facilities_cache: Optional[tuple] = None
 
     def set_market_context(self, *, region_id: Optional[int] = None, station_id: Optional[int] = None) -> None:
         if region_id is not None:
@@ -208,11 +212,116 @@ class ESIService:
         This endpoint is much more suitable for quickly locating manufacturing
         structures per solar system than scanning /universe/structures.
         """
+        now = time.time()
+        if self._industry_facilities_cache and (now - self._industry_facilities_cache[0] < self._industry_facilities_cache_ttl_seconds):
+            return self._industry_facilities_cache[1]
+
         try:
             data = self._esi_client.esi_get("/industry/facilities/")
         except Exception as e:
             raise RuntimeError(f"ESI request failed: {e}")
-        return list(data) if isinstance(data, list) else []
+
+        out = list(data) if isinstance(data, list) else []
+        self._industry_facilities_cache = (now, out)
+        return out
+
+    def get_industry_systems(self) -> List[Dict[str, Any]]:
+        """Return industry system cost indices.
+
+        Cached in-memory because the payload can be sizable.
+        """
+        now = time.time()
+        cache = getattr(self, "_industry_systems_cache", None)
+        ttl = getattr(self, "_industry_systems_cache_ttl_seconds", 3600)
+        if cache and (now - cache[0] < ttl):
+            return cache[1]
+
+        try:
+            data = self._esi_client.esi_get("/industry/systems/", paginate=True)
+        except Exception as e:
+            raise RuntimeError(f"ESI request failed: {e}")
+
+        out = list(data) if isinstance(data, list) else []
+        self._industry_systems_cache = (now, out)
+        self._industry_systems_cache_ttl_seconds = ttl
+        return out
+
+    def get_universe_type(self, type_id: int) -> Dict[str, Any]:
+        """Return /universe/types/{type_id}/ (cached).
+
+        This is a public endpoint but is useful for retrieving dogma attributes
+        for items such as structure rigs.
+        """
+        if not isinstance(type_id, int) or type_id <= 0:
+            raise ValueError(f"Invalid type_id: {type_id}")
+
+        now = time.time()
+        cache: Dict[int, tuple] = getattr(self, "_universe_type_cache", {})
+        ttl = getattr(self, "_universe_type_cache_ttl_seconds", 24 * 3600)
+
+        cached = cache.get(type_id)
+        if cached and (now - cached[0] < ttl):
+            return cached[1]
+
+        try:
+            data = self._esi_client.esi_get(f"/universe/types/{type_id}/")
+        except Exception as e:
+            raise RuntimeError(f"ESI request failed for /universe/types/{type_id}/: {e}")
+
+        out = dict(data) if isinstance(data, dict) else {}
+        cache[type_id] = (now, out)
+        self._universe_type_cache = cache
+        self._universe_type_cache_ttl_seconds = ttl
+        return out
+
+    def get_universe_names(self, ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
+        """Resolve a list of IDs to names via POST /universe/names/.
+
+        Returns {id: {"name": str, "category": str}} for resolved IDs.
+        Cached in-memory because this is often called for the same corp IDs.
+        """
+        id_list = [int(x) for x in (ids or []) if x is not None and int(x) > 0]
+        if not id_list:
+            return {}
+
+        now = time.time()
+        cache: Dict[int, tuple] = getattr(self, "_universe_names_cache", {})
+        ttl = getattr(self, "_universe_names_cache_ttl_seconds", 24 * 3600)
+
+        missing: list[int] = []
+        result: Dict[int, Dict[str, Any]] = {}
+        for _id in id_list:
+            cached = cache.get(int(_id))
+            if cached and (now - cached[0] < ttl):
+                result[int(_id)] = cached[1]
+            else:
+                missing.append(int(_id))
+
+        # ESI limit is reasonably high, but we chunk to be safe.
+        chunk_size = 500
+        for i in range(0, len(missing), chunk_size):
+            chunk = missing[i : i + chunk_size]
+            try:
+                data = self._esi_client.esi_post("/universe/names/", json=chunk, use_cache=False)
+            except Exception:
+                data = None
+
+            rows = list(data) if isinstance(data, list) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                rid = row.get("id")
+                name = row.get("name")
+                category = row.get("category")
+                if rid is None or not name:
+                    continue
+                payload = {"name": str(name), "category": str(category) if category is not None else ""}
+                cache[int(rid)] = (now, payload)
+                result[int(rid)] = payload
+
+        self._universe_names_cache = cache
+        self._universe_names_cache_ttl_seconds = ttl
+        return result
 
     def resolve_universe_names(self, ids: List[int]) -> Dict[int, str]:
         """Resolve universe IDs to names using /universe/names/ (batched)."""

@@ -17,6 +17,20 @@ class IndustryProfile:
     facility_id: Optional[int] = None
     facility_type: Optional[str] = None
     facility_tax: Optional[float] = None
+    scc_surcharge: Optional[float] = None
+    facility_cost_bonus: Optional[float] = None
+
+    # UI-friendly location fields
+    location_id: Optional[int] = None
+    location_name: Optional[str] = None
+    location_type: Optional[str] = None
+
+    # Cost + rig bonuses
+    manufacturing_cost_index: Optional[float] = None
+    installation_cost_modifier: Optional[float] = None
+    structure_rig_material_bonus: Optional[float] = None
+    structure_rig_time_bonus: Optional[float] = None
+    structure_rig_cost_bonus: Optional[float] = None
 
     material_efficiency_bonus: Optional[float] = None
     time_efficiency_bonus: Optional[float] = None
@@ -40,6 +54,16 @@ class IndustryProfile:
             facility_id=getattr(model, "facility_id", None),
             facility_type=getattr(model, "facility_type", None),
             facility_tax=getattr(model, "facility_tax", None),
+            scc_surcharge=getattr(model, "scc_surcharge", None),
+            facility_cost_bonus=getattr(model, "facility_cost_bonus", None),
+            location_id=getattr(model, "location_id", None),
+            location_name=getattr(model, "location_name", None),
+            location_type=getattr(model, "location_type", None),
+            manufacturing_cost_index=getattr(model, "manufacturing_cost_index", None),
+            installation_cost_modifier=getattr(model, "installation_cost_modifier", None),
+            structure_rig_material_bonus=getattr(model, "structure_rig_material_bonus", None),
+            structure_rig_time_bonus=getattr(model, "structure_rig_time_bonus", None),
+            structure_rig_cost_bonus=getattr(model, "structure_rig_cost_bonus", None),
             material_efficiency_bonus=getattr(model, "material_efficiency_bonus", None),
             time_efficiency_bonus=getattr(model, "time_efficiency_bonus", None),
             rig_slot0_type_id=getattr(model, "rig_slot0_type_id", None),
@@ -61,6 +85,16 @@ class IndustryProfile:
             "facility_id": self.facility_id,
             "facility_type": self.facility_type,
             "facility_tax": self.facility_tax,
+            "scc_surcharge": self.scc_surcharge,
+            "facility_cost_bonus": self.facility_cost_bonus,
+            "location_id": self.location_id,
+            "location_name": self.location_name,
+            "location_type": self.location_type,
+            "manufacturing_cost_index": self.manufacturing_cost_index,
+            "installation_cost_modifier": self.installation_cost_modifier,
+            "structure_rig_material_bonus": self.structure_rig_material_bonus,
+            "structure_rig_time_bonus": self.structure_rig_time_bonus,
+            "structure_rig_cost_bonus": self.structure_rig_cost_bonus,
             "material_efficiency_bonus": self.material_efficiency_bonus,
             "time_efficiency_bonus": self.time_efficiency_bonus,
             "rig_slot0_type_id": self.rig_slot0_type_id,

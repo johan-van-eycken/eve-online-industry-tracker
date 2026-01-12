@@ -11,6 +11,11 @@
     "bloodlines",
     "blueprints",
     "categories",
+    "dogmaAttributeCategories",
+    "dogmaAttributes",
+    "dogmaEffects",
+    "dogmaUnits",
+    "dynamicItemAttributes",
     "factions",
     "groups",
     "mapConstellations",
@@ -24,6 +29,8 @@
     "stationOperations",
     "stationServices",
     "types",
+    "typeBonus",
+    "typeDogma",
     "typeMaterials"
   ]
 }

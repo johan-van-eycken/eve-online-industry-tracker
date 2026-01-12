@@ -78,7 +78,8 @@ def get_npc_stations(session, language: str, system_id: int) -> List[dict]:
 
     for st in stations_q:
         corporation = corporation_map.get(st.ownerID)
-        station_name = parse_localized(getattr(corporation, "name", None), language) if corporation else ""
+        owner_name = parse_localized(getattr(corporation, "name", None), language) if corporation else ""
+        station_name = owner_name
         operation = operation_map.get(st.operationID)
 
         if st.useOperationName and st.operationID:
@@ -101,6 +102,7 @@ def get_npc_stations(session, language: str, system_id: int) -> List[dict]:
                 "type_id": st.typeID,
                 "system_id": st.solarSystemID,
                 "owner_id": st.ownerID,
+                "owner_name": owner_name,
                 "operation_id": st.operationID,
                 "reprocessing_efficiency": st.reprocessingEfficiency,
                 "reprocessing_hangar_flag": st.reprocessingHangarFlag,

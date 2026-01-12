@@ -10,6 +10,8 @@ from flask_app.state import state
 from flask_app.bootstrap import require_ready
 from flask_app.http import ok, error
 
+from classes.database_models import OAuthCharacter
+
 
 characters_bp = Blueprint("characters", __name__)
 
@@ -23,6 +25,48 @@ def characters():
     except Exception as e:
         logging.error("Error fetching characters: %s", e)
         return error(message="Error in GET Method `/characters`: " + str(e))
+
+
+@characters_bp.get("/characters/oauth")
+def characters_oauth():
+    """Return non-secret OAuth metadata for characters.
+
+    Exposes scopes and token expiry so the UI can show auth status.
+    Does NOT expose refresh/access tokens.
+    """
+    try:
+        require_ready()
+        session = state.db_oauth.session
+        rows = session.query(OAuthCharacter).all()
+
+        out = []
+        now = datetime.now(timezone.utc).timestamp()
+        for r in rows:
+            token_expiry = getattr(r, "token_expiry", None)
+            expires_in = None
+            if token_expiry is not None:
+                try:
+                    expires_in = int(token_expiry) - int(now)
+                except Exception:
+                    expires_in = None
+
+            out.append(
+                {
+                    "character_name": getattr(r, "character_name", None),
+                    "character_id": getattr(r, "character_id", None),
+                    "scopes": getattr(r, "scopes", "") or "",
+                    "token_expiry": token_expiry,
+                    "expires_in_seconds": expires_in,
+                    "has_refresh_token": bool(getattr(r, "refresh_token", None)),
+                    "has_access_token": bool(getattr(r, "access_token", None)),
+                }
+            )
+
+        out.sort(key=lambda x: (str(x.get("character_name") or "").lower()))
+        return ok(data=out)
+    except Exception as e:
+        logging.error("Error fetching character OAuth metadata: %s", e)
+        return error(message="Error in GET Method `/characters/oauth`: " + str(e))
 
 
 @characters_bp.get("/characters/wallet_balances")
