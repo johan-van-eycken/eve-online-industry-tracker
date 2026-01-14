@@ -49,6 +49,12 @@ def _compute_combined_reduction(reductions: list[float]) -> float:
         mul = 1.0
         for r in reductions:
             r = float(r or 0.0)
+
+            # Defensive normalization: accept percent-style inputs too.
+            # Example: 2.4 may mean 2.4% (0.024).
+            while r > 1.0:
+                r /= 100.0
+
             if r <= 0:
                 continue
             mul *= (1.0 - r)
@@ -978,12 +984,13 @@ def render():
                     else (float(upwell_scc_surcharge) if (upwell_scc_surcharge is not None) else None)
                 ),
                 "facility_cost_bonus": float(facility_cost_bonus_pct or 0.0) / 100.0,
+                "structure_type_id": (int(selected_upwell_type_id) if (not is_npc_station and selected_upwell_type_id is not None) else None),
                 "location_id": location_id,
                 "location_name": location_name,
                 "location_type": location_type,
                 # Reuse existing fields for facility ME/TE bonuses.
-                "material_efficiency_bonus": float(facility_me_bonus_pct or 0.0),
-                "time_efficiency_bonus": float(facility_te_bonus_pct or 0.0),
+                "material_efficiency_bonus": float(facility_me_bonus_pct or 0.0) / 100.0,
+                "time_efficiency_bonus": float(facility_te_bonus_pct or 0.0) / 100.0,
                 # Store as a total surcharge fraction (facility + SCC) for consistent downstream calculations.
                 "installation_cost_modifier": (
                     (float(npc_facility_tax or 0.0) + float(npc_scc_surcharge or 0.0))

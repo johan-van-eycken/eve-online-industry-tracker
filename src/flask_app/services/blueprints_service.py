@@ -173,6 +173,15 @@ def get_blueprint_assets(session, esi_service: ESIService) -> List[Dict[str, Any
                 mat["adjusted_price"] = None
                 mat["average_price"] = None
 
+            # Best-effort unit price used for cost calculations.
+            # Many items have only one of these, and some have neither.
+            unit = mat.get("adjusted_price")
+            if unit is None or (isinstance(unit, (int, float)) and float(unit) <= 0):
+                unit = mat.get("average_price")
+            if unit is not None and isinstance(unit, (int, float)) and float(unit) <= 0:
+                unit = None
+            mat["unit_price"] = unit
+
         for prod in bp.get("products", []):
             prod_type_id = prod.get("type_id")
             if prod_type_id in price_dict:
@@ -181,5 +190,12 @@ def get_blueprint_assets(session, esi_service: ESIService) -> List[Dict[str, Any
             else:
                 prod["adjusted_price"] = None
                 prod["average_price"] = None
+
+            unit = prod.get("average_price")
+            if unit is None or (isinstance(unit, (int, float)) and float(unit) <= 0):
+                unit = prod.get("adjusted_price")
+            if unit is not None and isinstance(unit, (int, float)) and float(unit) <= 0:
+                unit = None
+            prod["unit_price"] = unit
 
     return result

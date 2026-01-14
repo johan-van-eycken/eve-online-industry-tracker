@@ -17,6 +17,27 @@ def list_by_character_id(session, character_id: int) -> List[IndustryProfile]:
     return [IndustryProfile.from_model(r) for r in rows]
 
 
+def get_by_id(session, profile_id: int) -> IndustryProfile | None:
+    row = (
+        session.query(IndustryProfilesModel)
+        .filter(IndustryProfilesModel.id == int(profile_id))
+        .first()
+    )
+    return IndustryProfile.from_model(row) if row else None
+
+
+def get_default_for_character_id(session, character_id: int) -> IndustryProfile | None:
+    row = (
+        session.query(IndustryProfilesModel)
+        .filter(
+            IndustryProfilesModel.character_id == int(character_id),
+            IndustryProfilesModel.is_default == True,
+        )
+        .first()
+    )
+    return IndustryProfile.from_model(row) if row else None
+
+
 def create(session, data: Dict[str, Any]) -> int:
     profile = IndustryProfilesModel(
         character_id=data["character_id"],
@@ -34,6 +55,7 @@ def create(session, data: Dict[str, Any]) -> int:
         location_type=data.get("location_type"),
         manufacturing_cost_index=data.get("manufacturing_cost_index"),
         installation_cost_modifier=data.get("installation_cost_modifier"),
+        structure_type_id=data.get("structure_type_id"),
         structure_rig_material_bonus=data.get("structure_rig_material_bonus"),
         structure_rig_time_bonus=data.get("structure_rig_time_bonus"),
         structure_rig_cost_bonus=data.get("structure_rig_cost_bonus"),
@@ -78,6 +100,7 @@ def update(session, profile_id: int, data: Dict[str, Any]) -> None:
         "location_type",
         "manufacturing_cost_index",
         "installation_cost_modifier",
+        "structure_type_id",
         "structure_rig_material_bonus",
         "structure_rig_time_bonus",
         "structure_rig_cost_bonus",

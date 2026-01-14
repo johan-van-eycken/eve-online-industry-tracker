@@ -61,6 +61,7 @@ class CharacterModel(BaseApp):
     wallet_balance: Mapped[float] = mapped_column(Float, default=0.0)
     skills: Mapped[str] = mapped_column(Text, nullable=True)
     standings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
+    implants: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string of implant typeIDs
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 class CharacterWalletJournalModel(BaseApp):
@@ -335,6 +336,7 @@ class IndustryProfilesModel(BaseApp):
     location_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     manufacturing_cost_index: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     installation_cost_modifier: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    structure_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     structure_rig_material_bonus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     structure_rig_time_bonus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     structure_rig_cost_bonus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

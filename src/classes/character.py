@@ -55,6 +55,7 @@ class Character:
             self.wallet_balance: Optional[float] = None
             self.skills: Optional[Dict[str, Any]] = None
             self.standings: Optional[List[Dict[str, str]]] = None
+            self.implants: Optional[List[int]] = None
             self.wallet_journal: Optional[List[Dict[str, Any]]] = None
             self.wallet_transactions: Optional[List[Dict[str, Any]]] = None
             self.reprocessing_skills: Optional[Dict[str, int]] = None
@@ -139,6 +140,7 @@ class Character:
             "skills": self.skills if isinstance(self.skills, (dict, list)) else {},
             "reprocessing_skills": self.reprocessing_skills if isinstance(self.reprocessing_skills, dict) else {},
             "standings": self.standings if isinstance(self.standings, list) else [],
+            "implants": self.implants if isinstance(self.implants, list) else [],
             "wallet_journal": serialize_model_list(self.wallet_journal, CharacterWalletJournalModel),
             "wallet_transactions": serialize_model_list(self.wallet_transactions, CharacterWalletTransactionsModel),
             "market_orders": serialize_model_list(self.market_orders, CharacterMarketOrdersModel),
@@ -193,6 +195,8 @@ class Character:
                         value = json.dumps(value)  # convert dict → string
                     elif column == "standings" and isinstance(value, (dict, list)):
                         value = json.dumps(value)  # convert dict → string
+                    elif column == "implants" and isinstance(value, (dict, list)):
+                        value = json.dumps(value)  # convert list[int] → string
                     setattr(character_record, column, value)
 
             character_record.updated_at = datetime.now(timezone.utc)
@@ -328,6 +332,7 @@ class Character:
              # Call individual data refresh methods
             self.refresh_profile()
             self.refresh_skills()
+            self.refresh_implants()
             self.refresh_wallet_journal()
             self.refresh_wallet_transactions()
             self.refresh_market_orders()
@@ -773,6 +778,55 @@ class Character:
             error_message = f"Failed to refresh skills for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
+    # -------------------
+    # Refresh Implants
+    # -------------------
+    def refresh_implants(self) -> None:
+        """Fetch and update the character's implants from ESI.
+
+        Requires scope: esi-clones.read_implants.v1
+
+        This is best-effort: if the character is not re-authed with the new
+        scope yet, ESI may return 403 and we keep the app running.
+        """
+        try:
+            self.ensure_esi()
+
+            data = self._esi_client.esi_get(f"/characters/{self.character_id}/implants/")
+            if not isinstance(data, list):
+                logging.warning(
+                    "Unexpected implants payload for %s (%s): %r",
+                    self.character_name,
+                    self.character_id,
+                    type(data),
+                )
+                return
+
+            implant_ids: list[int] = []
+            for x in data:
+                try:
+                    implant_ids.append(int(x))
+                except Exception:
+                    continue
+
+            self.implants = sorted(set(implant_ids))
+            self.save_character()
+
+            logging.debug(
+                "Implants refreshed for %s (%s): %s",
+                self.character_name,
+                self.character_id,
+                len(self.implants or []),
+            )
+        except Exception as e:
+            logging.warning(
+                "Skipping implant refresh for %s (%s): %s",
+                self.character_name,
+                self.character_id,
+                str(e),
+            )
+            return
     
     # -------------------
     # Market Orders
@@ -1096,3 +1150,4 @@ class Character:
             error_message = f"Failed to refresh assets for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
