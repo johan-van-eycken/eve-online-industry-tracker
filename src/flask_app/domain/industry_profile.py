@@ -28,6 +28,7 @@ class IndustryProfile:
     # Cost + rig bonuses
     manufacturing_cost_index: Optional[float] = None
     installation_cost_modifier: Optional[float] = None
+    structure_type_id: Optional[int] = None
     structure_rig_material_bonus: Optional[float] = None
     structure_rig_time_bonus: Optional[float] = None
     structure_rig_cost_bonus: Optional[float] = None
@@ -61,6 +62,7 @@ class IndustryProfile:
             location_type=getattr(model, "location_type", None),
             manufacturing_cost_index=getattr(model, "manufacturing_cost_index", None),
             installation_cost_modifier=getattr(model, "installation_cost_modifier", None),
+            structure_type_id=getattr(model, "structure_type_id", None),
             structure_rig_material_bonus=getattr(model, "structure_rig_material_bonus", None),
             structure_rig_time_bonus=getattr(model, "structure_rig_time_bonus", None),
             structure_rig_cost_bonus=getattr(model, "structure_rig_cost_bonus", None),
@@ -92,6 +94,7 @@ class IndustryProfile:
             "location_type": self.location_type,
             "manufacturing_cost_index": self.manufacturing_cost_index,
             "installation_cost_modifier": self.installation_cost_modifier,
+            "structure_type_id": self.structure_type_id,
             "structure_rig_material_bonus": self.structure_rig_material_bonus,
             "structure_rig_time_bonus": self.structure_rig_time_bonus,
             "structure_rig_cost_bonus": self.structure_rig_cost_bonus,

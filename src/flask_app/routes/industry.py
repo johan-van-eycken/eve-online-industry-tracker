@@ -16,6 +16,7 @@ from flask_app.services.sde_context import ensure_sde_ready, get_language
 from flask_app.services.sde_locations_service import get_solar_systems, get_npc_stations
 from flask_app.services.sde_types_service import get_type_data
 from flask_app.services.industry_builder_service import enrich_blueprints_for_character
+from flask_app.services.structure_rig_effects_service import get_rig_effects_for_type_ids
 from flask_app.settings import public_structures_cache_ttl_seconds
 from flask_app.services.public_structures_cache_service import (
     get_cached_public_structures,
@@ -163,7 +164,8 @@ def _extract_structure_industry_bonuses_from_type_bonus(row: dict, *, language: 
         if bonus is None:
             continue
         try:
-            bonus_val = float(bonus)
+            # SDE sometimes stores reductions as negative numbers.
+            bonus_val = abs(float(bonus))
         except Exception:
             continue
 
@@ -229,11 +231,78 @@ def industry_builder(character_id: int):
             )
 
         session = get_db_app_session()
+        language = get_language()
+
+        sde_session = None
+        try:
+            ensure_sde_ready()
+            sde_session = get_db_sde_session()
+        except Exception:
+            sde_session = None
+
+        # Optional industry profile selection (defaults to the character's default profile).
+        profile_id = request.args.get("profile_id", default=None, type=int)
+        selected_profile = None
+        if profile_id:
+            selected_profile = industry_profiles_repo.get_by_id(session, int(profile_id))
+            if selected_profile and int(selected_profile.character_id) != int(character_id):
+                return error(message="Industry profile does not belong to this character.", status_code=400)
+        else:
+            selected_profile = industry_profiles_repo.get_default_for_character_id(session, int(character_id))
+
+        # Live manufacturing system cost index (from ESI), if we have a profile+system.
+        manufacturing_ci = 0.0
+        if selected_profile is not None and getattr(selected_profile, "system_id", None) is not None:
+            if state.esi_service is not None:
+                try:
+                    systems = state.esi_service.get_industry_systems()
+                    sid = int(getattr(selected_profile, "system_id"))
+                    row = next((s for s in systems if s.get("solar_system_id") == sid), None)
+                    if row:
+                        for entry in (row.get("cost_indices") or []):
+                            if entry.get("activity") == "manufacturing":
+                                manufacturing_ci = float(entry.get("cost_index") or 0.0)
+                                break
+                except Exception:
+                    manufacturing_ci = 0.0
+
+        # Rig effects for the selected profile (SDE-driven).
+        rig_payload: list[dict] = []
+        try:
+            if selected_profile is not None:
+                rig_ids = [
+                    getattr(selected_profile, "rig_slot0_type_id", None),
+                    getattr(selected_profile, "rig_slot1_type_id", None),
+                    getattr(selected_profile, "rig_slot2_type_id", None),
+                ]
+                rig_ids = [int(x) for x in rig_ids if x is not None and int(x) != 0]
+                if rig_ids:
+                    ensure_sde_ready()
+                    sde_session = get_db_sde_session()
+                    rig_payload = get_rig_effects_for_type_ids(sde_session, rig_ids)
+        except Exception:
+            rig_payload = []
         all_blueprints = blueprints_service.get_blueprint_assets(session, state.esi_service)
         if character_id:
             all_blueprints = [bp for bp in all_blueprints if bp.get("owner_id") == character_id]
 
-        return ok(data=enrich_blueprints_for_character(all_blueprints, character))
+        data = enrich_blueprints_for_character(
+            all_blueprints,
+            character,
+            industry_profile=selected_profile,
+            manufacturing_system_cost_index=manufacturing_ci,
+            rig_payload=rig_payload,
+            db_app_session=session,
+            db_sde_session=sde_session,
+            language=language,
+        )
+        return ok(
+            data=data,
+            meta={
+                "profile_id": (int(getattr(selected_profile, "id")) if selected_profile is not None else None),
+                "profile_name": (getattr(selected_profile, "profile_name", None) if selected_profile is not None else None),
+            },
+        )
     except Exception as e:
         return error(message=f"Error in GET Method `/industry_builder_data/{character_id}`: " + str(e))
 
