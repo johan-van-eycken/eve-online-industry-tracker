@@ -71,6 +71,7 @@ def _extract_manufacturing_data(bp_info: Dict[str, Any]) -> Dict[str, Any]:
         "research_time": bp_info.get("research_time", 0),
         "research_material": bp_info.get("research_material", 0),
         "copying_time": bp_info.get("copying", 0),
+        "max_production_limit": bp_info.get("max_production_limit", 0),
     }
 
 
@@ -104,7 +105,7 @@ def _build_owned_blueprints(session) -> Tuple[List[Dict[str, Any]], Set[int]]:
     return owned_blueprints, owned_type_ids
 
 
-def get_blueprint_assets(session, esi_service: ESIService) -> List[Dict[str, Any]]:
+def get_blueprint_assets(session, esi_service: ESIService, *, include_unowned: bool = False) -> List[Dict[str, Any]]:
     """Return blueprint assets enriched with SDE manufacturing data and ESI prices.
 
     Keeps the output payload stable for the existing API routes.
@@ -114,7 +115,11 @@ def get_blueprint_assets(session, esi_service: ESIService) -> List[Dict[str, Any
     ensure_sde_ready()
     sde_session = get_db_sde_session()
     language = get_language()
-    all_blueprint_data = get_blueprint_manufacturing_data(sde_session, language)
+    all_blueprint_data = get_blueprint_manufacturing_data(
+        sde_session,
+        language,
+        blueprint_type_ids=None if include_unowned else sorted(owned_type_ids),
+    )
 
     result: List[Dict[str, Any]] = []
 
@@ -125,7 +130,7 @@ def get_blueprint_assets(session, esi_service: ESIService) -> List[Dict[str, Any
         result.append(bp)
 
     unowned_type_ids = set(all_blueprint_data.keys()) - owned_type_ids
-    if unowned_type_ids:
+    if include_unowned and unowned_type_ids:
         for type_id in unowned_type_ids:
             bp_info = all_blueprint_data.get(type_id, {})
             bp = {

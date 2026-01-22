@@ -72,6 +72,7 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
     Initialize Databases and Schemas
     """
     from classes.database_models import BaseOauth, BaseApp
+    from classes.schema_migrations import ensure_app_schema
 
     try:
         cfg = cfgManager.all()
@@ -85,6 +86,9 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         db_app = init_db_app(cfgManager)
         if refresh_metadata:
             BaseApp.metadata.create_all(bind=db_app.engine)
+
+        # Forward-migrate app DB schema (SQLite) for new columns.
+        ensure_app_schema(db_app)
 
         logging.debug(f"Database URI for SDE: {cfg['app']['database_sde_uri']}")
         db_sde = init_db_sde(cfgManager)

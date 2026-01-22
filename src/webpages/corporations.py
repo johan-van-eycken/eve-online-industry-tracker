@@ -455,7 +455,22 @@ def render():
                         df = add_item_images(direct_items)
                         df["total_volume"] = df["type_volume"] * df["quantity"]
                         df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                        display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
+                        display_columns = [
+                            "image_url",
+                            "type_name",
+                            "quantity",
+                            "type_volume",
+                            "total_volume",
+                            "acquisition_source",
+                            "acquisition_unit_cost",
+                            "acquisition_total_cost",
+                            "acquisition_date",
+                            "type_average_price",
+                            "total_average_price",
+                            "type_group_name",
+                            "type_category_name",
+                        ]
+                        display_columns = [c for c in display_columns if c in df.columns]
                         df_display = df[display_columns].sort_values(by="type_name")
                         column_config = {
                             "image_url": st.column_config.ImageColumn("", width="auto"),
@@ -463,11 +478,16 @@ def render():
                             "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
                             "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
                             "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                            "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
+                            "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
+                            "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
+                            "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
                             "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
                             "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
                             "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                             "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                         }
+                        column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
                         st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                     # Then show containers and their items
                     for _, container in division_containers.iterrows():
@@ -491,7 +511,22 @@ def render():
                                     df = add_item_images(items_in_container)
                                     df["total_volume"] = df["type_volume"] * df["quantity"]
                                     df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                                    display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
+                                    display_columns = [
+                                        "image_url",
+                                        "type_name",
+                                        "quantity",
+                                        "type_volume",
+                                        "total_volume",
+                                        "acquisition_source",
+                                        "acquisition_unit_cost",
+                                        "acquisition_total_cost",
+                                        "acquisition_date",
+                                        "type_average_price",
+                                        "total_average_price",
+                                        "type_group_name",
+                                        "type_category_name",
+                                    ]
+                                    display_columns = [c for c in display_columns if c in df.columns]
                                     df_display = df[display_columns].sort_values(by="type_name")
                                     column_config = {
                                         "image_url": st.column_config.ImageColumn("", width="auto"),
@@ -499,11 +534,16 @@ def render():
                                         "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
                                         "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
                                         "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                                        "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
+                                        "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
+                                        "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
+                                        "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
                                         "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
                                         "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
                                         "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                                         "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                                     }
+                                    column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
                                     st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                                 else:
                                     st.info("No items in this container.")
@@ -533,7 +573,22 @@ def render():
                 df = add_item_images(deliveries_items)
                 df["total_volume"] = df["type_volume"] * df["quantity"]
                 df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume","type_average_price","total_average_price","type_group_name","type_category_name"]
+                display_columns = [
+                    "image_url",
+                    "type_name",
+                    "quantity",
+                    "type_volume",
+                    "total_volume",
+                    "acquisition_source",
+                    "acquisition_unit_cost",
+                    "acquisition_total_cost",
+                    "acquisition_date",
+                    "type_average_price",
+                    "total_average_price",
+                    "type_group_name",
+                    "type_category_name",
+                ]
+                display_columns = [c for c in display_columns if c in df.columns]
                 df_display = df[display_columns].sort_values(by="type_name")
                 column_config = {
                     "image_url": st.column_config.ImageColumn("", width="auto"),
@@ -541,11 +596,16 @@ def render():
                     "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
                     "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
                     "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                    "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
+                    "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
+                    "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
+                    "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
                     "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
                     "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                 }
+                column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
                 st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
             st.divider()
 
@@ -561,7 +621,22 @@ def render():
                 df = add_item_images(structure_fuel_items)
                 df["total_volume"] = df["type_volume"] * df["quantity"]
                 df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume","type_average_price","total_average_price","type_group_name","type_category_name"]
+                display_columns = [
+                    "image_url",
+                    "type_name",
+                    "quantity",
+                    "type_volume",
+                    "total_volume",
+                    "acquisition_source",
+                    "acquisition_unit_cost",
+                    "acquisition_total_cost",
+                    "acquisition_date",
+                    "type_average_price",
+                    "total_average_price",
+                    "type_group_name",
+                    "type_category_name",
+                ]
+                display_columns = [c for c in display_columns if c in df.columns]
                 df_display = df[display_columns].sort_values(by="type_name")
                 column_config = {
                     "image_url": st.column_config.ImageColumn("", width="auto"),
@@ -569,11 +644,16 @@ def render():
                     "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
                     "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
                     "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                    "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
+                    "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
+                    "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
+                    "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
                     "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
                     "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                 }
+                column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
                 st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                 st.divider()
 
@@ -589,7 +669,22 @@ def render():
                 df = add_item_images(quantum_core_items)
                 df["total_volume"] = df["type_volume"] * df["quantity"]
                 df["total_average_price"] = df["type_average_price"] * df["quantity"]
-                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume","type_average_price","total_average_price","type_group_name","type_category_name"]
+                display_columns = [
+                    "image_url",
+                    "type_name",
+                    "quantity",
+                    "type_volume",
+                    "total_volume",
+                    "acquisition_source",
+                    "acquisition_unit_cost",
+                    "acquisition_total_cost",
+                    "acquisition_date",
+                    "type_average_price",
+                    "total_average_price",
+                    "type_group_name",
+                    "type_category_name",
+                ]
+                display_columns = [c for c in display_columns if c in df.columns]
                 df_display = df[display_columns].sort_values(by="type_name")
                 column_config = {
                     "image_url": st.column_config.ImageColumn("", width="auto"),
@@ -597,11 +692,16 @@ def render():
                     "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
                     "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
                     "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                    "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
+                    "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
+                    "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
+                    "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
                     "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
                     "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                 }
+                column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
                 st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                 st.divider()
 
@@ -630,7 +730,22 @@ def render():
                                 df["total_average_price"] = df["type_average_price"] * df["quantity"]
                                 df["type_name"] = (df["container_name"]) if df["container_name"].notnull().all() else df["type_name"]
                                 df["type_name"] = (df["ship_name"]) if df["ship_name"].notnull().all() else df["type_name"]
-                                display_columns = ["image_url","type_name", "quantity", "type_volume", "total_volume", "type_average_price", "total_average_price", "type_group_name","type_category_name"]
+                                display_columns = [
+                                    "image_url",
+                                    "type_name",
+                                    "quantity",
+                                    "type_volume",
+                                    "total_volume",
+                                    "acquisition_source",
+                                    "acquisition_unit_cost",
+                                    "acquisition_total_cost",
+                                    "acquisition_date",
+                                    "type_average_price",
+                                    "total_average_price",
+                                    "type_group_name",
+                                    "type_category_name",
+                                ]
+                                display_columns = [c for c in display_columns if c in df.columns]
                                 df_display = df[display_columns].sort_values(by="type_name")
                                 column_config = {
                                     "image_url": st.column_config.ImageColumn("", width="auto"),
@@ -638,11 +753,16 @@ def render():
                                     "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
                                     "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
                                     "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
+                                    "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
+                                    "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
+                                    "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
+                                    "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
                                     "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
                                     "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
                                     "type_group_name": st.column_config.TextColumn("Group", width="auto"),
                                     "type_category_name": st.column_config.TextColumn("Category", width="auto"),
                                 }
+                                column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
                                 st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
                             else:
                                 st.info("No items in this container.")
