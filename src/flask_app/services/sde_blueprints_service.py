@@ -1,16 +1,30 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Iterable
 
 from classes.database_models import Blueprints
 
 from flask_app.services.sde_types_service import get_type_data
 
 
-def get_blueprint_manufacturing_data(session, language: str) -> Dict[int, Dict]:
-    """Return manufacturing materials/products/skills and research times for all blueprints."""
+def get_blueprint_manufacturing_data(
+    session,
+    language: str,
+    blueprint_type_ids: Iterable[int] | None = None,
+) -> Dict[int, Dict]:
+    """Return manufacturing materials/products/skills and research times for blueprints.
 
-    blueprints = session.query(Blueprints).all()
+    If `blueprint_type_ids` is provided, only those blueprint typeIDs are loaded.
+    """
+
+    q = session.query(Blueprints)
+    if blueprint_type_ids is not None:
+        ids = list({int(i) for i in blueprint_type_ids if i is not None})
+        if not ids:
+            return {}
+        q = q.filter(Blueprints.blueprintTypeID.in_(ids))
+
+    blueprints = q.all()
     if not blueprints:
         return {}
 
@@ -101,6 +115,7 @@ def get_blueprint_manufacturing_data(session, language: str) -> Dict[int, Dict]:
             "group_name": type_data.get("group_name", ""),
             "category_id": type_data.get("category_id"),
             "category_name": type_data.get("category_name", ""),
+            "max_production_limit": int(getattr(bp, "maxProductionLimit", 0) or 0),
             "manufacturing": {
                 "time": manufacturing.get("time", 0),
                 "materials": materials,

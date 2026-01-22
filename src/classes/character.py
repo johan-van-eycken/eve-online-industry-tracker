@@ -9,8 +9,11 @@ from classes.esi import ESIClient
 from classes.esi_service import ESIService
 from classes.database_models import CharacterModel, CharacterWalletJournalModel \
     , CharacterWalletTransactionsModel, CharacterMarketOrdersModel, CharacterAssetsModel \
+    , CharacterIndustryJobsModel \
     , NpcCorporations, Bloodlines, Races, Types \
     , Groups, Categories, Factions
+
+from classes.asset_provenance import build_cost_map_for_assets
 
 class Character:
     """Ingame entity of a character."""
@@ -336,6 +339,7 @@ class Character:
             self.refresh_wallet_journal()
             self.refresh_wallet_transactions()
             self.refresh_market_orders()
+            self.refresh_industry_jobs()
             self.refresh_assets()
 
             logging.debug(f"All data successfully refreshed for {self.character_name}.")
@@ -643,6 +647,69 @@ class Character:
             error_message = f"Failed to refresh wallet transactions for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
+    # -------------------
+    # Industry Jobs
+    # -------------------
+    def refresh_industry_jobs(self) -> None:
+        """Fetch and store industry job history for provenance/costing.
+
+        Requires scope: esi-industry.read_character_jobs.v1
+
+        Best-effort: if not authorized, it will keep running with no jobs.
+        """
+        try:
+            self.ensure_esi()
+
+            jobs = self._esi_client.esi_get(
+                f"/characters/{self.character_id}/industry/jobs/",
+                params={"include_completed": True},
+                paginate=True,
+            )
+            if not jobs or not isinstance(jobs, list):
+                # No jobs or not authorized
+                return
+
+            rows: list[dict[str, Any]] = []
+            for j in jobs:
+                if not isinstance(j, dict):
+                    continue
+                job_id = j.get("job_id")
+                if job_id is None:
+                    continue
+                rows.append(
+                    {
+                        "character_id": int(self.character_id),
+                        "job_id": int(job_id),
+                        "status": j.get("status"),
+                        "start_date": j.get("start_date"),
+                        "end_date": j.get("end_date"),
+                        "completed_date": j.get("completed_date"),
+                        "blueprint_type_id": j.get("blueprint_type_id"),
+                        "product_type_id": j.get("product_type_id"),
+                        "runs": j.get("runs"),
+                        "successful_runs": j.get("successful_runs"),
+                        "installer_id": j.get("installer_id"),
+                        "facility_id": j.get("facility_id"),
+                        "location_id": j.get("location_id"),
+                        "output_location_id": j.get("output_location_id"),
+                        "cost": j.get("cost"),
+                        "raw": j,
+                    }
+                )
+
+            # Replace snapshot for this character.
+            self._db_app.session.query(CharacterIndustryJobsModel).filter_by(character_id=self.character_id).delete()
+            self._db_app.session.bulk_save_objects([CharacterIndustryJobsModel(**r) for r in rows])
+            self._db_app.session.commit()
+        except Exception as e:
+            logging.warning(
+                "Skipping industry jobs refresh for %s (%s): %s",
+                self.character_name,
+                self.character_id,
+                str(e),
+            )
+            return
 
     # -------------------
     # Skillpoints
@@ -980,6 +1047,32 @@ class Character:
             blueprints = self._esi_client.esi_get(f"/characters/{self.character_id}/blueprints/", paginate=True)
             market_prices = self._esi_client.esi_get(f"/markets/prices/")
 
+            # Precompute per-type cost basis using stored wallet tx / industry jobs.
+            type_ids_for_cost = [a.get("type_id") for a in assets if isinstance(a, dict)]
+            qty_by_type: dict[int, int] = {}
+            for a in assets:
+                if not isinstance(a, dict):
+                    continue
+                t = a.get("type_id")
+                q = a.get("quantity")
+                if not (isinstance(t, int) or (isinstance(t, str) and t.isdigit())):
+                    continue
+                if not (isinstance(q, int) or (isinstance(q, str) and str(q).isdigit())):
+                    continue
+                tid = int(t)
+                qty_by_type[tid] = qty_by_type.get(tid, 0) + int(q)
+            cost_map = build_cost_map_for_assets(
+                app_session=self._db_app.session,
+                sde_session=self._db_sde.session,
+                owner_kind="character_id",
+                owner_id=int(self.character_id),
+                asset_type_ids=[int(t) for t in type_ids_for_cost if isinstance(t, int) or str(t).isdigit()],
+                asset_quantities_by_type=qty_by_type,
+                wallet_tx_model=CharacterWalletTransactionsModel,
+                industry_job_model=CharacterIndustryJobsModel,
+                market_prices=market_prices if isinstance(market_prices, list) else [],
+            )
+
             asset_list = []
             type_ids = set(asset.get("type_id") for asset in assets)
             type_data_map = {t.id: t for t in self._db_sde.session.query(Types).filter(Types.id.in_(type_ids)).all()}
@@ -1059,8 +1152,23 @@ class Character:
                     "is_container": type_id == 17366 and asset.get("is_singleton", False) == True,
                     "is_asset_safety_wrap": type_id == 60 and asset.get("is_singleton", False) == True,
                     "is_ship": group_data.categoryID == 6 if group_data else False,
-                    "is_office_folder": type_id == 27
+                    "is_office_folder": type_id == 27,
                 }
+
+                # Best-effort provenance + cost basis
+                ci = cost_map.get(int(type_id)) if type_id is not None else None
+                if ci is not None:
+                    unit_cost = ci.unit_cost
+                    qty = asset_entry.get("quantity", 0) or 0
+                    total_cost = (unit_cost * float(qty)) if (unit_cost is not None and qty is not None) else None
+                    asset_entry["acquisition_source"] = ci.source
+                    asset_entry["acquisition_unit_cost"] = unit_cost
+                    asset_entry["acquisition_total_cost"] = total_cost
+                    asset_entry["acquisition_reference_type"] = ci.reference_type
+                    asset_entry["acquisition_reference_id"] = ci.reference_id
+                    asset_entry["acquisition_date"] = ci.acquisition_date
+                    asset_entry["acquisition_updated_at"] = datetime.now(timezone.utc).isoformat()
+
                 asset_list.append(asset_entry)
             
             # Fetch custom names for containers

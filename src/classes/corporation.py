@@ -7,9 +7,11 @@ from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
 from classes.database_models import CorporationModel, CorporationStructuresModel \
     , CorporationMemberModel, CorporationAssetsModel
-from classes.database_models import Types, Groups, Categories, Factions, Races
+from classes.database_models import Types, Groups, Categories, Factions, Races, NpcCorporations
+from classes.database_models import CorporationWalletTransactionsModel, CorporationIndustryJobsModel
 from classes.character import Character
 from classes.character_manager import CharacterManager
+from classes.asset_provenance import build_cost_map_for_assets
 
 class Corporation:
     """Ingame entity of a corporation."""
@@ -244,6 +246,8 @@ class Corporation:
             if hasattr(self._default_esi_character, "ensure_esi"):
                 self._default_esi_character.ensure_esi()
             self.refresh_corporation()
+            self.refresh_wallet_transactions()
+            self.refresh_industry_jobs()
             self.refresh_members()
             self.refresh_structures()
             self.refresh_assets()
@@ -420,14 +424,265 @@ class Corporation:
             raise Exception(error_message)
 
     # -------------------
+    # Wallet Transactions
+    # -------------------
+    def refresh_wallet_transactions(self) -> None:
+        """Fetch and store corporation wallet transactions.
+
+        Requires scope: esi-wallet.read_corporation_wallets.v1
+
+        Best-effort: if not authorized, it will keep running with no transactions.
+        """
+        try:
+            if hasattr(self._default_esi_character, "ensure_esi"):
+                self._default_esi_character.ensure_esi()
+
+            corp_wallets = self._default_esi_character._esi_client.esi_get(
+                f"/corporations/{self.corporation_id}/wallets/"
+            )
+            if isinstance(corp_wallets, str):
+                corp_wallets = json.loads(corp_wallets)
+            if not corp_wallets or not isinstance(corp_wallets, list):
+                return
+
+            new_entries: List[Dict[str, Any]] = []
+            for wallet in corp_wallets:
+                if not isinstance(wallet, dict):
+                    continue
+                division = wallet.get("division")
+                if division is None:
+                    continue
+
+                transactions = self._default_esi_character._esi_client.esi_get(
+                    f"/corporations/{self.corporation_id}/wallets/{division}/transactions/"
+                )
+                if isinstance(transactions, str):
+                    transactions = json.loads(transactions)
+                if not transactions or not isinstance(transactions, list):
+                    continue
+
+                for entry in transactions:
+                    if not isinstance(entry, dict):
+                        continue
+                    tx_id = entry.get("transaction_id")
+                    if tx_id is None:
+                        continue
+                    exists = (
+                        self._db_app.session.query(CorporationWalletTransactionsModel)
+                        .filter_by(transaction_id=tx_id)
+                        .first()
+                    )
+                    if exists:
+                        continue
+                    entry["division"] = division
+                    new_entries.append(entry)
+
+            if not new_entries:
+                return
+
+            client_ids: set[int] = set()
+            for e in new_entries:
+                cid = e.get("client_id")
+                if isinstance(cid, int):
+                    client_ids.add(cid)
+                elif isinstance(cid, str) and cid.isdigit():
+                    client_ids.add(int(cid))
+
+            client_names: Dict[int, Optional[str]] = {}
+            for cid in client_ids:
+                name = None
+                try:
+                    id_type = self._default_esi_character._esi_client.get_id_type(cid)
+                except Exception:
+                    id_type = None
+
+                try:
+                    if id_type == "character":
+                        data = self._default_esi_character._esi_client.esi_get(f"/characters/{cid}/")
+                        if data and "name" in data:
+                            name = data["name"]
+                    elif id_type == "alliance":
+                        data = self._default_esi_character._esi_client.esi_get(f"/alliances/{cid}/")
+                        if data and "name" in data:
+                            name = data["name"]
+                    elif id_type == "corporation":
+                        data = self._default_esi_character._esi_client.esi_get(f"/corporations/{cid}/")
+                        if data and "name" in data:
+                            name = data["name"]
+                    elif id_type == "npc_corporation":
+                        npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
+                        name = npc_corp.name[self._db_sde.language] if npc_corp else None
+                except Exception:
+                    name = None
+
+                client_names[cid] = name
+
+            rows: List[Dict[str, Any]] = []
+            for entry in new_entries:
+                cid = entry.get("client_id")
+                if isinstance(cid, int):
+                    entry["client_name"] = client_names.get(cid)
+                elif isinstance(cid, str) and cid.isdigit():
+                    entry["client_name"] = client_names.get(int(cid))
+                else:
+                    entry["client_name"] = None
+
+                type_id = entry.get("type_id")
+                type = self._db_sde.session.query(Types).filter_by(id=type_id).first()
+                entry["type_name"] = type.name[self._db_sde.language] if type else None
+                group = self._db_sde.session.query(Groups).filter_by(id=type.groupID).first() if type else None
+                entry["type_group_id"] = group.id if group else None
+                entry["type_group_name"] = group.name[self._db_sde.language] if group else None
+                category = self._db_sde.session.query(Categories).filter_by(id=group.categoryID).first() if group else None
+                entry["type_category_id"] = category.id if category else None
+                entry["type_category_name"] = category.name[self._db_sde.language] if category else None
+
+                qty = entry.get("quantity", 0) or 0
+                unit_price = entry.get("unit_price", 0.0) or 0.0
+                rows.append(
+                    {
+                        "corporation_id": int(self.corporation_id),
+                        "division": entry.get("division"),
+                        "transaction_id": entry.get("transaction_id"),
+                        "client_id": entry.get("client_id"),
+                        "client_name": entry.get("client_name"),
+                        "date": entry.get("date"),
+                        "is_buy": entry.get("is_buy"),
+                        "location_id": entry.get("location_id"),
+                        "quantity": qty,
+                        "type_id": entry.get("type_id"),
+                        "type_name": entry.get("type_name"),
+                        "type_group_id": entry.get("type_group_id"),
+                        "type_group_name": entry.get("type_group_name"),
+                        "type_category_id": entry.get("type_category_id"),
+                        "type_category_name": entry.get("type_category_name"),
+                        "unit_price": unit_price,
+                        "total_price": float(unit_price) * float(qty),
+                    }
+                )
+
+            if rows:
+                self._db_app.session.bulk_save_objects([CorporationWalletTransactionsModel(**r) for r in rows])
+                self._db_app.session.commit()
+        except Exception as e:
+            logging.warning(
+                "Skipping corporation wallet transactions refresh for %s (%s): %s",
+                self.corporation_name,
+                self.corporation_id,
+                str(e),
+            )
+            return
+
+    # -------------------
+    # Industry Jobs
+    # -------------------
+    def refresh_industry_jobs(self) -> None:
+        """Fetch and store corporation industry job history for provenance/costing.
+
+        Requires scope: esi-industry.read_corporation_jobs.v1
+
+        Best-effort: if not authorized, it will keep running with no jobs.
+        """
+        try:
+            if hasattr(self._default_esi_character, "ensure_esi"):
+                self._default_esi_character.ensure_esi()
+
+            jobs = self._default_esi_character._esi_client.esi_get(
+                f"/corporations/{self.corporation_id}/industry/jobs/",
+                params={"include_completed": True},
+                paginate=True,
+            )
+            if not jobs or not isinstance(jobs, list):
+                return
+
+            rows: List[Dict[str, Any]] = []
+            for j in jobs:
+                if not isinstance(j, dict):
+                    continue
+                job_id = j.get("job_id")
+                if job_id is None:
+                    continue
+                rows.append(
+                    {
+                        "corporation_id": int(self.corporation_id),
+                        "job_id": int(job_id),
+                        "status": j.get("status"),
+                        "start_date": j.get("start_date"),
+                        "end_date": j.get("end_date"),
+                        "completed_date": j.get("completed_date"),
+                        "blueprint_type_id": j.get("blueprint_type_id"),
+                        "product_type_id": j.get("product_type_id"),
+                        "runs": j.get("runs"),
+                        "successful_runs": j.get("successful_runs"),
+                        "installer_id": j.get("installer_id"),
+                        "facility_id": j.get("facility_id"),
+                        "location_id": j.get("location_id"),
+                        "output_location_id": j.get("output_location_id"),
+                        "cost": j.get("cost"),
+                        "raw": j,
+                    }
+                )
+
+            self._db_app.session.query(CorporationIndustryJobsModel).filter_by(corporation_id=self.corporation_id).delete()
+            self._db_app.session.bulk_save_objects([CorporationIndustryJobsModel(**r) for r in rows])
+            self._db_app.session.commit()
+        except Exception as e:
+            logging.warning(
+                "Skipping corporation industry jobs refresh for %s (%s): %s",
+                self.corporation_name,
+                self.corporation_id,
+                str(e),
+            )
+            return
+
+    # -------------------
     # Refresh Assets
     # -------------------
     def refresh_assets(self) -> None:
         """Refresh the asset list of the corporation from ESI and enrich with SDE and container custom names."""
         try:
-            assets = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/assets/")
+            assets = self._default_esi_character._esi_client.esi_get(
+                f"/corporations/{self.corporation_id}/assets/",
+                paginate=True,
+            )
+            if isinstance(assets, str):
+                assets = json.loads(assets)
+            if not assets or not isinstance(assets, list):
+                return
             blueprints = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/blueprints/", paginate=True)
             market_prices = self._default_esi_character._esi_client.esi_get(f"/markets/prices/")
+
+            type_ids_for_cost: List[int] = []
+            qty_by_type: Dict[int, int] = {}
+            for a in assets:
+                if not isinstance(a, dict):
+                    continue
+                t = a.get("type_id")
+                q = a.get("quantity")
+                if isinstance(t, int):
+                    type_ids_for_cost.append(t)
+                    if isinstance(q, int):
+                        qty_by_type[t] = qty_by_type.get(t, 0) + q
+                    elif isinstance(q, str) and q.isdigit():
+                        qty_by_type[t] = qty_by_type.get(t, 0) + int(q)
+                elif isinstance(t, str) and t.isdigit():
+                    tid = int(t)
+                    type_ids_for_cost.append(tid)
+                    if isinstance(q, int):
+                        qty_by_type[tid] = qty_by_type.get(tid, 0) + q
+                    elif isinstance(q, str) and q.isdigit():
+                        qty_by_type[tid] = qty_by_type.get(tid, 0) + int(q)
+            cost_map = build_cost_map_for_assets(
+                app_session=self._db_app.session,
+                sde_session=self._db_sde.session,
+                owner_kind="corporation_id",
+                owner_id=int(self.corporation_id),
+                asset_type_ids=type_ids_for_cost,
+                asset_quantities_by_type=qty_by_type,
+                wallet_tx_model=CorporationWalletTransactionsModel,
+                industry_job_model=CorporationIndustryJobsModel,
+                market_prices=market_prices if isinstance(market_prices, list) else [],
+            )
 
             self.asset_list = []
             type_ids = set(asset.get("type_id") for asset in assets)
@@ -510,6 +765,20 @@ class Corporation:
                     "is_ship": group_data.categoryID == 6 if group_data else False,
                     "is_office_folder": type_id == 27
                 }
+
+                # Best-effort provenance + cost basis
+                ci = cost_map.get(int(type_id)) if type_id is not None else None
+                if ci is not None:
+                    unit_cost = ci.unit_cost
+                    qty = asset_entry.get("quantity", 0) or 0
+                    total_cost = (unit_cost * float(qty)) if (unit_cost is not None and qty is not None) else None
+                    asset_entry["acquisition_source"] = ci.source
+                    asset_entry["acquisition_unit_cost"] = unit_cost
+                    asset_entry["acquisition_total_cost"] = total_cost
+                    asset_entry["acquisition_reference_type"] = ci.reference_type
+                    asset_entry["acquisition_reference_id"] = ci.reference_id
+                    asset_entry["acquisition_date"] = ci.acquisition_date
+                    asset_entry["acquisition_updated_at"] = datetime.now(timezone.utc).isoformat()
                 self.asset_list.append(asset_entry)
             
             # Fetch custom names for containers (type_id == 17366 and is_singleton == True)

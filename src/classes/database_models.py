@@ -182,6 +182,15 @@ class CharacterAssetsModel(BaseApp):
     is_ship: Mapped[bool] = mapped_column(Boolean, nullable=False)
     is_office_folder: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
+    # Best-effort provenance + cost basis (computed from wallet tx / industry jobs)
+    acquisition_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    acquisition_unit_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    acquisition_total_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    acquisition_reference_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    acquisition_reference_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    acquisition_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    acquisition_updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
 class CorporationModel(BaseApp):
     __tablename__ = "corporations"
 
@@ -247,6 +256,97 @@ class CorporationAssetsModel(BaseApp):
     is_asset_safety_wrap: Mapped[bool] = mapped_column(Boolean, nullable=True)
     is_ship: Mapped[bool] = mapped_column(Boolean, nullable=True)
     is_office_folder: Mapped[bool] = mapped_column(Boolean, nullable=True)
+
+    # Best-effort provenance + cost basis (computed from wallet tx / industry jobs)
+    acquisition_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    acquisition_unit_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    acquisition_total_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    acquisition_reference_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    acquisition_reference_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    acquisition_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    acquisition_updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class CharacterIndustryJobsModel(BaseApp):
+    __tablename__ = "character_industry_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+
+    status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    start_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    completed_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    blueprint_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    product_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    successful_runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    installer_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    facility_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    output_location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    raw: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CorporationIndustryJobsModel(BaseApp):
+    __tablename__ = "corporation_industry_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+
+    status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    start_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    completed_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    blueprint_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    product_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    successful_runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    installer_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    facility_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    output_location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    raw: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CorporationWalletTransactionsModel(BaseApp):
+    __tablename__ = "corporation_wallet_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    division: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    transaction_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    client_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    client_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    is_buy: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 class CorporationStructuresModel(BaseApp):
     __tablename__ = "corporation_structures"

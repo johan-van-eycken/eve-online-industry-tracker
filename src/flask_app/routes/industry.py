@@ -3,7 +3,21 @@ from __future__ import annotations
 from flask import Blueprint, request
 import json
 import time
+import threading
+import uuid
+from datetime import datetime
 from sqlalchemy import bindparam, text
+from sqlalchemy.sql import func
+
+from classes.asset_provenance import build_fifo_remaining_lots_by_type
+from classes.database_models import (
+    CharacterAssetsModel,
+    CharacterIndustryJobsModel,
+    CharacterWalletTransactionsModel,
+    CorporationAssetsModel,
+    CorporationIndustryJobsModel,
+    CorporationWalletTransactionsModel,
+)
 
 from flask_app.bootstrap import require_ready
 from flask_app.state import state
@@ -16,6 +30,7 @@ from flask_app.services.sde_context import ensure_sde_ready, get_language
 from flask_app.services.sde_locations_service import get_solar_systems, get_npc_stations
 from flask_app.services.sde_types_service import get_type_data
 from flask_app.services.industry_builder_service import enrich_blueprints_for_character
+from flask_app.services.submanufacturing_planner_service import plan_submanufacturing_tree
 from flask_app.services.structure_rig_effects_service import get_rig_effects_for_type_ids
 from flask_app.settings import public_structures_cache_ttl_seconds
 from flask_app.services.public_structures_cache_service import (
@@ -26,6 +41,400 @@ from flask_app.services.public_structures_cache_service import (
 
 industry_bp = Blueprint("industry", __name__)
 
+
+_INDUSTRY_BUILDER_JOB_TTL_SECONDS = 6 * 3600
+
+
+def _industry_builder_job_key(*, character_id: int, profile_id: int | None, maximize_runs: bool) -> str:
+    pid = int(profile_id or 0)
+    return f"{int(character_id)}:{pid}:{1 if maximize_runs else 0}"
+
+
+def _cleanup_old_industry_builder_jobs() -> None:
+    now = datetime.utcnow()
+    with state.industry_builder_jobs_lock:
+        to_delete: list[str] = []
+        for job_id, job in list(state.industry_builder_jobs.items()):
+            if not isinstance(job, dict):
+                to_delete.append(str(job_id))
+                continue
+            created_at = job.get("created_at")
+            if not isinstance(created_at, datetime):
+                continue
+            age_s = (now - created_at).total_seconds()
+            if age_s > _INDUSTRY_BUILDER_JOB_TTL_SECONDS:
+                to_delete.append(str(job_id))
+
+        for job_id in to_delete:
+            state.industry_builder_jobs.pop(job_id, None)
+            # Also remove from the key map (best-effort)
+            for k, v in list(state.industry_builder_jobs_by_key.items()):
+                if v == job_id:
+                    state.industry_builder_jobs_by_key.pop(k, None)
+
+
+def _run_industry_builder_update_job(
+    *,
+    job_id: str,
+    character_id: int,
+    profile_id: int | None,
+    maximize_runs: bool,
+) -> None:
+    """Compute full Industry Builder dataset (incl. submanufacturing) in a background thread."""
+    try:
+        require_ready()
+        character = state.char_manager.get_character_by_id(int(character_id))
+        if not character:
+            raise ValueError(f"Character ID {character_id} not found")
+
+        session = get_db_app_session()
+        language = get_language()
+
+        sde_session = None
+        try:
+            ensure_sde_ready()
+            sde_session = get_db_sde_session()
+        except Exception:
+            sde_session = None
+
+        # Resolve profile (same logic as GET /industry_builder_data)
+        selected_profile = None
+        if profile_id:
+            selected_profile = industry_profiles_repo.get_by_id(session, int(profile_id))
+            if selected_profile and int(getattr(selected_profile, "character_id", 0) or 0) != int(character_id):
+                raise ValueError("Industry profile does not belong to this character")
+        else:
+            selected_profile = industry_profiles_repo.get_default_for_character_id(session, int(character_id))
+
+        # Live cost indices
+        manufacturing_ci = 0.0
+        copying_ci = 0.0
+        research_me_ci = 0.0
+        research_te_ci = 0.0
+        if selected_profile is not None and getattr(selected_profile, "system_id", None) is not None:
+            if state.esi_service is not None:
+                try:
+                    systems = state.esi_service.get_industry_systems()
+                    sid = int(getattr(selected_profile, "system_id"))
+                    row = next((s for s in systems if s.get("solar_system_id") == sid), None)
+                    if row:
+                        for entry in (row.get("cost_indices") or []):
+                            if entry.get("activity") == "manufacturing":
+                                manufacturing_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "copying":
+                                copying_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_material_efficiency":
+                                research_me_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_time_efficiency":
+                                research_te_ci = float(entry.get("cost_index") or 0.0)
+                except Exception:
+                    manufacturing_ci = 0.0
+                    copying_ci = 0.0
+                    research_me_ci = 0.0
+                    research_te_ci = 0.0
+
+        # Surcharge rate (fraction)
+        surcharge_rate = 0.0
+        if selected_profile is not None:
+            try:
+                facility_tax = float(getattr(selected_profile, "facility_tax", 0.0) or 0.0)
+            except Exception:
+                facility_tax = 0.0
+            try:
+                scc_surcharge = float(getattr(selected_profile, "scc_surcharge", 0.0) or 0.0)
+            except Exception:
+                scc_surcharge = 0.0
+            if facility_tax >= 1.0:
+                facility_tax = facility_tax / 100.0
+            if scc_surcharge >= 1.0:
+                scc_surcharge = scc_surcharge / 100.0
+            surcharge_rate = max(0.0, facility_tax + scc_surcharge)
+
+        # Owned blueprint maps (character + corporation)
+        owned_bp_type_ids: set[int] = set()
+        owned_bp_best_by_type_id: dict[int, dict] = {}
+
+        def _consider_owned_bp(
+            *,
+            blueprint_type_id: int,
+            is_blueprint_copy: bool,
+            me_percent: int | None,
+            te_percent: int | None,
+            runs: int | None,
+        ) -> None:
+            tid = int(blueprint_type_id)
+            if tid <= 0:
+                return
+            owned_bp_type_ids.add(tid)
+
+            try:
+                me_i = int(me_percent or 0)
+            except Exception:
+                me_i = 0
+            try:
+                te_i = int(te_percent or 0)
+            except Exception:
+                te_i = 0
+
+            rec = {
+                "is_blueprint_copy": bool(is_blueprint_copy),
+                "me_percent": int(me_i),
+                "te_percent": int(te_i),
+                "runs": (int(runs) if runs is not None else None),
+            }
+
+            cur = owned_bp_best_by_type_id.get(tid)
+            if not isinstance(cur, dict):
+                owned_bp_best_by_type_id[tid] = rec
+                return
+
+            cur_is_bpc = bool(cur.get("is_blueprint_copy"))
+            new_is_bpc = bool(rec.get("is_blueprint_copy"))
+            if new_is_bpc and not cur_is_bpc:
+                owned_bp_best_by_type_id[tid] = rec
+                return
+            if new_is_bpc == cur_is_bpc:
+                cur_me = int(cur.get("me_percent") or 0)
+                cur_te = int(cur.get("te_percent") or 0)
+                new_me = int(rec.get("me_percent") or 0)
+                new_te = int(rec.get("te_percent") or 0)
+                if (new_me > cur_me) or (new_me == cur_me and new_te > cur_te):
+                    owned_bp_best_by_type_id[tid] = rec
+
+        try:
+            rows = (
+                session.query(
+                    CharacterAssetsModel.type_id,
+                    CharacterAssetsModel.is_blueprint_copy,
+                    CharacterAssetsModel.blueprint_material_efficiency,
+                    CharacterAssetsModel.blueprint_time_efficiency,
+                    CharacterAssetsModel.blueprint_runs,
+                )
+                .filter(
+                    CharacterAssetsModel.type_category_name == "Blueprint",
+                    CharacterAssetsModel.character_id == int(character_id),
+                )
+                .all()
+            )
+            for tid, is_bpc, me, te, runs in rows or []:
+                if tid is None:
+                    continue
+                _consider_owned_bp(
+                    blueprint_type_id=int(tid),
+                    is_blueprint_copy=bool(is_bpc),
+                    me_percent=(int(me) if me is not None else None),
+                    te_percent=(int(te) if te is not None else None),
+                    runs=(int(runs) if runs is not None else None),
+                )
+        except Exception:
+            pass
+
+        try:
+            corp_id = getattr(character, "corporation_id", None)
+            if corp_id is not None:
+                rows = (
+                    session.query(
+                        CorporationAssetsModel.type_id,
+                        CorporationAssetsModel.is_blueprint_copy,
+                        CorporationAssetsModel.blueprint_material_efficiency,
+                        CorporationAssetsModel.blueprint_time_efficiency,
+                        CorporationAssetsModel.blueprint_runs,
+                    )
+                    .filter(
+                        CorporationAssetsModel.type_category_name == "Blueprint",
+                        CorporationAssetsModel.corporation_id == int(corp_id),
+                    )
+                    .all()
+                )
+                for tid, is_bpc, me, te, runs in rows or []:
+                    if tid is None:
+                        continue
+                    _consider_owned_bp(
+                        blueprint_type_id=int(tid),
+                        is_blueprint_copy=bool(is_bpc),
+                        me_percent=(int(me) if me is not None else None),
+                        te_percent=(int(te) if te is not None else None),
+                        runs=(int(runs) if runs is not None else None),
+                    )
+        except Exception:
+            pass
+
+        rig_payload: list[dict] = []
+        try:
+            if selected_profile is not None:
+                rig_ids = [
+                    getattr(selected_profile, "rig_slot0_type_id", None),
+                    getattr(selected_profile, "rig_slot1_type_id", None),
+                    getattr(selected_profile, "rig_slot2_type_id", None),
+                ]
+                rig_ids = [int(x) for x in rig_ids if x is not None and int(x) != 0]
+                if rig_ids:
+                    ensure_sde_ready()
+                    sde_session = get_db_sde_session()
+                    rig_payload = get_rig_effects_for_type_ids(sde_session, rig_ids)
+        except Exception:
+            rig_payload = []
+
+        # Load owned blueprints only (fast path)
+        all_blueprints = blueprints_service.get_blueprint_assets(session, state.esi_service, include_unowned=False)
+        all_blueprints = [bp for bp in all_blueprints if bp.get("owner_id") == int(character_id)]
+
+        def _progress(done: int, total: int, _bp_type_id: int) -> None:
+            with state.industry_builder_jobs_lock:
+                job = state.industry_builder_jobs.get(job_id)
+                if not isinstance(job, dict):
+                    return
+                job["progress_done"] = int(done)
+                job["progress_total"] = int(total)
+                job["updated_at"] = datetime.utcnow()
+
+        data = enrich_blueprints_for_character(
+            all_blueprints,
+            character,
+            esi_service=state.esi_service,
+            industry_profile=selected_profile,
+            manufacturing_system_cost_index=manufacturing_ci,
+            copying_system_cost_index=copying_ci,
+            research_me_system_cost_index=research_me_ci,
+            research_te_system_cost_index=research_te_ci,
+            surcharge_rate_total_fraction=surcharge_rate,
+            owned_blueprint_type_ids=owned_bp_type_ids,
+            owned_blueprint_best_by_type_id=owned_bp_best_by_type_id,
+            include_submanufacturing=True,
+            submanufacturing_blueprint_type_id=None,
+            maximize_blueprint_runs=bool(maximize_runs),
+            rig_payload=rig_payload,
+            db_app_session=session,
+            db_sde_session=sde_session,
+            language=language,
+            progress_callback=_progress,
+        )
+
+        meta = {
+            "profile_id": (int(getattr(selected_profile, "id")) if selected_profile is not None else None),
+            "profile_name": (getattr(selected_profile, "profile_name", None) if selected_profile is not None else None),
+        }
+
+        with state.industry_builder_jobs_lock:
+            job = state.industry_builder_jobs.get(job_id)
+            if isinstance(job, dict):
+                job["status"] = "done"
+                job["data"] = data
+                job["meta"] = meta
+                job["updated_at"] = datetime.utcnow()
+
+    except Exception as e:
+        with state.industry_builder_jobs_lock:
+            job = state.industry_builder_jobs.get(job_id)
+            if isinstance(job, dict):
+                job["status"] = "error"
+                job["error"] = str(e)
+                job["updated_at"] = datetime.utcnow()
+
+
+@industry_bp.post("/industry_builder_update/<int:character_id>")
+def industry_builder_update(character_id: int):
+    """Kick off a background computation of Industry Builder data (incl. submanufacturing)."""
+    try:
+        require_ready()
+        _cleanup_old_industry_builder_jobs()
+
+        character = state.char_manager.get_character_by_id(int(character_id))
+        if not character:
+            return error(message=f"Character ID {character_id} not found", status_code=400)
+
+        payload = request.get_json(silent=True) or {}
+        profile_id = payload.get("profile_id")
+        try:
+            profile_id_i = int(profile_id) if profile_id is not None else None
+        except Exception:
+            profile_id_i = None
+        maximize_runs = bool(payload.get("maximize_runs", False))
+
+        key = _industry_builder_job_key(character_id=int(character_id), profile_id=profile_id_i, maximize_runs=maximize_runs)
+
+        with state.industry_builder_jobs_lock:
+            existing_job_id = state.industry_builder_jobs_by_key.get(key)
+            if existing_job_id:
+                existing = state.industry_builder_jobs.get(existing_job_id)
+                if isinstance(existing, dict) and existing.get("status") in {"running", "done"}:
+                    return ok(data={"job_id": str(existing_job_id)})
+
+            job_id = uuid.uuid4().hex
+            state.industry_builder_jobs_by_key[key] = job_id
+            state.industry_builder_jobs[job_id] = {
+                "status": "running",
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+                "character_id": int(character_id),
+                "profile_id": (int(profile_id_i) if profile_id_i is not None else None),
+                "maximize_runs": bool(maximize_runs),
+                "progress_done": 0,
+                "progress_total": None,
+                "error": None,
+                "meta": None,
+                "data": None,
+            }
+
+        t = threading.Thread(
+            target=_run_industry_builder_update_job,
+            kwargs={
+                "job_id": job_id,
+                "character_id": int(character_id),
+                "profile_id": profile_id_i,
+                "maximize_runs": bool(maximize_runs),
+            },
+            daemon=True,
+        )
+        t.start()
+
+        return ok(data={"job_id": str(job_id)})
+
+    except Exception as e:
+        return error(message=f"Error starting Industry Builder update: {e}")
+
+
+@industry_bp.get("/industry_builder_update_status/<job_id>")
+def industry_builder_update_status(job_id: str):
+    try:
+        require_ready()
+        with state.industry_builder_jobs_lock:
+            job = state.industry_builder_jobs.get(str(job_id))
+            if not isinstance(job, dict):
+                return error(message="Job not found", status_code=404)
+
+            return ok(
+                data={
+                    "job_id": str(job_id),
+                    "status": job.get("status"),
+                    "progress_done": job.get("progress_done"),
+                    "progress_total": job.get("progress_total"),
+                    "error": job.get("error"),
+                }
+            )
+    except Exception as e:
+        return error(message=f"Error reading job status: {e}")
+
+
+@industry_bp.get("/industry_builder_update_result/<job_id>")
+def industry_builder_update_result(job_id: str):
+    try:
+        require_ready()
+        with state.industry_builder_jobs_lock:
+            job = state.industry_builder_jobs.get(str(job_id))
+            if not isinstance(job, dict):
+                return error(message="Job not found", status_code=404)
+            if job.get("status") == "error":
+                return error(message=str(job.get("error") or "Job failed"), status_code=500)
+            if job.get("status") != "done":
+                return error(message="Job not finished", status_code=409)
+
+            data = job.get("data")
+            meta = job.get("meta")
+
+        return ok(data=data, meta=meta)
+    except Exception as e:
+        return error(message=f"Error reading job result: {e}")
 
 _STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS = 24 * 3600
 _STRUCTURE_RIGS_CACHE_VERSION = 3
@@ -242,6 +651,9 @@ def industry_builder(character_id: int):
 
         # Optional industry profile selection (defaults to the character's default profile).
         profile_id = request.args.get("profile_id", default=None, type=int)
+        maximize_runs = bool(request.args.get("maximize_runs", default=0, type=int))
+        include_submanufacturing = bool(request.args.get("include_submanufacturing", default=0, type=int))
+        submanufacturing_blueprint_type_id = request.args.get("blueprint_type_id", default=None, type=int)
         selected_profile = None
         if profile_id:
             selected_profile = industry_profiles_repo.get_by_id(session, int(profile_id))
@@ -252,6 +664,9 @@ def industry_builder(character_id: int):
 
         # Live manufacturing system cost index (from ESI), if we have a profile+system.
         manufacturing_ci = 0.0
+        copying_ci = 0.0
+        research_me_ci = 0.0
+        research_te_ci = 0.0
         if selected_profile is not None and getattr(selected_profile, "system_id", None) is not None:
             if state.esi_service is not None:
                 try:
@@ -262,9 +677,145 @@ def industry_builder(character_id: int):
                         for entry in (row.get("cost_indices") or []):
                             if entry.get("activity") == "manufacturing":
                                 manufacturing_ci = float(entry.get("cost_index") or 0.0)
-                                break
+                            elif entry.get("activity") == "copying":
+                                copying_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_material_efficiency":
+                                research_me_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_time_efficiency":
+                                research_te_ci = float(entry.get("cost_index") or 0.0)
                 except Exception:
                     manufacturing_ci = 0.0
+                    copying_ci = 0.0
+                    research_me_ci = 0.0
+                    research_te_ci = 0.0
+
+        # Surcharge rate used in job fee estimate (fraction)
+        surcharge_rate = 0.0
+        if selected_profile is not None:
+            try:
+                facility_tax = float(getattr(selected_profile, "facility_tax", 0.0) or 0.0)
+            except Exception:
+                facility_tax = 0.0
+            try:
+                scc_surcharge = float(getattr(selected_profile, "scc_surcharge", 0.0) or 0.0)
+            except Exception:
+                scc_surcharge = 0.0
+            if facility_tax >= 1.0:
+                facility_tax = facility_tax / 100.0
+            if scc_surcharge >= 1.0:
+                scc_surcharge = scc_surcharge / 100.0
+            surcharge_rate = max(0.0, facility_tax + scc_surcharge)
+
+        # Best-effort: determine owned blueprint type_ids + best ME/TE per blueprint (character + corporation).
+        owned_bp_type_ids: set[int] = set()
+        owned_bp_best_by_type_id: dict[int, dict] = {}
+
+        def _consider_owned_bp(
+            *,
+            blueprint_type_id: int,
+            is_blueprint_copy: bool,
+            me_percent: int | None,
+            te_percent: int | None,
+            runs: int | None,
+        ) -> None:
+            tid = int(blueprint_type_id)
+            if tid <= 0:
+                return
+            owned_bp_type_ids.add(tid)
+
+            me_i = 0
+            te_i = 0
+            try:
+                me_i = int(me_percent or 0)
+            except Exception:
+                me_i = 0
+            try:
+                te_i = int(te_percent or 0)
+            except Exception:
+                te_i = 0
+
+            rec = {
+                "is_blueprint_copy": bool(is_blueprint_copy),
+                "me_percent": int(me_i),
+                "te_percent": int(te_i),
+                "runs": (int(runs) if runs is not None else None),
+            }
+
+            cur = owned_bp_best_by_type_id.get(tid)
+            if not isinstance(cur, dict):
+                owned_bp_best_by_type_id[tid] = rec
+                return
+
+            cur_is_bpc = bool(cur.get("is_blueprint_copy"))
+            new_is_bpc = bool(rec.get("is_blueprint_copy"))
+            if new_is_bpc and not cur_is_bpc:
+                owned_bp_best_by_type_id[tid] = rec
+                return
+            if new_is_bpc == cur_is_bpc:
+                cur_me = int(cur.get("me_percent") or 0)
+                cur_te = int(cur.get("te_percent") or 0)
+                new_me = int(rec.get("me_percent") or 0)
+                new_te = int(rec.get("te_percent") or 0)
+                if (new_me > cur_me) or (new_me == cur_me and new_te > cur_te):
+                    owned_bp_best_by_type_id[tid] = rec
+
+        try:
+            rows = (
+                session.query(
+                    CharacterAssetsModel.type_id,
+                    CharacterAssetsModel.is_blueprint_copy,
+                    CharacterAssetsModel.blueprint_material_efficiency,
+                    CharacterAssetsModel.blueprint_time_efficiency,
+                    CharacterAssetsModel.blueprint_runs,
+                )
+                .filter(
+                    CharacterAssetsModel.type_category_name == "Blueprint",
+                    CharacterAssetsModel.character_id == int(character_id),
+                )
+                .all()
+            )
+            for tid, is_bpc, me, te, runs in rows or []:
+                if tid is None:
+                    continue
+                _consider_owned_bp(
+                    blueprint_type_id=int(tid),
+                    is_blueprint_copy=bool(is_bpc),
+                    me_percent=(int(me) if me is not None else None),
+                    te_percent=(int(te) if te is not None else None),
+                    runs=(int(runs) if runs is not None else None),
+                )
+        except Exception:
+            pass
+
+        try:
+            corp_id = getattr(character, "corporation_id", None)
+            if corp_id is not None:
+                rows = (
+                    session.query(
+                        CorporationAssetsModel.type_id,
+                        CorporationAssetsModel.is_blueprint_copy,
+                        CorporationAssetsModel.blueprint_material_efficiency,
+                        CorporationAssetsModel.blueprint_time_efficiency,
+                        CorporationAssetsModel.blueprint_runs,
+                    )
+                    .filter(
+                        CorporationAssetsModel.type_category_name == "Blueprint",
+                        CorporationAssetsModel.corporation_id == int(corp_id),
+                    )
+                    .all()
+                )
+                for tid, is_bpc, me, te, runs in rows or []:
+                    if tid is None:
+                        continue
+                    _consider_owned_bp(
+                        blueprint_type_id=int(tid),
+                        is_blueprint_copy=bool(is_bpc),
+                        me_percent=(int(me) if me is not None else None),
+                        te_percent=(int(te) if te is not None else None),
+                        runs=(int(runs) if runs is not None else None),
+                    )
+        except Exception:
+            pass
 
         # Rig effects for the selected profile (SDE-driven).
         rig_payload: list[dict] = []
@@ -282,15 +833,25 @@ def industry_builder(character_id: int):
                     rig_payload = get_rig_effects_for_type_ids(sde_session, rig_ids)
         except Exception:
             rig_payload = []
-        all_blueprints = blueprints_service.get_blueprint_assets(session, state.esi_service)
+        all_blueprints = blueprints_service.get_blueprint_assets(session, state.esi_service, include_unowned=False)
         if character_id:
             all_blueprints = [bp for bp in all_blueprints if bp.get("owner_id") == character_id]
 
         data = enrich_blueprints_for_character(
             all_blueprints,
             character,
+            esi_service=state.esi_service,
             industry_profile=selected_profile,
             manufacturing_system_cost_index=manufacturing_ci,
+            copying_system_cost_index=copying_ci,
+            research_me_system_cost_index=research_me_ci,
+            research_te_system_cost_index=research_te_ci,
+            surcharge_rate_total_fraction=surcharge_rate,
+            owned_blueprint_type_ids=owned_bp_type_ids,
+            owned_blueprint_best_by_type_id=owned_bp_best_by_type_id,
+            include_submanufacturing=include_submanufacturing,
+            submanufacturing_blueprint_type_id=(int(submanufacturing_blueprint_type_id) if submanufacturing_blueprint_type_id else None),
+            maximize_blueprint_runs=maximize_runs,
             rig_payload=rig_payload,
             db_app_session=session,
             db_sde_session=sde_session,
@@ -305,6 +866,400 @@ def industry_builder(character_id: int):
         )
     except Exception as e:
         return error(message=f"Error in GET Method `/industry_builder_data/{character_id}`: " + str(e))
+
+
+@industry_bp.post("/industry_submanufacturing_plan/<int:character_id>")
+def industry_submanufacturing_plan(character_id: int):
+    """Return build-vs-buy suggestions for required materials.
+
+        Request JSON body:
+            {
+                "materials": [{"type_id": 123, "type_name": "Tritanium", "quantity": 1000}, ...],
+                "profile_id": 1,     # optional
+                "max_depth": 10      # optional (default 25)
+            }
+
+        Notes:
+        - Recursive planner (depth-limited for safety).
+        - Reaction-formula outputs are treated as Buy (no reaction planning).
+        - Buy decisions use average price; job fees use adjusted price (EIV basis).
+    """
+
+    if not character_id:
+        return error(message="Character ID is required.", status_code=400)
+
+    try:
+        require_ready()
+        character = state.char_manager.get_character_by_id(character_id)
+        if not character:
+            return error(
+                message=f"Error in POST Method `/industry_submanufacturing_plan/{character_id}`: Character ID {character_id} not found",
+                status_code=400,
+            )
+
+        payload = request.get_json(silent=True) or {}
+        materials = payload.get("materials") or []
+        if not isinstance(materials, list) or not materials:
+            return error(message="Request must include a non-empty 'materials' list.", status_code=400)
+
+        profile_id = payload.get("profile_id")
+        try:
+            profile_id_i = int(profile_id) if profile_id is not None else None
+        except Exception:
+            profile_id_i = None
+
+        max_depth = payload.get("max_depth")
+        try:
+            max_depth_i = int(max_depth) if max_depth is not None else 3
+        except Exception:
+            max_depth_i = 3
+        max_depth_i = max(1, min(max_depth_i, 50))
+
+        session = get_db_app_session()
+        language = get_language()
+
+        # Optional industry profile selection (defaults to the character's default profile).
+        selected_profile = None
+        if profile_id_i:
+            selected_profile = industry_profiles_repo.get_by_id(session, int(profile_id_i))
+            if selected_profile and int(getattr(selected_profile, "character_id", 0) or 0) != int(character_id):
+                return error(message="Industry profile does not belong to this character.", status_code=400)
+        else:
+            selected_profile = industry_profiles_repo.get_default_for_character_id(session, int(character_id))
+
+        # Live manufacturing system cost index (from ESI), if we have a profile+system.
+        manufacturing_ci = 0.0
+        copying_ci = 0.0
+        research_me_ci = 0.0
+        research_te_ci = 0.0
+        if selected_profile is not None and getattr(selected_profile, "system_id", None) is not None:
+            if state.esi_service is not None:
+                try:
+                    systems = state.esi_service.get_industry_systems()
+                    sid = int(getattr(selected_profile, "system_id"))
+                    row = next((s for s in systems if s.get("solar_system_id") == sid), None)
+                    if row:
+                        for entry in (row.get("cost_indices") or []):
+                            if entry.get("activity") == "manufacturing":
+                                manufacturing_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "copying":
+                                copying_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_material_efficiency":
+                                research_me_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_time_efficiency":
+                                research_te_ci = float(entry.get("cost_index") or 0.0)
+                except Exception:
+                    manufacturing_ci = 0.0
+                    copying_ci = 0.0
+                    research_me_ci = 0.0
+                    research_te_ci = 0.0
+
+        # Surcharge rate used in job fee estimate (fraction)
+        surcharge_rate = 0.0
+        if selected_profile is not None:
+            try:
+                facility_tax = float(getattr(selected_profile, "facility_tax", 0.0) or 0.0)
+            except Exception:
+                facility_tax = 0.0
+            try:
+                scc_surcharge = float(getattr(selected_profile, "scc_surcharge", 0.0) or 0.0)
+            except Exception:
+                scc_surcharge = 0.0
+            # These are stored as fractions in newer rows, but legacy rows sometimes store percentages.
+            # Keep parity with industry_builder_service._as_fraction without importing it.
+            if facility_tax >= 1.0:
+                facility_tax = facility_tax / 100.0
+            if scc_surcharge >= 1.0:
+                scc_surcharge = scc_surcharge / 100.0
+            surcharge_rate = max(0.0, facility_tax + scc_surcharge)
+
+        ensure_sde_ready()
+        sde_session = get_db_sde_session()
+
+        # Best-effort: determine owned blueprint type_ids + best ME/TE per blueprint (character + corporation).
+        owned_bp_type_ids: set[int] = set()
+        owned_bp_best_by_type_id: dict[int, dict] = {}
+
+        def _consider_owned_bp(
+            *,
+            blueprint_type_id: int,
+            is_blueprint_copy: bool,
+            me_percent: int | None,
+            te_percent: int | None,
+            runs: int | None,
+        ) -> None:
+            tid = int(blueprint_type_id)
+            if tid <= 0:
+                return
+            owned_bp_type_ids.add(tid)
+
+            me_i = 0
+            te_i = 0
+            try:
+                me_i = int(me_percent or 0)
+            except Exception:
+                me_i = 0
+            try:
+                te_i = int(te_percent or 0)
+            except Exception:
+                te_i = 0
+
+            rec = {
+                "is_blueprint_copy": bool(is_blueprint_copy),
+                "me_percent": int(me_i),
+                "te_percent": int(te_i),
+                "runs": (int(runs) if runs is not None else None),
+            }
+
+            cur = owned_bp_best_by_type_id.get(tid)
+            if not isinstance(cur, dict):
+                owned_bp_best_by_type_id[tid] = rec
+                return
+
+            # Prefer an owned BPC over a BPO (matches planner semantics and avoids assumptions).
+            cur_is_bpc = bool(cur.get("is_blueprint_copy"))
+            new_is_bpc = bool(rec.get("is_blueprint_copy"))
+            if new_is_bpc and not cur_is_bpc:
+                owned_bp_best_by_type_id[tid] = rec
+                return
+            if new_is_bpc == cur_is_bpc:
+                # Same kind: pick the best efficiency.
+                cur_me = int(cur.get("me_percent") or 0)
+                cur_te = int(cur.get("te_percent") or 0)
+                new_me = int(rec.get("me_percent") or 0)
+                new_te = int(rec.get("te_percent") or 0)
+                if (new_me > cur_me) or (new_me == cur_me and new_te > cur_te):
+                    owned_bp_best_by_type_id[tid] = rec
+
+        try:
+            rows = (
+                session.query(
+                    CharacterAssetsModel.type_id,
+                    CharacterAssetsModel.is_blueprint_copy,
+                    CharacterAssetsModel.blueprint_material_efficiency,
+                    CharacterAssetsModel.blueprint_time_efficiency,
+                    CharacterAssetsModel.blueprint_runs,
+                )
+                .filter(
+                    CharacterAssetsModel.type_category_name == "Blueprint",
+                    CharacterAssetsModel.character_id == int(character_id),
+                )
+                .all()
+            )
+            for tid, is_bpc, me, te, runs in rows or []:
+                if tid is None:
+                    continue
+                _consider_owned_bp(
+                    blueprint_type_id=int(tid),
+                    is_blueprint_copy=bool(is_bpc),
+                    me_percent=(int(me) if me is not None else None),
+                    te_percent=(int(te) if te is not None else None),
+                    runs=(int(runs) if runs is not None else None),
+                )
+        except Exception:
+            owned_bp_type_ids = owned_bp_type_ids or set()
+
+        try:
+            corp_id = getattr(character, "corporation_id", None)
+            if corp_id is not None:
+                rows = (
+                    session.query(
+                        CorporationAssetsModel.type_id,
+                        CorporationAssetsModel.is_blueprint_copy,
+                        CorporationAssetsModel.blueprint_material_efficiency,
+                        CorporationAssetsModel.blueprint_time_efficiency,
+                        CorporationAssetsModel.blueprint_runs,
+                    )
+                    .filter(
+                        CorporationAssetsModel.type_category_name == "Blueprint",
+                        CorporationAssetsModel.corporation_id == int(corp_id),
+                    )
+                    .all()
+                )
+                for tid, is_bpc, me, te, runs in rows or []:
+                    if tid is None:
+                        continue
+                    _consider_owned_bp(
+                        blueprint_type_id=int(tid),
+                        is_blueprint_copy=bool(is_bpc),
+                        me_percent=(int(me) if me is not None else None),
+                        te_percent=(int(te) if te is not None else None),
+                        runs=(int(runs) if runs is not None else None),
+                    )
+        except Exception:
+            pass
+
+        # --- FIFO inventory costing inputs (best-effort) ---
+        # Compute on-hand quantities for the requested material types (character + corporation)
+        # and reconstruct FIFO lots from wallet transactions.
+        material_type_ids: set[int] = set()
+        for m in materials or []:
+            if not isinstance(m, dict):
+                continue
+            tid = m.get("type_id")
+            if tid is None:
+                continue
+            try:
+                tid_i = int(tid)
+            except Exception:
+                continue
+            if tid_i > 0:
+                material_type_ids.add(tid_i)
+
+        inventory_on_hand_by_type: dict[int, int] = {}
+        fifo_lots_by_type: dict[int, list] = {}
+
+        if material_type_ids:
+            try:
+                rows = (
+                    session.query(CharacterAssetsModel.type_id, func.sum(CharacterAssetsModel.quantity))
+                    .filter(CharacterAssetsModel.character_id == int(character_id))
+                    .filter(CharacterAssetsModel.type_id.in_(sorted(material_type_ids)))
+                    .group_by(CharacterAssetsModel.type_id)
+                    .all()
+                )
+                for tid, qty_sum in rows or []:
+                    if tid is None:
+                        continue
+                    try:
+                        inventory_on_hand_by_type[int(tid)] = int(qty_sum or 0)
+                    except Exception:
+                        continue
+            except Exception:
+                inventory_on_hand_by_type = inventory_on_hand_by_type or {}
+
+            try:
+                corp_id = getattr(character, "corporation_id", None)
+                if corp_id is not None:
+                    rows = (
+                        session.query(CorporationAssetsModel.type_id, func.sum(CorporationAssetsModel.quantity))
+                        .filter(CorporationAssetsModel.corporation_id == int(corp_id))
+                        .filter(CorporationAssetsModel.type_id.in_(sorted(material_type_ids)))
+                        .group_by(CorporationAssetsModel.type_id)
+                        .all()
+                    )
+                    for tid, qty_sum in rows or []:
+                        if tid is None:
+                            continue
+                        try:
+                            inventory_on_hand_by_type[int(tid)] = int(inventory_on_hand_by_type.get(int(tid), 0) or 0) + int(
+                                qty_sum or 0
+                            )
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+            tx_rows: list[object] = []
+            try:
+                tx_rows.extend(
+                    (
+                        session.query(CharacterWalletTransactionsModel)
+                        .filter(CharacterWalletTransactionsModel.character_id == int(character_id))
+                        .filter(CharacterWalletTransactionsModel.type_id.in_(sorted(material_type_ids)))
+                        .all()
+                    )
+                    or []
+                )
+            except Exception:
+                pass
+
+            try:
+                corp_id = getattr(character, "corporation_id", None)
+                if corp_id is not None:
+                    tx_rows.extend(
+                        (
+                            session.query(CorporationWalletTransactionsModel)
+                            .filter(CorporationWalletTransactionsModel.corporation_id == int(corp_id))
+                            .filter(CorporationWalletTransactionsModel.type_id.in_(sorted(material_type_ids)))
+                            .all()
+                        )
+                        or []
+                    )
+            except Exception:
+                pass
+
+            try:
+                job_rows: list[object] = []
+
+                try:
+                    job_rows.extend(
+                        (
+                            session.query(CharacterIndustryJobsModel)
+                            .filter(CharacterIndustryJobsModel.character_id == int(character_id))
+                            .filter(CharacterIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)))
+                            .all()
+                        )
+                        or []
+                    )
+                except Exception:
+                    job_rows = job_rows or []
+
+                try:
+                    corp_id = getattr(character, "corporation_id", None)
+                    if corp_id is not None:
+                        job_rows.extend(
+                            (
+                                session.query(CorporationIndustryJobsModel)
+                                .filter(CorporationIndustryJobsModel.corporation_id == int(corp_id))
+                                .filter(CorporationIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)))
+                                .all()
+                            )
+                            or []
+                        )
+                except Exception:
+                    pass
+
+                market_prices: list[dict] | None = None
+                try:
+                    if state.esi_service is not None:
+                        market_prices = (state.esi_service.get_market_prices() or [])
+                except Exception:
+                    market_prices = None
+
+                fifo_lots_by_type = build_fifo_remaining_lots_by_type(
+                    wallet_transactions=tx_rows,
+                    industry_jobs=job_rows,
+                    sde_session=sde_session,
+                    market_prices=market_prices,
+                    on_hand_quantities_by_type=inventory_on_hand_by_type,
+                )
+            except Exception:
+                fifo_lots_by_type = {}
+
+        plan = plan_submanufacturing_tree(
+            sde_session=sde_session,
+            language=language,
+            esi_service=state.esi_service,
+            materials=materials,
+            owned_blueprint_type_ids=owned_bp_type_ids,
+            owned_blueprint_best_by_type_id=owned_bp_best_by_type_id,
+            manufacturing_system_cost_index=manufacturing_ci,
+            copying_system_cost_index=copying_ci,
+            research_me_system_cost_index=research_me_ci,
+            research_te_system_cost_index=research_te_ci,
+            surcharge_rate_total_fraction=surcharge_rate,
+            inventory_on_hand_by_type=inventory_on_hand_by_type,
+            inventory_fifo_lots_by_type=fifo_lots_by_type,
+            use_fifo_inventory_costing=True,
+            max_depth=max_depth_i,
+        )
+
+        return ok(
+            data=plan,
+            meta={
+                "profile_id": (int(getattr(selected_profile, "id")) if selected_profile is not None else None),
+                "profile_name": (getattr(selected_profile, "profile_name", None) if selected_profile is not None else None),
+                "manufacturing_system_cost_index": float(manufacturing_ci),
+                "copying_system_cost_index": float(copying_ci),
+                "research_me_system_cost_index": float(research_me_ci),
+                "research_te_system_cost_index": float(research_te_ci),
+                "surcharge_rate_total_fraction": float(surcharge_rate),
+                "max_depth": int(max_depth_i),
+            },
+        )
+    except Exception as e:
+        return error(message=f"Error in POST Method `/industry_submanufacturing_plan/{character_id}`: " + str(e))
 
 
 @industry_bp.get("/solar_systems")
@@ -353,7 +1308,6 @@ def structures(system_id: int):
                 ),
                 status_code=503,
             )
-
         ttl_seconds = public_structures_cache_ttl_seconds()
         public_structures, is_fresh = get_cached_public_structures(system_id, ttl_seconds=ttl_seconds)
         refreshing = False

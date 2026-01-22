@@ -56,5 +56,12 @@ class AppState:
     public_structures_global_scan_attempted: int = 0
     public_structures_global_scan_rows_written: int = 0
 
+    # Industry Builder background update jobs
+    industry_builder_jobs_lock: threading.Lock = field(default_factory=threading.Lock)
+    # job_id -> job dict (status/progress/result)
+    industry_builder_jobs: dict[str, dict] = field(default_factory=dict)
+    # key (character/profile/maximize_runs) -> job_id (latest)
+    industry_builder_jobs_by_key: dict[str, str] = field(default_factory=dict)
+
 
 state = AppState()

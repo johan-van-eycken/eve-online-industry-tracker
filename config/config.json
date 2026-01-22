@@ -33,6 +33,7 @@
       "esi-characters.read_standings.v1",
       "esi-characters.read_titles.v1",
       "esi-clones.read_implants.v1",
+      "esi-industry.read_character_jobs.v1",
       "esi-skills.read_skills.v1",
       "esi-skills.read_skillqueue.v1",
       "esi-universe.read_structures.v1",
@@ -51,6 +52,7 @@
       "esi-corporations.read_structures.v1",
       "esi-corporations.read_titles.v1",
       "esi-corporations.read_standings.v1",
+      "esi-industry.read_corporation_jobs.v1",
       "esi-wallet.read_corporation_wallets.v1"
     ]
   }
