@@ -191,6 +191,25 @@ class ESIService:
         except Exception as e:
             raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
 
+    def get_universe_structure(self, structure_id: int, *, timeout_seconds: float = 15.0) -> Dict[str, Any]:
+        """Return /universe/structures/{structure_id}/.
+
+        This endpoint is gated by ACLs (requires auth). Callers should use this
+        helper instead of reaching into `_esi_client`.
+        """
+
+        if not isinstance(structure_id, int) or structure_id <= 0:
+            raise ValueError(f"Invalid structure_id: {structure_id}")
+
+        try:
+            return self._esi_client.esi_get(
+                f"/universe/structures/{structure_id}/",
+                use_cache=False,
+                timeout_seconds=float(timeout_seconds),
+            )
+        except Exception as e:
+            raise RuntimeError(f"ESI request failed for universe structure {structure_id}: {e}")
+
     def get_market_prices(self) -> List[Dict[str, Any]]:
         """Return market prices for all items (cached)."""
         now = time.time()

@@ -7,11 +7,14 @@ name = "eve-online-industry-tracker"
 version = "0.1.0"
 description = "Python tools + Flask/Streamlit app to track EVE Online industry data"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
 authors = [{name = "jveyc"}]
 
 dynamic = ["dependencies"]
+
+[project.scripts]
+eve-online-industry-tracker = "eve_online_industry_tracker.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -27,4 +30,5 @@ include = [
   "flask_app*",
   "webpages*",
   "config*",
+  "eve_online_industry_tracker*",
 ]

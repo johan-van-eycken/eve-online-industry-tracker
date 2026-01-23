@@ -1,83 +1,43 @@
 # EVE Online Industry Tracker
 
-A Python-based project to track EVE Online characters, corporations, and industry data.  
-It uses **EVE Static Data Export (SDE)**, **ESI API** calls, provides a **Streamlit dashboard** for viewing character and database information, and integrates with **Flask** for backend operations.
+Local-first EVE Online helper app that combines:
 
----
+- A Flask API backend (data refresh + background jobs)
+- A Streamlit UI frontend
+- Local SQLite databases for app data, OAuth tokens, and EVE SDE
 
-## Features
+The main “batteries included” entrypoint starts both backend and UI and keeps them running.
 
-### Database Management
-- Centralized SQLite database management via `DatabaseManager` class.
-- Supports multiple databases.
-- Tables can be listed, loaded into pandas DataFrames, and saved back.
-- ESI cache table included for storing API responses with etags.
+## Quickstart (Windows)
 
-### Character Management
-- Add, update, and retrieve characters using `CharacterManager`.
-- Supports main character designation.
-- Stores refresh tokens and ESI scopes.
-- Streamlit dashboard displays character portraits, wallet balance, birthday, security status, and other metadata.
-- **New:** Flask integration allows server-side logic (e.g., wallet balance refreshes) to be managed in an independent API backend.
+Requirements:
 
-### EVE SDE Import
-- Download and extract EVE Static Data Export (SDE) package.
-- Import selected YAML tables into SQLite.
-- Stores original nested dictionaries as JSON strings instead of flattening.
-- CLI options:
-  - `--download`: download and extract SDE.
-  - `--import`: import YAML tables into SQLite.
-  - `--cleanup`: remove temporary SDE folder.
-  - `--db`: specify SQLite database path (default: `database/eve_sde.db`).
-  - `--tmp`: specify temporary folder for extraction (default: `database/data/tmp_sde`).
-  - `--tables`: override tables to import (space-separated list).  
-    If omitted, defaults to `config/import_sde.json`.
-  - `--all`: download, import, and cleanup in one go.
-  - `--help`: show CLI usage instructions.
+- Python 3.10–3.12 (Python 3.13 is currently not supported due to pinned deps/wheels).
 
-Selected SDE tables imported by default from `config/import_sde.json`:
-> More tables can be added by editing `config/import_sde.json`.
+```powershell
+# From repo root
+py -3.10 -m venv .venv
+./.venv/Scripts/Activate.ps1
 
-### Flask Backend
-- **API endpoint**: `/refresh_wallet_balances` for refreshing wallet balances.
-- Accepts optional `character_name` to refresh specific character balances.
-- Returns response with updated wallet balances.
+python -m pip install -U pip setuptools wheel
 
-### Streamlit Dashboard
-- Characters tab: shows cards for each character with images, wallet balance (formatted in ISK), birthday (with age), gender, corporation ID, bloodline ID, race ID, and security status.
-- Database Maintenance tab:
-  - Select database and table to view.
-  - Refresh database and table lists dynamically.
-  - Filter tables using SQL `WHERE` clauses.
-  - Drop tables from the database.
+# This repo uses a src/ layout; editable install is the simplest way to run it
+python -m pip install -e . --no-build-isolation
 
-### Utils
-- Formatters for ISK, dates with age, and security status rounding.
-- Can be reused across different scripts and the dashboard.
-
----
+# First run will initialize databases and may take a bit
+python -m eve_online_industry_tracker
+```
 
 ## Installation
 
-1. Clone this repository:
+1) Clone the repository:
 
 ```bash
 git clone https://github.com/jveyc/eve-online-industry-tracker.git
 cd eve-online-industry-tracker
 ```
 
-2. Create a virtual environment and install dependencies:
-
-Recommended: use a local `.venv` (isolated from global Python).
-
-Windows (PowerShell):
-
-```powershell
-./scripts/setup_venv.ps1
-./.venv/Scripts/Activate.ps1
-```
-
-Manual setup (cross-platform):
+2) Create a virtualenv and install (recommended approach):
 
 ```bash
 python -m venv .venv
@@ -88,130 +48,149 @@ source .venv/bin/activate
 # Windows
 .venv\Scripts\activate
 
-python -m pip install -r requirements.txt
-
-# Needed for editable installs (provides the 'bdist_wheel' command):
-python -m pip install wheel
-
-# This repository uses a `src/` layout, so install in editable mode:
+python -m pip install -U pip setuptools wheel
 python -m pip install -e . --no-build-isolation
 ```
 
-If pip fails with `SSLCertVerificationError`, you likely need to configure your
-corporate proxy / trust store (or use an internal PyPI mirror). As a pragmatic
-fallback (less isolated, but works without downloading), you can create the venv
-with system site-packages:
+If pip fails with `SSLCertVerificationError`, you likely need to configure your corporate proxy/trust store (or use an internal PyPI mirror).
+
+As a pragmatic fallback (less isolated, but often works without downloads), you can create the venv with system site-packages:
 
 ```bash
 python -m venv --system-site-packages .venv
 ```
 
-3. Ensure config files exist:
+## Configuration
 
-```txt
-config/config.json
-config/secret.json (fill in your EVE client secret; you can also put your character list here)
-config/import_sde.json (list of SDE tables to import)
-```
+This project expects a few JSON config files under `config/`.
+
+- `config/config.json` (tracked)
+- `config/secret.json` (should be gitignored; contains EVE client secret + optional character list)
+- `config/import_sde.json` (tables + SDE download settings for the importer)
+
+By default, the app reads the main config from `config/config.json` and secrets from `config/secret.json`.
+You can override these paths via environment variables:
+
+- `APP_CONFIG_PATH` (default: `config/config.json`)
+- `APP_SECRET_PATH` (default: `config/secret.json`)
+
+If `config/secret.json` is missing, the app will create a placeholder and ask you to fill in the EVE `client_secret`.
 
 ## Usage
 
-### Import EVE SDE
+### Run the full app (recommended)
 
-Download, import, and cleanup with one command:
-
-```bash
-python ./scripts/import_sde.py --all
-```
-
-Or run steps individually:
+Runs Flask + Streamlit and restarts either process if it crashes:
 
 ```bash
-# Download and extract
-python ./scripts/import_sde.py --download
-
-# Import selected tables from config/import_sde.json
-python ./scripts/import_sde.py --import
-
-# Import custom tables (overrides config)
-python ./scripts/import_sde.py --import --tables invTypes invGroups
-
-# Cleanup temporary files
-python ./scripts/import_sde.py --cleanup
+python -m eve_online_industry_tracker
 ```
 
-### Run Streamlit App (Frontend)
-
-Serve the Streamlit dashboard:
+After an editable install, you can also run the console script:
 
 ```bash
-streamlit run streamlit_app.py
+eve-online-industry-tracker
 ```
 
-### Run Flask App (Backend)
+CLI flags:
 
-Serve the Flask API:
+```bash
+python -m eve_online_industry_tracker --help
+python -m eve_online_industry_tracker --no-streamlit
+python -m eve_online_industry_tracker --log-level INFO
+```
+
+### Run backend only
+
+Option A (via the supervisor, no UI):
+
+```bash
+python -m eve_online_industry_tracker --no-streamlit
+```
+
+Option B (run Flask directly):
 
 ```bash
 python -m flask_app
 ```
 
-### Runtime settings (env vars)
+### Run UI only
 
-The backend behavior is controlled via environment variables:
+```bash
+streamlit run streamlit_app.py
+```
+
+Note: the Streamlit UI expects the Flask API to be reachable (defaults to `http://localhost:5000`).
+
+### Import / update the EVE SDE
+
+The importer downloads the EVE Static Data Export and imports selected YAML tables into a local SQLite DB.
+
+```bash
+python ./scripts/import_sde.py --help
+
+# Download + import + cleanup
+python ./scripts/import_sde.py --all
+```
+
+The default list of tables comes from `config/import_sde.json`.
+
+## Runtime settings (environment variables)
+
+General:
+
+- `LOG_LEVEL` (overrides default logging level; e.g. `DEBUG`, `INFO`)
+- `LOG_FORCE` (set to `0`/`false` to avoid reconfiguring logging)
+
+Flask server:
 
 - `FLASK_HOST` (default: `localhost`)
 - `FLASK_PORT` (default: `5000`)
 - `FLASK_DEBUG` (default: `false`)
-- `FLASK_REFRESH_METADATA` (default: `true`) – controls DB metadata creation on startup
-- `FLASK_API_REQUEST_TIMEOUT` (default: `10`) – seconds for UI → API requests
-- `FLASK_HEALTH_POLL_TIMEOUT` (default: `120`) – seconds to wait for backend readiness in `main.py`
+- `FLASK_REFRESH_METADATA` (default: `true`) – best-effort DB metadata initialization during startup
+
+Supervisor / health checks:
+
+- `FLASK_HEALTH_POLL_TIMEOUT` (default: `120`) – max time to wait for backend readiness
 - `FLASK_HEALTH_REQUEST_TIMEOUT` (default: `2`) – per-request timeout for `/health`
-- `LOG_LEVEL` (default: `INFO` for `python -m flask_app`, `DEBUG` for `python main.py`)
+- `FLASK_API_REQUEST_TIMEOUT` (default: `10`) – UI → API request timeout
 
-The app configuration file locations are also configurable:
+Public structures caching & global scan:
 
-- `APP_CONFIG_PATH` (default: `config/config.json`)
-- `APP_SECRET_PATH` (default: `config/secret.json`)
+- `FLASK_PUBLIC_STRUCTURES_TTL` (default: `3600`) – cache freshness window (seconds)
+- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN` (default: `true`) – enable a bounded background global scan at startup
+- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_WORKERS` (default: `10`)
+- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_CAP` (default: `5000`)
+- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_TIME_BUDGET` (default: `60`)
+- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_BATCH_SIZE` (default: `100`)
+- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_PAUSE` (default: `5`)
+- `FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT` (default: `5`) – per-ESI-request timeout during scans
 
-Features:
+## Project layout
 
-* Refresh wallet balances via /refresh_wallet_balances endpoint.
-* Fully integrated with CharacterManager logic for server-side operations.
-
-## Project Structure
-
-```plaintext
+```text
 .
 ├── src/
-│   ├── classes/
-│   ├── config/
-│   ├── flask_app/
-│   ├── utils/
-│   └── webpages/
+│   ├── eve_online_industry_tracker/   # main package + CLI entrypoint
+│   ├── flask_app/                    # Flask API app
+│   ├── webpages/                     # Streamlit pages
+│   ├── classes/                      # legacy domain/services (gradually being wrapped)
+│   ├── config/                       # config schema + path helpers
+│   └── utils/
 ├── config/
 │   ├── config.json
-│   ├── secret.json          # gitignored (secrets + optional character list)
-│   └── import_sde.json      # list of SDE tables to import
-├── database/
-│   ├── eve_oauth.db
-│   ├── eve_app.db
-│   └── eve_sde.db
+│   ├── secret.json                   # expected locally; should not be committed
+│   └── import_sde.json
+├── database/                         # local SQLite DBs
 ├── scripts/
 │   └── import_sde.py
-├── main.py
-├── README.md
-├── requirements.txt
-└── streamlit_app.py
+├── streamlit_app.py
+├── main.py                           # legacy runner (kept for compatibility)
+└── README.md
 ```
 
-## Notes
+## Troubleshooting
 
-* Only a subset of SDE tables are imported initially. Add more via config/import_sde.json.
-* The project uses SQLite for simplicity; for large-scale use, consider a more robust DBMS.
-* Changes to Streamlit source files require a manual refresh.
-* Flask and Streamlit apps can run in parallel on different ports.
-
-## License
-
-MIT License
+- `No module named eve_online_industry_tracker`: you likely didn’t install the project. Use `python -m pip install -e . --no-build-isolation`.
+- `SSLCertVerificationError`: configure your proxy/trust store or use a trusted/internal package index. As a fallback you can create the venv with `--system-site-packages`.
+- Startup shows `/health` 503 for a while: initialization is intentionally done in the background; wait until it reports `status=OK`.

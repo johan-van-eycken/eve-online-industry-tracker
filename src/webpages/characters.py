@@ -124,6 +124,12 @@ def render():
                 break
             row = df.iloc[i + j]
 
+            security_status = row.get("security_status")
+            try:
+                security_status_display = f"{float(security_status):.2f}" if security_status is not None else "N/A"
+            except Exception:
+                security_status_display = "N/A"
+
             with col:
                 st.markdown(
                     f"""
@@ -142,7 +148,7 @@ def render():
                                 Corporation ID: {row.get('corporation_id', 'N/A')}<br>
                                 Race: {row.get('race', 'N/A')}<br>
                                 Bloodline: {row.get('bloodline', 'N/A')}<br>
-                                Security Status: {row.get('security_status', 'N/A'):.2f}
+                                Security Status: {security_status_display}
                             </div>
                         </div>
                     </div>
