@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+"""Compatibility boundary for legacy ORM models.
+
+This module centralizes imports from `classes.database_models` so the rest of the
+codebase doesn't need to import from `classes.*` directly.
+"""
+
+from classes.database_models import (
+    BaseApp,
+    BaseOauth,
+    Blueprints,
+    Categories,
+    CharacterAssetsModel,
+    CharacterIndustryJobsModel,
+    CharacterModel,
+    CharacterWalletTransactionsModel,
+    CorporationAssetsModel,
+    CorporationIndustryJobsModel,
+    CorporationModel,
+    CorporationStructuresModel,
+    CorporationWalletTransactionsModel,
+    Factions,
+    Groups,
+    IndustryProfilesModel,
+    MapConstellations,
+    MapRegions,
+    MapSolarSystems,
+    NpcCorporations,
+    NpcStations,
+    OAuthCharacter,
+    PublicStructuresModel,
+    PublicStructuresScanStateModel,
+    Races,
+    StationOperations,
+    StationServices,
+    TypeMaterials,
+    Types,
+)
+
+__all__ = [
+    "BaseApp",
+    "BaseOauth",
+    "Blueprints",
+    "Categories",
+    "CharacterAssetsModel",
+    "CharacterIndustryJobsModel",
+    "CharacterModel",
+    "CharacterWalletTransactionsModel",
+    "CorporationAssetsModel",
+    "CorporationIndustryJobsModel",
+    "CorporationModel",
+    "CorporationStructuresModel",
+    "CorporationWalletTransactionsModel",
+    "Factions",
+    "Groups",
+    "IndustryProfilesModel",
+    "MapConstellations",
+    "MapRegions",
+    "MapSolarSystems",
+    "NpcCorporations",
+    "NpcStations",
+    "OAuthCharacter",
+    "PublicStructuresModel",
+    "PublicStructuresScanStateModel",
+    "Races",
+    "StationOperations",
+    "StationServices",
+    "TypeMaterials",
+    "Types",
+]

@@ -565,7 +565,15 @@ class ESIClient:
     # ------------------------------
     # ESI API Calls (with Caching)
     # -----------------------------
-    def esi_get(self, endpoint: str, params: dict | None = None, use_cache: bool = True, paginate: bool = False, return_headers: bool = False) -> Any:
+    def esi_get(
+        self,
+        endpoint: str,
+        params: dict | None = None,
+        use_cache: bool = True,
+        paginate: bool = False,
+        return_headers: bool = False,
+        timeout_seconds: float = 15,
+    ) -> Any:
         """
         Issue a GET request to the ESI API with optional query params and caching.
         If paginate=True, will fetch all pages and return a combined list.
@@ -612,7 +620,7 @@ class ESIClient:
                 paged_url = f"{self.esi_base_uri}{endpoint}{paged_query}"
                 try:
                     _esi_gate(f"GET {endpoint} page={page}")
-                    response = requests.get(paged_url, headers=headers, timeout=15)
+                    response = requests.get(paged_url, headers=headers, timeout=float(timeout_seconds))
                     _ESI_ERROR_LIMITER.update_from_headers(response.headers)
                     if response.status_code == 200:
                         etag = response.headers.get("ETag")
@@ -658,7 +666,7 @@ class ESIClient:
         while retries < 3:
             try:
                 _esi_gate(f"GET {endpoint}")
-                response = requests.get(url, headers=headers, timeout=15)
+                response = requests.get(url, headers=headers, timeout=float(timeout_seconds))
                 _ESI_ERROR_LIMITER.update_from_headers(response.headers)
                 if response.status_code == 200:
                     etag = response.headers.get("ETag")

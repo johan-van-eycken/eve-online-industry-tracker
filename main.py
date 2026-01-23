@@ -3,7 +3,18 @@ import multiprocessing
 import subprocess
 import time
 
+import sys
+from pathlib import Path
+
 import requests
+
+
+# Ensure `src/` is on sys.path so `flask_app` and the package can be imported
+# when running `python main.py` from the repo root.
+_ROOT = Path(__file__).resolve().parent
+_SRC = _ROOT / "src"
+if _SRC.exists() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from flask_app.settings import (
     flask_debug,
@@ -25,7 +36,7 @@ def run_flask():
 
     # Initialization can be slow (DB/ESI refresh). Start it in the background so
     # the server becomes reachable quickly and /health can report progress.
-    start_background_initialization(refresh_metadata=refresh_metadata_on_startup())
+    start_background_initialization(app_state=app.extensions.get("app_state"), refresh_metadata=refresh_metadata_on_startup())
 
     # Avoid Werkzeug reloader when running under multiprocessing.
     app.run(
@@ -120,9 +131,9 @@ def main():
 
         # Shutdown Flask gracefully
         try:
-            requests.get(
+            requests.post(
                 f"http://{flask_host()}:{flask_port()}/shutdown",
-                timeout=2,
+                timeout=0.5,
             )
             logging.info("Flask shutdown signal sent.")
         except Exception as e:

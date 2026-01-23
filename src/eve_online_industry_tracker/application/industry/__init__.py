@@ -1,0 +1,1 @@
+"""Industry feature (use-cases)."""

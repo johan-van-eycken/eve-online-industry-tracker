@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import logging
-
 from flask import Blueprint
 
 from flask_app.bootstrap import require_ready
-from flask_app.state import state
-from flask_app.http import ok, error
+from flask_app.deps import get_state
+from flask_app.http import ok
+
+from eve_online_industry_tracker.application.corporations.service import CorporationsService
 
 
 corporations_bp = Blueprint("corporations", __name__)
@@ -14,21 +14,13 @@ corporations_bp = Blueprint("corporations", __name__)
 
 @corporations_bp.get("/corporations")
 def corporations():
-    try:
-        require_ready()
-        corporations_data = state.corp_manager.get_corporations()
-        return ok(data=corporations_data)
-    except Exception as e:
-        logging.error("Error fetching corporations: %s", e)
-        return error(message="Error in GET Method `/corporations`: " + str(e))
+    require_ready(get_state())
+    svc = CorporationsService(state=get_state())
+    return ok(data=svc.list_corporations())
 
 
 @corporations_bp.get("/corporations/assets")
 def corporations_assets():
-    try:
-        require_ready()
-        assets = state.corp_manager.get_assets()
-        return ok(data=assets)
-    except Exception as e:
-        logging.error("Error fetching corporation assets: %s", e)
-        return error(message="Error in GET Method `/corporations/assets`: " + str(e))
+    require_ready(get_state())
+    svc = CorporationsService(state=get_state())
+    return ok(data=svc.list_assets())

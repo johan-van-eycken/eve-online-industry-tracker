@@ -1,0 +1,1 @@
+"""Corporations feature (use-cases)."""
