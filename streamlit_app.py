@@ -1,6 +1,7 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import requests # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import time
+import os
 
 # Flask backend
 from utils.flask_api import api_get, api_post
@@ -13,7 +14,7 @@ st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")
 
 menu_nav = ["Characters", "Corporations", "Market Orders", "Industry Builder", "Ore Calculator", "Settings"]
-menu_admin = ["", "Database Maintenance", "Restart Flask App", "Public Structures Scan"]
+menu_admin = ["", "Database Maintenance", "Restart Flask App", "Restart Streamlit", "Public Structures Scan"]
 
 choice_nav = st.sidebar.selectbox("Navigation", menu_nav)
 choice_admin = st.sidebar.selectbox("Admin", menu_admin)
@@ -34,6 +35,18 @@ if choice_admin == "Restart Flask App":
             st.info("The page will automatically reconnect when Flask is back online.")
         except Exception as e:
             st.error(f"Error restarting Flask app: {e}")
+elif choice_admin == "Restart Streamlit":
+    st.subheader("Restart Streamlit")
+    st.caption(
+        "This stops the current Streamlit process. If you started the app via the supervisor "
+        "(`python -m eve_online_industry_tracker`), it should automatically restart Streamlit."
+    )
+    st.warning("Any in-memory UI state will be lost.")
+
+    if st.button("Confirm Restart Streamlit", type="primary"):
+        st.success("Restarting Streamlit...")
+        time.sleep(0.5)
+        os._exit(0)
 elif choice_admin == "Public Structures Scan":
     st.subheader("Public Structures Scan")
 

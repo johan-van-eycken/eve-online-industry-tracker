@@ -34,7 +34,18 @@ CONFIG_SCHEMA = {
     "oauth": {"client_id": None},  # no default allowed
     "characters": [],  # must be a list
     "client_secret": None,  # required from secret.json
-    "defaults": {"scopes": [], "scopes_corp_director": []},
+    "defaults": {
+        "scopes": [],
+        "scopes_corp_director": [],
+        "market_pricing": {
+            "material_price_source_default": "Jita Sell",
+            "product_price_source_default": "Jita Sell",
+            "orderbook_smoothing": "median_best_n",
+            "orderbook_depth": 5,
+            "sales_tax_fraction": 0.03375,
+            "broker_fee_fraction": 0.03,
+        },
+    },
 }
 
 IMPORT_SDE_SCHEMA = {

@@ -50,3 +50,6 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         _ensure_column(db_app, table=table, column="acquisition_reference_id", ddl_type="INTEGER")
         _ensure_column(db_app, table=table, column="acquisition_date", ddl_type="TEXT")
         _ensure_column(db_app, table=table, column="acquisition_updated_at", ddl_type="TEXT")
+
+    # Character market fee metadata (best-effort JSON blob)
+    _ensure_column(db_app, table="characters", column="market_fees", ddl_type="TEXT")

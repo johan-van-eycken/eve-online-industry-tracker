@@ -62,6 +62,7 @@ class CharacterModel(BaseApp):
     skills: Mapped[str] = mapped_column(Text, nullable=True)
     standings: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
     implants: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string of implant typeIDs
+    market_fees: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 class CharacterWalletJournalModel(BaseApp):

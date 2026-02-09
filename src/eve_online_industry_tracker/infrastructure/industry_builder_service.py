@@ -157,22 +157,29 @@ def _get_trained_skill_level(char_skills: list[dict], *, skill_name: str) -> int
 
 
 def _manufacturing_time_multiplier_from_skills(char_skills: list[dict]) -> float:
-    """Return manufacturing time multiplier from character skills.
+        """Return manufacturing time multiplier from baseline character skills.
 
         Mirrors the client concept of "Skills and implants" for manufacturing duration.
-        This function implements the skill portion:
-      - Industry: -4% manufacturing time per level
-      - Advanced Industry: -3% manufacturing time per level
-    """
 
-    industry_level = _get_trained_skill_level(char_skills, skill_name="Industry")
-    advanced_industry_level = _get_trained_skill_level(char_skills, skill_name="Advanced Industry")
+        Notes:
+        - This function intentionally only covers the global baseline skills that apply
+            to *all* manufacturing jobs.
+        - Blueprint-specific required skills that also reduce manufacturing time (e.g.
+            ship construction / engineering skills) are applied per blueprint elsewhere.
 
-    industry_mult = 1.0 - (0.04 * float(max(0, min(industry_level, 5))))
-    adv_mult = 1.0 - (0.03 * float(max(0, min(advanced_industry_level, 5))))
+        Implemented baseline skills:
+        - Industry: -4% manufacturing time per level
+        - Advanced Industry: -3% manufacturing time per level
+        """
 
-    mult = industry_mult * adv_mult
-    return max(0.0, min(mult, 1.0))
+        industry_level = _get_trained_skill_level(char_skills, skill_name="Industry")
+        advanced_industry_level = _get_trained_skill_level(char_skills, skill_name="Advanced Industry")
+
+        industry_mult = 1.0 - (0.04 * float(max(0, min(industry_level, 5))))
+        adv_mult = 1.0 - (0.03 * float(max(0, min(advanced_industry_level, 5))))
+
+        mult = industry_mult * adv_mult
+        return max(0.0, min(mult, 1.0))
 
 
 def _copying_time_multiplier_from_skills(char_skills: list[dict]) -> float:
@@ -188,6 +195,135 @@ def _copying_time_multiplier_from_skills(char_skills: list[dict]) -> float:
 
 _IMPLANT_ATTR_MANUFACTURING_TIME_BONUS = 440
 _IMPLANT_ATTR_COPY_SPEED_BONUS = 452
+
+
+def _type_attribute_value_map(
+    sde_session,
+    *,
+    type_ids: list[int] | None,
+    attribute_id: int,
+) -> dict[int, float]:
+    """Fetch a dogma attribute value by type_id from the SDE `typeDogma` table.
+
+    The SDE stores attributes as a JSON list under the `dogmaAttributes` column.
+    Returns a map of {type_id: attribute_value} for those type_ids that have the
+    attribute.
+    """
+
+    if sde_session is None:
+        return {}
+    if not type_ids:
+        return {}
+
+    ids = sorted({int(x) for x in type_ids if x is not None and int(x) > 0})
+    if not ids:
+        return {}
+
+    try:
+        rows = (
+            sde_session.execute(
+                text("SELECT id, dogmaAttributes FROM typeDogma WHERE id IN :ids").bindparams(
+                    bindparam("ids", expanding=True)
+                ),
+                {"ids": ids},
+            )
+            .fetchall()
+        )
+    except Exception:
+        return {}
+
+    out: dict[int, float] = {}
+    for type_id, attrs_raw in rows:
+        attrs = _safe_json_loads(attrs_raw) or []
+        if not isinstance(attrs, list):
+            continue
+        for a in attrs:
+            if not isinstance(a, dict):
+                continue
+            aid = a.get("attributeID")
+            if aid is None:
+                continue
+            try:
+                if int(aid) != int(attribute_id):
+                    continue
+            except Exception:
+                continue
+            val = a.get("value")
+            if val is None:
+                continue
+            try:
+                out[int(type_id)] = float(val)
+            except Exception:
+                continue
+    return out
+
+
+def _manufacturing_required_skill_time_multiplier(
+    *,
+    required_skills: list[dict] | None,
+    char_skill_level_by_type_id: dict[int, int],
+    manufacturing_time_bonus_pct_by_skill_type_id: dict[int, float],
+) -> tuple[float, list[dict]]:
+    """Compute extra manufacturing time multiplier from blueprint-required skills.
+
+    Some blueprint-required skills have dogma attribute `manufacturingTimeBonus`
+    (id=440), which is expressed as a negative percent *per level*.
+
+    This multiplier should be applied in addition to the baseline Industry / Advanced
+    Industry multipliers.
+    """
+
+    if not required_skills:
+        return 1.0, []
+
+    mult = 1.0
+    details: list[dict] = []
+
+    seen: set[int] = set()
+    for skill in required_skills:
+        if not isinstance(skill, dict):
+            continue
+        tid = skill.get("type_id")
+        if tid is None:
+            continue
+        try:
+            tid_i = int(tid)
+        except Exception:
+            continue
+        if tid_i <= 0 or tid_i in seen:
+            continue
+        seen.add(tid_i)
+
+        bonus_pct_per_level = manufacturing_time_bonus_pct_by_skill_type_id.get(tid_i)
+        if bonus_pct_per_level is None:
+            continue
+
+        level = int(char_skill_level_by_type_id.get(tid_i, 0) or 0)
+        level = max(0, min(level, 5))
+        if level <= 0:
+            continue
+
+        # Bonus is stored as a negative percent per level (e.g. -1.0).
+        # Example: -1% at level 4 => 0.96 multiplier.
+        skill_mult = 1.0 + ((float(bonus_pct_per_level) / 100.0) * float(level))
+        # Clamp to sane range.
+        skill_mult = max(0.0, min(float(skill_mult), 1.0))
+        reduction = max(0.0, min(1.0, 1.0 - float(skill_mult)))
+
+        details.append(
+            {
+                "type_id": int(tid_i),
+                "type_name": skill.get("type_name"),
+                "trained_skill_level": int(level),
+                "manufacturing_time_bonus_percent_per_level": float(bonus_pct_per_level),
+                "time_reduction": float(reduction),
+                "time_multiplier": float(skill_mult),
+            }
+        )
+        mult *= float(skill_mult)
+
+    mult = max(0.0, min(float(mult), 1.0))
+    return mult, details
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -378,6 +514,7 @@ def enrich_blueprints_for_character(
     db_sde_session: Any | None = None,
     language: str | None = None,
     use_fifo_inventory_costing: bool = True,
+    pricing_preferences: dict | None = None,
 ) -> List[Dict[str, Any]]:
     """Apply character-skill requirements and basic cost/value analysis.
 
@@ -385,8 +522,8 @@ def enrich_blueprints_for_character(
     manufacturing-specific inputs and derived properties.
     """
     char_skills = (getattr(character, "skills", None) or {}).get("skills", []) or []
-    mfg_skill_time_multiplier = _manufacturing_time_multiplier_from_skills(char_skills)
-    mfg_skill_time_reduction = max(0.0, min(1.0, 1.0 - float(mfg_skill_time_multiplier)))
+    # Baseline manufacturing skills that apply to all manufacturing jobs.
+    mfg_base_skill_time_multiplier = _manufacturing_time_multiplier_from_skills(char_skills)
 
     copy_skill_time_multiplier = _copying_time_multiplier_from_skills(char_skills)
     copy_skill_time_reduction = max(0.0, min(1.0, 1.0 - float(copy_skill_time_multiplier)))
@@ -409,6 +546,319 @@ def enrich_blueprints_for_character(
             sde_session = None
 
     lang = str(language or "en")
+
+    # Market price map (best-effort). Used for copy-job EIV estimation.
+    # ESI /markets/prices provides both average and adjusted prices.
+    market_price_map: dict[int, dict[str, float | None]] = {}
+    try:
+        if esi_service is not None:
+            rows = esi_service.get_market_prices() or []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                tid = row.get("type_id")
+                if tid is None:
+                    continue
+                try:
+                    type_id_i = int(tid)
+                except Exception:
+                    continue
+                if type_id_i <= 0:
+                    continue
+                avg = row.get("average_price")
+                adj = row.get("adjusted_price")
+                try:
+                    avg_f = float(avg) if avg is not None else None
+                except Exception:
+                    avg_f = None
+                try:
+                    adj_f = float(adj) if adj is not None else None
+                except Exception:
+                    adj_f = None
+                market_price_map[type_id_i] = {"average_price": avg_f, "adjusted_price": adj_f}
+    except Exception:
+        market_price_map = {}
+
+    # Optional: orderbook-based hub pricing (EveGuru-like). Default hub is Jita (The Forge / Jita 4-4).
+    pricing = pricing_preferences if isinstance(pricing_preferences, dict) else {}
+    pricing_hub = str(pricing.get("hub") or "jita").strip().lower()
+    material_price_source = str(pricing.get("material_price_source") or "jita_buy").strip().lower()
+    product_price_source = str(pricing.get("product_price_source") or "jita_sell").strip().lower()
+    use_hub_pricing = bool(pricing.get("enabled", True)) and pricing_hub == "jita"
+
+    # Orderbook smoothing: avoid single-order outliers skewing the price.
+    # If the fill VWAP uses fewer than `orderbook_depth` orders (e.g. qty=1),
+    # we fall back to a robust best-N price (median/mean of the best N orders).
+    try:
+        orderbook_depth = int(pricing.get("orderbook_depth") or 5)
+    except Exception:
+        orderbook_depth = 5
+    orderbook_depth = max(1, min(orderbook_depth, 20))
+
+    orderbook_smoothing = str(pricing.get("orderbook_smoothing") or "median_best_n").strip().lower()
+    if orderbook_smoothing not in {"median_best_n", "mean_best_n"}:
+        orderbook_smoothing = "median_best_n"
+
+    # Jita constants (match ESIService defaults).
+    try:
+        _JITA_REGION_ID = int(getattr(esi_service, "DEFAULT_REGION_ID", 10000002)) if esi_service is not None else 10000002
+    except Exception:
+        _JITA_REGION_ID = 10000002
+    try:
+        _JITA_STATION_ID = int(getattr(esi_service, "DEFAULT_STATION_ID", 60003760)) if esi_service is not None else 60003760
+    except Exception:
+        _JITA_STATION_ID = 60003760
+
+    def _order_side_from_source(src: str) -> str | None:
+        s = str(src or "").strip().lower()
+        if "sell" in s:
+            return "sell"
+        if "buy" in s:
+            return "buy"
+        return None
+
+    def _order_price(o: dict) -> float:
+        try:
+            return float(o.get("price") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _order_vol(o: dict) -> int:
+        try:
+            return int(o.get("volume_remain") or 0)
+        except Exception:
+            return 0
+
+    def _robust_best_n_order_price(orders: list[dict], *, side: str, n: int, mode: str) -> float | None:
+        """Return a robust unit price from the best N usable orders.
+
+        - mode='median_best_n' (default): median of the best N order prices.
+        - mode='mean_best_n'          : mean of the best N order prices.
+
+        Both are less sensitive to single tiny outliers than picking the best order.
+        """
+
+        if not orders:
+            return None
+        n_i = max(1, int(n or 1))
+        usable = [o for o in orders if isinstance(o, dict) and _order_price(o) > 0 and _order_vol(o) > 0]
+        if not usable:
+            return None
+        usable.sort(key=_order_price, reverse=(side == "buy"))
+        top = usable[:n_i]
+        prices = sorted([float(_order_price(o)) for o in top if _order_price(o) > 0])
+        if not prices:
+            return None
+
+        m = str(mode or "median_best_n").strip().lower()
+        if m == "mean_best_n":
+            return float(sum(prices)) / float(len(prices))
+
+        # median
+        mid = len(prices) // 2
+        if len(prices) % 2 == 1:
+            return float(prices[mid])
+        return (float(prices[mid - 1]) + float(prices[mid])) / 2.0
+
+    def _fill_vwap_from_view(view: list[tuple[float, int]], *, quantity: int) -> tuple[float | None, int]:
+        """Compute a volume-weighted average fill price for `quantity` units.
+
+        - side='sell': fill from lowest sell orders upwards.
+        - side='buy' : fill from highest buy orders downwards.
+
+        Returns (price, orders_used). Price is None if there are no usable orders.
+        """
+
+        if not view:
+            return None, 0
+
+        q_needed = max(0, int(quantity or 0))
+        # If quantity is unknown, we can't compute a fill VWAP.
+        if q_needed <= 0:
+            return None, 0
+
+        filled = 0
+        cost = 0.0
+        orders_used = 0
+        for price, vol in view:
+            if filled >= q_needed:
+                break
+            take = min(int(vol), q_needed - filled)
+            if take <= 0:
+                continue
+            cost += float(take) * float(price)
+            filled += int(take)
+            orders_used += 1
+
+        if filled <= 0:
+            return None, 0
+
+        # If we cannot fill fully at the hub, return the VWAP of what *is* available.
+        # Callers can decide whether to fall back to region/global pricing.
+        return (float(cost) / float(filled)), int(orders_used)
+
+    def _robust_best_n_from_view(view: list[tuple[float, int]], *, n: int, mode: str) -> float | None:
+        if not view:
+            return None
+        n_i = max(1, int(n or 1))
+        # view is already sorted by best price for the given side.
+        prices = sorted([float(p) for (p, _v) in view[:n_i] if float(p) > 0])
+        if not prices:
+            return None
+
+        m = str(mode or "median_best_n").strip().lower()
+        if m == "mean_best_n":
+            return float(sum(prices)) / float(len(prices))
+
+        mid = len(prices) // 2
+        if len(prices) % 2 == 1:
+            return float(prices[mid])
+        return (float(prices[mid - 1]) + float(prices[mid])) / 2.0
+
+    # Request-local order caching (in addition to ESIService cache).
+    # This avoids repeated filtering and sorting for overlapping materials across many blueprints.
+    _raw_order_cache: dict[tuple[str, int], list[dict]] = {}
+    _orderbook_view_cache: dict[tuple[str, int, bool], list[tuple[float, int]]] = {}
+
+    def _get_orders(*, side: str, type_id: int) -> list[dict]:
+        if esi_service is None:
+            return []
+        key = (str(side), int(type_id))
+        cached = _raw_order_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            if side == "sell":
+                book = esi_service.get_type_sellprices([int(type_id)], region_id=int(_JITA_REGION_ID)) or {}
+            else:
+                book = esi_service.get_type_buyprices([int(type_id)], region_id=int(_JITA_REGION_ID)) or {}
+            orders = book.get(int(type_id)) if isinstance(book, dict) else None
+            out = list(orders) if isinstance(orders, list) else []
+        except Exception:
+            out = []
+        _raw_order_cache[key] = out
+        return out
+
+    def _get_orderbook_view(*, side: str, type_id: int, at_hub: bool) -> list[tuple[float, int]]:
+        key = (str(side), int(type_id), bool(at_hub))
+        cached = _orderbook_view_cache.get(key)
+        if cached is not None:
+            return cached
+
+        orders = _get_orders(side=side, type_id=int(type_id))
+        if not orders:
+            _orderbook_view_cache[key] = []
+            return []
+
+        view: list[tuple[float, int]] = []
+        for o in orders:
+            if not isinstance(o, dict):
+                continue
+            if at_hub:
+                try:
+                    if int(o.get("location_id") or 0) != int(_JITA_STATION_ID):
+                        continue
+                except Exception:
+                    continue
+            p = _order_price(o)
+            if p <= 0:
+                continue
+            v = _order_vol(o)
+            if v <= 0:
+                continue
+            view.append((float(p), int(v)))
+
+        if view:
+            # Sell = ascending (cheapest first), Buy = descending (highest first)
+            view.sort(key=lambda t: t[0], reverse=(side == "buy"))
+
+        _orderbook_view_cache[key] = view
+        return view
+
+    # Best-effort prefetch: fetch all needed orderbooks up-front so we don't interleave network calls
+    # with blueprint processing.
+    if use_hub_pricing and esi_service is not None:
+        try:
+            needed_type_ids: set[int] = set()
+            for bp in blueprints or []:
+                if not isinstance(bp, dict):
+                    continue
+                for mat in (bp.get("materials") or []):
+                    if not isinstance(mat, dict):
+                        continue
+                    tid = mat.get("type_id")
+                    if tid is None:
+                        continue
+                    try:
+                        t = int(tid)
+                    except Exception:
+                        continue
+                    if t > 0:
+                        needed_type_ids.add(t)
+                for prod in (bp.get("products") or []):
+                    if not isinstance(prod, dict):
+                        continue
+                    tid = prod.get("type_id")
+                    if tid is None:
+                        continue
+                    try:
+                        t = int(tid)
+                    except Exception:
+                        continue
+                    if t > 0:
+                        needed_type_ids.add(t)
+
+            side_mat = _order_side_from_source(material_price_source)
+            side_prod = _order_side_from_source(product_price_source)
+            if needed_type_ids:
+                ids = sorted(needed_type_ids)
+                if side_mat == "sell" or side_prod == "sell":
+                    esi_service.get_type_sellprices(ids, region_id=int(_JITA_REGION_ID))
+                if side_mat == "buy" or side_prod == "buy":
+                    esi_service.get_type_buyprices(ids, region_id=int(_JITA_REGION_ID))
+        except Exception:
+            pass
+
+    def _hub_unit_price(*, type_id: int, quantity: int, source: str) -> float | None:
+        """Return a hub unit price for the requested source (jita_buy/jita_sell).
+
+        Filters to Jita 4-4 if possible; if no hub orders exist, falls back to region-wide orders.
+        """
+
+        side = _order_side_from_source(source)
+        if side not in {"buy", "sell"}:
+            return None
+
+        hub_view = _get_orderbook_view(side=side, type_id=int(type_id), at_hub=True)
+
+        q_i = int(quantity or 0)
+        p_fill, used = _fill_vwap_from_view(hub_view, quantity=q_i)
+        if p_fill is not None:
+            if orderbook_depth > 1 and used > 0 and used < orderbook_depth:
+                p_robust = _robust_best_n_from_view(hub_view, n=orderbook_depth, mode=orderbook_smoothing)
+                return float(p_robust) if p_robust is not None else float(p_fill)
+            return float(p_fill)
+
+        # If quantity is unknown (or fill VWAP not computable), fall back to a robust best-N mean.
+        if q_i <= 0:
+            p_unknown = _robust_best_n_from_view(hub_view, n=orderbook_depth, mode=orderbook_smoothing)
+            if p_unknown is not None:
+                return float(p_unknown)
+
+        # Fallback: region-wide (still sorted by best price). This avoids hard None when a type is illiquid at station.
+        region_view = _get_orderbook_view(side=side, type_id=int(type_id), at_hub=False)
+        p2_fill, used2 = _fill_vwap_from_view(region_view, quantity=q_i)
+        if p2_fill is not None:
+            if orderbook_depth > 1 and used2 > 0 and used2 < orderbook_depth:
+                p2_robust = _robust_best_n_from_view(region_view, n=orderbook_depth, mode=orderbook_smoothing)
+                return float(p2_robust) if p2_robust is not None else float(p2_fill)
+            return float(p2_fill)
+
+        if q_i <= 0:
+            p2_unknown = _robust_best_n_from_view(region_view, n=orderbook_depth, mode=orderbook_smoothing)
+            return float(p2_unknown) if p2_unknown is not None else None
+
+        return None
 
     # Optional: use the submanufacturing planner to compute effective input costs.
     try:
@@ -564,9 +1014,6 @@ def enrich_blueprints_for_character(
         [int(x) for x in char_implants if x is not None],
     )
     mfg_implant_time_reduction = max(0.0, min(1.0, 1.0 - float(mfg_implant_time_multiplier)))
-    mfg_skill_implant_time_multiplier = float(mfg_skill_time_multiplier) * float(mfg_implant_time_multiplier)
-    mfg_skill_implant_time_multiplier = max(0.0, min(mfg_skill_implant_time_multiplier, 1.0))
-    mfg_skill_implant_time_reduction = max(0.0, min(1.0, 1.0 - float(mfg_skill_implant_time_multiplier)))
 
     copy_implant_time_multiplier, copy_implant_details = _copying_time_multiplier_from_implants(
         sde_session,
@@ -606,6 +1053,26 @@ def enrich_blueprints_for_character(
 
     generated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     schema_version = 2
+
+    # Fast lookup for per-blueprint required skill levels.
+    char_skill_level_by_type_id: dict[int, int] = {}
+    for s in char_skills or []:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("skill_id")
+        if sid is None:
+            continue
+        try:
+            sid_i = int(sid)
+        except Exception:
+            continue
+        if sid_i <= 0:
+            continue
+        try:
+            lvl_i = int(s.get("trained_skill_level") or 0)
+        except Exception:
+            lvl_i = 0
+        char_skill_level_by_type_id[sid_i] = max(0, min(lvl_i, 5))
 
     # IMPORTANT: Do not mutate the input `blueprints` payload.
     # Upstream blueprint assets can be reused between requests; in-place mutation
@@ -879,6 +1346,28 @@ def enrich_blueprints_for_character(
         bp["skill_requirements_met"] = skill_requirements_met
         bp["required_skills"] = normalized_skills
 
+    # Preload manufacturing time bonuses (dogma attr 440) for all required skill type_ids
+    # across the current blueprint set, so we can apply blueprint-specific time modifiers.
+    required_skill_type_ids: list[int] = []
+    for bp in blueprints_copy:
+        for rs in bp.get("required_skills", []) or []:
+            if not isinstance(rs, dict):
+                continue
+            tid = rs.get("type_id")
+            if tid is None:
+                continue
+            try:
+                tid_i = int(tid)
+            except Exception:
+                continue
+            if tid_i > 0:
+                required_skill_type_ids.append(tid_i)
+    manufacturing_time_bonus_pct_by_skill_type_id = _type_attribute_value_map(
+        sde_session,
+        type_ids=required_skill_type_ids,
+        attribute_id=_IMPLANT_ATTR_MANUFACTURING_TIME_BONUS,
+    )
+
     total_blueprints = len(blueprints_copy)
 
     # Memoize heavy per-blueprint computations within this request.
@@ -969,6 +1458,21 @@ def enrich_blueprints_for_character(
         effective_time_reduction = 1.0 - ((1.0 - profile_time_reduction) * (1.0 - rig_time_reduction))
         effective_cost_reduction = 1.0 - ((1.0 - profile_cost_reduction) * (1.0 - rig_cost_reduction))
 
+        # Blueprint-specific skill time modifiers (e.g. ship construction / engineering skills).
+        mfg_required_skill_time_multiplier, mfg_required_skill_details = _manufacturing_required_skill_time_multiplier(
+            required_skills=bp.get("required_skills", []) or [],
+            char_skill_level_by_type_id=char_skill_level_by_type_id,
+            manufacturing_time_bonus_pct_by_skill_type_id=manufacturing_time_bonus_pct_by_skill_type_id,
+        )
+
+        mfg_skill_time_multiplier = float(mfg_base_skill_time_multiplier) * float(mfg_required_skill_time_multiplier)
+        mfg_skill_time_multiplier = max(0.0, min(float(mfg_skill_time_multiplier), 1.0))
+        mfg_skill_time_reduction = max(0.0, min(1.0, 1.0 - float(mfg_skill_time_multiplier)))
+
+        mfg_skill_implant_time_multiplier = float(mfg_skill_time_multiplier) * float(mfg_implant_time_multiplier)
+        mfg_skill_implant_time_multiplier = max(0.0, min(float(mfg_skill_implant_time_multiplier), 1.0))
+        mfg_skill_implant_time_reduction = max(0.0, min(1.0, 1.0 - float(mfg_skill_implant_time_multiplier)))
+
         # Server-side submanufacturing integration (optional): replace market-priced material totals
         # with effective buy/build costs so blueprint totals are consistent end-to-end.
         should_compute_submfg = bool(include_submanufacturing)
@@ -1031,21 +1535,38 @@ def enrich_blueprints_for_character(
                 base_qty_total = int(base_qty) * int(job_runs)
 
                 # IMPORTANT: never truncate down to 0 for required inputs.
-                # Material quantities in the client round up for the job total.
+                # Client behavior:
+                # - Rounds up at the job level.
+                # - Effectively enforces a minimum of 1 unit per run for any required material.
                 raw_qty = float(base_qty_total) * float(me_multiplier) * (1.0 - float(effective_material_reduction))
                 if base_qty > 0:
-                    adjusted_qty = max(1, int(math.ceil(max(0.0, raw_qty))))
+                    # Minimum of 1 per run.
+                    min_total = int(job_runs)
+                    adjusted_qty = max(min_total, int(math.ceil(max(0.0, raw_qty))))
                 else:
                     adjusted_qty = 0
 
                 # Client shows "Total estimated price" using market price (best-effort: average first).
-                unit_price = mat.get("average_price")
-                if unit_price is None:
-                    unit_price = mat.get("unit_price")
-                try:
-                    mat_price = float(unit_price) if unit_price is not None else None
-                except Exception:
-                    mat_price = None
+                mat_price: float | None = None
+
+                # Optional: use hub orderbook pricing for profitability decisions.
+                if use_hub_pricing:
+                    try:
+                        tid = int(mat.get("type_id") or 0)
+                    except Exception:
+                        tid = 0
+                    if tid > 0:
+                        mat_price = _hub_unit_price(type_id=int(tid), quantity=int(adjusted_qty), source=str(material_price_source))
+
+                # Fallback to ESI average/unit prices when hub pricing is disabled or unavailable.
+                if mat_price is None:
+                    unit_price = mat.get("average_price")
+                    if unit_price is None:
+                        unit_price = mat.get("unit_price")
+                    try:
+                        mat_price = float(unit_price) if unit_price is not None else None
+                    except Exception:
+                        mat_price = None
 
                 if mat_price is None or mat_price <= 0:
                     missing_material_price_count += 1
@@ -1121,6 +1642,7 @@ def enrich_blueprints_for_character(
                         "adjusted_price_isk": float(adj_price) if adj_price is not None else None,
                         "average_price_isk": avg_price_isk,
                         "unit_price_isk": (float(mat_price) if mat_price is not None else None),
+                        "unit_price_source": (str(material_price_source) if use_hub_pricing else "esi_average"),
                         "total_cost_isk": float(adjusted_qty) * float(mat_price_for_cost),
                         # FIFO inventory costing (best-effort)
                         "inventory_on_hand_qty": int(inv_on_hand) if use_fifo_inventory_costing else None,
@@ -1285,7 +1807,7 @@ def enrich_blueprints_for_character(
                 prod_qty = prod.get("quantity_per_run")
                 if prod_qty is None:
                     prod_qty = prod.get("quantity", 0)
-                prod_price = prod.get("average_price", 0.0) or 0.0
+
                 try:
                     prod_qty_i = int(prod_qty or 0)
                 except Exception:
@@ -1295,7 +1817,27 @@ def enrich_blueprints_for_character(
                 prod["quantity_per_run"] = int(prod_qty_i)
                 prod["quantity_total"] = int(prod_qty_total)
 
-                total_product_value += float(prod_qty_total) * float(prod_price)
+                # Revenue pricing for profitability decisions.
+                prod_price = None
+                if use_hub_pricing:
+                    try:
+                        prod_tid = int(prod.get("type_id") or 0)
+                    except Exception:
+                        prod_tid = 0
+                    if prod_tid > 0:
+                        prod_price = _hub_unit_price(type_id=int(prod_tid), quantity=int(prod_qty_total), source=str(product_price_source))
+
+                if prod_price is None:
+                    prod_price = prod.get("average_price", 0.0) or 0.0
+                try:
+                    prod_price_f = float(prod_price or 0.0)
+                except Exception:
+                    prod_price_f = 0.0
+
+                prod["market_unit_price_isk"] = float(prod_price_f)
+                prod["market_price_source"] = (str(product_price_source) if use_hub_pricing else "esi_average")
+
+                total_product_value += float(prod_qty_total) * float(prod_price_f)
 
             bp["total_product_value"] = total_product_value
             bp["profit_margin"] = total_product_value - total_material_cost
@@ -1394,7 +1936,35 @@ def enrich_blueprints_for_character(
                     )
 
                     copy_ci = float(copying_system_cost_index or 0.0)
-                    copy_job_value = float(estimated_item_value_per_run) * float(bpc_runs)
+                    # Copying activity uses blueprint value as its job-cost basis in the client.
+                    # Best-effort: use the blueprint type's adjusted price (fallback to average),
+                    # and scale by run_ratio (copying less than max runs reduces the job scope).
+                    bp_type_id = 0
+                    try:
+                        bp_type_id = int(bp.get("type_id") or 0)
+                    except Exception:
+                        bp_type_id = 0
+
+                    bp_prices = market_price_map.get(int(bp_type_id)) if bp_type_id > 0 else None
+                    bp_adj = None
+                    bp_avg = None
+                    if isinstance(bp_prices, dict):
+                        bp_adj = bp_prices.get("adjusted_price")
+                        bp_avg = bp_prices.get("average_price")
+
+                    copy_eiv_unit = None
+                    if isinstance(bp_adj, (int, float)) and float(bp_adj) > 0:
+                        copy_eiv_unit = float(bp_adj)
+                    elif isinstance(bp_avg, (int, float)) and float(bp_avg) > 0:
+                        copy_eiv_unit = float(bp_avg)
+
+                    if copy_eiv_unit is None:
+                        # Fallback: preserve legacy behavior if we can't price the blueprint.
+                        copy_job_value = float(estimated_item_value_per_run) * float(bpc_runs)
+                        copy_eiv_basis = "manufacturing_eiv_per_run * runs (fallback)"
+                    else:
+                        copy_job_value = float(copy_eiv_unit) * float(run_ratio)
+                        copy_eiv_basis = "blueprint_price * run_ratio"
                     copy_gross_cost = copy_job_value * copy_ci
                     copy_gross_cost_after_bonuses = copy_gross_cost * (1.0 - float(copy_effective_cost_reduction))
                     copy_taxes = copy_job_value * float(profile_surcharge_rate)
@@ -1427,6 +1997,7 @@ def enrich_blueprints_for_character(
                             "surcharge_rate_total_fraction": float(profile_surcharge_rate),
                             "structure_cost_reduction_fraction": float(copy_effective_cost_reduction),
                             "estimated_item_value_total_isk": float(copy_job_value),
+                            "estimated_item_value_basis": str(copy_eiv_basis),
                             "gross_cost_isk": float(copy_gross_cost),
                             "gross_cost_after_bonuses_isk": float(copy_gross_cost_after_bonuses),
                             "taxes_isk": float(copy_taxes),
@@ -1461,6 +2032,7 @@ def enrich_blueprints_for_character(
                             "implant_time_reduction_fraction": float(mfg_implant_time_reduction),
                             "skills_and_implants_time_multiplier": float(mfg_skill_implant_time_multiplier),
                             "skills_and_implants_time_reduction_fraction": float(mfg_skill_implant_time_reduction),
+                            "required_skill_details": mfg_required_skill_details,
                             "implant_details": implant_details,
                         },
                         "total_time_multiplier": float(te_multiplier)

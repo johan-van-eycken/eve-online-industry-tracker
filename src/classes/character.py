@@ -15,6 +15,11 @@ from classes.database_models import CharacterModel, CharacterWalletJournalModel 
 
 from classes.asset_provenance import build_cost_map_for_assets
 
+
+JITA_4_4_STATION_ID = 60003760
+SKILL_ID_ACCOUNTING = 16622
+SKILL_ID_BROKER_RELATIONS = 3446
+
 class Character:
     """Ingame entity of a character."""
 
@@ -59,6 +64,7 @@ class Character:
             self.skills: Optional[Dict[str, Any]] = None
             self.standings: Optional[List[Dict[str, str]]] = None
             self.implants: Optional[List[int]] = None
+            self.market_fees: Optional[Dict[str, Any]] = None
             self.wallet_journal: Optional[List[Dict[str, Any]]] = None
             self.wallet_transactions: Optional[List[Dict[str, Any]]] = None
             self.reprocessing_skills: Optional[Dict[str, int]] = None
@@ -144,6 +150,7 @@ class Character:
             "reprocessing_skills": self.reprocessing_skills if isinstance(self.reprocessing_skills, dict) else {},
             "standings": self.standings if isinstance(self.standings, list) else [],
             "implants": self.implants if isinstance(self.implants, list) else [],
+            "market_fees": self.market_fees if isinstance(self.market_fees, (dict, list)) else {},
             "wallet_journal": serialize_model_list(self.wallet_journal, CharacterWalletJournalModel),
             "wallet_transactions": serialize_model_list(self.wallet_transactions, CharacterWalletTransactionsModel),
             "market_orders": serialize_model_list(self.market_orders, CharacterMarketOrdersModel),
@@ -200,6 +207,8 @@ class Character:
                         value = json.dumps(value)  # convert dict → string
                     elif column == "implants" and isinstance(value, (dict, list)):
                         value = json.dumps(value)  # convert list[int] → string
+                    elif column == "market_fees" and isinstance(value, (dict, list)):
+                        value = json.dumps(value)
                     setattr(character_record, column, value)
 
             character_record.updated_at = datetime.now(timezone.utc)
@@ -335,6 +344,7 @@ class Character:
              # Call individual data refresh methods
             self.refresh_profile()
             self.refresh_skills()
+            self.refresh_market_fees()
             self.refresh_implants()
             self.refresh_wallet_journal()
             self.refresh_wallet_transactions()
@@ -347,6 +357,145 @@ class Character:
             error_message = f"Failed to refresh all data for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
+    def _get_skill_level(self, *, skill_id: int, skill_name: str | None = None) -> int:
+        try:
+            skills_obj = self.skills or {}
+            skills_list = (skills_obj.get("skills") or []) if isinstance(skills_obj, dict) else []
+            if not isinstance(skills_list, list):
+                skills_list = []
+        except Exception:
+            skills_list = []
+
+        for s in skills_list:
+            if not isinstance(s, dict):
+                continue
+            try:
+                if int(s.get("skill_id") or -1) == int(skill_id):
+                    return int(s.get("trained_skill_level") or 0)
+            except Exception:
+                continue
+
+        if skill_name:
+            skill_name_norm = str(skill_name).strip().lower()
+            for s in skills_list:
+                if not isinstance(s, dict):
+                    continue
+                try:
+                    if str(s.get("skill_name") or "").strip().lower() == skill_name_norm:
+                        return int(s.get("trained_skill_level") or 0)
+                except Exception:
+                    continue
+
+        return 0
+
+    def _get_standing(self, *, from_type: str, from_id: int) -> float:
+        standings_list = self.standings if isinstance(self.standings, list) else []
+        for s in standings_list:
+            if not isinstance(s, dict):
+                continue
+            try:
+                if str(s.get("from_type")) != str(from_type):
+                    continue
+                if int(s.get("from_id") or -1) != int(from_id):
+                    continue
+                return float(s.get("standing") or 0.0)
+            except Exception:
+                continue
+        return 0.0
+
+    def refresh_market_fees(self) -> None:
+        """Compute and persist character-specific market fees (Jita 4-4 only).
+
+        Uses character skills + standings plus SDE station ownership.
+
+        Sales tax (seller): 7.5% * (1 - 0.11 * AccountingLevel)
+        Broker fee (NPC station): 3% - 0.3%*BrokerRelationsLevel - 0.03%*factionStanding - 0.02%*corpStanding
+        """
+        try:
+            # Skills may not be loaded yet (e.g. missing scopes). Treat as best-effort.
+            accounting_level = self._get_skill_level(skill_id=SKILL_ID_ACCOUNTING, skill_name="Accounting")
+            broker_rel_level = self._get_skill_level(skill_id=SKILL_ID_BROKER_RELATIONS, skill_name="Broker Relations")
+
+            base_sales_tax = 0.075
+            sales_tax_fraction = float(base_sales_tax) * (1.0 - (0.11 * float(accounting_level)))
+            sales_tax_fraction = min(1.0, max(0.0, sales_tax_fraction))
+
+            owner_corp_id: int | None = None
+            owner_faction_id: int | None = None
+            try:
+                station = (
+                    self._db_sde.session.query(NpcStations)
+                    .filter_by(id=int(JITA_4_4_STATION_ID))
+                    .first()
+                )
+                if station is not None:
+                    owner_corp_id = int(station.ownerID)
+            except Exception:
+                owner_corp_id = None
+
+            if owner_corp_id is not None:
+                try:
+                    corp = (
+                        self._db_sde.session.query(NpcCorporations)
+                        .filter_by(id=int(owner_corp_id))
+                        .first()
+                    )
+                    if corp is not None and corp.factionID is not None:
+                        owner_faction_id = int(corp.factionID)
+                except Exception:
+                    owner_faction_id = None
+
+            faction_standing = (
+                self._get_standing(from_type="faction", from_id=int(owner_faction_id))
+                if owner_faction_id is not None
+                else 0.0
+            )
+            corp_standing = (
+                self._get_standing(from_type="npc_corp", from_id=int(owner_corp_id))
+                if owner_corp_id is not None
+                else 0.0
+            )
+
+            broker_fee_fraction = (
+                0.03
+                - (0.003 * float(broker_rel_level))
+                - (0.0003 * float(faction_standing))
+                - (0.0002 * float(corp_standing))
+            )
+            broker_fee_fraction = min(0.03, max(0.0, float(broker_fee_fraction)))
+
+            self.market_fees = {
+                "jita_4_4": {
+                    "station_id": int(JITA_4_4_STATION_ID),
+                    "owner_corp_id": int(owner_corp_id) if owner_corp_id is not None else None,
+                    "owner_faction_id": int(owner_faction_id) if owner_faction_id is not None else None,
+                    "skills": {
+                        "accounting_level": int(accounting_level),
+                        "broker_relations_level": int(broker_rel_level),
+                    },
+                    "standings": {
+                        "faction_standing": float(faction_standing),
+                        "corp_standing": float(corp_standing),
+                    },
+                    "rates": {
+                        "base_sales_tax_fraction": float(base_sales_tax),
+                        "sales_tax_fraction": float(sales_tax_fraction),
+                        "broker_fee_fraction": float(broker_fee_fraction),
+                    },
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "computed",
+                }
+            }
+
+            self.save_character()
+        except Exception as e:
+            logging.warning(
+                "Failed to compute market fees for %s (%s): %s",
+                self.character_name,
+                self.character_id,
+                str(e),
+            )
 
     # -------------------
     # Refresh Profile
@@ -408,6 +557,10 @@ class Character:
 
             # Save to database
             self.save_character()
+
+            # Best-effort: refresh market fees now that standings are updated.
+            # If skills are not loaded yet, this will compute partial data and be overwritten later.
+            self.refresh_market_fees()
 
             logging.debug(f"Profile data successfully refreshed for {self.character_name}.")
         
@@ -838,6 +991,9 @@ class Character:
 
             # Save to database
             self.save_character()
+
+            # Best-effort: refresh market fees now that skills are updated.
+            self.refresh_market_fees()
 
             logging.debug(f"Skills successfully updated for {self.character_name}. Total skill points: {self.skills['total_skillpoints']}")
         
