@@ -92,9 +92,9 @@ class IndustryService:
     # -----------------
 
     @staticmethod
-    def _industry_builder_job_key(*, character_id: int, profile_id: int | None, maximize_runs: bool) -> str:
+    def _industry_builder_job_key(*, character_id: int, profile_id: int | None, maximize_runs: bool, pricing_key: str) -> str:
         pid = int(profile_id or 0)
-        return f"{int(character_id)}:{pid}:{1 if maximize_runs else 0}"
+        return f"{int(character_id)}:{pid}:{1 if maximize_runs else 0}:{str(pricing_key)}"
 
     def _cleanup_old_industry_builder_jobs(self) -> None:
         now = datetime.utcnow()
@@ -124,6 +124,7 @@ class IndustryService:
         character_id: int,
         profile_id: int | None,
         maximize_runs: bool,
+        pricing_preferences: dict | None,
     ) -> None:
         try:
             character = self._state.char_manager.get_character_by_id(int(character_id))
@@ -151,27 +152,58 @@ class IndustryService:
             copying_ci = 0.0
             research_me_ci = 0.0
             research_te_ci = 0.0
-            if selected_profile is not None and getattr(selected_profile, "system_id", None) is not None:
-                if self._state.esi_service is not None:
-                    try:
-                        systems = self._state.esi_service.get_industry_systems()
-                        sid = int(getattr(selected_profile, "system_id"))
-                        row = next((s for s in systems if s.get("solar_system_id") == sid), None)
-                        if row:
-                            for entry in (row.get("cost_indices") or []):
-                                if entry.get("activity") == "manufacturing":
-                                    manufacturing_ci = float(entry.get("cost_index") or 0.0)
-                                elif entry.get("activity") == "copying":
-                                    copying_ci = float(entry.get("cost_index") or 0.0)
-                                elif entry.get("activity") == "researching_material_efficiency":
-                                    research_me_ci = float(entry.get("cost_index") or 0.0)
-                                elif entry.get("activity") == "researching_time_efficiency":
-                                    research_te_ci = float(entry.get("cost_index") or 0.0)
-                    except Exception:
-                        manufacturing_ci = 0.0
-                        copying_ci = 0.0
-                        research_me_ci = 0.0
-                        research_te_ci = 0.0
+            system_id_for_cost_index: int | None = None
+            system_id_for_cost_index_source: str | None = None
+            facility_id_for_cost_index: int | None = None
+
+            if selected_profile is not None:
+                try:
+                    raw_facility_id = getattr(selected_profile, "facility_id", None)
+                    if raw_facility_id is not None and int(raw_facility_id) > 0:
+                        facility_id_for_cost_index = int(raw_facility_id)
+                except Exception:
+                    facility_id_for_cost_index = None
+
+            # Prefer the facility's actual solar system (matches in-game quoting).
+            if facility_id_for_cost_index is not None and self._state.esi_service is not None:
+                try:
+                    facilities = self._state.esi_service.get_industry_facilities() or []
+                    fac_row = next((f for f in facilities if f.get("facility_id") == int(facility_id_for_cost_index)), None)
+                    if isinstance(fac_row, dict) and fac_row.get("solar_system_id") is not None:
+                        system_id_for_cost_index = int(fac_row.get("solar_system_id"))
+                        system_id_for_cost_index_source = "industry_facilities"
+                except Exception:
+                    system_id_for_cost_index = None
+                    system_id_for_cost_index_source = None
+
+            # Fallback: profile.system_id (older profiles / manual selection)
+            if system_id_for_cost_index is None and selected_profile is not None and getattr(selected_profile, "system_id", None) is not None:
+                try:
+                    system_id_for_cost_index = int(getattr(selected_profile, "system_id"))
+                    system_id_for_cost_index_source = "profile.system_id"
+                except Exception:
+                    system_id_for_cost_index = None
+                    system_id_for_cost_index_source = None
+
+            if system_id_for_cost_index is not None and self._state.esi_service is not None:
+                try:
+                    systems = self._state.esi_service.get_industry_systems() or []
+                    row = next((s for s in systems if s.get("solar_system_id") == int(system_id_for_cost_index)), None)
+                    if row:
+                        for entry in (row.get("cost_indices") or []):
+                            if entry.get("activity") == "manufacturing":
+                                manufacturing_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "copying":
+                                copying_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_material_efficiency":
+                                research_me_ci = float(entry.get("cost_index") or 0.0)
+                            elif entry.get("activity") == "researching_time_efficiency":
+                                research_te_ci = float(entry.get("cost_index") or 0.0)
+                except Exception:
+                    manufacturing_ci = 0.0
+                    copying_ci = 0.0
+                    research_me_ci = 0.0
+                    research_te_ci = 0.0
 
             surcharge_rate = 0.0
             if selected_profile is not None:
@@ -353,11 +385,22 @@ class IndustryService:
                 db_sde_session=sde_session,
                 language=language,
                 progress_callback=_progress,
+                pricing_preferences=(pricing_preferences if isinstance(pricing_preferences, dict) else None),
             )
 
             meta = {
                 "profile_id": (int(getattr(selected_profile, "id")) if selected_profile is not None else None),
                 "profile_name": (getattr(selected_profile, "profile_name", None) if selected_profile is not None else None),
+                "facility_id": int(facility_id_for_cost_index) if facility_id_for_cost_index is not None else None,
+                "system_id_for_cost_index": int(system_id_for_cost_index) if system_id_for_cost_index is not None else None,
+                "system_id_for_cost_index_source": system_id_for_cost_index_source,
+                "system_cost_indices": {
+                    "manufacturing": float(manufacturing_ci),
+                    "copying": float(copying_ci),
+                    "research_me": float(research_me_ci),
+                    "research_te": float(research_te_ci),
+                },
+                "pricing_preferences": (pricing_preferences if isinstance(pricing_preferences, dict) else None),
             }
 
             with self._state.industry_builder_jobs_lock:
@@ -390,7 +433,37 @@ class IndustryService:
             profile_id_i = None
         maximize_runs = bool(payload.get("maximize_runs", False))
 
-        key = self._industry_builder_job_key(character_id=int(character_id), profile_id=profile_id_i, maximize_runs=maximize_runs)
+        pricing_preferences = payload.get("pricing_preferences")
+        if not isinstance(pricing_preferences, dict):
+            pricing_preferences = None
+
+        if isinstance(pricing_preferences, dict):
+            try:
+                depth_i = int(pricing_preferences.get("orderbook_depth") or 5)
+            except Exception:
+                depth_i = 5
+            depth_i = max(1, min(depth_i, 20))
+
+            smoothing = str(pricing_preferences.get("orderbook_smoothing") or "median_best_n").strip().lower()
+            if smoothing not in {"median_best_n", "mean_best_n"}:
+                smoothing = "median_best_n"
+
+            pricing_key = (
+                f"{pricing_preferences.get('hub','jita')}:"
+                f"{pricing_preferences.get('material_price_source','jita_buy')}:"
+                f"{pricing_preferences.get('product_price_source','jita_sell')}:"
+                f"{smoothing}:"
+                f"depth{depth_i}"
+            )
+        else:
+            pricing_key = "default"
+
+        key = self._industry_builder_job_key(
+            character_id=int(character_id),
+            profile_id=profile_id_i,
+            maximize_runs=maximize_runs,
+            pricing_key=str(pricing_key),
+        )
 
         with self._state.industry_builder_jobs_lock:
             existing_job_id = self._state.industry_builder_jobs_by_key.get(key)
@@ -422,6 +495,7 @@ class IndustryService:
                 "character_id": int(character_id),
                 "profile_id": profile_id_i,
                 "maximize_runs": bool(maximize_runs),
+                "pricing_preferences": (pricing_preferences if isinstance(pricing_preferences, dict) else None),
             },
             daemon=True,
         )

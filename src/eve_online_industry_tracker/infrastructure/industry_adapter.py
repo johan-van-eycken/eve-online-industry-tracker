@@ -52,6 +52,7 @@ def enrich_blueprints_for_character(
     db_app_session: Any,
     db_sde_session: Any,
     language: str,
+    pricing_preferences: dict | None = None,
 ) -> Any:
     return industry_builder_service.enrich_blueprints_for_character(
         all_blueprints,
@@ -73,6 +74,7 @@ def enrich_blueprints_for_character(
         db_app_session=db_app_session,
         db_sde_session=db_sde_session,
         language=language,
+        pricing_preferences=(pricing_preferences if isinstance(pricing_preferences, dict) else None),
     )
 
 

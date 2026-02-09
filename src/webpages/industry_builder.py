@@ -1,11 +1,24 @@
 import streamlit as st  # pyright: ignore[reportMissingImports]
 import pandas as pd  # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 
-import hashlib
 import html
 import json
+import math
 import time
+import sys
+import traceback
 from typing import Any
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
+except Exception:  # pragma: no cover
+    _AGGRID_IMPORT_ERROR = traceback.format_exc()
+    AgGrid = None  # type: ignore
+    GridOptionsBuilder = None  # type: ignore
+    JsCode = None  # type: ignore
+    
+else:
+    _AGGRID_IMPORT_ERROR = None
 
 from utils.app_init import load_config, init_db_app
 from utils.flask_api import api_get, api_post
@@ -18,6 +31,32 @@ def _get_industry_profiles(character_id: int) -> dict | None:
 
 def render():
     st.subheader("Industry Builder")
+
+    def _parse_json_cell(value: Any) -> Any:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, float) and math.isnan(value):
+                return None
+            if isinstance(value, (dict, list)):
+                return value
+            if isinstance(value, str):
+                s = value.strip()
+                if not s:
+                    return None
+                return json.loads(s)
+        except Exception:
+            return None
+        return None
+
+    def _coerce_fraction(value: Any, *, default: float) -> float:
+        try:
+            v = float(value)
+        except Exception:
+            v = float(default)
+        if v >= 1.0:
+            v = v / 100.0
+        return float(min(1.0, max(0.0, v)))
 
     def _type_icon_url(type_id: Any, *, size: int = 32) -> str | None:
         try:
@@ -42,6 +81,7 @@ def render():
 
     try:
         cfgManager = load_config()
+        cfg = cfgManager.all()
         db = init_db_app(cfgManager)
     except Exception as e:
         st.error(f"Failed to load database: {e}")
@@ -131,9 +171,106 @@ def render():
 
     maximize_runs = bool(st.session_state.get("maximize_blueprint_runs", True))
 
+    # --- Market pricing preferences (EveGuru-like profit tool) ---
+    # These settings affect material costs + product revenue used for Profit/ROI.
+    # Hub pricing outlier protection defaults (config-driven; no UI control).
+    mp_defaults = ((cfg or {}).get("defaults") or {}).get("market_pricing") if isinstance(cfg, dict) else {}
+    if not isinstance(mp_defaults, dict):
+        mp_defaults = {}
+
+    # UI defaults (config-driven; stored in session state once).
+    material_price_source_default_cfg = str(mp_defaults.get("material_price_source_default") or "Jita Sell")
+    product_price_source_default_cfg = str(mp_defaults.get("product_price_source_default") or "Jita Sell")
+    if material_price_source_default_cfg not in {"Jita Buy", "Jita Sell"}:
+        material_price_source_default_cfg = "Jita Sell"
+    if product_price_source_default_cfg not in {"Jita Buy", "Jita Sell"}:
+        product_price_source_default_cfg = "Jita Sell"
+
+    if "industry_builder_material_price_source" not in st.session_state:
+        st.session_state["industry_builder_material_price_source"] = material_price_source_default_cfg
+    if "industry_builder_product_price_source" not in st.session_state:
+        st.session_state["industry_builder_product_price_source"] = product_price_source_default_cfg
+
+    # Config defaults (with a final hard fallback for robustness)
+    _cfg_default_sales_tax = mp_defaults.get("sales_tax_fraction")
+    _cfg_default_broker_fee = mp_defaults.get("broker_fee_fraction")
+    default_sales_tax_fraction_cfg = _coerce_fraction(_cfg_default_sales_tax, default=0.03375)
+    default_broker_fee_fraction_cfg = _coerce_fraction(_cfg_default_broker_fee, default=0.03)
+    if "industry_builder_orderbook_depth" not in st.session_state:
+        try:
+            st.session_state["industry_builder_orderbook_depth"] = int(mp_defaults.get("orderbook_depth") or 5)
+        except Exception:
+            st.session_state["industry_builder_orderbook_depth"] = 5
+    if "industry_builder_orderbook_smoothing" not in st.session_state:
+        st.session_state["industry_builder_orderbook_smoothing"] = str(mp_defaults.get("orderbook_smoothing") or "median_best_n")
+    if "industry_builder_sales_tax_fraction" not in st.session_state:
+        # Market sales tax (applies when selling items on the market).
+        # Default 3.375% corresponds to base 7.5% with Accounting V.
+        try:
+            st.session_state["industry_builder_sales_tax_fraction"] = float(default_sales_tax_fraction_cfg)
+        except Exception:
+            st.session_state["industry_builder_sales_tax_fraction"] = float(default_sales_tax_fraction_cfg)
+
+    # Per-character market fees (Jita 4-4): prefer computed values if present.
+    default_sales_tax_fraction = _coerce_fraction(
+        st.session_state.get("industry_builder_sales_tax_fraction"),
+        default=float(default_sales_tax_fraction_cfg),
+    )
+    default_broker_fee_fraction = float(default_broker_fee_fraction_cfg)
+
+    market_fees_obj: dict[str, Any] | None = None
+    try:
+        row = characters_df.loc[characters_df["character_id"] == selected_character_id].iloc[0]
+        market_fees_obj = _parse_json_cell(row.get("market_fees")) if hasattr(row, "get") else None
+        if market_fees_obj is not None and not isinstance(market_fees_obj, dict):
+            market_fees_obj = None
+    except Exception:
+        market_fees_obj = None
+
+    jita_rates = (((market_fees_obj or {}).get("jita_4_4") or {}).get("rates") or {}) if isinstance(market_fees_obj, dict) else {}
+    effective_sales_tax_fraction = _coerce_fraction(jita_rates.get("sales_tax_fraction"), default=float(default_sales_tax_fraction))
+    effective_broker_fee_fraction = _coerce_fraction(jita_rates.get("broker_fee_fraction"), default=float(default_broker_fee_fraction))
+
+    with st.expander("Market Pricing (Profit/ROI)", expanded=False):
+        st.caption(
+            "Choose which Jita hub prices to use for profitability calculations. "
+            "These do not affect in-game job fees; they affect Material Cost, Revenue, Profit and ROI. "
+            "Outlier protection uses median of best 5 orders (configurable in config/config.json). "
+            "Profit includes market sales tax and broker fees based on the selected character (Jita 4-4)."
+        )
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            st.selectbox(
+                "Materials (procurement)",
+                options=["Jita Buy", "Jita Sell"],
+                key="industry_builder_material_price_source",
+                disabled=job_running,
+                help="Jita Buy = highest buy orders (placing buy orders). Jita Sell = lowest sell orders (buying instantly).",
+            )
+        with col_p2:
+            st.selectbox(
+                "Products (sale)",
+                options=["Jita Sell", "Jita Buy"],
+                key="industry_builder_product_price_source",
+                disabled=job_running,
+                help="Jita Sell = lowest sell orders (listing items). Jita Buy = highest buy orders (selling instantly).",
+            )
+
+        st.caption(
+            f"Character fees (Jita 4-4): Sales tax {effective_sales_tax_fraction*100.0:.2f}% · Broker fee {effective_broker_fee_fraction*100.0:.2f}%"
+        )
+
     # --- Explicit update workflow (required because full submanufacturing is expensive) ---
     # No backend calls happen here unless the user clicks the button.
-    key = f"{int(selected_character_id)}:{int(selected_profile_id or 0)}:{1 if maximize_runs else 0}"
+    pricing_key = (
+        f"jita:{st.session_state.get('industry_builder_material_price_source')}:"
+        f"{st.session_state.get('industry_builder_product_price_source')}:"
+        f"{str(st.session_state.get('industry_builder_orderbook_smoothing') or 'median_best_n')}:"
+        f"depth{int(st.session_state.get('industry_builder_orderbook_depth') or 5)}:"
+        f"stax{float(effective_sales_tax_fraction or 0.0):.6f}:"
+        f"bfee{float(effective_broker_fee_fraction or 0.0):.6f}"
+    )
+    key = f"{int(selected_character_id)}:{int(selected_profile_id or 0)}:{1 if maximize_runs else 0}:{pricing_key}"
     cache: dict[str, dict] = st.session_state.setdefault("industry_builder_cache", {})
 
 
@@ -158,6 +295,18 @@ def render():
                 payload = {
                     "profile_id": (int(selected_profile_id) if selected_profile_id is not None else None),
                     "maximize_runs": bool(maximize_runs),
+                    "pricing_preferences": {
+                        "hub": "jita",
+                        "material_price_source": (
+                            "jita_buy" if str(st.session_state.get("industry_builder_material_price_source")) == "Jita Buy" else "jita_sell"
+                        ),
+                        "product_price_source": (
+                            "jita_sell" if str(st.session_state.get("industry_builder_product_price_source")) == "Jita Sell" else "jita_buy"
+                        ),
+                        "orderbook_depth": int(st.session_state.get("industry_builder_orderbook_depth") or 5),
+                        "orderbook_smoothing": str(st.session_state.get("industry_builder_orderbook_smoothing") or "median_best_n"),
+                        "enabled": True,
+                    },
                 }
                 resp = api_post(f"/industry_builder_update/{int(selected_character_id)}", payload) or {}
                 if resp.get("status") != "success":
@@ -181,51 +330,88 @@ def render():
             st.session_state["industry_builder_job_id"] = None
             st.session_state["industry_builder_job_key"] = None
             st.session_state["industry_builder_selected_profile_id"] = None
+            st.session_state.pop("industry_builder_poll_started_at", None)
             st.rerun()
 
     job_id = st.session_state.get("industry_builder_job_id")
     job_key = st.session_state.get("industry_builder_job_key")
-    if job_id and job_key == key and not industry_data:
+    # While an update job is running (and we don't have cached results yet), avoid rendering the rest
+    # of the page. This prevents flicker during frequent polling reruns.
+    if job_id and not industry_data:
+        if job_key != key:
+            st.info("An Industry Builder update is running for different settings. Please wait for it to finish.")
+            st.stop()
+
+        # Adaptive polling backoff to reduce backend load and log spam.
+        poll_started_at = st.session_state.get("industry_builder_poll_started_at")
+        if poll_started_at is None:
+            poll_started_at = time.time()
+            st.session_state["industry_builder_poll_started_at"] = poll_started_at
+
         try:
             status_resp = api_get(f"/industry_builder_update_status/{job_id}") or {}
             if status_resp.get("status") != "success":
                 st.error(f"API error: {status_resp.get('message', 'Unknown error')}")
-            else:
-                s = status_resp.get("data") or {}
-                status = s.get("status")
-                done = int(s.get("progress_done") or 0)
-                total = s.get("progress_total")
-                try:
-                    total_i = int(total) if total is not None else None
-                except Exception:
-                    total_i = None
+                st.stop()
 
-                if status == "error":
-                    st.error(f"Backend update failed: {s.get('error')}")
-                    st.session_state["industry_builder_job_id"] = None
-                    st.session_state["industry_builder_job_key"] = None
-                elif status == "done":
-                    result_resp = api_get(
-                        f"/industry_builder_update_result/{job_id}",
-                        timeout_seconds=300,
-                    ) or {}
-                    if result_resp.get("status") != "success":
-                        st.error(f"API error: {result_resp.get('message', 'Unknown error')}")
-                    else:
-                        data = result_resp.get("data") or []
-                        meta = result_resp.get("meta")
-                        if isinstance(cache, dict):
-                            cache[key] = {"data": data, "meta": meta}
-                        st.session_state["industry_builder_job_id"] = None
-                        st.session_state["industry_builder_job_key"] = None
-                        st.rerun()
+            s = status_resp.get("data") or {}
+            status = s.get("status")
+            done = int(s.get("progress_done") or 0)
+            total = s.get("progress_total")
+            try:
+                total_i = int(total) if total is not None else None
+            except Exception:
+                total_i = None
+
+            if status == "error":
+                st.error(f"Backend update failed: {s.get('error')}")
+                st.session_state["industry_builder_job_id"] = None
+                st.session_state["industry_builder_job_key"] = None
+                st.session_state.pop("industry_builder_poll_started_at", None)
+                st.stop()
+            elif status == "done":
+                result_resp = api_get(
+                    f"/industry_builder_update_result/{job_id}",
+                    timeout_seconds=300,
+                ) or {}
+                if result_resp.get("status") != "success":
+                    st.error(f"API error: {result_resp.get('message', 'Unknown error')}")
+                    st.stop()
+
+                data = result_resp.get("data") or []
+                meta = result_resp.get("meta")
+                if isinstance(cache, dict):
+                    cache[key] = {"data": data, "meta": meta}
+                st.session_state["industry_builder_job_id"] = None
+                st.session_state["industry_builder_job_key"] = None
+                st.session_state.pop("industry_builder_poll_started_at", None)
+                st.rerun()
+            else:
+                # Backoff schedule (seconds): 1s for first 15s, then 2s, 4s, 7s.
+                now = time.time()
+                elapsed_s = max(0.0, float(now - float(poll_started_at or now)))
+                if elapsed_s < 15.0:
+                    poll_s = 1.0
+                elif elapsed_s < 60.0:
+                    poll_s = 2.0
+                elif elapsed_s < 180.0:
+                    poll_s = 4.0
                 else:
-                    frac = (float(done) / float(total_i)) if total_i and total_i > 0 else 0.0
-                    st.progress(min(1.0, max(0.0, frac)), text=f"Updating: {done} / {total_i or '?'} blueprints")
-                    time.sleep(1)
-                    st.rerun()
+                    poll_s = 7.0
+
+                frac = (float(done) / float(total_i)) if total_i and total_i > 0 else 0.0
+                minutes = int(elapsed_s // 60.0)
+                seconds = int(elapsed_s % 60.0)
+                elapsed_txt = f"{minutes:02d}:{seconds:02d}"
+                st.progress(
+                    min(1.0, max(0.0, frac)),
+                    text=f"Updating: {done} / {total_i or '?'} blueprints (elapsed {elapsed_txt}; next check ~{int(poll_s)}s)",
+                )
+                time.sleep(poll_s)
+                st.rerun()
         except Exception as e:
             st.error(f"Error calling backend: {e}")
+            st.stop()
 
     if not industry_data:
         st.info("Click **Update Industry Jobs** to load data.")
@@ -358,6 +544,73 @@ def render():
                 help="Filter table rows by the produced item's category.",
             )
 
+        st.divider()
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Min. ROI**")
+            roi_cb_col, roi_val_col = st.columns([0.18, 0.82])
+            with roi_cb_col:
+                apply_min_roi = st.checkbox(
+                    "",
+                    value=False,
+                    key="industry_builder_apply_min_roi",
+                    label_visibility="collapsed",
+                )
+            with roi_val_col:
+                min_roi_pct = st.number_input(
+                    "ROI (%)",
+                    min_value=0.0,
+                    max_value=10_000.0,
+                    value=10.0,
+                    step=1.0,
+                    disabled=not bool(apply_min_roi),
+                    key="industry_builder_min_roi_pct",
+                )
+
+        with c2:
+            st.markdown("**Min. Profit**")
+            profit_cb_col, profit_val_col = st.columns([0.18, 0.82])
+            with profit_cb_col:
+                apply_min_profit = st.checkbox(
+                    "",
+                    value=False,
+                    key="industry_builder_apply_min_profit",
+                    label_visibility="collapsed",
+                )
+            with profit_val_col:
+                min_profit_isk = st.number_input(
+                    "Profit (ISK)",
+                    min_value=0,
+                    max_value=10_000_000_000_000,
+                    value=1_000_000,
+                    step=100_000,
+                    disabled=not bool(apply_min_profit),
+                    key="industry_builder_min_profit_isk",
+                )
+
+        with c3:
+            st.markdown("**Min. ISK/h**")
+            iskh_cb_col, iskh_val_col = st.columns([0.18, 0.82])
+            with iskh_cb_col:
+                apply_min_iskh = st.checkbox(
+                    "",
+                    value=False,
+                    key="industry_builder_apply_min_iskh",
+                    label_visibility="collapsed",
+                    help="Filters by the 'Profit / hour' column.",
+                )
+            with iskh_val_col:
+                min_iskh_isk = st.number_input(
+                    "ISK / hour",
+                    min_value=0,
+                    max_value=10_000_000_000_000,
+                    value=1_000_000,
+                    step=100_000,
+                    disabled=not bool(apply_min_iskh),
+                    key="industry_builder_min_iskh_isk",
+                )
+
     filtered_blueprints = [
         bp
         for bp in industry_data
@@ -369,6 +622,14 @@ def render():
             location_filter=location_filter,
         )
     ]
+
+    # Market fee behavior depends on which pricing mode is selected.
+    material_price_source = str(st.session_state.get("industry_builder_material_price_source") or "")
+    product_price_source = str(st.session_state.get("industry_builder_product_price_source") or "")
+    apply_buy_broker_fee = material_price_source == "Jita Buy"  # placing buy orders
+    apply_sell_broker_fee = product_price_source == "Jita Sell"  # listing sell orders
+    sales_tax_fraction = float(effective_sales_tax_fraction)
+    broker_fee_fraction = float(effective_broker_fee_fraction)
 
     # Explode to produced-item grain.
     table_rows: list[dict] = []
@@ -383,6 +644,7 @@ def render():
         props = (mj.get("properties") or {}) if isinstance(mj, dict) else {}
         cost = (props.get("job_cost") or {}) if isinstance(props, dict) else {}
         effective = (props.get("effective_totals") or {}) if isinstance(props, dict) else {}
+        time_eff = (props.get("total_time_efficiency") or {}) if isinstance(props, dict) else {}
 
         job_runs = props.get("job_runs")
         try:
@@ -390,10 +652,21 @@ def render():
         except Exception:
             job_runs_i = 1
 
-        # Effective totals (includes copy overhead for BPCs when present)
-        est_fee_total = effective.get("estimated_total_job_cost_isk")
-        if est_fee_total is None:
-            est_fee_total = cost.get("total_job_cost_isk")
+        # Job duration (seconds): main manufacturing job only.
+        # Intentionally excludes submanufacturing time and any copy/research overhead.
+        job_time_seconds: float | None = None
+        try:
+            v = time_eff.get("estimated_job_time_seconds")
+            job_time_seconds = float(v) if v is not None else None
+        except Exception:
+            job_time_seconds = None
+
+        job_duration_display = _format_duration(job_time_seconds) if job_time_seconds is not None else "-"
+
+        # Manufacturing job fee (aligns with in-game "Total job cost").
+        # Note: we compute optional copy overhead in the backend, but we don't include it
+        # in the main products table by default.
+        est_fee_total = cost.get("total_job_cost_isk")
         try:
             est_fee_total_f = float(est_fee_total or 0.0)
         except Exception:
@@ -411,8 +684,14 @@ def render():
             total_material_cost = 0.0
         total_product_value = float(bp.get("total_product_value") or 0.0)
 
+        # Broker fees: apply only when placing market orders.
+        broker_fee_buy_total = float(total_material_cost) * float(broker_fee_fraction) if apply_buy_broker_fee else 0.0
+        broker_fee_sell_total = float(total_product_value) * float(broker_fee_fraction) if apply_sell_broker_fee else 0.0
+
         # Profit (incl. job fee) is the most actionable for ROI.
+        sales_tax_total_bp = float(total_product_value) * float(sales_tax_fraction)
         profit_total = total_product_value - total_material_cost - est_fee_total_f
+        profit_total_net = profit_total - sales_tax_total_bp - broker_fee_buy_total - broker_fee_sell_total
 
         # Allocate blueprint-level costs across products to support multi-output blueprints.
         products_list = [p for p in (bp.get("products") or []) if isinstance(p, dict)]
@@ -424,7 +703,11 @@ def render():
             except Exception:
                 q = 0
             try:
-                unit_price = float(prod.get("average_price") or 0.0)
+                unit_price = float(
+                    prod.get("market_unit_price_isk")
+                    if prod.get("market_unit_price_isk") is not None
+                    else (prod.get("average_price") or 0.0)
+                )
             except Exception:
                 unit_price = 0.0
             product_qty_totals.append(max(0, q))
@@ -462,32 +745,39 @@ def render():
             allocated_product_value = float(total_product_value) * float(share)
             allocated_profit = allocated_product_value - allocated_material_cost - allocated_job_fee
 
+            allocated_broker_fee_buy = float(broker_fee_buy_total) * float(share)
+            allocated_broker_fee_sell = float(broker_fee_sell_total) * float(share)
+            broker_fee_total = float(allocated_broker_fee_buy) + float(allocated_broker_fee_sell)
+
+            sales_tax_total = float(allocated_product_value) * float(sales_tax_fraction)
+            allocated_profit_net = float(allocated_profit) - float(sales_tax_total) - float(broker_fee_total)
+
+            profit_per_hour: float | None = None
+            if job_time_seconds is not None:
+                try:
+                    hours = float(job_time_seconds) / 3600.0
+                except Exception:
+                    hours = 0.0
+                if hours > 0:
+                    profit_per_hour = float(allocated_profit_net) / float(hours)
+
             # Per-item metrics
             mat_cost_per_item = allocated_material_cost / float(prod_qty_total)
             prod_value_per_item = allocated_product_value / float(prod_qty_total)
-            profit_per_item = allocated_profit / float(prod_qty_total)
+            sales_tax_per_item = float(sales_tax_total) / float(prod_qty_total)
+            broker_fee_per_item = float(broker_fee_total) / float(prod_qty_total)
+            profit_per_item = allocated_profit_net / float(prod_qty_total)
             job_fee_per_item = allocated_job_fee / float(prod_qty_total)
 
-            denom_total = allocated_material_cost + allocated_job_fee
-            roi_total = (allocated_profit / float(denom_total)) if denom_total > 0 else None
+            denom_total = allocated_material_cost + allocated_job_fee + broker_fee_total
+            roi_total = (allocated_profit_net / float(denom_total)) if denom_total > 0 else None
             roi_total_percent = (float(roi_total) * 100.0) if roi_total is not None else None
-
-            # Per-item ROI is identical to total ROI for linear costs, but we show both.
-            denom_item = mat_cost_per_item + job_fee_per_item
-            roi_item = (profit_per_item / float(denom_item)) if denom_item > 0 else None
-            roi_item_percent = (float(roi_item) * 100.0) if roi_item is not None else None
 
             row = {
                 # Produced item grain
                 "type_id": prod_type_id,
-                "type_name": prod_type_name,
-                "category": prod_cat,
-                "group": prod_grp,
-
-                # Useful context
-                "blueprint": bp.get("type_name"),
-                "solar_system": (solar.get("name") if isinstance(solar, dict) else None),
-                "solar_system_security": (solar.get("security_status") if isinstance(solar, dict) else None),
+                "Name": prod_type_name,
+                "Category": prod_cat,
 
                 # Job configuration
                 "Runs": int(job_runs_i),
@@ -495,28 +785,37 @@ def render():
                 "ME": bp.get("blueprint_material_efficiency_percent"),
                 "TE": bp.get("blueprint_time_efficiency_percent"),
 
+                "Job Duration": str(job_duration_display),
+                "Profit / hour": float(profit_per_hour) if profit_per_hour is not None else None,
+
                 # Per-item outputs
                 "Mat. Cost / item": float(mat_cost_per_item),
-                "Prod. Value / item": float(prod_value_per_item),
+                "Revenue / item": float(prod_value_per_item),
+                "Sales Tax / item": float(sales_tax_per_item),
+                "Broker Fee / item": float(broker_fee_per_item),
                 "Profit / item": float(profit_per_item),
-                "Est. Job Fee / item": float(job_fee_per_item),
-                "ROI / item": float(roi_item_percent) if roi_item_percent is not None else None,
+                "Job Fee / item": float(job_fee_per_item),
 
                 # Totals
-                "Total Mat. Cost": float(allocated_material_cost),
-                "Total Prod. Value": float(allocated_product_value),
-                "Total Profit": float(allocated_profit),
-                "Total Job Fee": float(allocated_job_fee),
-                "ROI / total": float(roi_total_percent) if roi_total_percent is not None else None,
+                "Mat. Cost": float(allocated_material_cost),
+                "Revenue": float(allocated_product_value),
+                "Sales Tax": float(sales_tax_total),
+                "Broker Fee": float(broker_fee_total),
+                "Profit": float(allocated_profit_net),
+                "Job Fee": float(allocated_job_fee),
+                "ROI": float(roi_total_percent) if roi_total_percent is not None else None,
 
-                # Location should be last in the table
-                "location": (loc.get("display_name") if isinstance(loc, dict) else None),
+                # Location
+                "Location": (loc.get("display_name") if isinstance(loc, dict) else None),
+                "Solar System": (solar.get("name") if isinstance(solar, dict) else None),
+                "Solar System Security": (solar.get("security_status") if isinstance(solar, dict) else None),
 
-                # Internal (for consistency checks / possible later use)
-                "_profit_total": float(profit_total),
+                # Internal (for consistency checks)
+                "_profit_total": float(profit_total_net),
                 "_total_material_cost": float(total_material_cost),
                 "_total_product_value": float(total_product_value),
                 "_total_job_fee": float(est_fee_total_f),
+                "_job_time_seconds": float(job_time_seconds) if job_time_seconds is not None else None,
             }
 
             table_rows.append(row)
@@ -524,40 +823,57 @@ def render():
     products_df = pd.DataFrame(table_rows)
 
     if selected_categories:
-        products_df = products_df[products_df["category"].isin(selected_categories)]
+        products_df = products_df[products_df["Category"].isin(selected_categories)]
+
+    # Profitability threshold filters (product-row grain)
+    if bool(apply_min_roi) and "ROI" in products_df.columns:
+        try:
+            roi_s = pd.to_numeric(products_df["ROI"], errors="coerce")
+            products_df = products_df[roi_s >= float(min_roi_pct)]
+        except Exception:
+            pass
+
+    if bool(apply_min_profit) and "Profit" in products_df.columns:
+        try:
+            p_s = pd.to_numeric(products_df["Profit"], errors="coerce")
+            products_df = products_df[p_s >= float(min_profit_isk)]
+        except Exception:
+            pass
+
+    if bool(apply_min_iskh) and "Profit / hour" in products_df.columns:
+        try:
+            h_s = pd.to_numeric(products_df["Profit / hour"], errors="coerce")
+            products_df = products_df[h_s >= float(min_iskh_isk)]
+        except Exception:
+            pass
 
     st.caption(f"{len(products_df)} product rows")
+    st.caption(
+        "Job Duration shows the main manufacturing job time only (no submanufacturing, no copy/research overhead). "
+        "Profit / hour uses this duration."
+    )
 
     # Keep the main table focused: hide debug/internal fields.
     hidden_cols = {
+        "blueprint",
         "_profit_total",
         "_total_material_cost",
         "_total_product_value",
         "_total_job_fee",
+        "_job_time_seconds",
     }
     display_df = products_df.drop(columns=[c for c in hidden_cols if c in products_df.columns], errors="ignore")
-
-    # Hide category/group/blueprint fields from the table (requested).
-    display_df = display_df.drop(
-        columns=[c for c in ["category", "group", "blueprint"] if c in display_df.columns],
-        errors="ignore",
-    )
-
-    # Ensure location is the last visible column.
-    if "location" in display_df.columns:
-        cols = [c for c in display_df.columns if c != "location"] + ["location"]
-        display_df = display_df[cols]
 
     # Add item icon column right after type_id (if available).
     if "type_id" in display_df.columns:
         try:
-            icon_series = display_df["type_id"].apply(lambda tid: _type_icon_url(tid, size=32))
+            icon = display_df["type_id"].apply(lambda tid: _type_icon_url(tid, size=32))
             if "Icon" not in display_df.columns:
-                if "type_name" in display_df.columns:
-                    insert_at = max(0, int(list(display_df.columns).index("type_name")))
+                if "Name" in display_df.columns:
+                    insert_at = max(0, int(list(display_df.columns).index("Name")))
                 else:
                     insert_at = min(1, len(display_df.columns))
-                display_df.insert(insert_at, "Icon", icon_series)
+                display_df.insert(insert_at, "Icon", icon)
         except Exception:
             pass
 
@@ -578,40 +894,295 @@ def render():
         except Exception:
             display_df[_col] = display_df[_col].astype(str)
 
-    column_config = {}
-    if "Icon" in display_df.columns:
-        column_config["Icon"] = st.column_config.ImageColumn("Icon", width="small")
-    if "Mat. Cost / item" in display_df.columns:
-        column_config["Mat. Cost / item"] = st.column_config.NumberColumn("Mat. Cost / item", format="%.2f ISK")
-    if "Prod. Value / item" in display_df.columns:
-        column_config["Prod. Value / item"] = st.column_config.NumberColumn("Prod. Value / item", format="%.2f ISK")
-    if "Profit / item" in display_df.columns:
-        column_config["Profit / item"] = st.column_config.NumberColumn("Profit / item", format="%.2f ISK")
-    if "Est. Job Fee / item" in display_df.columns:
-        column_config["Est. Job Fee / item"] = st.column_config.NumberColumn(
-            "Est. Job Fee / item",
-            format="%.2f ISK",
-            help="Estimated installation fee per produced item. For BPCs, this includes estimated copying overhead.",
-        )
-    if "ROI / item" in display_df.columns:
-        column_config["ROI / item"] = st.column_config.NumberColumn(
-            "ROI / item",
-            format="%.2f%%",
-            help="Per-item ROI (same as total ROI for linear costs).",
-        )
-    if "ROI / total" in display_df.columns:
-        column_config["ROI / total"] = st.column_config.NumberColumn(
-            "ROI / total",
-            format="%.2f%%",
-            help="Total ROI for this product row.",
-        )
-    for col in ["Total Mat. Cost", "Total Prod. Value", "Total Profit", "Total Job Fee"]:
-        if col in display_df.columns:
-            column_config[col] = st.column_config.NumberColumn(col, format="%.0f ISK")
-    if "solar_system_security" in display_df.columns:
-        column_config["solar_system_security"] = st.column_config.NumberColumn("Sec", format="%.2f")
+    # Products table (AgGrid): EU formatting + icons + true right alignment.
 
-    st.dataframe(display_df, width="stretch", hide_index=True, column_config=column_config)
+    _preferred_cols = [
+        "type_id",
+        "Icon",
+        "Name",
+        "ME",
+        "TE",
+        "Runs",
+        "Units",
+        "Job Duration",
+        "Profit / hour",
+        "ROI",
+        "Mat. Cost",
+        "Job Fee",
+        "Revenue",
+        "Sales Tax",
+        "Broker Fee",
+        "Profit",
+        "Mat. Cost / item",
+        "Job Fee / item",
+        "Revenue / item",
+        "Sales Tax / item",
+        "Broker Fee / item",
+        "Profit / item",
+        "Location",
+        "Solar System",
+        "Solar System Security",
+        "Category",
+    ]
+    _cols = [c for c in _preferred_cols if c in display_df.columns]
+    _cols += [c for c in display_df.columns if c not in _cols]
+    display_df = display_df[_cols]
+
+    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+        st.error(
+            "Failed to import streamlit-aggrid in the running Streamlit process. "
+            "This usually means it isn't installed in the same Python interpreter, or Streamlit needs a restart after install."
+        )
+        st.caption(f"Python: {sys.executable}")
+        if _AGGRID_IMPORT_ERROR:
+            with st.expander("Import error details", expanded=False):
+                st.code(_AGGRID_IMPORT_ERROR)
+        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
+        st.info("Fallback: showing a basic table without AgGrid.")
+
+        # Fallback renderer (no true right-align): EU formatting as strings + icon images.
+        def _fmt_decimal_eu(value: Any, *, decimals: int = 2) -> str:
+            try:
+                if value is None or (isinstance(value, float) and pd.isna(value)):
+                    return "-"
+                v = float(value)
+            except Exception:
+                return "-"
+            s = f"{v:,.{int(decimals)}f}"  # 1,234,567.89
+            return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+        def _fmt_isk_eu(value: Any, *, decimals: int = 2) -> str:
+            s = _fmt_decimal_eu(value, decimals=decimals)
+            return f"{s} ISK" if s != "-" else "-"
+
+        def _fmt_pct_eu(value: Any, *, decimals: int = 2) -> str:
+            s = _fmt_decimal_eu(value, decimals=decimals)
+            return f"{s}%" if s != "-" else "-"
+
+        view_df = display_df.copy()
+        for c in [
+            "Mat. Cost",
+            "Job Fee",
+            "Revenue",
+            "Sales Tax",
+            "Broker Fee",
+            "Profit",
+            "Mat. Cost / item",
+            "Job Fee / item",
+            "Revenue / item",
+            "Sales Tax / item",
+            "Broker Fee / item",
+            "Profit / item",
+        ]:
+            if c in view_df.columns:
+                view_df[c] = view_df[c].apply(lambda x: _fmt_isk_eu(x, decimals=2))
+        if "ROI" in view_df.columns:
+            view_df["ROI"] = view_df["ROI"].apply(lambda x: _fmt_pct_eu(x, decimals=2))
+        if "Solar System Security" in view_df.columns:
+            view_df["Solar System Security"] = view_df["Solar System Security"].apply(lambda x: _fmt_decimal_eu(x, decimals=2))
+
+        fallback_config: dict[str, Any] = {}
+        if "Icon" in view_df.columns:
+            fallback_config["Icon"] = st.column_config.ImageColumn("Icon", width="small")
+        st.data_editor(
+            view_df,
+            width="stretch",
+            hide_index=True,
+            disabled=True,
+            num_rows="fixed",
+            column_config=fallback_config or None,
+        )
+        st.divider()
+        return
+
+    eu_locale = "nl-NL"  # '.' thousands, ',' decimals
+
+    img_renderer = JsCode(
+        """
+            (function() {
+                function IconRenderer() {}
+
+                IconRenderer.prototype.init = function(params) {
+                    this.eGui = document.createElement('div');
+                    this.eGui.style.display = 'flex';
+                    this.eGui.style.alignItems = 'center';
+                    this.eGui.style.justifyContent = 'center';
+                    this.eGui.style.width = '100%';
+
+                    this.eImg = document.createElement('img');
+                    this.eImg.style.width = '32px';
+                    this.eImg.style.height = '32px';
+                    this.eImg.style.display = 'block';
+                    this.eImg.src = params.value ? String(params.value) : '';
+
+                    this.eGui.appendChild(this.eImg);
+                };
+
+                IconRenderer.prototype.getGui = function() {
+                    return this.eGui;
+                };
+
+                IconRenderer.prototype.refresh = function(params) {
+                    if (this.eImg) {
+                        this.eImg.src = params.value ? String(params.value) : '';
+                    }
+                    return true;
+                };
+
+                return IconRenderer;
+            })()
+        """
+    )
+
+    def _js_eu_number(decimals: int) -> JsCode:
+        return JsCode(
+            f"""
+                function(params) {{
+                if (params.value === null || params.value === undefined || params.value === "") return "";
+                const n = Number(params.value);
+                if (isNaN(n)) return "";
+                return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n);
+                }}
+            """
+        )
+
+    def _js_eu_isk(decimals: int) -> JsCode:
+        return JsCode(
+            f"""
+                function(params) {{
+                if (params.value === null || params.value === undefined || params.value === "") return "";
+                const n = Number(params.value);
+                if (isNaN(n)) return "";
+                return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + ' ISK';
+                }}
+            """
+        )
+
+    def _js_eu_pct(decimals: int) -> JsCode:
+        return JsCode(
+            f"""
+                function(params) {{
+                    if (params.value === null || params.value === undefined || params.value === "") return "";
+                    const n = Number(params.value);
+                    if (isNaN(n)) return "";
+                    return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + '%';
+                }}
+            """
+        )
+
+    gb = GridOptionsBuilder.from_dataframe(display_df)
+    gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+
+    if "Icon" in display_df.columns:
+        gb.configure_column(
+            "Icon",
+            header_name="",
+            width=62,
+            pinned="left",
+            sortable=False,
+            filter=False,
+            suppressAutoSize=True,
+            cellRenderer=img_renderer,
+        )
+
+    right = {"textAlign": "right"}
+
+    # ISK columns
+    for c in [
+        "Mat. Cost",
+        "Job Fee",
+        "Revenue",
+        "Sales Tax",
+        "Broker Fee",
+        "Profit",
+        "Profit / hour",
+        "Mat. Cost / item",
+        "Job Fee / item",
+        "Revenue / item",
+        "Sales Tax / item",
+        "Broker Fee / item",
+        "Profit / item",
+    ]:
+        if c in display_df.columns:
+            gb.configure_column(
+                c,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=_js_eu_isk(2),
+                minWidth=150,
+                cellStyle=right,
+            )
+
+    if "ROI" in display_df.columns:
+        gb.configure_column(
+            "ROI",
+            type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=_js_eu_pct(2),
+            minWidth=110,
+            cellStyle=right,
+        )
+
+    if "Solar System Security" in display_df.columns:
+        gb.configure_column(
+            "Solar System Security",
+            type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=_js_eu_number(2),
+            minWidth=150,
+            cellStyle=right,
+        )
+
+    for c in ["Runs", "Units"]:
+        if c in display_df.columns:
+            gb.configure_column(
+                c,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=_js_eu_number(0),
+                minWidth=110,
+                cellStyle=right,
+            )
+
+    grid_options = gb.build()
+    # Column auto-sizing
+    # - Prefer AG Grid's autoSizeStrategy when supported (keeps widths in sync with rendered values).
+    # - Also trigger autoSizeAllColumns on key events as a fallback.
+    grid_options["autoSizeStrategy"] = {"type": "fitCellContents"}
+
+    _js_autosize_all = JsCode(
+        """
+            function(params) {
+                setTimeout(function() {
+                    try {
+                        // skipHeader=false so header text is included in sizing.
+                        params.columnApi.autoSizeAllColumns(false);
+                    } catch (e) {}
+                }, 50);
+            }
+        """
+    )
+
+    grid_options["onFirstDataRendered"] = JsCode(
+        """
+            function(params) {
+                // Delay helps when the grid is still laying out / fonts not ready.
+                setTimeout(function() {
+                    try {
+                        params.columnApi.autoSizeAllColumns(false);
+                    } catch (e) {}
+                }, 50);
+            }
+        """
+    )
+    grid_options["onGridSizeChanged"] = _js_autosize_all
+    grid_options["onSortChanged"] = _js_autosize_all
+    grid_options["onFilterChanged"] = _js_autosize_all
+    height = min(800, 40 + (len(display_df) * 35))
+    AgGrid(
+        display_df,
+        gridOptions=grid_options,
+        allow_unsafe_jscode=True,
+        theme="streamlit",
+        height=height,
+    )
+
     st.divider()
 
     if not filtered_blueprints or products_df.empty:
@@ -620,17 +1191,18 @@ def render():
     st.subheader("Product Details")
 
     # Select a produced item (product-centric workflow)
+    # products_df uses "Name" (not "type_name") for the produced item label.
     prod_pairs = (
-        products_df[["type_id", "type_name"]]
+        products_df[["type_id", "Name"]]
         .dropna()
         .drop_duplicates()
-        .sort_values(["type_name", "type_id"], ascending=[True, True])
+        .sort_values(["Name", "type_id"], ascending=[True, True])
     )
     if prod_pairs.empty:
         st.info("No producible products available with the current filters.")
         return
 
-    prod_options = [(int(r["type_id"]), str(r["type_name"])) for _, r in prod_pairs.iterrows()]
+    prod_options = [(int(r["type_id"]), str(r["Name"])) for _, r in prod_pairs.iterrows()]
     prod_label_by_id = {tid: name for tid, name in prod_options}
 
     selected_product_id = st.selectbox(
@@ -802,7 +1374,7 @@ def render():
     job_runs = mj_props.get("job_runs")
 
     materials = manufacture_job.get("required_materials", []) or []
-    required_skills = full_bp_data.get("required_skills", []) or []
+    required_skills = manufacture_job.get("required_skills") or []
 
     col_bp_icon, col_bp_title = st.columns([1, 11])
     with col_bp_icon:
@@ -1035,42 +1607,42 @@ def render():
 
             st.markdown(
                 """
-<style>
-.tree-name {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-}
-.tree-caret {
-    display: inline-block;
-    width: 0.9rem;
-    opacity: 0.7;
-    font-weight: 600;
-}
-.tree-caret-open {
-    transform: rotate(90deg);
-}
+                    <style>
+                    .tree-name {
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 0.35rem;
+                    }
+                    .tree-caret {
+                        display: inline-block;
+                        width: 0.9rem;
+                        opacity: 0.7;
+                        font-weight: 600;
+                    }
+                    .tree-caret-open {
+                        transform: rotate(90deg);
+                    }
 
-.qty-cell {
-    color: inherit !important;
-}
+                    .qty-cell {
+                        color: inherit !important;
+                    }
 
-.cost-good {
-    color: #2ecc71;
-    font-weight: 600;
-}
-.cost-bad {
-    color: #e74c3c;
-    font-weight: 600;
-}
+                    .cost-good {
+                        color: #2ecc71;
+                        font-weight: 600;
+                    }
+                    .cost-bad {
+                        color: #e74c3c;
+                        font-weight: 600;
+                    }
 
-hr.tree-divider {
-    margin: 0.2rem 0 !important;
-    border: 0;
-    border-top: 1px solid rgba(128, 128, 128, 0.35);
-}
-</style>
-""",
+                    hr.tree-divider {
+                        margin: 0.2rem 0 !important;
+                        border: 0;
+                        border-top: 1px solid rgba(128, 128, 128, 0.35);
+                    }
+                    </style>
+                """,
 
                 unsafe_allow_html=True,
             )
