@@ -2,8 +2,17 @@ import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
 
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
+except Exception:  # pragma: no cover
+    AgGrid = None  # type: ignore
+    GridOptionsBuilder = None  # type: ignore
+    JsCode = None  # type: ignore
+
 from utils.flask_api import cached_api_get, api_get, api_post
-from utils.formatters import format_isk, format_date, format_date_into_age
+from utils.formatters import format_isk, format_isk_short, format_date, format_date_into_age
+
+from webpages.industry_builder_utils import attach_aggrid_autosize
 
 
 @st.cache_data(ttl=60)
@@ -158,13 +167,50 @@ def render():
 
     st.divider()
 
-    def build_tooltip(breakdown, category, formatter=format_isk, join_labels=True):
+    def camel_heading(name: str) -> str:
+        # Convert snake_case to Title Case, with common acronyms uppercased.
+        parts = [p for p in str(name).split("_") if p]
+        acronyms = {"id", "isk", "esi", "utc"}
+        out: list[str] = []
+        for p in parts:
+            if p.lower() in acronyms:
+                out.append(p.upper())
+            else:
+                out.append(p[:1].upper() + p[1:])
+        return " ".join(out) if out else str(name)
+
+    def format_isk_suffix(value) -> str:
+        """EVE-style ISK formatting, but with 'ISK' as a suffix."""
+        if value is None or value == "":
+            value = 0.0
+        try:
+            v = float(value)
+            s = "{:,.2f}".format(v).replace(",", "X").replace(".", ",").replace("X", ".")
+            return f"{s} ISK"
+        except Exception:
+            return "N/A"
+
+    def format_isk_short_suffix(value) -> str:
+        """Compact ISK notation (k/m/b) with ISK as suffix."""
+        if value is None or value == "":
+            value = 0.0
+        try:
+            v = float(value)
+        except Exception:
+            return "N/A"
+        try:
+            return f"{format_isk_short(abs(v))} ISK"
+        except Exception:
+            return "N/A"
+
+    def build_tooltip(breakdown, category, formatter=format_isk, join_labels=True, label_formatter=None):
         """
         Builds a tooltip string with category left, ISK right.
         breakdown: grouped Series with MultiIndex or dict-like.
         category: 'Income' or 'Expenses'
         formatter: function to format ISK values
         join_labels: whether to join multiple index levels with '/'
+        label_formatter: optional callable to format the label text
         """
         if category not in breakdown.index.get_level_values(0):
             return ""
@@ -175,9 +221,19 @@ def render():
         if isinstance(items.index, pd.MultiIndex):
             for idx, val in items.items():
                 label = " / ".join(str(x) for x in idx) if join_labels else str(idx[-1])
+                if callable(label_formatter):
+                    try:
+                        label = label_formatter(label)
+                    except Exception:
+                        pass
                 tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
         else:
             for label, val in items.items():
+                if callable(label_formatter):
+                    try:
+                        label = label_formatter(label)
+                    except Exception:
+                        pass
                 tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
 
         return "".join(tooltip_lines)
@@ -318,27 +374,347 @@ def render():
             st.stop()
         try:
             journal_df = pd.DataFrame(journal_data)
-            journal_df["category"] = journal_df["amount"].apply(lambda x: "Income" if x > 0 else "Expenses")
-            aggregated_journal = journal_df.groupby("category")["amount"].sum()
-            journal_breakdown = journal_df.groupby(["category", "ref_type"])["amount"].sum()
-            journal_income_tooltip = build_tooltip(journal_breakdown, "Income")
-            journal_expense_tooltip = build_tooltip(journal_breakdown, "Expenses")
+
+            # Parse date once (tz-aware) so we can filter by time window.
+            if "date" in journal_df.columns:
+                journal_df["_date_dt"] = pd.to_datetime(journal_df["date"], utc=True, errors="coerce")
+            else:
+                journal_df["_date_dt"] = pd.NaT
+
+            # Time-window selector for totals (default 30 days)
+            # Common overview presets: 7d, 30d, MTD, 90d, 6m, YTD, rolling 12m, all-time.
+            range_options = [
+                "7 days",
+                "30 days",
+                "Month to date",
+                "90 days",
+                "6 months",
+                "Year to date",
+                "Rolling 12 months",
+                "All",
+            ]
+            selected_range = st.selectbox(
+                "Time range",
+                options=range_options,
+                index=range_options.index("30 days"),
+                key="wallet_journal_time_range",
+            )
+
+            cutoff = None
+            try:
+                now_utc = pd.Timestamp.now(tz="UTC")
+                if selected_range == "7 days":
+                    cutoff = now_utc - pd.Timedelta(days=7)
+                elif selected_range == "30 days":
+                    cutoff = now_utc - pd.Timedelta(days=30)
+                elif selected_range == "Month to date":
+                    cutoff = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                elif selected_range == "90 days":
+                    cutoff = now_utc - pd.Timedelta(days=90)
+                elif selected_range == "6 months":
+                    cutoff = now_utc - pd.DateOffset(months=6)
+                elif selected_range == "Year to date":
+                    cutoff = now_utc.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+                elif selected_range == "Rolling 12 months":
+                    cutoff = now_utc - pd.DateOffset(years=1)
+                else:
+                    cutoff = None
+            except Exception:
+                cutoff = None
+
+            if cutoff is not None:
+                filtered_journal_df = journal_df[journal_df["_date_dt"].notna() & (journal_df["_date_dt"] >= cutoff)].copy()
+            else:
+                filtered_journal_df = journal_df.copy()
+
+            filtered_journal_df["category"] = filtered_journal_df["amount"].apply(lambda x: "Income" if x > 0 else "Expenses")
+            aggregated_journal = filtered_journal_df.groupby("category")["amount"].sum()
+            journal_breakdown = filtered_journal_df.groupby(["category", "ref_type"])["amount"].sum()
+            journal_income_tooltip = build_tooltip(
+                journal_breakdown,
+                "Income",
+                formatter=format_isk_suffix,
+                label_formatter=camel_heading,
+            )
+            journal_expense_tooltip = build_tooltip(
+                journal_breakdown,
+                "Expenses",
+                formatter=format_isk_suffix,
+                label_formatter=camel_heading,
+            )
 
             st.markdown(f"""
             <div class="wallet-summary">
             <div class="tooltip">
-                Total Income: {format_isk(aggregated_journal.get("Income", 0))}
+                Total Income: {format_isk_short_suffix(aggregated_journal.get("Income", 0))}
                 <span class="tooltiptext">{journal_income_tooltip}</span>
             </div><br />
             <div class="tooltip">
-                Total Expenses: {format_isk(-aggregated_journal.get("Expenses", 0))}
+                Total Expenses: {format_isk_short_suffix(-aggregated_journal.get("Expenses", 0))}
                 <span class="tooltiptext">{journal_expense_tooltip}</span>
             </div>
             </div><br />
             """, unsafe_allow_html=True)
 
-            # Display wallet transaction entries
-            st.dataframe(journal_df.sort_values(by="date", ascending=False), width="stretch")
+            # Display wallet journal entries (match the selected time window)
+            journal_view_df = filtered_journal_df.copy()
+
+            def _order_same_timestamp_rows(group: pd.DataFrame) -> pd.DataFrame:
+                """Order rows in a same-timestamp group so balance changes look consistent.
+
+                We try to form a chain where for consecutive rows (newest-first):
+                next.balance ≈ current.balance - current.amount
+                """
+                if len(group) <= 1:
+                    return group
+                if "balance" not in group.columns or "amount" not in group.columns:
+                    return group
+
+                g = group.copy()
+                g["_bal__"] = pd.to_numeric(g["balance"], errors="coerce")
+                g["_amt__"] = pd.to_numeric(g["amount"], errors="coerce")
+                if g["_bal__"].isna().all() or g["_amt__"].isna().all():
+                    return group
+
+                g["_prev_bal__"] = g["_bal__"] - g["_amt__"]
+
+                tol = 0.05  # tolerate minor float noise / rounding
+                idxs = list(g.index)
+                unused = set(idxs)
+
+                def _matches(a, b) -> bool:
+                    try:
+                        if pd.isna(a) or pd.isna(b):
+                            return False
+                        return abs(float(a) - float(b)) <= tol
+                    except Exception:
+                        return False
+
+                # Start row: a row whose balance is not any other row's prev-balance.
+                prev_vals = {i: g.at[i, "_prev_bal__"] for i in idxs}
+                bal_vals = {i: g.at[i, "_bal__"] for i in idxs}
+
+                start_candidates: list[int] = []
+                for i in idxs:
+                    b = bal_vals.get(i)
+                    if not any(_matches(b, prev_vals.get(j)) for j in idxs if j != i):
+                        start_candidates.append(i)
+
+                if start_candidates:
+                    start = max(start_candidates, key=lambda i: (bal_vals.get(i) if pd.notna(bal_vals.get(i)) else float("-inf"), str(i)))
+                else:
+                    # Fallback: pick the highest balance as the most "recent" in the group.
+                    start = max(idxs, key=lambda i: (bal_vals.get(i) if pd.notna(bal_vals.get(i)) else float("-inf"), str(i)))
+
+                chain: list[int] = [start]
+                unused.remove(start)
+                while unused:
+                    cur = chain[-1]
+                    target = prev_vals.get(cur)
+                    matches = [j for j in unused if _matches(bal_vals.get(j), target)]
+                    if not matches:
+                        break
+                    # Deterministic tie-break: closest balance match, then higher balance.
+                    def _rank(j):
+                        bj = bal_vals.get(j)
+                        try:
+                            dist = abs(float(bj) - float(target))
+                        except Exception:
+                            dist = float("inf")
+                        bal_rank = float(bj) if pd.notna(bj) else float("-inf")
+                        return (dist, -bal_rank, str(j))
+
+                    nxt = sorted(matches, key=_rank)[0]
+                    chain.append(nxt)
+                    unused.remove(nxt)
+
+                # Append any leftovers in a stable, sensible order.
+                if unused:
+                    leftovers = sorted(
+                        list(unused),
+                        key=lambda i: (
+                            -(float(bal_vals.get(i)) if pd.notna(bal_vals.get(i)) else float("-inf")),
+                            str(i),
+                        ),
+                    )
+                    chain.extend(leftovers)
+
+                out = g.loc[chain].drop(columns=["_bal__", "_amt__", "_prev_bal__"], errors="ignore")
+                return out
+
+            # Order rows newest-first.
+            if "_date_dt" in journal_view_df.columns:
+                journal_view_df = journal_view_df.sort_values(by="_date_dt", ascending=False, kind="mergesort")
+                _gb = journal_view_df.groupby("_date_dt", sort=False, dropna=False, group_keys=False)
+                try:
+                    # pandas >= 2.2: prevents FutureWarning about grouping columns.
+                    journal_view_df = _gb.apply(_order_same_timestamp_rows, include_groups=False)
+                except TypeError:
+                    # Older pandas: no include_groups kwarg.
+                    journal_view_df = _gb.apply(_order_same_timestamp_rows)
+            elif "date" in journal_view_df.columns:
+                journal_view_df = journal_view_df.sort_values(by="date", ascending=False, kind="mergesort")
+
+            # Date formatting: YYYY-MM-DD HH24:Mi:SS (no 'T' / 'Z')
+            if "date" in journal_view_df.columns:
+                try:
+                    dt = journal_view_df.get("_date_dt")
+                    if dt is None:
+                        dt = pd.to_datetime(journal_view_df["date"], utc=True, errors="coerce")
+                    formatted = dt.dt.strftime("%Y-%m-%d %H:%M:%S")
+                    # For any unparsable values, fall back to a simple string cleanup.
+                    raw = journal_view_df["date"].astype(str)
+                    raw = raw.str.replace("T", " ", regex=False).str.replace("Z", "", regex=False)
+                    journal_view_df["date"] = formatted.fillna(raw)
+                except Exception:
+                    try:
+                        journal_view_df["date"] = (
+                            journal_view_df["date"].astype(str).str.replace("T", " ", regex=False).str.replace("Z", "", regex=False)
+                        )
+                    except Exception:
+                        pass
+
+            # Hide columns (both in AgGrid and fallback table)
+            hidden_cols = {
+                "ref_type",
+                "reason",
+                "context_id_type",
+                "context_id",
+                "character_id",
+                "first_party_id",
+                "id",
+                "second_party_id",
+                "tax_receiver_id",
+                "updated_at",
+                "wallet_journal_id",
+                "_date_dt",
+            }
+
+            # Visible subset for fallback / readability.
+            fallback_cols = [c for c in journal_view_df.columns if c not in hidden_cols]
+            fallback_df = journal_view_df[fallback_cols] if fallback_cols else journal_view_df
+
+            if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+                # Fallback: show only visible columns, with Camel-Cased headings.
+                view = fallback_df.copy()
+                try:
+                    view = view.rename(columns={c: camel_heading(c) for c in view.columns})
+                except Exception:
+                    pass
+                st.dataframe(view, width="stretch")
+            else:
+                eu_locale = "nl-NL"  # '.' thousands, ',' decimals
+
+                def _js_eu_isk(decimals: int) -> JsCode:
+                    return JsCode(
+                        f"""
+                            function(params) {{
+                                if (params.value === null || params.value === undefined || params.value === "") return "";
+                                const n = Number(params.value);
+                                if (isNaN(n)) return "";
+                                return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + ' ISK';
+                            }}
+                        """
+                    )
+
+                def _js_eu_number(decimals: int) -> JsCode:
+                    return JsCode(
+                        f"""
+                            function(params) {{
+                                if (params.value === null || params.value === undefined || params.value === "") return "";
+                                const n = Number(params.value);
+                                if (isNaN(n)) return "";
+                                return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n);
+                            }}
+                        """
+                    )
+
+                # Keep a readable column order (show key fields first).
+                preferred_cols = [
+                    "date",
+                    "description",
+                    "amount",
+                    "balance",
+                    "tax",
+                    "first_party_name",
+                    "second_party_name",
+                    "tax_receiver_name",
+                ]
+                ordered_cols = [c for c in preferred_cols if c in journal_view_df.columns]
+                ordered_cols += [c for c in journal_view_df.columns if c not in ordered_cols]
+                journal_view_df = journal_view_df[ordered_cols]
+
+                gb = GridOptionsBuilder.from_dataframe(journal_view_df)
+                gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+
+                # Apply Camel-Cased headings for all columns.
+                for c in list(journal_view_df.columns):
+                    gb.configure_column(c, header_name=camel_heading(c))
+
+                # Hide requested columns.
+                for c in hidden_cols:
+                    if c in journal_view_df.columns:
+                        gb.configure_column(c, hide=True)
+
+                right = {"textAlign": "right"}
+                for c in ["amount", "balance", "tax"]:
+                    if c in journal_view_df.columns:
+                        gb.configure_column(
+                            c,
+                            header_name=camel_heading(c),
+                            type=["numericColumn", "numberColumnFilter"],
+                            valueFormatter=_js_eu_isk(2 if c == "tax" else 2),
+                            minWidth=150,
+                            cellStyle=right,
+                        )
+
+                for c in ["wallet_journal_id", "character_id", "context_id", "first_party_id", "second_party_id", "tax_receiver_id", "id"]:
+                    if c in journal_view_df.columns:
+                        gb.configure_column(
+                            c,
+                            header_name=camel_heading(c),
+                            type=["numericColumn", "numberColumnFilter"],
+                            valueFormatter=_js_eu_number(0),
+                            minWidth=130,
+                            cellStyle=right,
+                        )
+
+                grid_options = gb.build()
+                attach_aggrid_autosize(grid_options, JsCode=JsCode)
+
+                # Auto-size columns to their contents.
+                grid_options["autoSizeStrategy"] = {"type": "fitCellContents"}
+
+                # Row color coding based on amount.
+                # Green = positive amount, Red = negative amount.
+                grid_options["getRowStyle"] = JsCode(
+                    """
+                    function(params) {
+                        try {
+                            if (!params || !params.data) return null;
+                            var v = params.data.amount;
+                            if (v === null || v === undefined || v === '') return null;
+                            var n = Number(v);
+                            if (isNaN(n) || n === 0) return null;
+                            if (n > 0) {
+                                return { backgroundColor: 'rgba(46, 204, 113, 0.10)' };
+                            }
+                            return { backgroundColor: 'rgba(231, 76, 60, 0.10)' };
+                        } catch (e) {
+                            return null;
+                        }
+                    }
+                    """
+                )
+
+                height = min(650, 40 + (len(journal_view_df) * 32))
+                AgGrid(
+                    journal_view_df,
+                    gridOptions=grid_options,
+                    allow_unsafe_jscode=True,
+                    theme="streamlit",
+                    height=height,
+                )
 
         except Exception as e:
             st.warning(f"No wallet journal data found. {e}")
@@ -353,33 +729,266 @@ def render():
             st.stop()
         try:
             transactions_df = pd.DataFrame(transactions_data)
-            transactions_df["category"] = transactions_df.apply(
-                lambda row: "Income" if row["is_buy"] == 0 else "Expenses", axis=1
-            )
-            aggregated_transactions = transactions_df.groupby("category")["total_price"].sum()
-            tx_breakdown = transactions_df.groupby(["category", "type_category_name"])["total_price"].sum()
-            tx_income_tooltip = build_tooltip(tx_breakdown, "Income", join_labels=False)
-            tx_expense_tooltip = build_tooltip(tx_breakdown, "Expenses", join_labels=False)
+            # Parse date once (tz-aware) so we can filter by time window.
+            if "date" in transactions_df.columns:
+                transactions_df["_date_dt"] = pd.to_datetime(transactions_df["date"], utc=True, errors="coerce")
+            else:
+                transactions_df["_date_dt"] = pd.NaT
 
-            st.markdown(f"""
-            <div class="wallet-summary">
-                <div class="tooltip">
-                    Total Income: {format_isk(aggregated_transactions.get("Income", 0))}
-                    <span class="tooltiptext">{tx_income_tooltip}</span>
+            # Time-window selector for totals/table (default 30 days)
+            range_options = [
+                "7 days",
+                "30 days",
+                "Month to date",
+                "90 days",
+                "6 months",
+                "Year to date",
+                "Rolling 12 months",
+                "All",
+            ]
+            selected_range = st.selectbox(
+                "Time range",
+                options=range_options,
+                index=range_options.index("30 days"),
+                key="wallet_transactions_time_range",
+            )
+
+            cutoff = None
+            try:
+                now_utc = pd.Timestamp.now(tz="UTC")
+                if selected_range == "7 days":
+                    cutoff = now_utc - pd.Timedelta(days=7)
+                elif selected_range == "30 days":
+                    cutoff = now_utc - pd.Timedelta(days=30)
+                elif selected_range == "Month to date":
+                    cutoff = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                elif selected_range == "90 days":
+                    cutoff = now_utc - pd.Timedelta(days=90)
+                elif selected_range == "6 months":
+                    cutoff = now_utc - pd.DateOffset(months=6)
+                elif selected_range == "Year to date":
+                    cutoff = now_utc.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+                elif selected_range == "Rolling 12 months":
+                    cutoff = now_utc - pd.DateOffset(years=1)
+                else:
+                    cutoff = None
+            except Exception:
+                cutoff = None
+
+            if cutoff is not None:
+                filtered_transactions_df = transactions_df[
+                    transactions_df["_date_dt"].notna() & (transactions_df["_date_dt"] >= cutoff)
+                ].copy()
+            else:
+                filtered_transactions_df = transactions_df.copy()
+
+            # Income vs Expenses (buy = expense).
+            filtered_transactions_df["category"] = filtered_transactions_df.get("is_buy").apply(
+                lambda b: "Expenses" if bool(b) else "Income"
+            )
+
+            aggregated_transactions = filtered_transactions_df.groupby("category")["total_price"].sum()
+            tx_breakdown = filtered_transactions_df.groupby(["category", "type_category_name"])["total_price"].sum()
+            tx_income_tooltip = build_tooltip(
+                tx_breakdown,
+                "Income",
+                formatter=format_isk_suffix,
+                join_labels=False,
+                label_formatter=camel_heading,
+            )
+            tx_expense_tooltip = build_tooltip(
+                tx_breakdown,
+                "Expenses",
+                formatter=format_isk_suffix,
+                join_labels=False,
+                label_formatter=camel_heading,
+            )
+
+            st.markdown(
+                f"""
+                <div class="wallet-summary">
+                    <div class="tooltip">
+                        Total Income: {format_isk_short_suffix(aggregated_transactions.get("Income", 0))}
+                        <span class="tooltiptext">{tx_income_tooltip}</span>
+                    </div><br />
+                    <div class="tooltip">
+                        Total Expenses: {format_isk_short_suffix(abs(aggregated_transactions.get("Expenses", 0)))}
+                        <span class="tooltiptext">{tx_expense_tooltip}</span>
+                    </div>
                 </div><br />
-                <div class="tooltip">
-                    Total Expenses: {format_isk(-aggregated_transactions.get("Expenses", 0))}
-                    <span class="tooltiptext">{tx_expense_tooltip}</span>
-                </div>
-            </div><br />
-            """, unsafe_allow_html=True)
+                """,
+                unsafe_allow_html=True,
+            )
 
         except Exception:
             st.warning("No wallet transactions data available.")
             st.stop()
 
-        # Display wallet transaction entries
-        st.dataframe(transactions_df.sort_values(by="date", ascending=False), width="stretch")
+        # Display wallet transaction entries (match selected time window)
+        tx_view_df = filtered_transactions_df.copy()
+
+        # Sort newest-first.
+        if "_date_dt" in tx_view_df.columns:
+            tx_view_df = tx_view_df.sort_values(by="_date_dt", ascending=False, kind="mergesort")
+        elif "date" in tx_view_df.columns:
+            tx_view_df = tx_view_df.sort_values(by="date", ascending=False, kind="mergesort")
+
+        # Date formatting: YYYY-MM-DD HH24:Mi:SS (no 'T' / 'Z')
+        if "date" in tx_view_df.columns:
+            try:
+                dt = tx_view_df.get("_date_dt")
+                if dt is None:
+                    dt = pd.to_datetime(tx_view_df["date"], utc=True, errors="coerce")
+                formatted = dt.dt.strftime("%Y-%m-%d %H:%M:%S")
+                raw = tx_view_df["date"].astype(str)
+                raw = raw.str.replace("T", " ", regex=False).str.replace("Z", "", regex=False)
+                tx_view_df["date"] = formatted.fillna(raw)
+            except Exception:
+                try:
+                    tx_view_df["date"] = (
+                        tx_view_df["date"].astype(str).str.replace("T", " ", regex=False).str.replace("Z", "", regex=False)
+                    )
+                except Exception:
+                    pass
+
+        # Desired column order.
+        tx_display_cols = [
+            "date",
+            "type_name",
+            "quantity",
+            "unit_price",
+            "total_price",
+            "client_name",
+            "is_personal",
+            "location_id",
+            "category",
+        ]
+
+        for c in tx_display_cols + ["is_buy"]:
+            if c not in tx_view_df.columns:
+                tx_view_df[c] = None
+
+        tx_grid_df = tx_view_df[tx_display_cols + ["is_buy"]].copy()
+
+        if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+            # Fallback: show only the requested columns in the requested order.
+            view = tx_grid_df[tx_display_cols].copy()
+            rename = {
+                "type_name": "Name",
+                "quantity": "Quantity",
+                "unit_price": "Unit Price",
+                "total_price": "Total Price",
+                "client_name": "Client Name",
+                "is_personal": "Is Personal",
+                "location_id": "Location ID",
+            }
+            try:
+                view = view.rename(columns=rename)
+            except Exception:
+                pass
+            st.dataframe(view, width="stretch")
+        else:
+            eu_locale = "nl-NL"  # '.' thousands, ',' decimals
+
+            def _js_eu_isk(decimals: int) -> JsCode:
+                return JsCode(
+                    f"""
+                        function(params) {{
+                            if (params.value === null || params.value === undefined || params.value === "") return "";
+                            const n = Number(params.value);
+                            if (isNaN(n)) return "";
+                            return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + ' ISK';
+                        }}
+                    """
+                )
+
+            def _js_eu_number(decimals: int) -> JsCode:
+                return JsCode(
+                    f"""
+                        function(params) {{
+                            if (params.value === null || params.value === undefined || params.value === "") return "";
+                            const n = Number(params.value);
+                            if (isNaN(n)) return "";
+                            return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n);
+                        }}
+                    """
+                )
+
+            gb = GridOptionsBuilder.from_dataframe(tx_grid_df)
+            gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+
+            # Explicit headers to match requested column names.
+            gb.configure_column("date", header_name="Date")
+            gb.configure_column("type_name", header_name="Name")
+            gb.configure_column("quantity", header_name="Quantity")
+            gb.configure_column("unit_price", header_name="Unit Price")
+            gb.configure_column("total_price", header_name="Total Price")
+            gb.configure_column("client_name", header_name="Client Name")
+            gb.configure_column("is_personal", header_name="Is Personal")
+            gb.configure_column("location_id", header_name="Location ID")
+            gb.configure_column("category", header_name="Category")
+
+            # Hide helper/styling-only columns.
+            gb.configure_column("is_buy", hide=True)
+
+            right = {"textAlign": "right"}
+            if "quantity" in tx_grid_df.columns:
+                gb.configure_column(
+                    "quantity",
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=_js_eu_number(0),
+                    minWidth=110,
+                    cellStyle=right,
+                )
+            for c in ["unit_price", "total_price"]:
+                if c in tx_grid_df.columns:
+                    gb.configure_column(
+                        c,
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=_js_eu_isk(2),
+                        minWidth=150,
+                        cellStyle=right,
+                    )
+            if "location_id" in tx_grid_df.columns:
+                gb.configure_column(
+                    "location_id",
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=_js_eu_number(0),
+                    minWidth=140,
+                    cellStyle=right,
+                )
+
+            grid_options = gb.build()
+            attach_aggrid_autosize(grid_options, JsCode=JsCode)
+            grid_options["autoSizeStrategy"] = {"type": "fitCellContents"}
+
+            # Row color coding: buy = red, sell = green.
+            grid_options["getRowStyle"] = JsCode(
+                """
+                function(params) {
+                    try {
+                        if (!params || !params.data) return null;
+                        var b = params.data.is_buy;
+                        var isBuy = (b === true || b === 1 || b === '1' || b === 'true' || b === 'True');
+                        if (isBuy) {
+                            return { backgroundColor: 'rgba(231, 76, 60, 0.10)' };
+                        }
+                        return { backgroundColor: 'rgba(46, 204, 113, 0.10)' };
+                    } catch (e) {
+                        return null;
+                    }
+                }
+                """
+            )
+
+            height = min(650, 40 + (len(tx_grid_df) * 32))
+            AgGrid(
+                tx_grid_df,
+                gridOptions=grid_options,
+                allow_unsafe_jscode=True,
+                theme="streamlit",
+                height=height,
+            )
 
     # --- CHARACTER SETTINGS / AUTH TAB ---
     with tab_settings:

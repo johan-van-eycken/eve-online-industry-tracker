@@ -6,7 +6,7 @@ import json
 import datetime
 from typing import Any, Dict, List
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import bindparam, or_, text
 from sqlalchemy.sql import func
 
 from classes.asset_provenance import build_fifo_remaining_lots_by_type, fifo_allocate_cost, fifo_allocate_cost_breakdown
@@ -25,9 +25,17 @@ from eve_online_industry_tracker.db_models import (
     NpcStations,
     PublicStructuresModel,
     StationOperations,
+    Types,
 )
 
 from eve_online_industry_tracker.infrastructure.sde.localization import parse_localized
+
+from eve_online_industry_tracker.infrastructure.industry_builder_viewmodel import (
+    apply_multi_output_cost_allocations,
+    compute_ui_build_tree_rows_by_product,
+    compute_ui_copy_jobs,
+    compute_ui_missing_blueprints,
+)
 
 
 def _as_fraction(v: Any) -> float:
@@ -185,12 +193,19 @@ def _manufacturing_time_multiplier_from_skills(char_skills: list[dict]) -> float
 def _copying_time_multiplier_from_skills(char_skills: list[dict]) -> float:
     """Return blueprint copying time multiplier from character skills.
 
-    In practice, blueprint copying speed is affected by the Science skill.
+    In practice, blueprint copying speed is affected by:
+    - Science: -5% per level
+    - Advanced Industry: -3% per level (applies to all industry job durations)
     """
 
     science_level = _get_trained_skill_level(char_skills, skill_name="Science")
     science_mult = 1.0 - (0.05 * float(max(0, min(science_level, 5))))
-    return max(0.0, min(science_mult, 1.0))
+
+    adv_industry_level = _get_trained_skill_level(char_skills, skill_name="Advanced Industry")
+    adv_industry_mult = 1.0 - (0.03 * float(max(0, min(adv_industry_level, 5))))
+
+    mult = float(science_mult) * float(adv_industry_mult)
+    return max(0.0, min(mult, 1.0))
 
 
 _IMPLANT_ATTR_MANUFACTURING_TIME_BONUS = 440
@@ -514,7 +529,11 @@ def enrich_blueprints_for_character(
     db_sde_session: Any | None = None,
     language: str | None = None,
     use_fifo_inventory_costing: bool = True,
+    prefer_inventory_consumption: bool = False,
     pricing_preferences: dict | None = None,
+    assume_bpo_copy_overhead: bool = False,
+    esi_market_prices: list[dict] | None = None,
+    market_price_map: dict[int, dict[str, float | None]] | None = None,
 ) -> List[Dict[str, Any]]:
     """Apply character-skill requirements and basic cost/value analysis.
 
@@ -549,11 +568,18 @@ def enrich_blueprints_for_character(
 
     # Market price map (best-effort). Used for copy-job EIV estimation.
     # ESI /markets/prices provides both average and adjusted prices.
-    market_price_map: dict[int, dict[str, float | None]] = {}
-    try:
-        if esi_service is not None:
-            rows = esi_service.get_market_prices() or []
-            for row in rows:
+    if not isinstance(market_price_map, dict):
+        market_price_map = {}
+
+    market_prices_rows: list[dict] | None = esi_market_prices if isinstance(esi_market_prices, list) else None
+
+    if not market_price_map:
+        try:
+            if market_prices_rows is None and esi_service is not None:
+                market_prices_rows = esi_service.get_market_prices() or []
+
+            rows_iter: list[dict] = list(market_prices_rows) if isinstance(market_prices_rows, list) else []
+            for row in rows_iter:
                 if not isinstance(row, dict):
                     continue
                 tid = row.get("type_id")
@@ -576,8 +602,9 @@ def enrich_blueprints_for_character(
                 except Exception:
                     adj_f = None
                 market_price_map[type_id_i] = {"average_price": avg_f, "adjusted_price": adj_f}
-    except Exception:
-        market_price_map = {}
+        except Exception:
+            market_price_map = {}
+            market_prices_rows = market_prices_rows or None
 
     # Optional: orderbook-based hub pricing (EveGuru-like). Default hub is Jita (The Forge / Jita 4-4).
     pricing = pricing_preferences if isinstance(pricing_preferences, dict) else {}
@@ -862,9 +889,27 @@ def enrich_blueprints_for_character(
 
     # Optional: use the submanufacturing planner to compute effective input costs.
     try:
-        from eve_online_industry_tracker.infrastructure.submanufacturing_planner_service import plan_submanufacturing_tree
+        from eve_online_industry_tracker.infrastructure.submanufacturing_planner_service import (
+            get_mfg_product_to_bps_cached,
+            get_reaction_product_type_ids_cached,
+            plan_submanufacturing_tree,
+        )
     except Exception:
         plan_submanufacturing_tree = None  # type: ignore[assignment]
+        get_mfg_product_to_bps_cached = None  # type: ignore[assignment]
+        get_reaction_product_type_ids_cached = None  # type: ignore[assignment]
+
+    shared_submfg_mfg_product_to_bps: dict[int, list[dict]] | None = None
+    shared_submfg_reaction_product_type_ids: set[int] | None = None
+    if bool(include_submanufacturing) and plan_submanufacturing_tree is not None and sde_session is not None:
+        try:
+            if callable(get_mfg_product_to_bps_cached):
+                shared_submfg_mfg_product_to_bps = get_mfg_product_to_bps_cached(sde_session=sde_session, language=lang)
+            if callable(get_reaction_product_type_ids_cached):
+                shared_submfg_reaction_product_type_ids = get_reaction_product_type_ids_cached(sde_session)
+        except Exception:
+            shared_submfg_mfg_product_to_bps = None
+            shared_submfg_reaction_product_type_ids = None
 
     def _build_location_maps(
         *,
@@ -1101,6 +1146,9 @@ def enrich_blueprints_for_character(
     # Flag reaction formulas via SDE activity data (not via name heuristics).
     # This is used by the Streamlit "Include Reactions" filter to match planner logic.
     reaction_by_blueprint_type_id: dict[int, bool] = {}
+    meta_group_by_blueprint_type_id: dict[int, int | None] = {}
+    faction_by_blueprint_type_id: dict[int, int | None] = {}
+    race_by_blueprint_type_id: dict[int, int | None] = {}
     if sde_session is not None:
         try:
             blueprint_type_ids: list[int] = []
@@ -1119,6 +1167,34 @@ def enrich_blueprints_for_character(
             blueprint_type_ids = []
 
         if blueprint_type_ids:
+            # Attach metaGroupID for the blueprint type itself (Tech I/II etc.)
+            # This is cheap and helps the UI decide when invention is applicable.
+            try:
+                rows = (
+                    sde_session.query(Types.id, Types.metaGroupID, Types.factionID, Types.raceID)
+                    .filter(Types.id.in_(blueprint_type_ids))
+                    .all()
+                )
+                for tid, mgid, fid, rid in rows or []:
+                    if tid is None:
+                        continue
+                    try:
+                        meta_group_by_blueprint_type_id[int(tid)] = (int(mgid) if mgid is not None else None)
+                    except Exception:
+                        meta_group_by_blueprint_type_id[int(tid)] = None
+                    try:
+                        faction_by_blueprint_type_id[int(tid)] = (int(fid) if fid is not None else None)
+                    except Exception:
+                        faction_by_blueprint_type_id[int(tid)] = None
+                    try:
+                        race_by_blueprint_type_id[int(tid)] = (int(rid) if rid is not None else None)
+                    except Exception:
+                        race_by_blueprint_type_id[int(tid)] = None
+            except Exception:
+                meta_group_by_blueprint_type_id = {}
+                faction_by_blueprint_type_id = {}
+                race_by_blueprint_type_id = {}
+
             try:
                 rows = (
                     sde_session.query(Blueprints.blueprintTypeID, Blueprints.activities)
@@ -1141,6 +1217,9 @@ def enrich_blueprints_for_character(
         except Exception:
             tid_i = 0
         bp["is_reaction_blueprint"] = bool(reaction_by_blueprint_type_id.get(tid_i, False))
+        bp["type_meta_group_id"] = meta_group_by_blueprint_type_id.get(tid_i)
+        bp["type_faction_id"] = faction_by_blueprint_type_id.get(tid_i)
+        bp["type_race_id"] = race_by_blueprint_type_id.get(tid_i)
 
     # Pre-build best-effort location maps (keyed by `top_location_id`).
     top_ids: list[int] = []
@@ -1274,7 +1353,12 @@ def enrich_blueprints_for_character(
                             (
                                 db_app_session.query(CharacterIndustryJobsModel)
                                 .filter(CharacterIndustryJobsModel.character_id == int(char_id))
-                                .filter(CharacterIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)))
+                                .filter(
+                                    or_(
+                                        CharacterIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)),
+                                        CharacterIndustryJobsModel.blueprint_type_id.in_(sorted(material_type_ids)),
+                                    )
+                                )
                                 .all()
                             )
                             or []
@@ -1288,7 +1372,12 @@ def enrich_blueprints_for_character(
                             (
                                 db_app_session.query(CorporationIndustryJobsModel)
                                 .filter(CorporationIndustryJobsModel.corporation_id == int(corp_id))
-                                .filter(CorporationIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)))
+                                .filter(
+                                    or_(
+                                        CorporationIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)),
+                                        CorporationIndustryJobsModel.blueprint_type_id.in_(sorted(material_type_ids)),
+                                    )
+                                )
                                 .all()
                             )
                             or []
@@ -1296,19 +1385,23 @@ def enrich_blueprints_for_character(
                 except Exception:
                     pass
 
-                try:
-                    market_prices: list[dict[str, Any]] | None = None
-                    if esi_service is not None:
-                        market_prices = (esi_service.get_market_prices() or [])
-                except Exception:
-                    market_prices = None
+                # Reuse market prices fetched earlier, or provided by caller.
+                market_prices_for_fifo: list[dict[str, Any]] | None = None
+                if isinstance(market_prices_rows, list) and market_prices_rows:
+                    market_prices_for_fifo = market_prices_rows  # type: ignore[assignment]
+                else:
+                    try:
+                        if esi_service is not None:
+                            market_prices_for_fifo = (esi_service.get_market_prices() or [])
+                    except Exception:
+                        market_prices_for_fifo = None
 
                 try:
                     fifo_lots_by_type = build_fifo_remaining_lots_by_type(
                         wallet_transactions=tx_rows,
                         industry_jobs=job_rows,
                         sde_session=sde_session,
-                        market_prices=market_prices,
+                        market_prices=market_prices_for_fifo,
                         on_hand_quantities_by_type=inventory_on_hand_by_type,
                     )
                 except Exception:
@@ -1715,7 +1808,11 @@ def enrich_blueprints_for_character(
                             inventory_on_hand_by_type=inventory_on_hand_by_type,
                             inventory_fifo_lots_by_type=fifo_lots_by_type,
                             use_fifo_inventory_costing=use_fifo_inventory_costing,
+                            prefer_inventory_consumption=bool(prefer_inventory_consumption),
                             max_depth=3,
+                            price_map=market_price_map,
+                            mfg_product_to_bps=shared_submfg_mfg_product_to_bps,
+                            reaction_product_type_ids=shared_submfg_reaction_product_type_ids,
                         )
 
                         plan_by_type_id: dict[int, dict] = {}
@@ -1869,15 +1966,18 @@ def enrich_blueprints_for_character(
 
             # Installation fee estimate (ISK)
             # Match client breakdown:
-            # - Gross cost uses EIV * system_cost_index, then structure/rig cost reduction
-            # - Taxes/surcharges (SCC + facility tax) apply to EIV directly
+            # - Manufacturing uses Job Cost Base (JCB) = 1% of EIV.
+            # - System Cost Index applies to JCB, then structure/rig cost reduction applies only to the SCI part.
+            # - Taxes/surcharges (SCC + facility tax) apply to JCB (not reduced by structure bonuses).
             ci = float(manufacturing_system_cost_index or 0.0)
-            job_value = float(estimated_item_value_total)
+            eiv_total_isk = float(estimated_item_value_total)
+            job_cost_base_fraction = 0.01
+            jcb_isk = float(eiv_total_isk) * float(job_cost_base_fraction)
 
-            gross_cost = job_value * ci
-            gross_cost_after_bonuses = gross_cost * (1.0 - effective_cost_reduction)
-            taxes = job_value * profile_surcharge_rate
-            total_job_cost_isk = max(0.0, gross_cost_after_bonuses + taxes)
+            gross_cost = float(jcb_isk) * float(ci)
+            gross_cost_after_bonuses = float(gross_cost) * (1.0 - float(effective_cost_reduction))
+            taxes = float(jcb_isk) * float(profile_surcharge_rate)
+            total_job_cost_isk = max(0.0, float(gross_cost_after_bonuses) + float(taxes))
 
             # Optional: include blueprint copying overhead when manufacturing is based on a BPC.
             # This estimates the copy job that would have produced the current BPC runs.
@@ -1889,7 +1989,26 @@ def enrich_blueprints_for_character(
             effective_total_job_time_seconds = float(estimated_job_time_seconds)
             effective_total_job_cost_isk = float(total_job_cost_isk)
 
-            if is_bpc:
+            # Copy overhead is only possible for blueprints that support copying in the SDE.
+            # Gate this strictly by activity data rather than meta-group/race heuristics:
+            # - copying_time_seconds must be > 0
+            # - max_production_limit must be > 0
+            try:
+                _copying_time_seconds = float(bp.get("copying_time_seconds", 0) or 0.0)
+            except Exception:
+                _copying_time_seconds = 0.0
+            try:
+                _max_production_limit = int(bp.get("max_production_limit") or 0)
+            except Exception:
+                _max_production_limit = 0
+            can_copy_from_bpo = bool(_copying_time_seconds > 0 and _max_production_limit > 0)
+
+            include_copy_overhead = (
+                (bool(is_bpc) or (bool(assume_bpo_copy_overhead) and not bool(is_bpc)))
+                and bool(can_copy_from_bpo)
+            )
+
+            if include_copy_overhead:
                 # Copy overhead should match the amount we manufacture, bounded by remaining runs.
                 bpc_runs = int(job_runs)
                 if remaining_runs is not None:
@@ -1900,11 +2019,10 @@ def enrich_blueprints_for_character(
                 except Exception:
                     max_runs = 0
 
-                if bpc_runs > 0:
+                if bpc_runs > 0 and max_runs > 0:
                     run_ratio = 1.0
-                    if max_runs > 0:
-                        run_ratio = float(bpc_runs) / float(max_runs)
-                        run_ratio = max(0.0, min(run_ratio, 1.0))
+                    run_ratio = float(bpc_runs) / float(max_runs)
+                    run_ratio = max(0.0, min(run_ratio, 1.0))
 
                     # Copying rig reductions are activity-specific.
                     copy_rig_time_reduction = 0.0
@@ -1926,8 +2044,9 @@ def enrich_blueprints_for_character(
                         (1.0 - float(profile_cost_reduction)) * (1.0 - float(copy_rig_cost_reduction))
                     )
 
-                    base_copy_time_s = float(bp.get("copying_time_seconds", 0) or 0.0)
-                    copy_base_time_for_runs_s = base_copy_time_s * float(run_ratio)
+                    # SDE `activities.copying.time` is per-run (seconds/run) and scales linearly with runs.
+                    base_copy_time_per_run_s = float(bp.get("copying_time_seconds", 0) or 0.0)
+                    copy_base_time_for_runs_s = float(base_copy_time_per_run_s) * float(bpc_runs)
                     copy_estimated_time_seconds = max(
                         0.0,
                         copy_base_time_for_runs_s
@@ -1936,47 +2055,30 @@ def enrich_blueprints_for_character(
                     )
 
                     copy_ci = float(copying_system_cost_index or 0.0)
-                    # Copying activity uses blueprint value as its job-cost basis in the client.
-                    # Best-effort: use the blueprint type's adjusted price (fallback to average),
-                    # and scale by run_ratio (copying less than max runs reduces the job scope).
-                    bp_type_id = 0
-                    try:
-                        bp_type_id = int(bp.get("type_id") or 0)
-                    except Exception:
-                        bp_type_id = 0
 
-                    bp_prices = market_price_map.get(int(bp_type_id)) if bp_type_id > 0 else None
-                    bp_adj = None
-                    bp_avg = None
-                    if isinstance(bp_prices, dict):
-                        bp_adj = bp_prices.get("adjusted_price")
-                        bp_avg = bp_prices.get("average_price")
+                    # Client-like job-cost model:
+                    # - EIV is based on ME0 input quantities using adjusted prices (same basis we compute for manufacturing)
+                    # - Job Cost Base (JCB) is 2% of EIV for copying
+                    # - System Cost Index applies to JCB, then structure/rig cost reduction applies only to the SCI part
+                    # - SCC surcharge + facility tax apply to JCB (not reduced by structure bonuses)
+                    copy_eiv_total_isk = float(estimated_item_value_per_run) * float(bpc_runs)
+                    copy_job_cost_base_fraction = 0.02
+                    copy_jcb_isk = float(copy_eiv_total_isk) * float(copy_job_cost_base_fraction)
 
-                    copy_eiv_unit = None
-                    if isinstance(bp_adj, (int, float)) and float(bp_adj) > 0:
-                        copy_eiv_unit = float(bp_adj)
-                    elif isinstance(bp_avg, (int, float)) and float(bp_avg) > 0:
-                        copy_eiv_unit = float(bp_avg)
-
-                    if copy_eiv_unit is None:
-                        # Fallback: preserve legacy behavior if we can't price the blueprint.
-                        copy_job_value = float(estimated_item_value_per_run) * float(bpc_runs)
-                        copy_eiv_basis = "manufacturing_eiv_per_run * runs (fallback)"
-                    else:
-                        copy_job_value = float(copy_eiv_unit) * float(run_ratio)
-                        copy_eiv_basis = "blueprint_price * run_ratio"
-                    copy_gross_cost = copy_job_value * copy_ci
-                    copy_gross_cost_after_bonuses = copy_gross_cost * (1.0 - float(copy_effective_cost_reduction))
-                    copy_taxes = copy_job_value * float(profile_surcharge_rate)
-                    copy_total_job_cost_isk = max(0.0, copy_gross_cost_after_bonuses + copy_taxes)
+                    copy_gross_cost = float(copy_jcb_isk) * float(copy_ci)
+                    copy_gross_cost_after_bonuses = float(copy_gross_cost) * (1.0 - float(copy_effective_cost_reduction))
+                    copy_taxes = float(copy_jcb_isk) * float(profile_surcharge_rate)
+                    copy_total_job_cost_isk = max(0.0, float(copy_gross_cost_after_bonuses) + float(copy_taxes))
 
                     copy_job = {
+                        "assumed_from_bpo": bool((not bool(is_bpc)) and bool(assume_bpo_copy_overhead)),
                         "runs": int(bpc_runs),
                         "remaining_runs": int(remaining_runs) if remaining_runs is not None else None,
                         "max_runs": int(max_runs) if max_runs > 0 else None,
                         "run_ratio": float(run_ratio),
                         "time": {
-                            "base_copy_time_seconds_max_runs": float(base_copy_time_s),
+                            "base_copy_time_seconds_per_run": float(base_copy_time_per_run_s),
+                            "base_copy_time_seconds_max_runs": float(base_copy_time_per_run_s) * float(max_runs),
                             "base_copy_time_seconds_for_runs": float(copy_base_time_for_runs_s),
                             "structure_time_reduction_fraction": float(copy_effective_time_reduction),
                             "skills_and_implants": {
@@ -1996,8 +2098,10 @@ def enrich_blueprints_for_character(
                             "facility_tax_fraction": float(facility_tax),
                             "surcharge_rate_total_fraction": float(profile_surcharge_rate),
                             "structure_cost_reduction_fraction": float(copy_effective_cost_reduction),
-                            "estimated_item_value_total_isk": float(copy_job_value),
-                            "estimated_item_value_basis": str(copy_eiv_basis),
+                            "estimated_item_value_total_isk": float(copy_eiv_total_isk),
+                            "job_cost_base_fraction": float(copy_job_cost_base_fraction),
+                            "job_cost_base_total_isk": float(copy_jcb_isk),
+                            "estimated_item_value_basis": "manufacturing_eiv_per_run * runs (ME0 adjusted prices)",
                             "gross_cost_isk": float(copy_gross_cost),
                             "gross_cost_after_bonuses_isk": float(copy_gross_cost_after_bonuses),
                             "taxes_isk": float(copy_taxes),
@@ -2046,7 +2150,9 @@ def enrich_blueprints_for_character(
                         "facility_tax_fraction": float(facility_tax),
                         "surcharge_rate_total_fraction": float(profile_surcharge_rate),
                         "structure_cost_reduction_fraction": float(effective_cost_reduction),
-                        "estimated_item_value_total_isk": float(estimated_item_value_total),
+                        "estimated_item_value_total_isk": float(eiv_total_isk),
+                        "job_cost_base_fraction": float(job_cost_base_fraction),
+                        "job_cost_base_total_isk": float(jcb_isk),
                         "gross_cost_isk": float(gross_cost),
                         "gross_cost_after_bonuses_isk": float(gross_cost_after_bonuses),
                         "taxes_isk": float(taxes),
@@ -2061,6 +2167,91 @@ def enrich_blueprints_for_character(
                     "job_runs": int(job_runs),
                 },
             }
+
+            # ----------------------------
+            # UI viewmodel payloads
+            # ----------------------------
+            # Allocate blueprint-level costs across outputs once (multi-output consistency).
+            raw_total_material_cost = (
+                bp.get("total_material_cost_effective")
+                if bp.get("total_material_cost_effective") is not None
+                else bp.get("total_material_cost")
+            )
+            try:
+                total_material_cost_for_alloc = float(raw_total_material_cost or 0.0)
+            except Exception:
+                total_material_cost_for_alloc = 0.0
+
+            copy_cost_total_isk = 0.0
+            try:
+                if isinstance(copy_job, dict):
+                    cj_cost = (copy_job.get("job_cost") or {}) if isinstance(copy_job.get("job_cost"), dict) else {}
+                    copy_cost_total_isk = float(cj_cost.get("total_job_cost_isk") or 0.0)
+            except Exception:
+                copy_cost_total_isk = 0.0
+
+            try:
+                total_job_fee_isk = float(total_job_cost_isk or 0.0)
+            except Exception:
+                total_job_fee_isk = 0.0
+
+            try:
+                apply_multi_output_cost_allocations(
+                    bp=bp,
+                    total_material_cost=total_material_cost_for_alloc,
+                    total_product_value=float(total_product_value or 0.0),
+                    total_job_fee=total_job_fee_isk,
+                    total_copy_cost=float(copy_cost_total_isk or 0.0),
+                )
+            except Exception:
+                pass
+
+            # Build Tree rows per product (TreeData-ready, already includes rollups).
+            try:
+                ui_tree_by_product: dict[str, list[dict[str, Any]]] = {}
+                for prod in (bp.get("products") or []):
+                    if not isinstance(prod, dict):
+                        continue
+                    tid = prod.get("type_id")
+                    try:
+                        tid_i = int(tid) if tid is not None else 0
+                    except Exception:
+                        tid_i = 0
+                    if tid_i <= 0:
+                        continue
+
+                    try:
+                        root_qty = int(prod.get("quantity_total") or prod.get("quantity") or 0)
+                    except Exception:
+                        root_qty = 0
+
+                    share = prod.get("allocation_share")
+                    ui_tree_by_product[str(tid_i)] = compute_ui_build_tree_rows_by_product(
+                        plan_rows=(bp.get("submanufacturing_plan") or []),
+                        required_materials=(required_materials or []),
+                        root_required_quantity=int(root_qty),
+                        allocation_share=(float(share) if share is not None else None),
+                    )
+
+                bp["ui_build_tree_rows_by_product_type_id"] = ui_tree_by_product
+            except Exception:
+                bp["ui_build_tree_rows_by_product_type_id"] = {}
+
+            # Blueprint copy jobs summary (root + submanufacturing build steps).
+            try:
+                bp["ui_blueprint_copy_jobs"] = compute_ui_copy_jobs(
+                    blueprint_name=str(bp.get("type_name") or ""),
+                    manufacture_job=(bp.get("manufacture_job") if isinstance(bp.get("manufacture_job"), dict) else None),
+                    plan_rows=(bp.get("submanufacturing_plan") or []),
+                )
+            except Exception:
+                bp["ui_blueprint_copy_jobs"] = []
+
+            # Required blueprints (not owned) inferred from the plan.
+            try:
+                bp["ui_missing_blueprints"] = compute_ui_missing_blueprints(bp.get("submanufacturing_plan") or [])
+            except Exception:
+                bp["ui_missing_blueprints"] = []
 
             # Cache the derived fields (exclude per-asset identifiers/location fields).
             keys_to_cache = [
@@ -2080,6 +2271,9 @@ def enrich_blueprints_for_character(
                 "research_time_seconds",
                 "manufacture_job",
                 "products",
+                "ui_build_tree_rows_by_product_type_id",
+                "ui_blueprint_copy_jobs",
+                "ui_missing_blueprints",
             ]
             cached_fields: dict[str, Any] = {}
             for k in keys_to_cache:

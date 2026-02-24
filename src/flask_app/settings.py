@@ -52,16 +52,16 @@ def get_settings() -> FlaskSettings:
         health_poll_timeout_seconds=_int("FLASK_HEALTH_POLL_TIMEOUT", default=120),
         health_request_timeout_seconds=_int("FLASK_HEALTH_REQUEST_TIMEOUT", default=2),
         api_request_timeout_seconds=_int("FLASK_API_REQUEST_TIMEOUT", default=10),
-        public_structures_cache_ttl_seconds=_int("FLASK_PUBLIC_STRUCTURES_TTL", default=3600),
+        public_structures_cache_ttl_seconds=_int("FLASK_PUBLIC_STRUCTURES_TTL", default=24 * 3600),
         public_structures_startup_scan_enabled=_bool("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN", default=True),
-        public_structures_startup_scan_max_workers=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_WORKERS", default=10),
+        public_structures_startup_scan_max_workers=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_WORKERS", default=5),
         public_structures_startup_scan_scan_cap=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_CAP", default=5000),
         public_structures_startup_scan_time_budget_seconds=_int(
             "FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_TIME_BUDGET", default=60
         ),
         public_structures_startup_scan_batch_size=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_BATCH_SIZE", default=100),
         public_structures_startup_scan_pause_seconds=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_PAUSE", default=5),
-        public_structures_esi_request_timeout_seconds=_int("FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT", default=5),
+        public_structures_esi_request_timeout_seconds=_int("FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT", default=10),
     )
 
 

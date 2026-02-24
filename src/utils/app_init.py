@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from config.schemas import CONFIG_SCHEMA
 from config.paths import app_config_path, app_secret_path
@@ -6,6 +7,44 @@ from classes.config_manager import ConfigManager
 from classes.database_manager import DatabaseManager
 from classes.character_manager import CharacterManager
 from classes.corporation_manager import CorporationManager
+
+
+def _resolve_sqlite_uri(db_uri: str, *, config_path: Path) -> str:
+    """Resolve relative SQLite DB URIs to an absolute path.
+
+    The project config uses URIs like `sqlite:///database/eve_app.db`. If the
+    process is started from a different working directory, SQLite will silently
+    create/use a different DB file.
+
+    We resolve relative paths against the repository root (inferred from the
+    config file location) so both Flask and Streamlit always point at the same
+    file.
+    """
+
+    if not isinstance(db_uri, str):
+        return db_uri
+
+    uri = db_uri.strip()
+    prefix = "sqlite:///"
+    if not uri.startswith(prefix):
+        return db_uri
+
+    raw_path = uri[len(prefix) :]
+    if not raw_path:
+        return db_uri
+
+    db_path = Path(raw_path)
+    if db_path.is_absolute():
+        return db_uri
+
+    # config/config.json -> repo root is parent of the `config/` folder.
+    try:
+        repo_root = config_path.resolve().parent.parent
+    except Exception:
+        return db_uri
+
+    abs_path = (repo_root / db_path).resolve()
+    return f"{prefix}{abs_path.as_posix()}"
 
 def load_config() -> ConfigManager:
     """
@@ -34,8 +73,10 @@ def init_db_oauth(cfgManager: ConfigManager) -> DatabaseManager:
     """
     try:
         cfg = cfgManager.all()
-        logging.debug(f"Database URI for OAuth: {cfg['app']['database_oauth_uri']}")
-        db_oauth = DatabaseManager(cfg["app"]["database_oauth_uri"], cfg["app"]["language"])
+        raw_uri = cfg["app"]["database_oauth_uri"]
+        uri = _resolve_sqlite_uri(str(raw_uri), config_path=cfgManager.base_path)
+        logging.debug(f"Database URI for OAuth: {uri}")
+        db_oauth = DatabaseManager(uri, cfg["app"]["language"])
         return db_oauth
     except Exception as e:
         logging.error(f"Failed to initialize OAuth database: {e}")
@@ -47,8 +88,10 @@ def init_db_app(cfgManager: ConfigManager) -> DatabaseManager:
     """
     try:
         cfg = cfgManager.all()
-        logging.debug(f"Database URI for App: {cfg['app']['database_app_uri']}")
-        db_app = DatabaseManager(cfg["app"]["database_app_uri"], cfg["app"]["language"])
+        raw_uri = cfg["app"]["database_app_uri"]
+        uri = _resolve_sqlite_uri(str(raw_uri), config_path=cfgManager.base_path)
+        logging.debug(f"Database URI for App: {uri}")
+        db_app = DatabaseManager(uri, cfg["app"]["language"])
         return db_app
     except Exception as e:
         logging.error(f"Failed to initialize App database: {e}")
@@ -60,8 +103,10 @@ def init_db_sde(cfgManager: ConfigManager) -> DatabaseManager:
     """
     try:
         cfg = cfgManager.all()
-        logging.debug(f"Database URI for SDE: {cfg['app']['database_sde_uri']}")
-        db_sde = DatabaseManager(cfg["app"]["database_sde_uri"], cfg["app"]["language"])
+        raw_uri = cfg["app"]["database_sde_uri"]
+        uri = _resolve_sqlite_uri(str(raw_uri), config_path=cfgManager.base_path)
+        logging.debug(f"Database URI for SDE: {uri}")
+        db_sde = DatabaseManager(uri, cfg["app"]["language"])
         return db_sde
     except Exception as e:
         logging.error(f"Failed to initialize SDE database: {e}")
