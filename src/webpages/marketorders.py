@@ -1,17 +1,8 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
-except Exception:  # pragma: no cover
-    AgGrid = None  # type: ignore
-    GridOptionsBuilder = None  # type: ignore
-    JsCode = None  # type: ignore
-
 from utils.flask_api import api_get
 from utils.formatters import format_isk_short
-
-from webpages.industry_builder_utils import attach_aggrid_autosize
 
 
 def _rerun() -> None:
@@ -44,214 +35,6 @@ def get_item_image_url(order):
 def render():
     st.header("Market Orders")
 
-    def _render_orders_aggrid(df: pd.DataFrame) -> None:
-        if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-            st.dataframe(
-                df,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Icon": st.column_config.ImageColumn("", width="small"),
-                    "Price": st.column_config.NumberColumn("Price", format="%.2f ISK"),
-                    "Total Price": st.column_config.NumberColumn("Total Price", format="%.2f ISK"),
-                    "Price Difference": st.column_config.NumberColumn("Price Difference", format="%.2f ISK"),
-                    "Escrow Remaining": st.column_config.NumberColumn("Escrow Remaining", format="%.2f ISK"),
-                },
-            )
-            return
-
-        eu_locale = "nl-NL"  # '.' thousands, ',' decimals
-
-        img_renderer = JsCode(
-            """
-                (function() {
-                    function IconRenderer() {}
-
-                    IconRenderer.prototype.init = function(params) {
-                        this.eGui = document.createElement('div');
-                        this.eGui.style.display = 'flex';
-                        this.eGui.style.alignItems = 'center';
-                        this.eGui.style.justifyContent = 'center';
-                        this.eGui.style.width = '100%';
-
-                        this.eImg = document.createElement('img');
-                        this.eImg.style.width = '28px';
-                        this.eImg.style.height = '28px';
-                        this.eImg.style.display = 'block';
-                        this.eImg.src = params.value ? String(params.value) : '';
-
-                        this.eGui.appendChild(this.eImg);
-                    };
-
-                    IconRenderer.prototype.getGui = function() {
-                        return this.eGui;
-                    };
-
-                    IconRenderer.prototype.refresh = function(params) {
-                        if (this.eImg) {
-                            this.eImg.src = params.value ? String(params.value) : '';
-                        }
-                        return true;
-                    };
-
-                    return IconRenderer;
-                })()
-            """
-        )
-
-        def _js_eu_number(decimals: int) -> JsCode:
-            return JsCode(
-                f"""
-                    function(params) {{
-                        if (params.value === null || params.value === undefined || params.value === "") return "";
-                        const n = Number(params.value);
-                        if (isNaN(n)) return "";
-                        return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n);
-                    }}
-                """
-            )
-
-        def _js_eu_isk(decimals: int) -> JsCode:
-            return JsCode(
-                f"""
-                    function(params) {{
-                        if (params.value === null || params.value === undefined || params.value === "") return "";
-                        const n = Number(params.value);
-                        if (isNaN(n)) return "";
-                        return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + ' ISK';
-                    }}
-                """
-            )
-
-        gb = GridOptionsBuilder.from_dataframe(df)
-        gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
-
-        # Legacy column removed from backend, but hide defensively if present.
-        if "Price Status" in df.columns:
-            gb.configure_column("Price Status", hide=True)
-
-        if "Icon" in df.columns:
-            gb.configure_column(
-                "Icon",
-                header_name="",
-                width=56,
-                pinned="left",
-                sortable=False,
-                filter=False,
-                suppressAutoSize=True,
-                cellRenderer=img_renderer,
-            )
-
-        right = {"textAlign": "right"}
-
-        for c in ["Price", "Total Price", "Price Difference", "Escrow Remaining"]:
-            if c in df.columns:
-                if c == "Price Difference":
-                    gb.configure_column(
-                        c,
-                        type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_isk(2),
-                        minWidth=160,
-                        cellStyle=JsCode(
-                            """
-                            function(params) {
-                                try {
-                                    var v = params.value;
-                                    var n = Number(v);
-                                    if (v === null || v === undefined || v === '' || isNaN(n) || n === 0) {
-                                        return { textAlign: 'right' };
-                                    }
-                                    // Positive = best price, Negative = undercut.
-                                    if (n > 0) {
-                                        return { textAlign: 'right', color: '#2ecc71', fontWeight: '600' };
-                                    }
-                                    return { textAlign: 'right', color: '#e74c3c', fontWeight: '600' };
-                                } catch (e) {
-                                    return { textAlign: 'right' };
-                                }
-                            }
-                            """
-                        ),
-                    )
-                else:
-                    gb.configure_column(
-                        c,
-                        type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_isk(2),
-                        minWidth=140,
-                        cellStyle=right,
-                    )
-
-        for c in ["Volume", "Min. Volume"]:
-            if c in df.columns:
-                if c == "Volume":
-                    # Volume is a string like "12/34" (remain/total).
-                    gb.configure_column(
-                        c,
-                        minWidth=120,
-                        cellStyle=right,
-                    )
-                else:
-                    gb.configure_column(
-                        c,
-                        type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_number(0),
-                        minWidth=110,
-                        cellStyle=right,
-                    )
-
-        grid_options = gb.build()
-        attach_aggrid_autosize(grid_options, JsCode=JsCode)
-        grid_options["autoSizeStrategy"] = {"type": "fitCellContents"}
-
-        # Row color coding based on expiry window.
-        # - red: expires within 5 days (or already expired)
-        # - orange: expires within 14 days
-        if "Expires In" in df.columns:
-            grid_options["getRowStyle"] = JsCode(
-                r"""
-                function(params) {
-                    try {
-                        if (!params || !params.data) return null;
-                        var raw = params.data['Expires In'];
-                        if (raw === null || raw === undefined) return null;
-                        var s = String(raw);
-                        if (s.toLowerCase().indexOf('expired') >= 0) {
-                            return { backgroundColor: 'rgba(231, 76, 60, 0.10)' };
-                        }
-                        var d = 0, h = 0, m = 0;
-                        var md = s.match(/(\d+)\s*d/);
-                        var mh = s.match(/(\d+)\s*h/);
-                        var mm = s.match(/(\d+)\s*m/);
-                        if (md && md[1]) d = Number(md[1]);
-                        if (mh && mh[1]) h = Number(mh[1]);
-                        if (mm && mm[1]) m = Number(mm[1]);
-                        if (isNaN(d) || isNaN(h) || isNaN(m)) return null;
-
-                        var days = d + (h / 24.0) + (m / 1440.0);
-                        if (days <= 5) {
-                            return { backgroundColor: 'rgba(231, 76, 60, 0.10)' };
-                        }
-                        if (days <= 14) {
-                            return { backgroundColor: 'rgba(243, 156, 18, 0.12)' };
-                        }
-                        return null;
-                    } catch (e) {
-                        return null;
-                    }
-                }
-                """
-            )
-
-        height = min(650, 40 + (len(df) * 32))
-        AgGrid(
-            df,
-            gridOptions=grid_options,
-            allow_unsafe_jscode=True,
-            theme="streamlit",
-            height=height,
-        )
-
     all_orders = []
     try:
         response = get_all_orders()
@@ -271,6 +54,7 @@ def render():
                     "Icon": get_item_image_url(order),
                     "Type": order.get("type_name", ""),
                     "Price": order.get("price", 0),
+                    "Price Status": order.get("price_status", "N/A"),
                     "Price Difference": order.get("price_difference", ""),
                     "Volume": order.get("volume", 0),
                     "Total Price": order.get("total_price", 0),
@@ -288,6 +72,7 @@ def render():
                 "Icon": get_item_image_url(order),
                 "Type": order.get("type_name", ""),
                 "Price": order.get("price", 0),
+                "Price Status": order.get("price_status", "N/A"),
                 "Price Difference": order.get("price_difference", ""),
                 "Volume": order.get("volume", 0),
                 "Total Price": order.get("total_price", 0),
@@ -333,7 +118,21 @@ def render():
         )
 
         # Sell Orders
-        _render_orders_aggrid(df)
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Icon": st.column_config.ImageColumn("", width="small"),
+                "Price": st.column_config.NumberColumn("Price", format="%.2f ISK"),
+                "Total Price": st.column_config.NumberColumn(
+                    "Total Price", format="%.2f ISK"
+                ),
+                "Price Difference": st.column_config.NumberColumn(
+                    "Price Difference", format="%.2f ISK"
+                ),
+            },
+        )
     else:
         st.info("No market sell orders found.")
 
@@ -359,7 +158,21 @@ def render():
         )
 
         # Buy Orders
-        _render_orders_aggrid(df)
+        st.dataframe(
+            df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Icon": st.column_config.ImageColumn("", width="small"),
+                "Price": st.column_config.NumberColumn("Price", format="%.2f ISK"),
+                "Total Price": st.column_config.NumberColumn(
+                    "Total Price", format="%.2f ISK"
+                ),
+                "Price Difference": st.column_config.NumberColumn(
+                    "Price Difference", format="%.2f ISK"
+                ),
+            },
+        )
     else:
         st.info("No market buy orders found.")
 

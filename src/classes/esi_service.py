@@ -235,24 +235,6 @@ class ESIService:
         except Exception as e:
             raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
 
-    def get_region_name(self, region_id: int) -> Optional[str]:
-        """Resolve a region id into its name.
-
-        Uses the explicit /universe/regions/{region_id}/ endpoint rather than
-        relying on id-type heuristics.
-        """
-        if not isinstance(region_id, int) or region_id <= 0:
-            return None
-        try:
-            info = self._esi_client.esi_get(f"/universe/regions/{int(region_id)}/")
-            if isinstance(info, dict):
-                name = info.get("name")
-                if isinstance(name, str) and name:
-                    return name
-        except Exception:
-            return None
-        return None
-
     def get_universe_structure(self, structure_id: int, *, timeout_seconds: float = 15.0) -> Dict[str, Any]:
         """Return /universe/structures/{structure_id}/.
 

@@ -22,4 +22,4 @@ def public_structures_cache_ttl_seconds() -> int:
     Keeps using the existing env var name for backwards compatibility.
     """
 
-    return _int("FLASK_PUBLIC_STRUCTURES_TTL", default=24 * 3600)
+    return _int("FLASK_PUBLIC_STRUCTURES_TTL", default=3600)

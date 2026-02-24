@@ -52,11 +52,7 @@ def enrich_blueprints_for_character(
     db_app_session: Any,
     db_sde_session: Any,
     language: str,
-    prefer_inventory_consumption: bool = False,
     pricing_preferences: dict | None = None,
-    assume_bpo_copy_overhead: bool = False,
-    esi_market_prices: list[dict] | None = None,
-    market_price_map: dict[int, dict[str, float | None]] | None = None,
 ) -> Any:
     return industry_builder_service.enrich_blueprints_for_character(
         all_blueprints,
@@ -78,11 +74,7 @@ def enrich_blueprints_for_character(
         db_app_session=db_app_session,
         db_sde_session=db_sde_session,
         language=language,
-        prefer_inventory_consumption=bool(prefer_inventory_consumption),
         pricing_preferences=(pricing_preferences if isinstance(pricing_preferences, dict) else None),
-        assume_bpo_copy_overhead=bool(assume_bpo_copy_overhead),
-        esi_market_prices=(esi_market_prices if isinstance(esi_market_prices, list) else None),
-        market_price_map=(market_price_map if isinstance(market_price_map, dict) else None),
     )
 
 
