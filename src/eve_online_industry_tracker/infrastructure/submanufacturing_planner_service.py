@@ -7,9 +7,50 @@ from classes.asset_provenance import FifoLot, fifo_allocate_cost_breakdown
 from eve_online_industry_tracker.db_models import Blueprints
 
 from eve_online_industry_tracker.infrastructure.sde.blueprints import get_blueprint_manufacturing_data
+from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
 
 _ALL_BLUEPRINT_MFG_CACHE_BY_LANG: dict[str, dict[int, dict]] = {}
+_MFG_PRODUCT_TO_BPS_CACHE_BY_LANG: dict[str, dict[int, list[dict]]] = {}
+_ACTIVITY_PRODUCT_TYPE_IDS_CACHE: dict[str, set[int]] = {}
+_TYPE_NAME_CACHE_BY_LANG: dict[str, dict[int, str]] = {}
+
+
+def _get_type_name_cached(sde_session, *, language: str, type_id: int) -> str | None:
+    """Best-effort type name lookup with an in-memory cache.
+
+    This is used for leaf nodes that don't have a manufacturing blueprint (raw materials,
+    moon goo, etc.), so the UI doesn't fall back to displaying raw type IDs.
+    """
+
+    if sde_session is None:
+        return None
+
+    lang = str(language or "en")
+    tid = int(type_id)
+    if tid <= 0:
+        return None
+
+    slot = _TYPE_NAME_CACHE_BY_LANG.get(lang)
+    if not isinstance(slot, dict):
+        slot = {}
+        _TYPE_NAME_CACHE_BY_LANG[lang] = slot
+
+    cached = slot.get(tid)
+    if cached:
+        return str(cached)
+
+    try:
+        data = get_type_data(sde_session, lang, [tid]) or {}
+        nm = (data.get(tid, {}) or {}).get("type_name")
+        nm_s = str(nm) if nm is not None else ""
+    except Exception:
+        nm_s = ""
+
+    if nm_s:
+        slot[tid] = nm_s
+        return nm_s
+    return None
 
 
 def _get_all_blueprint_manufacturing_data_cached(sde_session, language: str) -> dict[int, dict]:
@@ -21,6 +62,54 @@ def _get_all_blueprint_manufacturing_data_cached(sde_session, language: str) -> 
     if isinstance(data, dict) and data:
         _ALL_BLUEPRINT_MFG_CACHE_BY_LANG[lang] = data
     return data
+
+
+def _get_mfg_product_to_bps_cached(*, sde_session, language: str) -> dict[int, list[dict]]:
+    """Return cached product_type_id -> blueprints index for manufacturing."""
+
+    lang = str(language or "en")
+    cached = _MFG_PRODUCT_TO_BPS_CACHE_BY_LANG.get(lang)
+    if isinstance(cached, dict) and cached:
+        return cached
+
+    all_bp_data = _get_all_blueprint_manufacturing_data_cached(sde_session, lang)
+    idx = _index_blueprints_by_product(all_bp_data)
+    if isinstance(idx, dict) and idx:
+        _MFG_PRODUCT_TO_BPS_CACHE_BY_LANG[lang] = idx
+    return idx
+
+
+def get_mfg_product_to_bps_cached(*, sde_session, language: str) -> dict[int, list[dict]]:
+    """Public wrapper around the manufacturing product->blueprints index cache."""
+
+    return _get_mfg_product_to_bps_cached(sde_session=sde_session, language=str(language or "en"))
+
+
+def get_reaction_product_type_ids_cached(sde_session) -> set[int]:
+    """Public wrapper around the reaction-product-type-ids cache."""
+
+    return _index_activity_product_type_ids_cached(sde_session, activity="reaction")
+
+
+def _index_activity_product_type_ids_cached(sde_session, *, activity: str) -> set[int]:
+    """Cached variant of `_index_activity_product_type_ids`.
+
+    This query can be extremely expensive (full-table scan of SDE blueprints).
+    Activities are static for a given SDE DB, so caching is safe in practice.
+    """
+
+    act = str(activity or "").strip().lower()
+    if not act:
+        return set()
+
+    cached = _ACTIVITY_PRODUCT_TYPE_IDS_CACHE.get(act)
+    if isinstance(cached, set) and cached:
+        return cached
+
+    out = _index_activity_product_type_ids(sde_session, activity=act)
+    if isinstance(out, set) and out:
+        _ACTIVITY_PRODUCT_TYPE_IDS_CACHE[act] = out
+    return out
 
 
 def _build_price_map(esi_service) -> dict[int, dict[str, float | None]]:
@@ -232,7 +321,11 @@ def plan_submanufacturing_tree(
     inventory_on_hand_by_type: dict[int, int] | None = None,
     inventory_fifo_lots_by_type: dict[int, list[FifoLot]] | None = None,
     use_fifo_inventory_costing: bool = True,
+    prefer_inventory_consumption: bool = False,
     max_depth: int = 3,
+    price_map: dict[int, dict[str, float | None]] | None = None,
+    mfg_product_to_bps: dict[int, list[dict]] | None = None,
+    reaction_product_type_ids: set[int] | None = None,
 ) -> list[dict]:
     """Recursive build-vs-buy planner.
 
@@ -250,13 +343,19 @@ def plan_submanufacturing_tree(
     if owned_bp_best:
         owned_bps |= {int(k) for k in owned_bp_best.keys() if k is not None}
 
-    all_bp_data = _get_all_blueprint_manufacturing_data_cached(sde_session, lang)
-    mfg_product_to_bps = _index_blueprints_by_product(all_bp_data)
-    reaction_product_type_ids = _index_activity_product_type_ids(sde_session, activity="reaction")
+    if mfg_product_to_bps is None:
+        mfg_product_to_bps = _get_mfg_product_to_bps_cached(sde_session=sde_session, language=lang)
+    if reaction_product_type_ids is None:
+        reaction_product_type_ids = _index_activity_product_type_ids_cached(sde_session, activity="reaction")
+    if price_map is None:
+        price_map = _build_price_map(esi_service)
 
-    price_map = _build_price_map(esi_service)
+    # Full blueprint manufacturing dataset (cached). Used when we pick a candidate
+    # blueprint for a product and need its materials/time.
+    all_bp_data = _get_all_blueprint_manufacturing_data_cached(sde_session, lang)
 
     use_fifo_inventory_costing = bool(use_fifo_inventory_costing)
+    prefer_inventory_consumption = bool(prefer_inventory_consumption)
     inventory_on_hand_by_type = inventory_on_hand_by_type or {}
     inventory_fifo_lots_by_type = inventory_fifo_lots_by_type or {}
 
@@ -278,6 +377,62 @@ def plan_submanufacturing_tree(
         gross = eiv * ci_f
         gross_after_bonuses = gross * (1.0 - cost_red)
         taxes = eiv * surcharge
+        return max(0.0, float(gross_after_bonuses) + float(taxes))
+
+    def _estimate_mfg_job_fee_from_eiv(eiv_total_isk: float | None, *, ci: float) -> float | None:
+        """Estimate manufacturing job fee matching in-game behavior.
+
+        Manufacturing uses a Job Cost Base (JCB) of 1% of EIV.
+        - SCI applies to JCB and is reduced by structure/rig bonuses.
+        - Surcharges (SCC + facility tax) apply to JCB (not reduced by bonuses).
+        """
+
+        if eiv_total_isk is None:
+            return None
+        try:
+            eiv = float(eiv_total_isk)
+        except Exception:
+            return None
+        if eiv <= 0:
+            return 0.0
+
+        ci_f = max(0.0, float(ci or 0.0))
+        surcharge = max(0.0, float(surcharge_rate_total_fraction or 0.0))
+
+        job_cost_base_fraction = 0.01
+        jcb = float(eiv) * float(job_cost_base_fraction)
+
+        gross = float(jcb) * float(ci_f)
+        gross_after_bonuses = float(gross) * (1.0 - cost_red)
+        taxes = float(jcb) * float(surcharge)
+        return max(0.0, float(gross_after_bonuses) + float(taxes))
+
+    def _estimate_copy_job_fee_from_eiv(eiv_total_isk: float | None, *, ci: float) -> float | None:
+        """Estimate copying job fee matching in-game behavior.
+
+        Copying uses a Job Cost Base (JCB) of 2% of EIV.
+        - SCI applies to JCB and is reduced by structure/rig bonuses.
+        - Surcharges (SCC + facility tax) apply to JCB (not reduced by bonuses).
+        """
+
+        if eiv_total_isk is None:
+            return None
+        try:
+            eiv = float(eiv_total_isk)
+        except Exception:
+            return None
+        if eiv <= 0:
+            return 0.0
+
+        ci_f = max(0.0, float(ci or 0.0))
+        surcharge = max(0.0, float(surcharge_rate_total_fraction or 0.0))
+
+        job_cost_base_fraction = 0.02
+        jcb = float(eiv) * float(job_cost_base_fraction)
+
+        gross = float(jcb) * float(ci_f)
+        gross_after_bonuses = float(gross) * (1.0 - cost_red)
+        taxes = float(jcb) * float(surcharge)
         return max(0.0, float(gross_after_bonuses) + float(taxes))
 
     def _buy_cost_for_type(
@@ -402,30 +557,51 @@ def plan_submanufacturing_tree(
             total += float(q) * float(adj)
         return float(total)
 
-    def _plan_one(type_id: int, qty: int, *, depth: int, path: set[int]) -> dict:
+    def _plan_one(type_id: int, qty: int, *, depth: int, path: set[int], _all_bp_data: dict[int, dict] = all_bp_data) -> dict:
         type_id_i = int(type_id)
         qty_i = max(0, int(qty))
 
         buy_unit, buy_cost, buy_details = _buy_cost_for_type(type_id_i, qty_i)
 
-        take_possible = False
+        inv_used_qty = 0
+        fifo_priced_qty = 0
+        unknown_inv_qty = 0
+        buy_now_qty = qty_i
+        fifo_cost_isk: float | None = None
         try:
-            inv_used = int(buy_details.get("inventory_used_qty") or 0)
-            buy_now = int(buy_details.get("buy_now_qty") or 0)
-            fifo_priced = int(buy_details.get("inventory_fifo_priced_qty") or 0)
-            eff_unit = buy_details.get("buy_effective_unit_price_isk")
-            if (
-                qty_i > 0
-                and inv_used == qty_i
-                and buy_now == 0
-                and fifo_priced == qty_i
-                and (buy_unit is not None)
-                and (eff_unit is not None)
-                and float(eff_unit) < float(buy_unit)
-            ):
-                take_possible = True
+            inv_used_qty = int(buy_details.get("inventory_used_qty") or 0)
         except Exception:
-            take_possible = False
+            inv_used_qty = 0
+        try:
+            fifo_priced_qty = int(buy_details.get("inventory_fifo_priced_qty") or 0)
+        except Exception:
+            fifo_priced_qty = 0
+        try:
+            unknown_inv_qty = int(buy_details.get("inventory_unknown_cost_qty") or 0)
+        except Exception:
+            unknown_inv_qty = 0
+        try:
+            buy_now_qty = int(buy_details.get("buy_now_qty") or 0)
+        except Exception:
+            buy_now_qty = max(0, qty_i - inv_used_qty)
+        try:
+            fifo_raw = buy_details.get("inventory_fifo_cost_isk")
+            fifo_cost_isk = float(fifo_raw) if fifo_raw is not None else None
+        except Exception:
+            fifo_cost_isk = None
+
+        # Action semantics:
+        # - 'take' means you have enough inventory on-hand to cover the required quantity
+        #   (no market purchase needed), regardless of whether your FIFO book value is
+        #   higher/lower than current market price.
+        # - 'buy' means you need to buy some/all of it.
+        take_possible = False
+        if use_fifo_inventory_costing and qty_i > 0:
+            try:
+                if inv_used_qty == qty_i and buy_now_qty == 0:
+                    take_possible = True
+            except Exception:
+                take_possible = False
 
         node: dict[str, Any] = {
             "type_id": type_id_i,
@@ -445,14 +621,38 @@ def plan_submanufacturing_tree(
             "inventory_fifo_industry_build_qty": buy_details.get("inventory_fifo_industry_build_qty"),
             "inventory_fifo_industry_build_cost_isk": buy_details.get("inventory_fifo_industry_build_cost_isk"),
             "buy_now_qty": buy_details.get("buy_now_qty"),
+            # When the FIFO preference is enabled and inventory is partially available, we
+            # treat the plan as: consume inventory first, then cover the shortfall via the
+            # cheaper of buy vs build. These fields describe that shortfall decision.
+            "shortfall_quantity": None,
+            "shortfall_buy_cost_isk": None,
+            "shortfall_build_cost_isk": None,
+            "shortfall_recommendation": None,
+            # Prefer-inventory metadata (debugging/explainability)
+            "prefer_inventory_applied": False,
+            "prefer_inventory_changed_decision": None,
+            "baseline_recommendation": None,
             "reason": None,
             "recommendation": None,
             "savings_isk": None,
             "effective_cost_isk": None,
             "effective_time_seconds": None,
+            # "build" is the *recommended* build plan (only when recommendation == 'build').
+            # "build_full" is the what-if full-quantity build option for comparisons/debugging.
             "build": None,
+            "build_full": None,
             "children": [],
         }
+
+        # Always attempt to resolve a human-readable name, even for nodes that have
+        # no manufacturing blueprint (raw resources, etc.).
+        try:
+            if not node.get("type_name"):
+                nm = _get_type_name_cached(sde_session, language=str(language or "en"), type_id=int(type_id_i))
+                if nm:
+                    node["type_name"] = str(nm)
+        except Exception:
+            pass
 
         if depth >= max_depth:
             node["reason"] = "max_depth_reached"
@@ -483,8 +683,18 @@ def plan_submanufacturing_tree(
             node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
             return node
 
+        # Best-effort name resolution: the manufacturing index already knows the product name.
+        # This prevents the UI from falling back to showing raw type IDs in the build tree.
+        try:
+            if not node.get("type_name"):
+                pn = best.get("product_type_name")
+                if pn:
+                    node["type_name"] = str(pn)
+        except Exception:
+            pass
+
         blueprint_type_id = int(best.get("blueprint_type_id") or 0)
-        bp_info = all_bp_data.get(blueprint_type_id, {}) if isinstance(all_bp_data, dict) else {}
+        bp_info = _all_bp_data.get(blueprint_type_id, {}) if isinstance(_all_bp_data, dict) else {}
 
         output_per_run = int(best.get("product_quantity_per_run") or 0)
         if output_per_run <= 0:
@@ -528,62 +738,6 @@ def plan_submanufacturing_tree(
         te_percent_used = max(0.0, min(float(te_percent_used), 100.0))
         me_multiplier_used = max(0.0, min(1.0, 1.0 - (me_percent_used / 100.0)))
         te_multiplier_used = max(0.0, min(1.0, 1.0 - (te_percent_used / 100.0)))
-
-        children: list[dict] = []
-        child_inputs_me0_for_eiv: list[dict] = []
-        for inp in mfg_materials:
-            if not isinstance(inp, dict):
-                continue
-            inp_tid = inp.get("type_id")
-            if inp_tid is None:
-                continue
-            per_run_qty = _safe_int(inp.get("quantity"), default=0)
-            total_qty_me0 = int(per_run_qty) * int(runs_needed)
-            if total_qty_me0 <= 0:
-                continue
-
-            raw_after_me = float(total_qty_me0) * float(me_multiplier_used) * (1.0 - mat_red)
-            if total_qty_me0 > 0:
-                total_qty_after_me = max(1, int(math.ceil(max(0.0, raw_after_me))))
-            else:
-                total_qty_after_me = 0
-            if total_qty_after_me <= 0:
-                continue
-
-            child_inputs_me0_for_eiv.append({"type_id": int(inp_tid), "quantity": int(total_qty_me0)})
-
-            child = _plan_one(
-                int(inp_tid),
-                int(total_qty_after_me),
-                depth=depth + 1,
-                path={*path, type_id_i},
-            )
-            child["type_name"] = str(inp.get("type_name") or "") or child.get("type_name")
-            children.append(child)
-
-        children_cost_known = all((c.get("effective_cost_isk") is not None) for c in children)
-        children_cost = sum(float(c.get("effective_cost_isk") or 0.0) for c in children) if children_cost_known else None
-
-        children_time_known = all((c.get("effective_time_seconds") is not None) for c in children)
-        children_time_seconds = (
-            sum(float(c.get("effective_time_seconds") or 0.0) for c in children) if children_time_known else None
-        )
-
-        mfg_time_per_run = 0.0
-        try:
-            mfg_time_per_run = float(((bp_info.get("manufacturing") or {}).get("time")) or 0.0)  # type: ignore[union-attr]
-        except Exception:
-            mfg_time_per_run = 0.0
-        manufacturing_time_seconds = max(0.0, float(mfg_time_per_run) * float(runs_needed) * float(te_multiplier_used))
-        manufacturing_time_seconds *= (1.0 - time_red)
-
-        eiv_total = _compute_eiv_total_for_inputs(child_inputs_me0_for_eiv)
-        mfg_job_fee = _estimate_job_fee_from_eiv(eiv_total, ci=float(manufacturing_system_cost_index or 0.0))
-
-        total_build_cost = None
-        if children_cost is not None:
-            total_build_cost = float(children_cost) + (float(mfg_job_fee) if mfg_job_fee is not None else 0.0)
-
         owns_bp = blueprint_type_id in owned_bps
         bpo_buy_cost = _blueprint_bpo_buy_cost(blueprint_type_id) if not owns_bp else None
 
@@ -592,39 +746,162 @@ def plan_submanufacturing_tree(
         research_me_time_s = float(bp_info.get("research_material", 0) or 0.0) if isinstance(bp_info, dict) else 0.0
         research_te_time_s = float(bp_info.get("research_time", 0) or 0.0) if isinstance(bp_info, dict) else 0.0
 
-        copy_overhead: dict[str, Any] | None = None
-        copy_fee_included = False
-        copy_time_included = False
-        copy_time_seconds_included = 0.0
-        if copying_time_s > 0 and runs_needed > 0:
-            run_ratio = 1.0
-            if max_runs > 0:
-                run_ratio = max(0.0, min(1.0, float(runs_needed) / float(max_runs)))
-            est_copy_time = float(copying_time_s) * float(run_ratio)
-            est_copy_time *= (1.0 - time_red)
-            copy_fee = _estimate_job_fee_from_eiv(eiv_total, ci=float(copying_system_cost_index or 0.0))
-            copy_overhead = {
-                "assumption": "Estimated copy overhead for creating a BPC with enough runs.",
-                "max_production_limit": int(max_runs),
-                "estimated_copy_time_seconds": float(est_copy_time),
-                "estimated_copy_fee_isk": float(copy_fee) if copy_fee is not None else None,
+        # Memoize build computations for this node (we may compute full + shortfall).
+        build_option_cache: dict[int, tuple[dict[str, Any], float | None, float | None, list[dict], float | None]] = {}
+
+        def _compute_build_option(
+            *, desired_qty: int
+        ) -> tuple[dict[str, Any], float | None, float | None, list[dict], float | None]:
+            """Compute build option for desired_qty of the product.
+
+            Returns (build_dict, total_build_cost_isk, total_build_time_seconds, children_nodes, eiv_total_isk).
+            """
+
+            desired_qty_i = max(0, int(desired_qty or 0))
+            cached = build_option_cache.get(int(desired_qty_i))
+            if cached is not None:
+                return cached
+            runs_needed_i = _ceil_div(desired_qty_i, output_per_run)
+            output_total_i = runs_needed_i * output_per_run
+
+            children_i: list[dict] = []
+            child_inputs_me0_for_eiv_i: list[dict] = []
+
+            for inp in mfg_materials:
+                if not isinstance(inp, dict):
+                    continue
+                inp_tid = inp.get("type_id")
+                if inp_tid is None:
+                    continue
+                per_run_qty = _safe_int(inp.get("quantity"), default=0)
+                total_qty_me0 = int(per_run_qty) * int(runs_needed_i)
+                if total_qty_me0 <= 0:
+                    continue
+
+                raw_after_me = float(total_qty_me0) * float(me_multiplier_used) * (1.0 - mat_red)
+                if total_qty_me0 > 0:
+                    total_qty_after_me = max(1, int(math.ceil(max(0.0, raw_after_me))))
+                else:
+                    total_qty_after_me = 0
+                if total_qty_after_me <= 0:
+                    continue
+
+                child_inputs_me0_for_eiv_i.append({"type_id": int(inp_tid), "quantity": int(total_qty_me0)})
+
+                child = _plan_one(
+                    int(inp_tid),
+                    int(total_qty_after_me),
+                    depth=depth + 1,
+                    path={*path, type_id_i},
+                )
+                child["type_name"] = str(inp.get("type_name") or "") or child.get("type_name")
+                children_i.append(child)
+
+            children_cost_known = all((c.get("effective_cost_isk") is not None) for c in children_i)
+            children_cost = (
+                sum(float(c.get("effective_cost_isk") or 0.0) for c in children_i) if children_cost_known else None
+            )
+
+            children_time_known = all((c.get("effective_time_seconds") is not None) for c in children_i)
+            children_time_seconds = (
+                sum(float(c.get("effective_time_seconds") or 0.0) for c in children_i) if children_time_known else None
+            )
+
+            mfg_time_per_run = 0.0
+            try:
+                mfg_time_per_run = float(((bp_info.get("manufacturing") or {}).get("time")) or 0.0)  # type: ignore[union-attr]
+            except Exception:
+                mfg_time_per_run = 0.0
+            manufacturing_time_seconds = max(
+                0.0,
+                float(mfg_time_per_run) * float(runs_needed_i) * float(te_multiplier_used),
+            )
+            manufacturing_time_seconds *= (1.0 - time_red)
+
+            eiv_total = _compute_eiv_total_for_inputs(child_inputs_me0_for_eiv_i)
+            mfg_job_fee = _estimate_mfg_job_fee_from_eiv(eiv_total, ci=float(manufacturing_system_cost_index or 0.0))
+
+            total_build_cost = None
+            if children_cost is not None:
+                total_build_cost = float(children_cost) + (float(mfg_job_fee) if mfg_job_fee is not None else 0.0)
+
+            total_build_time_seconds = None
+            if children_time_seconds is not None:
+                total_build_time_seconds = float(children_time_seconds) + float(manufacturing_time_seconds)
+
+            copy_overhead: dict[str, Any] | None = None
+            copy_fee_included = False
+            copy_time_included = False
+            copy_time_seconds_included = 0.0
+            if copying_time_s > 0 and runs_needed_i > 0:
+                # SDE copying time is per-run; total time scales linearly with runs.
+                est_copy_time = float(copying_time_s) * float(runs_needed_i)
+                est_copy_time *= (1.0 - time_red)
+                copy_fee = _estimate_copy_job_fee_from_eiv(eiv_total, ci=float(copying_system_cost_index or 0.0))
+                copy_overhead = {
+                    "assumption": "Estimated copy overhead for creating a BPC with enough runs.",
+                    "max_production_limit": int(max_runs),
+                    "estimated_copy_time_seconds": float(est_copy_time),
+                    "estimated_copy_fee_isk": float(copy_fee) if copy_fee is not None else None,
+                }
+
+                if not owns_bp:
+                    if total_build_cost is not None and copy_fee is not None:
+                        total_build_cost = float(total_build_cost) + float(copy_fee)
+                        copy_fee_included = True
+                    if copy_overhead.get("estimated_copy_time_seconds") is not None:
+                        copy_time_included = True
+                        try:
+                            copy_time_seconds_included = float(copy_overhead.get("estimated_copy_time_seconds") or 0.0)
+                        except Exception:
+                            copy_time_seconds_included = 0.0
+
+            if total_build_time_seconds is not None and copy_time_included:
+                total_build_time_seconds += float(copy_time_seconds_included)
+
+            build_dict: dict[str, Any] = {
+                "blueprint_type_id": int(blueprint_type_id),
+                "blueprint_type_name": str(best.get("blueprint_type_name") or blueprint_type_id),
+                "runs_needed": int(runs_needed_i),
+                "product_quantity_per_run": int(output_per_run),
+                "output_total": int(output_total_i),
+                "blueprint_efficiency": {
+                    "me_percent": float(me_percent_used),
+                    "te_percent": float(te_percent_used),
+                    "source": str(eff_source),
+                    "owned_is_blueprint_copy": owned_is_bpc,
+                    "owned_runs": owned_runs,
+                    "note": "ME/TE affects materials/time estimates. Job fee estimates remain ME0-based (EIV/client behavior).",
+                },
+                "children_cost_isk": float(children_cost) if children_cost is not None else None,
+                "estimated_manufacturing_job_fee_isk": float(mfg_job_fee) if mfg_job_fee is not None else None,
+                "total_build_cost_isk": float(total_build_cost) if total_build_cost is not None else None,
+                "children_time_seconds": float(children_time_seconds) if children_time_seconds is not None else None,
+                "manufacturing_time_seconds": float(manufacturing_time_seconds),
+                "total_build_time_seconds": (
+                    float(total_build_time_seconds) if total_build_time_seconds is not None else None
+                ),
+                "blueprint_owned": bool(owns_bp),
+                "blueprint_acquisition_included_in_total_build_cost": False,
+                "copy_overhead_included_in_total_build_cost": bool(copy_fee_included),
+                "copy_overhead_included_in_total_time": bool(copy_time_included),
+                "blueprint_bpo_buy_cost_isk": float(bpo_buy_cost) if bpo_buy_cost is not None else None,
+                "research_overhead": None,
+                "copy_overhead": copy_overhead,
             }
 
-            if not owns_bp:
-                if total_build_cost is not None and copy_fee is not None:
-                    total_build_cost = float(total_build_cost) + float(copy_fee)
-                    copy_fee_included = True
-                if copy_overhead.get("estimated_copy_time_seconds") is not None:
-                    copy_time_included = True
-                    try:
-                        copy_time_seconds_included = float(copy_overhead.get("estimated_copy_time_seconds") or 0.0)
-                    except Exception:
-                        copy_time_seconds_included = 0.0
+            res = (build_dict, total_build_cost, total_build_time_seconds, children_i, eiv_total)
+            build_option_cache[int(desired_qty_i)] = res
+            return res
+
+        build_full, total_build_cost, total_build_time_seconds, children, eiv_total_full = _compute_build_option(
+            desired_qty=qty_i
+        )
 
         research_overhead: dict[str, Any] | None = None
         if (research_me_time_s > 0 or research_te_time_s > 0) and runs_needed > 0:
-            me_fee = _estimate_job_fee_from_eiv(eiv_total, ci=float(research_me_system_cost_index or 0.0))
-            te_fee = _estimate_job_fee_from_eiv(eiv_total, ci=float(research_te_system_cost_index or 0.0))
+            me_fee = _estimate_job_fee_from_eiv(eiv_total_full, ci=float(research_me_system_cost_index or 0.0))
+            te_fee = _estimate_job_fee_from_eiv(eiv_total_full, ci=float(research_te_system_cost_index or 0.0))
             research_overhead = {
                 "assumption": "Estimated ME/TE research overhead for the BPO; informational only.",
                 "estimated_research_me_time_seconds": float(research_me_time_s) * (1.0 - time_red),
@@ -633,41 +910,119 @@ def plan_submanufacturing_tree(
                 "estimated_research_te_fee_isk": float(te_fee) if te_fee is not None else None,
             }
 
-        total_build_time_seconds = None
-        if children_time_seconds is not None:
-            total_build_time_seconds = float(children_time_seconds) + float(manufacturing_time_seconds)
-            if copy_time_included:
-                total_build_time_seconds += float(copy_time_seconds_included)
-
+        # Attach full-build option (what-if) and keep children for tree inspection.
         node["children"] = children
-        node["build"] = {
-            "blueprint_type_id": int(blueprint_type_id),
-            "blueprint_type_name": str(best.get("blueprint_type_name") or blueprint_type_id),
-            "runs_needed": int(runs_needed),
-            "product_quantity_per_run": int(output_per_run),
-            "output_total": int(output_total),
-            "blueprint_efficiency": {
-                "me_percent": float(me_percent_used),
-                "te_percent": float(te_percent_used),
-                "source": str(eff_source),
-                "owned_is_blueprint_copy": owned_is_bpc,
-                "owned_runs": owned_runs,
-                "note": "ME/TE affects materials/time estimates. Job fee estimates remain ME0-based (EIV/client behavior).",
-            },
-            "children_cost_isk": float(children_cost) if children_cost is not None else None,
-            "estimated_manufacturing_job_fee_isk": float(mfg_job_fee) if mfg_job_fee is not None else None,
-            "total_build_cost_isk": float(total_build_cost) if total_build_cost is not None else None,
-            "children_time_seconds": float(children_time_seconds) if children_time_seconds is not None else None,
-            "manufacturing_time_seconds": float(manufacturing_time_seconds),
-            "total_build_time_seconds": float(total_build_time_seconds) if total_build_time_seconds is not None else None,
-            "blueprint_owned": bool(owns_bp),
-            "blueprint_acquisition_included_in_total_build_cost": False,
-            "copy_overhead_included_in_total_build_cost": bool(copy_fee_included),
-            "copy_overhead_included_in_total_time": bool(copy_time_included),
-            "blueprint_bpo_buy_cost_isk": float(bpo_buy_cost) if bpo_buy_cost is not None else None,
-            "research_overhead": research_overhead,
-            "copy_overhead": copy_overhead,
-        }
+        node["build_full"] = build_full
+        if isinstance(node.get("build"), dict):
+            node["build"]["research_overhead"] = research_overhead
+        if isinstance(node.get("build_full"), dict):
+            node["build_full"]["research_overhead"] = research_overhead
+
+        # Prefer-inventory mode: consume on-hand inventory first, then cover any shortfall
+        # via min(buy_shortfall, build_shortfall).
+        if prefer_inventory_consumption and use_fifo_inventory_costing and qty_i > 0 and inv_used_qty > 0 and buy_now_qty > 0:
+            node["prefer_inventory_applied"] = True
+
+            # Baseline recommendation (ignoring the preference logic): choose full buy vs full build.
+            baseline_rec = None
+            try:
+                if buy_cost is not None and total_build_cost is not None:
+                    baseline_rec = "build" if float(total_build_cost) < float(buy_cost) else "buy"
+                elif total_build_cost is not None and buy_cost is None:
+                    baseline_rec = "build"
+                elif buy_cost is not None:
+                    baseline_rec = "buy"
+            except Exception:
+                baseline_rec = None
+            if baseline_rec == "buy" and take_possible:
+                baseline_rec = "take"
+            node["baseline_recommendation"] = baseline_rec
+
+            shortfall_qty = max(0, int(buy_now_qty))
+            node["shortfall_quantity"] = int(shortfall_qty)
+
+            shortfall_buy_cost = None
+            if buy_unit is not None:
+                try:
+                    shortfall_buy_cost = float(shortfall_qty) * float(buy_unit)
+                except Exception:
+                    shortfall_buy_cost = None
+            node["shortfall_buy_cost_isk"] = float(shortfall_buy_cost) if shortfall_buy_cost is not None else None
+
+            # Build cost for the shortfall qty (do NOT reuse the full-build cost; we need the
+            # correct run rounding and material scaling for the smaller quantity).
+            build_shortfall, shortfall_build_cost, shortfall_build_time, shortfall_children, _ = _compute_build_option(
+                desired_qty=int(shortfall_qty)
+            )
+            node["shortfall_build_cost_isk"] = float(shortfall_build_cost) if shortfall_build_cost is not None else None
+            build_shortfall["research_overhead"] = research_overhead
+
+            # Inventory portion cost = FIFO priced lots + unknown-basis inventory at market avg (best-effort).
+            inv_portion_cost = 0.0
+            if fifo_cost_isk is not None:
+                inv_portion_cost += float(fifo_cost_isk)
+            if unknown_inv_qty > 0 and buy_unit is not None:
+                inv_portion_cost += float(unknown_inv_qty) * float(buy_unit)
+
+            # Choose cheapest shortfall fulfillment.
+            shortfall_rec = None
+            shortfall_cost = None
+            if shortfall_build_cost is not None and shortfall_buy_cost is not None:
+                if float(shortfall_build_cost) < float(shortfall_buy_cost):
+                    shortfall_rec = "build"
+                    shortfall_cost = float(shortfall_build_cost)
+                else:
+                    shortfall_rec = "buy"
+                    shortfall_cost = float(shortfall_buy_cost)
+            elif shortfall_build_cost is not None:
+                shortfall_rec = "build"
+                shortfall_cost = float(shortfall_build_cost)
+            elif shortfall_buy_cost is not None:
+                shortfall_rec = "buy"
+                shortfall_cost = float(shortfall_buy_cost)
+
+            node["shortfall_recommendation"] = str(shortfall_rec) if shortfall_rec is not None else None
+
+            # If the default full-quantity comparison would have recommended a full build,
+            # flag this node as being affected by the preference.
+            try:
+                if buy_cost is not None and total_build_cost is not None and float(total_build_cost) < float(buy_cost):
+                    node["reason"] = "prefer_inventory_consumption"
+            except Exception:
+                pass
+
+            node["recommendation"] = str(shortfall_rec) if shortfall_rec is not None else None
+            if take_possible:
+                node["recommendation"] = "take"
+
+            if shortfall_cost is not None:
+                node["effective_cost_isk"] = float(inv_portion_cost) + float(shortfall_cost)
+            else:
+                node["effective_cost_isk"] = None
+
+            # Savings relative to the baseline full-quantity buy valuation (FIFO+market shortfall).
+            try:
+                if buy_cost is not None and node.get("effective_cost_isk") is not None:
+                    node["savings_isk"] = float(buy_cost) - float(node.get("effective_cost_isk") or 0.0)
+            except Exception:
+                node["savings_isk"] = None
+
+            try:
+                if baseline_rec is not None:
+                    node["prefer_inventory_changed_decision"] = str(baseline_rec) != str(node.get("recommendation"))
+            except Exception:
+                node["prefer_inventory_changed_decision"] = None
+
+            if str(node.get("recommendation") or "").lower() == "build":
+                node["build"] = build_shortfall
+                node["children"] = shortfall_children
+                node["effective_time_seconds"] = float(shortfall_build_time) if shortfall_build_time is not None else None
+            else:
+                node["build"] = None
+                node["children"] = []
+                node["effective_time_seconds"] = 0.0 if node.get("effective_cost_isk") is not None else None
+
+            return node
 
         if buy_cost is not None and total_build_cost is not None:
             savings = float(buy_cost) - float(total_build_cost)
@@ -680,6 +1035,7 @@ def plan_submanufacturing_tree(
                 if (rec == "build" and total_build_time_seconds is not None)
                 else 0.0
             )
+            node["build"] = build_full if rec == "build" else None
         else:
             if total_build_cost is not None and buy_cost is None:
                 node["recommendation"] = "build"
@@ -688,12 +1044,14 @@ def plan_submanufacturing_tree(
                     float(total_build_time_seconds) if total_build_time_seconds is not None else None
                 )
                 node["reason"] = "buy_price_missing"
+                node["build"] = build_full
             else:
                 node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
                 node["effective_cost_isk"] = buy_cost
                 node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
                 if node.get("reason") is None:
                     node["reason"] = "insufficient_price_data"
+                node["build"] = None
 
         return node
 

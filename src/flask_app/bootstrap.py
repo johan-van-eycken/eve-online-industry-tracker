@@ -7,6 +7,7 @@ from flask_app.deps import get_state
 from flask_app.state import AppState
 from flask_app.background_jobs import register_thread, stop_background_jobs
 from flask_app.settings import (
+    public_structures_cache_ttl_seconds,
     public_structures_startup_scan_batch_size,
     public_structures_startup_scan_enabled,
     public_structures_esi_request_timeout_seconds,
@@ -26,7 +27,10 @@ from utils.app_init import (
 
 from eve_online_industry_tracker.esi_service import ESIService
 
-from eve_online_industry_tracker.infrastructure.public_structures_cache_service import trigger_global_public_structures_scan
+from eve_online_industry_tracker.infrastructure.public_structures_cache_service import (
+    should_run_global_public_structures_scan,
+    trigger_global_public_structures_scan,
+)
 
 
 def _register_thread(app_state: AppState, name: str, thread: threading.Thread) -> None:
@@ -113,7 +117,10 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
 
         # Start background global scan to populate public_structures. This is best-effort and
         # bounded by conservative limits so it doesn't block readiness.
-        if public_structures_startup_scan_enabled():
+        if public_structures_startup_scan_enabled() and should_run_global_public_structures_scan(
+            state=state,
+            min_interval_seconds=int(public_structures_cache_ttl_seconds()),
+        ):
             trigger_global_public_structures_scan(
                 state=state,
                 scan_cap=public_structures_startup_scan_scan_cap(),
