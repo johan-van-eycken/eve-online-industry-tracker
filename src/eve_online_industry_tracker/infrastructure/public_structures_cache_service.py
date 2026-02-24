@@ -66,36 +66,6 @@ def get_cached_public_structures(*, state: Any, system_id: int, ttl_seconds: int
             pass
 
 
-def should_run_global_public_structures_scan(*, state: Any, min_interval_seconds: int) -> bool:
-    """Return True if the startup global scan should run.
-
-    We persist the last successful completion timestamp in `public_structures_scan_state`.
-    This allows us to avoid re-triggering the heavy scan on every Flask restart.
-
-    If we cannot read scan state for any reason, we default to running.
-    """
-
-    if state.db_app is None:
-        return True
-
-    session = state.db_app.Session()
-    try:
-        _ensure_scan_state_table_exists(session)
-        last_completed_at = public_structures_scan_state_repo.get_last_completed_at(session)
-        if last_completed_at is None:
-            return True
-
-        age_seconds = (datetime.utcnow() - last_completed_at).total_seconds()
-        return age_seconds >= float(min_interval_seconds)
-    except Exception:
-        return True
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
-
-
 def refresh_public_structures_for_system(
     *,
     state: Any,
