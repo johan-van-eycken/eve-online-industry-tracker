@@ -56,11 +56,17 @@ def _normalize_asset_dict(asset_dict: dict[str, Any], source: str) -> dict[str, 
 
 def _extract_manufacturing_data(bp_info: dict[str, Any]) -> dict[str, Any]:
     manufacturing = bp_info.get("manufacturing", {})
+    invention = bp_info.get("invention", {})
     return {
         "manufacturing_time": manufacturing.get("time", 0),
         "materials": manufacturing.get("materials", []),
         "products": manufacturing.get("products", []),
         "required_skills": manufacturing.get("skills", []),
+        "invention_time": invention.get("time", 0),
+        "invention_probability": invention.get("probability", None),
+        "invention_materials": invention.get("materials", []),
+        "invention_products": invention.get("products", []),
+        "invention_required_skills": invention.get("skills", []),
         "research_time": bp_info.get("research_time", 0),
         "research_material": bp_info.get("research_material", 0),
         "copying_time": bp_info.get("copying", 0),
