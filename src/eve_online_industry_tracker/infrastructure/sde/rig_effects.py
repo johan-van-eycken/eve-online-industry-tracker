@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Iterable
 
 from sqlalchemy import bindparam, text
@@ -9,6 +10,29 @@ from sqlalchemy import bindparam, text
 _RIG_ATTR_TIME_REDUCTION = 2593
 _RIG_ATTR_MATERIAL_REDUCTION = 2594
 _RIG_ATTR_COST_REDUCTION = 2595
+
+
+_RIG_EFFECTS_CACHE: dict[tuple[int, ...], list[dict]] = {}
+_RIG_EFFECTS_CACHE_LOCK = threading.Lock()
+
+_RIG_REDUCTION_CACHE: dict[tuple[tuple[int, ...], str, str, str], float] = {}
+_RIG_REDUCTION_CACHE_LOCK = threading.Lock()
+
+
+def _clone_rig_effects_payload(payload: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for r in payload or []:
+        if not isinstance(r, dict):
+            continue
+        e = r.get("effects")
+        if isinstance(e, list):
+            effects_copy = [dict(x) for x in e if isinstance(x, dict)]
+        else:
+            effects_copy = []
+        rec = dict(r)
+        rec["effects"] = effects_copy
+        out.append(rec)
+    return out
 
 
 _RIG_GROUP_TOKEN_LABELS: dict[str, str] = {
@@ -123,6 +147,12 @@ def get_rig_effects_for_type_ids(sde_session: Any, rig_type_ids: Iterable[int]) 
     ids = sorted({int(x) for x in rig_type_ids if x is not None and int(x) != 0})
     if not ids:
         return []
+
+    cache_key = tuple(ids)
+    with _RIG_EFFECTS_CACHE_LOCK:
+        cached = _RIG_EFFECTS_CACHE.get(cache_key)
+    if isinstance(cached, list) and cached:
+        return _clone_rig_effects_payload(cached)
 
     dogma_rows = (
         sde_session.execute(
@@ -244,6 +274,9 @@ def get_rig_effects_for_type_ids(sde_session: Any, rig_type_ids: Iterable[int]) 
             }
         )
 
+    with _RIG_EFFECTS_CACHE_LOCK:
+        _RIG_EFFECTS_CACHE[cache_key] = _clone_rig_effects_payload(rigs_out)
+
     return rigs_out
 
 
@@ -290,6 +323,37 @@ def compute_rig_reduction_for(
     if not rigs_payload:
         return 0.0
 
+    # Cache per (rig tuple, activity, metric, group).
+    rig_key: tuple[int, ...] = tuple()
+    try:
+        rig_ids_set: set[int] = set()
+        for r in rigs_payload:
+            if not isinstance(r, dict):
+                continue
+            tid = r.get("type_id")
+            if tid is None:
+                continue
+            try:
+                tid_i = int(tid)
+            except Exception:
+                continue
+            if tid_i != 0:
+                rig_ids_set.add(int(tid_i))
+        rig_key = tuple(sorted(rig_ids_set))
+    except Exception:
+        rig_key = tuple()
+
+    akey = str(activity)
+    mkey = str(metric)
+    gkey = str((group or "").strip())
+    cache_key = (rig_key, akey, mkey, gkey)
+
+    if rig_key:
+        with _RIG_REDUCTION_CACHE_LOCK:
+            cached = _RIG_REDUCTION_CACHE.get(cache_key)
+        if isinstance(cached, (int, float)):
+            return float(cached)
+
     wanted_group = (group or "").strip()
 
     reductions: list[float] = []
@@ -311,4 +375,10 @@ def compute_rig_reduction_for(
             except Exception:
                 continue
 
-    return compute_combined_reduction(reductions)
+    out = compute_combined_reduction(reductions)
+
+    if rig_key:
+        with _RIG_REDUCTION_CACHE_LOCK:
+            _RIG_REDUCTION_CACHE[cache_key] = float(out)
+
+    return out

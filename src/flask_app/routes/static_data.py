@@ -7,6 +7,7 @@ from eve_online_industry_tracker.application.static_data.service import StaticDa
 from flask_app.bootstrap import require_ready, require_sde_ready
 from flask_app.deps import get_state
 from flask_app.http import ok
+from flask_app.session_provider import FlaskSessionProvider
 
 
 static_data_bp = Blueprint("static_data", __name__)
@@ -20,7 +21,7 @@ def get_static_file(filename: str):
 @static_data_bp.get("/facilities")
 def facilities():
     require_ready(get_state())
-    svc = StaticDataService(state=get_state())
+    svc = StaticDataService(state=get_state(), sessions=FlaskSessionProvider())
     return ok(data=svc.list_facilities())
 
 
@@ -34,7 +35,7 @@ def optimize():
     if missing:
         raise ServiceError(f"Missing field(s): {', '.join(missing)}", status_code=400)
 
-    svc = StaticDataService(state=get_state())
+    svc = StaticDataService(state=get_state(), sessions=FlaskSessionProvider())
     result = svc.optimize_ore_plan(payload)
     return ok(data=result)
 
@@ -43,7 +44,7 @@ def optimize():
 def materials():
     require_ready(get_state())
     require_sde_ready(get_state())
-    svc = StaticDataService(state=get_state())
+    svc = StaticDataService(state=get_state(), sessions=FlaskSessionProvider())
     return ok(data=svc.list_materials_cached())
 
 
@@ -51,5 +52,5 @@ def materials():
 def ores():
     require_ready(get_state())
     require_sde_ready(get_state())
-    svc = StaticDataService(state=get_state())
+    svc = StaticDataService(state=get_state(), sessions=FlaskSessionProvider())
     return ok(data=svc.list_ores())
