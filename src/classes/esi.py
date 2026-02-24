@@ -653,16 +653,7 @@ class ESIClient:
                     else:
                         response.raise_for_status()
                 except requests.RequestException as e:
-                    # Timeouts and transient network errors are expected sometimes,
-                    # especially during best-effort background scans.
-                    try:
-                        is_timeout = isinstance(e, requests.exceptions.Timeout)
-                    except Exception:
-                        is_timeout = False
-                    if is_timeout:
-                        logging.warning(f"ESI request timeout {paged_url}: {e}")
-                    else:
-                        logging.error(f"ESI request error {paged_url}: {e}")
+                    logging.error(f"ESI request error {paged_url}: {e}")
                     retries += 1
                     time.sleep(2 ** retries)
                     if retries >= 3:
@@ -704,14 +695,7 @@ class ESIClient:
                 else:
                     response.raise_for_status()
             except requests.RequestException as e:
-                try:
-                    is_timeout = isinstance(e, requests.exceptions.Timeout)
-                except Exception:
-                    is_timeout = False
-                if is_timeout:
-                    logging.warning(f"ESI request timeout {url}: {e}")
-                else:
-                    logging.error(f"ESI request error {url}: {e}")
+                logging.error(f"ESI request error {url}: {e}")
                 retries += 1
                 time.sleep(2 ** retries)
 

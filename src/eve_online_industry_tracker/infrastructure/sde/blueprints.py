@@ -38,45 +38,14 @@ def get_blueprint_manufacturing_data(
         activities = bp.activities if isinstance(bp.activities, dict) else {}
         manufacturing = activities.get("manufacturing", {})
 
-        invention = activities.get("invention", {})
-
         for mat in manufacturing.get("materials", []):
-            try:
-                material_type_ids.add(int(mat["typeID"]))
-            except Exception:
-                continue
+            material_type_ids.add(mat["typeID"])
 
         for prod in manufacturing.get("products", []):
-            try:
-                product_type_ids.add(int(prod["typeID"]))
-            except Exception:
-                continue
+            product_type_ids.add(prod["typeID"])
 
         for skill in manufacturing.get("skills", []):
-            try:
-                skill_type_ids.add(int(skill["typeID"]))
-            except Exception:
-                continue
-
-        # Invention activity (T2 invention from T1 BPCs)
-        if isinstance(invention, dict):
-            for mat in invention.get("materials", []):
-                try:
-                    material_type_ids.add(int(mat["typeID"]))
-                except Exception:
-                    continue
-
-            for prod in invention.get("products", []):
-                try:
-                    product_type_ids.add(int(prod["typeID"]))
-                except Exception:
-                    continue
-
-            for skill in invention.get("skills", []):
-                try:
-                    skill_type_ids.add(int(skill["typeID"]))
-                except Exception:
-                    continue
+            skill_type_ids.add(skill["typeID"])
 
     all_type_ids = list(material_type_ids | product_type_ids | blueprint_type_id_set | skill_type_ids)
     type_data_map = get_type_data(session, language, all_type_ids)
@@ -87,19 +56,13 @@ def get_blueprint_manufacturing_data(
         activities = bp.activities if isinstance(bp.activities, dict) else {}
         manufacturing = activities.get("manufacturing", {})
 
-        invention = activities.get("invention", {}) if isinstance(activities.get("invention", {}), dict) else {}
-
         materials = []
         for mat in manufacturing.get("materials", []):
-            raw_type_id = mat.get("typeID")
-            try:
-                type_id = int(raw_type_id)
-            except Exception:
-                continue
-            type_data = type_data_map.get(int(type_id), {})
+            type_id = mat.get("typeID")
+            type_data = type_data_map.get(type_id, {})
             materials.append(
                 {
-                    "type_id": int(type_id),
+                    "type_id": type_id,
                     "type_name": type_data.get("type_name", ""),
                     "group_id": type_data.get("group_id"),
                     "group_name": type_data.get("group_name", ""),
@@ -111,15 +74,11 @@ def get_blueprint_manufacturing_data(
 
         products = []
         for prod in manufacturing.get("products", []):
-            raw_type_id = prod.get("typeID")
-            try:
-                type_id = int(raw_type_id)
-            except Exception:
-                continue
-            type_data = type_data_map.get(int(type_id), {})
+            type_id = prod.get("typeID")
+            type_data = type_data_map.get(type_id, {})
             products.append(
                 {
-                    "type_id": int(type_id),
+                    "type_id": type_id,
                     "type_name": type_data.get("type_name", ""),
                     "group_id": type_data.get("group_id"),
                     "group_name": type_data.get("group_name", ""),
@@ -131,115 +90,17 @@ def get_blueprint_manufacturing_data(
 
         skills = []
         for skill in manufacturing.get("skills", []):
-            raw_type_id = skill.get("typeID")
-            try:
-                type_id = int(raw_type_id)
-            except Exception:
-                continue
-            type_data = type_data_map.get(int(type_id), {})
+            type_id = skill.get("typeID")
+            type_data = type_data_map.get(type_id, {})
             skills.append(
                 {
-                    "type_id": int(type_id),
+                    "type_id": type_id,
                     "type_name": type_data.get("type_name", ""),
                     "group_id": type_data.get("group_id"),
                     "group_name": type_data.get("group_name", ""),
                     "category_id": type_data.get("category_id"),
                     "category_name": type_data.get("category_name", ""),
                     "level": skill["level"],
-                }
-            )
-
-        invention_materials = []
-        for mat in (invention.get("materials", []) or []):
-            if not isinstance(mat, dict):
-                continue
-            raw_type_id = mat.get("typeID")
-            try:
-                type_id = int(raw_type_id)
-            except Exception:
-                continue
-            type_data = type_data_map.get(int(type_id), {})
-            invention_materials.append(
-                {
-                    "type_id": int(type_id),
-                    "type_name": type_data.get("type_name", ""),
-                    "group_id": type_data.get("group_id"),
-                    "group_name": type_data.get("group_name", ""),
-                    "category_id": type_data.get("category_id"),
-                    "category_name": type_data.get("category_name", ""),
-                    "quantity": mat.get("quantity"),
-                }
-            )
-
-        invention_products = []
-        for prod in (invention.get("products", []) or []):
-            if not isinstance(prod, dict):
-                continue
-            raw_type_id = prod.get("typeID")
-            try:
-                type_id = int(raw_type_id)
-            except Exception:
-                continue
-            type_data = type_data_map.get(int(type_id), {})
-            invention_products.append(
-                {
-                    "type_id": int(type_id),
-                    "type_name": type_data.get("type_name", ""),
-                    "group_id": type_data.get("group_id"),
-                    "group_name": type_data.get("group_name", ""),
-                    "category_id": type_data.get("category_id"),
-                    "category_name": type_data.get("category_name", ""),
-                    "probability": prod.get("probability"),
-                    "quantity": prod.get("quantity"),
-                }
-            )
-
-        invention_probability = invention.get("probability", None)
-        if invention_probability is None:
-            # Some SDE exports store invention chance on the product entry instead of
-            # as a top-level invention.probability.
-            raw_probs: list[float] = []
-            for prod in (invention.get("products", []) or []):
-                if not isinstance(prod, dict):
-                    continue
-                p = prod.get("probability")
-                if p is None:
-                    continue
-                try:
-                    pf = float(p)
-                except Exception:
-                    continue
-                if pf > 0:
-                    raw_probs.append(pf)
-
-            if len(raw_probs) == 1:
-                invention_probability = raw_probs[0]
-            elif len(raw_probs) > 1:
-                try:
-                    if max(raw_probs) - min(raw_probs) < 1e-9:
-                        invention_probability = raw_probs[0]
-                except Exception:
-                    pass
-
-        invention_skills = []
-        for skill in (invention.get("skills", []) or []):
-            if not isinstance(skill, dict):
-                continue
-            raw_type_id = skill.get("typeID")
-            try:
-                type_id = int(raw_type_id)
-            except Exception:
-                continue
-            type_data = type_data_map.get(int(type_id), {})
-            invention_skills.append(
-                {
-                    "type_id": int(type_id),
-                    "type_name": type_data.get("type_name", ""),
-                    "group_id": type_data.get("group_id"),
-                    "group_name": type_data.get("group_name", ""),
-                    "category_id": type_data.get("category_id"),
-                    "category_name": type_data.get("category_name", ""),
-                    "level": skill.get("level"),
                 }
             )
 
@@ -260,13 +121,6 @@ def get_blueprint_manufacturing_data(
                 "materials": materials,
                 "products": products,
                 "skills": skills,
-            },
-            "invention": {
-                "time": invention.get("time", 0),
-                "probability": invention_probability,
-                "materials": invention_materials,
-                "products": invention_products,
-                "skills": invention_skills,
             },
             "research_time": activities.get("research_time", {}).get("time", 0),
             "research_material": activities.get("research_material", {}).get("time", 0),

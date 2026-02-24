@@ -1,6 +1,8 @@
 import streamlit as st  # pyright: ignore[reportMissingImports]
 import pandas as pd  # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 
+import html
+import json
 import math
 import time
 import sys
@@ -21,19 +23,6 @@ else:
 from utils.app_init import load_config, init_db_app
 from utils.flask_api import api_get, api_post
 
-from webpages.industry_builder_utils import (
-    BUILD_TREE_CAPTION,
-    MATERIALS_TABLE_COLUMN_CONFIG,
-    attach_aggrid_autosize,
-    blueprint_image_url,
-    coerce_fraction,
-    format_duration,
-    parse_json_cell,
-    safe_float_opt,
-    safe_int,
-    safe_int_opt,
-    type_icon_url,
-)
 
 @st.cache_data(ttl=3600)
 def _get_industry_profiles(character_id: int) -> dict | None:
@@ -42,6 +31,51 @@ def _get_industry_profiles(character_id: int) -> dict | None:
 
 def render():
     st.subheader("Industry Builder")
+
+    def _parse_json_cell(value: Any) -> Any:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, float) and math.isnan(value):
+                return None
+            if isinstance(value, (dict, list)):
+                return value
+            if isinstance(value, str):
+                s = value.strip()
+                if not s:
+                    return None
+                return json.loads(s)
+        except Exception:
+            return None
+        return None
+
+    def _coerce_fraction(value: Any, *, default: float) -> float:
+        try:
+            v = float(value)
+        except Exception:
+            v = float(default)
+        if v >= 1.0:
+            v = v / 100.0
+        return float(min(1.0, max(0.0, v)))
+
+    def _type_icon_url(type_id: Any, *, size: int = 32) -> str | None:
+        try:
+            tid = int(type_id)
+        except Exception:
+            return None
+        if tid <= 0:
+            return None
+        return f"https://images.evetech.net/types/{tid}/icon?size={int(size)}"
+
+    def _blueprint_image_url(blueprint_type_id: Any, *, is_bpc: bool, size: int = 32) -> str | None:
+        try:
+            tid = int(blueprint_type_id)
+        except Exception:
+            return None
+        if tid <= 0:
+            return None
+        variation = "bpc" if bool(is_bpc) else "bp"
+        return f"https://images.evetech.net/types/{tid}/{variation}?size={int(size)}"
 
     db: Any = None
 
@@ -82,9 +116,6 @@ def render():
         st.session_state["industry_builder_job_id"] = None
     if "industry_builder_job_key" not in st.session_state:
         st.session_state["industry_builder_job_key"] = None
-    if "industry_builder_job_inflight" not in st.session_state:
-        # True only while the "start update job" API call is in progress.
-        st.session_state["industry_builder_job_inflight"] = False
     if "industry_builder_selected_profile_id" not in st.session_state:
         st.session_state["industry_builder_selected_profile_id"] = None
     if "industry_profiles_cache" not in st.session_state:
@@ -94,24 +125,8 @@ def render():
     if "maximize_blueprint_runs" not in st.session_state:
         st.session_state["maximize_blueprint_runs"] = True
 
-    # Optional workflow toggle: when you primarily own BPOs (often via corporation) but
-    # manufacture from BPCs (copy -> manufacture), include estimated copy overhead even
-    # for BPO-based manufacturing.
-    if "industry_builder_assume_bpo_copy_overhead" not in st.session_state:
-        st.session_state["industry_builder_assume_bpo_copy_overhead"] = True
-
-    # Optional planning toggle: prefer consuming inventory (FIFO-valued) even when
-    # it would be cheaper to buy/build at current market prices.
-    if "industry_builder_prefer_inventory_consumption" not in st.session_state:
-        st.session_state["industry_builder_prefer_inventory_consumption"] = True
-
-    # Cache invention options per (character, blueprint_type_id) to avoid repeated calls.
-    if "industry_invention_options_cache" not in st.session_state:
-        st.session_state["industry_invention_options_cache"] = {}
-
     job_id = st.session_state.get("industry_builder_job_id")
     job_running = bool(job_id)
-    job_inflight = bool(st.session_state.get("industry_builder_job_inflight"))
 
     # Industry profile selector (affects job cost/time estimates)
     profiles_resp = None
@@ -179,8 +194,8 @@ def render():
     # Config defaults (with a final hard fallback for robustness)
     _cfg_default_sales_tax = mp_defaults.get("sales_tax_fraction")
     _cfg_default_broker_fee = mp_defaults.get("broker_fee_fraction")
-    default_sales_tax_fraction_cfg = coerce_fraction(_cfg_default_sales_tax, default=0.03375)
-    default_broker_fee_fraction_cfg = coerce_fraction(_cfg_default_broker_fee, default=0.03)
+    default_sales_tax_fraction_cfg = _coerce_fraction(_cfg_default_sales_tax, default=0.03375)
+    default_broker_fee_fraction_cfg = _coerce_fraction(_cfg_default_broker_fee, default=0.03)
     if "industry_builder_orderbook_depth" not in st.session_state:
         try:
             st.session_state["industry_builder_orderbook_depth"] = int(mp_defaults.get("orderbook_depth") or 5)
@@ -197,7 +212,7 @@ def render():
             st.session_state["industry_builder_sales_tax_fraction"] = float(default_sales_tax_fraction_cfg)
 
     # Per-character market fees (Jita 4-4): prefer computed values if present.
-    default_sales_tax_fraction = coerce_fraction(
+    default_sales_tax_fraction = _coerce_fraction(
         st.session_state.get("industry_builder_sales_tax_fraction"),
         default=float(default_sales_tax_fraction_cfg),
     )
@@ -206,45 +221,17 @@ def render():
     market_fees_obj: dict[str, Any] | None = None
     try:
         row = characters_df.loc[characters_df["character_id"] == selected_character_id].iloc[0]
-        market_fees_obj = parse_json_cell(row.get("market_fees")) if hasattr(row, "get") else None
+        market_fees_obj = _parse_json_cell(row.get("market_fees")) if hasattr(row, "get") else None
         if market_fees_obj is not None and not isinstance(market_fees_obj, dict):
             market_fees_obj = None
     except Exception:
         market_fees_obj = None
 
     jita_rates = (((market_fees_obj or {}).get("jita_4_4") or {}).get("rates") or {}) if isinstance(market_fees_obj, dict) else {}
-    effective_sales_tax_fraction = coerce_fraction(jita_rates.get("sales_tax_fraction"), default=float(default_sales_tax_fraction))
-    effective_broker_fee_fraction = coerce_fraction(jita_rates.get("broker_fee_fraction"), default=float(default_broker_fee_fraction))
+    effective_sales_tax_fraction = _coerce_fraction(jita_rates.get("sales_tax_fraction"), default=float(default_sales_tax_fraction))
+    effective_broker_fee_fraction = _coerce_fraction(jita_rates.get("broker_fee_fraction"), default=float(default_broker_fee_fraction))
 
-    # --- Explicit update workflow (required because full submanufacturing is expensive) ---
-    # No backend calls happen here unless the user clicks the button.
-    pricing_key = (
-        f"jita:{st.session_state.get('industry_builder_material_price_source')}:"
-        f"{st.session_state.get('industry_builder_product_price_source')}:"
-        f"{str(st.session_state.get('industry_builder_orderbook_smoothing') or 'median_best_n')}:"
-        f"depth{int(st.session_state.get('industry_builder_orderbook_depth') or 5)}:"
-        f"stax{float(effective_sales_tax_fraction or 0.0):.6f}:"
-        f"bfee{float(effective_broker_fee_fraction or 0.0):.6f}:"
-        f"preferinv{1 if bool(st.session_state.get('industry_builder_prefer_inventory_consumption')) else 0}:"
-        f"bpocopy{1 if bool(st.session_state.get('industry_builder_assume_bpo_copy_overhead')) else 0}"
-    )
-    key = f"{int(selected_character_id)}:{int(selected_profile_id or 0)}:{1 if maximize_runs else 0}:{pricing_key}"
-    cache: dict[str, dict] = st.session_state.setdefault("industry_builder_cache", {})
-
-    cached = cache.get(key) if isinstance(cache, dict) else None
-    if isinstance(cached, dict) and isinstance(cached.get("data"), list):
-        industry_data = cached.get("data") or []
-    else:
-        industry_data = []
-
-    st.markdown("#### Update")
-    st.caption(
-        "Compute full Industry Builder data (incl. submanufacturing) for all owned blueprints. "
-        "This can take a while; results are cached for this session."
-    )
-
-    with st.expander("Update Industry Job settings", expanded=False):
-        st.markdown("**Market Pricing (Profit/ROI)**")
+    with st.expander("Market Pricing (Profit/ROI)", expanded=False):
         st.caption(
             "Choose which Jita hub prices to use for profitability calculations. "
             "These do not affect in-game job fees; they affect Material Cost, Revenue, Profit and ROI. "
@@ -273,38 +260,41 @@ def render():
             f"Character fees (Jita 4-4): Sales tax {effective_sales_tax_fraction*100.0:.2f}% · Broker fee {effective_broker_fee_fraction*100.0:.2f}%"
         )
 
-        st.markdown("**Submanufacturing planning**")
-        st.checkbox(
-            "Prefer consuming inventory (FIFO) even if suboptimal",
-            key="industry_builder_prefer_inventory_consumption",
-            disabled=job_running,
-            help=(
-                "When enabled, submanufacturing planning will prefer consuming on-hand inventory (valued at FIFO) "
-                "instead of switching to build decisions just because building is cheaper than your FIFO book value."
-            ),
-        )
+    # --- Explicit update workflow (required because full submanufacturing is expensive) ---
+    # No backend calls happen here unless the user clicks the button.
+    pricing_key = (
+        f"jita:{st.session_state.get('industry_builder_material_price_source')}:"
+        f"{st.session_state.get('industry_builder_product_price_source')}:"
+        f"{str(st.session_state.get('industry_builder_orderbook_smoothing') or 'median_best_n')}:"
+        f"depth{int(st.session_state.get('industry_builder_orderbook_depth') or 5)}:"
+        f"stax{float(effective_sales_tax_fraction or 0.0):.6f}:"
+        f"bfee{float(effective_broker_fee_fraction or 0.0):.6f}"
+    )
+    key = f"{int(selected_character_id)}:{int(selected_profile_id or 0)}:{1 if maximize_runs else 0}:{pricing_key}"
+    cache: dict[str, dict] = st.session_state.setdefault("industry_builder_cache", {})
 
-        st.markdown("**Blueprint workflow**")
-        st.checkbox(
-            "Assume BPOs are copied to BPCs before manufacturing (include copy overhead)",
-            key="industry_builder_assume_bpo_copy_overhead",
-            disabled=job_running,
-            help=(
-                "When enabled, manufacturing jobs based on a BPO will include an estimated blueprint copying job "
-                "to produce enough BPC runs. BPC-based blueprints already include this overhead."
-            ),
-        )
+
+    cached = cache.get(key) if isinstance(cache, dict) else None
+    if isinstance(cached, dict) and isinstance(cached.get("data"), list):
+        industry_data = cached.get("data") or []
+        response_meta = cached.get("meta")
+    else:
+        industry_data = []
+        response_meta = None
+
+    st.markdown("#### Update")
+    st.caption(
+        "Compute full Industry Builder data (incl. submanufacturing) for all owned blueprints. "
+        "This can take a while; results are cached for this session."
+    )
 
     col_update, col_clear = st.columns([1, 1])
     with col_update:
-        if st.button("Update Industry Jobs", type="primary", disabled=(job_running or job_inflight)):
+        if st.button("Update Industry Jobs", type="primary"):
             try:
-                st.session_state["industry_builder_job_inflight"] = True
                 payload = {
                     "profile_id": (int(selected_profile_id) if selected_profile_id is not None else None),
                     "maximize_runs": bool(maximize_runs),
-                    "prefer_inventory_consumption": bool(st.session_state.get("industry_builder_prefer_inventory_consumption")),
-                    "assume_bpo_copy_overhead": bool(st.session_state.get("industry_builder_assume_bpo_copy_overhead")),
                     "pricing_preferences": {
                         "hub": "jita",
                         "material_price_source": (
@@ -321,20 +311,17 @@ def render():
                 resp = api_post(f"/industry_builder_update/{int(selected_character_id)}", payload) or {}
                 if resp.get("status") != "success":
                     st.error(f"API error: {resp.get('message', 'Unknown error')}")
-                    st.session_state["industry_builder_job_inflight"] = False
                 else:
                     job_id = (resp.get("data") or {}).get("job_id")
                     st.session_state["industry_builder_job_id"] = job_id
                     st.session_state["industry_builder_job_key"] = key
                     st.session_state["industry_builder_selected_profile_id"] = selected_profile_id
-                    st.session_state["industry_builder_job_inflight"] = False
                     # Clear cached data for this key to avoid stale display.
                     if isinstance(cache, dict):
                         cache.pop(key, None)
                     st.rerun()
             except Exception as e:
                 st.error(f"Error calling backend: {e}")
-                st.session_state["industry_builder_job_inflight"] = False
 
     with col_clear:
         if st.button("Clear cached data"):
@@ -380,7 +367,6 @@ def render():
                 st.error(f"Backend update failed: {s.get('error')}")
                 st.session_state["industry_builder_job_id"] = None
                 st.session_state["industry_builder_job_key"] = None
-                st.session_state["industry_builder_job_inflight"] = False
                 st.session_state.pop("industry_builder_poll_started_at", None)
                 st.stop()
             elif status == "done":
@@ -398,7 +384,6 @@ def render():
                     cache[key] = {"data": data, "meta": meta}
                 st.session_state["industry_builder_job_id"] = None
                 st.session_state["industry_builder_job_key"] = None
-                st.session_state["industry_builder_job_inflight"] = False
                 st.session_state.pop("industry_builder_poll_started_at", None)
                 st.rerun()
             else:
@@ -429,10 +414,37 @@ def render():
             st.stop()
 
     if not industry_data:
-        # Avoid flicker while an update is in progress.
-        if not bool(st.session_state.get("industry_builder_job_id")) and not bool(st.session_state.get("industry_builder_job_inflight")):
-            st.info("Click **Update Industry Jobs** to load data.")
+        st.info("Click **Update Industry Jobs** to load data.")
         return
+
+    def _format_duration(seconds: float | int | None) -> str:
+        try:
+            s = int(round(float(seconds or 0.0)))
+        except Exception:
+            s = 0
+        if s < 0:
+            s = 0
+
+        month_s = 30 * 24 * 3600
+        day_s = 24 * 3600
+
+        months = s // month_s
+        s = s % month_s
+        days = s // day_s
+        s = s % day_s
+
+        hours = s // 3600
+        s = s % 3600
+        minutes = s // 60
+        secs = s % 60
+
+        parts = []
+        if months:
+            parts.append(f"{months}M")
+        if days:
+            parts.append(f"{days}D")
+        parts.append(f"{hours:02d}:{minutes:02d}:{secs:02d}")
+        return " ".join(parts)
 
     def _blueprint_passes_filters(bp: dict, *, bp_type_filter: str, skill_req_filter: bool, reactions_filter: bool, location_filter: str) -> bool:
         if not isinstance(bp, dict):
@@ -490,7 +502,7 @@ def render():
     category_options = sorted(all_product_categories)
 
     with st.expander("Filters", expanded=True):
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         with col1:
             maximize_runs_enabled = bool(st.session_state.get("maximize_blueprint_runs", True))
             if maximize_runs_enabled:
@@ -516,12 +528,6 @@ def render():
                 value=False,
                 help="Reactions can only be done in 0.4-secure space or lower.",
             )
-            include_inventions = st.checkbox(
-                "Include Inventions",
-                value=True,
-                key="industry_builder_include_inventions",
-                help="When enabled, adds a best-ROI invention-derived manufacturing row for T2 items.",
-            )
             st.checkbox(
                 "Maximize Blueprint Runs",
                 value=bool(st.session_state.get("maximize_blueprint_runs", True)),
@@ -530,75 +536,6 @@ def render():
             )
 
         with col3:
-            roi_lbl_col, roi_cb_col, roi_val_col = st.columns([0.38, 0.12, 0.50])
-            with roi_lbl_col:
-                st.markdown("**Min. ROI (%)**")
-            with roi_cb_col:
-                apply_min_roi = st.checkbox(
-                    "Apply Min ROI",
-                    value=False,
-                    key="industry_builder_apply_min_roi",
-                    label_visibility="collapsed",
-                )
-            with roi_val_col:
-                min_roi_pct = st.number_input(
-                    "Min ROI (%)",
-                    min_value=0.0,
-                    max_value=10_000.0,
-                    value=10.0,
-                    step=1.0,
-                    disabled=not bool(apply_min_roi),
-                    key="industry_builder_min_roi_pct",
-                    label_visibility="collapsed",
-                )
-
-            profit_lbl_col, profit_cb_col, profit_val_col = st.columns([0.38, 0.12, 0.50])
-            with profit_lbl_col:
-                st.markdown("**Min. Profit (ISK)**")
-            with profit_cb_col:
-                apply_min_profit = st.checkbox(
-                    "Apply Min Profit",
-                    value=False,
-                    key="industry_builder_apply_min_profit",
-                    label_visibility="collapsed",
-                )
-            with profit_val_col:
-                min_profit_isk = st.number_input(
-                    "Min Profit (ISK)",
-                    min_value=0,
-                    max_value=10_000_000_000_000,
-                    value=1_000_000,
-                    step=100_000,
-                    disabled=not bool(apply_min_profit),
-                    key="industry_builder_min_profit_isk",
-                    label_visibility="collapsed",
-                )
-
-            iskh_lbl_col, iskh_cb_col, iskh_val_col = st.columns([0.38, 0.12, 0.50])
-            with iskh_lbl_col:
-                st.markdown("**Min. ISK/h**")
-            with iskh_cb_col:
-                apply_min_iskh = st.checkbox(
-                    "Apply Min ISK/h",
-                    value=False,
-                    key="industry_builder_apply_min_iskh",
-                    label_visibility="collapsed",
-                    help="Filters by the 'Profit / hour' column.",
-                )
-            with iskh_val_col:
-                min_iskh_isk = st.number_input(
-                    "Min ISK/h",
-                    min_value=0,
-                    max_value=10_000_000_000_000,
-                    value=1_000_000,
-                    step=100_000,
-                    disabled=not bool(apply_min_iskh),
-                    key="industry_builder_min_iskh_isk",
-                    label_visibility="collapsed",
-                )
-            
-
-        with col4:
             location_filter = st.selectbox("Location", options=location_options, index=0)
             selected_categories = st.multiselect(
                 "Categories",
@@ -606,6 +543,73 @@ def render():
                 default=[],
                 help="Filter table rows by the produced item's category.",
             )
+
+        st.divider()
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Min. ROI**")
+            roi_cb_col, roi_val_col = st.columns([0.18, 0.82])
+            with roi_cb_col:
+                apply_min_roi = st.checkbox(
+                    "",
+                    value=False,
+                    key="industry_builder_apply_min_roi",
+                    label_visibility="collapsed",
+                )
+            with roi_val_col:
+                min_roi_pct = st.number_input(
+                    "ROI (%)",
+                    min_value=0.0,
+                    max_value=10_000.0,
+                    value=10.0,
+                    step=1.0,
+                    disabled=not bool(apply_min_roi),
+                    key="industry_builder_min_roi_pct",
+                )
+
+        with c2:
+            st.markdown("**Min. Profit**")
+            profit_cb_col, profit_val_col = st.columns([0.18, 0.82])
+            with profit_cb_col:
+                apply_min_profit = st.checkbox(
+                    "",
+                    value=False,
+                    key="industry_builder_apply_min_profit",
+                    label_visibility="collapsed",
+                )
+            with profit_val_col:
+                min_profit_isk = st.number_input(
+                    "Profit (ISK)",
+                    min_value=0,
+                    max_value=10_000_000_000_000,
+                    value=1_000_000,
+                    step=100_000,
+                    disabled=not bool(apply_min_profit),
+                    key="industry_builder_min_profit_isk",
+                )
+
+        with c3:
+            st.markdown("**Min. ISK/h**")
+            iskh_cb_col, iskh_val_col = st.columns([0.18, 0.82])
+            with iskh_cb_col:
+                apply_min_iskh = st.checkbox(
+                    "",
+                    value=False,
+                    key="industry_builder_apply_min_iskh",
+                    label_visibility="collapsed",
+                    help="Filters by the 'Profit / hour' column.",
+                )
+            with iskh_val_col:
+                min_iskh_isk = st.number_input(
+                    "ISK / hour",
+                    min_value=0,
+                    max_value=10_000_000_000_000,
+                    value=1_000_000,
+                    step=100_000,
+                    disabled=not bool(apply_min_iskh),
+                    key="industry_builder_min_iskh_isk",
+                )
 
     filtered_blueprints = [
         bp
@@ -618,57 +622,6 @@ def render():
             location_filter=location_filter,
         )
     ]
-
-    # -----------------
-    # Invention helpers
-    # -----------------
-    invention_cache: dict[str, Any] = st.session_state.get("industry_invention_options_cache") or {}
-    if not isinstance(invention_cache, dict):
-        invention_cache = {}
-        st.session_state["industry_invention_options_cache"] = invention_cache
-
-    def _inv_cache_key(*, character_id: int, blueprint_type_id: int, profile_id: int | None) -> str:
-        # Include the pricing_key (market pricing + assumptions) and profile_id so cached
-        # invention rows match the current UI context.
-        return f"{int(character_id)}:{int(blueprint_type_id)}:p{int(profile_id or 0)}:{str(pricing_key)}"
-
-    def _get_invention_options(*, blueprint_type_id: int, force: bool = False) -> dict[str, Any] | None:
-        k = _inv_cache_key(
-            character_id=int(selected_character_id),
-            blueprint_type_id=int(blueprint_type_id),
-            profile_id=(int(selected_profile_id) if selected_profile_id is not None else None),
-        )
-        if not force:
-            cached = invention_cache.get(k)
-            if isinstance(cached, dict) and cached.get("status") == "success":
-                return cached
-
-        payload: dict[str, Any] = {
-            "profile_id": (int(selected_profile_id) if selected_profile_id is not None else None),
-            "pricing_preferences": {
-                "hub": "jita",
-                "material_price_source": str(st.session_state.get("industry_builder_material_price_source") or "Jita Sell"),
-                "product_price_source": str(st.session_state.get("industry_builder_product_price_source") or "Jita Sell"),
-                "sales_tax_fraction": float(effective_sales_tax_fraction),
-                "broker_fee_fraction": float(effective_broker_fee_fraction),
-                "orderbook_smoothing": str(st.session_state.get("industry_builder_orderbook_smoothing") or "median_best_n"),
-                "orderbook_depth": int(st.session_state.get("industry_builder_orderbook_depth") or 5),
-            },
-        }
-
-        try:
-            resp = api_post(
-                f"/industry_invention_options/{int(selected_character_id)}/{int(blueprint_type_id)}",
-                payload,
-            )
-        except Exception:
-            resp = None
-
-        if isinstance(resp, dict) and resp.get("status") == "success":
-            invention_cache[k] = resp
-            return resp
-
-        return None
 
     # Market fee behavior depends on which pricing mode is selected.
     material_price_source = str(st.session_state.get("industry_builder_material_price_source") or "")
@@ -690,11 +643,8 @@ def render():
         mj = bp.get("manufacture_job") or {}
         props = (mj.get("properties") or {}) if isinstance(mj, dict) else {}
         cost = (props.get("job_cost") or {}) if isinstance(props, dict) else {}
+        effective = (props.get("effective_totals") or {}) if isinstance(props, dict) else {}
         time_eff = (props.get("total_time_efficiency") or {}) if isinstance(props, dict) else {}
-
-        copy_job = (props.get("copy_job") or {}) if isinstance(props, dict) else {}
-        copy_job_cost = (copy_job.get("job_cost") or {}) if isinstance(copy_job, dict) else {}
-        copy_job_time = (copy_job.get("time") or {}) if isinstance(copy_job, dict) else {}
 
         job_runs = props.get("job_runs")
         try:
@@ -702,7 +652,8 @@ def render():
         except Exception:
             job_runs_i = 1
 
-        # Job duration (seconds): manufacturing job.
+        # Job duration (seconds): main manufacturing job only.
+        # Intentionally excludes submanufacturing time and any copy/research overhead.
         job_time_seconds: float | None = None
         try:
             v = time_eff.get("estimated_job_time_seconds")
@@ -710,51 +661,16 @@ def render():
         except Exception:
             job_time_seconds = None
 
-        # Optional blueprint copy overhead (job time). When the backend does not compute
-        # copy overhead (or the user disables it), this stays None.
-        copy_time_seconds: float | None = None
-        try:
-            v = copy_job_time.get("estimated_copy_time_seconds")
-            copy_time_seconds = float(v) if v is not None else None
-        except Exception:
-            copy_time_seconds = None
+        job_duration_display = _format_duration(job_time_seconds) if job_time_seconds is not None else "-"
 
         # Manufacturing job fee (aligns with in-game "Total job cost").
+        # Note: we compute optional copy overhead in the backend, but we don't include it
+        # in the main products table by default.
         est_fee_total = cost.get("total_job_cost_isk")
         try:
             est_fee_total_f = float(est_fee_total or 0.0)
         except Exception:
             est_fee_total_f = 0.0
-
-        # Optional blueprint copy overhead (job cost). When the backend does not compute
-        # copy overhead (or the user disables it), this stays at 0.
-        raw_copy_cost_total = copy_job_cost.get("total_job_cost_isk")
-        try:
-            copy_cost_total_f = float(raw_copy_cost_total or 0.0)
-        except Exception:
-            copy_cost_total_f = 0.0
-
-        # Safety override: ensure Copy Cost is zero when the blueprint has no copying
-        # activity in the SDE (or older cached payloads still include a copy_job).
-        try:
-            copying_time_seconds = float(bp.get("copying_time_seconds", 0) or 0.0)
-            max_runs = int(bp.get("max_production_limit") or 0)
-        except Exception:
-            copying_time_seconds = 0.0
-            max_runs = 0
-
-        can_copy_from_bpo = bool(copying_time_seconds > 0 and max_runs > 0)
-        if not bool(can_copy_from_bpo):
-            copy_cost_total_f = 0.0
-            copy_time_seconds = None
-
-        total_job_time_seconds: float | None = None
-        if job_time_seconds is not None or copy_time_seconds is not None:
-            total_job_time_seconds = float(job_time_seconds or 0.0) + float(copy_time_seconds or 0.0)
-
-        job_duration_display = "-"
-        if total_job_time_seconds is not None:
-            job_duration_display = format_duration(total_job_time_seconds)
 
         # Prefer server-side effective costs (submanufacturing-aware) when present.
         raw_total_material_cost = (
@@ -774,7 +690,7 @@ def render():
 
         # Profit (incl. job fee) is the most actionable for ROI.
         sales_tax_total_bp = float(total_product_value) * float(sales_tax_fraction)
-        profit_total = total_product_value - total_material_cost - copy_cost_total_f - est_fee_total_f
+        profit_total = total_product_value - total_material_cost - est_fee_total_f
         profit_total_net = profit_total - sales_tax_total_bp - broker_fee_buy_total - broker_fee_sell_total
 
         # Allocate blueprint-level costs across products to support multi-output blueprints.
@@ -807,6 +723,7 @@ def render():
             prod_type_id = prod.get("type_id")
             prod_type_name = prod.get("type_name")
             prod_cat = prod.get("category_name")
+            prod_grp = prod.get("group_name")
             try:
                 prod_qty_total = int(prod.get("quantity_total") or prod.get("quantity") or 0)
             except Exception:
@@ -816,29 +733,17 @@ def render():
                 continue
 
             # Allocate costs/fees by product share.
-            share = safe_float_opt(prod.get("allocation_share"))
-            if share is None:
-                if value_total_sum > 0:
-                    share = float(product_value_totals[idx]) / float(value_total_sum)
-                elif qty_total_sum > 0:
-                    share = float(product_qty_totals[idx]) / float(qty_total_sum)
-                else:
-                    share = 1.0
+            if value_total_sum > 0:
+                share = float(product_value_totals[idx]) / float(value_total_sum)
+            elif qty_total_sum > 0:
+                share = float(product_qty_totals[idx]) / float(qty_total_sum)
+            else:
+                share = 1.0
 
-            allocated_material_cost = safe_float_opt(prod.get("allocated_material_cost_isk"))
-            allocated_copy_cost = safe_float_opt(prod.get("allocated_copy_cost_isk"))
-            allocated_job_fee = safe_float_opt(prod.get("allocated_job_fee_isk"))
-            allocated_product_value = safe_float_opt(prod.get("allocated_product_value_isk"))
-
-            if allocated_material_cost is None:
-                allocated_material_cost = float(total_material_cost) * float(share)
-            if allocated_copy_cost is None:
-                allocated_copy_cost = float(copy_cost_total_f) * float(share)
-            if allocated_job_fee is None:
-                allocated_job_fee = float(est_fee_total_f) * float(share)
-            if allocated_product_value is None:
-                allocated_product_value = float(total_product_value) * float(share)
-            allocated_profit = allocated_product_value - allocated_material_cost - allocated_copy_cost - allocated_job_fee
+            allocated_material_cost = float(total_material_cost) * float(share)
+            allocated_job_fee = float(est_fee_total_f) * float(share)
+            allocated_product_value = float(total_product_value) * float(share)
+            allocated_profit = allocated_product_value - allocated_material_cost - allocated_job_fee
 
             allocated_broker_fee_buy = float(broker_fee_buy_total) * float(share)
             allocated_broker_fee_sell = float(broker_fee_sell_total) * float(share)
@@ -848,9 +753,9 @@ def render():
             allocated_profit_net = float(allocated_profit) - float(sales_tax_total) - float(broker_fee_total)
 
             profit_per_hour: float | None = None
-            if total_job_time_seconds is not None:
+            if job_time_seconds is not None:
                 try:
-                    hours = float(total_job_time_seconds) / 3600.0
+                    hours = float(job_time_seconds) / 3600.0
                 except Exception:
                     hours = 0.0
                 if hours > 0:
@@ -863,12 +768,8 @@ def render():
             broker_fee_per_item = float(broker_fee_total) / float(prod_qty_total)
             profit_per_item = allocated_profit_net / float(prod_qty_total)
             job_fee_per_item = allocated_job_fee / float(prod_qty_total)
-            copy_cost_per_item = allocated_copy_cost / float(prod_qty_total)
 
-            total_cost_total = allocated_material_cost + allocated_copy_cost + allocated_job_fee + float(sales_tax_total)
-            total_cost_per_item = float(total_cost_total) / float(prod_qty_total)
-
-            denom_total = allocated_material_cost + allocated_copy_cost + allocated_job_fee + broker_fee_total
+            denom_total = allocated_material_cost + allocated_job_fee + broker_fee_total
             roi_total = (allocated_profit_net / float(denom_total)) if denom_total > 0 else None
             roi_total_percent = (float(roi_total) * 100.0) if roi_total is not None else None
 
@@ -878,25 +779,17 @@ def render():
                 "Name": prod_type_name,
                 "Category": prod_cat,
 
-                # Internal
-                "_product_row_key": f"base:{int(prod_type_id or 0)}",
-                "_row_kind": "base",
-                "_source_blueprint_type_id": bp.get("type_id"),
-
                 # Job configuration
                 "Runs": int(job_runs_i),
-                        "sales_tax_fraction": float(effective_sales_tax_fraction),
-                        "broker_fee_fraction": float(effective_broker_fee_fraction),
                 "Units": int(prod_qty_total),
                 "ME": bp.get("blueprint_material_efficiency_percent"),
                 "TE": bp.get("blueprint_time_efficiency_percent"),
 
                 "Job Duration": str(job_duration_display),
+                "Profit / hour": float(profit_per_hour) if profit_per_hour is not None else None,
 
                 # Per-item outputs
                 "Mat. Cost / item": float(mat_cost_per_item),
-                "Copy Cost / item": float(copy_cost_per_item),
-                "Total Cost / item": float(total_cost_per_item),
                 "Revenue / item": float(prod_value_per_item),
                 "Sales Tax / item": float(sales_tax_per_item),
                 "Broker Fee / item": float(broker_fee_per_item),
@@ -905,13 +798,10 @@ def render():
 
                 # Totals
                 "Mat. Cost": float(allocated_material_cost),
-                "Copy Cost": float(allocated_copy_cost),
-                "Total Cost": float(total_cost_total),
                 "Revenue": float(allocated_product_value),
                 "Sales Tax": float(sales_tax_total),
                 "Broker Fee": float(broker_fee_total),
                 "Profit": float(allocated_profit_net),
-                "Profit / hour": float(profit_per_hour) if profit_per_hour is not None else None,
                 "Job Fee": float(allocated_job_fee),
                 "ROI": float(roi_total_percent) if roi_total_percent is not None else None,
 
@@ -925,60 +815,9 @@ def render():
                 "_total_material_cost": float(total_material_cost),
                 "_total_product_value": float(total_product_value),
                 "_total_job_fee": float(est_fee_total_f),
-                "_total_copy_cost": float(copy_cost_total_f),
-                "_job_time_seconds": float(total_job_time_seconds) if total_job_time_seconds is not None else None,
+                "_job_time_seconds": float(job_time_seconds) if job_time_seconds is not None else None,
             }
 
-            table_rows.append(row)
-
-    # Inject invention-derived T2 manufacturing rows (best decryptor by ROI) into the product overview.
-    # These are "virtual jobs": invention (expected) + manufacturing from the invented T2 BPC.
-    if bool(include_inventions):
-        best_inv_row_by_product_id: dict[int, dict] = {}
-
-        def _better_invention_row(a: dict | None, b: dict) -> bool:
-            if a is None:
-                return True
-            try:
-                a_roi = float(a.get("ROI") or float("-inf"))
-            except Exception:
-                a_roi = float("-inf")
-            try:
-                b_roi = float(b.get("ROI") or float("-inf"))
-            except Exception:
-                b_roi = float("-inf")
-            if b_roi != a_roi:
-                return b_roi > a_roi
-            try:
-                a_p = float(a.get("Profit") or float("-inf"))
-            except Exception:
-                a_p = float("-inf")
-            try:
-                b_p = float(b.get("Profit") or float("-inf"))
-            except Exception:
-                b_p = float("-inf")
-            return b_p > a_p
-
-        for bp in filtered_blueprints:
-            if not isinstance(bp, dict):
-                continue
-            bp_type_id_i = safe_int(bp.get("type_id"), default=0)
-            if bp_type_id_i <= 0:
-                continue
-
-            row = bp.get("ui_invention_overview_row")
-            if not isinstance(row, dict):
-                continue
-
-            prod_type_id = safe_int(row.get("type_id"), default=0)
-            if prod_type_id <= 0:
-                continue
-
-            cur = best_inv_row_by_product_id.get(int(prod_type_id))
-            if _better_invention_row(cur, row):
-                best_inv_row_by_product_id[int(prod_type_id)] = row
-
-        for row in best_inv_row_by_product_id.values():
             table_rows.append(row)
 
     products_df = pd.DataFrame(table_rows)
@@ -1009,20 +848,18 @@ def render():
             pass
 
     st.caption(f"{len(products_df)} product rows")
+    st.caption(
+        "Job Duration shows the main manufacturing job time only (no submanufacturing, no copy/research overhead). "
+        "Profit / hour uses this duration."
+    )
 
     # Keep the main table focused: hide debug/internal fields.
     hidden_cols = {
         "blueprint",
-        "_product_row_key",
-        "_row_kind",
-        "_source_blueprint_type_id",
-        "_invention_source_blueprint_type_id",
-        "_invention_decryptor",
         "_profit_total",
         "_total_material_cost",
         "_total_product_value",
         "_total_job_fee",
-        "_total_copy_cost",
         "_job_time_seconds",
     }
     display_df = products_df.drop(columns=[c for c in hidden_cols if c in products_df.columns], errors="ignore")
@@ -1030,7 +867,7 @@ def render():
     # Add item icon column right after type_id (if available).
     if "type_id" in display_df.columns:
         try:
-            icon = display_df["type_id"].apply(lambda tid: type_icon_url(tid, size=32))
+            icon = display_df["type_id"].apply(lambda tid: _type_icon_url(tid, size=32))
             if "Icon" not in display_df.columns:
                 if "Name" in display_df.columns:
                     insert_at = max(0, int(list(display_df.columns).index("Name")))
@@ -1068,23 +905,19 @@ def render():
         "Runs",
         "Units",
         "Job Duration",
-        "ROI",
-        "Profit",
         "Profit / hour",
-        "Total Cost",
-        "Revenue",
+        "ROI",
         "Mat. Cost",
-        "Copy Cost",
         "Job Fee",
+        "Revenue",
         "Sales Tax",
         "Broker Fee",
-        "Total Cost / item",
+        "Profit",
         "Mat. Cost / item",
-        "Copy Cost / item",
         "Job Fee / item",
+        "Revenue / item",
         "Sales Tax / item",
         "Broker Fee / item",
-        "Revenue / item",
         "Profit / item",
         "Location",
         "Solar System",
@@ -1129,16 +962,12 @@ def render():
         view_df = display_df.copy()
         for c in [
             "Mat. Cost",
-            "Copy Cost",
-            "Total Cost",
             "Job Fee",
             "Revenue",
             "Sales Tax",
             "Broker Fee",
             "Profit",
             "Mat. Cost / item",
-            "Copy Cost / item",
-            "Total Cost / item",
             "Job Fee / item",
             "Revenue / item",
             "Sales Tax / item",
@@ -1180,21 +1009,11 @@ def render():
                     this.eGui.style.justifyContent = 'center';
                     this.eGui.style.width = '100%';
 
-                    var url = (params && params.value) ? String(params.value) : '';
-                    if (!url) {
-                        // No icon for this row.
-                        this.eImg = null;
-                        return;
-                    }
-
                     this.eImg = document.createElement('img');
                     this.eImg.style.width = '32px';
                     this.eImg.style.height = '32px';
                     this.eImg.style.display = 'block';
-                    this.eImg.onerror = function() {
-                        try { this.style.display = 'none'; } catch (e) {}
-                    };
-                    this.eImg.src = url;
+                    this.eImg.src = params.value ? String(params.value) : '';
 
                     this.eGui.appendChild(this.eImg);
                 };
@@ -1204,28 +1023,8 @@ def render():
                 };
 
                 IconRenderer.prototype.refresh = function(params) {
-                    try {
-                        var url = (params && params.value) ? String(params.value) : '';
-                        if (!url) {
-                            if (this.eImg) {
-                                this.eImg.style.display = 'none';
-                            }
-                            return true;
-                        }
-                        if (!this.eImg) {
-                            this.eImg = document.createElement('img');
-                            this.eImg.style.width = '32px';
-                            this.eImg.style.height = '32px';
-                            this.eImg.style.display = 'block';
-                            this.eImg.onerror = function() {
-                                try { this.style.display = 'none'; } catch (e) {}
-                            };
-                            this.eGui.appendChild(this.eImg);
-                        }
-                        this.eImg.style.display = 'block';
-                        this.eImg.src = url;
-                    } catch (e) {
-                        // ignore
+                    if (this.eImg) {
+                        this.eImg.src = params.value ? String(params.value) : '';
                     }
                     return true;
                 };
@@ -1235,7 +1034,7 @@ def render():
         """
     )
 
-    def _js_eu_number(decimals: int):
+    def _js_eu_number(decimals: int) -> JsCode:
         return JsCode(
             f"""
                 function(params) {{
@@ -1247,7 +1046,7 @@ def render():
             """
         )
 
-    def _js_eu_isk(decimals: int):
+    def _js_eu_isk(decimals: int) -> JsCode:
         return JsCode(
             f"""
                 function(params) {{
@@ -1259,7 +1058,7 @@ def render():
             """
         )
 
-    def _js_eu_pct(decimals: int):
+    def _js_eu_pct(decimals: int) -> JsCode:
         return JsCode(
             f"""
                 function(params) {{
@@ -1291,8 +1090,6 @@ def render():
     # ISK columns
     for c in [
         "Mat. Cost",
-        "Copy Cost",
-        "Total Cost",
         "Job Fee",
         "Revenue",
         "Sales Tax",
@@ -1300,8 +1097,6 @@ def render():
         "Profit",
         "Profit / hour",
         "Mat. Cost / item",
-        "Copy Cost / item",
-        "Total Cost / item",
         "Job Fee / item",
         "Revenue / item",
         "Sales Tax / item",
@@ -1346,7 +1141,39 @@ def render():
             )
 
     grid_options = gb.build()
-    attach_aggrid_autosize(grid_options, JsCode=JsCode)
+    # Column auto-sizing
+    # - Prefer AG Grid's autoSizeStrategy when supported (keeps widths in sync with rendered values).
+    # - Also trigger autoSizeAllColumns on key events as a fallback.
+    grid_options["autoSizeStrategy"] = {"type": "fitCellContents"}
+
+    _js_autosize_all = JsCode(
+        """
+            function(params) {
+                setTimeout(function() {
+                    try {
+                        // skipHeader=false so header text is included in sizing.
+                        params.columnApi.autoSizeAllColumns(false);
+                    } catch (e) {}
+                }, 50);
+            }
+        """
+    )
+
+    grid_options["onFirstDataRendered"] = JsCode(
+        """
+            function(params) {
+                // Delay helps when the grid is still laying out / fonts not ready.
+                setTimeout(function() {
+                    try {
+                        params.columnApi.autoSizeAllColumns(false);
+                    } catch (e) {}
+                }, 50);
+            }
+        """
+    )
+    grid_options["onGridSizeChanged"] = _js_autosize_all
+    grid_options["onSortChanged"] = _js_autosize_all
+    grid_options["onFilterChanged"] = _js_autosize_all
     height = min(800, 40 + (len(display_df) * 35))
     AgGrid(
         display_df,
@@ -1365,30 +1192,24 @@ def render():
 
     # Select a produced item (product-centric workflow)
     # products_df uses "Name" (not "type_name") for the produced item label.
-    if "_product_row_key" not in products_df.columns:
-        products_df["_product_row_key"] = products_df["type_id"].apply(lambda tid: f"base:{int(tid or 0)}")
     prod_pairs = (
-        products_df[["_product_row_key", "type_id", "Name"]]
+        products_df[["type_id", "Name"]]
         .dropna()
-        .drop_duplicates(subset=["_product_row_key"])
+        .drop_duplicates()
         .sort_values(["Name", "type_id"], ascending=[True, True])
     )
     if prod_pairs.empty:
         st.info("No producible products available with the current filters.")
         return
 
-    prod_options = [(str(r["_product_row_key"]), int(r["type_id"]), str(r["Name"])) for _, r in prod_pairs.iterrows()]
-    prod_type_id_by_key = {k: int(tid) for k, tid, _ in prod_options}
-    prod_label_by_key = {k: name for k, _, name in prod_options}
+    prod_options = [(int(r["type_id"]), str(r["Name"])) for _, r in prod_pairs.iterrows()]
+    prod_label_by_id = {tid: name for tid, name in prod_options}
 
-    selected_product_key = st.selectbox(
+    selected_product_id = st.selectbox(
         "Select a product",
-        options=[k for k, _, _ in prod_options],
-        format_func=lambda k: f"{prod_label_by_key.get(str(k), str(k))} (typeID {prod_type_id_by_key.get(str(k), 0)})",
+        options=[tid for tid, _ in prod_options],
+        format_func=lambda tid: f"{prod_label_by_id.get(int(tid), str(tid))} (typeID {int(tid)})",
     )
-
-    selected_product_id = int(prod_type_id_by_key.get(str(selected_product_key), 0) or 0)
-    selected_product_is_invention = str(selected_product_key).startswith("invention:")
 
     # Show blueprints that can produce that item
     candidates: list[dict] = []
@@ -1456,151 +1277,35 @@ def render():
         )
 
     if not candidates:
-        # For invention-derived rows, we still want to show the invented T2 BPC.
-        # Avoid showing a misleading warning in that case.
-        if not selected_product_is_invention:
-            st.info("No blueprints found that can produce this product (with the current filters).")
-            return
-
-    # If the user selected the invention-derived product row, inject the invented T2 BPC as a candidate and default-select it.
-    invented_candidate = None
-    inv_source_bp_type_id = None
-    if bool(selected_product_is_invention):
-        try:
-            inv_row = products_df.loc[products_df["_product_row_key"] == str(selected_product_key)].iloc[0]
-            inv_source_bp_type_id = safe_int(inv_row.get("_invention_source_blueprint_type_id"), default=0)
-        except Exception:
-            inv_source_bp_type_id = 0
-
-        if inv_source_bp_type_id and inv_source_bp_type_id > 0:
-            inv_resp = _get_invention_options(blueprint_type_id=int(inv_source_bp_type_id), force=False)
-        else:
-            inv_resp = None
-
-        if isinstance(inv_resp, dict):
-            data = inv_resp.get("data") if isinstance(inv_resp.get("data"), dict) else {}
-            options = data.get("options") if isinstance(data.get("options"), list) else []
-            best = next((o for o in options if isinstance(o, dict)), None) or {}
-            inv = data.get("invention") if isinstance(data.get("invention"), dict) else {}
-            base_out = inv.get("base_output") if isinstance(inv.get("base_output"), dict) else {}
-            out_bp_type_id = safe_int(base_out.get("blueprint_type_id"), default=0)
-
-            mfg = data.get("manufacturing") if isinstance(data.get("manufacturing"), dict) else {}
-            prod_qty_per_run = safe_int(mfg.get("product_quantity_per_run"), default=0)
-            invented_runs = safe_int(best.get("invented_runs"), default=0)
-            invented_me = safe_int(best.get("invented_me"), default=0)
-            invented_te = safe_int(best.get("invented_te"), default=0)
-
-            if out_bp_type_id > 0 and prod_qty_per_run > 0 and invented_runs > 0:
-                invented_candidate = {
-                    "blueprint_type_id": int(out_bp_type_id),
-                    "blueprint": str(base_out.get("blueprint_type_name") or f"typeID {out_bp_type_id}"),
-                    "type": "BPC (Invention)",
-                    "remaining_runs": int(invented_runs),
-                    "job_runs": int(invented_runs),
-                    "units_per_run": int(prod_qty_per_run),
-                    "units_total": int(invented_runs) * int(prod_qty_per_run),
-                    "ME": int(invented_me),
-                    "TE": int(invented_te),
-                    "skill_requirements_met": True,
-                    "solar_system": None,
-                    "sec": None,
-                    "location": "(invention)",
-                    "_candidate_kind": "invention",
-                    "_invention_source_blueprint_type_id": int(inv_source_bp_type_id or 0),
-                }
-
-    if isinstance(invented_candidate, dict):
-        candidates = [invented_candidate, *candidates]
+        st.info("No blueprints found that can produce this product (with the current filters).")
+        return
 
     candidates_df = pd.DataFrame(candidates).reset_index(drop=True)
     # Blueprint overview: show blueprint icon, hide blueprint_type_id.
     candidates_display_df = candidates_df.copy()
-    # Hide internal fields (used for selection logic)
-    try:
-        internal_cols = [c for c in candidates_display_df.columns if str(c).startswith("_")]
-        if internal_cols:
-            candidates_display_df = candidates_display_df.drop(columns=internal_cols, errors="ignore")
-    except Exception:
-        pass
     if "blueprint_type_id" in candidates_display_df.columns:
         try:
             candidates_display_df.insert(
                 0,
                 "Icon",
                 candidates_display_df.apply(
-                    lambda r: blueprint_image_url(
-                        r.get("blueprint_type_id"),
-                        is_bpc=str(r.get("type") or "").upper().startswith("BPC"),
-                        size=32,
-                    ),
+                    lambda r: _blueprint_image_url(r.get("blueprint_type_id"), is_bpc=(str(r.get("type") or "").upper() == "BPC"), size=32),
                     axis=1,
                 ),
             )
         except Exception:
             pass
         candidates_display_df = candidates_display_df.drop(columns=["blueprint_type_id"], errors="ignore")
-
-    # Candidates overview table: use AgGrid for consistency with the main table.
-    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-        st.dataframe(
-            candidates_display_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Icon": st.column_config.ImageColumn("Icon", width="small"),
-            }
-            if "Icon" in candidates_display_df.columns
-            else None,
-        )
-    else:
-        gb2 = GridOptionsBuilder.from_dataframe(candidates_display_df)
-        gb2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
-
-        if "Icon" in candidates_display_df.columns:
-            gb2.configure_column(
-                "Icon",
-                header_name="",
-                width=62,
-                pinned="left",
-                sortable=False,
-                filter=False,
-                suppressAutoSize=True,
-                cellRenderer=img_renderer,
-            )
-
-        # Light formatting for numeric columns.
-        for c in ["ME", "TE", "remaining_runs", "job_runs", "units_per_run", "units_total"]:
-            if c in candidates_display_df.columns:
-                gb2.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=_js_eu_number(0),
-                    minWidth=110,
-                    cellStyle=right,
-                )
-
-        if "sec" in candidates_display_df.columns:
-            gb2.configure_column(
-                "sec",
-                header_name="sec",
-                type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=_js_eu_number(2),
-                minWidth=110,
-                cellStyle=right,
-            )
-
-        grid_options2 = gb2.build()
-        attach_aggrid_autosize(grid_options2, JsCode=JsCode)
-
-        height2 = min(420, 40 + (len(candidates_display_df) * 35))
-        AgGrid(
-            candidates_display_df,
-            gridOptions=grid_options2,
-            allow_unsafe_jscode=True,
-            theme="streamlit",
-            height=height2,
-        )
+    st.dataframe(
+        candidates_display_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Icon": st.column_config.ImageColumn("Icon", width="small"),
+        }
+        if "Icon" in candidates_display_df.columns
+        else None,
+    )
 
     # Pick a blueprint candidate
     label_by_idx: dict[int, str] = {}
@@ -1619,69 +1324,57 @@ def render():
             rr_txt = ""
         label_by_idx[int(idx)] = f"{bp_name} [{kind}] @ {loc}{rr_txt}"
 
-    default_idx = 0 if (selected_product_is_invention and isinstance(invented_candidate, dict)) else 0
     selected_idx = st.selectbox(
         "Select a blueprint",
         options=idxs,
         format_func=lambda i: label_by_idx.get(int(i), str(i)),
-        index=int(default_idx) if int(default_idx) in idxs else 0,
     )
 
+    def _safe_int(v: Any, default: int = 0) -> int:
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    def _safe_int_opt(v: Any) -> int | None:
+        try:
+            if v is None:
+                return None
+            return int(v)
+        except Exception:
+            return None
+
+    def _safe_float_opt(v: Any) -> float | None:
+        try:
+            if v is None:
+                return None
+            return float(v)
+        except Exception:
+            return None
+
     selected_row = candidates_df.iloc[int(selected_idx)]
-    selected_bp_type_id_i = safe_int(selected_row.get("blueprint_type_id"), default=0)
-    candidate_kind = str(selected_row.get("_candidate_kind") or "")
+    selected_bp_type_id_i = _safe_int(selected_row.get("blueprint_type_id"), default=0)
+    full_bp_data = next(
+        (bp for bp in filtered_blueprints if _safe_int(bp.get("type_id"), default=0) == selected_bp_type_id_i),
+        None,
+    )
+    if not isinstance(full_bp_data, dict):
+        st.warning("Blueprint details not found.")
+        return
 
-    full_bp_data = None
-    if candidate_kind != "invention":
-        full_bp_data = next(
-            (bp for bp in filtered_blueprints if safe_int(bp.get("type_id"), default=0) == selected_bp_type_id_i),
-            None,
-        )
-        if not isinstance(full_bp_data, dict):
-            st.warning("Blueprint details not found.")
-            return
+    bp_id = full_bp_data.get("type_id")
+    bp_name = full_bp_data.get("type_name", "Unknown")
+    flags = full_bp_data.get("flags", {}) or {}
+    is_bpc = bool(flags.get("is_blueprint_copy")) if isinstance(flags, dict) else False
+    variation = "bpc" if is_bpc else "bp"
+    skill_requirements_met = bool(full_bp_data.get("skill_requirements_met", False))
 
-    if candidate_kind == "invention":
-        # Use invention options to construct a virtual manufacturing job from the invented T2 BPC.
-        inv_source = safe_int(selected_row.get("_invention_source_blueprint_type_id"), default=0)
-        inv_resp = _get_invention_options(blueprint_type_id=int(inv_source), force=False) if inv_source > 0 else None
-        if not isinstance(inv_resp, dict):
-            st.warning("Invention details not available for this selection.")
-            return
-        inv_data = inv_resp.get("data") if isinstance(inv_resp.get("data"), dict) else {}
-        inv_opts = inv_data.get("options") if isinstance(inv_data.get("options"), list) else []
-        best = next((o for o in inv_opts if isinstance(o, dict)), None) or {}
+    manufacture_job = full_bp_data.get("manufacture_job", {}) or {}
+    mj_props = manufacture_job.get("properties", {}) or {}
+    job_runs = mj_props.get("job_runs")
 
-        inv = inv_data.get("invention") if isinstance(inv_data.get("invention"), dict) else {}
-        base_out = inv.get("base_output") if isinstance(inv.get("base_output"), dict) else {}
-        mfg = inv_data.get("manufacturing") if isinstance(inv_data.get("manufacturing"), dict) else {}
-
-        bp_id = safe_int(base_out.get("blueprint_type_id"), default=0)
-        bp_name = str(base_out.get("blueprint_type_name") or "Invented T2 BPC")
-        variation = "bpc"
-        skill_requirements_met = True
-
-        materials = (
-            inv_data.get("best_manufacturing_required_materials")
-            if isinstance(inv_data.get("best_manufacturing_required_materials"), list)
-            else []
-        )
-        required_skills = []
-        job_runs = safe_int(best.get("invented_runs"), default=0)
-    else:
-        bp_id = full_bp_data.get("type_id")
-        bp_name = full_bp_data.get("type_name", "Unknown")
-        flags = full_bp_data.get("flags", {}) or {}
-        is_bpc = bool(flags.get("is_blueprint_copy")) if isinstance(flags, dict) else False
-        variation = "bpc" if is_bpc else "bp"
-        skill_requirements_met = bool(full_bp_data.get("skill_requirements_met", False))
-
-        manufacture_job = full_bp_data.get("manufacture_job", {}) or {}
-        mj_props = manufacture_job.get("properties", {}) or {}
-        job_runs = mj_props.get("job_runs")
-
-        materials = manufacture_job.get("required_materials", []) or []
-        required_skills = manufacture_job.get("required_skills") or []
+    materials = manufacture_job.get("required_materials", []) or []
+    required_skills = manufacture_job.get("required_skills") or []
 
     col_bp_icon, col_bp_title = st.columns([1, 11])
     with col_bp_icon:
@@ -1695,531 +1388,40 @@ def render():
         if bp_id:
             st.caption(f"Blueprint typeID: {bp_id}")
 
-    st.markdown("### Manufacturing Job")
-    with st.container():
-        if candidate_kind == "invention":
-            st.markdown("#### Copy & Invention Jobs")
-
-            _PATH_SEP = "|||"
-            ci_rows = (
-                inv_data.get("best_ui_copy_invention_jobs_rows")
-                if isinstance(inv_data.get("best_ui_copy_invention_jobs_rows"), list)
-                else []
-            )
-            if not ci_rows:
-                st.caption("No Copy & Invention job breakdown available.")
-
-            if ci_rows:
-                ci_df = pd.DataFrame(ci_rows)
-            else:
-                ci_df = pd.DataFrame(
-                    columns=[
-                        "Icon",
-                        "Action",
-                        "Job Runs",
-                        "Job Fee",
-                        "Qty",
-                        "Effective Cost",
-                        "Duration",
-                        "Effective / unit",
-                        "Inventory Cost",
-                        "Buy Cost",
-                        "path",
-                    ]
-                )
-            # Material names are already encoded into the tree path labels; don't show a separate
-            # (and redundant) Material column.
-            ci_df = ci_df.drop(columns=["Material"], errors="ignore")
-            preferred_cols = [
-                "Icon",
-                "Action",
-                "Job Runs",
-                "Job Fee",
-                "Qty",
-                "Effective Cost",
-                "Duration",
-                "Effective / unit",
-                "Inventory Cost",
-                "Buy Cost",
-                "path",
-            ]
-            ci_df = ci_df[[c for c in preferred_cols if c in ci_df.columns] + [c for c in ci_df.columns if c not in preferred_cols]]
-
-            if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-                # Fallback (no AgGrid): show the full tree path as a visible Group column.
-                df_display = ci_df.copy()
-                if "path" in df_display.columns:
-                    df_display["Copy & Invention Jobs"] = df_display["path"].apply(
-                        lambda s: " / ".join(str(s).split(_PATH_SEP)) if s is not None else ""
-                    )
-                    df_display = df_display.drop(columns=["path"], errors="ignore")
-                ordered = [
-                    "Copy & Invention Jobs",
-                    "Icon",
-                    "Action",
-                    "Job Runs",
-                    "Job Fee",
-                    "Qty",
-                    "Effective Cost",
-                    "Duration",
-                    "Effective / unit",
-                    "Inventory Cost",
-                    "Buy Cost",
-                ]
-                df_display = df_display[[c for c in ordered if c in df_display.columns] + [c for c in df_display.columns if c not in ordered]]
-                st.dataframe(
-                    df_display,
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "Copy & Invention Jobs": st.column_config.TextColumn("Copy & Invention Jobs"),
-                        "Icon": st.column_config.ImageColumn("Icon", width="small"),
-                        "Job Runs": st.column_config.NumberColumn("Job Runs", format="%.0f"),
-                        "Job Fee": st.column_config.NumberColumn("Job Fee", format="%,.0f ISK"),
-                        "Qty": st.column_config.NumberColumn("Qty", format="%.0f"),
-                        "Effective Cost": st.column_config.NumberColumn("Effective Cost", format="%,.0f ISK"),
-                        "Duration": st.column_config.TextColumn("Duration"),
-                        "Effective / unit": st.column_config.NumberColumn("Effective / unit", format="%,.0f ISK"),
-                        "Inventory Cost": st.column_config.NumberColumn("Inventory Cost", format="%,.0f ISK"),
-                        "Buy Cost": st.column_config.NumberColumn("Buy Cost", format="%,.0f ISK"),
-                    },
-                )
-            else:
-                # Type narrowing for static analyzers (JsCode/AgGrid are dynamically imported).
-                assert GridOptionsBuilder is not None
-                assert JsCode is not None
-
-                gb_ci = GridOptionsBuilder.from_dataframe(ci_df)
-                gb_ci.configure_default_column(editable=False, sortable=False, filter=False, resizable=True)
-
-                # Hide internal tree path
-                if "path" in ci_df.columns:
-                    gb_ci.configure_column("path", hide=True)
-
-                # Icon column (pinned left, after the group column)
-                if "Icon" in ci_df.columns:
-                    gb_ci.configure_column(
-                        "Icon",
-                        header_name="",
-                        pinned="left",
-                        width=54,
-                        minWidth=54,
-                        maxWidth=54,
-                        cellRenderer=img_renderer,
-                        suppressSizeToFit=True,
-                    )
-
-                # Action column next to Icon
-                if "Action" in ci_df.columns:
-                    gb_ci.configure_column("Action", minWidth=110)
-
-                right = {"textAlign": "right"}
-                if "Job Runs" in ci_df.columns:
-                    gb_ci.configure_column(
-                        "Job Runs",
-                        type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_number(0),
-                        minWidth=110,
-                        cellStyle=right,
-                    )
-                if "Qty" in ci_df.columns:
-                    gb_ci.configure_column(
-                        "Qty",
-                        type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_number(0),
-                        minWidth=110,
-                        cellStyle=right,
-                    )
-
-                for c in ["Job Fee", "Effective Cost", "Effective / unit", "Inventory Cost", "Buy Cost"]:
-                    if c in ci_df.columns:
-                        gb_ci.configure_column(
-                            c,
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0 if c != "Effective / unit" else 2),
-                            minWidth=150,
-                            cellStyle=right,
-                        )
-
-                grid_opts_ci = gb_ci.build()
-                grid_opts_ci["autoSizeStrategy"] = {"type": "fitCellContents"}
-                grid_opts_ci["treeData"] = True
-                grid_opts_ci["getDataPath"] = JsCode(
-                    """
-                    function(data) {
-                        try {
-                            if (!data || data.path === null || data.path === undefined) return [];
-                            var s = String(data.path);
-                            if (!s) return [];
-                            return s.split('|||').filter(function(x) { return x !== null && x !== undefined && String(x).length > 0; });
-                        } catch (e) {
-                            return [];
+    with st.expander("Manufacturing Job", expanded=True):
+        st.markdown("#### Required Skills")
+        st.write(f"Met: **{'Yes' if skill_requirements_met else 'No'}**")
+        with st.expander("Show skill details", expanded=False):
+            if isinstance(required_skills, list) and required_skills:
+                rows = []
+                for s in required_skills:
+                    if not isinstance(s, dict):
+                        continue
+                    rows.append(
+                        {
+                            "Skill": s.get("type_name"),
+                            "Required": s.get("required_level"),
+                            "Character": s.get("character_level"),
+                            "Met": bool(s.get("met", False)),
                         }
-                    }
-                    """
-                )
-                grid_opts_ci["groupDefaultExpanded"] = 1
-                grid_opts_ci["autoGroupColumnDef"] = {
-                    "headerName": "Copy & Invention Jobs",
-                    "pinned": "left",
-                    "minWidth": 320,
-                    "cellRendererParams": {"suppressCount": True},
-                }
+                    )
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            else:
+                st.info("No required skills data available.")
 
-                height_ci = min(520, 70 + (len(ci_df) * 32))
-                AgGrid(
-                    ci_df,
-                    gridOptions=grid_opts_ci,
-                    allow_unsafe_jscode=True,
-                    enable_enterprise_modules=True,
-                    theme="streamlit",
-                    height=height_ci,
-                )
-            if units_total > 0 and total_cost is not None:
-                st.caption(f"Output: {int(units_total)} units · Copy+Invention expected cost: {float(total_cost):,.0f} ISK")
-
-            if copy_fee_total is None or copy_time_total is None:
-                st.caption(
-                    "Copying job fee/duration is best-effort and depends on SDE copy time + selected Industry Profile (system + taxes/rigs)."
-                )
-
-            # Decryptor details (kept in a separate expander; materials are inline in the table above).
-            with st.expander("Decryptors", expanded=False):
-                best_dec_unit_cost = safe_float_opt(best.get("decryptor_effective_cost_isk"))
-                best_dec_cost = None
-                try:
-                    if best_dec_unit_cost is not None and attempts_per_success is not None:
-                        best_dec_cost = float(best_dec_unit_cost) * float(attempts_per_success)
-                except Exception:
-                    best_dec_cost = None
-                best_inv_fee_total = float(inv_fee_total) if inv_fee_total is not None else None
-                best_inv_time_total = float(inv_time_total) if inv_time_total is not None else None
-
-                st.write(
-                    {
-                        "Best decryptor": decryptor,
-                        "Success %": (float(p) * 100.0) if p is not None else None,
-                        "Expected Attempts": float(attempts_per_success) if attempts_per_success is not None else None,
-                        "Decryptor Cost": float(best_dec_cost) if best_dec_cost is not None else None,
-                        "Job Fee": float(best_inv_fee_total) if best_inv_fee_total is not None else None,
-                        "Duration": format_duration(best_inv_time_total) if best_inv_time_total is not None else "-",
-                    }
-                )
-
-                with st.expander("Other decryptor options", expanded=False):
-                    shown = 0
-                    for rank, opt in enumerate((inv_opts or [])[:25]):
-                        if not isinstance(opt, dict):
-                            continue
-                        dec_name = str(opt.get("decryptor_type_name") or "(none)")
-                        p_opt = safe_float_opt(opt.get("success_probability"))
-                        attempts = (1.0 / float(p_opt)) if (p_opt is not None and p_opt > 0) else None
-
-                        att_mat = safe_float_opt(opt.get("invention_attempt_material_cost_isk"))
-                        att_fee = safe_float_opt(opt.get("invention_job_fee_isk"))
-                        expected_inv_fee = None
-                        expected_inv_time = None
-                        expected_cost = None
-                        try:
-                            if attempts is not None:
-                                expected_cost = float(att_mat or 0.0) * float(attempts) + float(att_fee or 0.0) * float(attempts)
-                                expected_inv_fee = float(att_fee or 0.0) * float(attempts)
-                        except Exception:
-                            expected_cost = None
-                            expected_inv_fee = None
-
-                        try:
-                            if attempts is not None and inv_time_attempt is not None:
-                                expected_inv_time = float(inv_time_attempt) * float(attempts)
-                        except Exception:
-                            expected_inv_time = None
-
-                        dec_cost = safe_float_opt(opt.get("decryptor_effective_cost_isk"))
-                        dec_cost_total = None
-                        try:
-                            if dec_cost is not None and attempts is not None:
-                                dec_cost_total = float(dec_cost) * float(attempts)
-                        except Exception:
-                            dec_cost_total = None
-                        copy_fee_opt = safe_float_opt(opt.get("copying_job_fee_isk"))
-                        copy_time_opt = safe_float_opt(opt.get("copying_expected_time_seconds"))
-
-                        with st.expander(f"#{int(rank + 1)} {dec_name}", expanded=False):
-                            st.write(
-                                {
-                                    "Success %": (float(p_opt) * 100.0) if p_opt is not None else None,
-                                    "Expected Attempts": float(attempts) if attempts is not None else None,
-                                    "Invented Runs": safe_int(opt.get("invented_runs"), default=0),
-                                    "ME": safe_int(opt.get("invented_me"), default=0),
-                                    "TE": safe_int(opt.get("invented_te"), default=0),
-                                    "Decryptor Cost": float(dec_cost_total) if dec_cost_total is not None else None,
-                                    "Expected Invention Cost": float(expected_cost) if expected_cost is not None else None,
-                                    "Job Fee": float(expected_inv_fee) if expected_inv_fee is not None else None,
-                                    "Duration": format_duration(expected_inv_time) if expected_inv_time is not None else "-",
-                                    "Copying Job Fee": float(copy_fee_opt) if copy_fee_opt is not None else None,
-                                    "Copying Duration": format_duration(copy_time_opt) if copy_time_opt is not None else "-",
-                                }
-                            )
-
-                        shown += 1
-                        if shown >= 10:
-                            st.caption("Showing top 10 options.")
-                            break
-
-        # --- Build tree / submanufacturing plan ---
-
-        backend_tree_rows: list[dict[str, Any]] = []
-        backend_copy_jobs: list[dict[str, Any]] = []
-        backend_missing_bps: list[dict[str, Any]] = []
+        st.markdown("#### Required Materials")
 
         # Planner is computed server-side as part of industry_builder_data.
-        plan_rows = full_bp_data.get("submanufacturing_plan") or [] if isinstance(full_bp_data, dict) else []
-
-        # For invention-derived jobs, use the backend-provided best manufacturing subplan.
-        if candidate_kind == "invention":
-            plan_children = (
-                inv_data.get("best_manufacturing_submanufacturing_plan")
-                if isinstance(inv_data.get("best_manufacturing_submanufacturing_plan"), list)
-                else []
-            )
-            plan_rows = (
-                [
-                    {
-                        "type_id": 0,
-                        "type_name": "Manufacturing Job",
-                        "recommendation": "build",
-                        "required_quantity": safe_int(selected_row.get("units_total"), default=0),
-                        "children": plan_children,
-                    }
-                ]
-                if plan_children
-                else []
-            )
-
-            backend_tree_rows = (
-                inv_data.get("best_ui_build_tree_rows")
-                if isinstance(inv_data.get("best_ui_build_tree_rows"), list)
-                else []
-            )
-            backend_copy_jobs = (
-                inv_data.get("best_ui_blueprint_copy_jobs")
-                if isinstance(inv_data.get("best_ui_blueprint_copy_jobs"), list)
-                else []
-            )
-            backend_missing_bps = (
-                inv_data.get("best_ui_missing_blueprints")
-                if isinstance(inv_data.get("best_ui_missing_blueprints"), list)
-                else []
-            )
-        elif isinstance(full_bp_data, dict):
-            tree_map = full_bp_data.get("ui_build_tree_rows_by_product_type_id")
-            if isinstance(tree_map, dict):
-                rows = tree_map.get(str(int(selected_product_id)))
-                if rows is None:
-                    rows = tree_map.get(int(selected_product_id))
-                backend_tree_rows = rows if isinstance(rows, list) else []
-
-            backend_copy_jobs = full_bp_data.get("ui_blueprint_copy_jobs") if isinstance(full_bp_data.get("ui_blueprint_copy_jobs"), list) else []
-            backend_missing_bps = full_bp_data.get("ui_missing_blueprints") if isinstance(full_bp_data.get("ui_missing_blueprints"), list) else []
-
-        # Normalize Build Tree shape across T1/T2 selections:
-        # always render a single top-level "Manufacturing Job" node.
-        def _wrap_under_mfg_root(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            if (
-                isinstance(rows, list)
-                and len(rows) == 1
-                and isinstance(rows[0], dict)
-                and safe_int(rows[0].get("type_id"), default=0) == 0
-                and str(rows[0].get("type_name") or "").lower().startswith("manufact")
-            ):
-                return rows
-            return [
-                {
-                    "type_id": 0,
-                    "type_name": "Manufacturing Job",
-                    "recommendation": "build",
-                    "required_quantity": safe_int(selected_row.get("units_total"), default=0),
-                    "children": rows,
-                }
-            ]
-
-        # If no planner rows are available (common for T1-only workflows),
-        # synthesize a minimal tree from the required materials so the Build Tree
-        # still uses the same UI (expand Manufacturing Job to see materials).
-        if not plan_rows and isinstance(materials, list) and materials:
-            material_nodes: list[dict[str, Any]] = []
-            for m in materials:
-                if not isinstance(m, dict):
-                    continue
-                tid_i = safe_int(m.get("type_id"), default=0)
-                if tid_i <= 0:
-                    continue
-                qty = m.get("quantity_after_efficiency")
-                if qty is None:
-                    qty = m.get("quantity_me0")
-                qty_i = safe_int(qty, default=0)
-                if qty_i <= 0:
-                    continue
-                material_nodes.append(
-                    {
-                        "type_id": int(tid_i),
-                        "type_name": (m.get("type_name") or str(tid_i)),
-                        "recommendation": "buy",
-                        "required_quantity": int(qty_i),
-                        "children": [],
-                    }
-                )
-            if material_nodes:
-                plan_rows = _wrap_under_mfg_root(material_nodes)
-
-        if plan_rows:
-            plan_rows = _wrap_under_mfg_root([r for r in plan_rows if isinstance(r, dict)])
-
-        # --- Blueprint Copy Jobs overview (main + submanufacturing build steps) ---
-        copy_job_rows: list[dict[str, Any]] = []
-
-        # Prefer backend-provided copy jobs extraction.
-        if isinstance(backend_copy_jobs, list) and backend_copy_jobs:
-            for r in backend_copy_jobs:
-                if not isinstance(r, dict):
-                    continue
-                dur_s = safe_float_opt(r.get("Duration"))
-                copy_job_rows.append(
-                    {
-                        "Blueprint": r.get("Blueprint"),
-                        "Runs": safe_int(r.get("Runs"), default=0),
-                        "Max Runs": safe_int_opt(r.get("Max Runs")),
-                        "Duration": (format_duration(dur_s) if dur_s is not None else "-"),
-                        "Job Fee": safe_float_opt(r.get("Job Fee")),
-                    }
-                )
-
-        # Root manufacturing blueprint copy job (when manufacturing is based on a BPC)
-        if not copy_job_rows and candidate_kind != "invention" and isinstance(full_bp_data, dict):
-            mj = full_bp_data.get("manufacture_job") if isinstance(full_bp_data.get("manufacture_job"), dict) else None
-            props = mj.get("properties") if isinstance(mj, dict) and isinstance(mj.get("properties"), dict) else None
-            root_copy = props.get("copy_job") if isinstance(props, dict) and isinstance(props.get("copy_job"), dict) else None
-            if isinstance(root_copy, dict):
-                time_d = root_copy.get("time") if isinstance(root_copy.get("time"), dict) else {}
-                cost_d = root_copy.get("job_cost") if isinstance(root_copy.get("job_cost"), dict) else {}
-                copy_job_rows.append(
-                    {
-                        "Blueprint": str(bp_name),
-                        "Runs": safe_int(root_copy.get("runs"), default=0),
-                        "Max Runs": safe_int_opt(root_copy.get("max_runs")),
-                        "Duration": (
-                            format_duration(safe_float_opt(time_d.get("estimated_copy_time_seconds")))
-                            if safe_float_opt(time_d.get("estimated_copy_time_seconds")) is not None
-                            else "-"
-                        ),
-                        "Job Fee": safe_float_opt(cost_d.get("total_job_cost_isk")),
-                    }
-                )
-
-        # Submanufacturing copy overhead (only for nodes where recommendation == 'build')
-        def _walk_copy_overhead(nodes: list[dict[str, Any]]) -> None:
-            for n in nodes or []:
-                if not isinstance(n, dict):
-                    continue
-                rec = str(n.get("recommendation") or "").lower()
-                if rec == "build":
-                    build = n.get("build") if isinstance(n.get("build"), dict) else None
-                    if isinstance(build, dict):
-                        co = build.get("copy_overhead") if isinstance(build.get("copy_overhead"), dict) else None
-                        if isinstance(co, dict):
-                            copy_job_rows.append(
-                                {
-                                    "Blueprint": str(build.get("blueprint_type_name") or build.get("blueprint_type_id") or ""),
-                                    "Runs": safe_int(build.get("runs_needed"), default=0),
-                                    "Max Runs": safe_int_opt(co.get("max_production_limit")),
-                                    "Duration": (
-                                        format_duration(safe_float_opt(co.get("estimated_copy_time_seconds")))
-                                        if safe_float_opt(co.get("estimated_copy_time_seconds")) is not None
-                                        else "-"
-                                    ),
-                                    "Job Fee": safe_float_opt(co.get("estimated_copy_fee_isk")),
-                                }
-                            )
-
-                children = n.get("children")
-                if isinstance(children, list) and children:
-                    _walk_copy_overhead([c for c in children if isinstance(c, dict)])
-
-        if not copy_job_rows and isinstance(plan_rows, list) and plan_rows:
-            _walk_copy_overhead([r for r in plan_rows if isinstance(r, dict)])
-
-        if copy_job_rows:
-            st.markdown("#### Blueprint Copy Jobs")
-            df_copy = pd.DataFrame(copy_job_rows)
-            if "Output BPC" not in df_copy.columns:
-                try:
-                    df_copy.insert(1, "Output BPC", df_copy["Blueprint"].apply(lambda s: f"{s} (BPC)" if s else "(BPC)"))
-                except Exception:
-                    pass
-            if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-                st.dataframe(
-                    df_copy,
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "Job Fee": st.column_config.NumberColumn("Job Fee", format="%,.0f ISK"),
-                    },
-                )
-            else:
-                gb_copy = GridOptionsBuilder.from_dataframe(df_copy)
-                gb_copy.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
-                right_style = {"textAlign": "right"}
-
-                for c in ["Runs", "Max Runs"]:
-                    if c in df_copy.columns:
-                        gb_copy.configure_column(
-                            c,
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_number(0),
-                            minWidth=110,
-                            cellStyle=right_style,
-                        )
-
-                if "Job Fee" in df_copy.columns:
-                    gb_copy.configure_column(
-                        "Job Fee",
-                        type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_isk(0),
-                        minWidth=160,
-                        cellStyle=right_style,
-                    )
-
-                grid_opts_copy = gb_copy.build()
-                attach_aggrid_autosize(grid_opts_copy, JsCode=JsCode)
-                grid_opts_copy["autoSizeStrategy"] = {"type": "fitCellContents"}
-
-                height_copy = min(320, 60 + (len(df_copy) * 32))
-                AgGrid(
-                    df_copy,
-                    gridOptions=grid_opts_copy,
-                    allow_unsafe_jscode=True,
-                    theme="streamlit",
-                    height=height_copy,
-                )
-        else:
-            st.markdown("#### Blueprint Copy Jobs")
-            st.info("No blueprint copy jobs found for this build.")
-
-        st.markdown("#### Build Tree")
+        plan_rows = full_bp_data.get("submanufacturing_plan") or []
         plan_by_type_id: dict[int, dict] = {}
-        def _walk_plan(nodes: list[dict[str, Any]] | None) -> None:
-            for n in nodes or []:
-                if not isinstance(n, dict):
-                    continue
-                tid_i = safe_int(n.get("type_id"), default=0)
-                if tid_i > 0:
-                    plan_by_type_id[int(tid_i)] = n
-                children = n.get("children")
-                if isinstance(children, list) and children:
-                    _walk_plan([c for c in children if isinstance(c, dict)])
-
-        if isinstance(plan_rows, list) and plan_rows:
-            _walk_plan([r for r in plan_rows if isinstance(r, dict)])
+        for r in plan_rows:
+            if not isinstance(r, dict):
+                continue
+            tid = r.get("type_id")
+            tid_i = _safe_int(tid, default=0)
+            if tid_i <= 0:
+                continue
+            plan_by_type_id[int(tid_i)] = r
 
         # --- Required blueprints (not owned) ---
         # Based on the submanufacturing tree: only include nodes where we recommend building
@@ -2235,7 +1437,7 @@ def render():
                 if rec == "build" and isinstance(build, dict):
                     owned = build.get("blueprint_owned")
                     if owned is False:
-                        bp_type_id = safe_int(build.get("blueprint_type_id"), default=0)
+                        bp_type_id = _safe_int(build.get("blueprint_type_id"), default=0)
                         if bp_type_id > 0:
                             slot = by_bp.get(bp_type_id)
                             if slot is None:
@@ -2254,7 +1456,7 @@ def render():
                                     te_f = None
                                 slot = {
                                     "blueprint_type_id": int(bp_type_id),
-                                    "Icon": blueprint_image_url(int(bp_type_id), is_bpc=False, size=32),
+                                    "Icon": _blueprint_image_url(int(bp_type_id), is_bpc=False, size=32),
                                     "Blueprint": str(build.get("blueprint_type_name") or bp_type_id),
                                     "Assumed ME": me_f,
                                     "Assumed TE": te_f,
@@ -2284,7 +1486,7 @@ def render():
                         _walk(root)
 
             rows: list[dict] = []
-            for _bp_type_id, slot in by_bp.items():
+            for bp_type_id, slot in by_bp.items():
                 used_for = slot.get("Used For")
                 used_list = []
                 if isinstance(used_for, set):
@@ -2307,44 +1509,26 @@ def render():
             rows.sort(key=lambda r: str(r.get("Blueprint") or ""))
             return rows
 
-        missing_bp_rows: list[dict[str, Any]] = []
-        if isinstance(backend_missing_bps, list) and backend_missing_bps:
-            for r in backend_missing_bps:
-                if not isinstance(r, dict):
-                    continue
-                bp_tid = safe_int(r.get("blueprint_type_id"), default=0)
-                missing_bp_rows.append(
-                    {
-                        "Icon": blueprint_image_url(int(bp_tid), is_bpc=False, size=32) if bp_tid > 0 else None,
-                        "Blueprint": r.get("Blueprint"),
-                        "Assumed ME": safe_float_opt(r.get("Assumed ME")),
-                        "Assumed TE": safe_float_opt(r.get("Assumed TE")),
-                        "Assumption Source": r.get("Assumption Source"),
-                        "Est. BPO Buy Cost": safe_float_opt(r.get("Est. BPO Buy Cost")),
-                        "Used For": r.get("Used For"),
-                    }
-                )
-        elif plan_rows:
+        if plan_rows:
             missing_bp_rows = _collect_unowned_blueprints(plan_rows)
-
-        if missing_bp_rows:
-            st.markdown("#### Required Blueprints (Not Owned)")
-            st.caption(
-                "These submanufacturing steps recommend **build**, but you don't own the blueprint. "
-                "ME/TE shown are the planner assumptions for unowned blueprints (best-effort)."
-            )
-            df_missing_bp = pd.DataFrame(missing_bp_rows)
-            st.dataframe(
-                df_missing_bp,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Icon": st.column_config.ImageColumn("Icon", width="small"),
-                    "Assumed ME": st.column_config.NumberColumn("Assumed ME", format="%.0f%%"),
-                    "Assumed TE": st.column_config.NumberColumn("Assumed TE", format="%.0f%%"),
-                    "Est. BPO Buy Cost": st.column_config.NumberColumn("Est. BPO Buy Cost", format="%.0f ISK"),
-                },
-            )
+            if missing_bp_rows:
+                st.markdown("#### Required Blueprints (Not Owned)")
+                st.caption(
+                    "These submanufacturing steps recommend **build**, but you don't own the blueprint. "
+                    "ME/TE shown are the planner assumptions for unowned blueprints (best-effort)."
+                )
+                df_missing_bp = pd.DataFrame(missing_bp_rows)
+                st.dataframe(
+                    df_missing_bp,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Icon": st.column_config.ImageColumn("Icon", width="small"),
+                        "Assumed ME": st.column_config.NumberColumn("Assumed ME", format="%.0f%%"),
+                        "Assumed TE": st.column_config.NumberColumn("Assumed TE", format="%.0f%%"),
+                        "Est. BPO Buy Cost": st.column_config.NumberColumn("Est. BPO Buy Cost", format="%.0f ISK"),
+                    },
+                )
 
         mat_rows = []
         for m in materials:
@@ -2378,19 +1562,8 @@ def render():
             rec = plan.get("recommendation") if isinstance(plan, dict) else None
             buy_cost = plan.get("buy_cost_isk") if isinstance(plan, dict) else None
             build = plan.get("build") if isinstance(plan, dict) and isinstance(plan.get("build"), dict) else None
-            build_full = plan.get("build_full") if isinstance(plan, dict) and isinstance(plan.get("build_full"), dict) else None
             build_cost = (build or {}).get("total_build_cost_isk") if isinstance(build, dict) else None
-            build_cost_full = (build_full or {}).get("total_build_cost_isk") if isinstance(build_full, dict) else None
-            build_cost_for_row = build_cost if build_cost is not None else build_cost_full
             effective_cost = plan.get("effective_cost_isk") if isinstance(plan, dict) else None
-
-            market_unit = plan.get("buy_unit_price_isk") if isinstance(plan, dict) else None
-            market_buy_cost = None
-            try:
-                if market_unit is not None and qty_i is not None:
-                    market_buy_cost = float(market_unit) * float(qty_i)
-            except Exception:
-                market_buy_cost = None
 
             roi_build = None
             if rec == "build" and buy_cost is not None and effective_cost is not None:
@@ -2404,32 +1577,34 @@ def render():
             mat_rows.append(
                 {
                     "type_id": int(tid_i),
-                    "Icon": type_icon_url(tid_i, size=32),
+                    "Icon": _type_icon_url(tid_i, size=32),
                     "Material": m.get("type_name"),
                     "Qty": int(qty_i),
                     "Unit Price": float(unit_price) if unit_price is not None else None,
-                    "Effective Cost": float(total_cost) if total_cost is not None else None,
-                    "Market Buy Cost": float(market_buy_cost) if market_buy_cost is not None else None,
+                    "Buy Cost": float(total_cost) if total_cost is not None else None,
                     "FIFO (Market)": (
-                        safe_float_opt(m.get("inventory_fifo_market_buy_cost_isk"))
+                        _safe_float_opt(m.get("inventory_fifo_market_buy_cost_isk"))
                     ),
                     "FIFO (Built)": (
-                        safe_float_opt(m.get("inventory_fifo_industry_build_cost_isk"))
+                        _safe_float_opt(m.get("inventory_fifo_industry_build_cost_isk"))
                     ),
                     "Inv Used": (
-                        safe_int_opt(m.get("inventory_used_qty"))
+                        _safe_int_opt(m.get("inventory_used_qty"))
                     ),
-                    "Shortfall Qty": (
-                        safe_int_opt(m.get("inventory_buy_now_qty"))
+                    "Buy-Now Qty": (
+                        _safe_int_opt(m.get("inventory_buy_now_qty"))
                     ),
                     "Action": rec,
-                    "Build Cost": float(build_cost_for_row) if build_cost_for_row is not None else None,
+                    "Build Cost": float(build_cost) if build_cost is not None else None,
                     "Build ROI": float(roi_build) if roi_build is not None else None,
                 }
             )
 
         mat_df = pd.DataFrame(mat_rows)
         if mat_rows:
+
+            st.markdown("#### Materials (Buy/Build tree)")
+
             st.markdown(
                 """
                     <style>
@@ -2488,904 +1663,188 @@ def render():
                 except Exception:
                     return "-"
 
-            # Prefer backend-provided flattened Build Tree rows when available.
-            use_backend_tree = isinstance(backend_tree_rows, list) and len(backend_tree_rows) > 0
+            # If planner data is available, render everything as a single aligned tree table.
+            if plan_rows:
+                col_widths = [0.9, 3.4, 0.8, 1.2, 1.4, 1.4, 1.0]
 
-            # If planner data (or backend viewmodel rows) are available, render everything as a single aligned tree table.
-            if plan_rows or use_backend_tree:
-                # AgGrid tree view (collapsible).
-                # Only include children when the planner recommends building (rec == 'build'),
-                # matching the current manual renderer behavior.
-                if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-                    # Should not normally happen (page returns earlier), but keep a safe fallback.
-                    st.dataframe(
-                        mat_df,
-                        width="stretch",
-                        hide_index=True,
-                        column_config=MATERIALS_TABLE_COLUMN_CONFIG,
-                    )
-                else:
-                    def _node_name(n: dict) -> str:
-                        return str(n.get("type_name") or n.get("type_id") or "")
+                h = st.columns(col_widths)
+                h[0].markdown("**Action**")
+                h[1].markdown("**Name**")
+                h[2].markdown("**Qty**")
+                h[3].markdown("**Unit**")
+                h[4].markdown("**Buy Cost**")
+                h[5].markdown("**Build Cost**")
+                h[6].markdown("**ROI**")
 
-                    def _has_expandable_build_steps(nodes: list[dict]) -> bool:
-                        # Only enable TreeData when there are *build* steps that actually
-                        # have required materials to show (non-empty children).
-                        def _walk(x: dict) -> bool:
-                            if not isinstance(x, dict):
-                                return False
-                            rec = str(x.get("recommendation") or "").lower()
-                            children = x.get("children")
-                            if rec == "build" and isinstance(children, list) and len(children) > 0:
-                                return True
-                            if isinstance(children, list):
-                                for ch in children:
-                                    if isinstance(ch, dict) and _walk(ch):
-                                        return True
-                            return False
+                def _render_tree_row(node: dict, *, level: int) -> None:
+                    if not isinstance(node, dict):
+                        return
 
-                        if not isinstance(nodes, list):
-                            return False
-                        for root in nodes:
-                            if isinstance(root, dict) and _walk(root):
-                                return True
-                        return False
+                    rec = str(node.get("recommendation") or "-")
+                    name = str(node.get("type_name") or node.get("type_id") or "")
+                    qty = node.get("required_quantity")
+                    unit = node.get("buy_unit_price_isk")
+                    buy_cost = node.get("buy_cost_isk")
 
-                    def _node_key(n: dict) -> str:
-                        # Key used for the tree path; keep it stable and unique-ish.
+                    build = node.get("build") if isinstance(node.get("build"), dict) else None
+                    build_cost = build.get("total_build_cost_isk") if isinstance(build, dict) else None
+
+                    # ROI rule:
+                    # - If rec == build: show ROI (buy vs build)
+                    # - If rec == buy but build_cost exists: show ROI only when building would be worse (negative)
+                    roi_display = None
+                    if buy_cost is not None and build_cost is not None:
                         try:
-                            tid = int(n.get("type_id") or 0)
+                            bc = float(build_cost)
+                            roi_if_build = ((float(buy_cost) - float(build_cost)) / bc) * 100.0 if bc > 0 else None
                         except Exception:
-                            tid = 0
-                        nm = _node_name(n)
-                        return f"{nm}#{tid}" if tid else nm
+                            roi_if_build = None
 
-                    # When backend rows exist, they already include rollups and allocation scaling.
-                    tree_rows: list[dict] = [r for r in backend_tree_rows if isinstance(r, dict)] if use_backend_tree else []
-                    # Use a plain delimiter (not a control char) to avoid any serialization/
-                    # rendering oddities in Streamlit-AgGrid/React.
-                    _PATH_SEP = "|||"
-
-                    def _walk_tree(n: dict, *, parent_path: list[str]) -> None:
-                        if not isinstance(n, dict):
-                            return
-
-                        rec = str(n.get("recommendation") or "-").lower()
-                        key = _node_key(n)
-                        path = [*parent_path, key]
-                        path_str = _PATH_SEP.join([str(p) for p in path if p is not None])
-
-                        # The tree (auto-group) column already shows the hierarchy (Invention/Manufacturing -> ...),
-                        # so we don't need a separate "Material" column.
-
-                        # Planner cost fields:
-                        # - buy_unit_price_isk: market unit price (avg)
-                        # - buy_cost_isk: effective buy cost (FIFO inventory valuation + market for any shortfall)
-                        # - effective_cost_isk: planner-chosen total cost for this node.
-                        #   When FIFO preference is enabled and inventory is partially available, this becomes:
-                        #   inventory(FIFO) + min(buy shortfall, build shortfall).
-                        effective_cost = n.get("effective_cost_isk")
-                        market_unit = n.get("buy_unit_price_isk")
-
-                        qty_required = n.get("required_quantity")
-                        qty_shortfall = n.get("shortfall_quantity")
-                        inv_used_qty = n.get("inventory_used_qty")
-
-                        # Display qty as the planner-required quantity. Shortfall and inventory-used
-                        # quantities are shown via dedicated (hidden-by-default) columns.
-                        qty = qty_required
-
-                        market_buy_cost = None
-                        try:
-                            if market_unit is not None and qty is not None:
-                                market_buy_cost = float(market_unit) * float(qty)
-                        except Exception:
-                            market_buy_cost = None
-
-                        inv_used_qty = n.get("inventory_used_qty")
-                        inv_fifo_priced_qty = n.get("inventory_fifo_priced_qty")
-                        inv_fifo_cost = n.get("inventory_fifo_cost_isk")
-                        build = n.get("build") if isinstance(n.get("build"), dict) else None
-                        build_full = n.get("build_full") if isinstance(n.get("build_full"), dict) else None
-                        build_for_cost = build if (rec == "build" and isinstance(build, dict)) else build_full
-                        build_cost = build_for_cost.get("total_build_cost_isk") if isinstance(build_for_cost, dict) else None
-
-                        shortfall_qty = n.get("shortfall_quantity")
-                        shortfall_action = n.get("shortfall_recommendation")
-                        shortfall_buy_cost = n.get("shortfall_buy_cost_isk")
-                        shortfall_build_cost = n.get("shortfall_build_cost_isk")
-                        savings_isk = n.get("savings_isk")
-
-                        inv_used_qty_i = safe_int_opt(inv_used_qty)
-                        inv_fifo_priced_qty_i = safe_int_opt(inv_fifo_priced_qty)
-
-                        qty_required_i = safe_int_opt(qty_required)
-                        shortfall_qty_i = safe_int_opt(shortfall_qty)
-                        try:
-                            if shortfall_qty_i is None and qty_required_i is not None and inv_used_qty_i is not None:
-                                shortfall_qty_i = max(0, int(qty_required_i) - int(inv_used_qty_i))
-                        except Exception:
-                            shortfall_qty_i = shortfall_qty_i
-
-                        # Inventory cost display value:
-                        # - Prefer FIFO valuation when available.
-                        # - Fallback to market valuation for the inventory-used quantity when FIFO isn't available.
-                        inventory_cost_display = None
-                        try:
-                            if inv_used_qty_i is not None and int(inv_used_qty_i) > 0:
-                                if inv_fifo_cost is not None and inv_fifo_priced_qty_i is not None and int(inv_fifo_priced_qty_i) > 0:
-                                    # FIFO priced part + market fallback for any unknown-basis inventory.
-                                    inventory_cost_display = float(inv_fifo_cost)
-                                    try:
-                                        unknown_qty_i = max(0, int(inv_used_qty_i) - int(inv_fifo_priced_qty_i))
-                                    except Exception:
-                                        unknown_qty_i = 0
-                                    if unknown_qty_i > 0 and market_unit is not None:
-                                        inventory_cost_display += float(market_unit) * float(unknown_qty_i)
-                                elif market_unit is not None:
-                                    inventory_cost_display = float(market_unit) * float(inv_used_qty_i)
-                        except Exception:
-                            inventory_cost_display = None
-
-                        def _choose_buy_vs_build(*, buy_cost_total: Any, build_cost_total: Any) -> str | None:
-                            buy_n: float | None
-                            build_n: float | None
-                            try:
-                                buy_n = float(buy_cost_total) if buy_cost_total is not None else None
-                            except Exception:
-                                buy_n = None
-                            try:
-                                build_n = float(build_cost_total) if build_cost_total is not None else None
-                            except Exception:
-                                build_n = None
-
-                            if buy_n is None and build_n is None:
-                                return None
-                            if build_n is None:
-                                return "buy"
-                            if buy_n is None:
-                                return "build"
-                            return "buy" if buy_n <= build_n else "build"
-
-                        # Action display policy: reflect the effective cost path.
-                        action_display = rec
-                        try:
-                            if inv_used_qty_i is not None and int(inv_used_qty_i) > 0:
-                                if shortfall_qty_i is not None and int(shortfall_qty_i) > 0:
-                                    # Inventory + remainder
-                                    rem_buy = shortfall_buy_cost
-                                    if rem_buy is None and market_unit is not None:
-                                        rem_buy = float(market_unit) * float(shortfall_qty_i)
-                                    rem_build = shortfall_build_cost if shortfall_build_cost is not None else build_cost
-                                    rem_choice = _choose_buy_vs_build(buy_cost_total=rem_buy, build_cost_total=rem_build)
-                                    action_display = f"take/{rem_choice}" if rem_choice else "take"
-                                else:
-                                    action_display = "take"
-                            else:
-                                choice = _choose_buy_vs_build(buy_cost_total=market_buy_cost, build_cost_total=build_cost)
-                                if choice is not None:
-                                    action_display = choice
-                        except Exception:
-                            action_display = rec
-
-                        # Effective Cost display policy (UI):
-                        # - Prefer the planner-provided `effective_cost_isk` (matches backend totals).
-                        # - Only fall back to best-effort composition when planner cost is missing.
-                        effective_cost_display = effective_cost
-                        try:
-                            if effective_cost_display is None:
-                                inv_cost_for_eff = inventory_cost_display
-
-                                # Prefer the backend-provided shortfall quantity, but fall back to the
-                                # derived value (required - inventory_used) when it's missing.
-                                sf_qty_i = safe_int_opt(shortfall_qty)
-                                if sf_qty_i is None:
-                                    sf_qty_i = shortfall_qty_i
-
-                                def _min_known(a: Any, b: Any) -> float | None:
-                                    vals: list[float] = []
-                                    try:
-                                        if a is not None:
-                                            vals.append(float(a))
-                                    except Exception:
-                                        pass
-                                    try:
-                                        if b is not None:
-                                            vals.append(float(b))
-                                    except Exception:
-                                        pass
-                                    vals = [v for v in vals if v > 0]
-                                    return min(vals) if vals else None
-
-                                if inv_cost_for_eff is not None:
-                                    if sf_qty_i is not None and int(sf_qty_i) > 0:
-                                        rem = _min_known(shortfall_buy_cost, shortfall_build_cost)
-                                        if rem is None:
-                                            rem = _min_known(market_buy_cost, build_cost)
-                                        effective_cost_display = float(inv_cost_for_eff) + float(rem or 0.0)
-                                    else:
-                                        effective_cost_display = float(inv_cost_for_eff)
-                                else:
-                                    rem = _min_known(market_buy_cost, build_cost)
-                                    if rem is not None:
-                                        effective_cost_display = float(rem)
-                        except Exception:
-                            effective_cost_display = effective_cost
-
-                        effective_unit = None
-                        try:
-                            if effective_cost_display is not None and qty_required is not None and float(qty_required) > 0:
-                                effective_unit = float(effective_cost_display) / float(qty_required)
-                        except Exception:
-                            effective_unit = None
-
-                        roi_display = None
-                        if market_buy_cost is not None and build_cost is not None:
-                            try:
-                                bc = float(build_cost)
-                                roi_if_build = ((float(market_buy_cost) - float(build_cost)) / bc) * 100.0 if bc > 0 else None
-                            except Exception:
-                                roi_if_build = None
+                        if rec == "build":
+                            roi_display = roi_if_build
+                        elif rec == "buy" and roi_if_build is not None and roi_if_build < 0:
                             roi_display = roi_if_build
 
-                        # Buy Cost display policy (UI):
-                        # - For take/buy: show only the *shortfall* buy cost (what you'd still need to buy).
-                        # - For take: blank (nothing left to buy).
-                        # - Otherwise: show the buy-everything cost for this node.
-                        buy_cost_display = market_buy_cost
+                    children = node.get("children") or []
+                    has_children = isinstance(children, list) and len(children) > 0
+
+                    # Only show an indented required-material list when we actually recommend building.
+                    show_children = bool(has_children and rec == "build")
+
+                    indent_px = int(level) * 18
+                    safe_name = html.escape(name)
+                    caret_class = "tree-caret tree-caret-open" if show_children else "tree-caret"
+                    icon_url = _type_icon_url(node.get("type_id"), size=32)
+                    icon_html = (
+                        f"<img src='{html.escape(icon_url)}' style='width:32px;height:32px' /> "
+                        if isinstance(icon_url, str) and icon_url
+                        else ""
+                    )
+                    name_html = (
+                        f"<span class='tree-name' style='padding-left:{indent_px}px'>"
+                        f"<span class='{caret_class}'>&gt;</span>{icon_html}{safe_name}"
+                        f"</span>"
+                    )
+
+                    # Cost coloring rules (when both values exist):
+                    # - Buy cost red when > Build cost else green
+                    # - Build cost red when > Buy cost else green
+                    buy_class = None
+                    build_class = None
+                    if buy_cost is not None and build_cost is not None:
                         try:
-                            if str(action_display) == "take":
-                                buy_cost_display = None
-                            elif str(action_display) == "take/buy":
-                                rem_buy = shortfall_buy_cost
-                                if rem_buy is None and market_unit is not None and shortfall_qty_i is not None:
-                                    rem_buy = float(market_unit) * float(shortfall_qty_i)
-                                buy_cost_display = rem_buy
+                            buy_v = float(buy_cost)
+                            build_v = float(build_cost)
+                            buy_class = "cost-bad" if buy_v > build_v else "cost-good"
+                            build_class = "cost-bad" if build_v > buy_v else "cost-good"
                         except Exception:
-                            buy_cost_display = market_buy_cost
+                            buy_class = None
+                            build_class = None
 
-                        # Build Cost display policy (UI):
-                        # - When inventory partially covers the requirement, show the shortfall build cost
-                        #   (if available) so it compares apples-to-apples with shortfall buy cost.
-                        build_cost_display = build_cost
-                        try:
-                            if inv_used_qty_i is not None and int(inv_used_qty_i) > 0 and shortfall_qty_i is not None and int(shortfall_qty_i) > 0:
-                                if shortfall_build_cost is not None:
-                                    build_cost_display = float(shortfall_build_cost)
-                        except Exception:
-                            build_cost_display = build_cost
+                    buy_html = _fmt_isk(buy_cost) if buy_cost is not None else "-"
+                    build_html = _fmt_isk(build_cost) if build_cost is not None else "-"
+                    if buy_class is not None and buy_cost is not None:
+                        buy_html = f"<span class='{buy_class}'>{html.escape(buy_html)}</span>"
+                    if build_class is not None and build_cost is not None:
+                        build_html = f"<span class='{build_class}'>{html.escape(build_html)}</span>"
 
-                        try:
-                            type_id_i = int(n.get("type_id") or 0)
-                        except Exception:
-                            type_id_i = 0
+                    # Inventory/FIFO attribution (optional): show a compact breakdown under Buy Cost.
+                    inv_used_qty = node.get("inventory_used_qty")
+                    fifo_mkt = node.get("inventory_fifo_market_buy_cost_isk")
+                    fifo_built = node.get("inventory_fifo_industry_build_cost_isk")
+                    unknown_qty = node.get("inventory_unknown_cost_qty")
+                    buy_now_qty = node.get("buy_now_qty")
+                    market_unit = node.get("buy_unit_price_isk")
 
-                        icon_override = n.get("icon_url") if isinstance(n, dict) else None
-                        icon_url = str(icon_override) if icon_override else (type_icon_url(type_id_i, size=32) if type_id_i > 0 else None)
-
-                        tree_rows.append(
-                            {
-                                "path": path_str,
-                                "type_id": type_id_i,
-                                "Icon": icon_url,
-                                "action": (str(action_display) if action_display is not None else rec),
-                                "reason": (str(n.get("reason")) if n.get("reason") is not None else None),
-                                "qty": safe_int_opt(qty),
-                                "qty_required": safe_int_opt(qty_required),
-                                # Displayed unit cost: planner-chosen effective cost per required unit.
-                                "unit": safe_float_opt(effective_unit),
-                                # Keep the market unit price available for JS comparisons and column menu.
-                                "market_unit": safe_float_opt(market_unit),
-                                # Shortfall decision metadata (usually only populated when prefer-inventory is enabled).
-                                "shortfall_qty": safe_int_opt(shortfall_qty),
-                                "shortfall_action": (str(shortfall_action) if shortfall_action is not None else None),
-                                "shortfall_buy_cost": safe_float_opt(shortfall_buy_cost),
-                                "shortfall_build_cost": safe_float_opt(shortfall_build_cost),
-                                "savings_isk": safe_float_opt(savings_isk),
-                                "inventory_used_qty": safe_int_opt(inv_used_qty),
-                                "inventory_fifo_priced_qty": safe_int_opt(inv_fifo_priced_qty),
-                                # Inventory cost (best-effort): FIFO when possible, else fallback to market for the inventory-used qty.
-                                "inventory_cost": safe_float_opt(inventory_cost_display) if (inv_used_qty_i is not None and int(inv_used_qty_i) > 0) else None,
-                                # Effective cost (UI): inventory-first composition when inventory is used.
-                                "effective_cost": safe_float_opt(effective_cost_display),
-                                "buy_cost": safe_float_opt(buy_cost_display),
-                                "build_cost": safe_float_opt(build_cost_display),
-                                "roi": float(roi_display) if roi_display is not None else None,
-                            }
-                        )
-
-                        children = n.get("children") or []
-                        # Always include the submanufacturing tree, regardless of Action.
-                        # (Tree starts collapsed; user can expand nodes as needed.)
-                        if isinstance(children, list) and len(children) > 0:
-                            for ch in children:
-                                if isinstance(ch, dict):
-                                    _walk_tree(ch, parent_path=path)
-
-                    if not use_backend_tree:
-                        for root in plan_rows:
-                            if isinstance(root, dict):
-                                _walk_tree(root, parent_path=[])
-
-                    tree_df = pd.DataFrame(tree_rows)
-
-                    # Summarize totals on the top-level root row (e.g. "Manufacturing" / "Manufacturing Job").
-                    # Important: sum only *immediate children* to avoid double-counting,
-                    # because parent nodes already represent the total for their subtree.
                     try:
-                        if not tree_df.empty and "path" in tree_df.columns:
-                            path_s = tree_df["path"].astype(str)
-                            # NOTE: pandas .str.count treats the pattern as a regex; our separator is "|||",
-                            # so use a literal split to compute depth.
-                            depth_s = path_s.str.split(_PATH_SEP, regex=False).str.len()
-
-                            root_paths = sorted(set(path_s.loc[depth_s == 1].tolist()))
-                            for root_path in root_paths:
-                                root_mask = path_s == root_path
-                                if not bool(root_mask.any()):
-                                    continue
-
-                                child_mask = path_s.str.startswith(root_path + _PATH_SEP) & (depth_s == 2)
-
-                                def _parse_num(v: Any) -> float | None:
-                                    try:
-                                        if v is None:
-                                            return None
-                                        if isinstance(v, (int, float)):
-                                            return float(v)
-                                        s = str(v).strip()
-                                        if not s or s == "-":
-                                            return None
-                                        s = s.replace("\u202f", "").replace(" ", "")
-                                        s = s.replace("ISK", "").replace("isk", "")
-                                        s = s.replace("%", "")
-                                        # Handle EU formatting:
-                                        # - "1.234,56" => 1234.56
-                                        # - "40,80" => 40.80
-                                        if "," in s and "." in s:
-                                            s = s.replace(".", "")
-                                            s = s.replace(",", ".")
-                                        elif "," in s and "." not in s:
-                                            s = s.replace(",", ".")
-                                        else:
-                                            # No comma present.
-                                            # Many values come in as EU thousands formatting, e.g. "114.095.973" or "25.225.200".
-                                            # If there are multiple dots, they are almost certainly thousands separators.
-                                            if s.count(".") > 1:
-                                                s = s.replace(".", "")
-                                            elif s.count(".") == 1:
-                                                # Ambiguous single dot: treat as thousands separator when it looks like grouping (###.###).
-                                                left, right = s.split(".", 1)
-                                                if left.isdigit() and right.isdigit() and len(right) == 3:
-                                                    s = left + right
-
-                                        # Keep only digits, dot, minus.
-                                        cleaned = "".join(ch for ch in s if (ch.isdigit() or ch in {".", "-"}))
-                                        if cleaned in {"", "-", "."}:
-                                            return None
-                                        return float(cleaned)
-                                    except Exception:
-                                        return None
-
-                                def _sum_numeric(col: str) -> float | None:
-                                    if col not in tree_df.columns:
-                                        return None
-                                    raw = tree_df.loc[child_mask, col]
-                                    vals = [x for x in (_parse_num(v) for v in raw.tolist()) if x is not None]
-                                    if not vals:
-                                        return None
-                                    return float(sum(vals))
-
-                                eff_total = _sum_numeric("effective_cost")
-                                inv_total = _sum_numeric("inventory_cost")
-                                buy_total = _sum_numeric("buy_cost")
-
-                                if eff_total is not None and "effective_cost" in tree_df.columns:
-                                    tree_df.loc[root_mask, "effective_cost"] = float(eff_total)
-                                if inv_total is not None and "inventory_cost" in tree_df.columns:
-                                    tree_df.loc[root_mask, "inventory_cost"] = float(inv_total)
-                                if buy_total is not None and "buy_cost" in tree_df.columns:
-                                    tree_df.loc[root_mask, "buy_cost"] = float(buy_total)
-
-                                # Effective / Unit for the root.
-                                if eff_total is not None and "unit" in tree_df.columns:
-                                    qty_base_col = "qty_required" if "qty_required" in tree_df.columns else "qty"
-                                    try:
-                                        qty_raw = tree_df.loc[root_mask, qty_base_col].iloc[0]
-                                        qty_n = _parse_num(qty_raw)
-                                    except Exception:
-                                        qty_n = None
-                                    if qty_n is not None and qty_n > 0:
-                                        tree_df.loc[root_mask, "unit"] = float(eff_total) / float(qty_n)
+                        inv_used_i = int(inv_used_qty) if inv_used_qty is not None else 0
                     except Exception:
-                        pass
+                        inv_used_i = 0
 
-                    # Enable TreeData only when we actually emitted child rows.
-                    # (We consider it hierarchical when any path contains the separator.)
-                    use_tree = any((_PATH_SEP in str(r.get("path") or "")) for r in tree_rows)
+                    breakdown_parts: list[str] = []
+                    fifo_mkt_qty = node.get("inventory_fifo_market_buy_qty")
+                    fifo_built_qty = node.get("inventory_fifo_industry_build_qty")
 
-                    # Keep a predictable column order.
-                    preferred_cols = [
-                        "Icon",
-                        "action",
-                        "qty",
-                        "unit",
-                        "effective_cost",
-                        "inventory_cost",
-                        "buy_cost",
-                        "build_cost",
-                        "roi",
-                        "shortfall_qty",
-                        "shortfall_action",
-                        "shortfall_buy_cost",
-                        "shortfall_build_cost",
-                        "savings_isk",
-                        "path",
-                        "type_id",
-                    ]
-                    tree_df = tree_df[[c for c in preferred_cols if c in tree_df.columns] + [c for c in tree_df.columns if c not in preferred_cols]]
+                    if fifo_mkt is not None:
+                        try:
+                            q_m = int(fifo_mkt_qty) if fifo_mkt_qty is not None else None
+                        except Exception:
+                            q_m = None
+                        qty_label = f"{q_m}u " if q_m is not None and q_m > 0 else ""
+                        breakdown_parts.append(f"mkt {qty_label}{_fmt_isk(fifo_mkt)}")
+                    if fifo_built is not None:
+                        try:
+                            q_b = int(fifo_built_qty) if fifo_built_qty is not None else None
+                        except Exception:
+                            q_b = None
+                        qty_label = f"{q_b}u " if q_b is not None and q_b > 0 else ""
+                        breakdown_parts.append(f"built {qty_label}{_fmt_isk(fifo_built)}")
 
-                    # Hide columns that are never populated (common for T1 blueprint selections).
-                    # This keeps the Build Tree table compact and avoids empty "Build Cost" / "ROI" columns.
-                    def _drop_if_all_empty(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-                        drop_cols: list[str] = []
-                        for col in cols:
-                            if col not in df.columns:
-                                continue
-                            s = pd.to_numeric(df[col], errors="coerce")
-                            if s.isna().all() or ((s.isna()) | (s == 0)).all():
-                                drop_cols.append(col)
-                        return df.drop(columns=drop_cols) if drop_cols else df
+                    try:
+                        market_priced_qty = int(unknown_qty or 0) + int(buy_now_qty or 0)
+                    except Exception:
+                        market_priced_qty = 0
 
-                    tree_df = _drop_if_all_empty(tree_df, ["build_cost", "roi"])
+                    market_priced_cost = None
+                    if market_priced_qty > 0 and market_unit is not None:
+                        try:
+                            market_priced_cost = float(market_priced_qty) * float(market_unit)
+                        except Exception:
+                            market_priced_cost = None
+                    if market_priced_cost is not None and market_priced_cost > 0:
+                        breakdown_parts.append(f"mkt-priced {market_priced_qty}u {_fmt_isk(market_priced_cost)}")
+                    elif market_priced_qty > 0:
+                        breakdown_parts.append(f"mkt-priced {market_priced_qty}u")
 
-                    gb_tree = GridOptionsBuilder.from_dataframe(tree_df)
-                    gb_tree.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
-
-                    # Hide internal columns
-                    for c in [
-                        "path",
-                        "type_id",
-                        "reason",
-                        "inventory_used_qty",
-                        "inventory_fifo_priced_qty",
-                        "market_unit",
-                        "qty_required",
-                        # Keep these available via column menu, but hidden by default.
-                        "shortfall_qty",
-                        "shortfall_action",
-                        "shortfall_buy_cost",
-                        "shortfall_build_cost",
-                        "savings_isk",
-                    ]:
-                        if c in tree_df.columns:
-                            gb_tree.configure_column(c, hide=True)
-
-                    # Decryptor influence columns: keep visible (only populated for invention rows).
-
-                    if "Icon" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "Icon",
-                            header_name="",
-                            width=56,
-                            pinned="left",
-                            sortable=False,
-                            filter=False,
-                            suppressAutoSize=True,
-                            cellRenderer=img_renderer,
+                    if inv_used_i > 0 and breakdown_parts:
+                        breakdown_text = " | ".join([html.escape(str(x)) for x in breakdown_parts])
+                        buy_html = (
+                            f"{buy_html}<br/>"
+                            f"<span style='opacity:0.75;font-size:0.80em'>inv-{breakdown_text}</span>"
                         )
 
-                    right_style = {"textAlign": "right"}
-                    if "action" in tree_df.columns:
-                        gb_tree.configure_column("action", header_name="Action", minWidth=110)
-                    if "qty" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "qty",
-                            header_name="Qty",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_number(0),
-                            minWidth=100,
-                            cellStyle=right_style,
-                        )
+                    roi_html = "-"
+                    if roi_display is not None:
+                        roi_text = _fmt_pct(roi_display)
+                        roi_class = "cost-good" if float(roi_display) > 0 else "cost-bad"
+                        roi_html = f"<span class='{roi_class}'>{html.escape(roi_text)}</span>"
 
-                    # Invention/decryptor columns intentionally removed from the Build Tree table.
+                    row = st.columns(col_widths)
+                    row[0].write(rec)
+                    row[1].markdown(name_html, unsafe_allow_html=True)
+                    qty_text = str(int(qty)) if qty is not None else "-"
+                    row[2].markdown(f"<span class='qty-cell'>{html.escape(qty_text)}</span>", unsafe_allow_html=True)
+                    row[3].write(_fmt_isk(unit) if unit is not None else "-")
+                    row[4].markdown(buy_html, unsafe_allow_html=True)
+                    row[5].markdown(build_html, unsafe_allow_html=True)
+                    row[6].markdown(roi_html, unsafe_allow_html=True)
 
-                    if "unit" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "unit",
-                            header_name="Effective / Unit",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(2),
-                            minWidth=140,
-                            cellStyle=right_style,
-                        )
+                    if show_children:
+                        for ch in children:
+                            _render_tree_row(ch, level=level + 1)
 
-                    if "inventory_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "inventory_cost",
-                            header_name="Inventory Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
-                            minWidth=180,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        if (!params || !params.data) return style;
-                                        var inv = params.value;
-                                        if (inv === null || inv === undefined || inv === '') return style;
-
-                                        // Requirement:
-                                        // - Inventory Cost is green when inventory is actually used (full or partial).
-                                        // - When inventory is used, it is prioritized for Effective Cost.
-                                        style.color = '#2ecc71';
-                                        style.fontWeight = '600';
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-
-                    if "effective_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "effective_cost",
-                            header_name="Effective Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
-                            minWidth=200,
-                            cellStyle=right_style,
-                        )
-                    if "buy_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "buy_cost",
-                            header_name="Buy Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
-                            minWidth=160,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        if (!params || !params.data) return style;
-                                        var buy = params.value;
-                                        if (buy === null || buy === undefined || buy === '') return style;
-
-                                        var inv = params.data.inventory_cost;
-                                        var build = params.data.build_cost;
-                                        var shortfall = params.data.shortfall_qty;
-
-                                        var buyN = Number(buy);
-                                        if (isNaN(buyN)) return style;
-
-                                        var invN = (inv === null || inv === undefined || inv === '') ? null : Number(inv);
-                                        if (invN !== null && isNaN(invN)) invN = null;
-
-                                        var buildN = (build === null || build === undefined || build === '') ? null : Number(build);
-                                        if (buildN !== null && isNaN(buildN)) buildN = null;
-
-                                        var shortfallN = (shortfall === null || shortfall === undefined || shortfall === '') ? null : Number(shortfall);
-                                        if (shortfallN !== null && isNaN(shortfallN)) shortfallN = null;
-
-                                        if (shortfallN === null) {
-                                            var req = params.data.qty_required;
-                                            var invUsed = params.data.inventory_used_qty;
-                                            var reqN = (req === null || req === undefined || req === '') ? null : Number(req);
-                                            var invUsedN = (invUsed === null || invUsed === undefined || invUsed === '') ? null : Number(invUsed);
-                                            if (reqN !== null && invUsedN !== null && !isNaN(reqN) && !isNaN(invUsedN)) {
-                                                shortfallN = Math.max(0, reqN - invUsedN);
-                                            }
-                                        }
-                                        if (shortfallN === null || isNaN(shortfallN)) shortfallN = 0;
-
-                                        // Coloring rules:
-                                        // - No inventory used: only the cheapest of (buy, build) is green.
-                                        // - Full inventory used: buy/build are red.
-                                        // - Partial inventory used: inventory is green and the cheapest of (buy, build) is green.
-                                        if (invN !== null && shortfallN <= 0) {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                            return style;
-                                        }
-
-                                        // Decide winner between buy/build.
-                                        var winner = 'buy';
-                                        if (buildN === null) winner = 'buy';
-                                        else if (buyN === null) winner = 'build';
-                                        else winner = (buyN <= buildN) ? 'buy' : 'build';
-
-                                        if (winner === 'buy') {
-                                            style.color = '#2ecc71';
-                                            style.fontWeight = '600';
-                                        } else {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                        }
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-                    if "build_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "build_cost",
-                            header_name="Build Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
-                            minWidth=160,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        if (!params || !params.data) return style;
-                                        var build = params.value;
-                                        if (build === null || build === undefined || build === '') return style;
-
-                                        var inv = params.data.inventory_cost;
-                                        var buy = params.data.buy_cost;
-                                        var shortfall = params.data.shortfall_qty;
-
-                                        var buildN = Number(build);
-                                        if (isNaN(buildN)) return style;
-
-                                        var invN = (inv === null || inv === undefined || inv === '') ? null : Number(inv);
-                                        if (invN !== null && isNaN(invN)) invN = null;
-
-                                        var buyN = (buy === null || buy === undefined || buy === '') ? null : Number(buy);
-                                        if (buyN !== null && isNaN(buyN)) buyN = null;
-
-                                        var shortfallN = (shortfall === null || shortfall === undefined || shortfall === '') ? null : Number(shortfall);
-                                        if (shortfallN !== null && isNaN(shortfallN)) shortfallN = null;
-
-                                        if (shortfallN === null) {
-                                            var req = params.data.qty_required;
-                                            var invUsed = params.data.inventory_used_qty;
-                                            var reqN = (req === null || req === undefined || req === '') ? null : Number(req);
-                                            var invUsedN = (invUsed === null || invUsed === undefined || invUsed === '') ? null : Number(invUsed);
-                                            if (reqN !== null && invUsedN !== null && !isNaN(reqN) && !isNaN(invUsedN)) {
-                                                shortfallN = Math.max(0, reqN - invUsedN);
-                                            }
-                                        }
-                                        if (shortfallN === null || isNaN(shortfallN)) shortfallN = 0;
-
-                                        if (invN !== null && shortfallN <= 0) {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                            return style;
-                                        }
-
-                                        var winner = 'buy';
-                                        if (buyN === null) winner = 'build';
-                                        else if (buildN === null) winner = 'buy';
-                                        else winner = (buyN <= buildN) ? 'buy' : 'build';
-
-                                        if (winner === 'build') {
-                                            style.color = '#2ecc71';
-                                            style.fontWeight = '600';
-                                        } else {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                        }
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-                    if "roi" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "roi",
-                            header_name="ROI",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_pct(2),
-                            minWidth=110,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        var v = params.value;
-                                        if (v === null || v === undefined || v === '') return style;
-                                        var n = Number(v);
-                                        if (isNaN(n) || n === 0) return style;
-                                        if (n > 0) {
-                                            style.color = '#2ecc71';
-                                            style.fontWeight = '600';
-                                        } else if (n < 0) {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                        }
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-
-                    if "shortfall_buy_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_buy_cost",
-                            header_name="Shortfall Buy Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
-                            minWidth=190,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-                    if "shortfall_build_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_build_cost",
-                            header_name="Shortfall Build Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
-                            minWidth=200,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-                    if "shortfall_qty" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_qty",
-                            header_name="Shortfall Qty",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_number(0),
-                            minWidth=150,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-                    if "shortfall_action" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_action",
-                            header_name="Shortfall Action",
-                            minWidth=170,
-                            hide=True,
-                        )
-                    if "savings_isk" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "savings_isk",
-                            header_name="Savings vs Buy",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
-                            minWidth=170,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-
-                    grid_opts = gb_tree.build()
-                    grid_opts["autoSizeStrategy"] = {"type": "fitCellContents"}
-
-                    if use_tree:
-                        grid_opts["treeData"] = True
-                        grid_opts["getDataPath"] = JsCode(
-                            """
-                            function(data) {
-                                try {
-                                    if (!data || data.path === null || data.path === undefined) return [];
-                                    var s = String(data.path);
-                                    if (!s) return [];
-                                    return s.split('|||').filter(function(x) { return x !== null && x !== undefined && String(x).length > 0; });
-                                } catch (e) {
-                                    return [];
-                                }
-                            }
-                            """
-                        )
-                        # Start collapsed so the user can expand nodes manually.
-                        # Expand the top-level "Manufacturing Job" row by default,
-                        # while keeping deeper levels collapsed.
-                        grid_opts["groupDefaultExpanded"] = 1
-
-                        # Configure the tree column so it shows the actual submanufacturing step/item
-                        # instead of a generic "Group" column.
-                        grid_opts["autoGroupColumnDef"] = {
-                            "headerName": "Build Tree",
-                            "pinned": "left",
-                            "minWidth": 420,
-                            "cellRendererParams": {
-                                "suppressCount": True,
-                                "innerRenderer": JsCode(
-                                    """
-                                    function(params) {
-                                        try {
-                                            var raw = (params && params.value !== null && params.value !== undefined) ? String(params.value) : '';
-                                            var name = raw.split('#')[0];
-                                            return name;
-                                        } catch (e) {
-                                            return (params && params.value !== null && params.value !== undefined) ? String(params.value) : '';
-                                        }
-                                    }
-                                    """
-                                ),
-                            },
-                        }
-
-                        grid_opts["animateRows"] = True
-                        grid_opts["suppressRowClickSelection"] = False
-                        grid_opts["rowSelection"] = "single"
-                        grid_opts["onRowClicked"] = JsCode(
-                            """
-                            function(event) {
-                                try {
-                                    if (!event || !event.node) return;
-                                    if (event.node.childrenAfterGroup && event.node.childrenAfterGroup.length > 0) {
-                                        event.node.setExpanded(!event.node.expanded);
-                                    }
-                                } catch (e) {}
-                            }
-                            """
-                        )
-
-                        height = min(650, 60 + (len(tree_df) * 32))
-                        AgGrid(
-                            tree_df,
-                            gridOptions=grid_opts,
-                            allow_unsafe_jscode=True,
-                            enable_enterprise_modules=True,
-                            theme="streamlit",
-                            height=height,
-                        )
-
-                        st.caption(
-                            BUILD_TREE_CAPTION
-                        )
-                    else:
-                        # Flat table: hide tree-only internals and don't enable TreeData.
-                        grid_opts.pop("treeData", None)
-                        grid_opts.pop("getDataPath", None)
-                        height = min(420, 60 + (len(tree_df) * 32))
-                        AgGrid(
-                            tree_df.drop(columns=[c for c in ["path", "type_id"] if c in tree_df.columns], errors="ignore"),
-                            gridOptions=grid_opts,
-                            allow_unsafe_jscode=True,
-                            theme="streamlit",
-                            height=height,
-                        )
-
-                        st.caption(
-                            BUILD_TREE_CAPTION
-                        )
+                for idx, root in enumerate(plan_rows):
+                    _render_tree_row(root, level=0)
+                    if idx < (len(plan_rows) - 1):
+                        st.markdown("<hr class='tree-divider' />", unsafe_allow_html=True)
             else:
                 # Fallback when planner isn't available: show the simple materials table.
                 st.dataframe(
                     mat_df,
                     width="stretch",
                     hide_index=True,
-                    column_config=MATERIALS_TABLE_COLUMN_CONFIG,
+                    column_config={
+                        "Icon": st.column_config.ImageColumn("Icon", width="small"),
+                        "Unit Price": st.column_config.NumberColumn("Unit Price", format="%.2f ISK"),
+                        "Buy Cost": st.column_config.NumberColumn("Buy Cost", format="%.0f ISK"),
+                        "FIFO (Market)": st.column_config.NumberColumn("FIFO (Market)", format="%.0f ISK"),
+                        "FIFO (Built)": st.column_config.NumberColumn("FIFO (Built)", format="%.0f ISK"),
+                        "Build Cost": st.column_config.NumberColumn("Build Cost", format="%.0f ISK"),
+                        "Build ROI": st.column_config.NumberColumn("Build ROI", format="%.2f%%"),
+                    },
                 )
         else:
             st.info("No materials required")
-
-        if candidate_kind != "invention":
-            st.markdown("#### Required Skills")
-            st.write(f"Met: **{'Yes' if skill_requirements_met else 'No'}**")
-            with st.expander("Show skill details", expanded=False):
-                if isinstance(required_skills, list) and required_skills:
-                    rows = []
-                    for s in required_skills:
-                        if not isinstance(s, dict):
-                            continue
-                        rows.append(
-                            {
-                                "Skill": s.get("type_name"),
-                                "Required": s.get("required_level"),
-                                "Character": s.get("character_level"),
-                                "Met": bool(s.get("met", False)),
-                            }
-                        )
-                    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-                else:
-                    st.info("No required skills data available.")
 
     with st.expander("View Raw Blueprint Data (Debug)"):
         st.json(full_bp_data)
