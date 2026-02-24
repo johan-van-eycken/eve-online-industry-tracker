@@ -11,8 +11,6 @@ from classes.database_models import Blueprints
 
 
 ASSET_SOURCE_INDUSTRY_BUILD = "industry_build"
-ASSET_SOURCE_INDUSTRY_COPY = "industry_copy"
-ASSET_SOURCE_INDUSTRY_INVENTION = "industry_invention"
 ASSET_SOURCE_MARKET_BUY = "market_buy"
 ASSET_SOURCE_UNKNOWN = "unknown"
 
@@ -123,122 +121,10 @@ def build_fifo_remaining_lots_by_type(
         )
 
     # Add industry-job outputs as FIFO "buy" lots (best-effort).
-    # This allows FIFO valuation for items you produced (manufacturing, copying, invention),
-    # not only bought.
-    if industry_jobs is not None and sde_session is not None:
+    # This allows FIFO valuation for items you manufactured, not only bought.
+    if industry_jobs is not None and sde_session is not None and market_price_map:
         completed_statuses = {"delivered", "ready", "completed"}
         qty_per_run_cache: dict[tuple[int, int], Optional[int]] = {}
-
-        # Caches for invention lookups/costing.
-        invention_bp_cache: dict[int, dict[str, Any] | None] = {}
-        invention_cost_per_attempt_cache: dict[int, float | None] = {}
-        invention_output_bp_type_cache: dict[int, int | None] = {}
-
-        def _job_activity_id(job_obj: Any) -> Optional[int]:
-            raw = getattr(job_obj, "raw", None)
-            if not isinstance(raw, dict):
-                return None
-            v = raw.get("activity_id")
-            if v is None:
-                v = raw.get("activityID")
-            try:
-                return int(v) if v is not None else None
-            except Exception:
-                return None
-
-        def _get_invention_activity_for_blueprint(input_blueprint_type_id: int) -> dict[str, Any] | None:
-            tid = int(input_blueprint_type_id)
-            if tid <= 0:
-                return None
-            cached = invention_bp_cache.get(tid)
-            if cached is not None:
-                inv = cached.get("invention") if isinstance(cached, dict) else None
-                return inv if isinstance(inv, dict) else None
-
-            bp = (
-                sde_session.query(Blueprints)
-                .filter_by(blueprintTypeID=int(tid))
-                .first()
-            )
-            if bp is None:
-                invention_bp_cache[tid] = None
-                return None
-            activities = getattr(bp, "activities", None)
-            if not isinstance(activities, dict):
-                invention_bp_cache[tid] = None
-                return None
-            inv = activities.get("invention")
-            if not isinstance(inv, dict):
-                invention_bp_cache[tid] = None
-                return None
-            invention_bp_cache[tid] = {"invention": inv}
-            return inv
-
-        def _invention_output_blueprint_type_id(input_blueprint_type_id: int) -> int | None:
-            tid = int(input_blueprint_type_id)
-            cached = invention_output_bp_type_cache.get(tid)
-            if tid in invention_output_bp_type_cache:
-                return cached
-            inv = _get_invention_activity_for_blueprint(int(tid))
-            if not isinstance(inv, dict):
-                invention_output_bp_type_cache[tid] = None
-                return None
-            products = inv.get("products")
-            if not isinstance(products, list) or not products:
-                invention_output_bp_type_cache[tid] = None
-                return None
-            out_tid = None
-            for p in products:
-                if not isinstance(p, dict):
-                    continue
-                v = p.get("typeID")
-                if v is None:
-                    v = p.get("type_id")
-                try:
-                    out_tid = int(v) if v is not None else None
-                except Exception:
-                    out_tid = None
-                if out_tid is not None and out_tid > 0:
-                    break
-            invention_output_bp_type_cache[tid] = out_tid
-            return out_tid
-
-        def _invention_material_cost_per_attempt(input_blueprint_type_id: int) -> float | None:
-            tid = int(input_blueprint_type_id)
-            if tid in invention_cost_per_attempt_cache:
-                return invention_cost_per_attempt_cache.get(tid)
-            inv = _get_invention_activity_for_blueprint(int(tid))
-            if not isinstance(inv, dict):
-                invention_cost_per_attempt_cache[tid] = None
-                return None
-            mats = inv.get("materials")
-            if not isinstance(mats, list) or not mats:
-                invention_cost_per_attempt_cache[tid] = 0.0
-                return 0.0
-            total = 0.0
-            any_priced = False
-            for m in mats:
-                if not isinstance(m, dict):
-                    continue
-                mtid = m.get("typeID")
-                if mtid is None:
-                    mtid = m.get("type_id")
-                qty = m.get("quantity")
-                try:
-                    mtid_i = int(mtid) if mtid is not None else 0
-                    qty_i = int(qty or 0)
-                except Exception:
-                    continue
-                if mtid_i <= 0 or qty_i <= 0:
-                    continue
-                unit = market_price_map.get(int(mtid_i)) if isinstance(market_price_map, dict) else None
-                if unit is None or float(unit) <= 0:
-                    continue
-                any_priced = True
-                total += float(qty_i) * float(unit)
-            out = float(total) if any_priced else None
-            invention_cost_per_attempt_cache[tid] = out
-            return out
 
         def _output_qty_per_run(blueprint_type_id: int, product_type_id: int) -> Optional[int]:
             key = (int(blueprint_type_id), int(product_type_id))
@@ -283,189 +169,49 @@ def build_fifo_remaining_lots_by_type(
             if completed_date is None:
                 continue
 
-            raw = getattr(job, "raw", None)
-            act_id = _job_activity_id(job)
-
-            # ESI activity IDs (common): 1=manufacturing, 5=copying, 8=invention.
-            ACT_MFG = 1
-            ACT_COPY = 5
-            ACT_INV = 8
-
-            blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
             product_type_id = _safe_int(getattr(job, "product_type_id", None))
+            blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
+            if not product_type_id or not blueprint_type_id:
+                continue
 
-            job_cost_total = _safe_float(getattr(job, "cost", None))
-            job_id = _safe_int(getattr(job, "job_id", None))
+            runs = _safe_int(getattr(job, "successful_runs", None)) or _safe_int(getattr(job, "runs", None)) or 1
+            runs = max(1, int(runs))
+
+            qpr = _output_qty_per_run(int(blueprint_type_id), int(product_type_id))
+            if qpr is None:
+                continue
+            lot_qty = int(qpr) * int(runs)
+            if lot_qty <= 0:
+                continue
+
+            job_cost = _safe_float(getattr(job, "cost", None))
+            unit_cost = estimate_industry_job_unit_cost(
+                sde_session=sde_session,
+                blueprint_type_id=int(blueprint_type_id),
+                product_type_id=int(product_type_id),
+                runs=int(runs),
+                job_cost=job_cost,
+                market_price_map=market_price_map,
+            )
+            if unit_cost is None or unit_cost <= 0:
+                continue
+
             date_s = completed_date
             dt = _parse_date(date_s)
-
-            # Best-effort: infer manufacturing when activity_id is missing.
-            if act_id is None:
-                try:
-                    if product_type_id and blueprint_type_id and int(product_type_id) != int(blueprint_type_id):
-                        act_id = ACT_MFG
-                except Exception:
-                    act_id = None
-
-            # Manufacturing job outputs: value as built inventory.
-            if act_id == ACT_MFG:
-                if not product_type_id or not blueprint_type_id:
-                    continue
-                runs = _safe_int(getattr(job, "successful_runs", None)) or _safe_int(getattr(job, "runs", None)) or 1
-                runs = max(1, int(runs))
-                qpr = _output_qty_per_run(int(blueprint_type_id), int(product_type_id))
-                if qpr is None:
-                    continue
-                lot_qty = int(qpr) * int(runs)
-                if lot_qty <= 0:
-                    continue
-                unit_cost = estimate_industry_job_unit_cost(
-                    sde_session=sde_session,
-                    blueprint_type_id=int(blueprint_type_id),
-                    product_type_id=int(product_type_id),
-                    runs=int(runs),
-                    job_cost=job_cost_total,
-                    market_price_map=(market_price_map or {}),
-                )
-                if unit_cost is None or unit_cost <= 0:
-                    continue
-
-                tx_by_type[int(product_type_id)].append(
-                    {
-                        "kind": "buy",
-                        "quantity": int(lot_qty),
-                        "unit_price": float(unit_cost),
-                        "date": (str(date_s) if date_s is not None else None),
-                        "dt": dt,
-                        "sort_id": int(job_id or 0),
-                        "reference_id": job_id,
-                        "reference_type": REFERENCE_TYPE_INDUSTRY_JOB,
-                        "source": ASSET_SOURCE_INDUSTRY_BUILD,
-                    }
-                )
-                continue
-
-            # Copying job outputs: blueprint copies (BPCs) are assets with the blueprint type_id.
-            if act_id == ACT_COPY:
-                if not blueprint_type_id:
-                    continue
-                copies = None
-                try:
-                    copies = _safe_int(getattr(job, "runs", None))
-                except Exception:
-                    copies = None
-                if copies is None and isinstance(raw, dict):
-                    try:
-                        copies = int(raw.get("runs") or 0)
-                    except Exception:
-                        copies = None
-                copies_i = max(0, int(copies or 0))
-                if copies_i <= 0:
-                    continue
-
-                unit_cost = None
-                if job_cost_total is not None and float(job_cost_total) > 0:
-                    unit_cost = float(job_cost_total) / float(copies_i)
-                else:
-                    # Fallback: if we can't price via job cost, use market as a proxy.
-                    try:
-                        unit_cost = float((market_price_map or {}).get(int(blueprint_type_id)) or 0.0)
-                    except Exception:
-                        unit_cost = None
-
-                if unit_cost is None or float(unit_cost) <= 0:
-                    continue
-
-                tx_by_type[int(blueprint_type_id)].append(
-                    {
-                        "kind": "buy",
-                        "quantity": int(copies_i),
-                        "unit_price": float(unit_cost),
-                        "date": (str(date_s) if date_s is not None else None),
-                        "dt": dt,
-                        "sort_id": int(job_id or 0),
-                        "reference_id": job_id,
-                        "reference_type": REFERENCE_TYPE_INDUSTRY_JOB,
-                        "source": ASSET_SOURCE_INDUSTRY_COPY,
-                    }
-                )
-                continue
-
-            # Invention job outputs: invented blueprint copies (BPCs).
-            if act_id == ACT_INV:
-                # Determine output blueprint type ID (prefer ESI product_type_id, else SDE invention products).
-                out_bp_type_id = None
-                if product_type_id is not None and int(product_type_id) > 0:
-                    out_bp_type_id = int(product_type_id)
-                elif blueprint_type_id is not None and int(blueprint_type_id) > 0:
-                    out_bp_type_id = _invention_output_blueprint_type_id(int(blueprint_type_id))
-                if out_bp_type_id is None or int(out_bp_type_id) <= 0:
-                    continue
-
-                # How many invented BPCs were produced? Prefer successful_runs; if missing, assume 1.
-                successes = _safe_int(getattr(job, "successful_runs", None))
-                if successes is None and isinstance(raw, dict):
-                    try:
-                        successes = int(raw.get("successful_runs") or 0)
-                    except Exception:
-                        successes = None
-                if successes is None:
-                    successes = 1
-                successes_i = max(0, int(successes or 0))
-                if successes_i <= 0:
-                    continue
-
-                attempts = _safe_int(getattr(job, "runs", None))
-                if attempts is None and isinstance(raw, dict):
-                    try:
-                        attempts = int(raw.get("runs") or 0)
-                    except Exception:
-                        attempts = None
-                attempts_i = max(1, int(attempts or successes_i or 1))
-
-                # Best-effort attempt-cost estimate: invention materials at market + job fee (if present).
-                attempt_mat_cost = None
-                if blueprint_type_id is not None and int(blueprint_type_id) > 0 and market_price_map:
-                    attempt_mat_cost = _invention_material_cost_per_attempt(int(blueprint_type_id))
-
-                total_cost = 0.0
-                any_cost = False
-                if attempt_mat_cost is not None and float(attempt_mat_cost) > 0:
-                    total_cost += float(attempt_mat_cost) * float(attempts_i)
-                    any_cost = True
-                if job_cost_total is not None and float(job_cost_total) > 0:
-                    total_cost += float(job_cost_total)
-                    any_cost = True
-
-                if not any_cost or float(total_cost) <= 0:
-                    # Fallback: use market price of the output blueprint as proxy.
-                    try:
-                        proxy = float((market_price_map or {}).get(int(out_bp_type_id)) or 0.0)
-                    except Exception:
-                        proxy = 0.0
-                    if proxy <= 0:
-                        continue
-                    unit_cost = float(proxy)
-                else:
-                    unit_cost = float(total_cost) / float(successes_i)
-
-                if unit_cost <= 0:
-                    continue
-
-                tx_by_type[int(out_bp_type_id)].append(
-                    {
-                        "kind": "buy",
-                        "quantity": int(successes_i),
-                        "unit_price": float(unit_cost),
-                        "date": (str(date_s) if date_s is not None else None),
-                        "dt": dt,
-                        "sort_id": int(job_id or 0),
-                        "reference_id": job_id,
-                        "reference_type": REFERENCE_TYPE_INDUSTRY_JOB,
-                        "source": ASSET_SOURCE_INDUSTRY_INVENTION,
-                    }
-                )
-                continue
+            job_id = _safe_int(getattr(job, "job_id", None))
+            tx_by_type[int(product_type_id)].append(
+                {
+                    "kind": "buy",
+                    "quantity": int(lot_qty),
+                    "unit_price": float(unit_cost),
+                    "date": (str(date_s) if date_s is not None else None),
+                    "dt": dt,
+                    "sort_id": int(job_id or 0),
+                    "reference_id": job_id,
+                    "reference_type": REFERENCE_TYPE_INDUSTRY_JOB,
+                    "source": ASSET_SOURCE_INDUSTRY_BUILD,
+                }
+            )
 
     lots_by_type: dict[int, list[FifoLot]] = {}
     for tid, txs in tx_by_type.items():

@@ -22,7 +22,7 @@ def _int(name: str, default: int) -> int:
 
 
 def public_structures_cache_ttl_seconds() -> int:
-    return _int("FLASK_PUBLIC_STRUCTURES_TTL", default=24 * 3600)
+    return _int("FLASK_PUBLIC_STRUCTURES_TTL", default=3600)
 
 
 def public_structures_startup_scan_enabled() -> bool:

@@ -7,11 +7,10 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import bindparam, or_, text
+from sqlalchemy import bindparam, text
 from sqlalchemy.sql import func
 
 from classes.asset_provenance import build_fifo_remaining_lots_by_type
-from classes.database_models import Blueprints
 from eve_online_industry_tracker.db_models import (
     CharacterAssetsModel,
     CharacterIndustryJobsModel,
@@ -45,21 +44,6 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
     plan_submanufacturing_tree,
     public_structures_cache_ttl_seconds,
     trigger_refresh_public_structures_for_system,
-)
-
-from eve_online_industry_tracker.infrastructure.invention_options_service import (
-    compute_invention_options_for_blueprint,
-    market_price_map_from_esi_prices,
-)
-
-from eve_online_industry_tracker.infrastructure.sde.blueprints import get_blueprint_manufacturing_data
-
-from eve_online_industry_tracker.infrastructure.industry_builder_viewmodel import (
-    compute_ui_build_tree_rows_by_product,
-    compute_ui_copy_jobs,
-    compute_ui_copy_invention_jobs_rows_for_best_option,
-    compute_ui_invention_overview_row_from_summary,
-    compute_ui_missing_blueprints,
 )
 
 
@@ -108,20 +92,9 @@ class IndustryService:
     # -----------------
 
     @staticmethod
-    def _industry_builder_job_key(
-        *,
-        character_id: int,
-        profile_id: int | None,
-        maximize_runs: bool,
-        pricing_key: str,
-        prefer_inventory_consumption: bool,
-        assume_bpo_copy_overhead: bool,
-    ) -> str:
+    def _industry_builder_job_key(*, character_id: int, profile_id: int | None, maximize_runs: bool, pricing_key: str) -> str:
         pid = int(profile_id or 0)
-        return (
-            f"{int(character_id)}:{pid}:{1 if maximize_runs else 0}:"
-            f"{1 if prefer_inventory_consumption else 0}:{1 if assume_bpo_copy_overhead else 0}:{str(pricing_key)}"
-        )
+        return f"{int(character_id)}:{pid}:{1 if maximize_runs else 0}:{str(pricing_key)}"
 
     def _cleanup_old_industry_builder_jobs(self) -> None:
         now = datetime.utcnow()
@@ -152,22 +125,16 @@ class IndustryService:
         profile_id: int | None,
         maximize_runs: bool,
         pricing_preferences: dict | None,
-        prefer_inventory_consumption: bool,
-        assume_bpo_copy_overhead: bool,
     ) -> None:
-        # Keep these as Any to avoid Optional-induced type noise; lifetime is managed
-        # in the finally block below.
-        session: Any = None
-        sde_session: Any = None
-
         try:
             character = self._state.char_manager.get_character_by_id(int(character_id))
             if not character:
                 raise ServiceError(f"Character ID {character_id} not found", status_code=400)
 
-            session = self._sessions.app_session()
+            session: Any = self._sessions.app_session()
             language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
 
+            sde_session = None
             try:
                 sde_session = self._sessions.sde_session()
             except Exception:
@@ -182,7 +149,6 @@ class IndustryService:
                 selected_profile = industry_profile_get_default_for_character_id(session, int(character_id))
 
             manufacturing_ci = 0.0
-            invention_ci = 0.0
             copying_ci = 0.0
             research_me_ci = 0.0
             research_te_ci = 0.0
@@ -203,12 +169,8 @@ class IndustryService:
                 try:
                     facilities = self._state.esi_service.get_industry_facilities() or []
                     fac_row = next((f for f in facilities if f.get("facility_id") == int(facility_id_for_cost_index)), None)
-                    if isinstance(fac_row, dict):
-                        fac_system_id = fac_row.get("solar_system_id")
-                    else:
-                        fac_system_id = None
-                    if fac_system_id is not None:
-                        system_id_for_cost_index = int(fac_system_id)
+                    if isinstance(fac_row, dict) and fac_row.get("solar_system_id") is not None:
+                        system_id_for_cost_index = int(fac_row.get("solar_system_id"))
                         system_id_for_cost_index_source = "industry_facilities"
                 except Exception:
                     system_id_for_cost_index = None
@@ -231,8 +193,6 @@ class IndustryService:
                         for entry in (row.get("cost_indices") or []):
                             if entry.get("activity") == "manufacturing":
                                 manufacturing_ci = float(entry.get("cost_index") or 0.0)
-                            elif entry.get("activity") == "invention":
-                                invention_ci = float(entry.get("cost_index") or 0.0)
                             elif entry.get("activity") == "copying":
                                 copying_ci = float(entry.get("cost_index") or 0.0)
                             elif entry.get("activity") == "researching_material_efficiency":
@@ -241,7 +201,6 @@ class IndustryService:
                                 research_te_ci = float(entry.get("cost_index") or 0.0)
                 except Exception:
                     manufacturing_ci = 0.0
-                    invention_ci = 0.0
                     copying_ci = 0.0
                     research_me_ci = 0.0
                     research_te_ci = 0.0
@@ -380,30 +339,13 @@ class IndustryService:
                     ]
                     rig_ids = [int(x) for x in rig_ids if x is not None and int(x) != 0]
                     if rig_ids:
-                        if sde_session is None:
-                            sde_session = self._sessions.sde_session()
+                        sde_session = self._sessions.sde_session()
                         rig_payload = get_rig_effects_for_type_ids(sde_session, rig_ids)
             except Exception:
                 rig_payload = []
 
             if sde_session is None:
                 sde_session = self._sessions.sde_session()
-
-            # Fetch ESI market prices once per update run (best-effort) and reuse.
-            market_prices_rows: list[dict] | None = None
-            try:
-                if self._state.esi_service is not None:
-                    market_prices_rows = self._state.esi_service.get_market_prices() or []
-            except Exception:
-                market_prices_rows = None
-
-            market_price_map_shared: dict[int, dict[str, float | None]] = {}
-            try:
-                market_price_map_shared = market_price_map_from_esi_prices(
-                    market_prices_rows if isinstance(market_prices_rows, list) else None
-                )
-            except Exception:
-                market_price_map_shared = {}
 
             all_blueprints = get_blueprint_assets(
                 session,
@@ -443,405 +385,8 @@ class IndustryService:
                 db_sde_session=sde_session,
                 language=language,
                 progress_callback=_progress,
-                prefer_inventory_consumption=bool(prefer_inventory_consumption),
                 pricing_preferences=(pricing_preferences if isinstance(pricing_preferences, dict) else None),
-                assume_bpo_copy_overhead=bool(assume_bpo_copy_overhead),
-                esi_market_prices=market_prices_rows,
-                market_price_map=market_price_map_shared,
             )
-
-            # Precompute best-ROI invention summaries as part of the update job.
-            # This avoids the UI calling /industry_invention_options for every blueprint on page load
-            # (which can exhaust the SQLAlchemy connection pool).
-            try:
-                bp_type_ids: list[int] = []
-                for bp in data or []:
-                    if not isinstance(bp, dict):
-                        continue
-                    tid = bp.get("type_id")
-                    if tid is None:
-                        continue
-                    try:
-                        tid_i = int(tid)
-                    except Exception:
-                        continue
-                    if tid_i > 0:
-                        bp_type_ids.append(tid_i)
-                bp_type_ids = sorted(set(bp_type_ids))
-            except Exception:
-                bp_type_ids = []
-
-            supports_invention_by_bp_type_id: dict[int, bool] = {}
-            if bp_type_ids and sde_session is not None:
-                try:
-                    rows = (
-                        sde_session.query(Blueprints.blueprintTypeID, Blueprints.activities)
-                        .filter(Blueprints.blueprintTypeID.in_(bp_type_ids))
-                        .all()
-                    )
-                    for bp_tid, activities in rows or []:
-                        if bp_tid is None:
-                            continue
-                        inv = activities.get("invention") if isinstance(activities, dict) else None
-                        products = inv.get("products") if isinstance(inv, dict) else None
-                        supports_invention_by_bp_type_id[int(bp_tid)] = bool(isinstance(products, list) and len(products) > 0)
-                except Exception:
-                    supports_invention_by_bp_type_id = {}
-
-            # Prefetch blueprint data for invention computations (SDE) and prices (ESI) once.
-            blueprint_data_map_for_invention: dict[int, dict] = {}
-            market_price_map_for_invention: dict[int, dict[str, float | None]] = {}
-            base_map_for_invention: dict[int, dict] = {}
-
-            try:
-                from eve_online_industry_tracker.infrastructure.sde.blueprints import get_blueprint_manufacturing_data
-
-                inventable_bp_type_ids = [tid for tid in bp_type_ids if bool(supports_invention_by_bp_type_id.get(int(tid), False))]
-                if inventable_bp_type_ids and sde_session is not None:
-                    base_map = get_blueprint_manufacturing_data(sde_session, language, inventable_bp_type_ids) or {}
-                    base_map_for_invention = base_map or {}
-
-                    out_bp_type_ids: set[int] = set()
-                    for _tid, _bp in (base_map or {}).items():
-                        if not isinstance(_bp, dict):
-                            continue
-                        inv = _bp.get("invention") if isinstance(_bp.get("invention"), dict) else None
-                        prods = inv.get("products") if isinstance(inv, dict) else None
-                        if not isinstance(prods, list):
-                            continue
-                        for p in prods:
-                            if not isinstance(p, dict):
-                                continue
-                            out_id = p.get("type_id")
-                            if out_id is None:
-                                continue
-                            try:
-                                out_bp_type_ids.add(int(out_id))
-                            except Exception:
-                                continue
-
-                    out_map = {}
-                    if out_bp_type_ids:
-                        out_map = get_blueprint_manufacturing_data(sde_session, language, sorted(out_bp_type_ids)) or {}
-
-                    blueprint_data_map_for_invention = {**(base_map or {}), **(out_map or {})}
-            except Exception:
-                blueprint_data_map_for_invention = {}
-                base_map_for_invention = {}
-
-            try:
-                market_price_map_for_invention = market_price_map_shared
-            except Exception:
-                market_price_map_for_invention = {}
-
-            # Inventory-aware valuation for invention summaries (datacores + decryptors).
-            # Compute once per update run to avoid per-blueprint DB fan-out.
-            inv_inventory_on_hand_by_type: dict[int, int] = {}
-            inv_fifo_lots_by_type: dict[int, list] = {}
-            use_fifo_for_invention = bool(prefer_inventory_consumption)
-            try:
-                def _chunks(values: list[int], *, size: int = 900):
-                    # SQLite often limits bound params to 999. Keep a little headroom.
-                    for i in range(0, len(values), int(size)):
-                        yield values[i : i + int(size)]
-
-                inv_type_ids: set[int] = set()
-                for _bp in (base_map_for_invention or {}).values():
-                    if not isinstance(_bp, dict):
-                        continue
-                    inv = _bp.get("invention") if isinstance(_bp.get("invention"), dict) else None
-                    mats = inv.get("materials") if isinstance(inv, dict) else None
-                    for m in mats or []:
-                        if not isinstance(m, dict):
-                            continue
-                        tid = m.get("type_id")
-                        if tid is None:
-                            continue
-                        try:
-                            t = int(tid)
-                        except Exception:
-                            continue
-                        if t > 0:
-                            inv_type_ids.add(int(t))
-
-                try:
-                    from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
-
-                    for d in get_t2_invention_decryptors(sde_session, language=language) or []:
-                        if not isinstance(d, dict):
-                            continue
-                        tid = d.get("type_id")
-                        if tid is None:
-                            continue
-                        try:
-                            t = int(tid)
-                        except Exception:
-                            continue
-                        if t > 0:
-                            inv_type_ids.add(int(t))
-                except Exception:
-                    pass
-
-                if inv_type_ids:
-                    char_id = getattr(character, "character_id", None)
-                    corp_id = getattr(character, "corporation_id", None)
-
-                    inv_type_ids_list = sorted({int(t) for t in inv_type_ids if t is not None and int(t) > 0})
-
-                    # On-hand quantities (always gathered; FIFO lots are optional).
-                    try:
-                        if char_id is not None:
-                            for chunk in _chunks(inv_type_ids_list):
-                                rows = (
-                                    session.query(CharacterAssetsModel.type_id, func.sum(CharacterAssetsModel.quantity))
-                                    .filter(CharacterAssetsModel.character_id == int(char_id))
-                                    .filter(CharacterAssetsModel.type_id.in_(chunk))
-                                    .group_by(CharacterAssetsModel.type_id)
-                                    .all()
-                                )
-                                for tid, qty_sum in rows or []:
-                                    if tid is None:
-                                        continue
-                                    inv_inventory_on_hand_by_type[int(tid)] = int(qty_sum or 0)
-                    except Exception:
-                        pass
-
-                    try:
-                        if corp_id is not None:
-                            for chunk in _chunks(inv_type_ids_list):
-                                rows = (
-                                    session.query(CorporationAssetsModel.type_id, func.sum(CorporationAssetsModel.quantity))
-                                    .filter(CorporationAssetsModel.corporation_id == int(corp_id))
-                                    .filter(CorporationAssetsModel.type_id.in_(chunk))
-                                    .group_by(CorporationAssetsModel.type_id)
-                                    .all()
-                                )
-                                for tid, qty_sum in rows or []:
-                                    if tid is None:
-                                        continue
-                                    inv_inventory_on_hand_by_type[int(tid)] = int(
-                                        inv_inventory_on_hand_by_type.get(int(tid), 0) or 0
-                                    ) + int(qty_sum or 0)
-                    except Exception:
-                        pass
-
-                    if use_fifo_for_invention:
-                        # FIFO lots from wallet transactions + completed jobs.
-                        tx_rows: list[Any] = []
-                        try:
-                            if char_id is not None:
-                                for chunk in _chunks(inv_type_ids_list):
-                                    tx_rows.extend(
-                                        (
-                                            session.query(CharacterWalletTransactionsModel)
-                                            .filter(CharacterWalletTransactionsModel.character_id == int(char_id))
-                                            .filter(CharacterWalletTransactionsModel.type_id.in_(chunk))
-                                            .all()
-                                        )
-                                        or []
-                                    )
-                        except Exception:
-                            pass
-
-                        try:
-                            if corp_id is not None:
-                                for chunk in _chunks(inv_type_ids_list):
-                                    tx_rows.extend(
-                                        (
-                                            session.query(CorporationWalletTransactionsModel)
-                                            .filter(CorporationWalletTransactionsModel.corporation_id == int(corp_id))
-                                            .filter(CorporationWalletTransactionsModel.type_id.in_(chunk))
-                                            .all()
-                                        )
-                                        or []
-                                    )
-                        except Exception:
-                            pass
-
-                        job_rows: list[Any] = []
-                        try:
-                            if char_id is not None:
-                                for chunk in _chunks(inv_type_ids_list):
-                                    job_rows.extend(
-                                        (
-                                            session.query(CharacterIndustryJobsModel)
-                                            .filter(CharacterIndustryJobsModel.character_id == int(char_id))
-                                            .filter(
-                                                or_(
-                                                    CharacterIndustryJobsModel.product_type_id.in_(chunk),
-                                                    CharacterIndustryJobsModel.blueprint_type_id.in_(chunk),
-                                                )
-                                            )
-                                            .all()
-                                        )
-                                        or []
-                                    )
-                        except Exception:
-                            pass
-
-                        try:
-                            if corp_id is not None:
-                                for chunk in _chunks(inv_type_ids_list):
-                                    job_rows.extend(
-                                        (
-                                            session.query(CorporationIndustryJobsModel)
-                                            .filter(CorporationIndustryJobsModel.corporation_id == int(corp_id))
-                                            .filter(
-                                                or_(
-                                                    CorporationIndustryJobsModel.product_type_id.in_(chunk),
-                                                    CorporationIndustryJobsModel.blueprint_type_id.in_(chunk),
-                                                )
-                                            )
-                                            .all()
-                                        )
-                                        or []
-                                    )
-                        except Exception:
-                            pass
-
-                        try:
-                            inv_fifo_lots_by_type = build_fifo_remaining_lots_by_type(
-                                wallet_transactions=tx_rows,
-                                industry_jobs=job_rows,
-                                sde_session=sde_session,
-                                market_prices=(market_prices_rows if isinstance(market_prices_rows, list) else None),
-                                on_hand_quantities_by_type=inv_inventory_on_hand_by_type,
-                            )
-                        except Exception:
-                            inv_fifo_lots_by_type = {}
-            except Exception:
-                inv_inventory_on_hand_by_type = {}
-                inv_fifo_lots_by_type = {}
-
-            invention_summary_cache: dict[int, dict[str, Any] | None] = {}
-
-            def _trim_facility_context(fc: Any, *, keys: set[str]) -> dict[str, Any] | None:
-                if not isinstance(fc, dict):
-                    return None
-                out = {k: fc.get(k) for k in keys if k in fc}
-                return out or None
-
-            for bp in data or []:
-                if not isinstance(bp, dict):
-                    continue
-                tid = bp.get("type_id")
-                try:
-                    tid_i = int(tid) if tid is not None else 0
-                except Exception:
-                    tid_i = 0
-                if tid_i <= 0:
-                    continue
-
-                if tid_i in invention_summary_cache:
-                    cached_summary = invention_summary_cache.get(tid_i)
-                    if isinstance(cached_summary, dict):
-                        bp["invention_best_summary"] = cached_summary
-                        ui_row = compute_ui_invention_overview_row_from_summary(
-                            bp=bp,
-                            invention_best_summary=cached_summary,
-                            pricing_preferences=(pricing_preferences if isinstance(pricing_preferences, dict) else None),
-                        )
-                        if isinstance(ui_row, dict):
-                            bp["ui_invention_overview_row"] = ui_row
-                    continue
-
-                if not bool(supports_invention_by_bp_type_id.get(tid_i, False)):
-                    invention_summary_cache[tid_i] = None
-                    continue
-
-                try:
-                    inv_data, _inv_meta = compute_invention_options_for_blueprint(
-                        sde_session=sde_session,
-                        esi_service=self._state.esi_service,
-                        language=language,
-                        blueprint_type_id=int(tid_i),
-                        character_skills=((character.skills or {}).get("skills") if isinstance(character.skills, dict) else None),
-                        industry_profile=selected_profile,
-                        rig_payload=rig_payload,
-                        manufacturing_system_cost_index=float(manufacturing_ci),
-                        invention_system_cost_index=float(invention_ci),
-                        copying_system_cost_index=float(copying_ci) if copying_ci is not None else None,
-                        blueprint_data_map=blueprint_data_map_for_invention,
-                        market_price_map=market_price_map_for_invention,
-                        inventory_on_hand_by_type=inv_inventory_on_hand_by_type,
-                        inventory_fifo_lots_by_type=inv_fifo_lots_by_type,
-                        use_fifo_inventory_costing=use_fifo_for_invention,
-                    )
-
-                    opts = inv_data.get("options") if isinstance(inv_data, dict) else None
-                    best = next((o for o in (opts or []) if isinstance(o, dict)), None)
-                    mfg = inv_data.get("manufacturing") if isinstance(inv_data, dict) else None
-                    inv = inv_data.get("invention") if isinstance(inv_data, dict) else None
-                    if not isinstance(best, dict) or not isinstance(mfg, dict) or not isinstance(inv, dict):
-                        invention_summary_cache[tid_i] = None
-                        continue
-
-                    best_keep = {
-                        "decryptor_type_id",
-                        "decryptor_type_name",
-                        "success_probability",
-                        "invented_blueprint_type_id",
-                        "invented_runs",
-                        "invented_me",
-                        "invented_te",
-                        "invention_attempt_material_cost_isk",
-                        "invention_job_fee_isk",
-                        "copying_expected_runs",
-                        "copying_expected_time_seconds",
-                        "copying_job_fee_isk",
-                        "manufacturing_material_cost_per_run_isk",
-                        "manufacturing_job_fee_per_run_isk",
-                        "manufacturing_revenue_per_run_isk",
-                        "net_profit_per_run_after_invention_isk",
-                        "roi_percent",
-                    }
-                    mfg_keep = {
-                        "product_type_id",
-                        "product_type_name",
-                        "product_category_name",
-                        "product_quantity_per_run",
-                        "time_seconds",
-                    }
-                    inv_keep = {"time_seconds"}
-
-                    mfg_fc = _trim_facility_context(
-                        mfg.get("facility_context"),
-                        keys={
-                            "estimated_time_seconds_per_run",
-                        },
-                    )
-                    inv_fc = _trim_facility_context(
-                        inv.get("facility_context"),
-                        keys={
-                            "estimated_time_seconds",
-                        },
-                    )
-
-                    summary = {
-                        "best_option": {k: best.get(k) for k in best_keep if k in best},
-                        "manufacturing": {
-                            **{k: mfg.get(k) for k in mfg_keep if k in mfg},
-                            "facility_context": mfg_fc,
-                        },
-                        "invention": {
-                            **{k: inv.get(k) for k in inv_keep if k in inv},
-                            "facility_context": inv_fc,
-                        },
-                    }
-
-                    invention_summary_cache[tid_i] = summary
-                    bp["invention_best_summary"] = summary
-
-                    ui_row = compute_ui_invention_overview_row_from_summary(
-                        bp=bp,
-                        invention_best_summary=summary,
-                        pricing_preferences=(pricing_preferences if isinstance(pricing_preferences, dict) else None),
-                    )
-                    if isinstance(ui_row, dict):
-                        bp["ui_invention_overview_row"] = ui_row
-                except Exception:
-                    invention_summary_cache[tid_i] = None
-                    continue
 
             meta = {
                 "profile_id": (int(getattr(selected_profile, "id")) if selected_profile is not None else None),
@@ -851,13 +396,11 @@ class IndustryService:
                 "system_id_for_cost_index_source": system_id_for_cost_index_source,
                 "system_cost_indices": {
                     "manufacturing": float(manufacturing_ci),
-                    "invention": float(invention_ci),
                     "copying": float(copying_ci),
                     "research_me": float(research_me_ci),
                     "research_te": float(research_te_ci),
                 },
                 "pricing_preferences": (pricing_preferences if isinstance(pricing_preferences, dict) else None),
-                "assume_bpo_copy_overhead": bool(assume_bpo_copy_overhead),
             }
 
             with self._state.industry_builder_jobs_lock:
@@ -876,19 +419,6 @@ class IndustryService:
                     job["error"] = str(e)
                     job["updated_at"] = datetime.utcnow()
 
-        finally:
-            # Best-effort: return connections to the pool promptly.
-            try:
-                if session is not None and hasattr(session, "close"):
-                    session.close()
-            except Exception:
-                pass
-            try:
-                if sde_session is not None and hasattr(sde_session, "close"):
-                    sde_session.close()
-            except Exception:
-                pass
-
     def start_industry_builder_update(self, *, character_id: int, payload: dict) -> dict:
         self._cleanup_old_industry_builder_jobs()
 
@@ -902,10 +432,6 @@ class IndustryService:
         except Exception:
             profile_id_i = None
         maximize_runs = bool(payload.get("maximize_runs", False))
-
-        prefer_inventory_consumption = bool(payload.get("prefer_inventory_consumption", False))
-
-        assume_bpo_copy_overhead = bool(payload.get("assume_bpo_copy_overhead", False))
 
         pricing_preferences = payload.get("pricing_preferences")
         if not isinstance(pricing_preferences, dict):
@@ -937,8 +463,6 @@ class IndustryService:
             profile_id=profile_id_i,
             maximize_runs=maximize_runs,
             pricing_key=str(pricing_key),
-            prefer_inventory_consumption=bool(prefer_inventory_consumption),
-            assume_bpo_copy_overhead=bool(assume_bpo_copy_overhead),
         )
 
         with self._state.industry_builder_jobs_lock:
@@ -957,8 +481,6 @@ class IndustryService:
                 "character_id": int(character_id),
                 "profile_id": (int(profile_id_i) if profile_id_i is not None else None),
                 "maximize_runs": bool(maximize_runs),
-                "prefer_inventory_consumption": bool(prefer_inventory_consumption),
-                "assume_bpo_copy_overhead": bool(assume_bpo_copy_overhead),
                 "progress_done": 0,
                 "progress_total": None,
                 "error": None,
@@ -974,8 +496,6 @@ class IndustryService:
                 "profile_id": profile_id_i,
                 "maximize_runs": bool(maximize_runs),
                 "pricing_preferences": (pricing_preferences if isinstance(pricing_preferences, dict) else None),
-                "prefer_inventory_consumption": bool(prefer_inventory_consumption),
-                "assume_bpo_copy_overhead": bool(assume_bpo_copy_overhead),
             },
             daemon=True,
         )
@@ -1520,7 +1040,6 @@ class IndustryService:
 
         inventory_on_hand_by_type: dict[int, int] = {}
         fifo_lots_by_type: dict[int, list] = {}
-        market_price_map: dict[int, dict[str, float | None]] = {}
 
         if material_type_ids:
             try:
@@ -1600,12 +1119,7 @@ class IndustryService:
                         (
                             session.query(CharacterIndustryJobsModel)
                             .filter(CharacterIndustryJobsModel.character_id == int(character_id))
-                            .filter(
-                                or_(
-                                    CharacterIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)),
-                                    CharacterIndustryJobsModel.blueprint_type_id.in_(sorted(material_type_ids)),
-                                )
-                            )
+                            .filter(CharacterIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)))
                             .all()
                         )
                         or []
@@ -1620,12 +1134,7 @@ class IndustryService:
                             (
                                 session.query(CorporationIndustryJobsModel)
                                 .filter(CorporationIndustryJobsModel.corporation_id == int(corp_id))
-                                .filter(
-                                    or_(
-                                        CorporationIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)),
-                                        CorporationIndustryJobsModel.blueprint_type_id.in_(sorted(material_type_ids)),
-                                    )
-                                )
+                                .filter(CorporationIndustryJobsModel.product_type_id.in_(sorted(material_type_ids)))
                                 .all()
                             )
                             or []
@@ -1639,37 +1148,6 @@ class IndustryService:
                         market_prices = (self._state.esi_service.get_market_prices() or [])
                 except Exception:
                     market_prices = None
-
-                # Build a price map once; the planner can reuse it.
-                try:
-                    for row in market_prices or []:
-                        if not isinstance(row, dict):
-                            continue
-                        tid = row.get("type_id")
-                        if tid is None:
-                            continue
-                        try:
-                            type_id = int(tid)
-                        except Exception:
-                            continue
-
-                        avg = row.get("average_price")
-                        adj = row.get("adjusted_price")
-                        try:
-                            avg_f = float(avg) if avg is not None else None
-                        except Exception:
-                            avg_f = None
-                        try:
-                            adj_f = float(adj) if adj is not None else None
-                        except Exception:
-                            adj_f = None
-
-                        market_price_map[type_id] = {
-                            "average_price": avg_f,
-                            "adjusted_price": adj_f,
-                        }
-                except Exception:
-                    market_price_map = market_price_map or {}
 
                 fifo_lots_by_type = build_fifo_remaining_lots_by_type(
                     wallet_transactions=tx_rows,
@@ -1697,7 +1175,6 @@ class IndustryService:
             inventory_fifo_lots_by_type=fifo_lots_by_type,
             use_fifo_inventory_costing=True,
             max_depth=max_depth_i,
-            price_map=market_price_map,
         )
 
         meta = {
@@ -1712,380 +1189,6 @@ class IndustryService:
         }
 
         return plan, meta
-
-    def industry_invention_options(
-        self,
-        *,
-        character_id: int,
-        blueprint_type_id: int,
-        payload: dict,
-    ) -> tuple[Any, dict]:
-        if not character_id:
-            raise ServiceError("Character ID is required.", status_code=400)
-        if not blueprint_type_id:
-            raise ServiceError("Blueprint type ID is required.", status_code=400)
-
-        character = self._state.char_manager.get_character_by_id(int(character_id))
-        if not character:
-            raise ServiceError(f"Character ID {character_id} not found", status_code=400)
-
-        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
-        sde_session: Any = self._sessions.sde_session()
-
-        profile_id = payload.get("profile_id") if isinstance(payload, dict) else None
-
-        selected_profile = None
-        rig_payload = None
-        invention_ci = None
-        manufacturing_ci = None
-        copying_ci = None
-
-        if profile_id is not None:
-            try:
-                profile_id_i = int(profile_id)
-            except Exception:
-                profile_id_i = None
-
-            if profile_id_i is not None and profile_id_i > 0:
-                try:
-                    app_session: Any = self._sessions.app_session()
-                    selected_profile = industry_profile_get_by_id(app_session, int(profile_id_i))
-                except Exception:
-                    selected_profile = None
-
-        # Resolve rig effects from fitted rig slots (structure rigs).
-        if selected_profile is not None:
-            try:
-                from eve_online_industry_tracker.infrastructure.sde.rig_effects import get_rig_effects_for_type_ids
-
-                rig_ids: list[int] = []
-                for attr in ["rig_slot0_type_id", "rig_slot1_type_id", "rig_slot2_type_id"]:
-                    v = getattr(selected_profile, attr, None)
-                    if v is None:
-                        continue
-                    try:
-                        tid = int(v)
-                    except Exception:
-                        continue
-                    if tid > 0:
-                        rig_ids.append(int(tid))
-
-                rig_payload = get_rig_effects_for_type_ids(sde_session, rig_ids)
-            except Exception:
-                rig_payload = None
-
-        # Live system cost indices for invention/manufacturing.
-        if selected_profile is not None and self._state.esi_service is not None:
-            system_id = getattr(selected_profile, "system_id", None)
-            try:
-                system_id_i = int(system_id) if system_id is not None else None
-            except Exception:
-                system_id_i = None
-
-            if system_id_i is not None and system_id_i > 0:
-                try:
-                    systems = self._state.esi_service.get_industry_systems() or []
-                    row = next((s for s in systems if s.get("solar_system_id") == int(system_id_i)), None)
-                    cost_indices = (row or {}).get("cost_indices") if isinstance(row, dict) else None
-                    if isinstance(cost_indices, list):
-                        for entry in cost_indices:
-                            if not isinstance(entry, dict):
-                                continue
-                            act = str(entry.get("activity") or "")
-                            if act == "invention":
-                                invention_ci = float(entry.get("cost_index") or 0.0)
-                            elif act == "manufacturing":
-                                manufacturing_ci = float(entry.get("cost_index") or 0.0)
-                            elif act == "copying":
-                                copying_ci = float(entry.get("cost_index") or 0.0)
-                except Exception:
-                    invention_ci = None
-                    manufacturing_ci = None
-                    copying_ci = None
-
-        # Inventory-aware valuation for invention inputs (datacores + decryptors).
-        # This mirrors the manufacturing materials logic (FIFO lots + on-hand first).
-        inventory_on_hand_by_type: dict[int, int] = {}
-        fifo_lots_by_type: dict[int, list] = {}
-        try:
-            app_session: Any = self._sessions.app_session()
-
-            # Determine relevant type IDs from SDE: invention materials + decryptors.
-            bp_map = get_blueprint_manufacturing_data(sde_session, language, [int(blueprint_type_id)])
-            bp = bp_map.get(int(blueprint_type_id)) if isinstance(bp_map, dict) else None
-            inv = bp.get("invention") if isinstance(bp, dict) else None
-            inv_mats = (inv.get("materials") if isinstance(inv, dict) else None) or []
-            type_ids: set[int] = set()
-            for m in inv_mats or []:
-                if not isinstance(m, dict):
-                    continue
-                tid = m.get("type_id")
-                if tid is None:
-                    continue
-                try:
-                    t = int(tid)
-                except Exception:
-                    continue
-                if t > 0:
-                    type_ids.add(int(t))
-
-            try:
-                from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
-
-                for d in get_t2_invention_decryptors(sde_session, language=language) or []:
-                    if not isinstance(d, dict):
-                        continue
-                    tid = d.get("type_id")
-                    if tid is None:
-                        continue
-                    try:
-                        t = int(tid)
-                    except Exception:
-                        continue
-                    if t > 0:
-                        type_ids.add(int(t))
-            except Exception:
-                pass
-
-            if type_ids:
-                char_id = getattr(character, "character_id", None)
-                corp_id = getattr(character, "corporation_id", None)
-
-                # On-hand quantities.
-                try:
-                    if char_id is not None:
-                        rows = (
-                            app_session.query(CharacterAssetsModel.type_id, func.sum(CharacterAssetsModel.quantity))
-                            .filter(CharacterAssetsModel.character_id == int(char_id))
-                            .filter(CharacterAssetsModel.type_id.in_(sorted(type_ids)))
-                            .group_by(CharacterAssetsModel.type_id)
-                            .all()
-                        )
-                        for tid, qty_sum in rows or []:
-                            if tid is None:
-                                continue
-                            inventory_on_hand_by_type[int(tid)] = int(qty_sum or 0)
-                except Exception:
-                    pass
-
-                try:
-                    if corp_id is not None:
-                        rows = (
-                            app_session.query(CorporationAssetsModel.type_id, func.sum(CorporationAssetsModel.quantity))
-                            .filter(CorporationAssetsModel.corporation_id == int(corp_id))
-                            .filter(CorporationAssetsModel.type_id.in_(sorted(type_ids)))
-                            .group_by(CorporationAssetsModel.type_id)
-                            .all()
-                        )
-                        for tid, qty_sum in rows or []:
-                            if tid is None:
-                                continue
-                            inventory_on_hand_by_type[int(tid)] = int(inventory_on_hand_by_type.get(int(tid), 0) or 0) + int(
-                                qty_sum or 0
-                            )
-                except Exception:
-                    pass
-
-                # Wallet transactions + completed jobs for FIFO lot reconstruction.
-                tx_rows: list[Any] = []
-                try:
-                    if char_id is not None:
-                        tx_rows.extend(
-                            (
-                                app_session.query(CharacterWalletTransactionsModel)
-                                .filter(CharacterWalletTransactionsModel.character_id == int(char_id))
-                                .filter(CharacterWalletTransactionsModel.type_id.in_(sorted(type_ids)))
-                                .all()
-                            )
-                            or []
-                        )
-                except Exception:
-                    pass
-
-                try:
-                    if corp_id is not None:
-                        tx_rows.extend(
-                            (
-                                app_session.query(CorporationWalletTransactionsModel)
-                                .filter(CorporationWalletTransactionsModel.corporation_id == int(corp_id))
-                                .filter(CorporationWalletTransactionsModel.type_id.in_(sorted(type_ids)))
-                                .all()
-                            )
-                            or []
-                        )
-                except Exception:
-                    pass
-
-                job_rows: list[Any] = []
-                try:
-                    if char_id is not None:
-                        job_rows.extend(
-                            (
-                                app_session.query(CharacterIndustryJobsModel)
-                                .filter(CharacterIndustryJobsModel.character_id == int(char_id))
-                                .filter(
-                                    or_(
-                                        CharacterIndustryJobsModel.product_type_id.in_(sorted(type_ids)),
-                                        CharacterIndustryJobsModel.blueprint_type_id.in_(sorted(type_ids)),
-                                    )
-                                )
-                                .all()
-                            )
-                            or []
-                        )
-                except Exception:
-                    pass
-
-                try:
-                    if corp_id is not None:
-                        job_rows.extend(
-                            (
-                                app_session.query(CorporationIndustryJobsModel)
-                                .filter(CorporationIndustryJobsModel.corporation_id == int(corp_id))
-                                .filter(
-                                    or_(
-                                        CorporationIndustryJobsModel.product_type_id.in_(sorted(type_ids)),
-                                        CorporationIndustryJobsModel.blueprint_type_id.in_(sorted(type_ids)),
-                                    )
-                                )
-                                .all()
-                            )
-                            or []
-                        )
-                except Exception:
-                    pass
-
-                market_prices_for_fifo: list[dict[str, Any]] | None = None
-                try:
-                    if self._state.esi_service is not None:
-                        market_prices_for_fifo = self._state.esi_service.get_market_prices() or []
-                except Exception:
-                    market_prices_for_fifo = None
-
-                try:
-                    fifo_lots_by_type = build_fifo_remaining_lots_by_type(
-                        wallet_transactions=tx_rows,
-                        industry_jobs=job_rows,
-                        sde_session=sde_session,
-                        market_prices=market_prices_for_fifo,
-                        on_hand_quantities_by_type=inventory_on_hand_by_type,
-                    )
-                except Exception:
-                    fifo_lots_by_type = {}
-        except Exception:
-            inventory_on_hand_by_type = {}
-            fifo_lots_by_type = {}
-
-        data, meta = compute_invention_options_for_blueprint(
-            sde_session=sde_session,
-            esi_service=self._state.esi_service,
-            language=language,
-            blueprint_type_id=int(blueprint_type_id),
-            character_skills=((character.skills or {}).get("skills") if isinstance(character.skills, dict) else None),
-            industry_profile=selected_profile,
-            rig_payload=rig_payload,
-            manufacturing_system_cost_index=manufacturing_ci,
-            invention_system_cost_index=invention_ci,
-            copying_system_cost_index=copying_ci,
-            inventory_on_hand_by_type=inventory_on_hand_by_type,
-            inventory_fifo_lots_by_type=fifo_lots_by_type,
-            use_fifo_inventory_costing=bool(payload.get("prefer_inventory_consumption", False)),
-        )
-
-        # Optional: include manufacturing submanufacturing plan + UI-ready Build Tree for the best option.
-        # This removes the need for Streamlit to call /industry_submanufacturing_plan.
-        try:
-            if isinstance(data, dict):
-                opts = data.get("options") if isinstance(data.get("options"), list) else []
-                best = next((o for o in opts if isinstance(o, dict)), None) or None
-
-                mfg_materials_per_run = (best or {}).get("manufacturing_materials_per_run")
-                invented_runs = int((best or {}).get("invented_runs") or 0)
-
-                mfg = data.get("manufacturing") if isinstance(data.get("manufacturing"), dict) else {}
-                prod_qty_per_run = int(mfg.get("product_quantity_per_run") or 0)
-                units_total = int(max(0, invented_runs * prod_qty_per_run))
-
-                mats_payload: list[dict[str, Any]] = []
-                synthesized_materials: list[dict[str, Any]] = []
-                if isinstance(mfg_materials_per_run, list) and invented_runs > 0:
-                    for mm in mfg_materials_per_run:
-                        if not isinstance(mm, dict):
-                            continue
-                        try:
-                            tid = int(mm.get("type_id") or 0)
-                        except Exception:
-                            tid = 0
-                        try:
-                            qty_eff = int(mm.get("quantity_after_efficiency") or 0)
-                        except Exception:
-                            qty_eff = 0
-                        try:
-                            qty_me0 = int(mm.get("quantity_me0") or 0)
-                        except Exception:
-                            qty_me0 = 0
-
-                        if tid <= 0 or qty_eff <= 0:
-                            continue
-
-                        qty_total_eff = int(qty_eff) * int(invented_runs)
-                        qty_total_me0 = (int(qty_me0) * int(invented_runs)) if qty_me0 > 0 else None
-
-                        mats_payload.append({"type_id": int(tid), "quantity": int(qty_total_eff)})
-                        synthesized_materials.append(
-                            {
-                                "type_id": int(tid),
-                                "type_name": mm.get("type_name"),
-                                "group_name": mm.get("group_name"),
-                                "category_name": mm.get("category_name"),
-                                "quantity_after_efficiency": int(qty_total_eff),
-                                "quantity_me0": (int(qty_total_me0) if qty_total_me0 is not None else None),
-                            }
-                        )
-
-                data["best_manufacturing_required_materials"] = synthesized_materials
-
-                best_plan: list[dict[str, Any]] = []
-                if mats_payload:
-                    best_plan, _meta = self.industry_submanufacturing_plan(
-                        character_id=int(character_id),
-                        payload={"profile_id": profile_id, "materials": mats_payload, "max_depth": 10},
-                    )
-                    if not isinstance(best_plan, list):
-                        best_plan = []
-
-                data["best_manufacturing_submanufacturing_plan"] = best_plan
-                data["best_ui_build_tree_rows"] = compute_ui_build_tree_rows_by_product(
-                    plan_rows=best_plan,
-                    required_materials=synthesized_materials,
-                    root_required_quantity=int(units_total),
-                )
-                data["best_ui_blueprint_copy_jobs"] = compute_ui_copy_jobs(
-                    blueprint_name=str((data.get("manufacturing") or {}).get("blueprint_type_name") or ""),
-                    manufacture_job=None,
-                    plan_rows=best_plan,
-                )
-                data["best_ui_missing_blueprints"] = compute_ui_missing_blueprints(best_plan)
-
-                # UI-ready 'Copy & Invention Jobs' TreeData rows for the best option.
-                inv_sec = data.get("invention") if isinstance(data.get("invention"), dict) else {}
-                base_out = inv_sec.get("base_output") if isinstance(inv_sec.get("base_output"), dict) else {}
-                try:
-                    out_bp_type_id = int(base_out.get("blueprint_type_id") or 0)
-                except Exception:
-                    out_bp_type_id = 0
-                out_bp_name = str(base_out.get("blueprint_type_name") or "")
-
-                data["best_ui_copy_invention_jobs_rows"] = compute_ui_copy_invention_jobs_rows_for_best_option(
-                    inv_data=data,
-                    best_option=best,
-                    output_blueprint_type_id=int(out_bp_type_id),
-                    output_blueprint_type_name=str(out_bp_name),
-                )
-        except Exception:
-            pass
-
-        return data, meta
 
     def solar_systems(self) -> Any:
         session: Any = self._sessions.sde_session()
