@@ -2428,756 +2428,500 @@ def render():
 
                     build_cost = build_for_cost.get("total_build_cost_isk") if isinstance(build_for_cost, dict) else None
 
-                        shortfall_qty = n.get("shortfall_quantity")
-                        shortfall_action = n.get("shortfall_recommendation")
-                        shortfall_buy_cost = n.get("shortfall_buy_cost_isk")
-                        shortfall_build_cost = n.get("shortfall_build_cost_isk")
-                        savings_isk = n.get("savings_isk")
+                    shortfall_qty = n.get("shortfall_quantity")
+                    shortfall_action = n.get("shortfall_recommendation")
+                    shortfall_buy_cost = n.get("shortfall_buy_cost_isk")
+                    shortfall_build_cost = n.get("shortfall_build_cost_isk")
+                    savings_isk = n.get("savings_isk")
 
-                        inv_used_qty_i = safe_int_opt(inv_used_qty)
-                        inv_fifo_priced_qty_i = safe_int_opt(inv_fifo_priced_qty)
+                    inv_used_qty_i = safe_int_opt(inv_used_qty)
+                    inv_fifo_priced_qty_i = safe_int_opt(inv_fifo_priced_qty)
 
-                        qty_required_i = safe_int_opt(qty_required)
-                        shortfall_qty_i = safe_int_opt(shortfall_qty)
-                        try:
-                            if shortfall_qty_i is None and qty_required_i is not None and inv_used_qty_i is not None:
-                                shortfall_qty_i = max(0, int(qty_required_i) - int(inv_used_qty_i))
-                        except Exception:
-                            shortfall_qty_i = shortfall_qty_i
-
-                        # Inventory cost display value:
-                        # - Prefer FIFO valuation when available.
-                        # - Fallback to market valuation for the inventory-used quantity when FIFO isn't available.
-                        inventory_cost_display = None
-                        try:
-                            if inv_used_qty_i is not None and int(inv_used_qty_i) > 0:
-                                if inv_fifo_cost is not None and inv_fifo_priced_qty_i is not None and int(inv_fifo_priced_qty_i) > 0:
-                                    # FIFO priced part + market fallback for any unknown-basis inventory.
-                                    inventory_cost_display = float(inv_fifo_cost)
-                                    try:
-                                        unknown_qty_i = max(0, int(inv_used_qty_i) - int(inv_fifo_priced_qty_i))
-                                    except Exception:
-                                        unknown_qty_i = 0
-                                    if unknown_qty_i > 0 and market_unit is not None:
-                                        inventory_cost_display += float(market_unit) * float(unknown_qty_i)
-                                elif market_unit is not None:
-                                    inventory_cost_display = float(market_unit) * float(inv_used_qty_i)
-                        except Exception:
-                            inventory_cost_display = None
-
-                        def _choose_buy_vs_build(*, buy_cost_total: Any, build_cost_total: Any) -> str | None:
-                            buy_n: float | None
-                            build_n: float | None
-                            try:
-                                buy_n = float(buy_cost_total) if buy_cost_total is not None else None
-                            except Exception:
-                                buy_n = None
-                            try:
-                                build_n = float(build_cost_total) if build_cost_total is not None else None
-                            except Exception:
-                                build_n = None
-
-                            if buy_n is None and build_n is None:
-                                return None
-                            if build_n is None:
-                                return "buy"
-                            if buy_n is None:
-                                return "build"
-                            return "buy" if buy_n <= build_n else "build"
-
-                        # Action display policy: reflect the effective cost path.
-                        action_display = rec
-                        try:
-                            if inv_used_qty_i is not None and int(inv_used_qty_i) > 0:
-                                if shortfall_qty_i is not None and int(shortfall_qty_i) > 0:
-                                    # Inventory + remainder
-                                    rem_buy = shortfall_buy_cost
-                                    if rem_buy is None and market_unit is not None:
-                                        rem_buy = float(market_unit) * float(shortfall_qty_i)
-                                    rem_build = shortfall_build_cost if shortfall_build_cost is not None else build_cost
-                                    rem_choice = _choose_buy_vs_build(buy_cost_total=rem_buy, build_cost_total=rem_build)
-                                    action_display = f"take/{rem_choice}" if rem_choice else "take"
-                                else:
-                                    action_display = "take"
-                            else:
-                                choice = _choose_buy_vs_build(buy_cost_total=market_buy_cost, build_cost_total=build_cost)
-                                if choice is not None:
-                                    action_display = choice
-                        except Exception:
-                            action_display = rec
-
-                        # Effective Cost display policy (UI):
-                        # - Prefer the planner-provided `effective_cost_isk` (matches backend totals).
-                        # - Only fall back to best-effort composition when planner cost is missing.
-                        effective_cost_display = effective_cost
-                        try:
-                            if effective_cost_display is None:
-                                inv_cost_for_eff = inventory_cost_display
-
-                                # Prefer the backend-provided shortfall quantity, but fall back to the
-                                # derived value (required - inventory_used) when it's missing.
-                                sf_qty_i = safe_int_opt(shortfall_qty)
-                                if sf_qty_i is None:
-                                    sf_qty_i = shortfall_qty_i
-
-                                if inv_cost_for_eff is not None:
-                                    if sf_qty_i is not None and int(sf_qty_i) > 0:
-                                        rem = min_known_positive(shortfall_buy_cost, shortfall_build_cost)
-                                        if rem is None:
-                                            rem = min_known_positive(market_buy_cost, build_cost)
-                                        effective_cost_display = float(inv_cost_for_eff) + float(rem or 0.0)
-                                    else:
-                                        effective_cost_display = float(inv_cost_for_eff)
-                                else:
-                                    rem = min_known_positive(market_buy_cost, build_cost)
-                                    if rem is not None:
-                                        effective_cost_display = float(rem)
-                        except Exception:
-                            effective_cost_display = effective_cost
-
-                        effective_unit = None
-                        try:
-                            if effective_cost_display is not None and qty_required is not None and float(qty_required) > 0:
-                                effective_unit = float(effective_cost_display) / float(qty_required)
-                        except Exception:
-                            effective_unit = None
-
-                        roi_display = None
-                        if market_buy_cost is not None and build_cost is not None:
-                            try:
-                                bc = float(build_cost)
-                                roi_if_build = ((float(market_buy_cost) - float(build_cost)) / bc) * 100.0 if bc > 0 else None
-                            except Exception:
-                                roi_if_build = None
-                            roi_display = roi_if_build
-
-                        # Buy Cost display policy (UI):
-                        # - For take/buy: show only the *shortfall* buy cost (what you'd still need to buy).
-                        # - For take: blank (nothing left to buy).
-                        # - Otherwise: show the buy-everything cost for this node.
-                        buy_cost_display = market_buy_cost
-                        try:
-                            if str(action_display) == "take":
-                                buy_cost_display = None
-                            elif str(action_display) == "take/buy":
-                                rem_buy = shortfall_buy_cost
-                                if rem_buy is None and market_unit is not None and shortfall_qty_i is not None:
-                                    rem_buy = float(market_unit) * float(shortfall_qty_i)
-                                buy_cost_display = rem_buy
-                        except Exception:
-                            buy_cost_display = market_buy_cost
-
-                        # Build Cost display policy (UI):
-                        # - When inventory partially covers the requirement, show the shortfall build cost
-                        #   (if available) so it compares apples-to-apples with shortfall buy cost.
-                        build_cost_display = build_cost
-                        try:
-                            if inv_used_qty_i is not None and int(inv_used_qty_i) > 0 and shortfall_qty_i is not None and int(shortfall_qty_i) > 0:
-                                if shortfall_build_cost is not None:
-                                    build_cost_display = float(shortfall_build_cost)
-                        except Exception:
-                            build_cost_display = build_cost
-
-                        try:
-                            type_id_i = int(n.get("type_id") or 0)
-                        except Exception:
-                            type_id_i = 0
-
-                        icon_override = n.get("icon_url") if isinstance(n, dict) else None
-                        icon_url = str(icon_override) if icon_override else (type_icon_url(type_id_i, size=32) if type_id_i > 0 else None)
-
-                        tree_rows.append(
-                            {
-                                "path": path_str,
-                                "type_id": type_id_i,
-                                "Icon": icon_url,
-                                "action": (str(action_display) if action_display is not None else rec),
-                                "reason": (str(n.get("reason")) if n.get("reason") is not None else None),
-                                "qty": safe_int_opt(qty),
-                                "qty_required": safe_int_opt(qty_required),
-                                # Displayed unit cost: planner-chosen effective cost per required unit.
-                                "unit": safe_float_opt(effective_unit),
-                                # Keep the market unit price available for JS comparisons and column menu.
-                                "market_unit": safe_float_opt(market_unit),
-                                # Shortfall decision metadata (usually only populated when prefer-inventory is enabled).
-                                "shortfall_qty": safe_int_opt(shortfall_qty),
-                                "shortfall_action": (str(shortfall_action) if shortfall_action is not None else None),
-                                "shortfall_buy_cost": safe_float_opt(shortfall_buy_cost),
-                                "shortfall_build_cost": safe_float_opt(shortfall_build_cost),
-                                "savings_isk": safe_float_opt(savings_isk),
-                                "inventory_used_qty": safe_int_opt(inv_used_qty),
-                                "inventory_fifo_priced_qty": safe_int_opt(inv_fifo_priced_qty),
-                                # Inventory cost (best-effort): FIFO when possible, else fallback to market for the inventory-used qty.
-                                "inventory_cost": safe_float_opt(inventory_cost_display) if (inv_used_qty_i is not None and int(inv_used_qty_i) > 0) else None,
-                                # Effective cost (UI): inventory-first composition when inventory is used.
-                                "effective_cost": safe_float_opt(effective_cost_display),
-                                "buy_cost": safe_float_opt(buy_cost_display),
-                                "build_cost": safe_float_opt(build_cost_display),
-                                "roi": float(roi_display) if roi_display is not None else None,
-                            }
-                        )
-
-                        children = n.get("children") or []
-                        # Always include the submanufacturing tree, regardless of Action.
-                        # (Tree starts collapsed; user can expand nodes as needed.)
-                        if isinstance(children, list) and len(children) > 0:
-                            for ch in children:
-                                if isinstance(ch, dict):
-                                    _walk_tree(ch, parent_path=path)
-
-                    if not use_backend_tree:
-                        for root in plan_rows:
-                            if isinstance(root, dict):
-                                _walk_tree(root, parent_path=[])
-
-                    tree_df = pd.DataFrame(tree_rows)
-
-                    # Summarize totals on the top-level root row (e.g. "Manufacturing" / "Manufacturing Job").
-                    # Important: sum only *immediate children* to avoid double-counting,
-                    # because parent nodes already represent the total for their subtree.
+                    qty_required_i = safe_int_opt(qty_required)
+                    shortfall_qty_i = safe_int_opt(shortfall_qty)
                     try:
-                        if not tree_df.empty and "path" in tree_df.columns:
-                            path_s = tree_df["path"].astype(str)
-                            # NOTE: pandas .str.count treats the pattern as a regex; our separator is "|||",
-                            # so use a literal split to compute depth.
-                            depth_s = path_s.str.split(_PATH_SEP, regex=False).str.len()
-
-                            root_paths = sorted(set(path_s.loc[depth_s == 1].tolist()))
-                            for root_path in root_paths:
-                                root_mask = path_s == root_path
-                                if not bool(root_mask.any()):
-                                    continue
-
-                                child_mask = path_s.str.startswith(root_path + _PATH_SEP) & (depth_s == 2)
-
-                                def _parse_num(v: Any) -> float | None:
-                                    try:
-                                        if v is None:
-                                            return None
-                                        if isinstance(v, (int, float)):
-                                            return float(v)
-                                        s = str(v).strip()
-                                        if not s or s == "-":
-                                            return None
-                                        s = s.replace("\u202f", "").replace(" ", "")
-                                        s = s.replace("ISK", "").replace("isk", "")
-                                        s = s.replace("%", "")
-                                        # Handle EU formatting:
-                                        # - "1.234,56" => 1234.56
-                                        # - "40,80" => 40.80
-                                        if "," in s and "." in s:
-                                            s = s.replace(".", "")
-                                            s = s.replace(",", ".")
-                                        elif "," in s and "." not in s:
-                                            s = s.replace(",", ".")
-                                        else:
-                                            # No comma present.
-                                            # Many values come in as EU thousands formatting, e.g. "114.095.973" or "25.225.200".
-                                            # If there are multiple dots, they are almost certainly thousands separators.
-                                            if s.count(".") > 1:
-                                                s = s.replace(".", "")
-                                            elif s.count(".") == 1:
-                                                # Ambiguous single dot: treat as thousands separator when it looks like grouping (###.###).
-                                                left, right = s.split(".", 1)
-                                                if left.isdigit() and right.isdigit() and len(right) == 3:
-                                                    s = left + right
-
-                                        # Keep only digits, dot, minus.
-                                        cleaned = "".join(ch for ch in s if (ch.isdigit() or ch in {".", "-"}))
-                                        if cleaned in {"", "-", "."}:
-                                            return None
-                                        return float(cleaned)
-                                    except Exception:
-                                        return None
-
-                                def _sum_numeric(col: str) -> float | None:
-                                    if col not in tree_df.columns:
-                                        return None
-                                    raw = tree_df.loc[child_mask, col]
-                                    vals = [x for x in (_parse_num(v) for v in raw.tolist()) if x is not None]
-                                    if not vals:
-                                        return None
-                                    return float(sum(vals))
-
-                                eff_total = _sum_numeric("effective_cost")
-                                inv_total = _sum_numeric("inventory_cost")
-                                buy_total = _sum_numeric("buy_cost")
-
-                                if eff_total is not None and "effective_cost" in tree_df.columns:
-                                    tree_df.loc[root_mask, "effective_cost"] = float(eff_total)
-                                if inv_total is not None and "inventory_cost" in tree_df.columns:
-                                    tree_df.loc[root_mask, "inventory_cost"] = float(inv_total)
-                                if buy_total is not None and "buy_cost" in tree_df.columns:
-                                    tree_df.loc[root_mask, "buy_cost"] = float(buy_total)
-
-                                # Effective / Unit for the root.
-                                if eff_total is not None and "unit" in tree_df.columns:
-                                    qty_base_col = "qty_required" if "qty_required" in tree_df.columns else "qty"
-                                    try:
-                                        qty_raw = tree_df.loc[root_mask, qty_base_col].iloc[0]
-                                        qty_n = _parse_num(qty_raw)
-                                    except Exception:
-                                        qty_n = None
-                                    if qty_n is not None and qty_n > 0:
-                                        tree_df.loc[root_mask, "unit"] = float(eff_total) / float(qty_n)
+                        if shortfall_qty_i is None and qty_required_i is not None and inv_used_qty_i is not None:
+                            shortfall_qty_i = max(0, int(qty_required_i) - int(inv_used_qty_i))
                     except Exception:
-                        pass
+                        shortfall_qty_i = shortfall_qty_i
 
-                    # Enable TreeData only when we actually emitted child rows.
-                    # (We consider it hierarchical when any path contains the separator.)
-                    use_tree = any((_PATH_SEP in str(r.get("path") or "")) for r in tree_rows)
+                    # Inventory cost display value:
+                    # - Prefer FIFO valuation when available.
+                    # - Fallback to market valuation for the inventory-used quantity when FIFO isn't available.
+                    inventory_cost_display = None
+                    try:
+                        if inv_used_qty_i is not None and int(inv_used_qty_i) > 0:
+                            if inv_fifo_cost is not None and inv_fifo_priced_qty_i is not None and int(inv_fifo_priced_qty_i) > 0:
+                                # FIFO priced part + market fallback for any unknown-basis inventory.
+                                inventory_cost_display = float(inv_fifo_cost)
+                                try:
+                                    unknown_qty_i = max(0, int(inv_used_qty_i) - int(inv_fifo_priced_qty_i))
+                                except Exception:
+                                    unknown_qty_i = 0
+                                if unknown_qty_i > 0 and market_unit is not None:
+                                    inventory_cost_display += float(market_unit) * float(unknown_qty_i)
+                            elif market_unit is not None:
+                                inventory_cost_display = float(market_unit) * float(inv_used_qty_i)
+                    except Exception:
+                        inventory_cost_display = None
 
-                    # Keep a predictable column order.
-                    preferred_cols = [
-                        "Icon",
-                        "action",
-                        "qty",
-                        "unit",
-                        "effective_cost",
-                        "inventory_cost",
-                        "buy_cost",
-                        "build_cost",
-                        "roi",
-                        "shortfall_qty",
-                        "shortfall_action",
-                        "shortfall_buy_cost",
-                        "shortfall_build_cost",
-                        "savings_isk",
-                        "path",
-                        "type_id",
-                    ]
-                    tree_df = tree_df[[c for c in preferred_cols if c in tree_df.columns] + [c for c in tree_df.columns if c not in preferred_cols]]
+                    # Keep Build Tree display aligned with the rest of the UI:
+                    # - Action is the planner recommendation (no extra inference like take/buy).
+                    # - Costs are shown as the straightforward totals (no shortfall substitution, no blanking).
+                    action_display = rec
+                    effective_cost_display = effective_cost
+                    buy_cost_display = market_buy_cost
+                    build_cost_display = build_cost
 
-                    # Hide columns that are never populated (common for T1 blueprint selections).
-                    # This keeps the Build Tree table compact and avoids empty "Build Cost" / "ROI" columns.
-                    def _drop_if_all_empty(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-                        drop_cols: list[str] = []
-                        for col in cols:
-                            if col not in df.columns:
-                                continue
-                            s = pd.to_numeric(df[col], errors="coerce")
-                            if s.isna().all() or ((s.isna()) | (s == 0)).all():
-                                drop_cols.append(col)
-                        return df.drop(columns=drop_cols) if drop_cols else df
+                    effective_unit = None
+                    try:
+                        if effective_cost_display is not None and qty_required is not None and float(qty_required) > 0:
+                            effective_unit = float(effective_cost_display) / float(qty_required)
+                    except Exception:
+                        effective_unit = None
 
-                    tree_df = _drop_if_all_empty(tree_df, ["build_cost", "roi"])
+                    roi_display = None
+                    if market_buy_cost is not None and build_cost is not None:
+                        try:
+                            bc = float(build_cost)
+                            roi_if_build = ((float(market_buy_cost) - float(build_cost)) / bc) * 100.0 if bc > 0 else None
+                        except Exception:
+                            roi_if_build = None
+                        roi_display = roi_if_build
 
-                    gb_tree = GridOptionsBuilder.from_dataframe(tree_df)
-                    gb_tree.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+                    try:
+                        type_id_i = int(n.get("type_id") or 0)
+                    except Exception:
+                        type_id_i = 0
 
-                    # Hide internal columns
-                    for c in [
-                        "path",
-                        "type_id",
-                        "reason",
-                        "inventory_used_qty",
-                        "inventory_fifo_priced_qty",
-                        "market_unit",
-                        "qty_required",
-                        # Keep these available via column menu, but hidden by default.
-                        "shortfall_qty",
-                        "shortfall_action",
-                        "shortfall_buy_cost",
-                        "shortfall_build_cost",
-                        "savings_isk",
-                    ]:
-                        if c in tree_df.columns:
-                            gb_tree.configure_column(c, hide=True)
+                    icon_override = n.get("icon_url") if isinstance(n, dict) else None
+                    icon_url = str(icon_override) if icon_override else (type_icon_url(type_id_i, size=32) if type_id_i > 0 else None)
 
-                    # Decryptor influence columns: keep visible (only populated for invention rows).
-
-                    if "Icon" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "Icon",
-                            header_name="",
-                            width=56,
-                            pinned="left",
-                            sortable=False,
-                            filter=False,
-                            suppressAutoSize=True,
-                            cellRenderer=img_renderer,
-                        )
-
-                    right_style = {"textAlign": "right"}
-                    if "action" in tree_df.columns:
-                        gb_tree.configure_column("action", header_name="Action", minWidth=110)
-                    if "qty" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "qty",
-                            header_name="Qty",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=100,
-                            cellStyle=right_style,
-                        )
-
-                    # Invention/decryptor columns intentionally removed from the Build Tree table.
-
-                    if "unit" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "unit",
-                            header_name="Effective / Unit",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
-                            minWidth=140,
-                            cellStyle=right_style,
-                        )
-
-                    if "inventory_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "inventory_cost",
-                            header_name="Inventory Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=180,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        if (!params || !params.data) return style;
-                                        var inv = params.value;
-                                        if (inv === null || inv === undefined || inv === '') return style;
-
-                                        // Requirement:
-                                        // - Inventory Cost is green when inventory is actually used (full or partial).
-                                        // - When inventory is used, it is prioritized for Effective Cost.
-                                        style.color = '#2ecc71';
-                                        style.fontWeight = '600';
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-
-                    if "effective_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "effective_cost",
-                            header_name="Effective Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=200,
-                            cellStyle=right_style,
-                        )
-                    if "buy_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "buy_cost",
-                            header_name="Buy Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=160,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        if (!params || !params.data) return style;
-                                        var buy = params.value;
-                                        if (buy === null || buy === undefined || buy === '') return style;
-
-                                        var inv = params.data.inventory_cost;
-                                        var build = params.data.build_cost;
-                                        var shortfall = params.data.shortfall_qty;
-
-                                        var buyN = Number(buy);
-                                        if (isNaN(buyN)) return style;
-
-                                        var invN = (inv === null || inv === undefined || inv === '') ? null : Number(inv);
-                                        if (invN !== null && isNaN(invN)) invN = null;
-
-                                        var buildN = (build === null || build === undefined || build === '') ? null : Number(build);
-                                        if (buildN !== null && isNaN(buildN)) buildN = null;
-
-                                        var shortfallN = (shortfall === null || shortfall === undefined || shortfall === '') ? null : Number(shortfall);
-                                        if (shortfallN !== null && isNaN(shortfallN)) shortfallN = null;
-
-                                        if (shortfallN === null) {
-                                            var req = params.data.qty_required;
-                                            var invUsed = params.data.inventory_used_qty;
-                                            var reqN = (req === null || req === undefined || req === '') ? null : Number(req);
-                                            var invUsedN = (invUsed === null || invUsed === undefined || invUsed === '') ? null : Number(invUsed);
-                                            if (reqN !== null && invUsedN !== null && !isNaN(reqN) && !isNaN(invUsedN)) {
-                                                shortfallN = Math.max(0, reqN - invUsedN);
-                                            }
-                                        }
-                                        if (shortfallN === null || isNaN(shortfallN)) shortfallN = 0;
-
-                                        // Coloring rules:
-                                        // - No inventory used: only the cheapest of (buy, build) is green.
-                                        // - Full inventory used: buy/build are red.
-                                        // - Partial inventory used: inventory is green and the cheapest of (buy, build) is green.
-                                        if (invN !== null && shortfallN <= 0) {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                            return style;
-                                        }
-
-                                        // Decide winner between buy/build.
-                                        var winner = 'buy';
-                                        if (buildN === null) winner = 'buy';
-                                        else if (buyN === null) winner = 'build';
-                                        else winner = (buyN <= buildN) ? 'buy' : 'build';
-
-                                        if (winner === 'buy') {
-                                            style.color = '#2ecc71';
-                                            style.fontWeight = '600';
-                                        } else {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                        }
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-                    if "build_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "build_cost",
-                            header_name="Build Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=160,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        if (!params || !params.data) return style;
-                                        var build = params.value;
-                                        if (build === null || build === undefined || build === '') return style;
-
-                                        var inv = params.data.inventory_cost;
-                                        var buy = params.data.buy_cost;
-                                        var shortfall = params.data.shortfall_qty;
-
-                                        var buildN = Number(build);
-                                        if (isNaN(buildN)) return style;
-
-                                        var invN = (inv === null || inv === undefined || inv === '') ? null : Number(inv);
-                                        if (invN !== null && isNaN(invN)) invN = null;
-
-                                        var buyN = (buy === null || buy === undefined || buy === '') ? null : Number(buy);
-                                        if (buyN !== null && isNaN(buyN)) buyN = null;
-
-                                        var shortfallN = (shortfall === null || shortfall === undefined || shortfall === '') ? null : Number(shortfall);
-                                        if (shortfallN !== null && isNaN(shortfallN)) shortfallN = null;
-
-                                        if (shortfallN === null) {
-                                            var req = params.data.qty_required;
-                                            var invUsed = params.data.inventory_used_qty;
-                                            var reqN = (req === null || req === undefined || req === '') ? null : Number(req);
-                                            var invUsedN = (invUsed === null || invUsed === undefined || invUsed === '') ? null : Number(invUsed);
-                                            if (reqN !== null && invUsedN !== null && !isNaN(reqN) && !isNaN(invUsedN)) {
-                                                shortfallN = Math.max(0, reqN - invUsedN);
-                                            }
-                                        }
-                                        if (shortfallN === null || isNaN(shortfallN)) shortfallN = 0;
-
-                                        if (invN !== null && shortfallN <= 0) {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                            return style;
-                                        }
-
-                                        var winner = 'buy';
-                                        if (buyN === null) winner = 'build';
-                                        else if (buildN === null) winner = 'buy';
-                                        else winner = (buyN <= buildN) ? 'buy' : 'build';
-
-                                        if (winner === 'build') {
-                                            style.color = '#2ecc71';
-                                            style.fontWeight = '600';
-                                        } else {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                        }
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-                    if "roi" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "roi",
-                            header_name="ROI",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_pct_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
-                            minWidth=110,
-                            cellStyle=JsCode(
-                                """
-                                function(params) {
-                                    try {
-                                        var style = { textAlign: 'right' };
-                                        var v = params.value;
-                                        if (v === null || v === undefined || v === '') return style;
-                                        var n = Number(v);
-                                        if (isNaN(n) || n === 0) return style;
-                                        if (n > 0) {
-                                            style.color = '#2ecc71';
-                                            style.fontWeight = '600';
-                                        } else if (n < 0) {
-                                            style.color = '#e74c3c';
-                                            style.fontWeight = '600';
-                                        }
-                                        return style;
-                                    } catch (e) {
-                                        return { textAlign: 'right' };
-                                    }
-                                }
-                                """
-                            ),
-                        )
-
-                    if "shortfall_buy_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_buy_cost",
-                            header_name="Shortfall Buy Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=190,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-                    if "shortfall_build_cost" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_build_cost",
-                            header_name="Shortfall Build Cost",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=200,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-                    if "shortfall_qty" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_qty",
-                            header_name="Shortfall Qty",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=150,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-                    if "shortfall_action" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "shortfall_action",
-                            header_name="Shortfall Action",
-                            minWidth=170,
-                            hide=True,
-                        )
-                    if "savings_isk" in tree_df.columns:
-                        gb_tree.configure_column(
-                            "savings_isk",
-                            header_name="Savings vs Buy",
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=170,
-                            cellStyle=right_style,
-                            hide=True,
-                        )
-
-                    grid_opts = gb_tree.build()
-                    grid_opts["autoSizeStrategy"] = {"type": "fitCellContents"}
-
-                    if use_tree:
-                        grid_opts["treeData"] = True
-                        grid_opts["getDataPath"] = JsCode(
-                            """
-                            function(data) {
-                                try {
-                                    if (!data || data.path === null || data.path === undefined) return [];
-                                    var s = String(data.path);
-                                    if (!s) return [];
-                                    return s.split('|||').filter(function(x) { return x !== null && x !== undefined && String(x).length > 0; });
-                                } catch (e) {
-                                    return [];
-                                }
-                            }
-                            """
-                        )
-                        # Start collapsed so the user can expand nodes manually.
-                        # Expand the top-level "Manufacturing Job" row by default,
-                        # while keeping deeper levels collapsed.
-                        grid_opts["groupDefaultExpanded"] = 1
-
-                        # Configure the tree column so it shows the actual submanufacturing step/item
-                        # instead of a generic "Group" column.
-                        grid_opts["autoGroupColumnDef"] = {
-                            "headerName": "Build Tree",
-                            "pinned": "left",
-                            "minWidth": 420,
-                            "cellRendererParams": {
-                                "suppressCount": True,
-                                "innerRenderer": JsCode(
-                                    """
-                                    function(params) {
-                                        try {
-                                            var raw = (params && params.value !== null && params.value !== undefined) ? String(params.value) : '';
-                                            var name = raw.split('#')[0];
-                                            return name;
-                                        } catch (e) {
-                                            return (params && params.value !== null && params.value !== undefined) ? String(params.value) : '';
-                                        }
-                                    }
-                                    """
-                                ),
-                            },
+                    tree_rows.append(
+                        {
+                            "path": path_str,
+                            "type_id": type_id_i,
+                            "Icon": icon_url,
+                            "action": (str(action_display) if action_display is not None else rec),
+                            "reason": (str(n.get("reason")) if n.get("reason") is not None else None),
+                            "qty": safe_int_opt(qty),
+                            "qty_required": safe_int_opt(qty_required),
+                            # Displayed unit cost: planner-chosen effective cost per required unit.
+                            "unit": safe_float_opt(effective_unit),
+                            # Keep the market unit price available for JS comparisons and column menu.
+                            "market_unit": safe_float_opt(market_unit),
+                            # Shortfall decision metadata (usually only populated when prefer-inventory is enabled).
+                            "shortfall_qty": safe_int_opt(shortfall_qty),
+                            "shortfall_action": (str(shortfall_action) if shortfall_action is not None else None),
+                            "shortfall_buy_cost": safe_float_opt(shortfall_buy_cost),
+                            "shortfall_build_cost": safe_float_opt(shortfall_build_cost),
+                            "savings_isk": safe_float_opt(savings_isk),
+                            "inventory_used_qty": safe_int_opt(inv_used_qty),
+                            "inventory_fifo_priced_qty": safe_int_opt(inv_fifo_priced_qty),
+                            # Inventory cost (best-effort): FIFO when possible, else fallback to market for the inventory-used qty.
+                            "inventory_cost": safe_float_opt(inventory_cost_display) if (inv_used_qty_i is not None and int(inv_used_qty_i) > 0) else None,
+                            # Effective cost as provided by the planner (or backend rows).
+                            "effective_cost": safe_float_opt(effective_cost_display),
+                            "buy_cost": safe_float_opt(buy_cost_display),
+                            "build_cost": safe_float_opt(build_cost_display),
+                            "roi": float(roi_display) if roi_display is not None else None,
                         }
+                    )
 
-                        grid_opts["animateRows"] = True
-                        grid_opts["suppressRowClickSelection"] = False
-                        grid_opts["rowSelection"] = "single"
-                        grid_opts["onRowClicked"] = JsCode(
-                            """
-                            function(event) {
-                                try {
-                                    if (!event || !event.node) return;
-                                    if (event.node.childrenAfterGroup && event.node.childrenAfterGroup.length > 0) {
-                                        event.node.setExpanded(!event.node.expanded);
-                                    }
-                                } catch (e) {}
+                    children = n.get("children") or []
+                    # Always include the submanufacturing tree, regardless of Action.
+                    # (Tree starts collapsed; user can expand nodes as needed.)
+                    if isinstance(children, list) and len(children) > 0:
+                        for ch in children:
+                            if isinstance(ch, dict):
+                                _walk_tree(ch, parent_path=path)
+
+                if not use_backend_tree:
+                    for root in plan_rows:
+                        if isinstance(root, dict):
+                            _walk_tree(root, parent_path=[])
+
+                tree_df = pd.DataFrame(tree_rows)
+
+                # Summarize totals on the top-level root row (e.g. "Manufacturing" / "Manufacturing Job").
+                # Important: sum only *immediate children* to avoid double-counting,
+                # because parent nodes already represent the total for their subtree.
+                try:
+                    if not tree_df.empty and "path" in tree_df.columns:
+                        path_s = tree_df["path"].astype(str)
+                        # NOTE: pandas .str.count treats the pattern as a regex; our separator is "|||",
+                        # so use a literal split to compute depth.
+                        depth_s = path_s.str.split(_PATH_SEP, regex=False).str.len()
+
+                        root_paths = sorted(set(path_s.loc[depth_s == 1].tolist()))
+                        for root_path in root_paths:
+                            root_mask = path_s == root_path
+                            if not bool(root_mask.any()):
+                                continue
+
+                            child_mask = path_s.str.startswith(root_path + _PATH_SEP) & (depth_s == 2)
+
+                            def _parse_num(v: Any) -> float | None:
+                                try:
+                                    if v is None:
+                                        return None
+                                    if isinstance(v, (int, float)):
+                                        return float(v)
+                                    s = str(v).strip()
+                                    if not s or s == "-":
+                                        return None
+                                    s = s.replace("\u202f", "").replace(" ", "")
+                                    s = s.replace("ISK", "").replace("isk", "")
+                                    s = s.replace("%", "")
+                                    # Handle EU formatting:
+                                    # - "1.234,56" => 1234.56
+                                    # - "40,80" => 40.80
+                                    if "," in s and "." in s:
+                                        s = s.replace(".", "")
+                                        s = s.replace(",", ".")
+                                    elif "," in s and "." not in s:
+                                        s = s.replace(",", ".")
+                                    else:
+                                        # No comma present.
+                                        # Many values come in as EU thousands formatting, e.g. "114.095.973" or "25.225.200".
+                                        # If there are multiple dots, they are almost certainly thousands separators.
+                                        if s.count(".") > 1:
+                                            s = s.replace(".", "")
+                                        elif s.count(".") == 1:
+                                            # Ambiguous single dot: treat as thousands separator when it looks like grouping (###.###).
+                                            left, right = s.split(".", 1)
+                                            if left.isdigit() and right.isdigit() and len(right) == 3:
+                                                s = left + right
+
+                                    # Keep only digits, dot, minus.
+                                    cleaned = "".join(ch for ch in s if (ch.isdigit() or ch in {".", "-"}))
+                                    if cleaned in {"", "-", "."}:
+                                        return None
+                                    return float(cleaned)
+                                except Exception:
+                                    return None
+
+                            def _sum_numeric(col: str) -> float | None:
+                                if col not in tree_df.columns:
+                                    return None
+                                raw = tree_df.loc[child_mask, col]
+                                vals = [x for x in (_parse_num(v) for v in raw.tolist()) if x is not None]
+                                if not vals:
+                                    return None
+                                return float(sum(vals))
+
+                            eff_total = _sum_numeric("effective_cost")
+                            inv_total = _sum_numeric("inventory_cost")
+                            buy_total = _sum_numeric("buy_cost")
+
+                            if eff_total is not None and "effective_cost" in tree_df.columns:
+                                tree_df.loc[root_mask, "effective_cost"] = float(eff_total)
+                            if inv_total is not None and "inventory_cost" in tree_df.columns:
+                                tree_df.loc[root_mask, "inventory_cost"] = float(inv_total)
+                            if buy_total is not None and "buy_cost" in tree_df.columns:
+                                tree_df.loc[root_mask, "buy_cost"] = float(buy_total)
+
+                            # Effective / Unit for the root.
+                            if eff_total is not None and "unit" in tree_df.columns:
+                                qty_base_col = "qty_required" if "qty_required" in tree_df.columns else "qty"
+                                try:
+                                    qty_raw = tree_df.loc[root_mask, qty_base_col].iloc[0]
+                                    qty_n = _parse_num(qty_raw)
+                                except Exception:
+                                    qty_n = None
+                                if qty_n is not None and qty_n > 0:
+                                    tree_df.loc[root_mask, "unit"] = float(eff_total) / float(qty_n)
+                except Exception:
+                    pass
+
+                # Enable TreeData only when we actually emitted child rows.
+                # (We consider it hierarchical when any path contains the separator.)
+                use_tree = any((_PATH_SEP in str(r.get("path") or "")) for r in tree_rows)
+
+                # Keep a predictable column order.
+                preferred_cols = [
+                    "Icon",
+                    "action",
+                    "qty",
+                    "unit",
+                    "effective_cost",
+                    "inventory_cost",
+                    "buy_cost",
+                    "build_cost",
+                    "roi",
+                    "shortfall_qty",
+                    "shortfall_action",
+                    "shortfall_buy_cost",
+                    "shortfall_build_cost",
+                    "savings_isk",
+                    "path",
+                    "type_id",
+                ]
+                tree_df = tree_df[[c for c in preferred_cols if c in tree_df.columns] + [c for c in tree_df.columns if c not in preferred_cols]]
+
+                # Hide columns that are never populated (common for T1 blueprint selections).
+                # This keeps the Build Tree table compact and avoids empty "Build Cost" / "ROI" columns.
+                def _drop_if_all_empty(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+                    drop_cols: list[str] = []
+                    for col in cols:
+                        if col not in df.columns:
+                            continue
+                        s = pd.to_numeric(df[col], errors="coerce")
+                        if s.isna().all() or ((s.isna()) | (s == 0)).all():
+                            drop_cols.append(col)
+                    return df.drop(columns=drop_cols) if drop_cols else df
+
+                tree_df = _drop_if_all_empty(tree_df, ["build_cost", "roi"])
+
+                gb_tree = GridOptionsBuilder.from_dataframe(tree_df)
+                gb_tree.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+
+                # Hide internal columns
+                for c in [
+                    "path",
+                    "type_id",
+                    "reason",
+                    "inventory_used_qty",
+                    "inventory_fifo_priced_qty",
+                    "market_unit",
+                    "qty_required",
+                    # Keep these available via column menu, but hidden by default.
+                    "shortfall_qty",
+                    "shortfall_action",
+                    "shortfall_buy_cost",
+                    "shortfall_build_cost",
+                    "savings_isk",
+                ]:
+                    if c in tree_df.columns:
+                        gb_tree.configure_column(c, hide=True)
+
+                # Decryptor influence columns: keep visible (only populated for invention rows).
+
+                if "Icon" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "Icon",
+                        header_name="",
+                        width=56,
+                        pinned="left",
+                        sortable=False,
+                        filter=False,
+                        suppressAutoSize=True,
+                        cellRenderer=img_renderer,
+                    )
+
+                right_style = {"textAlign": "right"}
+                if "action" in tree_df.columns:
+                    gb_tree.configure_column("action", header_name="Action", minWidth=110)
+                if "qty" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "qty",
+                        header_name="Qty",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=100,
+                        cellStyle=right_style,
+                    )
+
+                # Invention/decryptor columns intentionally removed from the Build Tree table.
+
+                if "unit" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "unit",
+                        header_name="Effective / Unit",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                        minWidth=140,
+                        cellStyle=right_style,
+                    )
+
+                if "inventory_cost" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "inventory_cost",
+                        header_name="Inventory Cost",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=180,
+                        cellStyle=right_style,
+                    )
+
+                if "effective_cost" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "effective_cost",
+                        header_name="Effective Cost",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=200,
+                        cellStyle=right_style,
+                    )
+                if "buy_cost" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "buy_cost",
+                        header_name="Buy Cost",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=160,
+                        cellStyle=right_style,
+                    )
+                if "build_cost" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "build_cost",
+                        header_name="Build Cost",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=160,
+                        cellStyle=right_style,
+                    )
+                if "roi" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "roi",
+                        header_name="ROI",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_pct_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                        minWidth=110,
+                        cellStyle=right_style,
+                    )
+
+                if "shortfall_buy_cost" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "shortfall_buy_cost",
+                        header_name="Shortfall Buy Cost",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=190,
+                        cellStyle=right_style,
+                        hide=True,
+                    )
+                if "shortfall_build_cost" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "shortfall_build_cost",
+                        header_name="Shortfall Build Cost",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=200,
+                        cellStyle=right_style,
+                        hide=True,
+                    )
+                if "shortfall_qty" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "shortfall_qty",
+                        header_name="Shortfall Qty",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=150,
+                        cellStyle=right_style,
+                        hide=True,
+                    )
+                if "shortfall_action" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "shortfall_action",
+                        header_name="Shortfall Action",
+                        minWidth=170,
+                        hide=True,
+                    )
+                if "savings_isk" in tree_df.columns:
+                    gb_tree.configure_column(
+                        "savings_isk",
+                        header_name="Savings vs Buy",
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=170,
+                        cellStyle=right_style,
+                        hide=True,
+                    )
+
+                grid_opts = gb_tree.build()
+                grid_opts["autoSizeStrategy"] = {"type": "fitCellContents"}
+
+                if use_tree:
+                    grid_opts["treeData"] = True
+                    grid_opts["getDataPath"] = JsCode(
+                        """
+                        function(data) {
+                            try {
+                                if (!data || data.path === null || data.path === undefined) return [];
+                                var s = String(data.path);
+                                if (!s) return [];
+                                return s.split('|||').filter(function(x) { return x !== null && x !== undefined && String(x).length > 0; });
+                            } catch (e) {
+                                return [];
                             }
-                            """
-                        )
+                        }
+                        """
+                    )
+                    # Start collapsed so the user can expand nodes manually.
+                    # Expand the top-level "Manufacturing Job" row by default,
+                    # while keeping deeper levels collapsed.
+                    grid_opts["groupDefaultExpanded"] = 1
 
-                        height = min(650, 60 + (len(tree_df) * 32))
-                        AgGrid(
-                            tree_df,
-                            gridOptions=grid_opts,
-                            allow_unsafe_jscode=True,
-                            enable_enterprise_modules=True,
-                            theme="streamlit",
-                            height=height,
-                        )
+                    # Configure the tree column so it shows the actual submanufacturing step/item
+                    # instead of a generic "Group" column.
+                    grid_opts["autoGroupColumnDef"] = {
+                        "headerName": "Build Tree",
+                        "pinned": "left",
+                        "minWidth": 420,
+                        "cellRendererParams": {
+                            "suppressCount": True,
+                            "innerRenderer": JsCode(
+                                """
+                                function(params) {
+                                    try {
+                                        var raw = (params && params.value !== null && params.value !== undefined) ? String(params.value) : '';
+                                        var name = raw.split('#')[0];
+                                        return name;
+                                    } catch (e) {
+                                        return (params && params.value !== null && params.value !== undefined) ? String(params.value) : '';
+                                    }
+                                }
+                                """
+                            ),
+                        },
+                    }
 
-                        st.caption(
-                            BUILD_TREE_CAPTION
-                        )
-                    else:
-                        # Flat table: hide tree-only internals and don't enable TreeData.
-                        grid_opts.pop("treeData", None)
-                        grid_opts.pop("getDataPath", None)
-                        height = min(420, 60 + (len(tree_df) * 32))
-                        AgGrid(
-                            tree_df.drop(columns=[c for c in ["path", "type_id"] if c in tree_df.columns], errors="ignore"),
-                            gridOptions=grid_opts,
-                            allow_unsafe_jscode=True,
-                            theme="streamlit",
-                            height=height,
-                        )
+                    grid_opts["animateRows"] = True
+                    grid_opts["suppressRowClickSelection"] = False
+                    grid_opts["rowSelection"] = "single"
+                    grid_opts["onRowClicked"] = JsCode(
+                        """
+                        function(event) {
+                            try {
+                                if (!event || !event.node) return;
+                                if (event.node.childrenAfterGroup && event.node.childrenAfterGroup.length > 0) {
+                                    event.node.setExpanded(!event.node.expanded);
+                                }
+                            } catch (e) {}
+                        }
+                        """
+                    )
 
-                        st.caption(
-                            BUILD_TREE_CAPTION
-                        )
+                    height = min(650, 60 + (len(tree_df) * 32))
+                    AgGrid(
+                        tree_df,
+                        gridOptions=grid_opts,
+                        allow_unsafe_jscode=True,
+                        enable_enterprise_modules=True,
+                        theme="streamlit",
+                        height=height,
+                    )
+
+                    st.caption(
+                        BUILD_TREE_CAPTION
+                    )
+                else:
+                    # Flat table: hide tree-only internals and don't enable TreeData.
+                    grid_opts.pop("treeData", None)
+                    grid_opts.pop("getDataPath", None)
+                    height = min(420, 60 + (len(tree_df) * 32))
+                    AgGrid(
+                        tree_df.drop(columns=[c for c in ["path", "type_id"] if c in tree_df.columns], errors="ignore"),
+                        gridOptions=grid_opts,
+                        allow_unsafe_jscode=True,
+                        theme="streamlit",
+                        height=height,
+                    )
+
+                    st.caption(
+                        BUILD_TREE_CAPTION
+                    )
             else:
                 # Fallback when planner isn't available: show the simple materials table.
                 gb_mat = GridOptionsBuilder.from_dataframe(mat_df)
