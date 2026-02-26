@@ -27,7 +27,13 @@ from webpages.industry_builder_utils import (
     attach_aggrid_autosize,
     blueprint_image_url,
     coerce_fraction,
+    format_decimal_eu,
     format_duration,
+    format_isk_eu,
+    format_pct_eu,
+    js_eu_isk_formatter,
+    js_eu_number_formatter,
+    js_eu_pct_formatter,
     parse_json_cell,
     safe_float_opt,
     safe_int,
@@ -1107,25 +1113,6 @@ def render():
         st.code(f"{sys.executable} -m pip install streamlit-aggrid")
         st.info("Fallback: showing a basic table without AgGrid.")
 
-        # Fallback renderer (no true right-align): EU formatting as strings + icon images.
-        def _fmt_decimal_eu(value: Any, *, decimals: int = 2) -> str:
-            try:
-                if value is None or (isinstance(value, float) and pd.isna(value)):
-                    return "-"
-                v = float(value)
-            except Exception:
-                return "-"
-            s = f"{v:,.{int(decimals)}f}"  # 1,234,567.89
-            return s.replace(",", "X").replace(".", ",").replace("X", ".")
-
-        def _fmt_isk_eu(value: Any, *, decimals: int = 2) -> str:
-            s = _fmt_decimal_eu(value, decimals=decimals)
-            return f"{s} ISK" if s != "-" else "-"
-
-        def _fmt_pct_eu(value: Any, *, decimals: int = 2) -> str:
-            s = _fmt_decimal_eu(value, decimals=decimals)
-            return f"{s}%" if s != "-" else "-"
-
         view_df = display_df.copy()
         for c in [
             "Mat. Cost",
@@ -1146,11 +1133,11 @@ def render():
             "Profit / item",
         ]:
             if c in view_df.columns:
-                view_df[c] = view_df[c].apply(lambda x: _fmt_isk_eu(x, decimals=2))
+                view_df[c] = view_df[c].apply(lambda x: format_isk_eu(x, decimals=2))
         if "ROI" in view_df.columns:
-            view_df["ROI"] = view_df["ROI"].apply(lambda x: _fmt_pct_eu(x, decimals=2))
+            view_df["ROI"] = view_df["ROI"].apply(lambda x: format_pct_eu(x, decimals=2))
         if "Solar System Security" in view_df.columns:
-            view_df["Solar System Security"] = view_df["Solar System Security"].apply(lambda x: _fmt_decimal_eu(x, decimals=2))
+            view_df["Solar System Security"] = view_df["Solar System Security"].apply(lambda x: format_decimal_eu(x, decimals=2))
 
         fallback_config: dict[str, Any] = {}
         if "Icon" in view_df.columns:
@@ -1235,42 +1222,6 @@ def render():
         """
     )
 
-    def _js_eu_number(decimals: int):
-        return JsCode(
-            f"""
-                function(params) {{
-                if (params.value === null || params.value === undefined || params.value === "") return "";
-                const n = Number(params.value);
-                if (isNaN(n)) return "";
-                return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n);
-                }}
-            """
-        )
-
-    def _js_eu_isk(decimals: int):
-        return JsCode(
-            f"""
-                function(params) {{
-                if (params.value === null || params.value === undefined || params.value === "") return "";
-                const n = Number(params.value);
-                if (isNaN(n)) return "";
-                return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + ' ISK';
-                }}
-            """
-        )
-
-    def _js_eu_pct(decimals: int):
-        return JsCode(
-            f"""
-                function(params) {{
-                    if (params.value === null || params.value === undefined || params.value === "") return "";
-                    const n = Number(params.value);
-                    if (isNaN(n)) return "";
-                    return new Intl.NumberFormat('{eu_locale}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + '%';
-                }}
-            """
-        )
-
     gb = GridOptionsBuilder.from_dataframe(display_df)
     gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
 
@@ -1312,7 +1263,7 @@ def render():
             gb.configure_column(
                 c,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=_js_eu_isk(2),
+                valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
                 minWidth=150,
                 cellStyle=right,
             )
@@ -1321,7 +1272,7 @@ def render():
         gb.configure_column(
             "ROI",
             type=["numericColumn", "numberColumnFilter"],
-            valueFormatter=_js_eu_pct(2),
+            valueFormatter=js_eu_pct_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
             minWidth=110,
             cellStyle=right,
         )
@@ -1330,7 +1281,7 @@ def render():
         gb.configure_column(
             "Solar System Security",
             type=["numericColumn", "numberColumnFilter"],
-            valueFormatter=_js_eu_number(2),
+            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
             minWidth=150,
             cellStyle=right,
         )
