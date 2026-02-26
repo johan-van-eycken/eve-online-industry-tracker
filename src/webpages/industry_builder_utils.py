@@ -187,6 +187,76 @@ def safe_float_opt(v: Any) -> float | None:
         return None
 
 
+def blueprint_passes_filters(
+    bp: dict,
+    *,
+    maximize_blueprint_runs: bool,
+    bp_type_filter: str,
+    skill_req_filter: bool,
+    reactions_filter: bool,
+    location_filter: str,
+) -> bool:
+    if not isinstance(bp, dict):
+        return False
+
+    flags = bp.get("flags") or {}
+    is_bpc = bool(flags.get("is_blueprint_copy")) if isinstance(flags, dict) else False
+    if bool(maximize_blueprint_runs):
+        if not is_bpc:
+            return False
+    else:
+        if bp_type_filter == "Originals (BPO)" and is_bpc:
+            return False
+        if bp_type_filter == "Copies (BPC)" and not is_bpc:
+            return False
+
+    if skill_req_filter:
+        if not bool(bp.get("skill_requirements_met", False)):
+            return False
+
+    if reactions_filter is False:
+        flags = bp.get("flags") or {}
+        is_reaction_bp = bool(flags.get("is_reaction_blueprint")) if isinstance(flags, dict) else False
+        if is_reaction_bp:
+            return False
+
+    if location_filter != "All":
+        loc = bp.get("location") or {}
+        disp = (loc.get("display_name") if isinstance(loc, dict) else None) or ""
+        if str(disp) != str(location_filter):
+            return False
+
+    return True
+
+
+def industry_invention_cache_key(
+    *,
+    character_id: int,
+    blueprint_type_id: int,
+    profile_id: int | None,
+    pricing_key: str,
+) -> str:
+    # Include the pricing_key (market pricing + assumptions) and profile_id so cached
+    # invention rows match the current UI context.
+    return f"{int(character_id)}:{int(blueprint_type_id)}:p{int(profile_id or 0)}:{str(pricing_key)}"
+
+
+def min_known_positive(a: Any, b: Any) -> float | None:
+    vals: list[float] = []
+    try:
+        if a is not None:
+            vals.append(float(a))
+    except Exception:
+        pass
+    try:
+        if b is not None:
+            vals.append(float(b))
+    except Exception:
+        pass
+    vals = [v for v in vals if v > 0]
+    return min(vals) if vals else None
+
+
 def attach_aggrid_autosize(grid_options: dict[str, Any], *, JsCode: Any) -> None:
     if not isinstance(grid_options, dict) or JsCode is None:
         return

@@ -26,14 +26,17 @@ from webpages.industry_builder_utils import (
     MATERIALS_TABLE_COLUMN_CONFIG,
     attach_aggrid_autosize,
     blueprint_image_url,
+    blueprint_passes_filters,
     coerce_fraction,
     format_decimal_eu,
     format_duration,
     format_isk_eu,
     format_pct_eu,
+    industry_invention_cache_key,
     js_eu_isk_formatter,
     js_eu_number_formatter,
     js_eu_pct_formatter,
+    min_known_positive,
     parse_json_cell,
     safe_float_opt,
     safe_int,
@@ -440,39 +443,6 @@ def render():
             st.info("Click **Update Industry Jobs** to load data.")
         return
 
-    def _blueprint_passes_filters(bp: dict, *, bp_type_filter: str, skill_req_filter: bool, reactions_filter: bool, location_filter: str) -> bool:
-        if not isinstance(bp, dict):
-            return False
-
-        flags = bp.get("flags") or {}
-        is_bpc = bool(flags.get("is_blueprint_copy")) if isinstance(flags, dict) else False
-        if bool(st.session_state.get("maximize_blueprint_runs", False)):
-            if not is_bpc:
-                return False
-        else:
-            if bp_type_filter == "Originals (BPO)" and is_bpc:
-                return False
-            if bp_type_filter == "Copies (BPC)" and not is_bpc:
-                return False
-
-        if skill_req_filter:
-            if not bool(bp.get("skill_requirements_met", False)):
-                return False
-
-        if reactions_filter is False:
-            flags = bp.get("flags") or {}
-            is_reaction_bp = bool(flags.get("is_reaction_blueprint")) if isinstance(flags, dict) else False
-            if is_reaction_bp:
-                return False
-
-        if location_filter != "All":
-            loc = bp.get("location") or {}
-            disp = (loc.get("display_name") if isinstance(loc, dict) else None) or ""
-            if str(disp) != str(location_filter):
-                return False
-
-        return True
-
     # Precompute filter option lists from blueprint-level and product-level data.
     location_options = ["All"]
     all_locations: set[str] = set()
@@ -616,8 +586,9 @@ def render():
     filtered_blueprints = [
         bp
         for bp in industry_data
-        if _blueprint_passes_filters(
+        if blueprint_passes_filters(
             bp,
+            maximize_blueprint_runs=bool(st.session_state.get("maximize_blueprint_runs", False)),
             bp_type_filter=bp_type_filter,
             skill_req_filter=skill_req_filter,
             reactions_filter=reactions_filter,
@@ -633,16 +604,12 @@ def render():
         invention_cache = {}
         st.session_state["industry_invention_options_cache"] = invention_cache
 
-    def _inv_cache_key(*, character_id: int, blueprint_type_id: int, profile_id: int | None) -> str:
-        # Include the pricing_key (market pricing + assumptions) and profile_id so cached
-        # invention rows match the current UI context.
-        return f"{int(character_id)}:{int(blueprint_type_id)}:p{int(profile_id or 0)}:{str(pricing_key)}"
-
     def _get_invention_options(*, blueprint_type_id: int, force: bool = False) -> dict[str, Any] | None:
-        k = _inv_cache_key(
+        k = industry_invention_cache_key(
             character_id=int(selected_character_id),
             blueprint_type_id=int(blueprint_type_id),
             profile_id=(int(selected_profile_id) if selected_profile_id is not None else None),
+            pricing_key=str(pricing_key),
         )
         if not force:
             cached = invention_cache.get(k)
@@ -1291,7 +1258,7 @@ def render():
             gb.configure_column(
                 c,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=_js_eu_number(0),
+                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                 minWidth=110,
                 cellStyle=right,
             )
@@ -1526,7 +1493,7 @@ def render():
                 gb2.configure_column(
                     c,
                     type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=_js_eu_number(0),
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                     minWidth=110,
                     cellStyle=right,
                 )
@@ -1536,7 +1503,7 @@ def render():
                 "sec",
                 header_name="sec",
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=_js_eu_number(2),
+                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
                 minWidth=110,
                 cellStyle=right,
             )
@@ -1769,7 +1736,7 @@ def render():
                     gb_ci.configure_column(
                         "Job Runs",
                         type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_number(0),
+                        valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                         minWidth=110,
                         cellStyle=right,
                     )
@@ -1777,7 +1744,7 @@ def render():
                     gb_ci.configure_column(
                         "Qty",
                         type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_number(0),
+                        valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                         minWidth=110,
                         cellStyle=right,
                     )
@@ -1787,7 +1754,11 @@ def render():
                         gb_ci.configure_column(
                             c,
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0 if c != "Effective / unit" else 2),
+                            valueFormatter=js_eu_isk_formatter(
+                                JsCode=JsCode,
+                                locale=eu_locale,
+                                decimals=(0 if c != "Effective / unit" else 2),
+                            ),
                             minWidth=150,
                             cellStyle=right,
                         )
@@ -2126,7 +2097,7 @@ def render():
                         gb_copy.configure_column(
                             c,
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_number(0),
+                            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=110,
                             cellStyle=right_style,
                         )
@@ -2135,7 +2106,7 @@ def render():
                     gb_copy.configure_column(
                         "Job Fee",
                         type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=_js_eu_isk(0),
+                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                         minWidth=160,
                         cellStyle=right_style,
                     )
@@ -2633,31 +2604,16 @@ def render():
                                 if sf_qty_i is None:
                                     sf_qty_i = shortfall_qty_i
 
-                                def _min_known(a: Any, b: Any) -> float | None:
-                                    vals: list[float] = []
-                                    try:
-                                        if a is not None:
-                                            vals.append(float(a))
-                                    except Exception:
-                                        pass
-                                    try:
-                                        if b is not None:
-                                            vals.append(float(b))
-                                    except Exception:
-                                        pass
-                                    vals = [v for v in vals if v > 0]
-                                    return min(vals) if vals else None
-
                                 if inv_cost_for_eff is not None:
                                     if sf_qty_i is not None and int(sf_qty_i) > 0:
-                                        rem = _min_known(shortfall_buy_cost, shortfall_build_cost)
+                                        rem = min_known_positive(shortfall_buy_cost, shortfall_build_cost)
                                         if rem is None:
-                                            rem = _min_known(market_buy_cost, build_cost)
+                                            rem = min_known_positive(market_buy_cost, build_cost)
                                         effective_cost_display = float(inv_cost_for_eff) + float(rem or 0.0)
                                     else:
                                         effective_cost_display = float(inv_cost_for_eff)
                                 else:
-                                    rem = _min_known(market_buy_cost, build_cost)
+                                    rem = min_known_positive(market_buy_cost, build_cost)
                                     if rem is not None:
                                         effective_cost_display = float(rem)
                         except Exception:
@@ -2934,7 +2890,7 @@ def render():
                             "qty",
                             header_name="Qty",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_number(0),
+                            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=100,
                             cellStyle=right_style,
                         )
@@ -2946,7 +2902,7 @@ def render():
                             "unit",
                             header_name="Effective / Unit",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(2),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
                             minWidth=140,
                             cellStyle=right_style,
                         )
@@ -2956,7 +2912,7 @@ def render():
                             "inventory_cost",
                             header_name="Inventory Cost",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=180,
                             cellStyle=JsCode(
                                 """
@@ -2986,7 +2942,7 @@ def render():
                             "effective_cost",
                             header_name="Effective Cost",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=200,
                             cellStyle=right_style,
                         )
@@ -2995,7 +2951,7 @@ def render():
                             "buy_cost",
                             header_name="Buy Cost",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=160,
                             cellStyle=JsCode(
                                 """
@@ -3069,7 +3025,7 @@ def render():
                             "build_cost",
                             header_name="Build Cost",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=160,
                             cellStyle=JsCode(
                                 """
@@ -3138,7 +3094,7 @@ def render():
                             "roi",
                             header_name="ROI",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_pct(2),
+                            valueFormatter=js_eu_pct_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
                             minWidth=110,
                             cellStyle=JsCode(
                                 """
@@ -3170,7 +3126,7 @@ def render():
                             "shortfall_buy_cost",
                             header_name="Shortfall Buy Cost",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=190,
                             cellStyle=right_style,
                             hide=True,
@@ -3180,7 +3136,7 @@ def render():
                             "shortfall_build_cost",
                             header_name="Shortfall Build Cost",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=200,
                             cellStyle=right_style,
                             hide=True,
@@ -3190,7 +3146,7 @@ def render():
                             "shortfall_qty",
                             header_name="Shortfall Qty",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_number(0),
+                            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=150,
                             cellStyle=right_style,
                             hide=True,
@@ -3207,7 +3163,7 @@ def render():
                             "savings_isk",
                             header_name="Savings vs Buy",
                             type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=_js_eu_isk(0),
+                            valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                             minWidth=170,
                             cellStyle=right_style,
                             hide=True,
