@@ -514,6 +514,7 @@ def enrich_blueprints_for_character(
     db_sde_session: Any | None = None,
     language: str | None = None,
     use_fifo_inventory_costing: bool = True,
+    prefer_inventory_consumption: bool = True,
     pricing_preferences: dict | None = None,
 ) -> List[Dict[str, Any]]:
     """Apply character-skill requirements and basic cost/value analysis.
@@ -1158,6 +1159,7 @@ def enrich_blueprints_for_character(
     # --- Inventory FIFO lots (best-effort) ---
     # We precompute this once per request and reuse for all blueprint calculations.
     use_fifo_inventory_costing = bool(use_fifo_inventory_costing)
+    prefer_inventory_consumption = bool(prefer_inventory_consumption)
     inventory_on_hand_by_type: dict[int, int] = {}
     fifo_lots_by_type: dict[int, list] = {}
 
@@ -1505,6 +1507,7 @@ def enrich_blueprints_for_character(
             bool(should_compute_submfg),
             int(submanufacturing_blueprint_type_id or 0),
             3,  # max_depth
+            bool(prefer_inventory_consumption),
         )
 
         cached_calc = computed_blueprint_cache.get(cache_key)
@@ -1715,6 +1718,7 @@ def enrich_blueprints_for_character(
                             inventory_on_hand_by_type=inventory_on_hand_by_type,
                             inventory_fifo_lots_by_type=fifo_lots_by_type,
                             use_fifo_inventory_costing=use_fifo_inventory_costing,
+                            prefer_inventory_consumption=prefer_inventory_consumption,
                             max_depth=3,
                         )
 

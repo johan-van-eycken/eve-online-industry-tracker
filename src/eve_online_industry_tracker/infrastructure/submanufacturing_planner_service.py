@@ -232,7 +232,9 @@ def plan_submanufacturing_tree(
     inventory_on_hand_by_type: dict[int, int] | None = None,
     inventory_fifo_lots_by_type: dict[int, list[FifoLot]] | None = None,
     use_fifo_inventory_costing: bool = True,
+    prefer_inventory_consumption: bool = True,
     max_depth: int = 3,
+    price_map: dict[int, dict[str, float | None]] | None = None,
 ) -> list[dict]:
     """Recursive build-vs-buy planner.
 
@@ -254,7 +256,12 @@ def plan_submanufacturing_tree(
     mfg_product_to_bps = _index_blueprints_by_product(all_bp_data)
     reaction_product_type_ids = _index_activity_product_type_ids(sde_session, activity="reaction")
 
-    price_map = _build_price_map(esi_service)
+    prefer_inventory_consumption = bool(prefer_inventory_consumption)
+
+    if isinstance(price_map, dict) and price_map:
+        price_map = price_map
+    else:
+        price_map = _build_price_map(esi_service)
 
     use_fifo_inventory_costing = bool(use_fifo_inventory_costing)
     inventory_on_hand_by_type = inventory_on_hand_by_type or {}
@@ -408,10 +415,30 @@ def plan_submanufacturing_tree(
 
         buy_unit, buy_cost, buy_details = _buy_cost_for_type(type_id_i, qty_i)
 
+        inv_used_qty = _safe_int(buy_details.get("inventory_used_qty"), default=0)
+        buy_now_qty = _safe_int(buy_details.get("buy_now_qty"), default=max(0, qty_i - inv_used_qty))
+        fifo_cost = buy_details.get("inventory_fifo_cost_isk")
+        unknown_inv_qty = _safe_int(buy_details.get("inventory_unknown_cost_qty"), default=0)
+
+        inv_cost_forced: float | None = None
+        if prefer_inventory_consumption and use_fifo_inventory_costing and qty_i > 0 and inv_used_qty > 0:
+            try:
+                fifo_cost_f = float(fifo_cost or 0.0)
+            except Exception:
+                fifo_cost_f = 0.0
+
+            if int(unknown_inv_qty) > 0:
+                if buy_unit is None:
+                    inv_cost_forced = None
+                else:
+                    inv_cost_forced = float(fifo_cost_f) + (float(unknown_inv_qty) * float(buy_unit))
+            else:
+                inv_cost_forced = float(fifo_cost_f)
+
         take_possible = False
         try:
-            inv_used = int(buy_details.get("inventory_used_qty") or 0)
-            buy_now = int(buy_details.get("buy_now_qty") or 0)
+            inv_used = int(inv_used_qty or 0)
+            buy_now = int(buy_now_qty or 0)
             fifo_priced = int(buy_details.get("inventory_fifo_priced_qty") or 0)
             eff_unit = buy_details.get("buy_effective_unit_price_isk")
             if (
@@ -454,33 +481,76 @@ def plan_submanufacturing_tree(
             "children": [],
         }
 
+        def _forced_inv_only_effective() -> tuple[str | None, float | None, float | None]:
+            """Return (recommendation, effective_cost, effective_time_seconds) for prefer-inventory mode.
+
+            - Always consumes on-hand inventory first.
+            - For any remaining shortfall, falls back to buy-at-market when build is unavailable.
+            """
+
+            if not (prefer_inventory_consumption and use_fifo_inventory_costing and qty_i > 0 and inv_used_qty > 0):
+                return None, None, None
+
+            if buy_now_qty <= 0:
+                return "take", float(inv_cost_forced) if inv_cost_forced is not None else None, 0.0
+
+            if buy_unit is None or inv_cost_forced is None:
+                return "buy", None, None
+
+            total = float(inv_cost_forced) + (float(buy_now_qty) * float(buy_unit))
+            return "buy", float(total), 0.0
+
         if depth >= max_depth:
             node["reason"] = "max_depth_reached"
-            node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
-            node["effective_cost_isk"] = buy_cost
-            node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
+            forced_rec, forced_cost, forced_time = _forced_inv_only_effective()
+            if forced_rec is not None:
+                node["recommendation"] = forced_rec
+                node["effective_cost_isk"] = forced_cost
+                node["effective_time_seconds"] = forced_time
+            else:
+                node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
+                node["effective_cost_isk"] = buy_cost
+                node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
             return node
 
         if type_id_i in path:
             node["reason"] = "cycle_detected"
-            node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
-            node["effective_cost_isk"] = buy_cost
-            node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
+            forced_rec, forced_cost, forced_time = _forced_inv_only_effective()
+            if forced_rec is not None:
+                node["recommendation"] = forced_rec
+                node["effective_cost_isk"] = forced_cost
+                node["effective_time_seconds"] = forced_time
+            else:
+                node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
+                node["effective_cost_isk"] = buy_cost
+                node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
             return node
 
         if _is_reaction_only(type_id_i):
             node["reason"] = "reaction_formula_not_supported"
-            node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
-            node["effective_cost_isk"] = buy_cost
-            node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
+            forced_rec, forced_cost, forced_time = _forced_inv_only_effective()
+            if forced_rec is not None:
+                node["recommendation"] = forced_rec
+                node["effective_cost_isk"] = forced_cost
+                node["effective_time_seconds"] = forced_time
+            else:
+                node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
+                node["effective_cost_isk"] = buy_cost
+                node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
             return node
 
         best = _pick_best_mfg_blueprint_for_product(type_id_i)
         if best is None:
             node["reason"] = "no_blueprint_found"
-            node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
-            node["effective_cost_isk"] = buy_cost
-            node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
+            forced_rec, forced_cost, forced_time = _forced_inv_only_effective()
+            if forced_rec is not None:
+                node["recommendation"] = forced_rec
+                node["effective_cost_isk"] = forced_cost
+                node["effective_time_seconds"] = forced_time
+            else:
+                node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
+                node["effective_cost_isk"] = buy_cost
+                node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
             return node
 
         blueprint_type_id = int(best.get("blueprint_type_id") or 0)
@@ -489,12 +559,29 @@ def plan_submanufacturing_tree(
         output_per_run = int(best.get("product_quantity_per_run") or 0)
         if output_per_run <= 0:
             node["reason"] = "invalid_blueprint_output"
-            node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
-            node["effective_cost_isk"] = buy_cost
-            node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
+            forced_rec, forced_cost, forced_time = _forced_inv_only_effective()
+            if forced_rec is not None:
+                node["recommendation"] = forced_rec
+                node["effective_cost_isk"] = forced_cost
+                node["effective_time_seconds"] = forced_time
+            else:
+                node["recommendation"] = ("take" if take_possible else "buy") if buy_cost is not None else None
+                node["effective_cost_isk"] = buy_cost
+                node["effective_time_seconds"] = 0.0 if buy_cost is not None else None
             return node
 
-        runs_needed = _ceil_div(qty_i, output_per_run)
+        # Prefer-inventory mode: consume on-hand first, then plan build/buy only for the shortfall.
+        qty_to_plan_for_build = int(qty_i)
+        if prefer_inventory_consumption and use_fifo_inventory_costing and int(inv_used_qty) > 0:
+            qty_to_plan_for_build = int(max(0, int(buy_now_qty)))
+            if qty_to_plan_for_build <= 0:
+                node["reason"] = "inventory_consumed"
+                node["recommendation"] = "take"
+                node["effective_cost_isk"] = float(inv_cost_forced) if inv_cost_forced is not None else buy_cost
+                node["effective_time_seconds"] = 0.0 if node.get("effective_cost_isk") is not None else None
+                return node
+
+        runs_needed = _ceil_div(int(qty_to_plan_for_build), output_per_run)
         output_total = runs_needed * output_per_run
 
         mfg = bp_info.get("manufacturing") if isinstance(bp_info, dict) else None
@@ -669,7 +756,49 @@ def plan_submanufacturing_tree(
             "copy_overhead": copy_overhead,
         }
 
-        if buy_cost is not None and total_build_cost is not None:
+        if prefer_inventory_consumption and use_fifo_inventory_costing and int(inv_used_qty) > 0 and int(buy_now_qty) > 0:
+            buy_shortfall_cost = (float(buy_unit) * float(buy_now_qty)) if buy_unit is not None else None
+            build_shortfall_cost = float(total_build_cost) if total_build_cost is not None else None
+
+            buy_total = (
+                (float(inv_cost_forced) + float(buy_shortfall_cost))
+                if (inv_cost_forced is not None and buy_shortfall_cost is not None)
+                else None
+            )
+            build_total = (
+                (float(inv_cost_forced) + float(build_shortfall_cost))
+                if (inv_cost_forced is not None and build_shortfall_cost is not None)
+                else None
+            )
+
+            if buy_total is not None and build_total is not None:
+                savings = float(buy_total) - float(build_total)
+                rec = "build" if savings > 0 else "buy"
+                node["recommendation"] = rec
+                node["savings_isk"] = float(savings)
+                node["effective_cost_isk"] = float(build_total) if rec == "build" else float(buy_total)
+                node["effective_time_seconds"] = (
+                    float(total_build_time_seconds)
+                    if (rec == "build" and total_build_time_seconds is not None)
+                    else 0.0
+                )
+            else:
+                # Best-effort fallback: prefer build if buy is unpriced.
+                if build_total is not None and buy_total is None:
+                    node["recommendation"] = "build"
+                    node["effective_cost_isk"] = float(build_total)
+                    node["effective_time_seconds"] = (
+                        float(total_build_time_seconds) if total_build_time_seconds is not None else None
+                    )
+                    node["reason"] = "buy_price_missing"
+                else:
+                    node["recommendation"] = "buy" if buy_total is not None else None
+                    node["effective_cost_isk"] = float(buy_total) if buy_total is not None else None
+                    node["effective_time_seconds"] = 0.0 if buy_total is not None else None
+                    if node.get("reason") is None:
+                        node["reason"] = "insufficient_price_data"
+
+        elif buy_cost is not None and total_build_cost is not None:
             savings = float(buy_cost) - float(total_build_cost)
             rec = "build" if savings > 0 else "buy"
             node["recommendation"] = ("take" if take_possible else "buy") if rec == "buy" else rec
