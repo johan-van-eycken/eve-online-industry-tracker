@@ -40,6 +40,10 @@ class ESIService:
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}
+        # { (order_type, region_id): (timestamp, [orders]) }
+        # Note: ESI /markets/{region_id}/orders supports order_type, but not type_id.
+        # We fetch the region orderbook once per (order_type, region_id) and filter locally.
+        self._region_orders_cache: Dict[tuple, tuple] = {}
         # (timestamp, [prices])
         self._market_prices_cache: Optional[tuple] = None
         # { (system_id, filter): (timestamp, [structures]) }
@@ -70,7 +74,7 @@ class ESIService:
         now = time.time()
         all_orders: List[Dict[str, Any]] = []
 
-        # Collect cached results first and parallel-fetch missing type_ids.
+        # Collect cached results first and fetch missing type_ids.
         to_fetch: List[int] = []
         for type_id in type_ids_list:
             cache_key = (order_type, region_id, type_id)
@@ -83,60 +87,66 @@ class ESIService:
         if not to_fetch:
             return all_orders
 
-        def _fetch_one(tid: int) -> tuple[int, list[dict]]:
+        # ESI does not support type_id filtering for region orders, so fetch the
+        # relevant orderbook once and cache per-type slices.
+        region_cache_key = (order_type, region_id)
+        region_cached = self._region_orders_cache.get(region_cache_key)
+        if region_cached and (now - region_cached[0] < self._type_orders_cache_ttl_seconds):
+            region_orders = region_cached[1]
+        else:
             # Small jitter to avoid spiky bursts against ESI.
             try:
                 time.sleep(random.uniform(0.0, 0.15))
             except Exception:
                 pass
 
-            cache_key = (order_type, region_id, int(tid))
             try:
-                data = self._esi_client.esi_get(
+                region_orders = self._esi_client.esi_get(
                     f"/markets/{region_id}/orders",
-                    params={"order_type": order_type, "type_id": int(tid)},
+                    params={"order_type": order_type},
                     paginate=True,
                 )
             except Exception as e:
                 logging.warning(
-                    "ESI market orders fetch failed (type_id=%s, order_type=%s, region_id=%s): %s",
-                    tid,
+                    "ESI market orders fetch failed (order_type=%s, region_id=%s): %s",
                     order_type,
                     region_id,
                     e,
                 )
-                # Degrade gracefully: cache empty to avoid repeated failing requests.
-                self._type_orders_cache[cache_key] = (time.time(), [])
-                return int(tid), []
+                region_orders = []
+
+            if not isinstance(region_orders, list):
+                region_orders = []
 
             # Defensive filter by is_buy_order.
             if order_type == "sell":
-                collected = [order for order in data if isinstance(order, dict) and order.get("is_buy_order") is False]
+                region_orders = [
+                    order
+                    for order in region_orders
+                    if isinstance(order, dict) and order.get("is_buy_order") is False
+                ]
             elif order_type == "buy":
-                collected = [order for order in data if isinstance(order, dict) and order.get("is_buy_order") is True]
-            else:
-                collected = list(data) if isinstance(data, list) else []
+                region_orders = [
+                    order
+                    for order in region_orders
+                    if isinstance(order, dict) and order.get("is_buy_order") is True
+                ]
 
+            self._region_orders_cache[region_cache_key] = (time.time(), region_orders)
+
+        wanted = set(to_fetch)
+        by_type: Dict[int, list[dict]] = {tid: [] for tid in wanted}
+        for order in region_orders:
+            if not isinstance(order, dict):
+                continue
+            tid = order.get("type_id")
+            if tid in wanted:
+                by_type[int(tid)].append(order)
+
+        for tid, collected in by_type.items():
+            cache_key = (order_type, region_id, int(tid))
             self._type_orders_cache[cache_key] = (time.time(), collected)
-            return int(tid), collected
-
-        # Parallelize to reduce total wall-clock time when many type_ids are requested.
-        max_workers = min(10, max(1, len(to_fetch)))
-        try:
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = [ex.submit(_fetch_one, int(tid)) for tid in to_fetch]
-                for fut in futures:
-                    try:
-                        _, collected = fut.result()
-                        all_orders.extend(collected)
-                    except Exception as e:
-                        # Should be rare because _fetch_one is defensive, but keep robustness.
-                        logging.warning("ESI market orders worker failed: %s", e)
-        except Exception as e:
-            logging.warning("ESI market orders parallel fetch failed, falling back to sequential: %s", e)
-            for tid in to_fetch:
-                _, collected = _fetch_one(int(tid))
-                all_orders.extend(collected)
+            all_orders.extend(collected)
 
         return all_orders
 

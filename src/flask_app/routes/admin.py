@@ -22,6 +22,8 @@ from flask_app.settings import (
     public_structures_startup_scan_time_budget_seconds,
 )
 
+from utils.esi_monitor import get_esi_monitor
+
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -170,3 +172,25 @@ def stop_public_structures_scan():
     svc = AdminService(state=get_state())
     out = svc.stop_public_structures_scan()
     return ok(message=out["message"], meta=out["meta"])
+
+
+@admin_bp.get("/esi_metrics")
+def esi_metrics():
+    """Return in-process ESI call metrics.
+
+    This endpoint is intentionally available even while the app is initializing,
+    so developers can observe startup ESI traffic.
+    """
+
+    def _int_arg(name: str, default: int) -> int:
+        raw = request.args.get(name)
+        if raw in (None, ""):
+            return int(default)
+        return int(raw)
+
+    window = _int_arg("window", 900)
+    bucket = _int_arg("bucket", 5)
+    top = _int_arg("top", 20)
+
+    snap = get_esi_monitor().snapshot(window_seconds=window, bucket_seconds=bucket, top_n=top)
+    return ok(data=snap)
