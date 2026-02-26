@@ -669,7 +669,9 @@ def compute_ui_build_tree_rows_by_product(
 
         build = n.get("build") if isinstance(n.get("build"), dict) else None
         build_full = n.get("build_full") if isinstance(n.get("build_full"), dict) else None
-        build_for_cost = build if (rec == "build" and isinstance(build, dict)) else build_full
+        # Prefer an explicit full-build alternative when provided, but otherwise fall back to the
+        # computed build option even when the planner recommends buying.
+        build_for_cost = build_full if isinstance(build_full, dict) else build
         build_cost = build_for_cost.get("total_build_cost_isk") if isinstance(build_for_cost, dict) else None
 
         shortfall_qty = n.get("shortfall_quantity")
