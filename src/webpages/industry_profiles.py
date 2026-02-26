@@ -1,5 +1,17 @@
 import streamlit as st
 import pandas as pd
+import sys
+import traceback
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
+except Exception:  # pragma: no cover
+    AgGrid = None  # type: ignore
+    GridOptionsBuilder = None  # type: ignore
+    JsCode = None  # type: ignore
+    _AGGRID_IMPORT_ERROR = traceback.format_exc()
+else:
+    _AGGRID_IMPORT_ERROR = None
 
 from utils.app_init import load_config, init_db_app
 from utils.flask_api import cached_api_get, api_get, api_post, api_put, api_delete
@@ -289,6 +301,18 @@ def _infer_upwell_size_from_type_name(type_name: str | None) -> str | None:
 
 def render():
     st.subheader("Industry Profiles")
+
+    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+        st.error(
+            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
+            "Install it in the same Python environment and restart Streamlit."
+        )
+        st.caption(f"Python: {sys.executable}")
+        if _AGGRID_IMPORT_ERROR:
+            with st.expander("Import error details", expanded=False):
+                st.code(_AGGRID_IMPORT_ERROR)
+        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
+        st.stop()
 
     if "show_create_new_profile" not in st.session_state:
         st.session_state["show_create_new_profile"] = False
@@ -934,7 +958,17 @@ def render():
             rig_options,
             rig_bonus_map,
         )
-        st.dataframe(effects_df, width="stretch", hide_index=True)
+        gb = GridOptionsBuilder.from_dataframe(effects_df)
+        gb.configure_default_column(resizable=True, sortable=True, filter=True)
+        grid_options = gb.build()
+        height = min(500, 40 + (len(effects_df) * 35))
+        AgGrid(
+            effects_df,
+            gridOptions=grid_options,
+            allow_unsafe_jscode=True,
+            theme="streamlit",
+            height=height,
+        )
 
     with st.form("create_profile_form"):
         profile_name = st.text_input(

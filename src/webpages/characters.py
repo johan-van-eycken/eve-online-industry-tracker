@@ -1,8 +1,22 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
+import sys
+import traceback
+from typing import cast
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
+except Exception:  # pragma: no cover
+    AgGrid = None  # type: ignore
+    GridOptionsBuilder = None  # type: ignore
+    JsCode = None  # type: ignore
+    _AGGRID_IMPORT_ERROR = traceback.format_exc()
+else:
+    _AGGRID_IMPORT_ERROR = None
 
 from utils.flask_api import cached_api_get, api_get, api_post
+from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
 from utils.formatters import format_isk, format_date, format_date_into_age
 
 
@@ -11,6 +25,92 @@ def _get_character_oauth_metadata() -> dict | None:
     return api_get("/characters/oauth")
 
 def render():
+    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+        st.error(
+            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
+            "Install it in the same Python environment and restart Streamlit."
+        )
+        st.caption(f"Python: {sys.executable}")
+        if _AGGRID_IMPORT_ERROR:
+            with st.expander("Import error details", expanded=False):
+                st.code(_AGGRID_IMPORT_ERROR)
+        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
+        st.stop()
+
+    # Re-import to get non-optional symbols for type checkers.
+    from st_aggrid import AgGrid as AgGrid_, GridOptionsBuilder as GridOptionsBuilder_, JsCode as JsCode_  # type: ignore
+
+    eu_locale = "nl-NL"  # '.' thousands, ',' decimals
+
+    img_renderer = js_icon_cell_renderer(JsCode=JsCode_, size_px=24)
+
+    def _render_aggrid_table(
+        df: pd.DataFrame,
+        *,
+        key: str,
+        isk_cols: list[str] | None = None,
+        int_cols: list[str] | None = None,
+        float_cols: list[str] | None = None,
+        height: int | None = None,
+    ) -> None:
+        gb = GridOptionsBuilder_.from_dataframe(df)
+        gb.configure_default_column(resizable=True, sortable=True, filter=True, wrapText=False)
+
+        if "image_url" in df.columns:
+            gb.configure_column(
+                "image_url",
+                headerName="",
+                width=60,
+                pinned="left",
+                cellRenderer=img_renderer,
+                suppressSizeToFit=True,
+            )
+
+        for col in (isk_cols or []):
+            if col in df.columns:
+                gb.configure_column(
+                    col,
+                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode_, locale=eu_locale, decimals=2),
+                    type=["numericColumn"],
+                )
+
+        for col in (int_cols or []):
+            if col in df.columns:
+                gb.configure_column(
+                    col,
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode_, locale=eu_locale, decimals=0),
+                    type=["numericColumn"],
+                )
+
+        for col in (float_cols or []):
+            if col in df.columns:
+                gb.configure_column(
+                    col,
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode_, locale=eu_locale, decimals=2),
+                    type=["numericColumn"],
+                )
+
+        grid_options = gb.build()
+        if height is None:
+            AgGrid_(
+                df,
+                gridOptions=grid_options,
+                key=key,
+                fit_columns_on_grid_load=True,
+                allow_unsafe_jscode=True,
+                theme="streamlit",
+            )
+        else:
+            AgGrid_(
+                df,
+                gridOptions=grid_options,
+                key=key,
+                height=int(height),
+                fit_columns_on_grid_load=True,
+                allow_unsafe_jscode=True,
+                theme="streamlit",
+            )
+
     # -- Custom Style --
     st.markdown("""
         <style>
@@ -82,7 +182,7 @@ def render():
 
     # Fetch all characters data from backend
     try:
-        characters_response = cached_api_get("/characters")
+        characters_response = cached_api_get("/characters") or {}
         if characters_response.get("status") != "success":
             st.error(f"Failed to get characters data: {characters_response.get('message', 'Unknown error')}")
             st.stop()
@@ -100,7 +200,7 @@ def render():
     with col_btn:
         if st.button("Refresh Wallets Balances"):
             try:
-                response = api_get("/characters/wallet_balances")
+                response = api_get("/characters/wallet_balances") or {}
                 if response.get("status") != "success":
                     raise Exception(f"{response.get('message', 'Unknown error')}")
                 response_data = response.get("data", [])
@@ -338,7 +438,12 @@ def render():
             """, unsafe_allow_html=True)
 
             # Display wallet transaction entries
-            st.dataframe(journal_df.sort_values(by="date", ascending=False), width="stretch")
+            journal_view = journal_df.sort_values(by=["date"], ascending=False)
+            _render_aggrid_table(
+                journal_view,
+                key="character_wallet_journal",
+                isk_cols=[c for c in ["amount", "balance"] if c in journal_view.columns],
+            )
 
         except Exception as e:
             st.warning(f"No wallet journal data found. {e}")
@@ -379,7 +484,13 @@ def render():
             st.stop()
 
         # Display wallet transaction entries
-        st.dataframe(transactions_df.sort_values(by="date", ascending=False), width="stretch")
+        tx_view = transactions_df.sort_values(by=["date"], ascending=False)
+        _render_aggrid_table(
+            tx_view,
+            key="character_wallet_transactions",
+            isk_cols=[c for c in ["unit_price", "total_price"] if c in tx_view.columns],
+            int_cols=[c for c in ["quantity"] if c in tx_view.columns],
+        )
 
     # --- CHARACTER SETTINGS / AUTH TAB ---
     with tab_settings:
@@ -388,10 +499,10 @@ def render():
 
         meta = _get_character_oauth_metadata()
         if meta is None or meta.get("status") != "success":
-            st.warning(
-                "OAuth metadata unavailable. "
-                + (meta.get("message") if isinstance(meta, dict) else "")
-            )
+            if isinstance(meta, dict):
+                st.warning(f"OAuth metadata unavailable. {str(meta.get('message') or '')}")
+            else:
+                st.warning("OAuth metadata unavailable.")
         else:
             rows = meta.get("data", []) or []
             target = None
@@ -451,8 +562,8 @@ def render():
         @st.cache_data(ttl=3600) 
         def get_location_info_cached(location_ids):
             try:
-                response = api_post(f"/locations", payload={"location_ids": list(map(int, location_ids))})
-                return response
+                response = api_post("/locations", payload={"location_ids": list(map(int, location_ids))})
+                return response or {}
             except Exception as e:
                 st.error(f"Error fetching location info from backend: {e}")
                 return {}
@@ -548,10 +659,8 @@ def render():
 
         if selected_location_id:
             # Show containers as expanders
-            containers = assets_df[
-                (assets_df["location_id"] == selected_location_id) &
-                (assets_df["is_container"])
-            ].sort_values(by="container_name")
+            container_mask = (assets_df["location_id"] == selected_location_id) & (assets_df["is_container"])
+            containers: pd.DataFrame = cast(pd.DataFrame, assets_df.loc[container_mask, :]).sort_values(by=["container_name"])
 
             assetsafety_locations = assets_df[assets_df["location_flag"] == "AssetSafety"]["location_id"].unique()
             
@@ -599,24 +708,24 @@ def render():
                                 "type_category_name",
                             ]
                             display_columns = [c for c in display_columns if c in df.columns]
-                            df_display = df[display_columns].sort_values(by="type_name")
-                            column_config = {
-                                "image_url": st.column_config.ImageColumn("", width="auto"),
-                                "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
-                                "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
-                                "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
-                                "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
-                                "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                            }
-                            column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
-                            st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
+                            df_display: pd.DataFrame = cast(pd.DataFrame, df.filter(items=display_columns)).sort_values(by=["type_name"])
+                            _render_aggrid_table(
+                                df_display,
+                                key=f"character_container_{int(container['item_id'])}",
+                                isk_cols=[
+                                    c
+                                    for c in [
+                                        "acquisition_unit_cost",
+                                        "acquisition_total_cost",
+                                        "type_average_price",
+                                        "total_average_price",
+                                    ]
+                                    if c in df_display.columns
+                                ],
+                                int_cols=[c for c in ["quantity"] if c in df_display.columns],
+                                float_cols=[c for c in ["type_volume", "total_volume"] if c in df_display.columns],
+                                height=320,
+                            )
                         else:
                             st.info("No items in this container.")
 
@@ -657,24 +766,15 @@ def render():
                     "type_category_name",
                 ]
                 display_columns = [c for c in display_columns if c in df.columns]
-                df_display = df[display_columns].sort_values(by="type_name")
-                column_config = {
-                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                    "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
-                    "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
-                    "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
-                    "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
-                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                }
-                column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
-                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
+                df_display: pd.DataFrame = cast(pd.DataFrame, df.filter(items=display_columns)).sort_values(by=["type_name"])
+                _render_aggrid_table(
+                    df_display,
+                    key=f"character_hangar_{int(selected_location_id)}",
+                    isk_cols=[c for c in ["acquisition_unit_cost", "acquisition_total_cost", "type_average_price", "total_average_price"] if c in df_display.columns],
+                    int_cols=[c for c in ["quantity"] if c in df_display.columns],
+                    float_cols=[c for c in ["type_volume", "total_volume"] if c in df_display.columns],
+                    height=420,
+                )
             st.divider()
 
             if selected_location_id in assetsafety_locations:
@@ -715,33 +815,22 @@ def render():
                                     "type_category_name",
                                 ]
                                 display_columns = [c for c in display_columns if c in df.columns]
-                                df_display = df[display_columns].sort_values(by="type_name")
-                                column_config = {
-                                    "image_url": st.column_config.ImageColumn("", width="auto"),
-                                    "type_name": st.column_config.TextColumn("Name", width="auto"),
-                                    "quantity": st.column_config.NumberColumn("Quantity", width="auto"),
-                                    "type_volume": st.column_config.NumberColumn("Volume", width="auto"),
-                                    "total_volume": st.column_config.NumberColumn("Total Volume", width="auto"),
-                                    "acquisition_source": st.column_config.TextColumn("Source", width="auto"),
-                                    "acquisition_unit_cost": st.column_config.NumberColumn("Unit Cost", width="auto"),
-                                    "acquisition_total_cost": st.column_config.NumberColumn("Total Cost", width="auto"),
-                                    "acquisition_date": st.column_config.TextColumn("Acquired", width="auto"),
-                                    "type_average_price": st.column_config.NumberColumn("Value", width="auto"),
-                                    "total_average_price": st.column_config.NumberColumn("Total Value", width="auto"),
-                                    "type_group_name": st.column_config.TextColumn("Group", width="auto"),
-                                    "type_category_name": st.column_config.TextColumn("Category", width="auto"),
-                                }
-                                column_config = {k: v for k, v in column_config.items() if k in df_display.columns}
-                                st.dataframe(df_display, width="stretch", column_config=column_config, hide_index=True)
+                                df_display: pd.DataFrame = cast(pd.DataFrame, df.filter(items=display_columns)).sort_values(by=["type_name"])
+                                _render_aggrid_table(
+                                    df_display,
+                                    key=f"character_assetsafety_wrap_{int(wrap['item_id'])}",
+                                    isk_cols=[c for c in ["acquisition_unit_cost", "acquisition_total_cost", "type_average_price", "total_average_price"] if c in df_display.columns],
+                                    int_cols=[c for c in ["quantity"] if c in df_display.columns],
+                                    float_cols=[c for c in ["type_volume", "total_volume"] if c in df_display.columns],
+                                    height=420,
+                                )
                             else:
                                 st.info("No items in this container.")
                 st.divider()
             
             # Show ships at this location
-            ships = assets_df[
-                (assets_df["location_id"] == selected_location_id) &
-                (assets_df["is_ship"])
-            ].sort_values(by="ship_name")
+            ships_mask = (assets_df["location_id"] == selected_location_id) & (assets_df["is_ship"])
+            ships: pd.DataFrame = cast(pd.DataFrame, assets_df.loc[ships_mask, :]).sort_values(by=["ship_name"])
 
             total_average_price = (ships["type_average_price"] * ships["quantity"]).sum()
             total_volume = (ships["type_volume"] * ships["quantity"]).sum()
