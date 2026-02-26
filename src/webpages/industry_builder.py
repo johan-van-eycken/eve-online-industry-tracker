@@ -28,6 +28,7 @@ from utils.formatters import (
     format_pct_eu,
     type_icon_url,
 )
+from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter
 
 from utils.industry_builder_utils import (
     BUILD_TREE_CAPTION,
@@ -36,9 +37,6 @@ from utils.industry_builder_utils import (
     blueprint_passes_filters,
     coerce_fraction,
     industry_invention_cache_key,
-    js_eu_isk_formatter,
-    js_eu_number_formatter,
-    js_eu_pct_formatter,
     min_known_positive,
     parse_json_cell,
     safe_float_opt,
