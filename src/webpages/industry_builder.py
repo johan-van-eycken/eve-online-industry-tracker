@@ -20,18 +20,21 @@ else:
 
 from utils.app_init import load_config, init_db_app
 from utils.flask_api import api_get, api_post
+from utils.formatters import (
+    blueprint_image_url,
+    format_decimal_eu,
+    format_duration,
+    format_isk_eu,
+    format_pct_eu,
+    type_icon_url,
+)
 
 from utils.industry_builder_utils import (
     BUILD_TREE_CAPTION,
     MATERIALS_TABLE_COLUMN_CONFIG,
     attach_aggrid_autosize,
-    blueprint_image_url,
     blueprint_passes_filters,
     coerce_fraction,
-    format_decimal_eu,
-    format_duration,
-    format_isk_eu,
-    format_pct_eu,
     industry_invention_cache_key,
     js_eu_isk_formatter,
     js_eu_number_formatter,
@@ -41,7 +44,6 @@ from utils.industry_builder_utils import (
     safe_float_opt,
     safe_int,
     safe_int_opt,
-    type_icon_url,
 )
 
 @st.cache_data(ttl=3600)
