@@ -83,6 +83,85 @@ def format_duration(seconds: float | int | None) -> str:
     return " ".join(parts)
 
 
+def format_decimal_eu(value: Any, *, decimals: int = 2, missing: str = "-") -> str:
+    """Format a numeric value using EU separators.
+
+    - Thousands separator: '.'
+    - Decimal separator  : ','
+
+    This is used for Streamlit fallback tables when AgGrid is unavailable.
+    """
+
+    try:
+        if value is None:
+            return missing
+        if isinstance(value, float) and math.isnan(value):
+            return missing
+        if isinstance(value, str) and not value.strip():
+            return missing
+        v = float(value)
+    except Exception:
+        return missing
+
+    s = f"{v:,.{int(decimals)}f}"  # 1,234,567.89
+    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_isk_eu(value: Any, *, decimals: int = 2, missing: str = "-") -> str:
+    s = format_decimal_eu(value, decimals=decimals, missing=missing)
+    return f"{s} ISK" if s != missing else missing
+
+
+def format_pct_eu(value: Any, *, decimals: int = 2, missing: str = "-") -> str:
+    s = format_decimal_eu(value, decimals=decimals, missing=missing)
+    return f"{s}%" if s != missing else missing
+
+
+def js_eu_number_formatter(*, JsCode: Any, locale: str, decimals: int) -> Any:
+    if JsCode is None:
+        return None
+    return JsCode(
+        f"""
+            function(params) {{
+            if (params.value === null || params.value === undefined || params.value === \"\") return \"\";
+            const n = Number(params.value);
+            if (isNaN(n)) return \"\";
+            return new Intl.NumberFormat('{str(locale)}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n);
+            }}
+        """
+    )
+
+
+def js_eu_isk_formatter(*, JsCode: Any, locale: str, decimals: int) -> Any:
+    if JsCode is None:
+        return None
+    return JsCode(
+        f"""
+            function(params) {{
+            if (params.value === null || params.value === undefined || params.value === \"\") return \"\";
+            const n = Number(params.value);
+            if (isNaN(n)) return \"\";
+            return new Intl.NumberFormat('{str(locale)}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + ' ISK';
+            }}
+        """
+    )
+
+
+def js_eu_pct_formatter(*, JsCode: Any, locale: str, decimals: int) -> Any:
+    if JsCode is None:
+        return None
+    return JsCode(
+        f"""
+            function(params) {{
+                if (params.value === null || params.value === undefined || params.value === \"\") return \"\";
+                const n = Number(params.value);
+                if (isNaN(n)) return \"\";
+                return new Intl.NumberFormat('{str(locale)}', {{ minimumFractionDigits: {int(decimals)}, maximumFractionDigits: {int(decimals)} }}).format(n) + '%';
+            }}
+        """
+    )
+
+
 def safe_int(v: Any, default: int = 0) -> int:
     try:
         return int(v)
