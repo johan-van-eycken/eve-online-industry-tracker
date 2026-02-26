@@ -59,13 +59,16 @@ def enrich_blueprints_for_character(
     market_price_map: dict[int, dict[str, float | None]] | None = None,
 ) -> Any:
     # Compatibility shim: `IndustryService` passes these newer kwargs.
-    # - `prefer_inventory_consumption` maps to FIFO inventory costing in the builder service.
+    # - `prefer_inventory_consumption` controls planner behavior (consume on-hand FIFO first).
     # - The others are currently unused by the builder service but accepted to avoid crashes.
     _ = assume_bpo_copy_overhead
     _ = esi_market_prices
     _ = market_price_map
 
-    use_fifo_inventory_costing = True if prefer_inventory_consumption is None else bool(prefer_inventory_consumption)
+    prefer_inventory_consumption_b = True if prefer_inventory_consumption is None else bool(prefer_inventory_consumption)
+    # FIFO lots/valuation remain enabled; the preference only affects whether inventory is forced
+    # to be consumed before making build-vs-buy decisions.
+    use_fifo_inventory_costing = True
     return industry_builder_service.enrich_blueprints_for_character(
         all_blueprints,
         character,
@@ -87,6 +90,7 @@ def enrich_blueprints_for_character(
         db_sde_session=db_sde_session,
         language=language,
         use_fifo_inventory_costing=use_fifo_inventory_costing,
+        prefer_inventory_consumption=prefer_inventory_consumption_b,
         pricing_preferences=(pricing_preferences if isinstance(pricing_preferences, dict) else None),
     )
 

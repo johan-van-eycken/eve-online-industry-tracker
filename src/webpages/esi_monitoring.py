@@ -265,7 +265,7 @@ def render() -> None:
                     [{"status": str(k), "count": int(v)} for k, v in calls_by_status.items()]
                 ).sort_values("count", ascending=False)
                 height_st = max(240, min(520, 40 + (len(df_status) * 28)))
-                st.dataframe(df_status, use_container_width=True, height=height_st, hide_index=True)
+                st.dataframe(df_status, width='stretch', height=height_st, hide_index=True)
             else:
                 st.info("No status data yet.")
 
@@ -276,7 +276,7 @@ def render() -> None:
                 ).sort_values("count", ascending=False)
                 df_cache["count"] = pd.to_numeric(df_cache["count"], errors="coerce").fillna(0).astype(int)
                 height_c = max(240, min(520, 40 + (len(df_cache) * 28)))
-                st.dataframe(df_cache, use_container_width=True, height=height_c, hide_index=True)
+                st.dataframe(df_cache, width='stretch', height=height_c, hide_index=True)
             else:
                 st.info("No cache counters recorded yet.")
 
@@ -297,7 +297,7 @@ def render() -> None:
                 show_cols = [c for c in ["method", "endpoint", "pages"] if c in df_pages.columns]
                 df_pages = df_pages[show_cols]
                 height_p = max(240, min(520, 40 + (len(df_pages) * 28)))
-                st.dataframe(df_pages, use_container_width=True, height=height_p, hide_index=True)
+                st.dataframe(df_pages, width='stretch', height=height_p, hide_index=True)
             else:
                 st.info("No pagination pages recorded yet.")
 
@@ -309,7 +309,7 @@ def render() -> None:
                     [{"reason": str(k), "count": int(v)} for k, v in retry_by_reason.items()]
                 ).sort_values("count", ascending=False)
                 height_r = max(240, min(520, 40 + (len(df_r) * 28)))
-                st.dataframe(df_r, use_container_width=True, height=height_r, hide_index=True)
+                st.dataframe(df_r, width='stretch', height=height_r, hide_index=True)
             else:
                 st.info("No retries recorded yet.")
 
@@ -321,7 +321,7 @@ def render() -> None:
                     [{"exception": str(k), "count": int(v)} for k, v in ex_by_type.items()]
                 ).sort_values("count", ascending=False)
                 height_ex = max(240, min(520, 40 + (len(df_ex) * 28)))
-                st.dataframe(df_ex, use_container_width=True, height=height_ex, hide_index=True)
+                st.dataframe(df_ex, width='stretch', height=height_ex, hide_index=True)
             else:
                 st.info("No exceptions recorded yet.")
 
@@ -349,7 +349,7 @@ def render() -> None:
                         df_slow[col] = pd.to_numeric(df_slow[col], errors="coerce").fillna(0).astype(int)
 
                 height_s = max(260, min(520, 40 + (len(df_slow) * 28)))
-                st.dataframe(df_slow, use_container_width=True, height=height_s, hide_index=True)
+                st.dataframe(df_slow, width='stretch', height=height_s, hide_index=True)
             else:
                 st.info("No latency samples recorded yet.")
 
@@ -377,7 +377,7 @@ def render() -> None:
                 ]
                 df_issues = df_issues[show_cols]
                 height2 = max(280, min(520, 40 + (len(df_issues) * 28)))
-                st.dataframe(df_issues, use_container_width=True, height=height2, hide_index=True)
+                st.dataframe(df_issues, width='stretch', height=height2, hide_index=True)
         else:
             st.info("No ESI warnings/errors recorded yet.")
 

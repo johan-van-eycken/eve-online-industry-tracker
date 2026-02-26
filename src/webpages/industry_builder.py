@@ -1563,12 +1563,44 @@ def render():
         if candidate_kind == "invention":
             st.markdown("#### Copy & Invention Jobs")
 
+            units_total = safe_int(selected_row.get("units_total"), default=0)
+            total_cost = None
+            copy_fee_total = None
+            copy_time_total = None
+            inv_fee_total = None
+            inv_time_total = None
+            decryptor = str(best.get("decryptor_type_name") or "(none)")
+            p = safe_float_opt(best.get("success_probability"))
+            attempts_per_success = (1.0 / float(p)) if (p is not None and float(p) > 0) else None
+
             _PATH_SEP = "|||"
             ci_rows = (
                 inv_data.get("best_ui_copy_invention_jobs_rows")
                 if isinstance(inv_data.get("best_ui_copy_invention_jobs_rows"), list)
                 else []
             )
+
+            # Derive summary values from the UI table rows (computed server-side).
+            # This keeps the caption/expander consistent with what the user sees in the tree.
+            for r in ci_rows:
+                if not isinstance(r, dict):
+                    continue
+                path = str(r.get("path") or "")
+                top = path.split(_PATH_SEP)[0] if _PATH_SEP in path else path
+                if top.endswith("(Copying)"):
+                    copy_fee_total = safe_float_opt(r.get("Job Fee"))
+                    copy_time_total = safe_float_opt(r.get("Duration"))
+                elif top.endswith("(Invention)"):
+                    inv_fee_total = safe_float_opt(r.get("Job Fee"))
+                    inv_time_total = safe_float_opt(r.get("Duration"))
+                elif top.strip().lower() == "total":
+                    fee = safe_float_opt(r.get("Job Fee"))
+                    eff = safe_float_opt(r.get("Effective Cost"))
+                    try:
+                        if fee is not None or eff is not None:
+                            total_cost = float(fee or 0.0) + float(eff or 0.0)
+                    except Exception:
+                        total_cost = None
             if not ci_rows:
                 st.caption("No Copy & Invention job breakdown available.")
 
