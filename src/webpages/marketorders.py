@@ -1,7 +1,20 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
+import sys
+import traceback
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
+except Exception:  # pragma: no cover
+    AgGrid = None  # type: ignore
+    GridOptionsBuilder = None  # type: ignore
+    JsCode = None  # type: ignore
+    _AGGRID_IMPORT_ERROR = traceback.format_exc()
+else:
+    _AGGRID_IMPORT_ERROR = None
 
 from utils.flask_api import api_get
+from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
 from utils.formatters import format_isk_short
 
 
@@ -12,7 +25,7 @@ def _rerun() -> None:
 # -- Cached API calls --
 @st.cache_data(ttl=3600)
 def get_all_orders():
-    return api_get("/characters/market_orders") or []
+    return api_get("/characters/market_orders") or {}
 
 def get_item_image_url(order):
     """Get the image URL for a single order item."""
@@ -35,6 +48,23 @@ def get_item_image_url(order):
 def render():
     st.header("Market Orders")
 
+    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+        st.error(
+            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
+            "Install it in the same Python environment and restart Streamlit."
+        )
+        st.caption(f"Python: {sys.executable}")
+        if _AGGRID_IMPORT_ERROR:
+            with st.expander("Import error details", expanded=False):
+                st.code(_AGGRID_IMPORT_ERROR)
+        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
+        st.stop()
+
+    eu_locale = "nl-NL"  # '.' thousands, ',' decimals
+    right = {"textAlign": "right"}
+
+    img_renderer = js_icon_cell_renderer(JsCode=JsCode, size_px=24)
+
     all_orders = []
     try:
         response = get_all_orders()
@@ -42,6 +72,8 @@ def render():
     except Exception as e:
         st.error(f"Error fetching market orders: {str(e)}")
         return
+
+    selected_owner = "All"
 
     # Split into sell and buy orders
     sell_orders = []
@@ -117,21 +149,36 @@ def render():
             unsafe_allow_html=True,
         )
 
-        # Sell Orders
-        st.dataframe(
+        gb = GridOptionsBuilder.from_dataframe(df)
+        gb.configure_default_column(resizable=True, sortable=True, filter=True)
+        gb.configure_column("Icon", headerName="", width=60, cellRenderer=img_renderer, suppressSizeToFit=True)
+        for c in ["Price", "Total Price", "Price Difference"]:
+            if c in df.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                    cellStyle=right,
+                    minWidth=120,
+                )
+        for c in ["Volume", "Min. Volume"]:
+            if c in df.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                    cellStyle=right,
+                    minWidth=110,
+                )
+
+        grid_options = gb.build()
+        height = min(700, 40 + (len(df) * 35))
+        AgGrid(
             df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Icon": st.column_config.ImageColumn("", width="small"),
-                "Price": st.column_config.NumberColumn("Price", format="%.2f ISK"),
-                "Total Price": st.column_config.NumberColumn(
-                    "Total Price", format="%.2f ISK"
-                ),
-                "Price Difference": st.column_config.NumberColumn(
-                    "Price Difference", format="%.2f ISK"
-                ),
-            },
+            gridOptions=grid_options,
+            allow_unsafe_jscode=True,
+            theme="streamlit",
+            height=height,
         )
     else:
         st.info("No market sell orders found.")
@@ -157,21 +204,36 @@ def render():
             unsafe_allow_html=True,
         )
 
-        # Buy Orders
-        st.dataframe(
+        gb = GridOptionsBuilder.from_dataframe(df)
+        gb.configure_default_column(resizable=True, sortable=True, filter=True)
+        gb.configure_column("Icon", headerName="", width=60, cellRenderer=img_renderer, suppressSizeToFit=True)
+        for c in ["Price", "Total Price", "Price Difference", "Escrow Remaining"]:
+            if c in df.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                    cellStyle=right,
+                    minWidth=120,
+                )
+        for c in ["Volume", "Min. Volume"]:
+            if c in df.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                    cellStyle=right,
+                    minWidth=110,
+                )
+
+        grid_options = gb.build()
+        height = min(700, 40 + (len(df) * 35))
+        AgGrid(
             df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Icon": st.column_config.ImageColumn("", width="small"),
-                "Price": st.column_config.NumberColumn("Price", format="%.2f ISK"),
-                "Total Price": st.column_config.NumberColumn(
-                    "Total Price", format="%.2f ISK"
-                ),
-                "Price Difference": st.column_config.NumberColumn(
-                    "Price Difference", format="%.2f ISK"
-                ),
-            },
+            gridOptions=grid_options,
+            allow_unsafe_jscode=True,
+            theme="streamlit",
+            height=height,
         )
     else:
         st.info("No market buy orders found.")

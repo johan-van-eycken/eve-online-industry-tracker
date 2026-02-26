@@ -1,8 +1,21 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
+import sys
+import traceback
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
+except Exception:  # pragma: no cover
+    AgGrid = None  # type: ignore
+    GridOptionsBuilder = None  # type: ignore
+    JsCode = None  # type: ignore
+    _AGGRID_IMPORT_ERROR = traceback.format_exc()
+else:
+    _AGGRID_IMPORT_ERROR = None
 
 from utils.app_init import load_config, init_db_app
 from utils.flask_api import api_get, api_post
+from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter
 
 #-- Cached API calls --
 @st.cache_data(ttl=3600)
@@ -28,6 +41,85 @@ def get_all_facilities():
 #-- Main Render Function --
 def render():
     st.header("Ore Calculator (MILP Version)")
+
+    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+        st.error(
+            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
+            "Install it in the same Python environment and restart Streamlit."
+        )
+        st.caption(f"Python: {sys.executable}")
+        if _AGGRID_IMPORT_ERROR:
+            with st.expander("Import error details", expanded=False):
+                st.code(_AGGRID_IMPORT_ERROR)
+        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
+        st.stop()
+
+    eu_locale = "nl-NL"  # '.' thousands, ',' decimals
+    right = {"textAlign": "right"}
+
+    def _render_aggrid_table(
+        df_in: pd.DataFrame,
+        *,
+        isk_cols: list[str] | None = None,
+        pct_cols: list[str] | None = None,
+        num_cols_0: list[str] | None = None,
+        num_cols_2: list[str] | None = None,
+        height_max: int = 700,
+    ) -> None:
+        if df_in is None or df_in.empty:
+            st.info("No data.")
+            return
+
+        df_tbl = df_in.copy()
+        gb = GridOptionsBuilder.from_dataframe(df_tbl)
+        gb.configure_default_column(resizable=True, sortable=True, filter=True)
+
+        for c in (isk_cols or []):
+            if c in df_tbl.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                    cellStyle=right,
+                    minWidth=120,
+                )
+        for c in (pct_cols or []):
+            if c in df_tbl.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_pct_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                    cellStyle=right,
+                    minWidth=110,
+                )
+        for c in (num_cols_0 or []):
+            if c in df_tbl.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                    cellStyle=right,
+                    minWidth=110,
+                )
+        for c in (num_cols_2 or []):
+            if c in df_tbl.columns:
+                gb.configure_column(
+                    c,
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                    cellStyle=right,
+                    minWidth=110,
+                )
+
+        grid_options = gb.build()
+        height = min(height_max, 40 + (len(df_tbl) * 35))
+        AgGrid(
+            df_tbl,
+            gridOptions=grid_options,
+            allow_unsafe_jscode=True,
+            theme="streamlit",
+            height=height,
+        )
 
     all_materials = get_all_materials()
     st.write("All Minerals: " + ", ".join(all_materials))
@@ -244,23 +336,40 @@ def render():
     sol_col, raw_col = st.columns(2)
     with sol_col:
         st.subheader("Optimized Ore Solution")
-        st.dataframe(
-            opt_display["df_solution"].rename(columns={
-                "ore_id": "Ore ID", "ore_name": "Ore", "batches": "Batches",
-                "batch_size": "Batch Size", "ore_units": "Ore Units", "cost": "Total Cost (ISK)",
-                "unit_price": "Unit Price (ISK)"
-            }),
-            width="stretch"
+        df_solution = opt_display["df_solution"].rename(
+            columns={
+                "ore_id": "Ore ID",
+                "ore_name": "Ore",
+                "batches": "Batches",
+                "batch_size": "Batch Size",
+                "ore_units": "Ore Units",
+                "cost": "Total Cost (ISK)",
+                "unit_price": "Unit Price (ISK)",
+            }
+        )
+        _render_aggrid_table(
+            df_solution,
+            num_cols_0=["Ore ID", "Batches", "Batch Size", "Ore Units"],
+            isk_cols=["Unit Price (ISK)", "Total Cost (ISK)"],
         )
         st.caption("Each row shows an ore type selected by the optimizer. 'Ore Units' = Batches × Batch Size.")
 
         st.markdown("**Ores Purchase Summary**")
-        st.dataframe(opt_display["df_ore_summary"], width="stretch")
+        _render_aggrid_table(
+            opt_display["df_ore_summary"],
+            num_cols_0=["Ore ID", "Ore Units"],
+            num_cols_2=["Volume (m3)", "ISK / Ore Unit"],
+            isk_cols=["Avg Unit Price", "Total Cost (ISK)"],
+        )
         st.caption("Summary of all ores purchased, including total volume.")
 
     with raw_col:
         st.subheader("Raw Minerals (Direct Market Purchase)")
-        st.dataframe(opt_display["df_raw"], width="stretch")
+        _render_aggrid_table(
+            opt_display["df_raw"],
+            num_cols_0=["quantity", "Qty", "Demand", "Yielded", "Surplus", "Shortfall"],
+            isk_cols=["Total Cost (ISK)", "Unit Price (ISK)", "Cost"],
+        )
         st.caption("Minerals required if you buy everything directly from the market.")
 
     # Optional debug sections
@@ -277,7 +386,10 @@ def render():
                     "Yield per Batch": qty
                 })
         if df_yields:
-            st.dataframe(pd.DataFrame(df_yields), width="stretch")
+            _render_aggrid_table(
+                pd.DataFrame(df_yields),
+                num_cols_0=["Ore ID", "Portion Size", "Yield per Batch"],
+            )
         else:
             st.info("No yield data available.")
 
@@ -295,7 +407,10 @@ def render():
                 "surplus": "Surplus",
                 "shortfall": "Shortfall"
             })
-            st.dataframe(df_coverage.style.format("{:,.2f}"), width="stretch")
+            _render_aggrid_table(
+                df_coverage,
+                num_cols_2=["Demand", "Yielded", "Surplus", "Shortfall"],
+            )
             st.caption("Shows for each mineral: demand, actual yield, surplus (overproduction), and any shortfall.")
 
     if opt_display["show_formula"]:

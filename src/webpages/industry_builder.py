@@ -28,7 +28,7 @@ from utils.formatters import (
     format_pct_eu,
     type_icon_url,
 )
-from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter
+from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter, js_icon_cell_renderer
 
 from utils.industry_builder_utils import (
     BUILD_TREE_CAPTION,
@@ -49,10 +49,31 @@ def _get_industry_profiles(character_id: int) -> dict | None:
     return api_get(f"/industry_profiles/{int(character_id)}")
 
 
-def render():
-    st.subheader("Industry Builder")
+def _industry_builder_setup_and_get_industry_data() -> dict[str, Any]:
+    """Build page context and fetch Industry Builder data.
+
+    This function intentionally owns the heavy setup + update/polling workflow so the
+    public `render()` stays small enough for static analyzers.
+    """
+
+    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
+        st.error(
+            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
+            "Install it in the same Python environment and restart Streamlit."
+        )
+        st.caption(f"Python: {sys.executable}")
+        if _AGGRID_IMPORT_ERROR:
+            with st.expander("Import error details", expanded=False):
+                st.code(_AGGRID_IMPORT_ERROR)
+        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
+        st.stop()
+
+    assert AgGrid is not None
+    assert GridOptionsBuilder is not None
+    assert JsCode is not None
 
     db: Any = None
+    cfg: Any = None
 
     try:
         cfgManager = load_config()
@@ -70,7 +91,6 @@ def render():
         characters_df = db.load_df("characters")
     except Exception:
         st.warning("No character data found. Run main.py first.")
-
         st.stop()
 
     assert characters_df is not None
@@ -84,7 +104,16 @@ def render():
     )
 
     if not selected_character_id:
-        return
+        return {
+            "cfg": cfg,
+            "characters_df": characters_df,
+            "selected_character_id": None,
+            "selected_profile_id": None,
+            "pricing_key": "",
+            "effective_sales_tax_fraction": 0.0,
+            "effective_broker_fee_fraction": 0.0,
+            "industry_data": [],
+        }
 
     # Background-update state (set up early so we can avoid extra backend calls during polling reruns).
     if "industry_builder_job_id" not in st.session_state:
@@ -441,6 +470,51 @@ def render():
         # Avoid flicker while an update is in progress.
         if not bool(st.session_state.get("industry_builder_job_id")) and not bool(st.session_state.get("industry_builder_job_inflight")):
             st.info("Click **Update Industry Jobs** to load data.")
+        return {
+            "cfg": cfg,
+            "characters_df": characters_df,
+            "selected_character_id": int(selected_character_id),
+            "selected_profile_id": (int(selected_profile_id) if selected_profile_id is not None else None),
+            "pricing_key": str(pricing_key),
+            "effective_sales_tax_fraction": float(effective_sales_tax_fraction),
+            "effective_broker_fee_fraction": float(effective_broker_fee_fraction),
+            "industry_data": [],
+        }
+
+    return {
+        "cfg": cfg,
+        "characters_df": characters_df,
+        "selected_character_id": int(selected_character_id),
+        "selected_profile_id": (int(selected_profile_id) if selected_profile_id is not None else None),
+        "pricing_key": str(pricing_key),
+        "effective_sales_tax_fraction": float(effective_sales_tax_fraction),
+        "effective_broker_fee_fraction": float(effective_broker_fee_fraction),
+        "industry_data": industry_data,
+    }
+
+
+def render():
+    st.subheader("Industry Builder")
+    ctx = _industry_builder_setup_and_get_industry_data()
+
+    # AgGrid availability is guaranteed by `_industry_builder_setup_and_get_industry_data()`.
+    assert AgGrid is not None
+    assert GridOptionsBuilder is not None
+    assert JsCode is not None
+
+    cfg = ctx.get("cfg")
+    characters_df = ctx.get("characters_df")
+    selected_character_id = ctx.get("selected_character_id")
+    selected_profile_id = ctx.get("selected_profile_id")
+    pricing_key = ctx.get("pricing_key")
+    effective_sales_tax_fraction = float(ctx.get("effective_sales_tax_fraction") or 0.0)
+    effective_broker_fee_fraction = float(ctx.get("effective_broker_fee_fraction") or 0.0)
+    industry_data = ctx.get("industry_data") or []
+
+    if not selected_character_id:
+        return
+
+    if not isinstance(industry_data, list) or not industry_data:
         return
 
     # Precompute filter option lists from blueprint-level and product-level data.
@@ -1068,126 +1142,9 @@ def render():
     _cols += [c for c in display_df.columns if c not in _cols]
     display_df = display_df[_cols]
 
-    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-        st.error(
-            "Failed to import streamlit-aggrid in the running Streamlit process. "
-            "This usually means it isn't installed in the same Python interpreter, or Streamlit needs a restart after install."
-        )
-        st.caption(f"Python: {sys.executable}")
-        if _AGGRID_IMPORT_ERROR:
-            with st.expander("Import error details", expanded=False):
-                st.code(_AGGRID_IMPORT_ERROR)
-        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
-        st.info("Fallback: showing a basic table without AgGrid.")
-
-        view_df = display_df.copy()
-        for c in [
-            "Mat. Cost",
-            "Copy Cost",
-            "Total Cost",
-            "Job Fee",
-            "Revenue",
-            "Sales Tax",
-            "Broker Fee",
-            "Profit",
-            "Mat. Cost / item",
-            "Copy Cost / item",
-            "Total Cost / item",
-            "Job Fee / item",
-            "Revenue / item",
-            "Sales Tax / item",
-            "Broker Fee / item",
-            "Profit / item",
-        ]:
-            if c in view_df.columns:
-                view_df[c] = view_df[c].apply(lambda x: format_isk_eu(x, decimals=2))
-        if "ROI" in view_df.columns:
-            view_df["ROI"] = view_df["ROI"].apply(lambda x: format_pct_eu(x, decimals=2))
-        if "Solar System Security" in view_df.columns:
-            view_df["Solar System Security"] = view_df["Solar System Security"].apply(lambda x: format_decimal_eu(x, decimals=2))
-
-        fallback_config: dict[str, Any] = {}
-        if "Icon" in view_df.columns:
-            fallback_config["Icon"] = st.column_config.ImageColumn("Icon", width="small")
-        st.data_editor(
-            view_df,
-            width="stretch",
-            hide_index=True,
-            disabled=True,
-            num_rows="fixed",
-            column_config=fallback_config or None,
-        )
-        st.divider()
-        return
-
     eu_locale = "nl-NL"  # '.' thousands, ',' decimals
 
-    img_renderer = JsCode(
-        """
-            (function() {
-                function IconRenderer() {}
-
-                IconRenderer.prototype.init = function(params) {
-                    this.eGui = document.createElement('div');
-                    this.eGui.style.display = 'flex';
-                    this.eGui.style.alignItems = 'center';
-                    this.eGui.style.justifyContent = 'center';
-                    this.eGui.style.width = '100%';
-
-                    var url = (params && params.value) ? String(params.value) : '';
-                    if (!url) {
-                        // No icon for this row.
-                        this.eImg = null;
-                        return;
-                    }
-
-                    this.eImg = document.createElement('img');
-                    this.eImg.style.width = '32px';
-                    this.eImg.style.height = '32px';
-                    this.eImg.style.display = 'block';
-                    this.eImg.onerror = function() {
-                        try { this.style.display = 'none'; } catch (e) {}
-                    };
-                    this.eImg.src = url;
-
-                    this.eGui.appendChild(this.eImg);
-                };
-
-                IconRenderer.prototype.getGui = function() {
-                    return this.eGui;
-                };
-
-                IconRenderer.prototype.refresh = function(params) {
-                    try {
-                        var url = (params && params.value) ? String(params.value) : '';
-                        if (!url) {
-                            if (this.eImg) {
-                                this.eImg.style.display = 'none';
-                            }
-                            return true;
-                        }
-                        if (!this.eImg) {
-                            this.eImg = document.createElement('img');
-                            this.eImg.style.width = '32px';
-                            this.eImg.style.height = '32px';
-                            this.eImg.style.display = 'block';
-                            this.eImg.onerror = function() {
-                                try { this.style.display = 'none'; } catch (e) {}
-                            };
-                            this.eGui.appendChild(this.eImg);
-                        }
-                        this.eImg.style.display = 'block';
-                        this.eImg.src = url;
-                    } catch (e) {
-                        // ignore
-                    }
-                    return true;
-                };
-
-                return IconRenderer;
-            })()
-        """
-    )
+    img_renderer = js_icon_cell_renderer(JsCode=JsCode, size_px=32)
 
     gb = GridOptionsBuilder.from_dataframe(display_df)
     gb.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
@@ -1460,65 +1417,53 @@ def render():
         candidates_display_df = candidates_display_df.drop(columns=["blueprint_type_id"], errors="ignore")
 
     # Candidates overview table: use AgGrid for consistency with the main table.
-    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-        st.dataframe(
-            candidates_display_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Icon": st.column_config.ImageColumn("Icon", width="small"),
-            }
-            if "Icon" in candidates_display_df.columns
-            else None,
+    gb2 = GridOptionsBuilder.from_dataframe(candidates_display_df)
+    gb2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+
+    if "Icon" in candidates_display_df.columns:
+        gb2.configure_column(
+            "Icon",
+            header_name="",
+            width=62,
+            pinned="left",
+            sortable=False,
+            filter=False,
+            suppressAutoSize=True,
+            cellRenderer=img_renderer,
         )
-    else:
-        gb2 = GridOptionsBuilder.from_dataframe(candidates_display_df)
-        gb2.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
 
-        if "Icon" in candidates_display_df.columns:
+    # Light formatting for numeric columns.
+    for c in ["ME", "TE", "remaining_runs", "job_runs", "units_per_run", "units_total"]:
+        if c in candidates_display_df.columns:
             gb2.configure_column(
-                "Icon",
-                header_name="",
-                width=62,
-                pinned="left",
-                sortable=False,
-                filter=False,
-                suppressAutoSize=True,
-                cellRenderer=img_renderer,
-            )
-
-        # Light formatting for numeric columns.
-        for c in ["ME", "TE", "remaining_runs", "job_runs", "units_per_run", "units_total"]:
-            if c in candidates_display_df.columns:
-                gb2.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                    minWidth=110,
-                    cellStyle=right,
-                )
-
-        if "sec" in candidates_display_df.columns:
-            gb2.configure_column(
-                "sec",
-                header_name="sec",
+                c,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
                 minWidth=110,
                 cellStyle=right,
             )
 
-        grid_options2 = gb2.build()
-        attach_aggrid_autosize(grid_options2, JsCode=JsCode)
-
-        height2 = min(420, 40 + (len(candidates_display_df) * 35))
-        AgGrid(
-            candidates_display_df,
-            gridOptions=grid_options2,
-            allow_unsafe_jscode=True,
-            theme="streamlit",
-            height=height2,
+    if "sec" in candidates_display_df.columns:
+        gb2.configure_column(
+            "sec",
+            header_name="sec",
+            type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
+            minWidth=110,
+            cellStyle=right,
         )
+
+    grid_options2 = gb2.build()
+    attach_aggrid_autosize(grid_options2, JsCode=JsCode)
+
+    height2 = min(420, 40 + (len(candidates_display_df) * 35))
+    AgGrid(
+        candidates_display_df,
+        gridOptions=grid_options2,
+        allow_unsafe_jscode=True,
+        theme="streamlit",
+        height=height2,
+    )
 
     # Pick a blueprint candidate
     label_by_idx: dict[int, str] = {}
@@ -1663,140 +1608,96 @@ def render():
             ]
             ci_df = ci_df[[c for c in preferred_cols if c in ci_df.columns] + [c for c in ci_df.columns if c not in preferred_cols]]
 
-            if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-                # Fallback (no AgGrid): show the full tree path as a visible Group column.
-                df_display = ci_df.copy()
-                if "path" in df_display.columns:
-                    df_display["Copy & Invention Jobs"] = df_display["path"].apply(
-                        lambda s: " / ".join(str(s).split(_PATH_SEP)) if s is not None else ""
-                    )
-                    df_display = df_display.drop(columns=["path"], errors="ignore")
-                ordered = [
-                    "Copy & Invention Jobs",
+            gb_ci = GridOptionsBuilder.from_dataframe(ci_df)
+            gb_ci.configure_default_column(editable=False, sortable=False, filter=False, resizable=True)
+
+            # Hide internal tree path
+            if "path" in ci_df.columns:
+                gb_ci.configure_column("path", hide=True)
+
+            # Icon column (pinned left, after the group column)
+            if "Icon" in ci_df.columns:
+                gb_ci.configure_column(
                     "Icon",
-                    "Action",
+                    header_name="",
+                    pinned="left",
+                    width=54,
+                    minWidth=54,
+                    maxWidth=54,
+                    cellRenderer=img_renderer,
+                    suppressSizeToFit=True,
+                )
+
+            # Action column next to Icon
+            if "Action" in ci_df.columns:
+                gb_ci.configure_column("Action", minWidth=110)
+
+            right = {"textAlign": "right"}
+            if "Job Runs" in ci_df.columns:
+                gb_ci.configure_column(
                     "Job Runs",
-                    "Job Fee",
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                    minWidth=110,
+                    cellStyle=right,
+                )
+            if "Qty" in ci_df.columns:
+                gb_ci.configure_column(
                     "Qty",
-                    "Effective Cost",
-                    "Duration",
-                    "Effective / unit",
-                    "Inventory Cost",
-                    "Buy Cost",
-                ]
-                df_display = df_display[[c for c in ordered if c in df_display.columns] + [c for c in df_display.columns if c not in ordered]]
-                st.dataframe(
-                    df_display,
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "Copy & Invention Jobs": st.column_config.TextColumn("Copy & Invention Jobs"),
-                        "Icon": st.column_config.ImageColumn("Icon", width="small"),
-                        "Job Runs": st.column_config.NumberColumn("Job Runs", format="%.0f"),
-                        "Job Fee": st.column_config.NumberColumn("Job Fee", format="%,.0f ISK"),
-                        "Qty": st.column_config.NumberColumn("Qty", format="%.0f"),
-                        "Effective Cost": st.column_config.NumberColumn("Effective Cost", format="%,.0f ISK"),
-                        "Duration": st.column_config.TextColumn("Duration"),
-                        "Effective / unit": st.column_config.NumberColumn("Effective / unit", format="%,.0f ISK"),
-                        "Inventory Cost": st.column_config.NumberColumn("Inventory Cost", format="%,.0f ISK"),
-                        "Buy Cost": st.column_config.NumberColumn("Buy Cost", format="%,.0f ISK"),
-                    },
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                    minWidth=110,
+                    cellStyle=right,
                 )
-            else:
-                # Type narrowing for static analyzers (JsCode/AgGrid are dynamically imported).
-                assert GridOptionsBuilder is not None
-                assert JsCode is not None
 
-                gb_ci = GridOptionsBuilder.from_dataframe(ci_df)
-                gb_ci.configure_default_column(editable=False, sortable=False, filter=False, resizable=True)
-
-                # Hide internal tree path
-                if "path" in ci_df.columns:
-                    gb_ci.configure_column("path", hide=True)
-
-                # Icon column (pinned left, after the group column)
-                if "Icon" in ci_df.columns:
+            for c in ["Job Fee", "Effective Cost", "Effective / unit", "Inventory Cost", "Buy Cost"]:
+                if c in ci_df.columns:
                     gb_ci.configure_column(
-                        "Icon",
-                        header_name="",
-                        pinned="left",
-                        width=54,
-                        minWidth=54,
-                        maxWidth=54,
-                        cellRenderer=img_renderer,
-                        suppressSizeToFit=True,
-                    )
-
-                # Action column next to Icon
-                if "Action" in ci_df.columns:
-                    gb_ci.configure_column("Action", minWidth=110)
-
-                right = {"textAlign": "right"}
-                if "Job Runs" in ci_df.columns:
-                    gb_ci.configure_column(
-                        "Job Runs",
+                        c,
                         type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                        minWidth=110,
-                        cellStyle=right,
-                    )
-                if "Qty" in ci_df.columns:
-                    gb_ci.configure_column(
-                        "Qty",
-                        type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                        minWidth=110,
+                        valueFormatter=js_eu_isk_formatter(
+                            JsCode=JsCode,
+                            locale=eu_locale,
+                            decimals=(0 if c != "Effective / unit" else 2),
+                        ),
+                        minWidth=150,
                         cellStyle=right,
                     )
 
-                for c in ["Job Fee", "Effective Cost", "Effective / unit", "Inventory Cost", "Buy Cost"]:
-                    if c in ci_df.columns:
-                        gb_ci.configure_column(
-                            c,
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_isk_formatter(
-                                JsCode=JsCode,
-                                locale=eu_locale,
-                                decimals=(0 if c != "Effective / unit" else 2),
-                            ),
-                            minWidth=150,
-                            cellStyle=right,
-                        )
-
-                grid_opts_ci = gb_ci.build()
-                grid_opts_ci["autoSizeStrategy"] = {"type": "fitCellContents"}
-                grid_opts_ci["treeData"] = True
-                grid_opts_ci["getDataPath"] = JsCode(
-                    """
-                    function(data) {
-                        try {
-                            if (!data || data.path === null || data.path === undefined) return [];
-                            var s = String(data.path);
-                            if (!s) return [];
-                            return s.split('|||').filter(function(x) { return x !== null && x !== undefined && String(x).length > 0; });
-                        } catch (e) {
-                            return [];
-                        }
+            grid_opts_ci = gb_ci.build()
+            grid_opts_ci["autoSizeStrategy"] = {"type": "fitCellContents"}
+            grid_opts_ci["treeData"] = True
+            grid_opts_ci["getDataPath"] = JsCode(
+                """
+                function(data) {
+                    try {
+                        if (!data || data.path === null || data.path === undefined) return [];
+                        var s = String(data.path);
+                        if (!s) return [];
+                        return s.split('|||').filter(function(x) { return x !== null && x !== undefined && String(x).length > 0; });
+                    } catch (e) {
+                        return [];
                     }
-                    """
-                )
-                grid_opts_ci["groupDefaultExpanded"] = 1
-                grid_opts_ci["autoGroupColumnDef"] = {
-                    "headerName": "Copy & Invention Jobs",
-                    "pinned": "left",
-                    "minWidth": 320,
-                    "cellRendererParams": {"suppressCount": True},
                 }
+                """
+            )
+            grid_opts_ci["groupDefaultExpanded"] = 1
+            grid_opts_ci["autoGroupColumnDef"] = {
+                "headerName": "Copy & Invention Jobs",
+                "pinned": "left",
+                "minWidth": 320,
+                "cellRendererParams": {"suppressCount": True},
+            }
 
-                height_ci = min(520, 70 + (len(ci_df) * 32))
-                AgGrid(
-                    ci_df,
-                    gridOptions=grid_opts_ci,
-                    allow_unsafe_jscode=True,
-                    enable_enterprise_modules=True,
-                    theme="streamlit",
-                    height=height_ci,
-                )
+            height_ci = min(520, 70 + (len(ci_df) * 32))
+            AgGrid(
+                ci_df,
+                gridOptions=grid_opts_ci,
+                allow_unsafe_jscode=True,
+                enable_enterprise_modules=True,
+                theme="streamlit",
+                height=height_ci,
+            )
             if units_total > 0 and total_cost is not None:
                 st.caption(f"Output: {int(units_total)} units · Copy+Invention expected cost: {float(total_cost):,.0f} ISK")
 
@@ -2078,51 +1979,41 @@ def render():
                     df_copy.insert(1, "Output BPC", df_copy["Blueprint"].apply(lambda s: f"{s} (BPC)" if s else "(BPC)"))
                 except Exception:
                     pass
-            if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-                st.dataframe(
-                    df_copy,
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "Job Fee": st.column_config.NumberColumn("Job Fee", format="%,.0f ISK"),
-                    },
-                )
-            else:
-                gb_copy = GridOptionsBuilder.from_dataframe(df_copy)
-                gb_copy.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
-                right_style = {"textAlign": "right"}
+            gb_copy = GridOptionsBuilder.from_dataframe(df_copy)
+            gb_copy.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+            right_style = {"textAlign": "right"}
 
-                for c in ["Runs", "Max Runs"]:
-                    if c in df_copy.columns:
-                        gb_copy.configure_column(
-                            c,
-                            type=["numericColumn", "numberColumnFilter"],
-                            valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                            minWidth=110,
-                            cellStyle=right_style,
-                        )
-
-                if "Job Fee" in df_copy.columns:
+            for c in ["Runs", "Max Runs"]:
+                if c in df_copy.columns:
                     gb_copy.configure_column(
-                        "Job Fee",
+                        c,
                         type=["numericColumn", "numberColumnFilter"],
-                        valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                        minWidth=160,
+                        valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=110,
                         cellStyle=right_style,
                     )
 
-                grid_opts_copy = gb_copy.build()
-                attach_aggrid_autosize(grid_opts_copy, JsCode=JsCode)
-                grid_opts_copy["autoSizeStrategy"] = {"type": "fitCellContents"}
-
-                height_copy = min(320, 60 + (len(df_copy) * 32))
-                AgGrid(
-                    df_copy,
-                    gridOptions=grid_opts_copy,
-                    allow_unsafe_jscode=True,
-                    theme="streamlit",
-                    height=height_copy,
+            if "Job Fee" in df_copy.columns:
+                gb_copy.configure_column(
+                    "Job Fee",
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                    minWidth=160,
+                    cellStyle=right_style,
                 )
+
+            grid_opts_copy = gb_copy.build()
+            attach_aggrid_autosize(grid_opts_copy, JsCode=JsCode)
+            grid_opts_copy["autoSizeStrategy"] = {"type": "fitCellContents"}
+
+            height_copy = min(320, 60 + (len(df_copy) * 32))
+            AgGrid(
+                df_copy,
+                gridOptions=grid_opts_copy,
+                allow_unsafe_jscode=True,
+                theme="streamlit",
+                height=height_copy,
+            )
         else:
             st.markdown("#### Blueprint Copy Jobs")
             st.info("No blueprint copy jobs found for this build.")
@@ -2256,16 +2147,49 @@ def render():
                 "ME/TE shown are the planner assumptions for unowned blueprints (best-effort)."
             )
             df_missing_bp = pd.DataFrame(missing_bp_rows)
-            st.dataframe(
+            gb_missing = GridOptionsBuilder.from_dataframe(df_missing_bp)
+            gb_missing.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+            right_style = {"textAlign": "right"}
+
+            if "Icon" in df_missing_bp.columns:
+                gb_missing.configure_column(
+                    "Icon",
+                    header_name="",
+                    width=62,
+                    pinned="left",
+                    sortable=False,
+                    filter=False,
+                    suppressAutoSize=True,
+                    cellRenderer=img_renderer,
+                )
+
+            for c in ["Assumed ME", "Assumed TE"]:
+                if c in df_missing_bp.columns:
+                    gb_missing.configure_column(
+                        c,
+                        type=["numericColumn", "numberColumnFilter"],
+                        valueFormatter=js_eu_pct_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                        minWidth=110,
+                        cellStyle=right_style,
+                    )
+
+            if "Est. BPO Buy Cost" in df_missing_bp.columns:
+                gb_missing.configure_column(
+                    "Est. BPO Buy Cost",
+                    type=["numericColumn", "numberColumnFilter"],
+                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                    minWidth=140,
+                    cellStyle=right_style,
+                )
+
+            grid_opts_missing = gb_missing.build()
+            height_missing = min(420, 40 + (len(df_missing_bp) * 35))
+            AgGrid(
                 df_missing_bp,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Icon": st.column_config.ImageColumn("Icon", width="small"),
-                    "Assumed ME": st.column_config.NumberColumn("Assumed ME", format="%.0f%%"),
-                    "Assumed TE": st.column_config.NumberColumn("Assumed TE", format="%.0f%%"),
-                    "Est. BPO Buy Cost": st.column_config.NumberColumn("Est. BPO Buy Cost", format="%.0f ISK"),
-                },
+                gridOptions=grid_opts_missing,
+                allow_unsafe_jscode=True,
+                theme="streamlit",
+                height=height_missing,
             )
 
         mat_rows = []
@@ -2418,99 +2342,91 @@ def render():
                 # AgGrid tree view (collapsible).
                 # Only include children when the planner recommends building (rec == 'build'),
                 # matching the current manual renderer behavior.
-                if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-                    # Should not normally happen (page returns earlier), but keep a safe fallback.
-                    st.dataframe(
-                        mat_df,
-                        width="stretch",
-                        hide_index=True,
-                        column_config=MATERIALS_TABLE_COLUMN_CONFIG,
-                    )
-                else:
-                    def _node_name(n: dict) -> str:
-                        return str(n.get("type_name") or n.get("type_id") or "")
+                def _node_name(n: dict) -> str:
+                    return str(n.get("type_name") or n.get("type_id") or "")
 
-                    def _has_expandable_build_steps(nodes: list[dict]) -> bool:
-                        # Only enable TreeData when there are *build* steps that actually
-                        # have required materials to show (non-empty children).
-                        def _walk(x: dict) -> bool:
-                            if not isinstance(x, dict):
-                                return False
-                            rec = str(x.get("recommendation") or "").lower()
-                            children = x.get("children")
-                            if rec == "build" and isinstance(children, list) and len(children) > 0:
-                                return True
-                            if isinstance(children, list):
-                                for ch in children:
-                                    if isinstance(ch, dict) and _walk(ch):
-                                        return True
+                def _has_expandable_build_steps(nodes: list[dict]) -> bool:
+                    # Only enable TreeData when there are *build* steps that actually
+                    # have required materials to show (non-empty children).
+                    def _walk(x: dict) -> bool:
+                        if not isinstance(x, dict):
                             return False
-
-                        if not isinstance(nodes, list):
-                            return False
-                        for root in nodes:
-                            if isinstance(root, dict) and _walk(root):
-                                return True
+                        rec = str(x.get("recommendation") or "").lower()
+                        children = x.get("children")
+                        if rec == "build" and isinstance(children, list) and len(children) > 0:
+                            return True
+                        if isinstance(children, list):
+                            for ch in children:
+                                if isinstance(ch, dict) and _walk(ch):
+                                    return True
                         return False
 
-                    def _node_key(n: dict) -> str:
-                        # Key used for the tree path; keep it stable and unique-ish.
-                        try:
-                            tid = int(n.get("type_id") or 0)
-                        except Exception:
-                            tid = 0
-                        nm = _node_name(n)
-                        return f"{nm}#{tid}" if tid else nm
+                    if not isinstance(nodes, list):
+                        return False
+                    for root in nodes:
+                        if isinstance(root, dict) and _walk(root):
+                            return True
+                    return False
 
-                    # When backend rows exist, they already include rollups and allocation scaling.
-                    tree_rows: list[dict] = [r for r in backend_tree_rows if isinstance(r, dict)] if use_backend_tree else []
-                    # Use a plain delimiter (not a control char) to avoid any serialization/
-                    # rendering oddities in Streamlit-AgGrid/React.
-                    _PATH_SEP = "|||"
+                def _node_key(n: dict) -> str:
+                    # Key used for the tree path; keep it stable and unique-ish.
+                    try:
+                        tid = int(n.get("type_id") or 0)
+                    except Exception:
+                        tid = 0
+                    nm = _node_name(n)
+                    return f"{nm}#{tid}" if tid else nm
 
-                    def _walk_tree(n: dict, *, parent_path: list[str]) -> None:
-                        if not isinstance(n, dict):
-                            return
+                # When backend rows exist, they already include rollups and allocation scaling.
+                tree_rows: list[dict] = [r for r in backend_tree_rows if isinstance(r, dict)] if use_backend_tree else []
+                # Use a plain delimiter (not a control char) to avoid any serialization/
+                # rendering oddities in Streamlit-AgGrid/React.
+                _PATH_SEP = "|||"
 
-                        rec = str(n.get("recommendation") or "-").lower()
-                        key = _node_key(n)
-                        path = [*parent_path, key]
-                        path_str = _PATH_SEP.join([str(p) for p in path if p is not None])
+                def _walk_tree(n: dict, *, parent_path: list[str]) -> None:
+                    if not isinstance(n, dict):
+                        return
 
-                        # The tree (auto-group) column already shows the hierarchy (Invention/Manufacturing -> ...),
-                        # so we don't need a separate "Material" column.
+                    rec = str(n.get("recommendation") or "-").lower()
+                    key = _node_key(n)
+                    path = [*parent_path, key]
+                    path_str = _PATH_SEP.join([str(p) for p in path if p is not None])
 
-                        # Planner cost fields:
-                        # - buy_unit_price_isk: market unit price (avg)
-                        # - buy_cost_isk: effective buy cost (FIFO inventory valuation + market for any shortfall)
-                        # - effective_cost_isk: planner-chosen total cost for this node.
-                        #   When FIFO preference is enabled and inventory is partially available, this becomes:
-                        #   inventory(FIFO) + min(buy shortfall, build shortfall).
-                        effective_cost = n.get("effective_cost_isk")
-                        market_unit = n.get("buy_unit_price_isk")
+                    # The tree (auto-group) column already shows the hierarchy (Invention/Manufacturing -> ...),
+                    # so we don't need a separate "Material" column.
 
-                        qty_required = n.get("required_quantity")
-                        qty_shortfall = n.get("shortfall_quantity")
-                        inv_used_qty = n.get("inventory_used_qty")
+                    # Planner cost fields:
+                    # - buy_unit_price_isk: market unit price (avg)
+                    # - buy_cost_isk: effective buy cost (FIFO inventory valuation + market for any shortfall)
+                    # - effective_cost_isk: planner-chosen total cost for this node.
+                    #   When FIFO preference is enabled and inventory is partially available, this becomes:
+                    #   inventory(FIFO) + min(buy shortfall, build shortfall).
+                    effective_cost = n.get("effective_cost_isk")
+                    market_unit = n.get("buy_unit_price_isk")
 
-                        # Display qty as the planner-required quantity. Shortfall and inventory-used
-                        # quantities are shown via dedicated (hidden-by-default) columns.
-                        qty = qty_required
+                    qty_required = n.get("required_quantity")
+                    qty_shortfall = n.get("shortfall_quantity")
+                    inv_used_qty = n.get("inventory_used_qty")
 
+                    # Display qty as the planner-required quantity. Shortfall and inventory-used
+                    # quantities are shown via dedicated (hidden-by-default) columns.
+                    qty = qty_required
+
+                    market_buy_cost = None
+                    try:
+                        if market_unit is not None and qty is not None:
+                            market_buy_cost = float(market_unit) * float(qty)
+                    except Exception:
                         market_buy_cost = None
-                        try:
-                            if market_unit is not None and qty is not None:
-                                market_buy_cost = float(market_unit) * float(qty)
-                        except Exception:
-                            market_buy_cost = None
 
-                        inv_used_qty = n.get("inventory_used_qty")
-                        inv_fifo_priced_qty = n.get("inventory_fifo_priced_qty")
-                        inv_fifo_cost = n.get("inventory_fifo_cost_isk")
-                        build = n.get("build") if isinstance(n.get("build"), dict) else None
-                        build_full = n.get("build_full") if isinstance(n.get("build_full"), dict) else None
-                        build_for_cost = build if (rec == "build" and isinstance(build, dict)) else build_full
-                        build_cost = build_for_cost.get("total_build_cost_isk") if isinstance(build_for_cost, dict) else None
+                    inv_used_qty = n.get("inventory_used_qty")
+                    inv_fifo_priced_qty = n.get("inventory_fifo_priced_qty")
+                    inv_fifo_cost = n.get("inventory_fifo_cost_isk")
+                    build = n.get("build") if isinstance(n.get("build"), dict) else None
+                    build_full = n.get("build_full") if isinstance(n.get("build_full"), dict) else None
+                    build_for_cost = build if (rec == "build" and isinstance(build, dict)) else build_full
+
+                    build_cost = build_for_cost.get("total_build_cost_isk") if isinstance(build_for_cost, dict) else None
 
                         shortfall_qty = n.get("shortfall_quantity")
                         shortfall_action = n.get("shortfall_recommendation")
@@ -3264,11 +3180,29 @@ def render():
                         )
             else:
                 # Fallback when planner isn't available: show the simple materials table.
-                st.dataframe(
+                gb_mat = GridOptionsBuilder.from_dataframe(mat_df)
+                gb_mat.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+                if "Icon" in mat_df.columns:
+                    gb_mat.configure_column(
+                        "Icon",
+                        header_name="",
+                        width=62,
+                        pinned="left",
+                        sortable=False,
+                        filter=False,
+                        suppressAutoSize=True,
+                        cellRenderer=img_renderer,
+                    )
+
+                grid_opts_mat = gb_mat.build()
+                attach_aggrid_autosize(grid_opts_mat, JsCode=JsCode)
+                height_mat = min(420, 40 + (len(mat_df) * 35))
+                AgGrid(
                     mat_df,
-                    width="stretch",
-                    hide_index=True,
-                    column_config=MATERIALS_TABLE_COLUMN_CONFIG,
+                    gridOptions=grid_opts_mat,
+                    allow_unsafe_jscode=True,
+                    theme="streamlit",
+                    height=height_mat,
                 )
         else:
             st.info("No materials required")
@@ -3290,7 +3224,28 @@ def render():
                                 "Met": bool(s.get("met", False)),
                             }
                         )
-                    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+                    df_skills = pd.DataFrame(rows)
+                    gb_skills = GridOptionsBuilder.from_dataframe(df_skills)
+                    gb_skills.configure_default_column(editable=False, sortable=True, filter=True, resizable=True)
+                    right_style = {"textAlign": "right"}
+                    for c in ["Required", "Character"]:
+                        if c in df_skills.columns:
+                            gb_skills.configure_column(
+                                c,
+                                type=["numericColumn", "numberColumnFilter"],
+                                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                                minWidth=110,
+                                cellStyle=right_style,
+                            )
+                    grid_opts_skills = gb_skills.build()
+                    height_skills = min(260, 40 + (len(df_skills) * 35))
+                    AgGrid(
+                        df_skills,
+                        gridOptions=grid_opts_skills,
+                        allow_unsafe_jscode=True,
+                        theme="streamlit",
+                        height=height_skills,
+                    )
                 else:
                     st.info("No required skills data available.")
 
