@@ -14,7 +14,7 @@ st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")
 
 menu_nav = ["Characters", "Corporations", "Market Orders", "Industry Builder", "Ore Calculator", "Settings"]
-menu_admin = ["", "Database Maintenance", "Restart Flask App", "Restart Streamlit", "Public Structures Scan"]
+menu_admin = ["", "Database Maintenance", "Restart Flask App", "Restart Streamlit", "Public Structures Scan", "ESI Monitoring"]
 
 choice_nav = st.sidebar.selectbox("Navigation", menu_nav)
 choice_admin = st.sidebar.selectbox("Admin", menu_admin)
@@ -100,6 +100,9 @@ elif choice_admin == "Public Structures Scan":
             _rerun()
 elif choice_admin == "Database Maintenance":
     from webpages.database_maintenance import render
+    render()
+elif choice_admin == "ESI Monitoring":
+    from webpages.esi_monitoring import render
     render()
 
 # Navigation actions
