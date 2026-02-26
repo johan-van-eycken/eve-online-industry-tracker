@@ -21,7 +21,7 @@ else:
 from utils.app_init import load_config, init_db_app
 from utils.flask_api import api_get, api_post
 
-from webpages.industry_builder_utils import (
+from utils.industry_builder_utils import (
     BUILD_TREE_CAPTION,
     MATERIALS_TABLE_COLUMN_CONFIG,
     attach_aggrid_autosize,
