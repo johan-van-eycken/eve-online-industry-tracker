@@ -20,31 +20,6 @@ def structure_type_bonuses(type_id: int):
     return ok(data=svc.structure_type_bonuses(type_id=type_id))
 
 
-@industry_bp.post("/industry_submanufacturing_plan/<int:character_id>")
-def industry_submanufacturing_plan(character_id: int):
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    payload = request.get_json(silent=True) or {}
-    svc = IndustryService(state=get_state())
-    data, meta = svc.industry_submanufacturing_plan(character_id=character_id, payload=payload)
-    return ok(data=data, meta=meta)
-
-
-@industry_bp.post("/industry_invention_options/<int:character_id>/<int:blueprint_type_id>")
-def industry_invention_options(character_id: int, blueprint_type_id: int):
-    """Compute T2 invention options (decryptor ROI) for a single blueprint."""
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    payload = request.get_json(silent=True) or {}
-    svc = IndustryService(state=get_state())
-    data, meta = svc.industry_invention_options(
-        character_id=int(character_id),
-        blueprint_type_id=int(blueprint_type_id),
-        payload=payload,
-    )
-    return ok(data=data, meta=meta)
-
-
 @industry_bp.get("/solar_systems")
 def solar_systems():
     require_ready(get_state())
