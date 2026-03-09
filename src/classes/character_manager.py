@@ -154,11 +154,18 @@ class CharacterManager:
                 raise Exception(error_message)
         return assets_list
     
-    def get_market_orders(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> Optional[List[Dict[str, object]]]:
+    def get_market_orders(
+        self,
+        character_name: Optional[str] = None,
+        character_id: Optional[int] = None,
+        *,
+        refresh: bool = True,
+    ) -> Optional[List[Dict[str, object]]]:
         orders_list = []
         for char in self._character_list:
             try:
-                self._refresh_batch("refresh_market_orders", character_name, character_id)
+                if refresh:
+                    self._refresh_batch("refresh_market_orders", character_name, character_id)
                 orders = char.get_market_orders()
                 orders_list.append(orders)
             except Exception as e:

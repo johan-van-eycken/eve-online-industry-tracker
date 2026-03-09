@@ -2,19 +2,17 @@ import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
 import sys
-import traceback
-from typing import cast
+from typing import Any, cast
 
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
-except Exception:  # pragma: no cover
-    AgGrid = None  # type: ignore
-    GridOptionsBuilder = None  # type: ignore
-    JsCode = None  # type: ignore
-    _AGGRID_IMPORT_ERROR = traceback.format_exc()
-else:
-    _AGGRID_IMPORT_ERROR = None
+from utils.aggrid_import import import_aggrid
 
+_ag = import_aggrid()
+AgGrid = _ag.AgGrid  # type: ignore
+GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
+JsCode = _ag.JsCode  # type: ignore
+_AGGRID_IMPORT_ERROR = _ag.import_error
+
+from utils.characters_api import build_character_options, fetch_characters
 from utils.flask_api import cached_api_get, api_get, api_post
 from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
 from utils.formatters import format_isk, format_date, format_date_into_age
@@ -37,12 +35,13 @@ def render():
         st.code(f"{sys.executable} -m pip install streamlit-aggrid")
         st.stop()
 
-    # Re-import to get non-optional symbols for type checkers.
-    from st_aggrid import AgGrid as AgGrid_, GridOptionsBuilder as GridOptionsBuilder_, JsCode as JsCode_  # type: ignore
+    aggrid_fn = cast(Any, AgGrid)
+    grid_options_builder = cast(Any, GridOptionsBuilder)
+    js_code = cast(Any, JsCode)
 
     eu_locale = "nl-NL"  # '.' thousands, ',' decimals
 
-    img_renderer = js_icon_cell_renderer(JsCode=JsCode_, size_px=24)
+    img_renderer = js_icon_cell_renderer(JsCode=js_code, size_px=24)
 
     def _render_aggrid_table(
         df: pd.DataFrame,
@@ -53,7 +52,7 @@ def render():
         float_cols: list[str] | None = None,
         height: int | None = None,
     ) -> None:
-        gb = GridOptionsBuilder_.from_dataframe(df)
+        gb = grid_options_builder.from_dataframe(df)
         gb.configure_default_column(resizable=True, sortable=True, filter=True, wrapText=False)
 
         if "image_url" in df.columns:
@@ -70,7 +69,7 @@ def render():
             if col in df.columns:
                 gb.configure_column(
                     col,
-                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode_, locale=eu_locale, decimals=2),
+                    valueFormatter=js_eu_isk_formatter(JsCode=js_code, locale=eu_locale, decimals=2),
                     type=["numericColumn"],
                 )
 
@@ -78,7 +77,7 @@ def render():
             if col in df.columns:
                 gb.configure_column(
                     col,
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode_, locale=eu_locale, decimals=0),
+                    valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=eu_locale, decimals=0),
                     type=["numericColumn"],
                 )
 
@@ -86,13 +85,13 @@ def render():
             if col in df.columns:
                 gb.configure_column(
                     col,
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode_, locale=eu_locale, decimals=2),
+                    valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=eu_locale, decimals=2),
                     type=["numericColumn"],
                 )
 
         grid_options = gb.build()
         if height is None:
-            AgGrid_(
+            aggrid_fn(
                 df,
                 gridOptions=grid_options,
                 key=key,
@@ -101,7 +100,7 @@ def render():
                 theme="streamlit",
             )
         else:
-            AgGrid_(
+            aggrid_fn(
                 df,
                 gridOptions=grid_options,
                 key=key,
@@ -182,12 +181,7 @@ def render():
 
     # Fetch all characters data from backend
     try:
-        characters_response = cached_api_get("/characters") or {}
-        if characters_response.get("status") != "success":
-            st.error(f"Failed to get characters data: {characters_response.get('message', 'Unknown error')}")
-            st.stop()
-        
-        characters_list = characters_response.get("data", [])
+        characters_list = fetch_characters()
     except Exception as e:
         st.error(f"Failed to get characters data: {e}")
         st.stop()
@@ -285,7 +279,7 @@ def render():
     st.subheader("Character Details")
 
     # Dropdown to select character
-    char_options = df.set_index("character_id")["character_name"].to_dict()
+    char_options = build_character_options(characters_list)
     selected_id = st.selectbox(
         "Select character:",
         options=list(char_options.keys()),
