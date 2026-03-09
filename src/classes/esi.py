@@ -1174,11 +1174,15 @@ class ESIClient:
             return "npc_character"
         elif 900000 <= entity_id <= 999999:
             return "universe"
-        elif 1000000 <= entity_id <= 1999999:
+        # EVE Universe IDs (ESI):
+        # - Regions:         10000000-19999999
+        # - Constellations:  20000000-29999999
+        # - Solar systems:   30000000-39999999
+        elif 10000000 <= entity_id <= 19999999:
             return "region"
-        elif 2000000 <= entity_id <= 2999999:
+        elif 20000000 <= entity_id <= 29999999:
             return "constellation"
-        elif 3000000 <= entity_id <= 3999999:
+        elif 30000000 <= entity_id <= 39999999:
             return "solar_system"
         elif 40000000 <= entity_id <= 49999999:
             return "celestial"

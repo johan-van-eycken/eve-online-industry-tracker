@@ -1,20 +1,17 @@
 import streamlit as st
 import pandas as pd
 import sys
-import traceback
 
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
-except Exception:  # pragma: no cover
-    AgGrid = None  # type: ignore
-    GridOptionsBuilder = None  # type: ignore
-    JsCode = None  # type: ignore
-    _AGGRID_IMPORT_ERROR = traceback.format_exc()
-else:
-    _AGGRID_IMPORT_ERROR = None
+from utils.aggrid_import import import_aggrid
 
-from utils.app_init import load_config, init_db_app
+_ag = import_aggrid()
+AgGrid = _ag.AgGrid  # type: ignore
+GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
+JsCode = _ag.JsCode  # type: ignore
+_AGGRID_IMPORT_ERROR = _ag.import_error
+
 from utils.flask_api import cached_api_get, api_get, api_post, api_put, api_delete
+from utils.streamlit_selectors import select_character_id
 
 
 @st.cache_data(ttl=300)
@@ -317,29 +314,14 @@ def render():
     if "show_create_new_profile" not in st.session_state:
         st.session_state["show_create_new_profile"] = False
 
-    try:
-        cfgManager = load_config()
-        db = init_db_app(cfgManager)
-    except Exception as e:
-        st.error(f"Failed to load database: {e}")
-        st.stop()
-
-    try:
-        df = db.load_df("characters")
-    except Exception:
-        st.warning("No character data found. Run main.py first.")
-        st.stop()
-
-    # Character selection
-    character_map = dict(zip(df["character_id"], df["character_name"]))
-    selected_character_id = st.selectbox(
-        "Select a character",
-        options=df["character_id"].tolist(),
-        format_func=lambda x: character_map[x],
+    selected_character_id = select_character_id(
+        label="Select a character",
+        key="industry_profiles_character_id",
+        default_to_main=False,
     )
 
-    if not selected_character_id:
-        return
+    if selected_character_id is None:
+        st.stop()
 
     # Load structure rigs once (used for both editing existing profiles and creating new ones).
     rig_options = {0: "None"}
@@ -431,6 +413,14 @@ def render():
                     (profile.get("location_type") or "").lower() == "station"
                     or (profile.get("facility_type") or "").lower() == "npc_station"
                 )
+
+                # Defaults so values are always bound across column blocks.
+                rig0 = int(profile.get("rig_slot0_type_id") or 0)
+                rig1 = int(profile.get("rig_slot1_type_id") or 0)
+                rig2 = int(profile.get("rig_slot2_type_id") or 0)
+                computed_mat = float(profile.get("structure_rig_material_bonus") or 0.0)
+                computed_time = float(profile.get("structure_rig_time_bonus") or 0.0)
+                computed_cost = float(profile.get("structure_rig_cost_bonus") or 0.0)
 
                 with col1:
                     st.write(f"**Location:** {profile['location_name'] or 'Not set'}")
@@ -651,6 +641,7 @@ def render():
         )
 
     # Fetch NPC stations
+    stations: list[dict] = []
     try:
         npc_stations_response = cached_api_get(f"/npc_stations/{selected_system_id}")
         try:
@@ -1040,10 +1031,10 @@ def render():
             },
         )
 
-        if create_response.get("status") == "success":
+        if create_response and create_response.get("status") == "success":
             st.success("Profile created successfully!")
             _get_industry_profiles.clear()
             st.session_state["show_create_new_profile"] = False
             _rerun()
         else:
-            st.error(f"Error: {create_response.get('message')}")
+            st.error(f"Error: {create_response.get('message') if create_response else 'API connection failed'}")

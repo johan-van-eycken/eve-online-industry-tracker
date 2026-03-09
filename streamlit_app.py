@@ -13,7 +13,7 @@ def _rerun() -> None:
 st.set_page_config(page_title="EVE Online Industry Tracker", layout="wide")
 st.title("EVE Online Industry Tracker")
 
-menu_nav = ["Characters", "Corporations", "Market Orders", "Ore Calculator", "Settings"]
+menu_nav = ["Characters", "Corporations", "Industry Tracker", "Market Orders", "Ore Calculator", "Settings"]
 menu_admin = ["", "Database Maintenance", "Restart Flask App", "Restart Streamlit", "Public Structures Scan", "ESI Monitoring"]
 
 choice_nav = st.sidebar.selectbox("Navigation", menu_nav)
@@ -111,6 +111,9 @@ if choice_nav == "Characters":
     render()
 elif choice_nav == "Corporations":
     from webpages.corporations import render
+    render()
+elif choice_nav == "Industry Tracker":
+    from webpages.industry_tracker import render
     render()
 elif choice_nav == "Ore Calculator":
     from webpages.ore_calculator import render

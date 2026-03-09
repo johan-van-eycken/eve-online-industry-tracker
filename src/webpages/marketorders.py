@@ -1,17 +1,14 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import sys
-import traceback
 
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
-except Exception:  # pragma: no cover
-    AgGrid = None  # type: ignore
-    GridOptionsBuilder = None  # type: ignore
-    JsCode = None  # type: ignore
-    _AGGRID_IMPORT_ERROR = traceback.format_exc()
-else:
-    _AGGRID_IMPORT_ERROR = None
+from utils.aggrid_import import import_aggrid
+
+_ag = import_aggrid()
+AgGrid = _ag.AgGrid  # type: ignore
+GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
+JsCode = _ag.JsCode  # type: ignore
+_AGGRID_IMPORT_ERROR = _ag.import_error
 
 from utils.flask_api import api_get
 from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
@@ -25,7 +22,8 @@ def _rerun() -> None:
 # -- Cached API calls --
 @st.cache_data(ttl=3600)
 def get_all_orders():
-    return api_get("/characters/market_orders") or {}
+    # Default path: no forced ESI refresh, but include price comparison.
+    return (api_get("/characters/market_orders?refresh=0", timeout_seconds=60) or {})
 
 def get_item_image_url(order):
     """Get the image URL for a single order item."""
@@ -86,8 +84,8 @@ def render():
                     "Icon": get_item_image_url(order),
                     "Type": order.get("type_name", ""),
                     "Price": order.get("price", 0),
-                    "Price Status": order.get("price_status", "N/A"),
-                    "Price Difference": order.get("price_difference", ""),
+                    "Price Status": order.get("price_status") or "N/A",
+                    "Price Difference": order.get("price_difference") or 0,
                     "Volume": order.get("volume", 0),
                     "Total Price": order.get("total_price", 0),
                     "Range": order.get("range", ""),
@@ -104,8 +102,8 @@ def render():
                 "Icon": get_item_image_url(order),
                 "Type": order.get("type_name", ""),
                 "Price": order.get("price", 0),
-                "Price Status": order.get("price_status", "N/A"),
-                "Price Difference": order.get("price_difference", ""),
+                "Price Status": order.get("price_status") or "N/A",
+                "Price Difference": order.get("price_difference") or 0,
                 "Volume": order.get("volume", 0),
                 "Total Price": order.get("total_price", 0),
                 "Expires In": order.get("expires_in", ""),
@@ -134,6 +132,15 @@ def render():
         with refresh_market_orders:
             st.write("<br>", unsafe_allow_html=True)
             if st.button("Refresh Market Orders"):
+                # Force a fresh pull from ESI.
+                with st.spinner("Refreshing market orders..."):
+                    try:
+                        api_get(
+                            "/characters/market_orders?refresh=1",
+                            timeout_seconds=120,
+                        )
+                    except Exception as e:
+                        st.error(f"Refresh failed: {str(e)}")
                 st.cache_data.clear()
                 _rerun()
         with filler:
@@ -161,15 +168,24 @@ def render():
                     cellStyle=right,
                     minWidth=120,
                 )
-        for c in ["Volume", "Min. Volume"]:
-            if c in df.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                    cellStyle=right,
-                    minWidth=110,
-                )
+
+        # API returns `volume` as a string like "12/100" (remain/total). If we format it
+        # as a number, the formatter yields blank values; keep it as text.
+        if "Volume" in df.columns:
+            gb.configure_column(
+                "Volume",
+                cellStyle=right,
+                minWidth=110,
+            )
+
+        if "Min. Volume" in df.columns:
+            gb.configure_column(
+                "Min. Volume",
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                cellStyle=right,
+                minWidth=110,
+            )
 
         grid_options = gb.build()
         height = min(700, 40 + (len(df) * 35))
@@ -216,15 +232,22 @@ def render():
                     cellStyle=right,
                     minWidth=120,
                 )
-        for c in ["Volume", "Min. Volume"]:
-            if c in df.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                    cellStyle=right,
-                    minWidth=110,
-                )
+
+        if "Volume" in df.columns:
+            gb.configure_column(
+                "Volume",
+                cellStyle=right,
+                minWidth=110,
+            )
+
+        if "Min. Volume" in df.columns:
+            gb.configure_column(
+                "Min. Volume",
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
+                cellStyle=right,
+                minWidth=110,
+            )
 
         grid_options = gb.build()
         height = min(700, 40 + (len(df) * 35))
