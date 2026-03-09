@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
+import requests
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from classes.esi import ESIClient
@@ -40,9 +41,7 @@ class ESIService:
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}
-        # { (order_type, region_id): (timestamp, [orders]) }
-        # Note: ESI /markets/{region_id}/orders supports order_type, but not type_id.
-        # We fetch the region orderbook once per (order_type, region_id) and filter locally.
+        # Legacy: kept for backwards compatibility; we no longer fetch full region order books.
         self._region_orders_cache: Dict[tuple, tuple] = {}
         # (timestamp, [prices])
         self._market_prices_cache: Optional[tuple] = None
@@ -66,6 +65,63 @@ class ESIService:
                 raise ValueError(f"Invalid type_id: {type_id}")
         return normalized
 
+    def _public_headers(self) -> Dict[str, str]:
+        return {
+            "Accept": getattr(self._esi_client, "esi_header_accept", "application/json"),
+            "Accept-Language": getattr(self._esi_client, "esi_header_acceptlanguage", "en"),
+            "User-Agent": getattr(self._esi_client, "user_agent", "eve-online-industry-tracker"),
+            "X-Compatibility-Date": getattr(self._esi_client, "esi_header_xcompatibilitydate", "2025-08-26"),
+            "X-Tenant": getattr(self._esi_client, "esi_header_xtenant", "tranquility"),
+        }
+
+    def _public_esi_get(
+        self,
+        endpoint: str,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        paginate: bool = False,
+        timeout_seconds: float = 15.0,
+    ) -> Any:
+        base_uri = str(getattr(self._esi_client, "esi_base_uri", "https://esi.evetech.net")).rstrip("/")
+        headers = self._public_headers()
+
+        if not paginate:
+            response = requests.get(
+                f"{base_uri}{endpoint}",
+                params=params,
+                headers=headers,
+                timeout=float(timeout_seconds),
+            )
+            response.raise_for_status()
+            return response.json()
+
+        all_data: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            paged_params = dict(params or {})
+            paged_params["page"] = page
+            response = requests.get(
+                f"{base_uri}{endpoint}",
+                params=paged_params,
+                headers=headers,
+                timeout=float(timeout_seconds),
+            )
+            response.raise_for_status()
+
+            payload = response.json()
+            if isinstance(payload, list):
+                all_data.extend(payload)
+            else:
+                all_data.append(payload)
+
+            total_pages = int(response.headers.get("X-Pages", "1"))
+            if page >= total_pages:
+                break
+            page += 1
+            time.sleep(0.2)
+
+        return all_data
+
     def _fetch_region_orders(self, type_ids: Iterable[int], *, region_id: int, order_type: str) -> List[Dict[str, Any]]:
         type_ids_list = self._validate_type_ids(type_ids)
         if not type_ids_list:
@@ -87,66 +143,66 @@ class ESIService:
         if not to_fetch:
             return all_orders
 
-        # ESI does not support type_id filtering for region orders, so fetch the
-        # relevant orderbook once and cache per-type slices.
-        region_cache_key = (order_type, region_id)
-        region_cached = self._region_orders_cache.get(region_cache_key)
-        if region_cached and (now - region_cached[0] < self._type_orders_cache_ttl_seconds):
-            region_orders = region_cached[1]
-        else:
+        # ESI supports filtering region orders by type_id; use that to avoid
+        # downloading the entire region order book (which can be huge).
+        to_fetch = sorted(set(to_fetch))
+
+        def _fetch_one(type_id: int) -> tuple[int, List[Dict[str, Any]]]:
             # Small jitter to avoid spiky bursts against ESI.
             try:
-                time.sleep(random.uniform(0.0, 0.15))
+                time.sleep(random.uniform(0.0, 0.05))
             except Exception:
                 pass
 
             try:
-                region_orders = self._esi_client.esi_get(
-                    f"/markets/{region_id}/orders",
-                    params={"order_type": order_type},
+                orders = self._public_esi_get(
+                    f"/markets/{region_id}/orders/",
+                    params={"order_type": order_type, "type_id": int(type_id)},
                     paginate=True,
+                    timeout_seconds=15.0,
                 )
             except Exception as e:
                 logging.warning(
-                    "ESI market orders fetch failed (order_type=%s, region_id=%s): %s",
+                    "ESI market orders fetch failed (order_type=%s, region_id=%s, type_id=%s): %s",
                     order_type,
                     region_id,
+                    type_id,
                     e,
                 )
-                region_orders = []
+                orders = []
 
-            if not isinstance(region_orders, list):
-                region_orders = []
+            if not isinstance(orders, list):
+                return int(type_id), []
 
             # Defensive filter by is_buy_order.
             if order_type == "sell":
-                region_orders = [
-                    order
-                    for order in region_orders
-                    if isinstance(order, dict) and order.get("is_buy_order") is False
+                orders = [
+                    o for o in orders if isinstance(o, dict) and o.get("is_buy_order") is False
                 ]
             elif order_type == "buy":
-                region_orders = [
-                    order
-                    for order in region_orders
-                    if isinstance(order, dict) and order.get("is_buy_order") is True
+                orders = [
+                    o for o in orders if isinstance(o, dict) and o.get("is_buy_order") is True
                 ]
 
-            self._region_orders_cache[region_cache_key] = (time.time(), region_orders)
+            return int(type_id), orders
 
-        wanted = set(to_fetch)
-        by_type: Dict[int, list[dict]] = {tid: [] for tid in wanted}
-        for order in region_orders:
-            if not isinstance(order, dict):
-                continue
-            tid = order.get("type_id")
-            if tid in wanted:
-                by_type[int(tid)].append(order)
-
-        for tid, collected in by_type.items():
-            cache_key = (order_type, region_id, int(tid))
-            self._type_orders_cache[cache_key] = (time.time(), collected)
-            all_orders.extend(collected)
+        max_workers = min(8, max(1, len(to_fetch)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_one, int(type_id)) for type_id in to_fetch]
+            for fut in as_completed(futures):
+                try:
+                    type_id, orders = fut.result()
+                except Exception as e:
+                    logging.warning(
+                        "ESI market orders fetch task failed (order_type=%s, region_id=%s): %s",
+                        order_type,
+                        region_id,
+                        e,
+                    )
+                    continue
+                cache_key = (order_type, region_id, int(type_id))
+                self._type_orders_cache[cache_key] = (time.time(), orders)
+                all_orders.extend(orders)
 
         return all_orders
 
@@ -232,15 +288,15 @@ class ESIService:
         id_type = self._esi_client.get_id_type(location_id)
         try:
             if id_type == "station":
-                return self._esi_client.esi_get(f"/universe/stations/{location_id}/")
+                return self._public_esi_get(f"/universe/stations/{location_id}/")
             if id_type == "structure":
                 return self._esi_client.esi_get(f"/universe/structures/{location_id}/")
             if id_type == "region":
-                return self._esi_client.esi_get(f"/universe/regions/{location_id}/")
+                return self._public_esi_get(f"/universe/regions/{location_id}/")
             if id_type == "constellation":
-                return self._esi_client.esi_get(f"/universe/constellations/{location_id}/")
+                return self._public_esi_get(f"/universe/constellations/{location_id}/")
             if id_type == "solar_system":
-                return self._esi_client.esi_get(f"/universe/systems/{location_id}/")
+                return self._public_esi_get(f"/universe/systems/{location_id}/")
             return {}
         except Exception as e:
             raise RuntimeError(f"ESI request failed for location {location_id}: {e}")

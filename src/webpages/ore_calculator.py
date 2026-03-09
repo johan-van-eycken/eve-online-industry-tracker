@@ -1,21 +1,18 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import sys
-import traceback
 
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
-except Exception:  # pragma: no cover
-    AgGrid = None  # type: ignore
-    GridOptionsBuilder = None  # type: ignore
-    JsCode = None  # type: ignore
-    _AGGRID_IMPORT_ERROR = traceback.format_exc()
-else:
-    _AGGRID_IMPORT_ERROR = None
+from utils.aggrid_import import import_aggrid
 
-from utils.app_init import load_config, init_db_app
+_ag = import_aggrid()
+AgGrid = _ag.AgGrid  # type: ignore
+GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
+JsCode = _ag.JsCode  # type: ignore
+_AGGRID_IMPORT_ERROR = _ag.import_error
+
 from utils.flask_api import api_get, api_post
 from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter
+from utils.streamlit_selectors import select_character_id
 
 #-- Cached API calls --
 @st.cache_data(ttl=3600)
@@ -128,28 +125,13 @@ def render():
 
     with right:
         st.subheader("Optimizer Options")
-        try:
-            cfgManager = load_config()
-            db = init_db_app(cfgManager)
-        except Exception as e:
-            st.error(f"Failed to load database: {e}")
-            st.stop()
-
-        try:
-            df = db.load_df("characters")
-        except Exception:
-            st.warning("No character data found. Run main.py first.")
-            st.stop()
-
-        chars_map = dict(zip(df["character_id"], df["character_name"]))
-        main_id = df.loc[df["is_main"] == True, "character_id"].iloc[0] if "is_main" in df.columns and df["is_main"].any() else None
-        character_id = st.selectbox(
-            "Select Character",
-            list(chars_map.keys()),
-            index=list(chars_map.keys()).index(main_id) if main_id in chars_map else 0,
-            format_func=lambda x: chars_map[x],
-            key="opt_character_id"
+        character_id = select_character_id(
+            label="Select Character",
+            key="opt_character_id",
+            default_to_main=True,
         )
+        if character_id is None:
+            st.stop()
         all_implants = {
             0: "None",
             1: "Zainou 'Beancounter' Reprocessing RX-801",

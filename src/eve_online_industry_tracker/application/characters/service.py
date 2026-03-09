@@ -26,38 +26,44 @@ class CharactersService:
     def get_assets(self) -> Any:
         return self._state.char_manager.get_assets()
 
-    def get_market_orders_enriched(self) -> list[dict[str, Any]]:
-        refreshed_data = self._state.char_manager.get_market_orders()
+    def get_market_orders_enriched(
+        self,
+        *,
+        refresh: bool = False,
+        include_orderbook_comparison: bool = True,
+    ) -> list[dict[str, Any]]:
+        refreshed_data = self._state.char_manager.get_market_orders(refresh=bool(refresh))
 
         now = datetime.now(timezone.utc)
         enriched_orders: list[dict[str, Any]] = []
 
-        buy_type_ids: set[int] = set()
-        sell_type_ids: set[int] = set()
-        for character in refreshed_data:
-            for order in (character or {}).get("market_orders", []):
-                type_id = order.get("type_id")
-                if not isinstance(type_id, int):
-                    continue
-                if order.get("is_buy_order"):
-                    buy_type_ids.add(type_id)
-                else:
-                    sell_type_ids.add(type_id)
-
         buy_order_book: dict[int, list[dict[str, Any]]] = {}
         sell_order_book: dict[int, list[dict[str, Any]]] = {}
 
-        try:
-            if buy_type_ids:
-                buy_order_book = self._state.esi_service.get_type_buyprices(sorted(buy_type_ids))
-        except Exception:
-            buy_order_book = {}
+        if include_orderbook_comparison:
+            buy_type_ids: set[int] = set()
+            sell_type_ids: set[int] = set()
+            for character in refreshed_data:
+                for order in (character or {}).get("market_orders", []):
+                    type_id = order.get("type_id")
+                    if not isinstance(type_id, int):
+                        continue
+                    if order.get("is_buy_order"):
+                        buy_type_ids.add(type_id)
+                    else:
+                        sell_type_ids.add(type_id)
 
-        try:
-            if sell_type_ids:
-                sell_order_book = self._state.esi_service.get_type_sellprices(sorted(sell_type_ids))
-        except Exception:
-            sell_order_book = {}
+            try:
+                if buy_type_ids:
+                    buy_order_book = self._state.esi_service.get_type_buyprices(sorted(buy_type_ids))
+            except Exception:
+                buy_order_book = {}
+
+            try:
+                if sell_type_ids:
+                    sell_order_book = self._state.esi_service.get_type_sellprices(sorted(sell_type_ids))
+            except Exception:
+                sell_order_book = {}
 
         for character in refreshed_data:
             for order in (character or {}).get("market_orders", []):
@@ -92,7 +98,7 @@ class CharactersService:
                 except Exception:
                     order_price = 0.0
 
-                if isinstance(type_id, int):
+                if include_orderbook_comparison and isinstance(type_id, int):
                     if order.get("is_buy_order"):
                         prices_list = buy_order_book.get(type_id, []) if isinstance(buy_order_book, dict) else []
                         if prices_list and all(isinstance(o, dict) for o in prices_list):
@@ -112,6 +118,17 @@ class CharactersService:
                             except Exception:
                                 pass
 
+                # Best-effort: older cached orders may have region_id but no region_name
+                # due to ID classification/enrichment issues at the time they were stored.
+                region_name = order.get("region_name")
+                if (not region_name) and isinstance(order.get("region_id"), int):
+                    try:
+                        region_info = self._state.esi_service.get_location_info(int(order.get("region_id")))
+                        if isinstance(region_info, dict):
+                            region_name = region_info.get("name")
+                    except Exception:
+                        region_name = None
+
                 enriched_orders.append(
                     {
                         "owner": order.get("owner"),
@@ -129,7 +146,7 @@ class CharactersService:
                         "station": order.get("station_name")
                         or order.get("location_name")
                         or f"Location {order.get('location_id', 'Unknown')}",
-                        "region": order.get("region_name")
+                        "region": region_name
                         or (f"Region {order.get('region_id')}" if order.get("region_id") else "Unknown"),
                         "is_buy_order": order.get("is_buy_order"),
                         "type_group_id": order.get("type_group_id", -1),

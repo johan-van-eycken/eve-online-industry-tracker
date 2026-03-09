@@ -2,18 +2,15 @@ import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
 import sys
-import traceback
-from typing import cast
+from typing import Any, cast
 
-try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
-except Exception:  # pragma: no cover
-    AgGrid = None  # type: ignore
-    GridOptionsBuilder = None  # type: ignore
-    JsCode = None  # type: ignore
-    _AGGRID_IMPORT_ERROR = traceback.format_exc()
-else:
-    _AGGRID_IMPORT_ERROR = None
+from utils.aggrid_import import import_aggrid
+
+_ag = import_aggrid()
+AgGrid = _ag.AgGrid  # type: ignore
+GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
+JsCode = _ag.JsCode  # type: ignore
+_AGGRID_IMPORT_ERROR = _ag.import_error
 
 from utils.app_init import load_config, init_db_app
 from utils.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age
@@ -33,12 +30,13 @@ def render():
         st.code(f"{sys.executable} -m pip install streamlit-aggrid")
         st.stop()
 
-    # Re-import to get non-optional symbols for type checkers.
-    from st_aggrid import AgGrid as AgGrid_, GridOptionsBuilder as GridOptionsBuilder_, JsCode as JsCode_  # type: ignore
+    aggrid_fn = cast(Any, AgGrid)
+    grid_options_builder = cast(Any, GridOptionsBuilder)
+    js_code = cast(Any, JsCode)
 
     eu_locale = "nl-NL"  # '.' thousands, ',' decimals
     right = {"textAlign": "right"}
-    img_renderer = js_icon_cell_renderer(JsCode=JsCode_, size_px=24)
+    img_renderer = js_icon_cell_renderer(JsCode=js_code, size_px=24)
 
     def _render_aggrid_table(
         df_in: pd.DataFrame,
@@ -54,7 +52,7 @@ def render():
             return
 
         df_tbl = df_in.copy()
-        gb = GridOptionsBuilder_.from_dataframe(df_tbl)
+        gb = grid_options_builder.from_dataframe(df_tbl)
         gb.configure_default_column(resizable=True, sortable=True, filter=True)
 
         for c in (image_cols or []):
@@ -66,7 +64,7 @@ def render():
                 gb.configure_column(
                     c,
                     type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode_, locale=eu_locale, decimals=2),
+                    valueFormatter=js_eu_isk_formatter(JsCode=js_code, locale=eu_locale, decimals=2),
                     cellStyle=right,
                     minWidth=120,
                 )
@@ -76,7 +74,7 @@ def render():
                 gb.configure_column(
                     c,
                     type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode_, locale=eu_locale, decimals=0),
+                    valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=eu_locale, decimals=0),
                     cellStyle=right,
                     minWidth=110,
                 )
@@ -86,14 +84,14 @@ def render():
                 gb.configure_column(
                     c,
                     type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode_, locale=eu_locale, decimals=2),
+                    valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=eu_locale, decimals=2),
                     cellStyle=right,
                     minWidth=110,
                 )
 
         grid_options = gb.build()
         height = min(height_max, 40 + (len(df_tbl) * 35))
-        AgGrid_(
+        aggrid_fn(
             df_tbl,
             gridOptions=grid_options,
             allow_unsafe_jscode=True,
