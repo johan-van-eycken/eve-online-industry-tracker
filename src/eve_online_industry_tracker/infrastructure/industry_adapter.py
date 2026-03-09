@@ -9,7 +9,6 @@ from eve_online_industry_tracker.infrastructure.persistence import industry_prof
 from eve_online_industry_tracker.infrastructure.sde.locations import get_npc_stations, get_solar_systems
 from eve_online_industry_tracker.infrastructure.sde.rig_effects import get_rig_effects_for_type_ids
 from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
-from eve_online_industry_tracker.infrastructure.submanufacturing_planner_service import plan_submanufacturing_tree
 
 
 def get_cached_public_structures(*, state: Any, system_id: int, ttl_seconds: int) -> tuple[list[dict], bool]:
