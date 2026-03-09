@@ -61,7 +61,7 @@ def get_settings() -> FlaskSettings:
         ),
         public_structures_startup_scan_batch_size=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_BATCH_SIZE", default=100),
         public_structures_startup_scan_pause_seconds=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_PAUSE", default=5),
-        public_structures_esi_request_timeout_seconds=_int("FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT", default=5),
+        public_structures_esi_request_timeout_seconds=_int("FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT", default=15),
     )
 
 

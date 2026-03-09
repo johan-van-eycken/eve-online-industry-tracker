@@ -61,18 +61,8 @@ class PublicStructuresJobState:
 
 
 @dataclass
-class IndustryBuilderJobState:
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    # job_id -> job dict (status/progress/result)
-    jobs: dict[str, dict] = field(default_factory=dict)
-    # key (character/profile/maximize_runs) -> job_id (latest)
-    jobs_by_key: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
 class JobsState:
     public_structures: PublicStructuresJobState = field(default_factory=PublicStructuresJobState)
-    industry_builder: IndustryBuilderJobState = field(default_factory=IndustryBuilderJobState)
 
 
 @dataclass
@@ -315,19 +305,6 @@ class AppState:
     @property
     def public_structures_global_scan_stop_event(self) -> threading.Event:
         return self.jobs.public_structures.global_scan_stop_event
-
-    # Industry builder job legacy fields
-    @property
-    def industry_builder_jobs_lock(self) -> threading.Lock:
-        return self.jobs.industry_builder.lock
-
-    @property
-    def industry_builder_jobs(self) -> dict[str, dict]:
-        return self.jobs.industry_builder.jobs
-
-    @property
-    def industry_builder_jobs_by_key(self) -> dict[str, str]:
-        return self.jobs.industry_builder.jobs_by_key
 
 
 state = AppState()

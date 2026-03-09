@@ -11,31 +11,6 @@ from flask_app.http import ok
 industry_bp = Blueprint("industry", __name__)
 
 
-@industry_bp.post("/industry_builder_update/<int:character_id>")
-def industry_builder_update(character_id: int):
-    """Kick off a background computation of Industry Builder data (incl. submanufacturing)."""
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    payload = request.get_json(silent=True) or {}
-    svc = IndustryService(state=get_state())
-    return ok(data=svc.start_industry_builder_update(character_id=character_id, payload=payload))
-
-
-@industry_bp.get("/industry_builder_update_status/<job_id>")
-def industry_builder_update_status(job_id: str):
-    require_ready(get_state())
-    svc = IndustryService(state=get_state())
-    return ok(data=svc.industry_builder_update_status(job_id=job_id))
-
-
-@industry_bp.get("/industry_builder_update_result/<job_id>")
-def industry_builder_update_result(job_id: str):
-    require_ready(get_state())
-    svc = IndustryService(state=get_state())
-    data, meta = svc.industry_builder_update_result(job_id=job_id)
-    return ok(data=data, meta=meta)
-
-
 @industry_bp.get("/structure_type_bonuses/<int:type_id>")
 def structure_type_bonuses(type_id: int):
     """Return base industry bonuses for a given structure type."""
@@ -43,26 +18,6 @@ def structure_type_bonuses(type_id: int):
     require_sde_ready(get_state())
     svc = IndustryService(state=get_state())
     return ok(data=svc.structure_type_bonuses(type_id=type_id))
-
-
-@industry_bp.get("/industry_builder_data/<int:character_id>")
-def industry_builder(character_id: int):
-    require_ready(get_state())
-    require_sde_ready(get_state())
-    profile_id = request.args.get("profile_id", default=None, type=int)
-    maximize_runs = bool(request.args.get("maximize_runs", default=0, type=int))
-    include_submanufacturing = bool(request.args.get("include_submanufacturing", default=0, type=int))
-    submanufacturing_blueprint_type_id = request.args.get("blueprint_type_id", default=None, type=int)
-
-    svc = IndustryService(state=get_state())
-    data, meta = svc.industry_builder_data(
-        character_id=character_id,
-        profile_id=profile_id,
-        maximize_runs=maximize_runs,
-        include_submanufacturing=include_submanufacturing,
-        submanufacturing_blueprint_type_id=submanufacturing_blueprint_type_id,
-    )
-    return ok(data=data, meta=meta)
 
 
 @industry_bp.post("/industry_submanufacturing_plan/<int:character_id>")

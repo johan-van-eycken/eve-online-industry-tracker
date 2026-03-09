@@ -194,7 +194,7 @@ def trigger_global_public_structures_scan(
     batch_size: int = 100,
     pause_seconds: float = 5.0,
     stop_event: threading.Event | None = None,
-    request_timeout_seconds: float = 5.0,
+    request_timeout_seconds: float = 15.0,
 ) -> bool:
     """Start a background global scan that tries to populate public_structures for all accessible structures.
 
