@@ -5,6 +5,22 @@ import logging
 from classes.database_manager import DatabaseManager
 
 
+def _ensure_table(db: DatabaseManager, *, ddl: str, table: str) -> None:
+    try:
+        db.execute(ddl)
+        logging.info("Ensured table %s", table)
+    except Exception as e:
+        logging.warning("Failed ensuring table %s: %s", table, str(e))
+
+
+def _ensure_index(db: DatabaseManager, *, ddl: str, name: str) -> None:
+    try:
+        db.execute(ddl)
+        logging.info("Ensured index %s", name)
+    except Exception as e:
+        logging.warning("Failed ensuring index %s: %s", name, str(e))
+
+
 def _table_columns(db: DatabaseManager, table: str) -> set[str]:
     try:
         rows = db.query(f"PRAGMA table_info({table});")
@@ -53,3 +69,33 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
 
     # Character market fee metadata (best-effort JSON blob)
     _ensure_column(db_app, table="characters", column="market_fees", ddl_type="TEXT")
+
+    # Market orderbook view cache (persistent hub pricing aggregates)
+    _ensure_table(
+        db_app,
+        table="market_orderbook_view_cache",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS market_orderbook_view_cache ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "hub TEXT NOT NULL,"
+            "region_id INTEGER NOT NULL,"
+            "station_id INTEGER NOT NULL,"
+            "side TEXT NOT NULL,"
+            "type_id INTEGER NOT NULL,"
+            "at_hub INTEGER NOT NULL,"
+            "depth INTEGER NOT NULL DEFAULT 200,"
+            "levels TEXT NULL,"
+            "fetched_at REAL NOT NULL,"
+            "version INTEGER NOT NULL DEFAULT 1,"
+            "UNIQUE(hub, region_id, station_id, side, type_id, at_hub)"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_market_orderbook_view_cache_lookup",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_market_orderbook_view_cache_lookup "
+            "ON market_orderbook_view_cache(hub, region_id, station_id, side, at_hub, type_id)"
+        ),
+    )

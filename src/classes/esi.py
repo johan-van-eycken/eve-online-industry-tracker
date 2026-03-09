@@ -107,6 +107,47 @@ class _EsiErrorRateLimiter:
 _ESI_ERROR_LIMITER = _EsiErrorRateLimiter()
 
 
+class _EsiRequestErrorLogLimiter:
+    """Rate-limit noisy per-request exception logs.
+
+    The public structures startup scan can fan out thousands of requests; when
+    ESI is slow or unreachable, logging every timeout at ERROR floods the console.
+    """
+
+    def __init__(self, *, window_seconds: float = 60.0, max_logs_per_key: int = 5):
+        self._lock = threading.Lock()
+        self._window_seconds = float(window_seconds)
+        self._max_logs_per_key = int(max_logs_per_key)
+        self._state: dict[str, tuple[float, int]] = {}
+
+    def allow(self, key: str) -> bool:
+        if not key:
+            return True
+        now = time.time()
+        with self._lock:
+            window_start, count = self._state.get(key, (now, 0))
+            if (now - window_start) >= self._window_seconds:
+                window_start, count = now, 0
+            if count >= self._max_logs_per_key:
+                self._state[key] = (window_start, count)
+                return False
+            self._state[key] = (window_start, count + 1)
+            return True
+
+
+_ESI_REQUEST_ERROR_LOG_LIMITER = _EsiRequestErrorLogLimiter()
+
+
+def _esi_error_log_key(*, method: str, endpoint: Optional[str], url: str) -> str:
+    ep = (endpoint or "").strip()
+    # Collapse the noisiest endpoint into a single key.
+    if ep.startswith("/universe/structures/"):
+        return f"{method} /universe/structures/*"
+    if ep:
+        return f"{method} {ep}"
+    return f"{method} {url}"
+
+
 _SSO_ISSUER = "https://login.eveonline.com"
 _SSO_JWKS_URL = "https://login.eveonline.com/oauth/jwks"
 _SSO_JWKS_TTL_SECONDS = 24 * 3600
@@ -720,9 +761,30 @@ class ESIClient:
                             )
                     except Exception:
                         pass
-                    logging.error(f"ESI request error {paged_url}: {e}")
-                    retries += 1
-                    wait = 2 ** retries
+                    next_retries = retries + 1
+                    wait = 2 ** next_retries
+                    will_retry = next_retries < 3
+                    log_key = _esi_error_log_key(method="GET", endpoint=str(endpoint) if endpoint is not None else None, url=str(paged_url))
+                    if will_retry:
+                        if _ESI_REQUEST_ERROR_LOG_LIMITER.allow(log_key):
+                            logging.warning(
+                                "ESI GET request error %s: %s (retry %s/%s in %.1fs)",
+                                str(paged_url),
+                                str(e),
+                                next_retries,
+                                3,
+                                float(wait),
+                            )
+                    else:
+                        logging.error(
+                            "ESI GET request failed %s: %s (attempt %s/%s)",
+                            str(paged_url),
+                            str(e),
+                            next_retries,
+                            3,
+                        )
+
+                    retries = next_retries
                     try:
                         if get_esi_monitor is not None:
                             get_esi_monitor().record_retry_event(
@@ -817,9 +879,30 @@ class ESIClient:
                         )
                 except Exception:
                     pass
-                logging.error(f"ESI request error {url}: {e}")
-                retries += 1
-                wait = 2 ** retries
+                next_retries = retries + 1
+                wait = 2 ** next_retries
+                will_retry = next_retries < 3
+                log_key = _esi_error_log_key(method="GET", endpoint=str(endpoint) if endpoint is not None else None, url=str(url))
+                if will_retry:
+                    if _ESI_REQUEST_ERROR_LOG_LIMITER.allow(log_key):
+                        logging.warning(
+                            "ESI GET request error %s: %s (retry %s/%s in %.1fs)",
+                            str(url),
+                            str(e),
+                            next_retries,
+                            3,
+                            float(wait),
+                        )
+                else:
+                    logging.error(
+                        "ESI GET request failed %s: %s (attempt %s/%s)",
+                        str(url),
+                        str(e),
+                        next_retries,
+                        3,
+                    )
+
+                retries = next_retries
                 try:
                     if get_esi_monitor is not None:
                         get_esi_monitor().record_retry_event(

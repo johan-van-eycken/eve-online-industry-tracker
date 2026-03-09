@@ -418,6 +418,28 @@ class PublicStructuresScanStateModel(BaseApp):
     last_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
+
+class MarketOrderbookViewCacheModel(BaseApp):
+    __tablename__ = "market_orderbook_view_cache"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    # Market context
+    hub: Mapped[str] = mapped_column(String, nullable=False)  # e.g. 'jita'
+    region_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    station_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # 0 for region-wide fallback
+
+    # What was cached
+    side: Mapped[str] = mapped_column(String, nullable=False)  # 'buy' or 'sell'
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    at_hub: Mapped[bool] = mapped_column(Boolean, nullable=False)  # True => station-filtered
+
+    # Payload
+    depth: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
+    levels: Mapped[Optional[list[list[float | int]]]] = mapped_column(JSON, nullable=True)
+    fetched_at: Mapped[float] = mapped_column(Float, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
 class IndustryProfilesModel(BaseApp):
     __tablename__ = "industry_profiles"
 
