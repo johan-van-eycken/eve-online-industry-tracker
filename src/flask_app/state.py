@@ -18,6 +18,7 @@ class RuntimeState:
     char_manager: Any = None
     corp_manager: Any = None
     esi_service: Any = None
+    industry_job_manager: Any = None
 
 
 @dataclass
@@ -61,8 +62,15 @@ class PublicStructuresJobState:
 
 
 @dataclass
+class IndustryOverviewRefreshJobState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
 class JobsState:
     public_structures: PublicStructuresJobState = field(default_factory=PublicStructuresJobState)
+    industry_overview_refresh: IndustryOverviewRefreshJobState = field(default_factory=IndustryOverviewRefreshJobState)
 
 
 @dataclass
@@ -140,6 +148,14 @@ class AppState:
     @esi_service.setter
     def esi_service(self, v: Any) -> None:
         self.runtime.esi_service = v
+
+    @property
+    def industry_job_manager(self) -> Any:
+        return self.runtime.industry_job_manager
+
+    @industry_job_manager.setter
+    def industry_job_manager(self, v: Any) -> None:
+        self.runtime.industry_job_manager = v
 
     @property
     def materials_cache(self) -> Any:

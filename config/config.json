@@ -26,11 +26,15 @@
     "client_id": "84f5c62c020c46559d2b8615ea1eb146"
   },
   "defaults": {
+    "industry": {
+      "excluded_blueprint_type_ids": [2864]
+    },
     "market_pricing": {
       "material_price_source_default": "Jita Sell",
       "product_price_source_default": "Jita Sell",
-      "orderbook_smoothing": "median_best_n",
+      "orderbook_smoothing": "volume_weighted_mean_best_n",
       "orderbook_depth": 5,
+      "material_price_cache_ttl_seconds": 3600,
       "sales_tax_fraction": 0.03375,
       "broker_fee_fraction": 0.03
     },
