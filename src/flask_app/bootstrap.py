@@ -24,6 +24,7 @@ from utils.app_init import (
     init_corp_manager,
 )
 
+from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.esi_service import ESIService
 
 from eve_online_industry_tracker.infrastructure.public_structures_cache_service import trigger_global_public_structures_scan
@@ -109,6 +110,8 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         state.init_state = "Initializing Data Adapters"
         main_character = state.char_manager.get_main_character()
         state.esi_service = ESIService(main_character.esi_client)
+        state.industry_job_manager = IndustryJobManager(state=state)
+        state.industry_job_manager.start()
         # Adapters no longer keep module-level globals; they read from state + request-scoped sessions.
 
         # Start background global scan to populate public_structures. This is best-effort and

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import MetaData, Table, select  # pyright: ignore[reportMissingImports]
+
 from eve_online_industry_tracker.db_models import Categories, Factions, Groups, Races, Types
 
 from eve_online_industry_tracker.infrastructure.sde.localization import parse_localized
@@ -13,6 +15,30 @@ def get_type_data(session: Any, language: str, type_ids: list[int]) -> dict[int,
         return {}
 
     types_q = session.query(Types).filter(Types.id.in_(type_ids)).all()
+    bind = session.get_bind()
+
+    meta_group_ids = {t.metaGroupID for t in types_q if getattr(t, "metaGroupID", None) is not None}
+    meta_group_data_map: dict[int, dict[str, Any]] = {}
+    if meta_group_ids:
+        meta_groups_table = Table("metaGroups", MetaData(), autoload_with=bind)
+        meta_group_rows = session.execute(
+            select(
+                meta_groups_table.c.id,
+                meta_groups_table.c.color,
+                meta_groups_table.c.name,
+                meta_groups_table.c.iconID,
+            ).where(meta_groups_table.c.id.in_(meta_group_ids))
+        )
+        meta_group_data_map = {
+            int(row.id): {
+                "id": int(row.id),
+                "color": row.color,
+                "name": row.name,
+                "icon_id": row.iconID,
+            }
+            for row in meta_group_rows
+        }
+
     group_ids = {t.groupID for t in types_q if getattr(t, "groupID", None) is not None}
     group_data_map = {g.id: g for g in session.query(Groups).filter(Groups.id.in_(group_ids)).all()}
 
@@ -28,6 +54,9 @@ def get_type_data(session: Any, language: str, type_ids: list[int]) -> dict[int,
     result: dict[int, dict] = {}
 
     for t in types_q:
+        raw_meta_group_id = getattr(t, "metaGroupID", None)
+        meta_group_id = int(raw_meta_group_id) if raw_meta_group_id is not None else None
+        meta_group = meta_group_data_map.get(meta_group_id) if meta_group_id is not None else None
         group = group_data_map.get(t.groupID)
         category = category_data_map.get(group.categoryID) if group else None
         race = race_data_map.get(t.raceID) if getattr(t, "raceID", None) is not None else None
@@ -44,6 +73,9 @@ def get_type_data(session: Any, language: str, type_ids: list[int]) -> dict[int,
             "base_price": getattr(t, "basePrice", None),
             "icon_id": getattr(t, "iconID", None),
             "meta_group_id": getattr(t, "metaGroupID", None),
+            "meta_group_name": parse_localized(meta_group.get("name"), language) if meta_group else "",
+            "meta_group_color": meta_group.get("color") if meta_group else None,
+            "meta_group_icon_id": meta_group.get("icon_id") if meta_group else None,
             "group_id": getattr(t, "groupID", None),
             "group_name": parse_localized(getattr(group, "name", None), language) if group else "",
             "group_icon_id": getattr(group, "iconID", None) if group else None,

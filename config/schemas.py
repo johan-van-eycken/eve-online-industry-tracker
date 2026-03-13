@@ -24,13 +24,17 @@ CONFIG_SCHEMA = {
     "characters": [],  # must be a list
     "client_secret": None,  # required from secret.json
     "defaults": {
+        "industry": {
+            "excluded_blueprint_type_ids": [2864],
+        },
         "scopes": [],
         "scopes_corp_director": [],
         "market_pricing": {
             "material_price_source_default": "Jita Sell",
             "product_price_source_default": "Jita Sell",
-            "orderbook_smoothing": "median_best_n", #median_best_n or mean_best_n
+            "orderbook_smoothing": "volume_weighted_mean_best_n", # median_best_n, mean_best_n or volume_weighted_mean_best_n
             "orderbook_depth": 5,
+            "material_price_cache_ttl_seconds": 3600,
             "sales_tax_fraction": 0.03375,
             "broker_fee_fraction": 0.03,
         },
