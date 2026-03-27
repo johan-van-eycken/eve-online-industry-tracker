@@ -209,7 +209,7 @@ def _get_meta_group_name(row: dict[str, Any]) -> str:
 
 
 def _meta_group_label(meta_group_name: str) -> str:
-    return meta_group_name if meta_group_name else "No Meta Group"
+    return meta_group_name if meta_group_name else "Other"
 
 
 def _meta_group_toggle_key(meta_group_name: str) -> str:
@@ -226,7 +226,7 @@ def _ordered_meta_group_names(meta_group_names: set[str]) -> list[str]:
         "Faction",
         "Storyline",
         "Officer",
-        "No Meta Group",
+        "Other",
     ]
     ordered: list[str] = []
     available = {_meta_group_label(name): name for name in meta_group_names}
@@ -242,17 +242,74 @@ def _ordered_meta_group_names(meta_group_names: set[str]) -> list[str]:
     return ordered
 
 
+def _blueprint_step_name(source_row: dict[str, Any], node: dict[str, Any]) -> str:
+    blueprint_name = str(node.get("blueprint_name") or "").strip()
+    if blueprint_name:
+        return blueprint_name
+
+    manufacturing_job = _get_manufacturing_job(source_row)
+    blueprint_sde = manufacturing_job.get("blueprint_sde") or {}
+    if isinstance(blueprint_sde, dict):
+        blueprint_name = str(blueprint_sde.get("type_name") or blueprint_sde.get("name") or "").strip()
+        if blueprint_name:
+            return blueprint_name
+
+    return "Blueprint"
+
+
+def _tree_node_step_label(source_row: dict[str, Any], node: dict[str, Any]) -> str:
+    activity = str(node.get("activity") or "").strip().lower()
+    label = str(node.get("label") or "")
+    if activity == "invention":
+        return f"{_blueprint_step_name(source_row, node)} Copy (invention)"
+    if activity == "copying":
+        return f"{_blueprint_step_name(source_row, node)} Copy"
+    return label
+
+
 def _tree_node_type_label(node: dict[str, Any]) -> str:
     node_type = str(node.get("node_type") or "").strip().lower()
-    if node_type == "product":
-        return "Product"
-    if node_type == "activity":
-        return "Job"
-    if node_type == "materials":
-        return "Materials"
+    activity = str(node.get("activity") or "").strip().lower()
+    if node_type == "product" or activity == "manufacturing":
+        return "Manufacture"
+    if activity == "reaction":
+        return "Reaction"
+    if activity == "invention":
+        return "Invention"
+    if activity == "copying":
+        return "Copying"
+    if activity in {"research_material", "research_time"}:
+        return "Research"
+    return ""
+
+
+def _tree_node_activity_label(node: dict[str, Any]) -> str:
+    node_type = str(node.get("node_type") or "").strip().lower()
+    activity = str(node.get("activity") or "").strip().lower()
+    recommendation_action = str(node.get("recommendation_action") or "").strip().lower()
+    sourcing_strategy = str(node.get("sourcing_strategy") or "").strip().lower()
+    runs = int(node.get("runs") or 0)
+
+    if recommendation_action in {"build", "take", "buy", "copy", "invent", "research"}:
+        return recommendation_action
+
+    if node_type == "product" or activity in {"manufacturing", "reaction"}:
+        return "build"
+    if activity == "invention":
+        return "invent" if runs > 0 else "take"
+    if activity == "copying":
+        return "copy" if runs > 0 else "take"
+    if activity in {"research_material", "research_time"}:
+        return "research"
     if node_type == "material":
-        return "Material"
-    return node_type.title() if node_type else "Step"
+        if sourcing_strategy == "build":
+            return "build"
+        if sourcing_strategy == "take":
+            return "take"
+        if sourcing_strategy in {"buy", "buy_reaction_available"}:
+            return "buy"
+        return "take or buy"
+    return ""
 
 
 def _flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -275,12 +332,14 @@ def _flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list
         if job_cost is None:
             job_cost = node.get("job_cost")
 
-        material_cost = None
-        total_cost = job_cost
+        material_cost = node.get("material_cost")
+        total_cost = node.get("total_cost")
+        if total_cost is None:
+            total_cost = job_cost
         bpc_source = ""
         bpo_source = ""
-        meta_group = ""
-        category = ""
+        meta_group = str(node.get("meta_group_name") or "")
+        category = str(node.get("category_name") or "")
         current_path = tree_path_separator.join([*path_ids, sibling_key])
 
         if node_type == "product":
@@ -289,15 +348,22 @@ def _flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list
             total_cost = manufacturing_job.get("total_cost")
             bpc_source = _get_blueprint_copy_source(source_row)
             bpo_source = _get_blueprint_original_source(source_row)
-            meta_group = str(source_row.get("meta_group_name") or "")
-            category = _get_product_category_name(source_row)
+            meta_group = str(node.get("meta_group_name") or source_row.get("meta_group_name") or "")
+            category = str(node.get("category_name") or _get_product_category_name(source_row) or "")
         elif activity == "manufacturing":
-            material_cost = manufacturing_job.get("material_cost")
-            total_cost = manufacturing_job.get("total_cost")
-            bpc_source = _get_blueprint_copy_source(source_row)
-            bpo_source = _get_blueprint_original_source(source_row)
-            meta_group = str(source_row.get("meta_group_name") or "")
-            category = _get_product_category_name(source_row)
+            if int(node.get("type_id") or 0) == int(source_row.get("type_id") or 0):
+                material_cost = manufacturing_job.get("material_cost")
+                total_cost = manufacturing_job.get("total_cost")
+                bpc_source = _get_blueprint_copy_source(source_row)
+                bpo_source = _get_blueprint_original_source(source_row)
+            meta_group = str(node.get("meta_group_name") or source_row.get("meta_group_name") or "")
+            category = str(node.get("category_name") or _get_product_category_name(source_row) or "")
+
+        explicit_item_id = int(node.get("item_id") or 0)
+        type_id_value = int(node.get("type_id") or source_row.get("type_id") or 0)
+        display_id = explicit_item_id if explicit_item_id > 0 else (
+            type_id_value if str(node_type).strip().lower() in {"product", "material"} and type_id_value > 0 else None
+        )
 
         flattened_rows.append(
             {
@@ -306,14 +372,16 @@ def _flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list
                 "_depth": len(path_ids),
                 "_sort_order": order_key,
                 "_has_children": bool(node.get("children") or []),
-                "ID": int(node.get("type_id") or source_row.get("type_id") or 0),
-                "Step": str(node.get("label") or ""),
+                "ID": display_id,
+                "Step": _tree_node_step_label(source_row, node),
                 "Type": _tree_node_type_label(node),
-                "Activity": activity,
+                "Activity": _tree_node_activity_label(node),
                 "Qty": node.get("quantity"),
                 "Runs": node.get("runs"),
                 "Job Duration": (
-                    format_duration(int(duration_seconds or 0)) if duration_seconds is not None else ""
+                    format_duration(int(duration_seconds or 0))
+                    if duration_seconds is not None and int(duration_seconds or 0) > 0
+                    else ""
                 ),
                 "Material Cost": material_cost,
                 "Job Cost": job_cost,
@@ -322,7 +390,6 @@ def _flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list
                 "BPO Source": bpo_source,
                 "Meta Group": meta_group,
                 "Category": category,
-                "Blueprint Source": str(node.get("blueprint_source_kind") or ""),
             }
         )
 
@@ -367,44 +434,6 @@ def _flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list
         )
 
     return flattened_rows
-
-
-def _visible_tree_rows(flattened_rows: list[dict[str, Any]], expanded_paths: set[str]) -> list[dict[str, Any]]:
-    visible_rows: list[dict[str, Any]] = []
-    for row in flattened_rows:
-        if not isinstance(row, dict):
-            continue
-        parent_path = str(row.get("_parent_path") or "")
-        if not parent_path:
-            visible_rows.append(dict(row))
-            continue
-
-        ancestor_path = parent_path
-        is_visible = True
-        while ancestor_path:
-            if ancestor_path not in expanded_paths:
-                is_visible = False
-                break
-            if "|||" not in ancestor_path:
-                ancestor_path = ""
-            else:
-                ancestor_path = ancestor_path.rsplit("|||", 1)[0]
-
-        if is_visible:
-            visible_rows.append(dict(row))
-    return visible_rows
-
-
-def _display_tree_step(row: dict[str, Any], expanded_paths: set[str]) -> str:
-    depth = max(0, int(row.get("_depth") or 0))
-    path = str(row.get("_path") or "")
-    has_children = bool(row.get("_has_children", False))
-    prefix = "  " * depth
-    if has_children:
-        marker = "▾ " if path in expanded_paths else "▸ "
-    else:
-        marker = "• "
-    return f"{prefix}{marker}{str(row.get('Step') or '')}"
 
 
 def _build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
@@ -724,7 +753,7 @@ def render() -> None:
         column_groups = [
             {"Tech I", "Tech II", "Tech III"},
             {"Faction", "Storyline", "Officer"},
-            {"No Meta Group"},
+            {"Other"},
         ]
         enabled_meta_groups: set[str] = set()
         for meta_group_name in meta_group_names:
@@ -835,22 +864,8 @@ def render() -> None:
         return
 
     tree_rows = _flatten_overview_job_tree_rows(filtered_overview_rows)
-    valid_paths = {str(row.get("_path") or "") for row in tree_rows if isinstance(row, dict)}
-    if "industry_builder_expanded_tree_paths" not in st.session_state:
-        st.session_state["industry_builder_expanded_tree_paths"] = set()
-    expanded_tree_paths = {
-        str(path)
-        for path in cast(set[str], st.session_state.get("industry_builder_expanded_tree_paths") or set())
-        if str(path) in valid_paths
-    }
-    st.session_state["industry_builder_expanded_tree_paths"] = expanded_tree_paths
-
-    visible_tree_rows = _visible_tree_rows(tree_rows, expanded_tree_paths)
-    for row in visible_tree_rows:
-        row["Step"] = _display_tree_step(row, expanded_tree_paths)
-
-    df = pd.DataFrame(visible_tree_rows).sort_values(by=["_sort_order"], ascending=[True]).reset_index(drop=True)
-    st.caption("Click a row with a ▸ or ▾ marker in Step to expand or collapse that branch.")
+    df = pd.DataFrame(tree_rows).sort_values(by=["_sort_order"], ascending=[True]).reset_index(drop=True)
+    st.caption("Use the AgGrid chevrons in Step to expand or collapse the build tree.")
 
     gb = grid_options_builder.from_dataframe(df)
     gb.configure_default_column(
@@ -862,13 +877,16 @@ def render() -> None:
         wrapHeaderText=False,
         autoHeaderHeight=False,
         cellStyle={"whiteSpace": "nowrap", "lineHeight": "1.2"},
+        groupable=True, 
+        value=True, 
+        enableRowGroup=True, 
+        editable=True,
+        enableRangeSelection=True,
     )
 
     for col, width in [
-        ("Step", 320),
         ("Type", 110),
         ("Activity", 120),
-        ("Blueprint Source", 150),
         ("BPC Source", 160),
         ("BPO Source", 160),
         ("Meta Group", 130),
@@ -884,6 +902,9 @@ def render() -> None:
                 autoHeaderHeight=False,
                 cellStyle={"whiteSpace": "nowrap", "lineHeight": "1.2"},
             )
+
+    if "Step" in df.columns:
+        gb.configure_column("Step", hide=True)
 
     for col in [
         "ID",
@@ -942,47 +963,61 @@ def render() -> None:
     )
 
     grid_options = gb.build()
-    height = min(1100, 120 + (len(visible_tree_rows) * 34))
-    grid_state_key = abs(hash("|".join(sorted(expanded_tree_paths))))
-    grid_response = aggrid_fn(
+    grid_options["treeData"] = True
+    grid_options["enableRangeSelection"] = True
+    grid_options["getDataPath"] = js_code(
+        """
+        function(data) {
+            try {
+                if (!data || data._path === null || data._path === undefined) return [];
+                var path = String(data._path);
+                if (!path) return [];
+                return path.split('|||').filter(function(part) {
+                    return part !== null && part !== undefined && String(part).length > 0;
+                });
+            } catch (e) {
+                return [];
+            }
+        }
+        """
+    )
+    grid_options["groupDefaultExpanded"] = 0
+    grid_options["isGroupOpenByDefault"] = js_code(
+        """
+        function() {
+            return false;
+        }
+        """
+    )
+    grid_options["autoGroupColumnDef"] = {
+        "headerName": "Step",
+        "pinned": "left",
+        "minWidth": 320,
+        "cellRendererParams": {
+            "suppressCount": True,
+            "innerRenderer": js_code(
+                """
+                function(params) {
+                    if (!params || !params.data) return '';
+                    return String(params.data.Step || '');
+                }
+                """
+            ),
+        },
+    }
+
+    height = min(1100, 120 + (len(tree_rows) * 34))
+    grid_state_key = abs(hash("|".join(str(row.get("_path") or "") for row in tree_rows)))
+    aggrid_fn(
         df,
         gridOptions=grid_options,
         allow_unsafe_jscode=True,
+        enable_enterprise_modules=True,
         theme="streamlit",
         height=height,
         fit_columns_on_grid_load=True,
         key=f"industry_builder_products_overview_{grid_state_key}",
     )
-
-    selected_rows = []
-    if isinstance(grid_response, dict):
-        raw_selected_rows = grid_response.get("selected_rows") or []
-        if isinstance(raw_selected_rows, list):
-            selected_rows = raw_selected_rows
-        elif hasattr(raw_selected_rows, "to_dict"):
-            try:
-                selected_rows = cast(list[dict[str, Any]], raw_selected_rows.to_dict("records"))
-            except Exception:
-                selected_rows = []
-
-    selected_path = ""
-    selected_has_children = False
-    if selected_rows:
-        selected_row = cast(dict[str, Any], selected_rows[0] or {})
-        selected_path = str(selected_row.get("_path") or "")
-        selected_has_children = bool(selected_row.get("_has_children", False))
-
-    last_selected_path = str(st.session_state.get("industry_builder_last_selected_tree_path") or "")
-    if selected_path and selected_has_children and selected_path != last_selected_path:
-        if selected_path in expanded_tree_paths:
-            expanded_tree_paths.remove(selected_path)
-        else:
-            expanded_tree_paths.add(selected_path)
-        st.session_state["industry_builder_expanded_tree_paths"] = expanded_tree_paths
-        st.session_state["industry_builder_last_selected_tree_path"] = selected_path
-        _rerun()
-    elif not selected_path and last_selected_path:
-        st.session_state["industry_builder_last_selected_tree_path"] = ""
 
     debug_options: dict[str, str] = {}
     for row in filtered_overview_rows:

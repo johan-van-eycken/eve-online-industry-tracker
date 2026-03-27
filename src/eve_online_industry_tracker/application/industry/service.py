@@ -1164,6 +1164,228 @@ class IndustryService:
         return total, priced_count
 
     @classmethod
+    def _resolve_preferred_unit_value(
+        cls,
+        *,
+        type_id: int,
+        type_payload: dict[str, Any] | None,
+        sell_price_map: dict[int, dict[str, Any]] | None,
+        adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> tuple[float | None, str | None]:
+        payload = type_payload if isinstance(type_payload, dict) else {}
+
+        explicit_unit_price = cls._as_float(payload.get("unit_price"))
+        if explicit_unit_price is not None and explicit_unit_price > 0:
+            return explicit_unit_price, str(payload.get("price_source") or "explicit_unit_price")
+
+        acquisition_unit_cost = cls._as_float(payload.get("acquisition_unit_cost"))
+        if acquisition_unit_cost is not None and acquisition_unit_cost > 0:
+            return acquisition_unit_cost, "owned_asset_acquisition_cost"
+
+        sell_pricing = (sell_price_map or {}).get(int(type_id)) or {}
+        sell_unit_price = cls._as_float(sell_pricing.get("unit_price"))
+        if sell_unit_price is not None and sell_unit_price > 0:
+            return sell_unit_price, str(sell_pricing.get("price_source") or "market_sell_price")
+
+        average_price = cls._as_float(payload.get("type_average_price"))
+        if average_price is not None and average_price > 0:
+            return average_price, "asset_average_price"
+
+        adjusted_price = cls._as_float(payload.get("type_adjusted_price"))
+        if adjusted_price is not None and adjusted_price > 0:
+            return adjusted_price, "asset_adjusted_price"
+
+        return cls._resolve_eiv_pricing(
+            type_id=type_id,
+            type_payload=payload,
+            adjusted_price_map=adjusted_price_map,
+        )
+
+    @classmethod
+    def _sum_preferred_item_value(
+        cls,
+        entries: list[dict[str, Any]],
+        *,
+        quantity_key: str,
+        sell_price_map: dict[int, dict[str, Any]] | None,
+        adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> tuple[float | None, int]:
+        total = 0.0
+        priced_count = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                type_id = int(entry.get("type_id") or 0)
+            except Exception:
+                type_id = 0
+            if type_id <= 0:
+                continue
+            unit_value, _ = cls._resolve_preferred_unit_value(
+                type_id=type_id,
+                type_payload=entry,
+                sell_price_map=sell_price_map,
+                adjusted_price_map=adjusted_price_map,
+            )
+            if unit_value is None:
+                continue
+            try:
+                quantity = int(entry.get(quantity_key) or 0)
+            except Exception:
+                quantity = 0
+            if quantity <= 0:
+                continue
+            total += float(unit_value) * float(quantity)
+            priced_count += 1
+        if priced_count == 0:
+            return None, 0
+        return total, priced_count
+
+    @classmethod
+    def _plan_take_or_buy_material_nodes(
+        cls,
+        entries: list[dict[str, Any]],
+        *,
+        available_owned_item_quantity_by_type_id: dict[int, int] | None,
+        owned_item_unit_cost_by_type_id: dict[int, float] | None,
+        sell_price_map: dict[int, dict[str, Any]] | None,
+        adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        procurement_materials: list[dict[str, Any]] = []
+        material_nodes: list[dict[str, Any]] = []
+        available_owned_quantities = available_owned_item_quantity_by_type_id or {}
+        owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            type_id = int(entry.get("type_id") or 0)
+            quantity = int(entry.get("quantity") or 0)
+            if type_id <= 0 or quantity <= 0:
+                continue
+
+            available_owned_quantity = int(available_owned_quantities.get(type_id, 0))
+            preferred_owned_unit_cost = cls._as_float(owned_item_unit_costs.get(type_id))
+            buy_unit_price, buy_price_source = cls._resolve_preferred_unit_value(
+                type_id=type_id,
+                type_payload=entry,
+                sell_price_map=sell_price_map,
+                adjusted_price_map=adjusted_price_map,
+            )
+
+            recommendation_action = "buy"
+            unit_price = buy_unit_price
+            price_source = buy_price_source
+            if available_owned_quantity >= quantity:
+                available_owned_quantities[type_id] = max(0, available_owned_quantity - quantity)
+                unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
+                price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
+                recommendation_action = "take"
+
+            line_total = (
+                float(unit_price) * float(quantity)
+                if unit_price is not None and quantity > 0
+                else None
+            )
+            procurement_materials.append(
+                {
+                    **dict(entry),
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                    "price_source": price_source,
+                    "line_total": line_total,
+                }
+            )
+            material_nodes.append(
+                cls._job_tree_node(
+                    label=str(entry.get("type_name") or type_id or "Material"),
+                    node_type="material",
+                    activity="material",
+                    sourcing_strategy=recommendation_action,
+                    recommendation_action=recommendation_action,
+                    category_name=str(entry.get("category_name") or "") or None,
+                    meta_group_name=str(entry.get("meta_group_name") or "") or None,
+                    type_id=type_id,
+                    quantity=quantity,
+                    runs=None,
+                    duration_seconds=None,
+                    job_cost=None,
+                    total_job_cost=None,
+                    material_cost=line_total,
+                    total_cost=line_total,
+                    unit_price=unit_price,
+                    price_source=price_source,
+                    children=[],
+                )
+            )
+
+        return procurement_materials, material_nodes
+
+    @classmethod
+    def _owned_blueprint_copy_consumption_cost(
+        cls,
+        asset: CharacterAssetsModel | CorporationAssetsModel | None,
+        *,
+        consumed_runs: int,
+    ) -> float | None:
+        if asset is None or consumed_runs <= 0:
+            return None
+        acquisition_total_cost = cls._as_float(getattr(asset, "acquisition_total_cost", None))
+        acquisition_unit_cost = cls._as_float(getattr(asset, "acquisition_unit_cost", None))
+        blueprint_runs = max(0, int(getattr(asset, "blueprint_runs", 0) or 0))
+
+        if acquisition_total_cost is not None and acquisition_total_cost > 0:
+            if blueprint_runs > 0:
+                return float(acquisition_total_cost) * (float(min(consumed_runs, blueprint_runs)) / float(blueprint_runs))
+            return float(acquisition_total_cost)
+        if acquisition_unit_cost is not None and acquisition_unit_cost > 0:
+            if blueprint_runs > 0:
+                return float(acquisition_unit_cost) * (float(min(consumed_runs, blueprint_runs)) / float(blueprint_runs))
+            return float(acquisition_unit_cost)
+
+        fallback_asset_value = cls._as_float(getattr(asset, "type_average_price", None))
+        if fallback_asset_value is None or fallback_asset_value <= 0:
+            fallback_asset_value = cls._as_float(getattr(asset, "type_adjusted_price", None))
+        if fallback_asset_value is not None and fallback_asset_value > 0:
+            if blueprint_runs > 0:
+                return float(fallback_asset_value) * (float(min(consumed_runs, blueprint_runs)) / float(blueprint_runs))
+            return float(fallback_asset_value)
+
+        return None
+
+    @classmethod
+    def _owned_blueprint_copy_node_fields(
+        cls,
+        asset: CharacterAssetsModel | CorporationAssetsModel | None,
+        *,
+        blueprint_name: str,
+        recommendation_action: str,
+        runs_required: int,
+        category_name: str | None,
+        meta_group_name: str | None,
+        use_invention_label: bool,
+    ) -> dict[str, Any]:
+        allocated_cost = cls._owned_blueprint_copy_consumption_cost(asset, consumed_runs=runs_required)
+        remaining_runs = int(getattr(asset, "blueprint_runs", 0) or 0) if asset is not None else 0
+        return {
+            "item_id": int(getattr(asset, "item_id", 0) or 0) if asset is not None else None,
+            "quantity": 1 if asset is not None else None,
+            "runs": remaining_runs if remaining_runs > 0 else None,
+            "duration_seconds": None,
+            "job_cost": None,
+            "total_job_cost": None,
+            "material_cost": allocated_cost,
+            "total_cost": allocated_cost,
+            "recommendation_action": recommendation_action,
+            "blueprint_name": blueprint_name,
+            "category_name": category_name,
+            "meta_group_name": meta_group_name,
+            "node_type": "activity",
+            "activity": "invention" if use_invention_label else "copying",
+            "children": [],
+        }
+
+    @classmethod
     def _job_cost_total(
         cls,
         *,
@@ -1217,6 +1439,71 @@ class IndustryService:
         }
 
     @staticmethod
+    def _as_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    @classmethod
+    def _apply_material_pricing_to_job_tree(
+        cls,
+        node: dict[str, Any] | None,
+        *,
+        price_by_type_id: dict[int, dict[str, Any]],
+    ) -> float | None:
+        if not isinstance(node, dict):
+            return None
+
+        children = node.get("children") or []
+        child_material_costs: list[float] = []
+        if isinstance(children, list):
+            for child in children:
+                if not isinstance(child, dict):
+                    continue
+                child_material_cost = cls._apply_material_pricing_to_job_tree(
+                    child,
+                    price_by_type_id=price_by_type_id,
+                )
+                if child_material_cost is not None:
+                    child_material_costs.append(float(child_material_cost))
+
+        node_type = str(node.get("node_type") or "").strip().lower()
+        material_cost = cls._as_float(node.get("material_cost"))
+
+        if node_type == "material":
+            if child_material_costs:
+                material_cost = sum(child_material_costs)
+            else:
+                type_id = int(node.get("type_id") or 0)
+                quantity = int(node.get("quantity") or 0)
+                explicit_unit_price = cls._as_float(node.get("unit_price"))
+                if explicit_unit_price is not None and explicit_unit_price > 0:
+                    unit_price = explicit_unit_price
+                else:
+                    pricing = price_by_type_id.get(type_id) or {}
+                    unit_price = cls._as_float(pricing.get("unit_price"))
+                    node["unit_price"] = unit_price
+                    node["price_source"] = pricing.get("price_source")
+                    node["price_sample_size"] = pricing.get("sample_size")
+                    node["price_cached"] = pricing.get("cached")
+                material_cost = (float(unit_price) * quantity) if unit_price is not None and quantity > 0 else None
+                node["line_total"] = material_cost
+        elif node_type in {"materials", "activity", "product"} and child_material_costs:
+            material_cost = sum(child_material_costs)
+
+        node["material_cost"] = material_cost
+
+        job_cost = cls._as_float(node.get("total_job_cost"))
+        if job_cost is None:
+            job_cost = cls._as_float(node.get("job_cost"))
+        node["total_cost"] = (float(job_cost or 0.0) + float(material_cost or 0.0)) if (job_cost is not None or material_cost is not None) else None
+
+        return material_cost
+
+    @staticmethod
     def _profile_system_security_status(profile_payload: dict[str, Any] | None) -> float | None:
         if not isinstance(profile_payload, dict):
             return None
@@ -1259,11 +1546,41 @@ class IndustryService:
             if existing is None:
                 aggregated[type_id] = dict(entry)
                 continue
+            previous_quantity = int(existing.get("quantity") or 0)
+            existing_line_total = IndustryService._as_float(existing.get("line_total"))
+            if existing_line_total is None:
+                existing_unit_price = IndustryService._as_float(existing.get("unit_price"))
+                if existing_unit_price is not None and previous_quantity > 0:
+                    existing_line_total = float(existing_unit_price) * float(previous_quantity)
+
+            entry_quantity = int(entry.get("quantity") or 0)
+            entry_line_total = IndustryService._as_float(entry.get("line_total"))
+            if entry_line_total is None:
+                entry_unit_price = IndustryService._as_float(entry.get("unit_price"))
+                if entry_unit_price is not None and entry_quantity > 0:
+                    entry_line_total = float(entry_unit_price) * float(entry_quantity)
+
             existing["quantity"] = int(existing.get("quantity") or 0) + int(entry.get("quantity") or 0)
             if entry.get("quantity_per_run") is not None or existing.get("quantity_per_run") is not None:
                 existing["quantity_per_run"] = int(existing.get("quantity_per_run") or 0) + int(entry.get("quantity_per_run") or 0)
             if entry.get("base_quantity") is not None or existing.get("base_quantity") is not None:
                 existing["base_quantity"] = int(existing.get("base_quantity") or 0) + int(entry.get("base_quantity") or 0)
+            combined_line_total = None
+            if existing_line_total is not None or entry_line_total is not None:
+                combined_line_total = float(existing_line_total or 0.0) + float(entry_line_total or 0.0)
+                existing["line_total"] = combined_line_total
+                total_quantity = int(existing.get("quantity") or 0)
+                existing["unit_price"] = (
+                    float(combined_line_total) / float(total_quantity)
+                    if total_quantity > 0
+                    else None
+                )
+            existing_price_source = str(existing.get("price_source") or "").strip()
+            entry_price_source = str(entry.get("price_source") or "").strip()
+            if existing_price_source and entry_price_source and existing_price_source != entry_price_source:
+                existing["price_source"] = "mixed"
+            elif entry_price_source:
+                existing["price_source"] = entry_price_source
         return list(aggregated.values())
 
     @staticmethod
@@ -1325,7 +1642,11 @@ class IndustryService:
         selected_character_modifiers: dict[str, Any] | None,
         character_skill_levels_by_name: dict[str, int],
         adjusted_market_price_map: dict[int, dict[str, Any]],
+        sell_price_map: dict[int, dict[str, Any]] | None,
         blueprint_copy_assets_by_type_id: dict[int, list[Any]],
+        available_blueprint_copy_runs_by_type_id: dict[int, int] | None,
+        available_owned_item_quantity_by_type_id: dict[int, int] | None,
+        owned_item_unit_cost_by_type_id: dict[int, float] | None,
         blueprint_original_assets_by_type_id: dict[int, list[Any]],
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
         reaction_row_by_product_type_id: dict[int, dict[str, Any]],
@@ -1364,16 +1685,34 @@ class IndustryService:
         runs = max(1, int(math.ceil(float(required_quantity) / float(product_quantity_per_run))))
 
         blueprint_type_id = int(blueprint_row.get("blueprint_type_id") or 0)
+        blueprint_payload = blueprint_row.get("blueprint") or {}
+        if not isinstance(blueprint_payload, dict):
+            blueprint_payload = {}
+        blueprint_display_name = str(
+            blueprint_payload.get("type_name")
+            or blueprint_payload.get("name")
+            or blueprint_type_id
+            or "Blueprint"
+        )
         blueprint_material_efficiency = 0
         blueprint_time_efficiency = 0
         blueprint_source_kind = activity
         include_copying_job = False
         include_sde_research_chain = False
+        available_copy_runs = available_blueprint_copy_runs_by_type_id or {}
+        available_owned_item_quantities = available_owned_item_quantity_by_type_id or {}
+        owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
         matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
         matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
+        owned_copy_runs_used = 0
+        missing_blueprint_copy_runs = 0
         if activity == "manufacturing":
             if bool(build_from_bpc):
-                if matched_blueprint_copies:
+                available_target_copy_runs = int(available_copy_runs.get(blueprint_type_id, 0))
+                owned_copy_runs_used = min(max(0, available_target_copy_runs), runs)
+                missing_blueprint_copy_runs = max(0, runs - owned_copy_runs_used)
+                available_copy_runs[blueprint_type_id] = max(0, available_target_copy_runs - owned_copy_runs_used)
+                if owned_copy_runs_used > 0 and matched_blueprint_copies:
                     blueprint_material_efficiency = int(matched_blueprint_copies[0].blueprint_material_efficiency or 0)
                     blueprint_time_efficiency = int(matched_blueprint_copies[0].blueprint_time_efficiency or 0)
                     blueprint_source_kind = "owned_blueprint_copy"
@@ -1381,9 +1720,10 @@ class IndustryService:
                     blueprint_material_efficiency = int(matched_blueprint_originals[0].blueprint_material_efficiency or 0)
                     blueprint_time_efficiency = int(matched_blueprint_originals[0].blueprint_time_efficiency or 0)
                     blueprint_source_kind = "copied_from_owned_blueprint_original"
-                    include_copying_job = True
+                    include_copying_job = missing_blueprint_copy_runs > 0
                 else:
                     blueprint_source_kind = "unowned_blueprint_copy"
+                    include_copying_job = missing_blueprint_copy_runs > 0
             else:
                 if matched_blueprint_originals:
                     blueprint_material_efficiency = int(matched_blueprint_originals[0].blueprint_material_efficiency or 0)
@@ -1518,7 +1858,27 @@ class IndustryService:
             adjusted_price_map=adjusted_market_price_map,
         )
 
-        if include_copying_job:
+        invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
+        has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
+        selected_blueprint_copy_asset = matched_blueprint_copies[0] if matched_blueprint_copies else None
+        if activity == "manufacturing" and bool(build_from_bpc) and selected_blueprint_copy_asset is not None and owned_copy_runs_used > 0:
+            current_copy_node_fields = self._owned_blueprint_copy_node_fields(
+                selected_blueprint_copy_asset,
+                blueprint_name=blueprint_display_name,
+                recommendation_action="take",
+                runs_required=owned_copy_runs_used,
+                category_name=str(selected_product.get("category_name") or "") or None,
+                meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
+                use_invention_label=bool(has_invention_path),
+            )
+            prerequisite_nodes.append(
+                self._job_tree_node(
+                    label=self._ACTIVITY_LABELS["invention"] if has_invention_path else self._ACTIVITY_LABELS["copying"],
+                    **current_copy_node_fields,
+                )
+            )
+
+        if include_copying_job and missing_blueprint_copy_runs > 0:
             copying_time_reduction = self._combine_reductions(
                 [
                     self._skill_time_reduction(
@@ -1565,9 +1925,9 @@ class IndustryService:
                 profile_payload=selected_industry_profile,
                 activity="copying",
             )
-            base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0)) * runs
+            base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0)) * missing_blueprint_copy_runs
             copy_process_value = (
-                float(per_run_material_eiv or 0.0) * runs * 0.02
+                float(per_run_material_eiv or 0.0) * missing_blueprint_copy_runs * 0.02
                 if per_run_material_eiv is not None
                 else None
             )
@@ -1588,19 +1948,23 @@ class IndustryService:
                 "activity": "copying",
                 "duration_seconds": copying_duration_seconds,
                 "job_cost": copying_job_cost.get("total_job_cost"),
-                "runs": runs,
+                "runs": missing_blueprint_copy_runs,
             }
             prerequisite_nodes.append(
                 self._job_tree_node(
                     label=self._ACTIVITY_LABELS["copying"],
                     node_type="activity",
                     activity="copying",
-                    runs=runs,
+                    blueprint_name=blueprint_display_name,
+                    runs=missing_blueprint_copy_runs,
                     quantity=None,
                     duration_seconds=copying_duration_seconds,
                     direct_duration_seconds=copying_duration_seconds,
                     job_cost=copying_job_cost.get("total_job_cost"),
                     total_job_cost=copying_job_cost.get("total_job_cost"),
+                    category_name=str(selected_product.get("category_name") or "") or None,
+                    meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
+                    recommendation_action="copy",
                     children=[],
                 )
             )
@@ -1700,6 +2064,60 @@ class IndustryService:
         for material in adjusted_material_entries:
             child_type_id = int(material.get("type_id") or 0)
             child_quantity = int(material.get("quantity") or 0)
+            if child_type_id <= 0 or child_quantity <= 0:
+                continue
+
+            available_owned_quantity = int(available_owned_item_quantities.get(child_type_id, 0))
+            preferred_owned_unit_cost = self._as_float(owned_item_unit_costs.get(child_type_id))
+            buy_unit_price, buy_price_source = self._resolve_preferred_unit_value(
+                type_id=child_type_id,
+                type_payload=material,
+                sell_price_map=sell_price_map,
+                adjusted_price_map=adjusted_market_price_map,
+            )
+
+            if available_owned_quantity >= child_quantity:
+                available_owned_item_quantities[child_type_id] = max(0, available_owned_quantity - child_quantity)
+                take_unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
+                take_price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
+                line_total = (
+                    float(take_unit_price) * float(child_quantity)
+                    if take_unit_price is not None and child_quantity > 0
+                    else None
+                )
+                leaf_materials.append(
+                    {
+                        **dict(material),
+                        "quantity": child_quantity,
+                        "unit_price": take_unit_price,
+                        "price_source": take_price_source,
+                        "line_total": line_total,
+                    }
+                )
+                material_nodes.append(
+                    self._job_tree_node(
+                        label=str(material.get("type_name") or child_type_id),
+                        node_type="material",
+                        activity="material",
+                        sourcing_strategy="take",
+                        recommendation_action="take",
+                        category_name=str(material.get("category_name") or "") or None,
+                        meta_group_name=str(material.get("meta_group_name") or "") or None,
+                        type_id=child_type_id,
+                        quantity=child_quantity,
+                        runs=None,
+                        duration_seconds=None,
+                        job_cost=None,
+                        total_job_cost=None,
+                        material_cost=line_total,
+                        total_cost=line_total,
+                        unit_price=take_unit_price,
+                        price_source=take_price_source,
+                        children=[],
+                    )
+                )
+                continue
+
             child_row = None
             child_activity = "manufacturing"
             if include_reactions and child_type_id in reaction_row_by_product_type_id:
@@ -1721,7 +2139,11 @@ class IndustryService:
                     selected_character_modifiers=selected_character_modifiers,
                     character_skill_levels_by_name=character_skill_levels_by_name,
                     adjusted_market_price_map=adjusted_market_price_map,
+                    sell_price_map=sell_price_map,
                     blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
+                    available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
+                    available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+                    owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                     blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
                     manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                     reaction_row_by_product_type_id=reaction_row_by_product_type_id,
@@ -1730,55 +2152,140 @@ class IndustryService:
                     depth=depth + 1,
                 )
             if child_plan:
-                total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
-                if child_plan.get("total_job_cost") is not None:
-                    total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
-                    priced_job_count += int(child_plan.get("priced_job_count") or 0)
-                leaf_materials.extend([dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)])
-                recursive_activity_breakdown[f"{child_activity}:{child_type_id}"] = {
-                    "activity": child_activity,
-                    "type_id": child_type_id,
-                    "type_name": material.get("type_name"),
-                    "quantity": child_quantity,
-                    "time_seconds": child_plan.get("total_time_seconds"),
-                    "job_cost": child_plan.get("total_job_cost"),
-                    "direct_job_cost": child_plan.get("direct_job_cost"),
-                }
-                material_nodes.append(
-                    self._job_tree_node(
-                        label=str(material.get("type_name") or child_type_id),
-                        node_type="material",
-                        activity="material",
-                        type_id=child_type_id,
-                        quantity=child_quantity,
-                        runs=None,
-                        duration_seconds=None,
-                        job_cost=None,
-                        total_job_cost=child_plan.get("total_job_cost"),
-                        children=[child_plan.get("tree_node")],
-                    )
+                build_total_cost = self._as_float(child_plan.get("estimated_total_cost"))
+                buy_total_cost = (
+                    float(buy_unit_price) * float(child_quantity)
+                    if buy_unit_price is not None and child_quantity > 0
+                    else None
                 )
+                choose_build = (
+                    build_total_cost is not None
+                    and (buy_total_cost is None or build_total_cost <= buy_total_cost)
+                )
+
+                if choose_build:
+                    total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
+                    if child_plan.get("total_job_cost") is not None:
+                        total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
+                        priced_job_count += int(child_plan.get("priced_job_count") or 0)
+                    leaf_materials.extend([dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)])
+                    recursive_activity_breakdown[f"{child_activity}:{child_type_id}"] = {
+                        "activity": child_activity,
+                        "type_id": child_type_id,
+                        "type_name": material.get("type_name"),
+                        "quantity": child_quantity,
+                        "time_seconds": child_plan.get("total_time_seconds"),
+                        "job_cost": child_plan.get("total_job_cost"),
+                        "direct_job_cost": child_plan.get("direct_job_cost"),
+                        "recommended_action": "build",
+                    }
+                    child_tree_node = child_plan.get("tree_node")
+                    material_nodes.append(
+                        self._job_tree_node(
+                            label=str(material.get("type_name") or child_type_id),
+                            node_type="material",
+                            activity="material",
+                            sourcing_strategy="build",
+                            recommendation_action="build",
+                            category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
+                            meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
+                            type_id=child_type_id,
+                            quantity=child_quantity,
+                            runs=None,
+                            duration_seconds=None,
+                            job_cost=None,
+                            total_job_cost=child_plan.get("total_job_cost"),
+                            children=[child_tree_node] if isinstance(child_tree_node, dict) else [],
+                        )
+                    )
+                else:
+                    leaf_materials.append(
+                        {
+                            **dict(material),
+                            "quantity": child_quantity,
+                            "unit_price": buy_unit_price,
+                            "price_source": buy_price_source,
+                            "line_total": buy_total_cost,
+                        }
+                    )
+                    material_nodes.append(
+                        self._job_tree_node(
+                            label=str(material.get("type_name") or child_type_id),
+                            node_type="material",
+                            activity="material",
+                            sourcing_strategy="buy",
+                            recommendation_action="buy",
+                            category_name=str(material.get("category_name") or "") or None,
+                            meta_group_name=str(material.get("meta_group_name") or "") or None,
+                            type_id=child_type_id,
+                            quantity=child_quantity,
+                            runs=None,
+                            duration_seconds=None,
+                            job_cost=None,
+                            total_job_cost=None,
+                            material_cost=buy_total_cost,
+                            total_cost=buy_total_cost,
+                            unit_price=buy_unit_price,
+                            price_source=buy_price_source,
+                            children=[],
+                        )
+                    )
             else:
-                leaf_materials.append(dict(material))
+                buy_total_cost = (
+                    float(buy_unit_price) * float(child_quantity)
+                    if buy_unit_price is not None and child_quantity > 0
+                    else None
+                )
+                leaf_materials.append(
+                    {
+                        **dict(material),
+                        "quantity": child_quantity,
+                        "unit_price": buy_unit_price,
+                        "price_source": buy_price_source,
+                        "line_total": buy_total_cost,
+                    }
+                )
+                sourcing_strategy = (
+                    "buy_reaction_available"
+                    if not include_reactions and child_type_id in reaction_row_by_product_type_id
+                    else "buy"
+                )
                 material_nodes.append(
                     self._job_tree_node(
                         label=str(material.get("type_name") or child_type_id),
                         node_type="material",
                         activity="material",
+                        sourcing_strategy=sourcing_strategy,
+                        recommendation_action="buy",
+                        category_name=str(material.get("category_name") or "") or None,
+                        meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=child_type_id,
                         quantity=child_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
                         total_job_cost=None,
+                        material_cost=buy_total_cost,
+                        total_cost=buy_total_cost,
+                        unit_price=buy_unit_price,
+                        price_source=buy_price_source,
                         children=[],
                     )
                 )
 
-        if activity == "manufacturing" and not matched_blueprint_copies and not matched_blueprint_originals:
+        if activity == "manufacturing" and missing_blueprint_copy_runs > 0 and not matched_blueprint_originals:
             invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id)
             invention_job = (invention_source_row or {}).get("invention_job") or {}
             if invention_source_row and isinstance(invention_job, dict):
+                invention_blueprint_payload = invention_source_row.get("blueprint") or {}
+                if not isinstance(invention_blueprint_payload, dict):
+                    invention_blueprint_payload = {}
+                invention_blueprint_name = str(
+                    invention_blueprint_payload.get("type_name")
+                    or invention_blueprint_payload.get("name")
+                    or invention_source_row.get("blueprint_type_id")
+                    or "Blueprint"
+                )
                 target_entry = None
                 for product in invention_job.get("products") or []:
                     if not isinstance(product, dict):
@@ -1795,7 +2302,20 @@ class IndustryService:
                         probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
                     except Exception:
                         probability = 0.0
-                invention_attempts = max(1, int(math.ceil(1.0 / max(probability, 0.01))))
+                target_blueprint_name = str(
+                    ((target_entry or {}).get("product") or {}).get("type_name")
+                    if isinstance((target_entry or {}).get("product"), dict)
+                    else ""
+                ).strip() or blueprint_display_name
+                target_blueprint_copy_runs = max(1, int((job.get("max_production_limit") or 0) or 1))
+                successful_invention_jobs = max(
+                    1,
+                    int(math.ceil(float(missing_blueprint_copy_runs) / float(target_blueprint_copy_runs))),
+                )
+                invention_attempts = max(
+                    successful_invention_jobs,
+                    int(math.ceil(float(successful_invention_jobs) / max(probability, 0.01))),
+                )
                 invention_materials = [
                     dict(entry)
                     for entry in (invention_job.get("materials") or [])
@@ -1862,22 +2382,34 @@ class IndustryService:
                     "activity": "invention",
                     "blueprint_type_id": blueprint_type_id,
                     "attempts": invention_attempts,
+                    "successful_jobs": successful_invention_jobs,
                     "time_seconds": invention_duration_seconds,
                     "job_cost": invention_job_cost.get("total_job_cost"),
                 }
                 leaf_materials.extend(
                     [{**entry, "quantity": int(entry.get("quantity") or 0) * invention_attempts} for entry in invention_materials]
                 )
+                generated_target_copy_runs = successful_invention_jobs * target_blueprint_copy_runs
+                if generated_target_copy_runs > missing_blueprint_copy_runs:
+                    available_copy_runs[blueprint_type_id] = max(
+                        0,
+                        int(available_copy_runs.get(blueprint_type_id, 0))
+                        + (generated_target_copy_runs - missing_blueprint_copy_runs),
+                    )
                 prerequisite_nodes.append(
                     self._job_tree_node(
                         label=self._ACTIVITY_LABELS["invention"],
                         node_type="activity",
                         activity="invention",
+                        blueprint_name=target_blueprint_name,
                         runs=invention_attempts,
                         duration_seconds=invention_duration_seconds,
                         direct_duration_seconds=invention_duration_seconds,
                         job_cost=invention_job_cost.get("total_job_cost"),
                         total_job_cost=invention_job_cost.get("total_job_cost"),
+                        category_name=str(selected_product.get("category_name") or "") or None,
+                        meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
+                        recommendation_action="invent",
                         children=[
                             self._job_tree_node(
                                 label=self._ACTIVITY_LABELS["materials"],
@@ -1905,8 +2437,11 @@ class IndustryService:
 
                 source_copying_job = (invention_source_row.get("copying_job") or {}) if isinstance(invention_source_row, dict) else {}
                 source_blueprint_type_id = int((invention_source_row or {}).get("blueprint_type_id") or 0)
-                source_has_copy = bool(blueprint_copy_assets_by_type_id.get(source_blueprint_type_id))
-                if isinstance(source_copying_job, dict) and int(source_copying_job.get("time_seconds") or 0) > 0 and not source_has_copy:
+                available_source_copy_runs = int(available_copy_runs.get(source_blueprint_type_id, 0))
+                source_copy_runs_used = min(max(0, available_source_copy_runs), invention_attempts)
+                available_copy_runs[source_blueprint_type_id] = max(0, available_source_copy_runs - source_copy_runs_used)
+                missing_source_copy_runs = max(0, invention_attempts - source_copy_runs_used)
+                if isinstance(source_copying_job, dict) and int(source_copying_job.get("time_seconds") or 0) > 0 and missing_source_copy_runs > 0:
                     source_manufacturing_materials = [
                         dict(entry)
                         for entry in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or [])
@@ -1918,7 +2453,11 @@ class IndustryService:
                         adjusted_price_map=adjusted_market_price_map,
                     )
                     source_copy_job_cost = self._job_cost_total(
-                        process_value=(float(source_copy_process_value) * 0.02 if source_copy_process_value is not None else None),
+                        process_value=(
+                            float(source_copy_process_value) * float(missing_source_copy_runs) * 0.02
+                            if source_copy_process_value is not None
+                            else None
+                        ),
                         cost_index=self._system_cost_index(profile_payload=selected_industry_profile, activity="copying"),
                         cost_reduction=self._combine_reductions(
                             [
@@ -1943,7 +2482,7 @@ class IndustryService:
                     )
                     source_copy_duration_seconds = self._round_duration_seconds(
                         int(source_copying_job.get("time_seconds") or 0)
-                        * invention_attempts
+                        * missing_source_copy_runs
                         * max(
                             0.0,
                             1.0
@@ -1976,7 +2515,7 @@ class IndustryService:
                     recursive_activity_breakdown[f"copying:{source_blueprint_type_id}"] = {
                         "activity": "copying",
                         "blueprint_type_id": source_blueprint_type_id,
-                        "attempts": invention_attempts,
+                        "attempts": missing_source_copy_runs,
                         "time_seconds": source_copy_duration_seconds,
                         "job_cost": source_copy_job_cost.get("total_job_cost"),
                     }
@@ -1985,11 +2524,15 @@ class IndustryService:
                             label=self._ACTIVITY_LABELS["copying"],
                             node_type="activity",
                             activity="copying",
-                            runs=invention_attempts,
+                            blueprint_name=invention_blueprint_name,
+                            runs=missing_source_copy_runs,
                             duration_seconds=source_copy_duration_seconds,
                             direct_duration_seconds=source_copy_duration_seconds,
                             job_cost=source_copy_job_cost.get("total_job_cost"),
                             total_job_cost=source_copy_job_cost.get("total_job_cost"),
+                            category_name=str(selected_product.get("category_name") or "") or None,
+                            meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
+                            recommendation_action="copy",
                             children=[],
                         )
                     )
@@ -2006,6 +2549,8 @@ class IndustryService:
             activity=activity,
             blueprint_type_id=blueprint_type_id,
             type_id=int(selected_product.get("type_id") or desired_product_type_id),
+            category_name=str(selected_product.get("category_name") or "") or None,
+            meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
             quantity=required_quantity,
             runs=runs,
             duration_seconds=total_time_seconds,
@@ -2016,10 +2561,19 @@ class IndustryService:
             children=[*prerequisite_nodes, materials_container_node],
         )
 
+        estimated_material_cost, _ = self._sum_preferred_item_value(
+            leaf_materials,
+            quantity_key="quantity",
+            sell_price_map=sell_price_map,
+            adjusted_price_map=adjusted_market_price_map,
+        )
+
         return {
             "activity": activity,
             "blueprint_type_id": blueprint_type_id,
             "type_id": int(selected_product.get("type_id") or desired_product_type_id),
+            "category_name": str(selected_product.get("category_name") or "") or None,
+            "meta_group_name": str(selected_product.get("meta_group_name") or "") or None,
             "required_quantity": required_quantity,
             "runs": runs,
             "direct_time_seconds": direct_duration_seconds,
@@ -2029,6 +2583,12 @@ class IndustryService:
             "priced_job_count": priced_job_count,
             "estimated_item_value": process_value,
             "estimated_item_value_priced_material_count": priced_material_count,
+            "estimated_material_cost": estimated_material_cost,
+            "estimated_total_cost": (
+                float(total_job_cost or 0.0) + float(estimated_material_cost or 0.0)
+                if total_job_cost is not None or estimated_material_cost is not None
+                else None
+            ),
             "leaf_materials": self._aggregate_material_entries(leaf_materials),
             "recursive_activity_breakdown": recursive_activity_breakdown,
             "blueprint_source_kind": blueprint_source_kind,
@@ -2046,11 +2606,16 @@ class IndustryService:
         selected_character_modifiers: dict[str, Any] | None,
         character_skill_levels_by_name: dict[str, int],
         adjusted_market_price_map: dict[int, dict[str, Any]],
+        sell_price_map: dict[int, dict[str, Any]] | None,
         blueprint_copy_assets_by_type_id: dict[int, list[Any]],
+        available_blueprint_copy_runs_by_type_id: dict[int, int] | None,
+        available_owned_item_quantity_by_type_id: dict[int, int] | None,
+        owned_item_unit_cost_by_type_id: dict[int, float] | None,
         blueprint_original_assets_by_type_id: dict[int, list[Any]],
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
         reaction_row_by_product_type_id: dict[int, dict[str, Any]],
         invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
+        include_current_blueprint_prerequisites: bool = True,
     ) -> dict[str, Any]:
         reactions_enabled = bool(include_reactions) and self._reactions_allowed_for_profile(selected_industry_profile)
         total_time_seconds = 0
@@ -2060,13 +2625,24 @@ class IndustryService:
         recursive_activity_breakdown: dict[str, Any] = {}
         tree_children: list[dict[str, Any]] = []
         material_nodes: list[dict[str, Any]] = []
+        available_owned_item_quantities = available_owned_item_quantity_by_type_id or {}
+        owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
 
         matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(int(blueprint_type_id)) or []
         matched_blueprint_originals = blueprint_original_assets_by_type_id.get(int(blueprint_type_id)) or []
-        if not matched_blueprint_copies and not matched_blueprint_originals:
+        if include_current_blueprint_prerequisites and not matched_blueprint_copies and not matched_blueprint_originals:
             invention_source_row = invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
             invention_job = (invention_source_row or {}).get("invention_job") or {}
             if invention_source_row and isinstance(invention_job, dict):
+                invention_blueprint_payload = invention_source_row.get("blueprint") or {}
+                if not isinstance(invention_blueprint_payload, dict):
+                    invention_blueprint_payload = {}
+                invention_blueprint_name = str(
+                    invention_blueprint_payload.get("type_name")
+                    or invention_blueprint_payload.get("name")
+                    or invention_source_row.get("blueprint_type_id")
+                    or "Blueprint"
+                )
                 target_entry = None
                 for product in invention_job.get("products") or []:
                     if not isinstance(product, dict):
@@ -2083,6 +2659,11 @@ class IndustryService:
                         probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
                     except Exception:
                         probability = 0.0
+                target_blueprint_name = str(
+                    ((target_entry or {}).get("product") or {}).get("type_name")
+                    if isinstance((target_entry or {}).get("product"), dict)
+                    else ""
+                ).strip() or str(blueprint_type_id)
                 invention_attempts = max(1, int(math.ceil(1.0 / max(probability, 0.01))))
                 invention_materials = [
                     {**dict(entry), "quantity": int(entry.get("quantity") or 0) * invention_attempts}
@@ -2143,11 +2724,18 @@ class IndustryService:
                 invention_duration_seconds = self._round_duration_seconds(
                     int(invention_job.get("time_seconds") or 0) * invention_attempts * max(0.0, 1.0 - invention_time_reduction)
                 )
+                planned_invention_materials, invention_material_nodes = self._plan_take_or_buy_material_nodes(
+                    invention_materials,
+                    available_owned_item_quantity_by_type_id=available_owned_item_quantities,
+                    owned_item_unit_cost_by_type_id=owned_item_unit_costs,
+                    sell_price_map=sell_price_map,
+                    adjusted_price_map=adjusted_market_price_map,
+                )
                 total_time_seconds += invention_duration_seconds
                 if invention_job_cost.get("total_job_cost") is not None:
                     total_job_cost += float(invention_job_cost.get("total_job_cost") or 0.0)
                     priced_job_count += 1
-                procurement_materials.extend(invention_materials)
+                procurement_materials.extend(planned_invention_materials)
                 recursive_activity_breakdown[f"invention:{blueprint_type_id}"] = {
                     "activity": "invention",
                     "blueprint_type_id": blueprint_type_id,
@@ -2160,6 +2748,7 @@ class IndustryService:
                         label=self._ACTIVITY_LABELS["invention"],
                         node_type="activity",
                         activity="invention",
+                        blueprint_name=target_blueprint_name,
                         blueprint_type_id=blueprint_type_id,
                         runs=invention_attempts,
                         duration_seconds=invention_duration_seconds,
@@ -2171,21 +2760,7 @@ class IndustryService:
                                 label=self._ACTIVITY_LABELS["materials"],
                                 node_type="materials",
                                 activity="materials",
-                                children=[
-                                    self._job_tree_node(
-                                        label=str(entry.get("type_name") or entry.get("type_id") or "Material"),
-                                        node_type="material",
-                                        activity="material",
-                                        type_id=int(entry.get("type_id") or 0),
-                                        quantity=int(entry.get("quantity") or 0),
-                                        runs=None,
-                                        duration_seconds=None,
-                                        job_cost=None,
-                                        total_job_cost=None,
-                                        children=[],
-                                    )
-                                    for entry in invention_materials
-                                ],
+                                children=invention_material_nodes,
                             )
                         ],
                     )
@@ -2273,6 +2848,7 @@ class IndustryService:
                             label=self._ACTIVITY_LABELS["copying"],
                             node_type="activity",
                             activity="copying",
+                            blueprint_name=invention_blueprint_name,
                             blueprint_type_id=source_blueprint_type_id,
                             runs=invention_attempts,
                             duration_seconds=source_copy_duration_seconds,
@@ -2290,6 +2866,55 @@ class IndustryService:
             material_quantity = int(material.get("quantity") or 0)
             if material_type_id <= 0 or material_quantity <= 0:
                 continue
+            available_owned_quantity = int(available_owned_item_quantities.get(material_type_id, 0))
+            preferred_owned_unit_cost = self._as_float(owned_item_unit_costs.get(material_type_id))
+            buy_unit_price, buy_price_source = self._resolve_preferred_unit_value(
+                type_id=material_type_id,
+                type_payload=material,
+                sell_price_map=sell_price_map,
+                adjusted_price_map=adjusted_market_price_map,
+            )
+            if available_owned_quantity >= material_quantity:
+                available_owned_item_quantities[material_type_id] = max(0, available_owned_quantity - material_quantity)
+                take_unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
+                take_price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
+                line_total = (
+                    float(take_unit_price) * float(material_quantity)
+                    if take_unit_price is not None and material_quantity > 0
+                    else None
+                )
+                procurement_materials.append(
+                    {
+                        **dict(material),
+                        "quantity": material_quantity,
+                        "unit_price": take_unit_price,
+                        "price_source": take_price_source,
+                        "line_total": line_total,
+                    }
+                )
+                material_nodes.append(
+                    self._job_tree_node(
+                        label=str(material.get("type_name") or material_type_id),
+                        node_type="material",
+                        activity="material",
+                        sourcing_strategy="take",
+                        recommendation_action="take",
+                        category_name=str(material.get("category_name") or "") or None,
+                        meta_group_name=str(material.get("meta_group_name") or "") or None,
+                        type_id=material_type_id,
+                        quantity=material_quantity,
+                        runs=None,
+                        duration_seconds=None,
+                        job_cost=None,
+                        total_job_cost=None,
+                        material_cost=line_total,
+                        total_cost=line_total,
+                        unit_price=take_unit_price,
+                        price_source=take_price_source,
+                        children=[],
+                    )
+                )
+                continue
             child_row = None
             child_activity = "manufacturing"
             if reactions_enabled and material_type_id in reaction_row_by_product_type_id:
@@ -2298,18 +2923,44 @@ class IndustryService:
             elif material_type_id in manufacturing_row_by_product_type_id:
                 child_row = manufacturing_row_by_product_type_id.get(material_type_id)
             if child_row is None:
-                procurement_materials.append(dict(material))
+                line_total = (
+                    float(buy_unit_price) * float(material_quantity)
+                    if buy_unit_price is not None and material_quantity > 0
+                    else None
+                )
+                procurement_materials.append(
+                    {
+                        **dict(material),
+                        "quantity": material_quantity,
+                        "unit_price": buy_unit_price,
+                        "price_source": buy_price_source,
+                        "line_total": line_total,
+                    }
+                )
+                sourcing_strategy = (
+                    "buy_reaction_available"
+                    if not reactions_enabled and material_type_id in reaction_row_by_product_type_id
+                    else "buy"
+                )
                 material_nodes.append(
                     self._job_tree_node(
                         label=str(material.get("type_name") or material_type_id),
                         node_type="material",
                         activity="material",
+                        sourcing_strategy=sourcing_strategy,
+                        recommendation_action="buy",
+                        category_name=str(material.get("category_name") or "") or None,
+                        meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
                         quantity=material_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
                         total_job_cost=None,
+                        material_cost=line_total,
+                        total_cost=line_total,
+                        unit_price=buy_unit_price,
+                        price_source=buy_price_source,
                         children=[],
                     )
                 )
@@ -2326,7 +2977,11 @@ class IndustryService:
                 selected_character_modifiers=selected_character_modifiers,
                 character_skill_levels_by_name=character_skill_levels_by_name,
                 adjusted_market_price_map=adjusted_market_price_map,
+                sell_price_map=sell_price_map,
                 blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
+                available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
+                available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+                owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                 blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
                 manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                 reaction_row_by_product_type_id=reaction_row_by_product_type_id,
@@ -2335,52 +2990,127 @@ class IndustryService:
                 depth=1,
             )
             if child_plan is None:
-                procurement_materials.append(dict(material))
+                line_total = (
+                    float(buy_unit_price) * float(material_quantity)
+                    if buy_unit_price is not None and material_quantity > 0
+                    else None
+                )
+                procurement_materials.append(
+                    {
+                        **dict(material),
+                        "quantity": material_quantity,
+                        "unit_price": buy_unit_price,
+                        "price_source": buy_price_source,
+                        "line_total": line_total,
+                    }
+                )
+                sourcing_strategy = (
+                    "buy_reaction_available"
+                    if not reactions_enabled and material_type_id in reaction_row_by_product_type_id
+                    else "buy"
+                )
                 material_nodes.append(
                     self._job_tree_node(
                         label=str(material.get("type_name") or material_type_id),
                         node_type="material",
                         activity="material",
+                        sourcing_strategy=sourcing_strategy,
+                        recommendation_action="buy",
+                        category_name=str(material.get("category_name") or "") or None,
+                        meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
                         quantity=material_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
                         total_job_cost=None,
+                        material_cost=line_total,
+                        total_cost=line_total,
+                        unit_price=buy_unit_price,
+                        price_source=buy_price_source,
                         children=[],
                     )
                 )
                 continue
-            total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
-            if child_plan.get("total_job_cost") is not None:
-                total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
-                priced_job_count += int(child_plan.get("priced_job_count") or 0)
-            procurement_materials.extend(
-                [dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)]
+            build_total_cost = self._as_float(child_plan.get("estimated_total_cost"))
+            buy_total_cost = (
+                float(buy_unit_price) * float(material_quantity)
+                if buy_unit_price is not None and material_quantity > 0
+                else None
             )
-            recursive_activity_breakdown[f"{child_activity}:{material_type_id}"] = {
-                "activity": child_activity,
-                "type_id": material_type_id,
-                "type_name": material.get("type_name"),
-                "quantity": material_quantity,
-                "time_seconds": child_plan.get("total_time_seconds"),
-                "job_cost": child_plan.get("total_job_cost"),
-                "nested": child_plan.get("recursive_activity_breakdown") or {},
-            }
-            material_nodes.append(
-                self._job_tree_node(
-                    label=str(material.get("type_name") or material_type_id),
-                    node_type="material",
-                    activity="material",
-                    type_id=material_type_id,
-                    quantity=material_quantity,
-                    runs=None,
-                    duration_seconds=None,
-                    job_cost=None,
-                    total_job_cost=child_plan.get("total_job_cost"),
-                    children=[child_plan.get("tree_node")],
+            choose_build = (
+                build_total_cost is not None
+                and (buy_total_cost is None or build_total_cost <= buy_total_cost)
+            )
+            if choose_build:
+                total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
+                if child_plan.get("total_job_cost") is not None:
+                    total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
+                    priced_job_count += int(child_plan.get("priced_job_count") or 0)
+                procurement_materials.extend(
+                    [dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)]
                 )
-            )
+                recursive_activity_breakdown[f"{child_activity}:{material_type_id}"] = {
+                    "activity": child_activity,
+                    "type_id": material_type_id,
+                    "type_name": material.get("type_name"),
+                    "quantity": material_quantity,
+                    "time_seconds": child_plan.get("total_time_seconds"),
+                    "job_cost": child_plan.get("total_job_cost"),
+                    "nested": child_plan.get("recursive_activity_breakdown") or {},
+                    "recommended_action": "build",
+                }
+                child_tree_node = child_plan.get("tree_node")
+                material_nodes.append(
+                    self._job_tree_node(
+                        label=str(material.get("type_name") or material_type_id),
+                        node_type="material",
+                        activity="material",
+                        sourcing_strategy="build",
+                        recommendation_action="build",
+                        category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
+                        meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
+                        type_id=material_type_id,
+                        quantity=material_quantity,
+                        runs=None,
+                        duration_seconds=None,
+                        job_cost=None,
+                        total_job_cost=child_plan.get("total_job_cost"),
+                        children=[child_tree_node] if isinstance(child_tree_node, dict) else [],
+                    )
+                )
+            else:
+                procurement_materials.append(
+                    {
+                        **dict(material),
+                        "quantity": material_quantity,
+                        "unit_price": buy_unit_price,
+                        "price_source": buy_price_source,
+                        "line_total": buy_total_cost,
+                    }
+                )
+                material_nodes.append(
+                    self._job_tree_node(
+                        label=str(material.get("type_name") or material_type_id),
+                        node_type="material",
+                        activity="material",
+                        sourcing_strategy="buy",
+                        recommendation_action="buy",
+                        category_name=str(material.get("category_name") or "") or None,
+                        meta_group_name=str(material.get("meta_group_name") or "") or None,
+                        type_id=material_type_id,
+                        quantity=material_quantity,
+                        runs=None,
+                        duration_seconds=None,
+                        job_cost=None,
+                        total_job_cost=None,
+                        material_cost=buy_total_cost,
+                        total_cost=buy_total_cost,
+                        unit_price=buy_unit_price,
+                        price_source=buy_price_source,
+                        children=[],
+                    )
+                )
 
         if not procurement_materials:
             procurement_materials = [dict(entry) for entry in adjusted_material_entries if isinstance(entry, dict)]
@@ -2431,6 +3161,8 @@ class IndustryService:
             if asset.blueprint_time_efficiency is not None
             else None,
             "quantity": int(asset.quantity),
+            "acquisition_unit_cost": IndustryService._as_float(getattr(asset, "acquisition_unit_cost", None)),
+            "acquisition_total_cost": IndustryService._as_float(getattr(asset, "acquisition_total_cost", None)),
         }
         if isinstance(asset, CharacterAssetsModel):
             character_id = int(asset.character_id)
@@ -2611,6 +3343,134 @@ class IndustryService:
             except Exception:
                 pass
 
+    def _get_owned_item_inventory(
+        self,
+        *,
+        owned_blueprints_scope: str,
+    ) -> tuple[dict[int, int], dict[int, float]]:
+        session: Any = self._sessions.app_session()
+        try:
+            characters = self._state.char_manager.get_characters() or []
+            character_ids: list[int] = []
+            corporation_ids: list[int] = []
+            for character in characters:
+                if not isinstance(character, dict):
+                    continue
+                try:
+                    character_id = int(character.get("character_id") or 0)
+                except Exception:
+                    character_id = 0
+                try:
+                    corporation_id = int(character.get("corporation_id") or 0)
+                except Exception:
+                    corporation_id = 0
+                if character_id > 0:
+                    character_ids.append(character_id)
+                if corporation_id > 0:
+                    corporation_ids.append(corporation_id)
+
+            normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
+
+            def query_character_assets(ids: list[int]) -> list[CharacterAssetsModel]:
+                normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
+                if not normalized_ids:
+                    return []
+                return (
+                    session.query(CharacterAssetsModel)
+                    .filter(CharacterAssetsModel.character_id.in_(normalized_ids))
+                    .all()
+                )
+
+            def query_corporation_assets(ids: list[int]) -> list[CorporationAssetsModel]:
+                normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
+                if not normalized_ids:
+                    return []
+                return (
+                    session.query(CorporationAssetsModel)
+                    .filter(CorporationAssetsModel.corporation_id.in_(normalized_ids))
+                    .all()
+                )
+
+            character_assets: list[CharacterAssetsModel] = []
+            corporation_assets: list[CorporationAssetsModel] = []
+            if normalized_scope.startswith("character:"):
+                try:
+                    selected_character_id = int(normalized_scope.split(":", 1)[1])
+                except Exception:
+                    selected_character_id = 0
+                character_assets = query_character_assets([selected_character_id])
+            elif normalized_scope.startswith("character_and_corporation:"):
+                parts = normalized_scope.split(":")
+                try:
+                    selected_character_id = int(parts[1]) if len(parts) > 1 else 0
+                except Exception:
+                    selected_character_id = 0
+                try:
+                    selected_corporation_id = int(parts[2]) if len(parts) > 2 else 0
+                except Exception:
+                    selected_corporation_id = 0
+                character_assets = query_character_assets([selected_character_id])
+                corporation_assets = query_corporation_assets([selected_corporation_id])
+            elif normalized_scope.startswith("corporation:"):
+                try:
+                    selected_corporation_id = int(normalized_scope.split(":", 1)[1])
+                except Exception:
+                    selected_corporation_id = 0
+                corporation_assets = query_corporation_assets([selected_corporation_id])
+            elif normalized_scope == "all_characters":
+                character_assets = query_character_assets(character_ids)
+            elif normalized_scope == "character_and_corporations":
+                character_assets = query_character_assets(character_ids)
+                corporation_assets = query_corporation_assets(corporation_ids)
+            elif normalized_scope == "all_corporations":
+                corporation_assets = query_corporation_assets(corporation_ids)
+            elif normalized_scope == "all":
+                character_assets = query_character_assets(character_ids)
+                corporation_assets = query_corporation_assets(corporation_ids)
+            else:
+                character_assets = query_character_assets(character_ids)
+
+            quantity_by_type_id: dict[int, int] = {}
+            cost_total_by_type_id: dict[int, float] = {}
+            cost_quantity_by_type_id: dict[int, int] = {}
+            for asset in [*character_assets, *corporation_assets]:
+                try:
+                    type_id = int(asset.type_id or 0)
+                except Exception:
+                    type_id = 0
+                if type_id <= 0 or str(getattr(asset, "type_category_name", "") or "") == "Blueprint":
+                    continue
+                try:
+                    quantity = int(getattr(asset, "quantity", 0) or 0)
+                except Exception:
+                    quantity = 0
+                if quantity <= 0:
+                    continue
+                quantity_by_type_id[type_id] = int(quantity_by_type_id.get(type_id, 0)) + quantity
+
+                unit_cost = self._as_float(getattr(asset, "acquisition_unit_cost", None))
+                if unit_cost is None or unit_cost <= 0:
+                    unit_cost = self._as_float(getattr(asset, "type_average_price", None))
+                if unit_cost is None or unit_cost <= 0:
+                    unit_cost = self._as_float(getattr(asset, "type_adjusted_price", None))
+                if unit_cost is None or unit_cost <= 0:
+                    continue
+                cost_total_by_type_id[type_id] = float(cost_total_by_type_id.get(type_id, 0.0)) + (float(unit_cost) * quantity)
+                cost_quantity_by_type_id[type_id] = int(cost_quantity_by_type_id.get(type_id, 0)) + quantity
+
+            unit_cost_by_type_id: dict[int, float] = {}
+            for type_id, total_cost in cost_total_by_type_id.items():
+                quantity = int(cost_quantity_by_type_id.get(type_id, 0))
+                if quantity > 0:
+                    unit_cost_by_type_id[type_id] = float(total_cost) / float(quantity)
+
+            return quantity_by_type_id, unit_cost_by_type_id
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+
     def industry_manufacturing_product_overview(
         self,
         *,
@@ -2646,8 +3506,20 @@ class IndustryService:
             reaction_row_by_product_type_id,
             invention_row_by_blueprint_type_id,
         ) = self._build_blueprint_row_indexes(blueprint_rows)
+        product_sell_price_type_ids = sorted(
+            {
+                *[int(type_id) for type_id in manufacturing_row_by_product_type_id.keys()],
+                *[int(type_id) for type_id in reaction_row_by_product_type_id.keys()],
+            }
+        )
+        product_sell_price_map = MarketPricingService(state=self._state, sessions=self._sessions).get_material_sell_price_map(
+            material_type_ids=product_sell_price_type_ids,
+        )
         blueprint_copy_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
         blueprint_original_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
+        available_owned_item_quantity_by_type_id_base, owned_item_unit_cost_by_type_id = self._get_owned_item_inventory(
+            owned_blueprints_scope=owned_blueprints_scope,
+        )
         (
             character_blueprint_assets,
             corporation_blueprint_assets,
@@ -2696,6 +3568,11 @@ class IndustryService:
                     int(asset.item_id or 0),
                 )
             )
+
+        available_blueprint_copy_runs_by_type_id_base: dict[int, int] = {
+            int(blueprint_type_id): sum(max(0, int(asset.blueprint_runs or 0)) for asset in assets)
+            for blueprint_type_id, assets in blueprint_copy_assets_by_type_id.items()
+        }
 
         def compact_material(entry: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -2857,6 +3734,14 @@ class IndustryService:
                             effective_runs = blueprint_copy_runs
                         elif max_production_limit > 0:
                             effective_runs = max_production_limit
+
+                    available_blueprint_copy_runs_by_type_id = dict(available_blueprint_copy_runs_by_type_id_base)
+                    available_owned_item_quantity_by_type_id = dict(available_owned_item_quantity_by_type_id_base)
+                    if bool(build_from_bpc):
+                        if blueprint_copy_asset is not None:
+                            available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, blueprint_copy_runs)
+                        elif blueprint_original_asset is not None:
+                            available_blueprint_copy_runs_by_type_id[blueprint_type_id] = 0
 
                     compact_product = dict(raw_product)
                     compact_product["quantity"] = product_quantity_per_run * effective_runs
@@ -3050,8 +3935,44 @@ class IndustryService:
                     total_time_seconds = direct_manufacturing_time_seconds
                     total_job_cost = float(manufacturing_job_cost.get("total_job_cost") or 0.0)
                     priced_job_count = 1 if manufacturing_job_cost.get("total_job_cost") is not None else 0
+                    prerequisite_tree_nodes: list[dict[str, Any]] = []
+                    top_level_procurement_materials = cast(list[dict[str, Any]], [*adjusted_material_entries])
+                    invention_source_row = invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
+                    invention_job = (invention_source_row or {}).get("invention_job") or {}
+                    has_top_level_invention_path = invention_source_row and isinstance(invention_job, dict)
+                    available_target_copy_runs = (
+                        int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) if bool(build_from_bpc) else 0
+                    )
+                    owned_target_copy_runs_used = min(max(0, available_target_copy_runs), effective_runs) if bool(build_from_bpc) else 0
+                    if bool(build_from_bpc):
+                        available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(
+                            0,
+                            available_target_copy_runs - owned_target_copy_runs_used,
+                        )
+                    missing_top_level_copy_runs = max(0, effective_runs - owned_target_copy_runs_used) if bool(build_from_bpc) else 0
+                    requires_copying_job = bool(include_copying_job) and missing_top_level_copy_runs > 0
+                    requires_invention_chain = missing_top_level_copy_runs > 0 and not matched_blueprint_originals
 
-                    if include_copying_job:
+                    if bool(build_from_bpc) and blueprint_copy_asset is not None and owned_target_copy_runs_used > 0:
+                        current_copy_node_fields = self._owned_blueprint_copy_node_fields(
+                            blueprint_copy_asset,
+                            blueprint_name=str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id),
+                            recommendation_action="take",
+                            runs_required=owned_target_copy_runs_used,
+                            category_name=str(compact_product.get("category_name") or "") or None,
+                            meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                            use_invention_label=bool(has_top_level_invention_path),
+                        )
+                        prerequisite_tree_nodes.append(
+                            self._job_tree_node(
+                                label=(self._ACTIVITY_LABELS["invention"] if has_top_level_invention_path else self._ACTIVITY_LABELS["copying"]),
+                                **current_copy_node_fields,
+                            )
+                        )
+
+                    if int(((row.get("copying_job") or {}).get("time_seconds") or 0)) > 0 and not (
+                        has_top_level_invention_path and not matched_blueprint_originals
+                    ):
                         copying_time_reduction = self._combine_reductions(
                             [
                                 self._skill_time_reduction(
@@ -3098,9 +4019,12 @@ class IndustryService:
                             profile_payload=selected_industry_profile,
                             activity="copying",
                         )
-                        base_copy_time_seconds = int(((row.get("copying_job") or {}).get("time_seconds") or 0)) * effective_runs
+                        base_copy_time_seconds = int(((row.get("copying_job") or {}).get("time_seconds") or 0)) * max(
+                            0,
+                            missing_top_level_copy_runs,
+                        )
                         copy_process_value = (
-                            float(per_run_material_eiv or 0.0) * effective_runs * 0.02
+                            float(per_run_material_eiv or 0.0) * max(0, missing_top_level_copy_runs) * 0.02
                             if per_run_material_eiv is not None
                             else None
                         )
@@ -3121,13 +4045,343 @@ class IndustryService:
                             "cost_reduction": copying_cost_reduction,
                             "cost_index": copying_cost_index,
                             "estimated_item_value": per_run_material_eiv,
-                            "runs": effective_runs,
+                            "runs": max(0, missing_top_level_copy_runs),
                             **copying_job_cost,
                         }
-                        total_time_seconds += copying_duration_seconds
-                        if copying_job_cost.get("total_job_cost") is not None:
-                            total_job_cost += float(copying_job_cost.get("total_job_cost") or 0.0)
-                            priced_job_count += 1
+                        if requires_copying_job:
+                            total_time_seconds += copying_duration_seconds
+                            if copying_job_cost.get("total_job_cost") is not None:
+                                total_job_cost += float(copying_job_cost.get("total_job_cost") or 0.0)
+                                priced_job_count += 1
+                        else:
+                            activity_breakdown.pop("copying", None)
+                        if requires_copying_job or owned_target_copy_runs_used <= 0:
+                            prerequisite_tree_nodes.append(
+                                self._job_tree_node(
+                                    label=self._ACTIVITY_LABELS["copying"],
+                                    node_type="activity",
+                                    activity="copying",
+                                    blueprint_name=str(
+                                        ((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("type_name")
+                                        or ((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("name")
+                                        or blueprint_type_id
+                                        or "Blueprint"
+                                    ),
+                                    runs=max(0, missing_top_level_copy_runs),
+                                    duration_seconds=copying_duration_seconds,
+                                    direct_duration_seconds=copying_duration_seconds,
+                                    job_cost=copying_job_cost.get("total_job_cost"),
+                                    total_job_cost=copying_job_cost.get("total_job_cost"),
+                                    category_name=str(compact_product.get("category_name") or "") or None,
+                                    meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                                    recommendation_action="copy",
+                                    children=[],
+                                )
+                            )
+
+                    if invention_source_row and isinstance(invention_job, dict):
+                        invention_blueprint_payload = invention_source_row.get("blueprint") or {}
+                        if not isinstance(invention_blueprint_payload, dict):
+                            invention_blueprint_payload = {}
+                        invention_blueprint_name = str(
+                            invention_blueprint_payload.get("type_name")
+                            or invention_blueprint_payload.get("name")
+                            or invention_source_row.get("blueprint_type_id")
+                            or "Blueprint"
+                        )
+                        target_entry = None
+                        for product in invention_job.get("products") or []:
+                            if not isinstance(product, dict):
+                                continue
+                            invention_product = product.get("product") or {}
+                            if not isinstance(invention_product, dict):
+                                invention_product = {}
+                            if int(invention_product.get("type_id") or product.get("type_id") or 0) == int(blueprint_type_id):
+                                target_entry = product
+                                break
+
+                        probability = 0.0
+                        if isinstance(target_entry, dict):
+                            try:
+                                probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
+                            except Exception:
+                                probability = 0.0
+                        target_blueprint_name = str(
+                            ((target_entry or {}).get("product") or {}).get("type_name")
+                            if isinstance((target_entry or {}).get("product"), dict)
+                            else ""
+                        ).strip() or str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id)
+
+                        successful_invention_jobs = (
+                            max(
+                                1,
+                                int(
+                                    math.ceil(
+                                        float(max(1, missing_top_level_copy_runs))
+                                        / float(max(1, max_production_limit or 1))
+                                    )
+                                ),
+                            )
+                            if requires_invention_chain
+                            else 0
+                        )
+                        invention_attempts = (
+                            max(
+                                successful_invention_jobs,
+                                int(math.ceil(float(successful_invention_jobs) / max(probability, 0.01))),
+                            )
+                            if successful_invention_jobs > 0
+                            else 0
+                        )
+                        invention_materials = [
+                            {**dict(entry), "quantity": int(entry.get("quantity") or 0) * invention_attempts}
+                            for entry in (invention_job.get("materials") or [])
+                            if isinstance(entry, dict)
+                        ]
+                        invention_process_value, _ = self._sum_estimated_item_value(
+                            invention_materials,
+                            quantity_key="quantity",
+                            adjusted_price_map=adjusted_market_price_map,
+                        )
+                        invention_time_reduction = self._combine_reductions(
+                            [
+                                self._skill_time_reduction(
+                                    activity="invention",
+                                    skill_levels_by_name=character_skill_levels_by_name,
+                                ),
+                                self._profile_base_reduction(
+                                    profile_payload=selected_industry_profile,
+                                    activity="invention",
+                                    metric="time",
+                                ),
+                                self._profile_rig_reduction(
+                                    profile_payload=selected_industry_profile,
+                                    activity="invention",
+                                    metric="time",
+                                ),
+                                self._implant_reduction(
+                                    character_modifier_payload=selected_character_modifiers,
+                                    activity="invention",
+                                    metric="time",
+                                ),
+                            ]
+                        )
+                        invention_cost_index = self._system_cost_index(
+                            profile_payload=selected_industry_profile,
+                            activity="invention",
+                        )
+                        invention_cost_reduction = self._combine_reductions(
+                            [
+                                self._profile_base_reduction(
+                                    profile_payload=selected_industry_profile,
+                                    activity="invention",
+                                    metric="cost",
+                                ),
+                                self._profile_rig_reduction(
+                                    profile_payload=selected_industry_profile,
+                                    activity="invention",
+                                    metric="cost",
+                                ),
+                                self._implant_reduction(
+                                    character_modifier_payload=selected_character_modifiers,
+                                    activity="invention",
+                                    metric="cost",
+                                ),
+                            ]
+                        )
+                        invention_job_cost = self._job_cost_total(
+                            process_value=invention_process_value,
+                            cost_index=invention_cost_index,
+                            cost_reduction=invention_cost_reduction,
+                            installation_surcharge=installation_surcharge,
+                        )
+                        invention_duration_seconds = (
+                            self._round_duration_seconds(
+                                int(invention_job.get("time_seconds") or 0)
+                                * invention_attempts
+                                * max(0.0, 1.0 - invention_time_reduction)
+                            )
+                            if invention_attempts > 0
+                            else 0
+                        )
+                        planned_invention_materials, invention_material_nodes = self._plan_take_or_buy_material_nodes(
+                            invention_materials,
+                            available_owned_item_quantity_by_type_id=(
+                                available_owned_item_quantity_by_type_id
+                                if requires_invention_chain
+                                else dict(available_owned_item_quantity_by_type_id)
+                            ),
+                            owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
+                            sell_price_map=product_sell_price_map,
+                            adjusted_price_map=adjusted_market_price_map,
+                        )
+                        activity_breakdown["invention"] = {
+                            "activity": "invention",
+                            "duration_seconds": invention_duration_seconds,
+                            "base_duration_seconds": int(invention_job.get("time_seconds") or 0) * invention_attempts,
+                            "time_reduction": invention_time_reduction,
+                            "cost_reduction": invention_cost_reduction,
+                            "cost_index": invention_cost_index,
+                            "estimated_item_value": invention_process_value,
+                            "runs": invention_attempts,
+                            **invention_job_cost,
+                        }
+                        if requires_invention_chain:
+                            total_time_seconds += invention_duration_seconds
+                            if invention_job_cost.get("total_job_cost") is not None:
+                                total_job_cost += float(invention_job_cost.get("total_job_cost") or 0.0)
+                                priced_job_count += 1
+                            top_level_procurement_materials.extend(planned_invention_materials)
+                            generated_target_copy_runs = successful_invention_jobs * max(1, max_production_limit or 1)
+                            if generated_target_copy_runs > missing_top_level_copy_runs:
+                                available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(
+                                    0,
+                                    int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0))
+                                    + (generated_target_copy_runs - missing_top_level_copy_runs),
+                                )
+                        else:
+                            activity_breakdown.pop("invention", None)
+                        if requires_invention_chain or owned_target_copy_runs_used <= 0:
+                            prerequisite_tree_nodes.append(
+                                self._job_tree_node(
+                                    label=self._ACTIVITY_LABELS["invention"],
+                                    node_type="activity",
+                                    activity="invention",
+                                    blueprint_name=target_blueprint_name,
+                                    blueprint_type_id=blueprint_type_id,
+                                    runs=invention_attempts,
+                                    duration_seconds=invention_duration_seconds,
+                                    direct_duration_seconds=invention_duration_seconds,
+                                    job_cost=invention_job_cost.get("total_job_cost"),
+                                    total_job_cost=invention_job_cost.get("total_job_cost"),
+                                    category_name=str(compact_product.get("category_name") or "") or None,
+                                    meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                                    recommendation_action=("invent" if invention_attempts > 0 else "take"),
+                                    children=(
+                                        [
+                                            self._job_tree_node(
+                                                label=self._ACTIVITY_LABELS["materials"],
+                                                node_type="materials",
+                                                activity="materials",
+                                                children=invention_material_nodes,
+                                            )
+                                        ]
+                                        if invention_attempts > 0 and invention_material_nodes
+                                        else []
+                                    ),
+                                )
+                            )
+
+                        source_copying_job = (
+                            (invention_source_row.get("copying_job") or {}) if isinstance(invention_source_row, dict) else {}
+                        )
+                        source_blueprint_type_id = int((invention_source_row or {}).get("blueprint_type_id") or 0)
+                        available_source_copy_runs = int(available_blueprint_copy_runs_by_type_id.get(source_blueprint_type_id, 0))
+                        source_copy_runs_used = min(max(0, available_source_copy_runs), invention_attempts)
+                        available_blueprint_copy_runs_by_type_id[source_blueprint_type_id] = max(
+                            0,
+                            available_source_copy_runs - source_copy_runs_used,
+                        )
+                        missing_source_copy_runs = max(0, invention_attempts - source_copy_runs_used)
+                        if requires_invention_chain and isinstance(source_copying_job, dict) and int(source_copying_job.get("time_seconds") or 0) > 0:
+                                source_manufacturing_materials = [
+                                    dict(entry)
+                                    for entry in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or [])
+                                    if isinstance(entry, dict)
+                                ]
+                                source_copy_process_value, _ = self._sum_estimated_item_value(
+                                    source_manufacturing_materials,
+                                    quantity_key="quantity",
+                                    adjusted_price_map=adjusted_market_price_map,
+                                )
+                                source_copy_job_cost = self._job_cost_total(
+                                    process_value=(
+                                        float(source_copy_process_value) * float(max(0, missing_source_copy_runs)) * 0.02
+                                        if source_copy_process_value is not None
+                                        else None
+                                    ),
+                                    cost_index=self._system_cost_index(
+                                        profile_payload=selected_industry_profile,
+                                        activity="copying",
+                                    ),
+                                    cost_reduction=self._combine_reductions(
+                                        [
+                                            self._profile_base_reduction(
+                                                profile_payload=selected_industry_profile,
+                                                activity="copying",
+                                                metric="cost",
+                                            ),
+                                            self._profile_rig_reduction(
+                                                profile_payload=selected_industry_profile,
+                                                activity="copying",
+                                                metric="cost",
+                                            ),
+                                            self._implant_reduction(
+                                                character_modifier_payload=selected_character_modifiers,
+                                                activity="copying",
+                                                metric="cost",
+                                            ),
+                                        ]
+                                    ),
+                                    installation_surcharge=installation_surcharge,
+                                )
+                                source_copy_duration_seconds = (
+                                    self._round_duration_seconds(
+                                        int(source_copying_job.get("time_seconds") or 0)
+                                        * max(0, missing_source_copy_runs)
+                                        * max(
+                                            0.0,
+                                            1.0
+                                            - self._combine_reductions(
+                                                [
+                                                    self._skill_time_reduction(
+                                                        activity="copying",
+                                                        skill_levels_by_name=character_skill_levels_by_name,
+                                                    ),
+                                                    self._profile_base_reduction(
+                                                        profile_payload=selected_industry_profile,
+                                                        activity="copying",
+                                                        metric="time",
+                                                    ),
+                                                    self._profile_rig_reduction(
+                                                        profile_payload=selected_industry_profile,
+                                                        activity="copying",
+                                                        metric="time",
+                                                    ),
+                                                    self._implant_reduction(
+                                                        character_modifier_payload=selected_character_modifiers,
+                                                        activity="copying",
+                                                        metric="time",
+                                                    ),
+                                                ]
+                                            ),
+                                        )
+                                    )
+                                    if missing_source_copy_runs > 0
+                                    else 0
+                                )
+                                if requires_invention_chain and missing_source_copy_runs > 0:
+                                    total_time_seconds += source_copy_duration_seconds
+                                    if source_copy_job_cost.get("total_job_cost") is not None:
+                                        total_job_cost += float(source_copy_job_cost.get("total_job_cost") or 0.0)
+                                        priced_job_count += 1
+                                prerequisite_tree_nodes.append(
+                                    self._job_tree_node(
+                                        label=self._ACTIVITY_LABELS["copying"],
+                                        node_type="activity",
+                                        activity="copying",
+                                        blueprint_name=invention_blueprint_name,
+                                        runs=max(0, missing_source_copy_runs),
+                                        duration_seconds=source_copy_duration_seconds,
+                                        direct_duration_seconds=source_copy_duration_seconds,
+                                        job_cost=source_copy_job_cost.get("total_job_cost"),
+                                        total_job_cost=source_copy_job_cost.get("total_job_cost"),
+                                        category_name=str(compact_product.get("category_name") or "") or None,
+                                        meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                                        recommendation_action="copy",
+                                        children=[],
+                                    )
+                                )
 
                     if include_sde_research_chain:
                         for activity_name, source_field in [
@@ -3215,6 +4469,19 @@ class IndustryService:
                             if research_job_cost.get("total_job_cost") is not None:
                                 total_job_cost += float(research_job_cost.get("total_job_cost") or 0.0)
                                 priced_job_count += 1
+                            prerequisite_tree_nodes.append(
+                                self._job_tree_node(
+                                    label=self._ACTIVITY_LABELS.get(activity_name, activity_name),
+                                    node_type="activity",
+                                    activity=activity_name,
+                                    runs=None,
+                                    duration_seconds=research_duration_seconds,
+                                    direct_duration_seconds=research_duration_seconds,
+                                    job_cost=research_job_cost.get("total_job_cost"),
+                                    total_job_cost=research_job_cost.get("total_job_cost"),
+                                    children=[],
+                                )
+                            )
 
                     blueprint_copy_payload = self._compact_owned_blueprint_asset(
                         blueprint_copy_asset,
@@ -3242,11 +4509,20 @@ class IndustryService:
                         selected_character_modifiers=selected_character_modifiers,
                         character_skill_levels_by_name=character_skill_levels_by_name,
                         adjusted_market_price_map=adjusted_market_price_map,
+                        sell_price_map=product_sell_price_map,
                         blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
+                        available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
+                        available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+                        owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                         blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
                         manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                         reaction_row_by_product_type_id=reaction_row_by_product_type_id,
                         invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
+                        include_current_blueprint_prerequisites=False,
+                    )
+                    top_level_procurement_materials = cast(
+                        list[dict[str, Any]],
+                        recursive_prerequisite_plan.get("procurement_materials") or top_level_procurement_materials,
                     )
                     total_time_seconds += int(recursive_prerequisite_plan.get("time_seconds") or 0)
                     if recursive_prerequisite_plan.get("job_cost") is not None:
@@ -3261,24 +4537,6 @@ class IndustryService:
                             "activities": recursive_prerequisite_plan.get("activity_breakdown") or {},
                         }
 
-                    prerequisite_tree_nodes: list[dict[str, Any]] = []
-                    for activity_name in ["copying", "research_material", "research_time"]:
-                        activity_payload = activity_breakdown.get(activity_name) or {}
-                        if not isinstance(activity_payload, dict) or not activity_payload:
-                            continue
-                        prerequisite_tree_nodes.append(
-                            self._job_tree_node(
-                                label=self._ACTIVITY_LABELS.get(activity_name, activity_name),
-                                node_type="activity",
-                                activity=activity_name,
-                                runs=activity_payload.get("runs"),
-                                duration_seconds=activity_payload.get("duration_seconds"),
-                                direct_duration_seconds=activity_payload.get("duration_seconds"),
-                                job_cost=activity_payload.get("total_job_cost"),
-                                total_job_cost=activity_payload.get("total_job_cost"),
-                                children=[],
-                            )
-                        )
                     prerequisite_tree_nodes.extend(
                         [
                             node
@@ -3296,6 +4554,14 @@ class IndustryService:
                                 label=str(material.get("type_name") or material.get("type_id") or "Material"),
                                 node_type="material",
                                 activity="material",
+                                sourcing_strategy=(
+                                    "take_or_buy_reaction_available"
+                                    if not (bool(include_reactions) and self._reactions_allowed_for_profile(selected_industry_profile))
+                                    and int(material.get("type_id") or 0) in reaction_row_by_product_type_id
+                                    else "take_or_buy"
+                                ),
+                                category_name=str(material.get("category_name") or "") or None,
+                                meta_group_name=str(material.get("meta_group_name") or "") or None,
                                 type_id=int(material.get("type_id") or 0),
                                 quantity=int(material.get("quantity") or 0),
                                 runs=None,
@@ -3374,7 +4640,7 @@ class IndustryService:
                                 "activity_breakdown": activity_breakdown,
                                 "recursive_activity_breakdown": recursive_prerequisite_plan.get("activity_breakdown") or {},
                                 "procurement_materials": keyed_entries(
-                                    cast(list[dict[str, Any]], recursive_prerequisite_plan.get("procurement_materials") or adjusted_material_entries),
+                                    top_level_procurement_materials,
                                     compactor=lambda entry: entry,
                                 ),
                                 "activity_cost_indices": {
@@ -3492,12 +4758,16 @@ class IndustryService:
                 if not isinstance(material, dict):
                     continue
                 type_id = int(material.get("type_id") or 0)
-                pricing = price_by_type_id.get(type_id) or {}
-                unit_price = pricing.get("unit_price")
-                material["unit_price"] = unit_price
-                material["price_source"] = pricing.get("price_source")
-                material["price_sample_size"] = pricing.get("sample_size")
-                material["price_cached"] = pricing.get("cached")
+                explicit_unit_price = self._as_float(material.get("unit_price"))
+                if explicit_unit_price is not None and explicit_unit_price > 0:
+                    unit_price = explicit_unit_price
+                else:
+                    pricing = price_by_type_id.get(type_id) or {}
+                    unit_price = pricing.get("unit_price")
+                    material["unit_price"] = unit_price
+                    material["price_source"] = pricing.get("price_source")
+                    material["price_sample_size"] = pricing.get("sample_size")
+                    material["price_cached"] = pricing.get("cached")
                 line_total = None
                 if unit_price is not None:
                     line_total = float(unit_price) * int(material.get("quantity") or 0)
@@ -3512,6 +4782,10 @@ class IndustryService:
                 manufacturing_job["total_cost"] = float(total_job_cost or 0.0) + float(material_cost or 0.0)
             else:
                 manufacturing_job["total_cost"] = None
+
+            job_tree = manufacturing_job.get("job_tree") or {}
+            if isinstance(job_tree, dict) and job_tree:
+                self._apply_material_pricing_to_job_tree(job_tree, price_by_type_id=price_by_type_id)
 
         if progress_callback is not None:
             progress_callback(0.97, "Applied material prices to manufacturing rows", {"rows": len(product_rows)})
