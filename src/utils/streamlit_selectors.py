@@ -3,6 +3,7 @@ from __future__ import annotations
 import streamlit as st  # pyright: ignore[reportMissingImports]
 
 from utils.characters_api import build_character_options, fetch_characters
+from utils.session_state import ensure_valid_state_value
 
 
 def select_character_id(
@@ -56,10 +57,17 @@ def select_character_id(
         if main_id in char_options:
             default_index = character_ids.index(int(main_id))
 
+    default_character_id = int(character_ids[int(default_index)])
+    ensure_valid_state_value(
+        key,
+        default_character_id,
+        valid_values=character_ids,
+        coerce=int,
+    )
+
     selected = st.selectbox(
         label,
         options=character_ids,
-        index=int(default_index),
         format_func=lambda x: char_options.get(int(x), str(x)),
         key=key,
     )

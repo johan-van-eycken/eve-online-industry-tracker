@@ -1,9 +1,8 @@
-import pandas as pd
-import streamlit as st
-import sys
 import time
+import streamlit as st
 from typing import Any, cast
 
+from utils.aggrid_formatters import js_eu_number_formatter, js_icon_cell_renderer
 from utils.characters_api import (
     build_character_options,
     build_owned_blueprint_character_corporation_scope_options,
@@ -11,495 +10,67 @@ from utils.characters_api import (
     fetch_characters,
 )
 from utils.corporations_api import build_owned_blueprint_corporation_scope_options
-from utils.aggrid_formatters import js_eu_number_formatter
-from utils.aggrid_import import import_aggrid
 from utils.formatters import format_duration
-from utils.flask_api import api_get, api_post, cached_api_get
-from utils.industry_profiles_api import build_industry_profile_options, fetch_industry_profiles
-
-
-_ag = import_aggrid()
-AgGrid = _ag.AgGrid  # type: ignore
-GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
-JsCode = _ag.JsCode  # type: ignore
-_AGGRID_IMPORT_ERROR = _ag.import_error
+from utils.industry_builder_api import (
+    clear_industry_builder_caches,
+    fetch_job_manager_status,
+    fetch_product_overview_refresh_status,
+    fetch_solar_system_security_map,
+    start_product_overview_refresh,
+)
+from utils.industry_builder_page import (
+    default_character_id,
+    ensure_overview_refresh_state,
+    ensure_selection_state,
+    ensure_meta_group_filter_state,
+    ensure_toggle_state,
+    fetch_industry_profiles_cached,
+    overview_refresh_is_active,
+    overview_refresh_view,
+    persist_filter_preferences,
+    poll_overview_refresh_job,
+    resolve_profile_security_status,
+    start_overview_refresh_job,
+    clear_overview_refresh_job,
+)
+from utils.industry_builder_ui import (
+    build_overview_grid_frame,
+    build_debug_payload_preview,
+    filter_overview_rows,
+    meta_group_label,
+    meta_group_toggle_key,
+    ordered_meta_group_names,
+    get_meta_group_name,
+)
+from utils.industry_profiles_api import build_industry_profile_options
+from utils.session_state import ensure_valid_state_value
+from utils.webpage_ui import render_job_status_panel, require_aggrid
 
 
 def _rerun() -> None:
     st.rerun()
 
 
-@st.cache_data(ttl=300)
-def _fetch_product_overview(
-    *,
-    force_refresh: bool = False,
-    maximize_bp_runs: bool = False,
-    build_from_bpc: bool = True,
-    have_blueprint_source_only: bool = True,
-    include_reactions: bool = False,
-    industry_profile_id: int | None = None,
-    owned_blueprints_scope: str = "all_characters",
-    character_id: int,
-) -> list[dict]:
-    path = (
-        f"/industry_products/{int(character_id)}"
-        f"?maximize_bp_runs={1 if maximize_bp_runs else 0}"
-        f"&build_from_bpc={1 if build_from_bpc else 0}"
-        f"&have_blueprint_source_only={1 if have_blueprint_source_only else 0}"
-        f"&include_reactions={1 if include_reactions else 0}"
-        f"&owned_blueprints_scope={owned_blueprints_scope}"
-    )
-    if industry_profile_id is not None and int(industry_profile_id) > 0:
-        path += f"&industry_profile_id={int(industry_profile_id)}"
-    if force_refresh:
-        path += "&refresh=1"
-    resp = api_get(path, timeout_seconds=120 if force_refresh else 60) or {}
-    if resp.get("status") != "success":
-        raise RuntimeError(resp.get("message") or "Failed to load industry product overview")
-    data = resp.get("data") or []
-    return data if isinstance(data, list) else []
-
-
-@st.cache_data(ttl=30)
-def _fetch_job_manager_status() -> dict:
-    resp = api_get("/industry_job_manager/status") or {}
-    if resp.get("status") != "success":
-        raise RuntimeError(resp.get("message") or "Failed to load industry job manager status")
-    data = resp.get("data") or {}
-    return data if isinstance(data, dict) else {}
-
-
-def _start_product_overview_refresh(
-    *,
-    maximize_bp_runs: bool,
-    build_from_bpc: bool,
-    have_blueprint_source_only: bool,
-    include_reactions: bool,
-    industry_profile_id: int | None,
-    owned_blueprints_scope: str,
-    character_id: int,
-) -> dict[str, Any]:
-    resp = api_post(
-        f"/industry_products/{int(character_id)}/refresh",
-        {
-            "force_refresh": True,
-            "maximize_bp_runs": bool(maximize_bp_runs),
-            "build_from_bpc": bool(build_from_bpc),
-            "have_blueprint_source_only": bool(have_blueprint_source_only),
-            "include_reactions": bool(include_reactions),
-            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
-            "owned_blueprints_scope": str(owned_blueprints_scope),
-        },
-    ) or {}
-    if resp.get("status") != "success":
-        raise RuntimeError(resp.get("message") or "Failed to start industry product overview refresh")
-    data = resp.get("data") or {}
-    return data if isinstance(data, dict) else {}
-
-
-def _fetch_product_overview_refresh_status(job_id: str) -> dict[str, Any]:
-    resp = api_get(f"/industry_products/refresh/{job_id}", timeout_seconds=30) or {}
-    if resp.get("status") != "success":
-        raise RuntimeError(resp.get("message") or "Failed to load industry product overview refresh status")
-    data = resp.get("data") or {}
-    return data if isinstance(data, dict) else {}
-
-
-def _get_manufacturing_job(row: dict[str, Any]) -> dict[str, Any]:
-    return cast(dict[str, Any], row.get("manufacturing_job") or {})
-
-
-def _get_product_name(row: dict[str, Any]) -> str:
-    return str(row.get("type_name") or "")
-
-
-def _get_product_group_name(row: dict[str, Any]) -> str:
-    return str(row.get("group_name") or "")
-
-
-def _get_product_category_name(row: dict[str, Any]) -> str:
-    return str(row.get("category_name") or "")
-
-
-def _get_product_quantity(row: dict[str, Any]) -> int:
-    return int(row.get("quantity") or 0)
-
-
-def _get_effective_runs(row: dict[str, Any]) -> int:
-    return int(_get_manufacturing_job(row).get("runs") or 0)
-
-
-def _get_skill_requirements_met(row: dict[str, Any]) -> bool:
-    skills = _get_manufacturing_job(row).get("skills") or {}
-    if not isinstance(skills, dict):
-        return False
-    return bool(skills.get("skill_requirements_met", False))
-
-
-def _format_blueprint_owner_source(asset: dict[str, Any]) -> str:
-    if not isinstance(asset, dict) or not asset:
-        return ""
-    character_name = str(asset.get("character_name") or "").strip()
-    corporation_name = str(asset.get("corporation_name") or "").strip()
-    if character_name and corporation_name:
-        return f"{character_name} + {corporation_name}"
-    if character_name:
-        return character_name
-    if corporation_name:
-        return corporation_name
-    owner_type = str(asset.get("owner_type") or "").strip().lower()
-    if owner_type == "character":
-        owner_id = int(asset.get("character_id") or 0)
-        return f"character {owner_id}" if owner_id > 0 else "character"
-    if owner_type == "corporation":
-        owner_id = int(asset.get("corporation_id") or 0)
-        return f"corporation {owner_id}" if owner_id > 0 else "corporation"
-    character_id = int(asset.get("character_id") or 0)
-    if character_id > 0:
-        return f"character {character_id}"
-    corporation_id = int(asset.get("corporation_id") or 0)
-    if corporation_id > 0:
-        return f"corporation {corporation_id}"
-    return ""
-
-
-def _get_blueprint_copy_source(row: dict[str, Any]) -> str:
-    return _format_blueprint_owner_source(_get_manufacturing_job(row).get("blueprint_copy") or {})
-
-
-def _get_blueprint_original_source(row: dict[str, Any]) -> str:
-    return _format_blueprint_owner_source(_get_manufacturing_job(row).get("blueprint_original") or {})
-
-
-@st.cache_data(ttl=3600)
-def _fetch_solar_system_security_map() -> dict[int, float]:
-    resp = cached_api_get("/solar_systems") or {}
-    if resp.get("status") != "success":
-        raise RuntimeError(resp.get("message") or "Failed to load solar systems")
-
-    data = resp.get("data") or []
-    out: dict[int, float] = {}
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
-        try:
-            system_id = int(entry.get("id") or 0)
-            security_status = float(entry.get("security_status") or 0.0)
-        except Exception:
-            continue
-        if system_id > 0:
-            out[system_id] = security_status
-    return out
-
-
-def _get_meta_group_name(row: dict[str, Any]) -> str:
-    raw_name = str(row.get("meta_group_name") or "").strip()
-    normalized = raw_name.lower()
-    if normalized in {"tech i", "structure tech i", "abyssal"}:
-        return "Tech I"
-    if normalized in {"tech ii", "structure tech ii"}:
-        return "Tech II"
-    if normalized in {"tech iii", "structure tech iii"}:
-        return "Tech III"
-    if normalized in {"faction", "structure faction"}:
-        return "Faction"
-    if normalized in {"storyline", "limited time"}:
-        return "Storyline"
-    return raw_name
-
-
-def _meta_group_label(meta_group_name: str) -> str:
-    return meta_group_name if meta_group_name else "Other"
-
-
-def _meta_group_toggle_key(meta_group_name: str) -> str:
-    normalized = meta_group_name.strip().lower() or "none"
-    safe = "".join(ch if ch.isalnum() else "_" for ch in normalized)
-    return f"industry_builder_meta_group_{safe}"
-
-
-def _ordered_meta_group_names(meta_group_names: set[str]) -> list[str]:
-    preferred_order = [
-        "Tech I",
-        "Tech II",
-        "Tech III",
-        "Faction",
-        "Storyline",
-        "Officer",
-        "Other",
-    ]
-    ordered: list[str] = []
-    available = {_meta_group_label(name): name for name in meta_group_names}
-    for label in preferred_order:
-        if label in available:
-            ordered.append(available[label])
-
-    remaining = sorted(
-        [name for name in meta_group_names if _meta_group_label(name) not in preferred_order],
-        key=lambda name: _meta_group_label(name).lower(),
-    )
-    ordered.extend(remaining)
-    return ordered
-
-
-def _blueprint_step_name(source_row: dict[str, Any], node: dict[str, Any]) -> str:
-    blueprint_name = str(node.get("blueprint_name") or "").strip()
-    if blueprint_name:
-        return blueprint_name
-
-    manufacturing_job = _get_manufacturing_job(source_row)
-    blueprint_sde = manufacturing_job.get("blueprint_sde") or {}
-    if isinstance(blueprint_sde, dict):
-        blueprint_name = str(blueprint_sde.get("type_name") or blueprint_sde.get("name") or "").strip()
-        if blueprint_name:
-            return blueprint_name
-
-    return "Blueprint"
-
-
-def _tree_node_step_label(source_row: dict[str, Any], node: dict[str, Any]) -> str:
-    activity = str(node.get("activity") or "").strip().lower()
-    label = str(node.get("label") or "")
-    if activity == "invention":
-        return f"{_blueprint_step_name(source_row, node)} Copy (invention)"
-    if activity == "copying":
-        return f"{_blueprint_step_name(source_row, node)} Copy"
-    return label
-
-
-def _tree_node_type_label(node: dict[str, Any]) -> str:
-    node_type = str(node.get("node_type") or "").strip().lower()
-    activity = str(node.get("activity") or "").strip().lower()
-    if node_type == "product" or activity == "manufacturing":
-        return "Manufacture"
-    if activity == "reaction":
-        return "Reaction"
-    if activity == "invention":
-        return "Invention"
-    if activity == "copying":
-        return "Copying"
-    if activity in {"research_material", "research_time"}:
-        return "Research"
-    return ""
-
-
-def _tree_node_activity_label(node: dict[str, Any]) -> str:
-    node_type = str(node.get("node_type") or "").strip().lower()
-    activity = str(node.get("activity") or "").strip().lower()
-    recommendation_action = str(node.get("recommendation_action") or "").strip().lower()
-    sourcing_strategy = str(node.get("sourcing_strategy") or "").strip().lower()
-    runs = int(node.get("runs") or 0)
-
-    if recommendation_action in {"build", "take", "buy", "copy", "invent", "research"}:
-        return recommendation_action
-
-    if node_type == "product" or activity in {"manufacturing", "reaction"}:
-        return "build"
-    if activity == "invention":
-        return "invent" if runs > 0 else "take"
-    if activity == "copying":
-        return "copy" if runs > 0 else "take"
-    if activity in {"research_material", "research_time"}:
-        return "research"
-    if node_type == "material":
-        if sourcing_strategy == "build":
-            return "build"
-        if sourcing_strategy == "take":
-            return "take"
-        if sourcing_strategy in {"buy", "buy_reaction_available"}:
-            return "buy"
-        return "take or buy"
-    return ""
-
-
-def _flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    flattened_rows: list[dict[str, Any]] = []
-    tree_path_separator = "|||"
-
-    def add_node(
-        *,
-        source_row: dict[str, Any],
-        node: dict[str, Any],
-        path_ids: list[str],
-        sibling_key: str,
-        order_key: str,
-    ) -> None:
-        manufacturing_job = _get_manufacturing_job(source_row)
-        node_type = str(node.get("node_type") or "")
-        activity = str(node.get("activity") or "")
-        duration_seconds = node.get("duration_seconds")
-        job_cost = node.get("total_job_cost")
-        if job_cost is None:
-            job_cost = node.get("job_cost")
-
-        material_cost = node.get("material_cost")
-        total_cost = node.get("total_cost")
-        if total_cost is None:
-            total_cost = job_cost
-        bpc_source = ""
-        bpo_source = ""
-        meta_group = str(node.get("meta_group_name") or "")
-        category = str(node.get("category_name") or "")
-        current_path = tree_path_separator.join([*path_ids, sibling_key])
-
-        if node_type == "product":
-            material_cost = manufacturing_job.get("material_cost")
-            job_cost = manufacturing_job.get("total_job_cost")
-            total_cost = manufacturing_job.get("total_cost")
-            bpc_source = _get_blueprint_copy_source(source_row)
-            bpo_source = _get_blueprint_original_source(source_row)
-            meta_group = str(node.get("meta_group_name") or source_row.get("meta_group_name") or "")
-            category = str(node.get("category_name") or _get_product_category_name(source_row) or "")
-        elif activity == "manufacturing":
-            if int(node.get("type_id") or 0) == int(source_row.get("type_id") or 0):
-                material_cost = manufacturing_job.get("material_cost")
-                total_cost = manufacturing_job.get("total_cost")
-                bpc_source = _get_blueprint_copy_source(source_row)
-                bpo_source = _get_blueprint_original_source(source_row)
-            meta_group = str(node.get("meta_group_name") or source_row.get("meta_group_name") or "")
-            category = str(node.get("category_name") or _get_product_category_name(source_row) or "")
-
-        explicit_item_id = int(node.get("item_id") or 0)
-        type_id_value = int(node.get("type_id") or source_row.get("type_id") or 0)
-        display_id = explicit_item_id if explicit_item_id > 0 else (
-            type_id_value if str(node_type).strip().lower() in {"product", "material"} and type_id_value > 0 else None
-        )
-
-        flattened_rows.append(
-            {
-                "_path": current_path,
-                "_parent_path": tree_path_separator.join(path_ids) if path_ids else "",
-                "_depth": len(path_ids),
-                "_sort_order": order_key,
-                "_has_children": bool(node.get("children") or []),
-                "ID": display_id,
-                "Step": _tree_node_step_label(source_row, node),
-                "Type": _tree_node_type_label(node),
-                "Activity": _tree_node_activity_label(node),
-                "Qty": node.get("quantity"),
-                "Runs": node.get("runs"),
-                "Job Duration": (
-                    format_duration(int(duration_seconds or 0))
-                    if duration_seconds is not None and int(duration_seconds or 0) > 0
-                    else ""
-                ),
-                "Material Cost": material_cost,
-                "Job Cost": job_cost,
-                "Total Cost": total_cost,
-                "BPC Source": bpc_source,
-                "BPO Source": bpo_source,
-                "Meta Group": meta_group,
-                "Category": category,
-            }
-        )
-
-        children = node.get("children") or []
-        if not isinstance(children, list):
-            return
-        for child_index, child in enumerate(children, start=1):
-            if not isinstance(child, dict):
-                continue
-            child_label = str(child.get("label") or child.get("node_type") or f"child_{child_index}")
-            child_key = f"{child_index:03d}:{child_label}"
-            add_node(
-                source_row=source_row,
-                node=child,
-                path_ids=[*path_ids, sibling_key],
-                sibling_key=child_key,
-                order_key=f"{order_key}.{child_index:03d}",
-            )
-
-    for row_index, overview_row in enumerate(overview_rows, start=1):
-        manufacturing_job = _get_manufacturing_job(overview_row)
-        job_tree = manufacturing_job.get("job_tree") or {}
-        if not isinstance(job_tree, dict) or not job_tree:
-            job_tree = {
-                "label": _get_product_name(overview_row),
-                "node_type": "product",
-                "type_id": overview_row.get("type_id"),
-                "quantity": _get_product_quantity(overview_row),
-                "runs": _get_effective_runs(overview_row),
-                "duration_seconds": manufacturing_job.get("time_seconds"),
-                "total_job_cost": manufacturing_job.get("total_job_cost"),
-                "children": [],
-            }
-        root_label = str(job_tree.get("label") or _get_product_name(overview_row) or f"product_{row_index}")
-        root_key = f"{row_index:03d}:{root_label}"
-        add_node(
-            source_row=overview_row,
-            node=job_tree,
-            path_ids=[],
-            sibling_key=root_key,
-            order_key=f"{row_index:03d}",
-        )
-
-    return flattened_rows
-
-
-def _build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(row, dict):
-        return {}
-    manufacturing_job = row.get("manufacturing_job") or {}
-    if not isinstance(manufacturing_job, dict):
-        manufacturing_job = {}
-    return {
-        "overview_row_id": row.get("overview_row_id"),
-        "type_id": row.get("type_id"),
-        "type_name": row.get("type_name"),
-        "quantity": row.get("quantity"),
-        "meta_group_name": row.get("meta_group_name"),
-        "manufacturing_job": {
-            "runs": manufacturing_job.get("runs"),
-            "time_seconds": manufacturing_job.get("time_seconds"),
-            "manufacturing_time_seconds": manufacturing_job.get("manufacturing_time_seconds"),
-            "material_cost": manufacturing_job.get("material_cost"),
-            "total_job_cost": manufacturing_job.get("total_job_cost"),
-            "total_cost": manufacturing_job.get("total_cost"),
-            "blueprint_source_kind": manufacturing_job.get("blueprint_source_kind"),
-            "blueprint_material_efficiency": manufacturing_job.get("blueprint_material_efficiency"),
-            "blueprint_time_efficiency": manufacturing_job.get("blueprint_time_efficiency"),
-            "activity_breakdown": manufacturing_job.get("activity_breakdown"),
-            "recursive_activity_breakdown": manufacturing_job.get("recursive_activity_breakdown"),
-            "materials_count": len((manufacturing_job.get("materials") or {})),
-            "procurement_materials_count": len((manufacturing_job.get("procurement_materials") or {})),
-            "job_tree_child_count": len(((manufacturing_job.get("job_tree") or {}).get("children") or [])),
-        },
-    }
-
-
-def render() -> None:
-    st.subheader("Industry Builder")
-
-    try:
-        characters = fetch_characters()
-    except Exception as e:
-        st.error(f"Failed to load characters: {e}")
-        return
-
+def _load_character_context() -> tuple[
+    list[dict[str, Any]],
+    dict[int, str],
+    int,
+    list[str],
+    dict[str, str],
+    str,
+]:
+    characters = fetch_characters()
     if not characters:
-        st.warning("No character data found. Run main.py first.")
-        return
+        raise RuntimeError("No character data found. Run main.py first.")
 
     character_options = build_character_options(characters)
     if not character_options:
-        st.warning("No character data found. Run main.py first.")
-        return
+        raise RuntimeError("No character data found. Run main.py first.")
 
-    character_ids = list(character_options.keys())
-    default_character_id = character_ids[0]
-    for character in characters:
-        if not isinstance(character, dict):
-            continue
-        if not bool(character.get("is_main")):
-            continue
-        try:
-            main_character_id = int(character.get("character_id") or 0)
-        except Exception:
-            continue
-        if main_character_id in character_options:
-            default_character_id = main_character_id
-            break
-
+    default_character_id_value = default_character_id(
+        cast(list[dict[str, Any]], characters),
+        character_options,
+    )
     character_scope_options, character_scope_labels, default_character_scope = (
         build_owned_blueprint_character_scope_options(cast(list[dict[str, Any]], characters))
     )
@@ -522,27 +93,26 @@ def render() -> None:
         "all": "All (characters + corps)",
     }
     default_owned_blueprint_scope = default_character_corp_scope or default_character_scope or "all"
+    return (
+        cast(list[dict[str, Any]], characters),
+        character_options,
+        default_character_id_value,
+        owned_blueprint_scope_options,
+        owned_blueprint_scope_labels,
+        default_owned_blueprint_scope,
+    )
 
-    if "industry_builder_owned_blueprints_scope" not in st.session_state:
-        st.session_state["industry_builder_owned_blueprints_scope"] = default_owned_blueprint_scope
-    elif str(st.session_state.get("industry_builder_owned_blueprints_scope", "")) not in owned_blueprint_scope_options:
-        st.session_state["industry_builder_owned_blueprints_scope"] = default_owned_blueprint_scope
-    if "industry_builder_owned_blueprints_scope_applied" not in st.session_state:
-        st.session_state["industry_builder_owned_blueprints_scope_applied"] = default_owned_blueprint_scope
-    if "industry_builder_character_id" not in st.session_state:
-        st.session_state["industry_builder_character_id"] = int(default_character_id)
-    elif int(st.session_state.get("industry_builder_character_id", default_character_id)) not in character_options:
-        st.session_state["industry_builder_character_id"] = int(default_character_id)
-    if "industry_builder_character_id_applied" not in st.session_state:
-        st.session_state["industry_builder_character_id_applied"] = int(default_character_id)
-    if "industry_builder_industry_profile_id" not in st.session_state:
-        st.session_state["industry_builder_industry_profile_id"] = 0
-    if "industry_builder_industry_profile_id_applied" not in st.session_state:
-        st.session_state["industry_builder_industry_profile_id_applied"] = 0
 
+def _render_selector_section(
+    *,
+    character_options: dict[int, str],
+    owned_blueprint_scope_options: list[str],
+    owned_blueprint_scope_labels: dict[str, str],
+) -> tuple[int, int, list[dict[str, Any]], int]:
+    character_ids = list(character_options.keys())
     selector_col_left, selector_col_mid, selector_col_right = st.columns(3)
     with selector_col_left:
-        owned_blueprints_scope = st.selectbox(
+        st.selectbox(
             "Owned Blueprints",
             options=owned_blueprint_scope_options,
             format_func=lambda x: owned_blueprint_scope_labels.get(str(x), str(x)),
@@ -560,17 +130,16 @@ def render() -> None:
             key="industry_builder_character_id",
         )
 
-    try:
-        industry_profiles = fetch_industry_profiles(character_id=int(selected_character_id))
-    except Exception as e:
-        st.error(f"Failed to load industry profiles: {e}")
-        return
-
+    industry_profiles = fetch_industry_profiles_cached(character_id=int(selected_character_id))
     industry_profile_options, industry_profile_labels, default_industry_profile_id = build_industry_profile_options(
         cast(list[dict[str, Any]], industry_profiles)
     )
-    if int(st.session_state.get("industry_builder_industry_profile_id", 0)) not in industry_profile_options:
-        st.session_state["industry_builder_industry_profile_id"] = int(default_industry_profile_id)
+    ensure_valid_state_value(
+        "industry_builder_industry_profile_id",
+        int(default_industry_profile_id),
+        valid_values=industry_profile_options,
+        coerce=int,
+    )
 
     with selector_col_right:
         selected_industry_profile_id = st.selectbox(
@@ -584,290 +153,162 @@ def render() -> None:
         else:
             st.caption("Applied only after Refresh Overview. Used for system cost indices, facility tax, and structure rig modifiers.")
 
-    if "industry_builder_maximize_bp_runs_pending" not in st.session_state:
-        st.session_state["industry_builder_maximize_bp_runs_pending"] = True
-    if "industry_builder_maximize_bp_runs_applied" not in st.session_state:
-        st.session_state["industry_builder_maximize_bp_runs_applied"] = True
-    if "industry_builder_build_from_bpc" not in st.session_state:
-        st.session_state["industry_builder_build_from_bpc"] = True
-    if "industry_builder_build_from_bpc_applied" not in st.session_state:
-        st.session_state["industry_builder_build_from_bpc_applied"] = True
-    if "industry_builder_have_blueprint_source_only" not in st.session_state:
-        st.session_state["industry_builder_have_blueprint_source_only"] = True
-    if "industry_builder_have_blueprint_source_only_applied" not in st.session_state:
-        st.session_state["industry_builder_have_blueprint_source_only_applied"] = True
-    if "industry_builder_include_reactions" not in st.session_state:
-        st.session_state["industry_builder_include_reactions"] = False
-    if "industry_builder_include_reactions_applied" not in st.session_state:
-        st.session_state["industry_builder_include_reactions_applied"] = False
-    if "industry_builder_have_skills_only" not in st.session_state:
-        st.session_state["industry_builder_have_skills_only"] = True
+    return int(selected_character_id), int(selected_industry_profile_id), industry_profiles, int(default_industry_profile_id)
 
-    solar_system_security_map: dict[int, float] = {}
-    try:
-        solar_system_security_map = _fetch_solar_system_security_map()
-    except Exception as e:
-        st.warning(f"Failed to load solar system security status: {e}")
 
-    selected_profile_system_id: int | None = None
-    for profile in industry_profiles:
-        if int(profile.get("id") or 0) != int(selected_industry_profile_id):
-            continue
-        try:
-            selected_profile_system_id = int(profile.get("system_id") or 0) or None
-        except Exception:
-            selected_profile_system_id = None
-        break
+def _render_filters_section(
+    *,
+    overview_rows: list[dict[str, Any]],
+    reactions_allowed_for_profile: bool,
+) -> set[str]:
+    meta_group_names = ordered_meta_group_names({get_meta_group_name(row) for row in overview_rows})
+    if not meta_group_names:
+        return set()
 
-    selected_profile_security_status = (
-        float(solar_system_security_map.get(selected_profile_system_id or 0, 0.0)) if selected_profile_system_id else None
-    )
-    reactions_allowed_for_profile = (
-        selected_profile_security_status is None or selected_profile_security_status < 0.5
-    )
-    if not reactions_allowed_for_profile:
-        st.session_state["industry_builder_include_reactions"] = False
+    ensure_meta_group_filter_state(meta_group_names)
 
-    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-        st.error(
-            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
-            "Install it in the same Python environment and restart Streamlit."
-        )
-        st.caption(f"Python: {sys.executable}")
-        if _AGGRID_IMPORT_ERROR:
-            with st.expander("Import error details", expanded=False):
-                st.code(_AGGRID_IMPORT_ERROR)
-        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
-        st.stop()
+    filter_group_col, misc_group_col = st.columns(2)
+    with filter_group_col:
+        meta_group_container = st.container(border=True)
+        meta_group_container.caption("Meta Group Filters")
+        filter_columns = meta_group_container.columns(3)
 
-    aggrid_fn = cast(Any, AgGrid)
-    grid_options_builder = cast(Any, GridOptionsBuilder)
-    js_code = cast(Any, JsCode)
-    eu_locale = "nl-NL"
-
-    st.caption(
-        "Manufacturable product overview derived from the SDE blueprints and enriched with type metadata. "
-        "Each product row contains a simplified manufacturing job payload with materials, skills, time, and production limits."
-    )
-
-    if "industry_builder_overview_rows" not in st.session_state:
-        try:
-            st.session_state["industry_builder_overview_rows"] = _fetch_product_overview(
-                force_refresh=False,
-                maximize_bp_runs=bool(st.session_state.get("industry_builder_maximize_bp_runs_applied", False)),
-                build_from_bpc=bool(st.session_state.get("industry_builder_build_from_bpc_applied", True)),
-                have_blueprint_source_only=bool(
-                    st.session_state.get("industry_builder_have_blueprint_source_only_applied", True)
+    with misc_group_col:
+        misc_container = st.container(border=True)
+        misc_container.caption("Misc")
+        misc_col_left, misc_col_right = misc_container.columns(2)
+        with misc_col_left:
+            st.checkbox(
+                "Maximize BP runs",
+                key="industry_builder_maximize_bp_runs_pending",
+                help="Applied only after Refresh Overview. Uses the blueprint's max production limit as the number of manufacturing runs.",
+            )
+            st.checkbox(
+                "Group identical BPCs",
+                key="industry_builder_group_identical_bpcs",
+                help="Applied only after Refresh Overview. When enabled, identical owned blueprint copies for the same product are shown as one aggregated product row. Disable to show one top-level product row per owned BPC.",
+            )
+            st.checkbox(
+                "Build from BPC",
+                key="industry_builder_build_from_bpc",
+                help="Applied only after Refresh Overview. Prefer blueprint copies. If none exist, fallback to owned blueprint originals.",
+            )
+            st.checkbox(
+                "I have a BPC/BPO",
+                key="industry_builder_have_blueprint_source_only",
+                help="Applied only after Refresh Overview. Returns only products where the backend identified a BPC or BPO source.",
+            )
+        with misc_col_right:
+            st.checkbox(
+                "I have the skills",
+                key="industry_builder_have_skills_only",
+                help="Show only products for which the selected character meets all manufacturing skill requirements.",
+            )
+            st.checkbox(
+                "Include reactions",
+                key="industry_builder_include_reactions",
+                disabled=not reactions_allowed_for_profile,
+                help=(
+                    "Applied only after Refresh Overview. Includes recursive reaction planning for reaction-based materials."
+                    if reactions_allowed_for_profile
+                    else "Reactions are only available in low-sec or null-sec systems for the selected industry profile."
                 ),
-                include_reactions=bool(st.session_state.get("industry_builder_include_reactions_applied", False)),
-                industry_profile_id=int(st.session_state.get("industry_builder_industry_profile_id_applied", 0)) or None,
-                owned_blueprints_scope=str(st.session_state.get("industry_builder_owned_blueprints_scope_applied", default_owned_blueprint_scope)),
-                character_id=int(st.session_state.get("industry_builder_character_id_applied", default_character_id)),
             )
-        except Exception as e:
-            st.error(f"Failed to load industry product overview: {e}")
-            return
+            if not reactions_allowed_for_profile:
+                st.caption("Reactions disabled: the selected industry profile is in high-sec.")
 
-    if "industry_builder_job_manager_status" not in st.session_state:
-        try:
-            st.session_state["industry_builder_job_manager_status"] = _fetch_job_manager_status()
-        except Exception as e:
-            st.warning(f"Failed to load industry job manager status: {e}")
-            st.session_state["industry_builder_job_manager_status"] = {}
-
-    job_manager_status = cast(dict[str, Any], st.session_state.get("industry_builder_job_manager_status") or {})
-
-    if job_manager_status:
-        queue_counts = job_manager_status.get("queue_counts") or {}
-        last_snapshot_at = job_manager_status.get("last_snapshot_at") or "Not built yet"
-        st.caption(
-            "Snapshot rows: {rows} | Last snapshot: {snapshot} | Queues -> MFG: {mfg}, React: {react}, Copy: {copy}, Invention: {inv}".format(
-                rows=job_manager_status.get("snapshot_count", 0),
-                snapshot=last_snapshot_at,
-                mfg=queue_counts.get("manufacturing", 0),
-                react=queue_counts.get("reaction", 0),
-                copy=queue_counts.get("copying", 0),
-                inv=queue_counts.get("invention", 0),
-            )
-            + " | ME Research: {me} | TE Research: {te}".format(
-                me=queue_counts.get("research_material", 0),
-                te=queue_counts.get("research_time", 0),
-            )
-        )
-
-    overview_rows = cast(list[dict[str, Any]], st.session_state.get("industry_builder_overview_rows") or [])
-
-    if not overview_rows:
-        st.info("No manufacturable product rows are available yet.")
-        return
-
-    meta_group_names = _ordered_meta_group_names({_get_meta_group_name(row) for row in overview_rows})
-
-    if meta_group_names:
-        filter_group_col, misc_group_col = st.columns(2)
-
-        with filter_group_col:
-            meta_group_container = st.container(border=True)
-            meta_group_container.caption("Meta Group Filters")
-            filter_columns = meta_group_container.columns(3)
-
-        with misc_group_col:
-            misc_container = st.container(border=True)
-            misc_container.caption("Misc")
-            misc_col_left, misc_col_right = misc_container.columns(2)
-            with misc_col_left:
-                st.checkbox(
-                    "Maximize BP runs",
-                    key="industry_builder_maximize_bp_runs_pending",
-                    help="Applied only after Refresh Overview. Uses the blueprint's max production limit as the number of manufacturing runs.",
-                )
-                st.checkbox(
-                    "Build from BPC",
-                    key="industry_builder_build_from_bpc",
-                    help="Applied only after Refresh Overview. Prefer blueprint copies. If none exist, fallback to owned blueprint originals.",
-                )
-                st.checkbox(
-                    "I have a BPC/BPO",
-                    key="industry_builder_have_blueprint_source_only",
-                    help="Applied only after Refresh Overview. Returns only products where the backend identified a BPC or BPO source.",
-                )
-            with misc_col_right:
-                st.checkbox(
-                    "I have the skills",
-                    key="industry_builder_have_skills_only",
-                    help="Show only products for which the selected character meets all manufacturing skill requirements.",
-                )
-                st.checkbox(
-                    "Include reactions",
-                    key="industry_builder_include_reactions",
-                    disabled=not reactions_allowed_for_profile,
-                    help=(
-                        "Applied only after Refresh Overview. Includes recursive reaction planning for reaction-based materials."
-                        if reactions_allowed_for_profile
-                        else "Reactions are only available in low-sec or null-sec systems for the selected industry profile."
-                    ),
-                )
-                if not reactions_allowed_for_profile:
-                    st.caption("Reactions disabled: the selected industry profile is in high-sec.")
-
-        column_groups = [
-            {"Tech I", "Tech II", "Tech III"},
-            {"Faction", "Storyline", "Officer"},
-            {"Other"},
-        ]
-        enabled_meta_groups: set[str] = set()
-        for meta_group_name in meta_group_names:
-            toggle_key = _meta_group_toggle_key(meta_group_name)
-            label = _meta_group_label(meta_group_name)
-            if toggle_key not in st.session_state:
-                st.session_state[toggle_key] = label == "Tech I"
-
-            target_column_index = 2
-            for index, group in enumerate(column_groups):
-                if label in group:
-                    target_column_index = index
-                    break
-
-            with filter_columns[target_column_index]:
-                enabled = st.toggle(
-                    label,
-                    value=bool(st.session_state.get(toggle_key, False)),
-                    key=toggle_key,
-                )
-            if enabled:
-                enabled_meta_groups.add(meta_group_name)
-    else:
-        enabled_meta_groups = set()
-
-    refresh_col_left, refresh_col_right = st.columns([6, 1])
-    with refresh_col_left:
-        st.caption("Backend-backed changes are applied only after clicking Refresh Overview.")
-    with refresh_col_right:
-        if st.button("Refresh Overview", key="industry_builder_refresh_overview"):
-            st.session_state["industry_builder_maximize_bp_runs_applied"] = bool(
-                st.session_state.get("industry_builder_maximize_bp_runs_pending", False)
-            )
-            st.session_state["industry_builder_build_from_bpc_applied"] = bool(
-                st.session_state.get("industry_builder_build_from_bpc", True)
-            )
-            st.session_state["industry_builder_have_blueprint_source_only_applied"] = bool(
-                st.session_state.get("industry_builder_have_blueprint_source_only", True)
-            )
-            st.session_state["industry_builder_include_reactions_applied"] = (
-                bool(st.session_state.get("industry_builder_include_reactions", False)) and reactions_allowed_for_profile
-            )
-            st.session_state["industry_builder_owned_blueprints_scope_applied"] = str(
-                st.session_state.get("industry_builder_owned_blueprints_scope", default_owned_blueprint_scope)
-            )
-            st.session_state["industry_builder_character_id_applied"] = int(
-                st.session_state.get("industry_builder_character_id", default_character_id)
-            )
-            st.session_state["industry_builder_industry_profile_id_applied"] = int(
-                st.session_state.get("industry_builder_industry_profile_id", default_industry_profile_id)
-            )
-            _fetch_product_overview.clear()
-            _fetch_job_manager_status.clear()
-            progress_placeholder = st.empty()
-            progress_bar = progress_placeholder.progress(0, text="Starting overview refresh...")
-            try:
-                refresh_job = _start_product_overview_refresh(
-                    maximize_bp_runs=bool(st.session_state.get("industry_builder_maximize_bp_runs_applied", False)),
-                    build_from_bpc=bool(st.session_state.get("industry_builder_build_from_bpc_applied", True)),
-                    have_blueprint_source_only=bool(
-                        st.session_state.get("industry_builder_have_blueprint_source_only_applied", True)
-                    ),
-                    include_reactions=bool(st.session_state.get("industry_builder_include_reactions_applied", False)),
-                    industry_profile_id=int(st.session_state.get("industry_builder_industry_profile_id_applied", 0)) or None,
-                    owned_blueprints_scope=str(
-                        st.session_state.get("industry_builder_owned_blueprints_scope_applied", default_owned_blueprint_scope)
-                    ),
-                    character_id=int(st.session_state.get("industry_builder_character_id_applied", default_character_id)),
-                )
-                refresh_job_id = str(refresh_job.get("job_id") or "")
-                if not refresh_job_id:
-                    raise RuntimeError("Refresh job did not return a job_id")
-
-                while True:
-                    refresh_status = _fetch_product_overview_refresh_status(refresh_job_id)
-                    progress_fraction = float(refresh_status.get("progress_fraction") or 0.0)
-                    progress_label = str(refresh_status.get("progress_label") or "Refreshing overview...")
-                    progress_bar.progress(int(max(0.0, min(1.0, progress_fraction)) * 100), text=progress_label)
-                    status = str(refresh_status.get("status") or "")
-                    if status == "completed":
-                        st.session_state["industry_builder_overview_rows"] = cast(
-                            list[dict[str, Any]], refresh_status.get("result") or []
-                        )
-                        st.session_state["industry_builder_job_manager_status"] = _fetch_job_manager_status()
-                        break
-                    if status == "failed":
-                        raise RuntimeError(refresh_status.get("error_message") or "Refresh job failed")
-                    time.sleep(1.0)
-            except Exception as e:
-                st.error(f"Failed to refresh industry product overview: {e}")
-                return
-            finally:
-                progress_placeholder.empty()
-            _rerun()
-
-    filtered_overview_rows = [
-        row
-        for row in overview_rows
-        if _get_meta_group_name(row) in enabled_meta_groups
-        and (
-            not bool(st.session_state.get("industry_builder_have_skills_only", True))
-            or _get_skill_requirements_met(row)
-        )
+    column_groups = [
+        {"Tech I", "Tech II", "Tech III"},
+        {"Faction", "Storyline", "Officer"},
+        {"Other"},
     ]
+    enabled_meta_groups: set[str] = set()
+    for meta_group_name in meta_group_names:
+        toggle_key = meta_group_toggle_key(meta_group_name)
+        label = meta_group_label(meta_group_name)
+        if toggle_key not in st.session_state:
+            st.session_state[toggle_key] = label == "Tech I"
 
+        target_column_index = 2
+        for index, group in enumerate(column_groups):
+            if label in group:
+                target_column_index = index
+                break
+
+        with filter_columns[target_column_index]:
+            enabled = st.toggle(
+                label,
+                key=toggle_key,
+            )
+        if enabled:
+            enabled_meta_groups.add(meta_group_name)
+
+    persist_filter_preferences(meta_group_names)
+    return enabled_meta_groups
+
+
+def _render_job_manager_status(job_manager_status: dict[str, Any]) -> None:
+    if not job_manager_status:
+        return
+    queue_counts = job_manager_status.get("queue_counts") or {}
+    last_snapshot_at = job_manager_status.get("last_snapshot_at") or "Not built yet"
+    st.caption(
+        "Snapshot rows: {rows} | Last snapshot: {snapshot} | Queues -> MFG: {mfg}, React: {react}, Copy: {copy}, Invention: {inv}".format(
+            rows=job_manager_status.get("snapshot_count", 0),
+            snapshot=last_snapshot_at,
+            mfg=queue_counts.get("manufacturing", 0),
+            react=queue_counts.get("reaction", 0),
+            copy=queue_counts.get("copying", 0),
+            inv=queue_counts.get("invention", 0),
+        )
+        + " | ME Research: {me} | TE Research: {te}".format(
+            me=queue_counts.get("research_material", 0),
+            te=queue_counts.get("research_time", 0),
+        )
+    )
+
+
+def _ensure_initial_overview_refresh_started(
+    *,
+    default_character_id_value: int,
+    default_industry_profile_id: int,
+    default_owned_blueprint_scope: str,
+    reactions_allowed_for_profile: bool,
+) -> bool:
+    overview_rows = cast(list[dict[str, Any]], st.session_state.get("industry_builder_overview_rows") or [])
+    if overview_rows or overview_refresh_is_active():
+        return False
+
+    clear_industry_builder_caches()
+    fetch_industry_profiles_cached.clear()
+    start_overview_refresh_job(
+        default_character_id_value=default_character_id_value,
+        default_industry_profile_id=default_industry_profile_id,
+        default_owned_blueprint_scope=default_owned_blueprint_scope,
+        reactions_allowed_for_profile=reactions_allowed_for_profile,
+        start_refresh_fn=start_product_overview_refresh,
+    )
+    return True
+
+
+def _render_overview_grid(
+    *,
+    runtime: Any,
+    filtered_overview_rows: list[dict[str, Any]],
+) -> None:
     if not filtered_overview_rows:
-        st.info("No manufacturable product rows match the current meta group filters.")
+        st.info("No overview rows available for the current selection.")
         return
 
-    tree_rows = _flatten_overview_job_tree_rows(filtered_overview_rows)
-    df = pd.DataFrame(tree_rows).sort_values(by=["_sort_order"], ascending=[True]).reset_index(drop=True)
-    st.caption("Use the AgGrid chevrons in Step to expand or collapse the build tree.")
+    df, height, grid_state_key = build_overview_grid_frame(filtered_overview_rows)
+    if df.empty:
+        st.info("No overview rows available for the current selection.")
+        return
 
-    gb = grid_options_builder.from_dataframe(df)
+    st.caption("Use the AgGrid chevrons in Step to expand or collapse the build tree.")
+    icon_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
+
+    gb = runtime.grid_options_builder.from_dataframe(df)
     gb.configure_default_column(
         resizable=True,
         sortable=True,
@@ -877,15 +318,10 @@ def render() -> None:
         wrapHeaderText=False,
         autoHeaderHeight=False,
         cellStyle={"whiteSpace": "nowrap", "lineHeight": "1.2"},
-        groupable=True, 
-        value=True, 
-        enableRowGroup=True, 
-        editable=True,
-        enableRangeSelection=True,
     )
 
     for col, width in [
-        ("Type", 110),
+        ("Icon", 72),
         ("Activity", 120),
         ("BPC Source", 160),
         ("BPO Source", 160),
@@ -903,38 +339,46 @@ def render() -> None:
                 cellStyle={"whiteSpace": "nowrap", "lineHeight": "1.2"},
             )
 
+    if "Icon" in df.columns:
+        gb.configure_column(
+            "Icon",
+            headerName="",
+            width=72,
+            cellRenderer=icon_renderer,
+            suppressSizeToFit=True,
+            sortable=False,
+            filter=False,
+        )
+
     if "Step" in df.columns:
         gb.configure_column("Step", hide=True)
 
-    for col in [
-        "ID",
-        "Qty",
-        "Runs",
-    ]:
+    if "Type" in df.columns:
+        gb.configure_column("Type", hide=True)
+
+    for col in ["ID", "Qty", "Runs"]:
         if col in df.columns:
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=eu_locale, decimals=0),
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
                 minWidth=105,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
             )
+            if col == "ID":
+                gb.configure_column(col, hide=True)
 
     for col in ["_path", "_parent_path", "_depth", "_sort_order", "_has_children"]:
         if col in df.columns:
             gb.configure_column(col, hide=True)
 
-    for col in [
-        "Material Cost",
-        "Job Cost",
-        "Total Cost",
-    ]:
+    for col in ["Material Cost", "Job Cost", "Total Cost"]:
         if col in df.columns:
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=eu_locale, decimals=2),
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
                 minWidth=130,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
@@ -965,7 +409,10 @@ def render() -> None:
     grid_options = gb.build()
     grid_options["treeData"] = True
     grid_options["enableRangeSelection"] = True
-    grid_options["getDataPath"] = js_code(
+    grid_options["ensureDomOrder"] = True
+    grid_options["copyHeadersToClipboard"] = True
+    grid_options["suppressCopyRowsToClipboard"] = False
+    grid_options["getDataPath"] = runtime.js_code(
         """
         function(data) {
             try {
@@ -982,7 +429,7 @@ def render() -> None:
         """
     )
     grid_options["groupDefaultExpanded"] = 0
-    grid_options["isGroupOpenByDefault"] = js_code(
+    grid_options["isGroupOpenByDefault"] = runtime.js_code(
         """
         function() {
             return false;
@@ -995,7 +442,7 @@ def render() -> None:
         "minWidth": 320,
         "cellRendererParams": {
             "suppressCount": True,
-            "innerRenderer": js_code(
+            "innerRenderer": runtime.js_code(
                 """
                 function(params) {
                     if (!params || !params.data) return '';
@@ -1006,11 +453,11 @@ def render() -> None:
         },
     }
 
-    height = min(1100, 120 + (len(tree_rows) * 34))
-    grid_state_key = abs(hash("|".join(str(row.get("_path") or "") for row in tree_rows)))
-    aggrid_fn(
+    runtime.aggrid_fn(
         df,
         gridOptions=grid_options,
+        update_mode="NO_UPDATE",
+        update_on=[],
         allow_unsafe_jscode=True,
         enable_enterprise_modules=True,
         theme="streamlit",
@@ -1019,13 +466,14 @@ def render() -> None:
         key=f"industry_builder_products_overview_{grid_state_key}",
     )
 
+
+def _render_debug_panel(filtered_overview_rows: list[dict[str, Any]]) -> None:
     debug_options: dict[str, str] = {}
     for row in filtered_overview_rows:
         overview_row_id = str(row.get("overview_row_id") or "")
         product_name = str(row.get("type_name") or row.get("type_id") or "")
         product_type_id = int(row.get("type_id") or 0)
-        label = f"{product_name} ({product_type_id})"
-        debug_options[overview_row_id] = label
+        debug_options[overview_row_id] = f"{product_name} ({product_type_id})"
 
     if debug_options:
         selected_debug_blueprint_id = st.selectbox(
@@ -1034,7 +482,6 @@ def render() -> None:
             format_func=lambda x: debug_options.get(str(x), str(x)),
             key="industry_builder_debug_blueprint_id",
         )
-
         selected_debug_payload = next(
             (
                 row
@@ -1045,9 +492,179 @@ def render() -> None:
         )
 
         with st.expander("Raw data (for debugging)", expanded=False):
-            st.write(_build_debug_payload_preview(selected_debug_payload))
+            st.write(build_debug_payload_preview(selected_debug_payload))
             if st.checkbox("Show full nested payload", key="industry_builder_show_full_debug_payload"):
                 st.write(selected_debug_payload or {})
     else:
         with st.expander("Raw data (for debugging)", expanded=False):
             st.write({})
+
+
+def render() -> None:
+    st.subheader("Industry Builder")
+    runtime = require_aggrid()
+
+    try:
+        (
+            _characters,
+            character_options,
+            default_character_id_value,
+            owned_blueprint_scope_options,
+            owned_blueprint_scope_labels,
+            default_owned_blueprint_scope,
+        ) = _load_character_context()
+    except Exception as e:
+        st.error(str(e))
+        return
+
+    ensure_selection_state(
+        character_options=character_options,
+        default_character_id_value=default_character_id_value,
+        owned_blueprint_scope_options=owned_blueprint_scope_options,
+        default_owned_blueprint_scope=default_owned_blueprint_scope,
+    )
+    ensure_toggle_state()
+    ensure_overview_refresh_state()
+
+    try:
+        (
+            selected_character_id,
+            selected_industry_profile_id,
+            industry_profiles,
+            default_industry_profile_id,
+        ) = _render_selector_section(
+            character_options=character_options,
+            owned_blueprint_scope_options=owned_blueprint_scope_options,
+            owned_blueprint_scope_labels=owned_blueprint_scope_labels,
+        )
+    except Exception as e:
+        st.error(f"Failed to load industry profiles: {e}")
+        return
+
+    solar_system_security_map: dict[int, float] = {}
+    try:
+        solar_system_security_map = fetch_solar_system_security_map()
+    except Exception as e:
+        st.warning(f"Failed to load solar system security status: {e}")
+
+    selected_profile_security_status = resolve_profile_security_status(
+        industry_profiles=industry_profiles,
+        selected_industry_profile_id=int(selected_industry_profile_id),
+        solar_system_security_map=solar_system_security_map,
+    )
+    reactions_allowed_for_profile = (
+        selected_profile_security_status is None or selected_profile_security_status < 0.5
+    )
+    if not reactions_allowed_for_profile:
+        st.session_state["industry_builder_include_reactions"] = False
+
+    try:
+        started_initial_refresh = _ensure_initial_overview_refresh_started(
+            default_character_id_value=default_character_id_value,
+            default_industry_profile_id=default_industry_profile_id,
+            default_owned_blueprint_scope=default_owned_blueprint_scope,
+            reactions_allowed_for_profile=reactions_allowed_for_profile,
+        )
+    except Exception as e:
+        st.error(f"Failed to start industry product overview refresh: {e}")
+        return
+
+    if "industry_builder_job_manager_status" not in st.session_state:
+        try:
+            st.session_state["industry_builder_job_manager_status"] = fetch_job_manager_status()
+        except Exception as e:
+            st.warning(f"Failed to load industry job manager status: {e}")
+            st.session_state["industry_builder_job_manager_status"] = {}
+
+    if overview_refresh_is_active():
+        try:
+            poll_overview_refresh_job(
+                fetch_status_fn=fetch_product_overview_refresh_status,
+                fetch_job_manager_status_fn=fetch_job_manager_status,
+            )
+        except Exception as e:
+            clear_overview_refresh_job(error_message=str(e))
+
+    _render_job_manager_status(cast(dict[str, Any], st.session_state.get("industry_builder_job_manager_status") or {}))
+
+    refresh_view = overview_refresh_view()
+    if refresh_view.get("error_message"):
+        st.error(str(refresh_view.get("error_message")))
+
+    overview_rows = cast(list[dict[str, Any]], st.session_state.get("industry_builder_overview_rows") or [])
+    if not overview_rows:
+        if bool(refresh_view.get("is_active")):
+            if started_initial_refresh:
+                st.info("Preparing the initial product overview in the background.")
+            render_job_status_panel(
+                title="Preparing initial overview",
+                is_running=True,
+                progress_fraction=float(refresh_view.get("progress_fraction") or 0.0),
+                progress_text=str(refresh_view.get("progress_label") or "Refreshing overview..."),
+            )
+            st.caption("The initial product overview is being prepared in the background. This page will update automatically when the snapshot is ready.")
+            time.sleep(1.0)
+            _rerun()
+
+        st.info("No manufacturable product rows are available yet.")
+        return
+
+    st.caption(
+        "Manufacturable product overview derived from the SDE blueprints and enriched with type metadata. "
+        "Each product row contains a simplified manufacturing job payload with materials, skills, time, and production limits."
+    )
+
+    enabled_meta_groups = _render_filters_section(
+        overview_rows=overview_rows,
+        reactions_allowed_for_profile=reactions_allowed_for_profile,
+    )
+
+    refresh_col_left, refresh_col_right = st.columns([6, 1])
+    with refresh_col_left:
+        st.caption("Backend-backed changes are applied only after clicking Refresh Overview.")
+        if bool(refresh_view.get("is_active")):
+            render_job_status_panel(
+                title="Overview refresh",
+                is_running=True,
+                progress_fraction=float(refresh_view.get("progress_fraction") or 0.0),
+                progress_text=str(refresh_view.get("progress_label") or "Refreshing overview..."),
+            )
+            st.caption("Refresh job is running in the background. The current snapshot stays visible until the backend job completes.")
+    with refresh_col_right:
+        if st.button(
+            "Refresh Overview",
+            key="industry_builder_refresh_overview",
+            disabled=bool(refresh_view.get("is_active")),
+        ):
+            try:
+                clear_industry_builder_caches()
+                fetch_industry_profiles_cached.clear()
+                start_overview_refresh_job(
+                    default_character_id_value=default_character_id_value,
+                    default_industry_profile_id=default_industry_profile_id,
+                    default_owned_blueprint_scope=default_owned_blueprint_scope,
+                    reactions_allowed_for_profile=reactions_allowed_for_profile,
+                    start_refresh_fn=start_product_overview_refresh,
+                )
+            except Exception as e:
+                st.error(f"Failed to refresh industry product overview: {e}")
+                return
+            _rerun()
+
+    filtered_overview_rows = filter_overview_rows(
+        overview_rows,
+        tuple(sorted(enabled_meta_groups)),
+        bool(st.session_state.get("industry_builder_have_skills_only", True)),
+    )
+    if not filtered_overview_rows:
+        st.info("No manufacturable product rows match the current filters.")
+        return
+
+    _render_overview_grid(
+        runtime=runtime,
+        filtered_overview_rows=filtered_overview_rows,
+    )
+    _render_debug_panel(filtered_overview_rows)
+
+    if bool(refresh_view.get("is_active")):
+        _rerun()

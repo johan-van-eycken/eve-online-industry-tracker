@@ -1,29 +1,15 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
-import sys
 
-from utils.aggrid_import import import_aggrid
-
-_ag = import_aggrid()
-AgGrid = _ag.AgGrid  # type: ignore
-GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
-JsCode = _ag.JsCode  # type: ignore
-_AGGRID_IMPORT_ERROR = _ag.import_error
-
-from utils.flask_api import api_get
 from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
+from utils.assets_data import get_item_image_url as build_item_image_url
 from utils.formatters import format_isk_short
+from utils.market_orders_api import clear_market_orders_cache, fetch_market_orders, refresh_market_orders
+from utils.webpage_ui import AgGridRuntime, aggrid_height, require_aggrid
 
 
 def _rerun() -> None:
     st.rerun()
-
-
-# -- Cached API calls --
-@st.cache_data(ttl=3600)
-def get_all_orders():
-    # Default path: no forced ESI refresh, but include price comparison.
-    return (api_get("/characters/market_orders?refresh=0", timeout_seconds=60) or {})
 
 def get_item_image_url(order):
     """Get the image URL for a single order item."""
@@ -39,78 +25,108 @@ def get_item_image_url(order):
     else:
         variation = "icon"
 
-    return f"https://images.evetech.net/types/{type_id}/{variation}?size=32"
+    return build_item_image_url(
+        type_id=type_id,
+        type_category_name=type_category,
+        is_blueprint_copy=is_bpc,
+        size=32,
+    )
+
+
+def _build_order_rows(all_orders: list[dict]) -> tuple[list[dict], list[dict]]:
+    sell_orders: list[dict] = []
+    buy_orders: list[dict] = []
+    for order in all_orders:
+        common_fields = {
+            "Owner": order.get("owner", ""),
+            "Icon": get_item_image_url(order),
+            "Type": order.get("type_name", ""),
+            "Price": order.get("price", 0),
+            "Price Status": order.get("price_status") or "N/A",
+            "Price Difference": order.get("price_difference") or 0,
+            "Volume": order.get("volume", 0),
+            "Total Price": order.get("total_price", 0),
+            "Expires In": order.get("expires_in", ""),
+            "Station": order.get("station", ""),
+            "Region": order.get("region", ""),
+            "Range": order.get("range", ""),
+        }
+        if order.get("is_buy_order"):
+            buy_orders.append(
+                {
+                    **common_fields,
+                    "Min. Volume": order.get("min_volume", 0),
+                    "Escrow Remaining": order.get("escrow_remaining", 0),
+                }
+            )
+        else:
+            sell_orders.append(common_fields)
+    return sell_orders, buy_orders
+
+
+def _render_orders_grid(
+    df: pd.DataFrame,
+    *,
+    runtime: AgGridRuntime,
+    img_renderer: object,
+    isk_cols: list[str],
+    min_volume: bool,
+    key: str,
+) -> None:
+    gb = runtime.grid_options_builder.from_dataframe(df)
+    gb.configure_default_column(resizable=True, sortable=True, filter=True)
+    gb.configure_column("Icon", headerName="", width=60, cellRenderer=img_renderer, suppressSizeToFit=True)
+
+    right = {"textAlign": "right"}
+    for col in isk_cols:
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                cellStyle=right,
+                minWidth=120,
+            )
+
+    if "Volume" in df.columns:
+        gb.configure_column("Volume", cellStyle=right, minWidth=110)
+
+    if min_volume and "Min. Volume" in df.columns:
+        gb.configure_column(
+            "Min. Volume",
+            type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
+            cellStyle=right,
+            minWidth=110,
+        )
+
+    runtime.aggrid_fn(
+        df,
+        gridOptions=gb.build(),
+        allow_unsafe_jscode=True,
+        theme="streamlit",
+        height=aggrid_height(row_count=len(df), height_max=700),
+        key=key,
+    )
 
 
 # -- Main Render Function --
 def render():
     st.header("Market Orders")
 
-    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-        st.error(
-            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
-            "Install it in the same Python environment and restart Streamlit."
-        )
-        st.caption(f"Python: {sys.executable}")
-        if _AGGRID_IMPORT_ERROR:
-            with st.expander("Import error details", expanded=False):
-                st.code(_AGGRID_IMPORT_ERROR)
-        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
-        st.stop()
-
-    eu_locale = "nl-NL"  # '.' thousands, ',' decimals
-    right = {"textAlign": "right"}
-
-    img_renderer = js_icon_cell_renderer(JsCode=JsCode, size_px=24)
+    runtime = require_aggrid()
+    img_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
 
     all_orders = []
     try:
-        response = get_all_orders()
+        response = fetch_market_orders()
         all_orders = response.get("data", [])
     except Exception as e:
         st.error(f"Error fetching market orders: {str(e)}")
         return
 
     selected_owner = "All"
-
-    # Split into sell and buy orders
-    sell_orders = []
-    buy_orders = []
-    for order in all_orders:
-        if order.get("is_buy_order"):
-            buy_orders.append(
-                {
-                    "Owner": order.get("owner", ""),
-                    "Icon": get_item_image_url(order),
-                    "Type": order.get("type_name", ""),
-                    "Price": order.get("price", 0),
-                    "Price Status": order.get("price_status") or "N/A",
-                    "Price Difference": order.get("price_difference") or 0,
-                    "Volume": order.get("volume", 0),
-                    "Total Price": order.get("total_price", 0),
-                    "Range": order.get("range", ""),
-                    "Min. Volume": order.get("min_volume", 0),
-                    "Expires In": order.get("expires_in", ""),
-                    "Escrow Remaining": order.get("escrow_remaining", 0),
-                    "Station": order.get("station", ""),
-                    "Region": order.get("region", ""),
-                }
-            )
-        else:
-            sell_orders.append({
-                "Owner": order.get("owner", ""),
-                "Icon": get_item_image_url(order),
-                "Type": order.get("type_name", ""),
-                "Price": order.get("price", 0),
-                "Price Status": order.get("price_status") or "N/A",
-                "Price Difference": order.get("price_difference") or 0,
-                "Volume": order.get("volume", 0),
-                "Total Price": order.get("total_price", 0),
-                "Expires In": order.get("expires_in", ""),
-                "Station": order.get("station", ""),
-                "Region": order.get("region", ""),
-                "Range": order.get("range", "")
-            })
+    sell_orders, buy_orders = _build_order_rows(all_orders)
     
     if sell_orders:
         # Build DataFrame first
@@ -132,16 +148,12 @@ def render():
         with refresh_market_orders:
             st.write("<br>", unsafe_allow_html=True)
             if st.button("Refresh Market Orders"):
-                # Force a fresh pull from ESI.
                 with st.spinner("Refreshing market orders..."):
                     try:
-                        api_get(
-                            "/characters/market_orders?refresh=1",
-                            timeout_seconds=120,
-                        )
+                        refresh_market_orders()
                     except Exception as e:
                         st.error(f"Refresh failed: {str(e)}")
-                st.cache_data.clear()
+                clear_market_orders_cache()
                 _rerun()
         with filler:
             st.write("")
@@ -156,45 +168,13 @@ def render():
             unsafe_allow_html=True,
         )
 
-        gb = GridOptionsBuilder.from_dataframe(df)
-        gb.configure_default_column(resizable=True, sortable=True, filter=True)
-        gb.configure_column("Icon", headerName="", width=60, cellRenderer=img_renderer, suppressSizeToFit=True)
-        for c in ["Price", "Total Price", "Price Difference"]:
-            if c in df.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
-                    cellStyle=right,
-                    minWidth=120,
-                )
-
-        # API returns `volume` as a string like "12/100" (remain/total). If we format it
-        # as a number, the formatter yields blank values; keep it as text.
-        if "Volume" in df.columns:
-            gb.configure_column(
-                "Volume",
-                cellStyle=right,
-                minWidth=110,
-            )
-
-        if "Min. Volume" in df.columns:
-            gb.configure_column(
-                "Min. Volume",
-                type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                cellStyle=right,
-                minWidth=110,
-            )
-
-        grid_options = gb.build()
-        height = min(700, 40 + (len(df) * 35))
-        AgGrid(
+        _render_orders_grid(
             df,
-            gridOptions=grid_options,
-            allow_unsafe_jscode=True,
-            theme="streamlit",
-            height=height,
+            runtime=runtime,
+            img_renderer=img_renderer,
+            isk_cols=["Price", "Total Price", "Price Difference"],
+            min_volume=False,
+            key="market_orders_sell",
         )
     else:
         st.info("No market sell orders found.")
@@ -220,43 +200,13 @@ def render():
             unsafe_allow_html=True,
         )
 
-        gb = GridOptionsBuilder.from_dataframe(df)
-        gb.configure_default_column(resizable=True, sortable=True, filter=True)
-        gb.configure_column("Icon", headerName="", width=60, cellRenderer=img_renderer, suppressSizeToFit=True)
-        for c in ["Price", "Total Price", "Price Difference", "Escrow Remaining"]:
-            if c in df.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
-                    cellStyle=right,
-                    minWidth=120,
-                )
-
-        if "Volume" in df.columns:
-            gb.configure_column(
-                "Volume",
-                cellStyle=right,
-                minWidth=110,
-            )
-
-        if "Min. Volume" in df.columns:
-            gb.configure_column(
-                "Min. Volume",
-                type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                cellStyle=right,
-                minWidth=110,
-            )
-
-        grid_options = gb.build()
-        height = min(700, 40 + (len(df) * 35))
-        AgGrid(
+        _render_orders_grid(
             df,
-            gridOptions=grid_options,
-            allow_unsafe_jscode=True,
-            theme="streamlit",
-            height=height,
+            runtime=runtime,
+            img_renderer=img_renderer,
+            isk_cols=["Price", "Total Price", "Price Difference", "Escrow Remaining"],
+            min_volume=True,
+            key="market_orders_buy",
         )
     else:
         st.info("No market buy orders found.")

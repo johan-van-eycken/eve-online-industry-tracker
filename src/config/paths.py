@@ -24,3 +24,12 @@ def app_secret_path() -> str:
     """
 
     return _env("APP_SECRET_PATH", "config/secret.json")
+
+
+def streamlit_preferences_path() -> str:
+    """Path to the local Streamlit UI preferences JSON.
+
+    Controlled by STREAMLIT_PREFERENCES_PATH.
+    """
+
+    return _env("STREAMLIT_PREFERENCES_PATH", "database/streamlit_preferences.json")

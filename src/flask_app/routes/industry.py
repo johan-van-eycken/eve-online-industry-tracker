@@ -68,6 +68,8 @@ def industry_products(character_id: int):
     refresh = refresh_raw in {"1", "true", "yes", "y", "on"}
     maximize_bp_runs_raw = (request.args.get("maximize_bp_runs") or "0").strip().lower()
     maximize_bp_runs = maximize_bp_runs_raw in {"1", "true", "yes", "y", "on"}
+    group_identical_bpcs_raw = (request.args.get("group_identical_bpcs") or "1").strip().lower()
+    group_identical_bpcs = group_identical_bpcs_raw in {"1", "true", "yes", "y", "on"}
     build_from_bpc_raw = (request.args.get("build_from_bpc") or "1").strip().lower()
     build_from_bpc = build_from_bpc_raw in {"1", "true", "yes", "y", "on"}
     have_blueprint_source_only_raw = (request.args.get("have_blueprint_source_only") or "1").strip().lower()
@@ -87,6 +89,7 @@ def industry_products(character_id: int):
         data=svc.industry_manufacturing_product_overview(
             force_refresh=refresh,
             maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
             build_from_bpc=build_from_bpc,
             have_blueprint_source_only=have_blueprint_source_only,
             include_reactions=include_reactions,
@@ -103,6 +106,7 @@ def industry_products_refresh(character_id: int):
     require_sde_ready(get_state())
     payload = request.get_json(silent=True) or {}
     maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
+    group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
     build_from_bpc = bool(payload.get("build_from_bpc", True))
     have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
     include_reactions = bool(payload.get("include_reactions", False))
@@ -120,6 +124,7 @@ def industry_products_refresh(character_id: int):
         data=svc.start_industry_manufacturing_product_overview_refresh(
             force_refresh=force_refresh,
             maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
             build_from_bpc=build_from_bpc,
             have_blueprint_source_only=have_blueprint_source_only,
             include_reactions=include_reactions,

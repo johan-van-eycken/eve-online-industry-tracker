@@ -184,6 +184,7 @@ class IndustryService:
         *,
         force_refresh: bool = False,
         maximize_bp_runs: bool = False,
+        group_identical_bpcs: bool = True,
         build_from_bpc: bool = True,
         have_blueprint_source_only: bool = True,
         include_reactions: bool = False,
@@ -211,6 +212,7 @@ class IndustryService:
         params = {
             "force_refresh": bool(force_refresh),
             "maximize_bp_runs": bool(maximize_bp_runs),
+            "group_identical_bpcs": bool(group_identical_bpcs),
             "build_from_bpc": bool(build_from_bpc),
             "have_blueprint_source_only": bool(have_blueprint_source_only),
             "include_reactions": bool(include_reactions),
@@ -253,6 +255,7 @@ class IndustryService:
             result = self.industry_manufacturing_product_overview(
                 force_refresh=bool(params.get("force_refresh", False)),
                 maximize_bp_runs=bool(params.get("maximize_bp_runs", False)),
+                group_identical_bpcs=bool(params.get("group_identical_bpcs", True)),
                 build_from_bpc=bool(params.get("build_from_bpc", True)),
                 have_blueprint_source_only=bool(params.get("have_blueprint_source_only", True)),
                 include_reactions=bool(params.get("include_reactions", False)),
@@ -1364,13 +1367,19 @@ class IndustryService:
         category_name: str | None,
         meta_group_name: str | None,
         use_invention_label: bool,
+        character_name_by_id: dict[int, str] | None = None,
+        corporation_name_by_id: dict[int, str] | None = None,
     ) -> dict[str, Any]:
         allocated_cost = cls._owned_blueprint_copy_consumption_cost(asset, consumed_runs=runs_required)
-        remaining_runs = int(getattr(asset, "blueprint_runs", 0) or 0) if asset is not None else 0
+        blueprint_copy_payload = cls._compact_owned_blueprint_asset(
+            asset,
+            character_name_by_id=character_name_by_id,
+            corporation_name_by_id=corporation_name_by_id,
+        )
         return {
             "item_id": int(getattr(asset, "item_id", 0) or 0) if asset is not None else None,
             "quantity": 1 if asset is not None else None,
-            "runs": remaining_runs if remaining_runs > 0 else None,
+            "runs": max(0, int(runs_required or 0)) or None,
             "duration_seconds": None,
             "job_cost": None,
             "total_job_cost": None,
@@ -1378,12 +1387,119 @@ class IndustryService:
             "total_cost": allocated_cost,
             "recommendation_action": recommendation_action,
             "blueprint_name": blueprint_name,
+            "blueprint_copy": blueprint_copy_payload,
             "category_name": category_name,
             "meta_group_name": meta_group_name,
             "node_type": "activity",
             "activity": "invention" if use_invention_label else "copying",
             "children": [],
         }
+
+    @classmethod
+    def _allocate_owned_blueprint_copy_run_usage(
+        cls,
+        assets: list[CharacterAssetsModel | CorporationAssetsModel] | None,
+        *,
+        requested_runs: int,
+        available_total_runs: int,
+    ) -> list[tuple[CharacterAssetsModel | CorporationAssetsModel, int]]:
+        if not assets or requested_runs <= 0 or available_total_runs <= 0:
+            return []
+
+        remaining_requested_runs = max(0, int(requested_runs))
+        remaining_available_runs = max(0, int(available_total_runs))
+        allocations: list[tuple[CharacterAssetsModel | CorporationAssetsModel, int]] = []
+
+        for asset in assets:
+            if remaining_requested_runs <= 0 or remaining_available_runs <= 0:
+                break
+            asset_runs = max(0, int(getattr(asset, "blueprint_runs", 0) or 0))
+            if asset_runs <= 0:
+                continue
+            consumed_runs = min(asset_runs, remaining_requested_runs, remaining_available_runs)
+            if consumed_runs <= 0:
+                continue
+            allocations.append((asset, consumed_runs))
+            remaining_requested_runs -= consumed_runs
+            remaining_available_runs -= consumed_runs
+
+        return allocations
+
+    def _normalize_nested_owned_blueprint_copy_tree(
+        self,
+        tree_node: dict[str, Any] | None,
+        *,
+        blueprint_type_id: int,
+        planned_runs: int,
+        blueprint_copy_assets_by_type_id: dict[int, list[Any]],
+        category_name: str | None,
+        meta_group_name: str | None,
+        character_name_by_id: dict[int, str] | None,
+        corporation_name_by_id: dict[int, str] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(tree_node, dict):
+            return tree_node
+        if blueprint_type_id <= 0 or planned_runs <= 0:
+            return tree_node
+
+        normalized_tree_node = dict(tree_node)
+        matched_assets = cast(
+            list[CharacterAssetsModel | CorporationAssetsModel],
+            blueprint_copy_assets_by_type_id.get(int(blueprint_type_id)) or [],
+        )
+        allocations = self._allocate_owned_blueprint_copy_run_usage(
+            matched_assets,
+            requested_runs=planned_runs,
+            available_total_runs=planned_runs,
+        )
+        if not allocations:
+            return normalized_tree_node
+
+        existing_children = [child for child in (tree_node.get("children") or []) if isinstance(child, dict)]
+        removed_take_nodes = [
+            child
+            for child in existing_children
+            if str(child.get("activity") or "").strip().lower() in {"copying", "invention"}
+            and str(child.get("recommendation_action") or "").strip().lower() == "take"
+            and int(child.get("item_id") or 0) > 0
+        ]
+        preserved_children = [child for child in existing_children if child not in removed_take_nodes]
+        use_invention_label = any(
+            str(child.get("activity") or "").strip().lower() == "invention"
+            for child in removed_take_nodes
+        )
+        blueprint_name = "Blueprint"
+        for child in removed_take_nodes:
+            candidate_name = str(child.get("blueprint_name") or "").strip()
+            if candidate_name:
+                blueprint_name = candidate_name
+                break
+
+        normalized_take_nodes = [
+            self._job_tree_node(
+                label=self._ACTIVITY_LABELS["invention"] if use_invention_label else self._ACTIVITY_LABELS["copying"],
+                **self._owned_blueprint_copy_node_fields(
+                    asset,
+                    blueprint_name=blueprint_name,
+                    recommendation_action="take",
+                    runs_required=consumed_runs,
+                    category_name=category_name,
+                    meta_group_name=meta_group_name,
+                    use_invention_label=use_invention_label,
+                    character_name_by_id=character_name_by_id,
+                    corporation_name_by_id=corporation_name_by_id,
+                ),
+            )
+            for asset, consumed_runs in allocations
+        ]
+
+        normalized_tree_node["blueprint_copy"] = self._compact_owned_blueprint_assets(
+            [asset for asset, _ in allocations],
+            character_name_by_id=character_name_by_id,
+            corporation_name_by_id=corporation_name_by_id,
+        )
+        normalized_tree_node["children"] = [*normalized_take_nodes, *preserved_children]
+        return normalized_tree_node
 
     @classmethod
     def _job_cost_total(
@@ -1648,6 +1764,8 @@ class IndustryService:
         available_owned_item_quantity_by_type_id: dict[int, int] | None,
         owned_item_unit_cost_by_type_id: dict[int, float] | None,
         blueprint_original_assets_by_type_id: dict[int, list[Any]],
+        character_name_by_id: dict[int, str] | None = None,
+        corporation_name_by_id: dict[int, str] | None = None,
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
         reaction_row_by_product_type_id: dict[int, dict[str, Any]],
         invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
@@ -1682,7 +1800,9 @@ class IndustryService:
             return None
 
         product_quantity_per_run = max(1, int(selected_product.get("quantity") or 1))
-        runs = max(1, int(math.ceil(float(required_quantity) / float(product_quantity_per_run))))
+        requested_runs = max(1, int(math.ceil(float(required_quantity) / float(product_quantity_per_run))))
+        runs = requested_runs
+        planned_quantity = required_quantity
 
         blueprint_type_id = int(blueprint_row.get("blueprint_type_id") or 0)
         blueprint_payload = blueprint_row.get("blueprint") or {}
@@ -1709,13 +1829,19 @@ class IndustryService:
         if activity == "manufacturing":
             if bool(build_from_bpc):
                 available_target_copy_runs = int(available_copy_runs.get(blueprint_type_id, 0))
-                owned_copy_runs_used = min(max(0, available_target_copy_runs), runs)
-                missing_blueprint_copy_runs = max(0, runs - owned_copy_runs_used)
+                owned_copy_runs_used = min(max(0, available_target_copy_runs), requested_runs)
+                missing_blueprint_copy_runs = max(0, requested_runs - owned_copy_runs_used)
                 available_copy_runs[blueprint_type_id] = max(0, available_target_copy_runs - owned_copy_runs_used)
                 if owned_copy_runs_used > 0 and matched_blueprint_copies:
                     blueprint_material_efficiency = int(matched_blueprint_copies[0].blueprint_material_efficiency or 0)
                     blueprint_time_efficiency = int(matched_blueprint_copies[0].blueprint_time_efficiency or 0)
                     blueprint_source_kind = "owned_blueprint_copy"
+                    if missing_blueprint_copy_runs > 0 and bool(matched_blueprint_originals):
+                        include_copying_job = True
+                    elif missing_blueprint_copy_runs > 0:
+                        runs = owned_copy_runs_used
+                        planned_quantity = min(required_quantity, product_quantity_per_run * runs)
+                        missing_blueprint_copy_runs = 0
                 elif matched_blueprint_originals:
                     blueprint_material_efficiency = int(matched_blueprint_originals[0].blueprint_material_efficiency or 0)
                     blueprint_time_efficiency = int(matched_blueprint_originals[0].blueprint_time_efficiency or 0)
@@ -1724,6 +1850,8 @@ class IndustryService:
                 else:
                     blueprint_source_kind = "unowned_blueprint_copy"
                     include_copying_job = missing_blueprint_copy_runs > 0
+                if runs <= 0:
+                    return None
             else:
                 if matched_blueprint_originals:
                     blueprint_material_efficiency = int(matched_blueprint_originals[0].blueprint_material_efficiency or 0)
@@ -1860,23 +1988,52 @@ class IndustryService:
 
         invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
         has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
-        selected_blueprint_copy_asset = matched_blueprint_copies[0] if matched_blueprint_copies else None
-        if activity == "manufacturing" and bool(build_from_bpc) and selected_blueprint_copy_asset is not None and owned_copy_runs_used > 0:
-            current_copy_node_fields = self._owned_blueprint_copy_node_fields(
-                selected_blueprint_copy_asset,
-                blueprint_name=blueprint_display_name,
-                recommendation_action="take",
-                runs_required=owned_copy_runs_used,
-                category_name=str(selected_product.get("category_name") or "") or None,
-                meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
-                use_invention_label=bool(has_invention_path),
-            )
-            prerequisite_nodes.append(
-                self._job_tree_node(
-                    label=self._ACTIVITY_LABELS["invention"] if has_invention_path else self._ACTIVITY_LABELS["copying"],
-                    **current_copy_node_fields,
+        owned_blueprint_copy_allocations = self._allocate_owned_blueprint_copy_run_usage(
+            cast(list[CharacterAssetsModel | CorporationAssetsModel], matched_blueprint_copies),
+            requested_runs=int(owned_copy_runs_used or 0),
+            available_total_runs=int(owned_copy_runs_used or 0),
+        )
+        selected_blueprint_copy_asset = (
+            owned_blueprint_copy_allocations[0][0]
+            if owned_blueprint_copy_allocations
+            else (matched_blueprint_copies[0] if matched_blueprint_copies else None)
+        )
+        selected_blueprint_original_asset = matched_blueprint_originals[0] if matched_blueprint_originals else None
+        blueprint_copy_payload = self._compact_owned_blueprint_assets(
+            [asset for asset, _ in owned_blueprint_copy_allocations]
+            if owned_blueprint_copy_allocations
+            else ([selected_blueprint_copy_asset] if selected_blueprint_copy_asset is not None else []),
+            character_name_by_id=character_name_by_id,
+            corporation_name_by_id=corporation_name_by_id,
+        )
+        uses_blueprint_original = (
+            blueprint_source_kind in {"copied_from_owned_blueprint_original", "owned_blueprint_original"}
+            or (include_copying_job and missing_blueprint_copy_runs > 0)
+        )
+        blueprint_original_payload = self._compact_owned_blueprint_asset(
+            selected_blueprint_original_asset if uses_blueprint_original else None,
+            character_name_by_id=character_name_by_id,
+            corporation_name_by_id=corporation_name_by_id,
+        )
+        if activity == "manufacturing" and bool(build_from_bpc) and owned_blueprint_copy_allocations:
+            for consumed_blueprint_copy_asset, consumed_copy_runs in owned_blueprint_copy_allocations:
+                current_copy_node_fields = self._owned_blueprint_copy_node_fields(
+                    consumed_blueprint_copy_asset,
+                    blueprint_name=blueprint_display_name,
+                    recommendation_action="take",
+                    runs_required=consumed_copy_runs,
+                    category_name=str(selected_product.get("category_name") or "") or None,
+                    meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
+                    use_invention_label=bool(has_invention_path),
+                    character_name_by_id=character_name_by_id,
+                    corporation_name_by_id=corporation_name_by_id,
                 )
-            )
+                prerequisite_nodes.append(
+                    self._job_tree_node(
+                        label=self._ACTIVITY_LABELS["invention"] if has_invention_path else self._ACTIVITY_LABELS["copying"],
+                        **current_copy_node_fields,
+                    )
+                )
 
         if include_copying_job and missing_blueprint_copy_runs > 0:
             copying_time_reduction = self._combine_reductions(
@@ -1957,7 +2114,7 @@ class IndustryService:
                     activity="copying",
                     blueprint_name=blueprint_display_name,
                     runs=missing_blueprint_copy_runs,
-                    quantity=None,
+                    quantity=1,
                     duration_seconds=copying_duration_seconds,
                     direct_duration_seconds=copying_duration_seconds,
                     job_cost=copying_job_cost.get("total_job_cost"),
@@ -2076,19 +2233,20 @@ class IndustryService:
                 adjusted_price_map=adjusted_market_price_map,
             )
 
-            if available_owned_quantity >= child_quantity:
-                available_owned_item_quantities[child_type_id] = max(0, available_owned_quantity - child_quantity)
+            owned_quantity_to_take = min(max(0, available_owned_quantity), child_quantity)
+            if owned_quantity_to_take > 0:
+                available_owned_item_quantities[child_type_id] = max(0, available_owned_quantity - owned_quantity_to_take)
                 take_unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
                 take_price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
                 line_total = (
-                    float(take_unit_price) * float(child_quantity)
-                    if take_unit_price is not None and child_quantity > 0
+                    float(take_unit_price) * float(owned_quantity_to_take)
+                    if take_unit_price is not None and owned_quantity_to_take > 0
                     else None
                 )
                 leaf_materials.append(
                     {
                         **dict(material),
-                        "quantity": child_quantity,
+                        "quantity": owned_quantity_to_take,
                         "unit_price": take_unit_price,
                         "price_source": take_price_source,
                         "line_total": line_total,
@@ -2104,7 +2262,7 @@ class IndustryService:
                         category_name=str(material.get("category_name") or "") or None,
                         meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=child_type_id,
-                        quantity=child_quantity,
+                        quantity=owned_quantity_to_take,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
@@ -2116,6 +2274,8 @@ class IndustryService:
                         children=[],
                     )
                 )
+            remaining_child_quantity = max(0, child_quantity - owned_quantity_to_take)
+            if remaining_child_quantity <= 0:
                 continue
 
             child_row = None
@@ -2132,7 +2292,7 @@ class IndustryService:
                     blueprint_row=child_row,
                     activity=child_activity,
                     desired_product_type_id=child_type_id,
-                    required_quantity=child_quantity,
+                    required_quantity=remaining_child_quantity,
                     build_from_bpc=build_from_bpc,
                     include_reactions=include_reactions,
                     selected_industry_profile=selected_industry_profile,
@@ -2145,6 +2305,8 @@ class IndustryService:
                     available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
                     owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                     blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
+                    character_name_by_id=character_name_by_id,
+                    corporation_name_by_id=corporation_name_by_id,
                     manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                     reaction_row_by_product_type_id=reaction_row_by_product_type_id,
                     invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
@@ -2152,13 +2314,21 @@ class IndustryService:
                     depth=depth + 1,
                 )
             if child_plan:
+                planned_child_quantity = min(
+                    remaining_child_quantity,
+                    max(0, int(child_plan.get("planned_quantity") or remaining_child_quantity)),
+                )
+                uncovered_child_quantity = max(0, remaining_child_quantity - planned_child_quantity)
                 build_total_cost = self._as_float(child_plan.get("estimated_total_cost"))
                 buy_total_cost = (
-                    float(buy_unit_price) * float(child_quantity)
-                    if buy_unit_price is not None and child_quantity > 0
+                    float(buy_unit_price) * float(planned_child_quantity)
+                    if buy_unit_price is not None and planned_child_quantity > 0
                     else None
                 )
                 choose_build = (
+                    planned_child_quantity > 0
+                    and child_plan.get("tree_node") is not None
+                    and
                     build_total_cost is not None
                     and (buy_total_cost is None or build_total_cost <= buy_total_cost)
                 )
@@ -2173,13 +2343,22 @@ class IndustryService:
                         "activity": child_activity,
                         "type_id": child_type_id,
                         "type_name": material.get("type_name"),
-                        "quantity": child_quantity,
+                        "quantity": planned_child_quantity,
                         "time_seconds": child_plan.get("total_time_seconds"),
                         "job_cost": child_plan.get("total_job_cost"),
                         "direct_job_cost": child_plan.get("direct_job_cost"),
                         "recommended_action": "build",
                     }
-                    child_tree_node = child_plan.get("tree_node")
+                    child_tree_node = self._normalize_nested_owned_blueprint_copy_tree(
+                        cast(dict[str, Any] | None, child_plan.get("tree_node")),
+                        blueprint_type_id=int(child_plan.get("blueprint_type_id") or 0),
+                        planned_runs=int(child_plan.get("runs") or 0),
+                        blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
+                        category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
+                        meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
+                        character_name_by_id=character_name_by_id,
+                        corporation_name_by_id=corporation_name_by_id,
+                    )
                     material_nodes.append(
                         self._job_tree_node(
                             label=str(material.get("type_name") or child_type_id),
@@ -2190,19 +2369,58 @@ class IndustryService:
                             category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
                             meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
                             type_id=child_type_id,
-                            quantity=child_quantity,
-                            runs=None,
-                            duration_seconds=None,
+                            quantity=planned_child_quantity,
+                            runs=child_plan.get("runs"),
+                            duration_seconds=child_plan.get("total_time_seconds"),
                             job_cost=None,
                             total_job_cost=child_plan.get("total_job_cost"),
+                            blueprint_copy=child_plan.get("blueprint_copy") or {},
+                            blueprint_original=child_plan.get("blueprint_original") or {},
                             children=[child_tree_node] if isinstance(child_tree_node, dict) else [],
                         )
                     )
+                    if uncovered_child_quantity > 0:
+                        uncovered_buy_total_cost = (
+                            float(buy_unit_price) * float(uncovered_child_quantity)
+                            if buy_unit_price is not None and uncovered_child_quantity > 0
+                            else None
+                        )
+                        leaf_materials.append(
+                            {
+                                **dict(material),
+                                "quantity": uncovered_child_quantity,
+                                "unit_price": buy_unit_price,
+                                "price_source": buy_price_source,
+                                "line_total": uncovered_buy_total_cost,
+                            }
+                        )
+                        material_nodes.append(
+                            self._job_tree_node(
+                                label=str(material.get("type_name") or child_type_id),
+                                node_type="material",
+                                activity="material",
+                                sourcing_strategy="buy",
+                                recommendation_action="buy",
+                                category_name=str(material.get("category_name") or "") or None,
+                                meta_group_name=str(material.get("meta_group_name") or "") or None,
+                                type_id=child_type_id,
+                                quantity=uncovered_child_quantity,
+                                runs=None,
+                                duration_seconds=None,
+                                job_cost=None,
+                                total_job_cost=None,
+                                material_cost=uncovered_buy_total_cost,
+                                total_cost=uncovered_buy_total_cost,
+                                unit_price=buy_unit_price,
+                                price_source=buy_price_source,
+                                children=[],
+                            )
+                        )
                 else:
                     leaf_materials.append(
                         {
                             **dict(material),
-                            "quantity": child_quantity,
+                            "quantity": remaining_child_quantity,
                             "unit_price": buy_unit_price,
                             "price_source": buy_price_source,
                             "line_total": buy_total_cost,
@@ -2218,7 +2436,7 @@ class IndustryService:
                             category_name=str(material.get("category_name") or "") or None,
                             meta_group_name=str(material.get("meta_group_name") or "") or None,
                             type_id=child_type_id,
-                            quantity=child_quantity,
+                            quantity=remaining_child_quantity,
                             runs=None,
                             duration_seconds=None,
                             job_cost=None,
@@ -2232,14 +2450,14 @@ class IndustryService:
                     )
             else:
                 buy_total_cost = (
-                    float(buy_unit_price) * float(child_quantity)
-                    if buy_unit_price is not None and child_quantity > 0
+                    float(buy_unit_price) * float(remaining_child_quantity)
+                    if buy_unit_price is not None and remaining_child_quantity > 0
                     else None
                 )
                 leaf_materials.append(
                     {
                         **dict(material),
-                        "quantity": child_quantity,
+                        "quantity": remaining_child_quantity,
                         "unit_price": buy_unit_price,
                         "price_source": buy_price_source,
                         "line_total": buy_total_cost,
@@ -2260,7 +2478,7 @@ class IndustryService:
                         category_name=str(material.get("category_name") or "") or None,
                         meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=child_type_id,
-                        quantity=child_quantity,
+                        quantity=remaining_child_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
@@ -2551,13 +2769,15 @@ class IndustryService:
             type_id=int(selected_product.get("type_id") or desired_product_type_id),
             category_name=str(selected_product.get("category_name") or "") or None,
             meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
-            quantity=required_quantity,
+            quantity=planned_quantity,
             runs=runs,
             duration_seconds=total_time_seconds,
             direct_duration_seconds=direct_duration_seconds,
             job_cost=job_cost.get("total_job_cost"),
             total_job_cost=(total_job_cost if priced_job_count > 0 else None),
             blueprint_source_kind=blueprint_source_kind,
+            blueprint_copy=blueprint_copy_payload,
+            blueprint_original=blueprint_original_payload,
             children=[*prerequisite_nodes, materials_container_node],
         )
 
@@ -2575,6 +2795,7 @@ class IndustryService:
             "category_name": str(selected_product.get("category_name") or "") or None,
             "meta_group_name": str(selected_product.get("meta_group_name") or "") or None,
             "required_quantity": required_quantity,
+            "planned_quantity": planned_quantity,
             "runs": runs,
             "direct_time_seconds": direct_duration_seconds,
             "total_time_seconds": total_time_seconds,
@@ -2592,6 +2813,8 @@ class IndustryService:
             "leaf_materials": self._aggregate_material_entries(leaf_materials),
             "recursive_activity_breakdown": recursive_activity_breakdown,
             "blueprint_source_kind": blueprint_source_kind,
+            "blueprint_copy": blueprint_copy_payload,
+            "blueprint_original": blueprint_original_payload,
             "tree_node": activity_tree_node,
         }
 
@@ -2612,6 +2835,8 @@ class IndustryService:
         available_owned_item_quantity_by_type_id: dict[int, int] | None,
         owned_item_unit_cost_by_type_id: dict[int, float] | None,
         blueprint_original_assets_by_type_id: dict[int, list[Any]],
+        character_name_by_id: dict[int, str] | None = None,
+        corporation_name_by_id: dict[int, str] | None = None,
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
         reaction_row_by_product_type_id: dict[int, dict[str, Any]],
         invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
@@ -2874,19 +3099,20 @@ class IndustryService:
                 sell_price_map=sell_price_map,
                 adjusted_price_map=adjusted_market_price_map,
             )
-            if available_owned_quantity >= material_quantity:
-                available_owned_item_quantities[material_type_id] = max(0, available_owned_quantity - material_quantity)
+            owned_quantity_to_take = min(max(0, available_owned_quantity), material_quantity)
+            if owned_quantity_to_take > 0:
+                available_owned_item_quantities[material_type_id] = max(0, available_owned_quantity - owned_quantity_to_take)
                 take_unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
                 take_price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
                 line_total = (
-                    float(take_unit_price) * float(material_quantity)
-                    if take_unit_price is not None and material_quantity > 0
+                    float(take_unit_price) * float(owned_quantity_to_take)
+                    if take_unit_price is not None and owned_quantity_to_take > 0
                     else None
                 )
                 procurement_materials.append(
                     {
                         **dict(material),
-                        "quantity": material_quantity,
+                        "quantity": owned_quantity_to_take,
                         "unit_price": take_unit_price,
                         "price_source": take_price_source,
                         "line_total": line_total,
@@ -2902,7 +3128,7 @@ class IndustryService:
                         category_name=str(material.get("category_name") or "") or None,
                         meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
-                        quantity=material_quantity,
+                        quantity=owned_quantity_to_take,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
@@ -2914,6 +3140,8 @@ class IndustryService:
                         children=[],
                     )
                 )
+            remaining_material_quantity = max(0, material_quantity - owned_quantity_to_take)
+            if remaining_material_quantity <= 0:
                 continue
             child_row = None
             child_activity = "manufacturing"
@@ -2924,14 +3152,14 @@ class IndustryService:
                 child_row = manufacturing_row_by_product_type_id.get(material_type_id)
             if child_row is None:
                 line_total = (
-                    float(buy_unit_price) * float(material_quantity)
-                    if buy_unit_price is not None and material_quantity > 0
+                    float(buy_unit_price) * float(remaining_material_quantity)
+                    if buy_unit_price is not None and remaining_material_quantity > 0
                     else None
                 )
                 procurement_materials.append(
                     {
                         **dict(material),
-                        "quantity": material_quantity,
+                        "quantity": remaining_material_quantity,
                         "unit_price": buy_unit_price,
                         "price_source": buy_price_source,
                         "line_total": line_total,
@@ -2952,7 +3180,7 @@ class IndustryService:
                         category_name=str(material.get("category_name") or "") or None,
                         meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
-                        quantity=material_quantity,
+                        quantity=remaining_material_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
@@ -2970,7 +3198,7 @@ class IndustryService:
                 blueprint_row=child_row,
                 activity=child_activity,
                 desired_product_type_id=material_type_id,
-                required_quantity=material_quantity,
+                required_quantity=remaining_material_quantity,
                 build_from_bpc=build_from_bpc,
                 include_reactions=reactions_enabled,
                 selected_industry_profile=selected_industry_profile,
@@ -2983,6 +3211,8 @@ class IndustryService:
                 available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
                 owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                 blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
+                character_name_by_id=character_name_by_id,
+                corporation_name_by_id=corporation_name_by_id,
                 manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                 reaction_row_by_product_type_id=reaction_row_by_product_type_id,
                 invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
@@ -2991,14 +3221,14 @@ class IndustryService:
             )
             if child_plan is None:
                 line_total = (
-                    float(buy_unit_price) * float(material_quantity)
-                    if buy_unit_price is not None and material_quantity > 0
+                    float(buy_unit_price) * float(remaining_material_quantity)
+                    if buy_unit_price is not None and remaining_material_quantity > 0
                     else None
                 )
                 procurement_materials.append(
                     {
                         **dict(material),
-                        "quantity": material_quantity,
+                        "quantity": remaining_material_quantity,
                         "unit_price": buy_unit_price,
                         "price_source": buy_price_source,
                         "line_total": line_total,
@@ -3019,7 +3249,7 @@ class IndustryService:
                         category_name=str(material.get("category_name") or "") or None,
                         meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
-                        quantity=material_quantity,
+                        quantity=remaining_material_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
@@ -3032,13 +3262,21 @@ class IndustryService:
                     )
                 )
                 continue
+            planned_child_quantity = min(
+                remaining_material_quantity,
+                max(0, int(child_plan.get("planned_quantity") or remaining_material_quantity)),
+            )
+            uncovered_child_quantity = max(0, remaining_material_quantity - planned_child_quantity)
             build_total_cost = self._as_float(child_plan.get("estimated_total_cost"))
             buy_total_cost = (
-                float(buy_unit_price) * float(material_quantity)
-                if buy_unit_price is not None and material_quantity > 0
+                float(buy_unit_price) * float(planned_child_quantity)
+                if buy_unit_price is not None and planned_child_quantity > 0
                 else None
             )
             choose_build = (
+                planned_child_quantity > 0
+                and child_plan.get("tree_node") is not None
+                and
                 build_total_cost is not None
                 and (buy_total_cost is None or build_total_cost <= buy_total_cost)
             )
@@ -3054,13 +3292,22 @@ class IndustryService:
                     "activity": child_activity,
                     "type_id": material_type_id,
                     "type_name": material.get("type_name"),
-                    "quantity": material_quantity,
+                    "quantity": planned_child_quantity,
                     "time_seconds": child_plan.get("total_time_seconds"),
                     "job_cost": child_plan.get("total_job_cost"),
                     "nested": child_plan.get("recursive_activity_breakdown") or {},
                     "recommended_action": "build",
                 }
-                child_tree_node = child_plan.get("tree_node")
+                child_tree_node = self._normalize_nested_owned_blueprint_copy_tree(
+                    cast(dict[str, Any] | None, child_plan.get("tree_node")),
+                    blueprint_type_id=int(child_plan.get("blueprint_type_id") or 0),
+                    planned_runs=int(child_plan.get("runs") or 0),
+                    blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
+                    category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
+                    meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
+                    character_name_by_id=character_name_by_id,
+                    corporation_name_by_id=corporation_name_by_id,
+                )
                 material_nodes.append(
                     self._job_tree_node(
                         label=str(material.get("type_name") or material_type_id),
@@ -3071,7 +3318,7 @@ class IndustryService:
                         category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
                         meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
-                        quantity=material_quantity,
+                        quantity=planned_child_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
@@ -3079,11 +3326,48 @@ class IndustryService:
                         children=[child_tree_node] if isinstance(child_tree_node, dict) else [],
                     )
                 )
+                if uncovered_child_quantity > 0:
+                    uncovered_line_total = (
+                        float(buy_unit_price) * float(uncovered_child_quantity)
+                        if buy_unit_price is not None and uncovered_child_quantity > 0
+                        else None
+                    )
+                    procurement_materials.append(
+                        {
+                            **dict(material),
+                            "quantity": uncovered_child_quantity,
+                            "unit_price": buy_unit_price,
+                            "price_source": buy_price_source,
+                            "line_total": uncovered_line_total,
+                        }
+                    )
+                    material_nodes.append(
+                        self._job_tree_node(
+                            label=str(material.get("type_name") or material_type_id),
+                            node_type="material",
+                            activity="material",
+                            sourcing_strategy="buy",
+                            recommendation_action="buy",
+                            category_name=str(material.get("category_name") or "") or None,
+                            meta_group_name=str(material.get("meta_group_name") or "") or None,
+                            type_id=material_type_id,
+                            quantity=uncovered_child_quantity,
+                            runs=None,
+                            duration_seconds=None,
+                            job_cost=None,
+                            total_job_cost=None,
+                            material_cost=uncovered_line_total,
+                            total_cost=uncovered_line_total,
+                            unit_price=buy_unit_price,
+                            price_source=buy_price_source,
+                            children=[],
+                        )
+                    )
             else:
                 procurement_materials.append(
                     {
                         **dict(material),
-                        "quantity": material_quantity,
+                        "quantity": remaining_material_quantity,
                         "unit_price": buy_unit_price,
                         "price_source": buy_price_source,
                         "line_total": buy_total_cost,
@@ -3099,7 +3383,7 @@ class IndustryService:
                         category_name=str(material.get("category_name") or "") or None,
                         meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
-                        quantity=material_quantity,
+                        quantity=remaining_material_quantity,
                         runs=None,
                         duration_seconds=None,
                         job_cost=None,
@@ -3176,6 +3460,78 @@ class IndustryService:
             payload["owner_type"] = "corporation"
         return payload
 
+    @classmethod
+    def _compact_owned_blueprint_assets(
+        cls,
+        assets: list[CharacterAssetsModel | CorporationAssetsModel] | None,
+        *,
+        character_name_by_id: dict[int, str] | None = None,
+        corporation_name_by_id: dict[int, str] | None = None,
+        top_location_name_by_id: dict[int, str] | None = None,
+    ) -> dict[str, Any]:
+        if not assets:
+            return {}
+        if len(assets) == 1:
+            return cls._compact_owned_blueprint_asset(
+                assets[0],
+                character_name_by_id=character_name_by_id,
+                corporation_name_by_id=corporation_name_by_id,
+                top_location_name_by_id=top_location_name_by_id,
+            )
+
+        payloads = [
+            cls._compact_owned_blueprint_asset(
+                asset,
+                character_name_by_id=character_name_by_id,
+                corporation_name_by_id=corporation_name_by_id,
+                top_location_name_by_id=top_location_name_by_id,
+            )
+            for asset in assets
+        ]
+
+        def common_value(field_name: str) -> Any:
+            values = [payload.get(field_name) for payload in payloads if payload.get(field_name) not in {None, ""}]
+            if not values:
+                return None
+            first_value = values[0]
+            return first_value if all(value == first_value for value in values[1:]) else None
+
+        character_name = common_value("character_name")
+        corporation_name = common_value("corporation_name")
+        owner_type = common_value("owner_type")
+        if not character_name and not corporation_name:
+            character_name = f"{len(payloads)} owned BPCs"
+            owner_type = "multiple"
+
+        return {
+            "item_id": None,
+            "item_ids": [payload.get("item_id") for payload in payloads if payload.get("item_id") is not None],
+            "owner_type": owner_type,
+            "character_id": common_value("character_id"),
+            "character_name": character_name,
+            "corporation_id": common_value("corporation_id"),
+            "corporation_name": corporation_name,
+            "location_id": common_value("location_id"),
+            "location_type": common_value("location_type"),
+            "location_flag": common_value("location_flag"),
+            "top_location_id": common_value("top_location_id"),
+            "top_location_name": common_value("top_location_name"),
+            "container_name": common_value("container_name"),
+            "ship_name": common_value("ship_name"),
+            "is_singleton": False,
+            "is_blueprint_copy": True,
+            "runs": sum(max(0, int(payload.get("runs") or 0)) for payload in payloads) or None,
+            "material_efficiency": common_value("material_efficiency"),
+            "time_efficiency": common_value("time_efficiency"),
+            "quantity": len(payloads),
+            "acquisition_unit_cost": None,
+            "acquisition_total_cost": sum(
+                float(payload.get("acquisition_total_cost") or 0.0)
+                for payload in payloads
+                if payload.get("acquisition_total_cost") is not None
+            ) or None,
+        }
+
     def _get_owned_blueprint_assets(
         self,
         *,
@@ -3210,6 +3566,32 @@ class IndustryService:
 
             character_name_by_id = blueprints_repo.get_character_name_map(session, character_ids)
             corporation_name_by_id = blueprints_repo.get_corporation_name_map(session, corporation_ids)
+
+            for character in characters:
+                if not isinstance(character, dict):
+                    continue
+                try:
+                    character_id = int(character.get("character_id") or 0)
+                except Exception:
+                    character_id = 0
+                character_name = str(character.get("character_name") or character.get("name") or "").strip()
+                if character_id > 0 and character_name:
+                    character_name_by_id[character_id] = character_name
+
+            try:
+                corporations = self._state.corp_manager.get_corporations() or []
+            except Exception:
+                corporations = []
+            for corporation in corporations:
+                if not isinstance(corporation, dict):
+                    continue
+                try:
+                    corporation_id = int(corporation.get("corporation_id") or 0)
+                except Exception:
+                    corporation_id = 0
+                corporation_name = str(corporation.get("corporation_name") or corporation.get("name") or "").strip()
+                if corporation_id > 0 and corporation_name:
+                    corporation_name_by_id[corporation_id] = corporation_name
 
             def resolve_top_location_name_map(
                 assets: list[CharacterAssetsModel | CorporationAssetsModel],
@@ -3476,6 +3858,7 @@ class IndustryService:
         *,
         force_refresh: bool = False,
         maximize_bp_runs: bool = False,
+        group_identical_bpcs: bool = True,
         build_from_bpc: bool = True,
         have_blueprint_source_only: bool = True,
         include_reactions: bool = False,
@@ -3703,30 +4086,59 @@ class IndustryService:
                     }
 
                 if bool(build_from_bpc) and matched_blueprint_copies:
-                    selected_blueprint_variants: list[tuple[CharacterAssetsModel | None, CharacterAssetsModel | None]] = [
-                        (blueprint_copy_asset, None) for blueprint_copy_asset in matched_blueprint_copies
-                    ]
+                    if bool(group_identical_bpcs):
+                        selected_blueprint_variants: list[dict[str, Any]] = [
+                            {
+                                "blueprint_copy_assets": list(matched_blueprint_copies),
+                                "blueprint_original_asset": None,
+                            }
+                        ]
+                    else:
+                        selected_blueprint_variants = [
+                            {
+                                "blueprint_copy_assets": [blueprint_copy_asset],
+                                "blueprint_original_asset": None,
+                            }
+                            for blueprint_copy_asset in matched_blueprint_copies
+                        ]
                 elif matched_blueprint_originals:
                     selected_blueprint_variants = [
-                        (None, blueprint_original_asset) for blueprint_original_asset in matched_blueprint_originals
+                        {
+                            "blueprint_copy_assets": [],
+                            "blueprint_original_asset": blueprint_original_asset,
+                        }
+                        for blueprint_original_asset in matched_blueprint_originals
                     ]
                 else:
-                    selected_blueprint_variants = [(None, None)]
+                    selected_blueprint_variants = [
+                        {
+                            "blueprint_copy_assets": [],
+                            "blueprint_original_asset": None,
+                        }
+                    ]
 
                 if bool(have_blueprint_source_only):
                     selected_blueprint_variants = [
-                        (blueprint_copy_asset, blueprint_original_asset)
-                        for blueprint_copy_asset, blueprint_original_asset in selected_blueprint_variants
-                        if blueprint_copy_asset is not None or blueprint_original_asset is not None
+                        variant
+                        for variant in selected_blueprint_variants
+                        if (variant.get("blueprint_copy_assets") or []) or variant.get("blueprint_original_asset") is not None
                     ]
                     if not selected_blueprint_variants:
                         continue
 
-                for blueprint_copy_asset, blueprint_original_asset in selected_blueprint_variants:
-                    blueprint_copy_runs = (
-                        int(blueprint_copy_asset.blueprint_runs or 0)
-                        if blueprint_copy_asset is not None
-                        else 0
+                for blueprint_variant in selected_blueprint_variants:
+                    blueprint_copy_assets = cast(
+                        list[CharacterAssetsModel | CorporationAssetsModel],
+                        list(blueprint_variant.get("blueprint_copy_assets") or []),
+                    )
+                    blueprint_original_asset = cast(
+                        CharacterAssetsModel | CorporationAssetsModel | None,
+                        blueprint_variant.get("blueprint_original_asset"),
+                    )
+                    blueprint_copy_asset = blueprint_copy_assets[0] if blueprint_copy_assets else None
+                    blueprint_copy_runs = sum(
+                        max(0, int(getattr(copy_asset, "blueprint_runs", 0) or 0))
+                        for copy_asset in blueprint_copy_assets
                     )
                     effective_runs = 1
                     if bool(maximize_bp_runs):
@@ -3738,7 +4150,7 @@ class IndustryService:
                     available_blueprint_copy_runs_by_type_id = dict(available_blueprint_copy_runs_by_type_id_base)
                     available_owned_item_quantity_by_type_id = dict(available_owned_item_quantity_by_type_id_base)
                     if bool(build_from_bpc):
-                        if blueprint_copy_asset is not None:
+                        if blueprint_copy_assets:
                             available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, blueprint_copy_runs)
                         elif blueprint_original_asset is not None:
                             available_blueprint_copy_runs_by_type_id[blueprint_type_id] = 0
@@ -3775,6 +4187,7 @@ class IndustryService:
                             blueprint_material_efficiency = int(blueprint_copy_asset.blueprint_material_efficiency or 0)
                             blueprint_time_efficiency = int(blueprint_copy_asset.blueprint_time_efficiency or 0)
                             blueprint_source_kind = "owned_blueprint_copy"
+                            include_copying_job = max(0, blueprint_copy_runs) < effective_runs and bool(matched_blueprint_originals)
                         elif blueprint_original_asset is not None:
                             blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
                             blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
@@ -3952,23 +4365,31 @@ class IndustryService:
                     missing_top_level_copy_runs = max(0, effective_runs - owned_target_copy_runs_used) if bool(build_from_bpc) else 0
                     requires_copying_job = bool(include_copying_job) and missing_top_level_copy_runs > 0
                     requires_invention_chain = missing_top_level_copy_runs > 0 and not matched_blueprint_originals
+                    owned_top_level_copy_allocations = self._allocate_owned_blueprint_copy_run_usage(
+                        blueprint_copy_assets,
+                        requested_runs=owned_target_copy_runs_used,
+                        available_total_runs=owned_target_copy_runs_used,
+                    )
 
-                    if bool(build_from_bpc) and blueprint_copy_asset is not None and owned_target_copy_runs_used > 0:
-                        current_copy_node_fields = self._owned_blueprint_copy_node_fields(
-                            blueprint_copy_asset,
-                            blueprint_name=str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id),
-                            recommendation_action="take",
-                            runs_required=owned_target_copy_runs_used,
-                            category_name=str(compact_product.get("category_name") or "") or None,
-                            meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
-                            use_invention_label=bool(has_top_level_invention_path),
-                        )
-                        prerequisite_tree_nodes.append(
-                            self._job_tree_node(
-                                label=(self._ACTIVITY_LABELS["invention"] if has_top_level_invention_path else self._ACTIVITY_LABELS["copying"]),
-                                **current_copy_node_fields,
+                    if bool(build_from_bpc) and owned_top_level_copy_allocations:
+                        for consumed_blueprint_copy_asset, consumed_copy_runs in owned_top_level_copy_allocations:
+                            current_copy_node_fields = self._owned_blueprint_copy_node_fields(
+                                consumed_blueprint_copy_asset,
+                                blueprint_name=str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id),
+                                recommendation_action="take",
+                                runs_required=consumed_copy_runs,
+                                category_name=str(compact_product.get("category_name") or "") or None,
+                                meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                                use_invention_label=bool(has_top_level_invention_path),
+                                character_name_by_id=character_name_by_id,
+                                corporation_name_by_id=corporation_name_by_id,
                             )
-                        )
+                            prerequisite_tree_nodes.append(
+                                self._job_tree_node(
+                                    label=(self._ACTIVITY_LABELS["invention"] if has_top_level_invention_path else self._ACTIVITY_LABELS["copying"]),
+                                    **current_copy_node_fields,
+                                )
+                            )
 
                     if int(((row.get("copying_job") or {}).get("time_seconds") or 0)) > 0 and not (
                         has_top_level_invention_path and not matched_blueprint_originals
@@ -4067,6 +4488,7 @@ class IndustryService:
                                         or blueprint_type_id
                                         or "Blueprint"
                                     ),
+                                    quantity=1,
                                     runs=max(0, missing_top_level_copy_runs),
                                     duration_seconds=copying_duration_seconds,
                                     direct_duration_seconds=copying_duration_seconds,
@@ -4483,21 +4905,37 @@ class IndustryService:
                                 )
                             )
 
-                    blueprint_copy_payload = self._compact_owned_blueprint_asset(
-                        blueprint_copy_asset,
+                    selected_blueprint_copy_asset = (
+                        owned_top_level_copy_allocations[0][0]
+                        if owned_top_level_copy_allocations
+                        else blueprint_copy_asset
+                    )
+                    blueprint_copy_payload = self._compact_owned_blueprint_assets(
+                        blueprint_copy_assets if len(blueprint_copy_assets) > 1 else ([selected_blueprint_copy_asset] if selected_blueprint_copy_asset is not None else []),
                         character_name_by_id=character_name_by_id,
                         corporation_name_by_id=corporation_name_by_id,
                         top_location_name_by_id=top_location_name_by_id,
                     )
-                    blueprint_copy_item_id = int(blueprint_copy_asset.item_id) if blueprint_copy_asset is not None else None
+                    blueprint_copy_variant_key = (
+                        "-".join(
+                            str(int(getattr(copy_asset, "item_id", 0) or 0))
+                            for copy_asset in blueprint_copy_assets
+                            if int(getattr(copy_asset, "item_id", 0) or 0) > 0
+                        )
+                        or "none"
+                    )
+                    uses_blueprint_original = (
+                        blueprint_source_kind in {"copied_from_owned_blueprint_original", "owned_blueprint_original"}
+                        or requires_copying_job
+                    )
                     blueprint_original_payload = self._compact_owned_blueprint_asset(
-                        blueprint_original_asset,
+                        blueprint_original_asset if uses_blueprint_original else None,
                         character_name_by_id=character_name_by_id,
                         corporation_name_by_id=corporation_name_by_id,
                         top_location_name_by_id=top_location_name_by_id,
                     )
                     blueprint_original_item_id = (
-                        int(blueprint_original_asset.item_id) if blueprint_original_asset is not None else None
+                        int(blueprint_original_asset.item_id) if uses_blueprint_original and blueprint_original_asset is not None else None
                     )
 
                     recursive_prerequisite_plan = self._build_recursive_prerequisite_plan(
@@ -4515,6 +4953,8 @@ class IndustryService:
                         available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
                         owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                         blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
+                        character_name_by_id=character_name_by_id,
+                        corporation_name_by_id=corporation_name_by_id,
                         manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                         reaction_row_by_product_type_id=reaction_row_by_product_type_id,
                         invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
@@ -4615,7 +5055,7 @@ class IndustryService:
                         {
                             **compact_product,
                             "overview_row_id": (
-                                f"product:{row_index}:{product_index}:bpc:{blueprint_copy_item_id or 'none'}:bpo:{blueprint_original_item_id or 'none'}"
+                                f"product:{row_index}:{product_index}:bpc:{blueprint_copy_variant_key}:bpo:{blueprint_original_item_id or 'none'}"
                             ),
                             "manufacturing_job": {
                                 "materials": keyed_entries(adjusted_material_entries, compactor=lambda entry: entry),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from utils.flask_api import cached_api_get
+from utils.streamlit_api import cached_api_get
 
 
 def fetch_industry_profiles(*, character_id: int) -> list[dict]:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from utils.flask_api import cached_api_get
+from utils.streamlit_api import cached_api_get
 
 
 def build_character_options(characters: list[dict]) -> dict[int, str]:
