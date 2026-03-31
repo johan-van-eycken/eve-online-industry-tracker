@@ -28,6 +28,7 @@ from classes.database_manager import DatabaseManager
 from classes.config_manager import ConfigManager
 from classes.database_models import EsiCache, OAuthCharacter
 from classes.oauth import OAuthHandler, OAuthServer
+from utils.requests_ssl import get_requests_ssl_kwargs
 
 
 class _EsiErrorRateLimiter:
@@ -173,7 +174,7 @@ def _get_sso_jwk_for_kid(kid: str, *, timeout_seconds: int = 10) -> Optional[dic
 
     # (Re)fetch JWKS outside the lock.
     try:
-        resp = requests.get(_SSO_JWKS_URL, timeout=timeout_seconds)
+        resp = requests.get(_SSO_JWKS_URL, timeout=timeout_seconds, **get_requests_ssl_kwargs())
         resp.raise_for_status()
         payload = resp.json()
     except Exception as e:
@@ -361,6 +362,7 @@ class ESIClient:
                 "redirect_uri": self.redirect_uri,
             },
             timeout=10,
+            **get_requests_ssl_kwargs(),
         )
         response.raise_for_status()
         token_data = response.json()
@@ -386,6 +388,7 @@ class ESIClient:
                 "refresh_token": self.refresh_token,
             },
             timeout=10,
+            **get_requests_ssl_kwargs(),
         )
         response.raise_for_status()
         data = response.json()
@@ -438,6 +441,7 @@ class ESIClient:
                 self.verify_url,
                 headers={"Authorization": f"Bearer {self.access_token}"},
                 timeout=10,
+                **get_requests_ssl_kwargs(),
             )
             response.raise_for_status()
             data = response.json()
@@ -675,7 +679,12 @@ class ESIClient:
                 try:
                     _esi_gate(f"GET {endpoint} page={page}")
                     _t0 = time.time()
-                    response = requests.get(paged_url, headers=headers, timeout=float(timeout_seconds))
+                    response = requests.get(
+                        paged_url,
+                        headers=headers,
+                        timeout=float(timeout_seconds),
+                        **get_requests_ssl_kwargs(),
+                    )
                     try:
                         if get_esi_monitor is not None:
                             get_esi_monitor().record_http_attempt(
@@ -809,7 +818,12 @@ class ESIClient:
             try:
                 _esi_gate(f"GET {endpoint}")
                 _t0 = time.time()
-                response = requests.get(url, headers=headers, timeout=float(timeout_seconds))
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    timeout=float(timeout_seconds),
+                    **get_requests_ssl_kwargs(),
+                )
                 try:
                     if get_esi_monitor is not None:
                         get_esi_monitor().record_http_attempt(
@@ -963,7 +977,13 @@ class ESIClient:
                 try:
                     _esi_gate(f"POST {endpoint} page={page}")
                     _t0 = time.time()
-                    response = requests.post(url, headers=headers, json=paged_json, timeout=timeout)
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        json=paged_json,
+                        timeout=timeout,
+                        **get_requests_ssl_kwargs(),
+                    )
                     try:
                         if get_esi_monitor is not None:
                             get_esi_monitor().record_http_attempt(
@@ -1071,7 +1091,13 @@ class ESIClient:
             try:
                 _esi_gate(f"POST {endpoint}")
                 _t0 = time.time()
-                response = requests.post(url, headers=headers, json=json, timeout=timeout)
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=json,
+                    timeout=timeout,
+                    **get_requests_ssl_kwargs(),
+                )
                 try:
                     if get_esi_monitor is not None:
                         get_esi_monitor().record_http_attempt(

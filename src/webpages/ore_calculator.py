@@ -1,124 +1,63 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
-import sys
+from datetime import datetime
 
-from utils.aggrid_import import import_aggrid
-
-_ag = import_aggrid()
-AgGrid = _ag.AgGrid  # type: ignore
-GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
-JsCode = _ag.JsCode  # type: ignore
-_AGGRID_IMPORT_ERROR = _ag.import_error
-
-from utils.flask_api import api_get, api_post
-from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter
+from utils.flask_api import api_post
+from utils.ore_calculator_api import fetch_all_facilities, fetch_all_materials
 from utils.streamlit_selectors import select_character_id
+from utils.webpage_ui import render_aggrid_table, require_aggrid
 
-#-- Cached API calls --
-@st.cache_data(ttl=3600)
-def get_all_materials():
-    try:
-        r = api_get("/materials")
-        return [m["name"] for m in r.get("materials", [])]
-    except Exception as e:
-        st.error(f"Error fetching materials: {e}")
-        return []
 
-@st.cache_data(ttl=3600)
-def get_all_facilities():
+MODE_OPTIONS = {
+    "min_cost": "Lowest ISK cost",
+    "min_volume": "Lowest hauling volume",
+    "min_ore_types": "Fewest ore types",
+    "balanced": "Balanced cost and volume",
+}
+
+
+def _format_timestamp(ts: float | int | None) -> str:
+    if ts is None:
+        return "N/A"
     try:
-        r = api_get("/facilities")
-        if isinstance(r.get("data"), list):
-            return r.get("data")
-        return []
-    except Exception as e:
-        st.error(f"Error fetching facilities: {e}")
-        return []
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "N/A"
+
+
+def _build_sourcing_plan_rows(solution: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for solution_row in solution:
+        ore_name = str(solution_row.get("ore_name") or solution_row.get("ore_id") or "")
+        for index, tier in enumerate(solution_row.get("tiers") or [], start=1):
+            if not isinstance(tier, dict):
+                continue
+            rows.append(
+                {
+                    "Ore": ore_name,
+                    "Tier": index,
+                    "Order ID": tier.get("order_id"),
+                    "Location ID": tier.get("location_id"),
+                    "Batches": tier.get("batches"),
+                    "Ore Units": tier.get("ore_units"),
+                    "Unit Price (ISK)": tier.get("unit_price"),
+                    "Cost (ISK)": tier.get("cost"),
+                }
+            )
+    return rows
 
 #-- Main Render Function --
 def render():
     st.header("Ore Calculator (MILP Version)")
 
-    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-        st.error(
-            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
-            "Install it in the same Python environment and restart Streamlit."
-        )
-        st.caption(f"Python: {sys.executable}")
-        if _AGGRID_IMPORT_ERROR:
-            with st.expander("Import error details", expanded=False):
-                st.code(_AGGRID_IMPORT_ERROR)
-        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
-        st.stop()
+    runtime = require_aggrid()
 
-    eu_locale = "nl-NL"  # '.' thousands, ',' decimals
-    right = {"textAlign": "right"}
+    try:
+        all_materials = fetch_all_materials()
+    except Exception as e:
+        st.error(f"Error fetching materials: {e}")
+        return
 
-    def _render_aggrid_table(
-        df_in: pd.DataFrame,
-        *,
-        isk_cols: list[str] | None = None,
-        pct_cols: list[str] | None = None,
-        num_cols_0: list[str] | None = None,
-        num_cols_2: list[str] | None = None,
-        height_max: int = 700,
-    ) -> None:
-        if df_in is None or df_in.empty:
-            st.info("No data.")
-            return
-
-        df_tbl = df_in.copy()
-        gb = GridOptionsBuilder.from_dataframe(df_tbl)
-        gb.configure_default_column(resizable=True, sortable=True, filter=True)
-
-        for c in (isk_cols or []):
-            if c in df_tbl.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_isk_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
-                    cellStyle=right,
-                    minWidth=120,
-                )
-        for c in (pct_cols or []):
-            if c in df_tbl.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_pct_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
-                    cellStyle=right,
-                    minWidth=110,
-                )
-        for c in (num_cols_0 or []):
-            if c in df_tbl.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=0),
-                    cellStyle=right,
-                    minWidth=110,
-                )
-        for c in (num_cols_2 or []):
-            if c in df_tbl.columns:
-                gb.configure_column(
-                    c,
-                    type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=JsCode, locale=eu_locale, decimals=2),
-                    cellStyle=right,
-                    minWidth=110,
-                )
-
-        grid_options = gb.build()
-        height = min(height_max, 40 + (len(df_tbl) * 35))
-        AgGrid(
-            df_tbl,
-            gridOptions=grid_options,
-            allow_unsafe_jscode=True,
-            theme="streamlit",
-            height=height,
-        )
-
-    all_materials = get_all_materials()
     st.write("All Minerals: " + ", ".join(all_materials))
 
     left, right = st.columns([1, 2])
@@ -144,7 +83,12 @@ def render():
             format_func=lambda ipct: all_implants[ipct],
             key="opt_implant_pct"
         )
-        all_facilities = get_all_facilities()
+        try:
+            all_facilities = fetch_all_facilities()
+        except Exception as e:
+            st.error(f"Error fetching facilities: {e}")
+            return
+
         if not all_facilities:
             st.warning("No facilities available. Check your Flask API.")
             st.stop()
@@ -157,7 +101,12 @@ def render():
             key="opt_facility_id"
         )
 
-        mode = st.selectbox("Mode", ["min_cost"], key="opt_mode")
+        mode = st.selectbox(
+            "Mode",
+            options=list(MODE_OPTIONS.keys()),
+            format_func=lambda value: MODE_OPTIONS.get(str(value), str(value)),
+            key="opt_mode",
+        )
         with st.expander("Debug Options"):
             show_yield_table = st.checkbox("Show per-ore batch yields (debug)", value=False, key="dbg_yields")
             show_coverage_debug = st.checkbox("Show coverage & surplus breakdown (debug)", value=False, key="dbg_coverage")
@@ -209,7 +158,7 @@ def render():
             df_sol = df_sol[[c for c in base_cols if c in df_sol.columns]]
 
             # --- FIXED Ores Purchase Summary ---
-            ore_yields_map = {ore["id"]: ore for ore in opt_resp.get("ore_yields", [])}
+            ore_yields_map = {ore["id"]: ore for ore in result.get("ore_yields", [])}
             ore_summary_rows = []
             for row in solution:
                 ore_id = row["ore_id"]
@@ -249,13 +198,19 @@ def render():
                 )
 
             tiered_total_cost = result.get("tiered_total_cost", 0.0)
-            total_cost_with_reprocessing = result.get("total_cost_with_reprocessing", result["total_cost"])
+            total_cost_with_reprocessing = result.get(
+                "total_cost_with_reprocessing",
+                float(result["total_cost"]) + float(result.get("reprocessing_fee", 0.0) or 0.0),
+            )
             savings = tiered_total_cost - total_cost_with_reprocessing
             savings_pct = (savings / tiered_total_cost * 100) if tiered_total_cost > 0 else 0
+            sourcing_plan_df = pd.DataFrame(_build_sourcing_plan_rows(solution))
+            price_provenance = result.get("price_provenance", {}) or {}
 
             st.session_state["opt_display"] = {
                 "total_cost": result["total_cost"],
                 "total_cost_with_reprocessing": total_cost_with_reprocessing,
+                "optimization_mode": result.get("optimization_mode", mode),
                 "tiered_total_cost": tiered_total_cost,
                 "savings": savings,
                 "savings_pct": savings_pct,
@@ -270,6 +225,7 @@ def render():
                 "df_raw": raw_df,
                 "df_eff": df_eff,
                 "df_surplus": df_surplus,
+                "df_sourcing_plan": sourcing_plan_df,
                 "surplus_dict": surplus_dict,
                 "show_yield_table": show_yield_table,
                 "show_coverage_debug": show_coverage_debug,
@@ -277,6 +233,7 @@ def render():
                 "ore_yields": result.get("ore_yields", []),
                 "req_mat_prices": result.get("req_mat_prices", {}),
                 "demand_coverage": result.get("demand_coverage", {}),
+                "price_provenance": price_provenance,
             }
             st.session_state["last_opt_resp"] = result  # <-- store the last response
 
@@ -307,6 +264,52 @@ def render():
 
     colc3.metric("Savings (ISK)", f"{opt_display['savings']:,.2f}", f"{opt_display['savings_pct']:+.2f}%", help="Difference between optimized ore solution and direct mineral purchase.")
     colc3.metric("Savings Volume (m³)", f"{(raw_volume_m3 - ore_volume_m3):,.2f}" if ore_volume_m3 is not None else "N/A", help="Volume difference between direct minerals and optimized ore solution.")
+    st.caption(f"Optimization mode: {MODE_OPTIONS.get(str(opt_display.get('optimization_mode')), str(opt_display.get('optimization_mode')))}")
+
+    price_provenance = opt_display.get("price_provenance") or {}
+    if price_provenance:
+        with st.expander("Price provenance and freshness", expanded=False):
+            source = str(price_provenance.get("source") or "ESI sell orders")
+            region_id = price_provenance.get("region_id")
+            generated_at = _format_timestamp(price_provenance.get("generated_at"))
+            st.caption(f"Source: {source} | Region: {region_id or 'N/A'} | Generated: {generated_at}")
+
+            ore_orders = price_provenance.get("ore_orders") or {}
+            material_orders = price_provenance.get("material_orders") or {}
+            meta_left, meta_right = st.columns(2)
+            with meta_left:
+                st.markdown("**Ore order snapshot**")
+                st.write(
+                    {
+                        "type_count": ore_orders.get("type_count"),
+                        "cached_type_count": ore_orders.get("cached_type_count"),
+                        "total_orders": ore_orders.get("total_orders"),
+                        "cache_ttl_seconds": ore_orders.get("cache_ttl_seconds"),
+                        "oldest_fetched_at": _format_timestamp(ore_orders.get("oldest_fetched_at")),
+                        "newest_fetched_at": _format_timestamp(ore_orders.get("newest_fetched_at")),
+                    }
+                )
+            with meta_right:
+                st.markdown("**Material order snapshot**")
+                st.write(
+                    {
+                        "type_count": material_orders.get("type_count"),
+                        "cached_type_count": material_orders.get("cached_type_count"),
+                        "total_orders": material_orders.get("total_orders"),
+                        "cache_ttl_seconds": material_orders.get("cache_ttl_seconds"),
+                        "oldest_fetched_at": _format_timestamp(material_orders.get("oldest_fetched_at")),
+                        "newest_fetched_at": _format_timestamp(material_orders.get("newest_fetched_at")),
+                    }
+                )
+
+            price_rows = pd.DataFrame(price_provenance.get("price_rows") or [])
+            if not price_rows.empty:
+                render_aggrid_table(
+                    price_rows,
+                    runtime=runtime,
+                    isk_cols=["Unit Price (ISK)"],
+                    number_cols_0=["Type ID"],
+                )
 
     # Show total yielded minerals if available
     if "total_yielded_materials" in opt_display and opt_display["total_yielded_materials"]:
@@ -329,28 +332,41 @@ def render():
                 "unit_price": "Unit Price (ISK)",
             }
         )
-        _render_aggrid_table(
+        render_aggrid_table(
             df_solution,
-            num_cols_0=["Ore ID", "Batches", "Batch Size", "Ore Units"],
+            runtime=runtime,
             isk_cols=["Unit Price (ISK)", "Total Cost (ISK)"],
+            number_cols_0=["Ore ID", "Batches", "Batch Size", "Ore Units"],
         )
         st.caption("Each row shows an ore type selected by the optimizer. 'Ore Units' = Batches × Batch Size.")
 
         st.markdown("**Ores Purchase Summary**")
-        _render_aggrid_table(
+        render_aggrid_table(
             opt_display["df_ore_summary"],
-            num_cols_0=["Ore ID", "Ore Units"],
-            num_cols_2=["Volume (m3)", "ISK / Ore Unit"],
+            runtime=runtime,
             isk_cols=["Avg Unit Price", "Total Cost (ISK)"],
+            number_cols_0=["Ore ID", "Ore Units"],
+            number_cols_2=["Volume (m3)", "ISK / Ore Unit"],
         )
         st.caption("Summary of all ores purchased, including total volume.")
 
+        if not opt_display["df_sourcing_plan"].empty:
+            st.markdown("**Order-book sourcing plan**")
+            render_aggrid_table(
+                opt_display["df_sourcing_plan"],
+                runtime=runtime,
+                isk_cols=["Unit Price (ISK)", "Cost (ISK)"],
+                number_cols_0=["Tier", "Order ID", "Location ID", "Batches", "Ore Units"],
+            )
+            st.caption("Shows which sell-order tiers were consumed for each ore in the optimized solution.")
+
     with raw_col:
         st.subheader("Raw Minerals (Direct Market Purchase)")
-        _render_aggrid_table(
+        render_aggrid_table(
             opt_display["df_raw"],
-            num_cols_0=["quantity", "Qty", "Demand", "Yielded", "Surplus", "Shortfall"],
+            runtime=runtime,
             isk_cols=["Total Cost (ISK)", "Unit Price (ISK)", "Cost"],
+            number_cols_0=["quantity", "Qty", "Demand", "Yielded", "Surplus", "Shortfall"],
         )
         st.caption("Minerals required if you buy everything directly from the market.")
 
@@ -368,16 +384,17 @@ def render():
                     "Yield per Batch": qty
                 })
         if df_yields:
-            _render_aggrid_table(
+            render_aggrid_table(
                 pd.DataFrame(df_yields),
-                num_cols_0=["Ore ID", "Portion Size", "Yield per Batch"],
+                runtime=runtime,
+                number_cols_0=["Ore ID", "Portion Size", "Yield per Batch"],
             )
         else:
             st.info("No yield data available.")
 
     if opt_display["show_coverage_debug"]:
         st.subheader("Demand Coverage & Surplus (Debug)")
-        demand_coverage = opt_resp.get("demand_coverage", {})
+        demand_coverage = opt_display.get("demand_coverage", {})
         if demand_coverage:
             # Convert dict to DataFrame
             df_coverage = pd.DataFrame.from_dict(demand_coverage, orient="index")
@@ -389,11 +406,33 @@ def render():
                 "surplus": "Surplus",
                 "shortfall": "Shortfall"
             })
-            _render_aggrid_table(
+            render_aggrid_table(
                 df_coverage,
-                num_cols_2=["Demand", "Yielded", "Surplus", "Shortfall"],
+                runtime=runtime,
+                number_cols_2=["Demand", "Yielded", "Surplus", "Shortfall"],
             )
             st.caption("Shows for each mineral: demand, actual yield, surplus (overproduction), and any shortfall.")
+
+    if opt_display.get("df_eff") is not None and not opt_display["df_eff"].empty:
+        st.subheader("Effective Ore Contributions")
+        render_aggrid_table(
+            opt_display["df_eff"],
+            runtime=runtime,
+            number_cols_0=["Batches"],
+            number_cols_2=["Yield per Batch", "Total Yield", "Demand"],
+            pct_cols=["Coverage %", "Share of Yielded %"],
+        )
+        st.caption("Shows how each selected ore contributes to each demanded mineral.")
+
+    if opt_display.get("df_surplus") is not None and opt_display["df_surplus"] is not None and not opt_display["df_surplus"].empty:
+        st.subheader("Surplus Minerals")
+        render_aggrid_table(
+            opt_display["df_surplus"],
+            runtime=runtime,
+            isk_cols=[column for column in opt_display["df_surplus"].columns if "ISK" in str(column)],
+            number_cols_2=["Surplus Units"],
+        )
+        st.caption("Surplus output after fulfilling demand, including an 80% resale estimate when price data is available.")
 
     if opt_display["show_formula"]:
         st.subheader("Reprocessing Yield Formula & Multipliers")
@@ -409,8 +448,8 @@ def render():
             Values shown are final post-skill batch yields.
         """)
         # Show multipliers for the first ore as an example
-        if opt_resp["ore_yields"]:
-            ore = opt_resp["ore_yields"][0]
+        if opt_display["ore_yields"]:
+            ore = opt_display["ore_yields"][0]
             st.write(f"Example Ore: {ore['name']} (ID: {ore['id']})")
             st.write(f"Portion Size: {ore.get('batch_size')}")
             st.write("Batch Yields:")

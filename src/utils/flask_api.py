@@ -1,41 +1,44 @@
 import logging
 
-try:
-    import streamlit as st  # pyright: ignore[reportMissingImports]
-except Exception:  # pragma: no cover
-    st = None
 import requests  # pyright: ignore[reportMissingModuleSource]
+from requests import Response
+from requests import exceptions as requests_exceptions
 
 from flask_app.settings import api_base, api_request_timeout_seconds
 
-#-- API Helpers --
-def _handle_failure(path, r):
-    if st is not None:
-        st.error(f"{path} failed: {r.text}")
-    else:
-        logging.error("%s failed: %s", path, r.text)
+
+def _handle_failure(path: str, response: Response) -> None:
+    logging.error("%s failed with %s: %s", path, response.status_code, response.text)
 
 
 def _request(method, path, *, payload=None, timeout_seconds=None):
     timeout = api_request_timeout_seconds() if timeout_seconds is None else timeout_seconds
     url = f"{api_base()}{path}"
 
-    if method == "GET":
-        r = requests.get(url, timeout=timeout)
-    elif method == "POST":
-        r = requests.post(url, json=payload, timeout=timeout)
-    elif method == "PUT":
-        r = requests.put(url, json=payload, timeout=timeout)
-    elif method == "DELETE":
-        r = requests.delete(url, timeout=timeout)
-    else:
-        raise ValueError(f"Unsupported HTTP method: {method}")
-
-    if not (200 <= r.status_code < 300):
-        _handle_failure(path, r)
+    try:
+        if method == "GET":
+            response = requests.get(url, timeout=timeout)
+        elif method == "POST":
+            response = requests.post(url, json=payload, timeout=timeout)
+        elif method == "PUT":
+            response = requests.put(url, json=payload, timeout=timeout)
+        elif method == "DELETE":
+            response = requests.delete(url, timeout=timeout)
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+    except requests_exceptions.RequestException as exc:
+        logging.error("%s request failed: %s", path, exc)
         return None
 
-    return r.json()
+    if not (200 <= response.status_code < 300):
+        _handle_failure(path, response)
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        logging.error("%s returned invalid JSON", path)
+        return None
 
 
 def api_post(path, payload):
@@ -43,7 +46,7 @@ def api_post(path, payload):
 
 
 def cached_api_get(path, timeout_seconds=None):
-    return _request("GET", path, timeout_seconds=timeout_seconds)
+    return api_get(path, timeout_seconds=timeout_seconds)
 
 
 def api_get(path, timeout_seconds=None):
@@ -56,7 +59,3 @@ def api_put(path, payload):
 
 def api_delete(path):
     return _request("DELETE", path)
-
-
-if st is not None:
-    cached_api_get = st.cache_data(ttl=300)(cached_api_get)

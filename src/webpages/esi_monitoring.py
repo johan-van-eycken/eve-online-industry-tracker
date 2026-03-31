@@ -1,40 +1,19 @@
 import streamlit as st  # pyright: ignore[reportMissingImports]
 import pandas as pd  # pyright: ignore[reportMissingModuleSource, reportMissingImports]
-import sys
 from typing import Any, cast
-
-from utils.aggrid_import import import_aggrid
-
-_ag = import_aggrid()
-AgGrid = _ag.AgGrid  # type: ignore
-GridOptionsBuilder = _ag.GridOptionsBuilder  # type: ignore
-JsCode = _ag.JsCode  # type: ignore
-_AGGRID_IMPORT_ERROR = _ag.import_error
 
 from utils.flask_api import api_get
 from utils.aggrid_formatters import js_eu_number_formatter
+from utils.webpage_ui import aggrid_height, require_aggrid
 
 
 def render() -> None:
     st.subheader("ESI Monitoring")
 
-    if AgGrid is None or GridOptionsBuilder is None or JsCode is None:
-        st.error(
-            "streamlit-aggrid is required but could not be imported in this Streamlit process. "
-            "Install it in the same Python environment and restart Streamlit."
-        )
-        st.caption(f"Python: {sys.executable}")
-        if _AGGRID_IMPORT_ERROR:
-            with st.expander("Import error details", expanded=False):
-                st.code(_AGGRID_IMPORT_ERROR)
-        st.code(f"{sys.executable} -m pip install streamlit-aggrid")
-        st.stop()
-
-    aggrid_fn = cast(Any, AgGrid)
-    grid_options_builder = cast(Any, GridOptionsBuilder)
-    js_code = cast(Any, JsCode)
-
-    eu_locale = "nl-NL"
+    runtime = require_aggrid()
+    aggrid_fn = cast(Any, runtime.aggrid_fn)
+    grid_options_builder = cast(Any, runtime.grid_options_builder)
+    js_code = cast(Any, runtime.js_code)
 
     refresh_cols = st.columns([1, 2, 2])
     with refresh_cols[0]:
@@ -55,9 +34,7 @@ def render() -> None:
         )
 
     if refresh_now:
-        cache_data = getattr(st, "cache_data", None)
-        if cache_data is not None and hasattr(cache_data, "clear"):
-            cache_data.clear()  # best-effort; safe even if nothing is cached.
+        st.session_state.pop("esi_monitor_snapshot", None)
 
     def _fetch_snapshot() -> dict:
         snap_resp = api_get("/esi_metrics?window=900&bucket=5&top=20") or {}
@@ -193,7 +170,7 @@ def render() -> None:
                     "count",
                     header_name="Count",
                     type=["numericColumn", "numberColumnFilter"],
-                    valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=eu_locale, decimals=0),
+                    valueFormatter=js_eu_number_formatter(JsCode=js_code, locale=runtime.locale, decimals=0),
                     cellStyle=right,
                     width=120,
                 )
@@ -203,7 +180,7 @@ def render() -> None:
                 gb.configure_column("endpoint", header_name="Endpoint", minWidth=420)
 
             grid_opts = gb.build()
-            height = max(220, min(520, 60 + (len(df_top) * 32)))
+            height = max(220, aggrid_height(row_count=len(df_top), height_max=520, base_height=60, row_height=32))
             aggrid_fn(
                 df_top,
                 gridOptions=grid_opts,

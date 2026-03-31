@@ -1,5 +1,6 @@
 pandas==2.2.2
 requests==2.32.4
+truststore==0.10.4
 SQLAlchemy==2.0.19
 streamlit==1.52.2
 streamlit-aggrid==1.2.1.post2

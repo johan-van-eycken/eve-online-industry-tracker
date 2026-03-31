@@ -5,6 +5,7 @@ config/secret.json
 
 # database files
 database/*.db
+database/streamlit_preferences.json
 database/data/db_exports/
 database/data/tmp_sde/
 

@@ -9,6 +9,7 @@ import requests
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from classes.esi import ESIClient
+from utils.requests_ssl import get_requests_ssl_kwargs
 
 
 class ESIService:
@@ -19,6 +20,8 @@ class ESIService:
 
     DEFAULT_REGION_ID = 10000002
     DEFAULT_STATION_ID = 60003760
+    _PUBLIC_ESI_RETRYABLE_STATUS_CODES = {420, 429, 500, 502, 503, 504}
+    _PUBLIC_MARKET_ORDER_MAX_WORKERS = 2
 
     def __init__(
         self,
@@ -74,6 +77,21 @@ class ESIService:
             "X-Tenant": getattr(self._esi_client, "esi_header_xtenant", "tranquility"),
         }
 
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response | None) -> float:
+        if response is None:
+            return 0.0
+        try:
+            raw_value = response.headers.get("Retry-After")
+        except Exception:
+            return 0.0
+        if raw_value in {None, ""}:
+            return 0.0
+        try:
+            return max(0.0, float(raw_value))
+        except Exception:
+            return 0.0
+
     def _public_esi_get(
         self,
         endpoint: str,
@@ -81,18 +99,43 @@ class ESIService:
         params: Optional[Dict[str, Any]] = None,
         paginate: bool = False,
         timeout_seconds: float = 15.0,
+        max_retries: int = 4,
     ) -> Any:
         base_uri = str(getattr(self._esi_client, "esi_base_uri", "https://esi.evetech.net")).rstrip("/")
         headers = self._public_headers()
 
+        def issue_request(*, request_params: Optional[Dict[str, Any]] = None) -> requests.Response:
+            attempts = 0
+            url = f"{base_uri}{endpoint}"
+            while True:
+                try:
+                    response = requests.get(
+                        url,
+                        params=request_params,
+                        headers=headers,
+                        timeout=float(timeout_seconds),
+                        **get_requests_ssl_kwargs(),
+                    )
+                except requests.RequestException:
+                    attempts += 1
+                    if attempts > max_retries:
+                        raise
+                    time.sleep(min(8.0, float(2 ** attempts) + random.uniform(0.0, 0.5)))
+                    continue
+
+                if response.status_code not in self._PUBLIC_ESI_RETRYABLE_STATUS_CODES:
+                    response.raise_for_status()
+                    return response
+
+                attempts += 1
+                if attempts > max_retries:
+                    response.raise_for_status()
+                retry_after = self._retry_after_seconds(response)
+                backoff = min(12.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
+                time.sleep(max(retry_after, backoff))
+
         if not paginate:
-            response = requests.get(
-                f"{base_uri}{endpoint}",
-                params=params,
-                headers=headers,
-                timeout=float(timeout_seconds),
-            )
-            response.raise_for_status()
+            response = issue_request(request_params=params)
             return response.json()
 
         all_data: List[Dict[str, Any]] = []
@@ -100,13 +143,7 @@ class ESIService:
         while True:
             paged_params = dict(params or {})
             paged_params["page"] = page
-            response = requests.get(
-                f"{base_uri}{endpoint}",
-                params=paged_params,
-                headers=headers,
-                timeout=float(timeout_seconds),
-            )
-            response.raise_for_status()
+            response = issue_request(request_params=paged_params)
 
             payload = response.json()
             if isinstance(payload, list):
@@ -118,7 +155,7 @@ class ESIService:
             if page >= total_pages:
                 break
             page += 1
-            time.sleep(0.2)
+            time.sleep(0.4)
 
         return all_data
 
@@ -186,7 +223,7 @@ class ESIService:
 
             return int(type_id), orders
 
-        max_workers = min(8, max(1, len(to_fetch)))
+        max_workers = min(self._PUBLIC_MARKET_ORDER_MAX_WORKERS, max(1, len(to_fetch)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_fetch_one, int(type_id)) for type_id in to_fetch]
             for fut in as_completed(futures):
@@ -267,6 +304,33 @@ class ESIService:
         if not isinstance(material_ids, list) or not material_ids:
             return {}
         return self.get_sell_order_book(material_ids)
+
+    def get_sell_order_book_metadata(self, type_ids: Iterable[int], region_id: Optional[int] = None) -> Dict[str, Any]:
+        region_id = region_id or self._region_id
+        type_ids_list = self._validate_type_ids(type_ids)
+        timestamps: List[float] = []
+        cached_type_count = 0
+        total_orders = 0
+
+        for type_id in type_ids_list:
+            cached = self._type_orders_cache.get(("sell", region_id, int(type_id)))
+            if not cached:
+                continue
+            cached_type_count += 1
+            timestamps.append(float(cached[0]))
+            orders = cached[1] if isinstance(cached[1], list) else []
+            total_orders += len(orders)
+
+        return {
+            "region_id": int(region_id),
+            "order_type": "sell",
+            "type_count": len(type_ids_list),
+            "cached_type_count": cached_type_count,
+            "total_orders": total_orders,
+            "cache_ttl_seconds": int(self._type_orders_cache_ttl_seconds),
+            "oldest_fetched_at": min(timestamps) if timestamps else None,
+            "newest_fetched_at": max(timestamps) if timestamps else None,
+        }
 
     def get_type_sellprices(self, type_ids: List[int], region_id: Optional[int] = None) -> Dict[int, List[Dict[str, Any]]]:
         if not isinstance(type_ids, list) or not type_ids:
