@@ -11,6 +11,11 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 from classes.esi import ESIClient
 from utils.requests_ssl import get_requests_ssl_kwargs
 
+try:
+    from utils.esi_monitor import get_esi_monitor
+except Exception:  # pragma: no cover
+    get_esi_monitor = None  # type: ignore
+
 
 class ESIService:
     """Higher-level ESI operations with lightweight caching.
@@ -22,6 +27,7 @@ class ESIService:
     DEFAULT_STATION_ID = 60003760
     _PUBLIC_ESI_RETRYABLE_STATUS_CODES = {420, 429, 500, 502, 503, 504}
     _PUBLIC_MARKET_ORDER_MAX_WORKERS = 2
+    _PUBLIC_MARKET_HISTORY_MAX_WORKERS = 4
 
     def __init__(
         self,
@@ -32,6 +38,7 @@ class ESIService:
         market_prices_cache_ttl_seconds: int = 3600,
         public_structures_cache_ttl_seconds: int = 600,
         industry_facilities_cache_ttl_seconds: int = 6 * 3600,
+        market_history_cache_ttl_seconds: int = 6 * 3600,
     ):
         self._esi_client = esi_client
         self._region_id = region_id
@@ -41,11 +48,14 @@ class ESIService:
         self._market_prices_cache_ttl_seconds = market_prices_cache_ttl_seconds
         self._public_structures_cache_ttl_seconds = public_structures_cache_ttl_seconds
         self._industry_facilities_cache_ttl_seconds = industry_facilities_cache_ttl_seconds
+        self._market_history_cache_ttl_seconds = market_history_cache_ttl_seconds
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}
         # Legacy: kept for backwards compatibility; we no longer fetch full region order books.
         self._region_orders_cache: Dict[tuple, tuple] = {}
+        # { (region_id, type_id): (timestamp, [history_rows]) }
+        self._market_history_cache: Dict[tuple, tuple] = {}
         # (timestamp, [prices])
         self._market_prices_cache: Optional[tuple] = None
         # { (system_id, filter): (timestamp, [structures]) }
@@ -107,7 +117,15 @@ class ESIService:
         def issue_request(*, request_params: Optional[Dict[str, Any]] = None) -> requests.Response:
             attempts = 0
             url = f"{base_uri}{endpoint}"
+            page = None
+            if isinstance(request_params, dict):
+                try:
+                    raw_page = request_params.get("page")
+                    page = int(raw_page) if raw_page is not None else None
+                except Exception:
+                    page = None
             while True:
+                request_started_at = time.time()
                 try:
                     response = requests.get(
                         url,
@@ -116,11 +134,60 @@ class ESIService:
                         timeout=float(timeout_seconds),
                         **get_requests_ssl_kwargs(),
                     )
+                    try:
+                        if get_esi_monitor is not None:
+                            get_esi_monitor().record_http_attempt(
+                                method="GET",
+                                endpoint=str(endpoint),
+                                url=str(getattr(response, "url", url)),
+                                status_code=int(response.status_code) if response is not None else None,
+                                elapsed_ms=(time.time() - request_started_at) * 1000.0,
+                                headers=getattr(response, "headers", None),
+                                exception=None,
+                                cache_mode="off",
+                                page=page,
+                            )
+                    except Exception:
+                        pass
                 except requests.RequestException:
+                    exc = None
+                    try:
+                        raise
+                    except requests.RequestException as caught:
+                        exc = caught
+                        try:
+                            if get_esi_monitor is not None:
+                                get_esi_monitor().record_http_attempt(
+                                    method="GET",
+                                    endpoint=str(endpoint),
+                                    url=str(url),
+                                    status_code=None,
+                                    elapsed_ms=(time.time() - request_started_at) * 1000.0,
+                                    headers=None,
+                                    exception=caught,
+                                    cache_mode="off",
+                                    page=page,
+                                )
+                        except Exception:
+                            pass
+                    if exc is None:
+                        raise
                     attempts += 1
                     if attempts > max_retries:
-                        raise
-                    time.sleep(min(8.0, float(2 ** attempts) + random.uniform(0.0, 0.5)))
+                        raise exc
+                    wait_seconds = min(8.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
+                    try:
+                        if get_esi_monitor is not None:
+                            get_esi_monitor().record_retry_event(
+                                reason=type(exc).__name__,
+                                sleep_seconds=float(wait_seconds),
+                                method="GET",
+                                endpoint=str(endpoint),
+                                url=str(url),
+                            )
+                    except Exception:
+                        pass
+                    time.sleep(wait_seconds)
                     continue
 
                 if response.status_code not in self._PUBLIC_ESI_RETRYABLE_STATUS_CODES:
@@ -132,7 +199,19 @@ class ESIService:
                     response.raise_for_status()
                 retry_after = self._retry_after_seconds(response)
                 backoff = min(12.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
-                time.sleep(max(retry_after, backoff))
+                wait_seconds = max(retry_after, backoff)
+                try:
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_retry_event(
+                            reason=str(response.status_code),
+                            sleep_seconds=float(wait_seconds),
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(getattr(response, "url", url)),
+                        )
+                except Exception:
+                    pass
+                time.sleep(wait_seconds)
 
         if not paginate:
             response = issue_request(request_params=params)
@@ -341,6 +420,69 @@ class ESIService:
         if not isinstance(type_ids, list) or not type_ids:
             return {}
         return self.get_buy_order_book(type_ids, region_id=region_id)
+
+    def get_market_history(self, type_ids: Iterable[int], region_id: Optional[int] = None) -> Dict[int, List[Dict[str, Any]]]:
+        region_id = region_id or self._region_id
+        type_ids_list = self._validate_type_ids(type_ids)
+        if not type_ids_list:
+            return {}
+
+        now = time.time()
+        result: Dict[int, List[Dict[str, Any]]] = {}
+        to_fetch: List[int] = []
+
+        for type_id in type_ids_list:
+            cache_key = (int(region_id), int(type_id))
+            cached = self._market_history_cache.get(cache_key)
+            if cached and (now - cached[0] < self._market_history_cache_ttl_seconds):
+                result[int(type_id)] = cached[1] if isinstance(cached[1], list) else []
+            else:
+                to_fetch.append(int(type_id))
+
+        if not to_fetch:
+            return result
+
+        def _fetch_one(type_id: int) -> tuple[int, List[Dict[str, Any]]]:
+            try:
+                payload = self._public_esi_get(
+                    f"/markets/{int(region_id)}/history/",
+                    params={"type_id": int(type_id)},
+                    paginate=False,
+                    timeout_seconds=15.0,
+                )
+            except Exception as e:
+                logging.warning(
+                    "ESI market history fetch failed (region_id=%s, type_id=%s): %s",
+                    region_id,
+                    type_id,
+                    e,
+                )
+                payload = []
+
+            if not isinstance(payload, list):
+                return int(type_id), []
+
+            rows = [row for row in payload if isinstance(row, dict)]
+            rows.sort(key=lambda row: str(row.get("date") or ""))
+            return int(type_id), rows
+
+        max_workers = min(self._PUBLIC_MARKET_HISTORY_MAX_WORKERS, max(1, len(to_fetch)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_one, int(type_id)) for type_id in to_fetch]
+            for fut in as_completed(futures):
+                try:
+                    type_id, rows = fut.result()
+                except Exception as e:
+                    logging.warning(
+                        "ESI market history fetch task failed (region_id=%s): %s",
+                        region_id,
+                        e,
+                    )
+                    continue
+                self._market_history_cache[(int(region_id), int(type_id))] = (time.time(), rows)
+                result[int(type_id)] = rows
+
+        return result
 
     def get_location_info(self, location_id: Union[int, List[int]]) -> Union[Dict[str, Any], Dict[int, Dict[str, Any]]]:
         if isinstance(location_id, list):

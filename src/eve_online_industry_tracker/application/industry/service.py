@@ -9,7 +9,7 @@ from typing import Any, Callable, cast
 import uuid
 
 from sqlalchemy import bindparam, text
-from eve_online_industry_tracker.db_models import CharacterAssetsModel, CorporationAssetsModel
+from eve_online_industry_tracker.db_models import CharacterAssetsModel, CorporationAssetsModel, NpcCorporations, NpcStations
 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
@@ -43,6 +43,8 @@ ProgressCallback = Callable[[float, str, dict[str, Any] | None], None]
 
 
 class IndustryService:
+    _SKILL_ID_ACCOUNTING = 16622
+    _SKILL_ID_BROKER_RELATIONS = 3446
     _STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS = 24 * 3600
     _STRUCTURE_RIGS_CACHE_VERSION = 3
     _RIG_ATTR_TIME_REDUCTION = 2593
@@ -188,6 +190,9 @@ class IndustryService:
         build_from_bpc: bool = True,
         have_blueprint_source_only: bool = True,
         include_reactions: bool = False,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
+        product_price_side: str = "sell",
         industry_profile_id: int | None = None,
         owned_blueprints_scope: str = "all_characters",
         character_id: int | None = None,
@@ -216,6 +221,9 @@ class IndustryService:
             "build_from_bpc": bool(build_from_bpc),
             "have_blueprint_source_only": bool(have_blueprint_source_only),
             "include_reactions": bool(include_reactions),
+            "market_hub": MarketPricingService.normalize_market_hub(market_hub),
+            "material_price_side": MarketPricingService.normalize_order_side(material_price_side),
+            "product_price_side": MarketPricingService.normalize_order_side(product_price_side),
             "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
             "owned_blueprints_scope": str(owned_blueprints_scope),
             "character_id": int(character_id) if character_id is not None else None,
@@ -259,6 +267,9 @@ class IndustryService:
                 build_from_bpc=bool(params.get("build_from_bpc", True)),
                 have_blueprint_source_only=bool(params.get("have_blueprint_source_only", True)),
                 include_reactions=bool(params.get("include_reactions", False)),
+                market_hub=str(params.get("market_hub") or "jita"),
+                material_price_side=str(params.get("material_price_side") or "sell"),
+                product_price_side=str(params.get("product_price_side") or "sell"),
                 industry_profile_id=params.get("industry_profile_id"),
                 owned_blueprints_scope=str(params.get("owned_blueprints_scope") or "all_characters"),
                 character_id=params.get("character_id"),
@@ -797,6 +808,288 @@ class IndustryService:
             trained_skill_levels[skill_type_id] = max(trained_skill_level, trained_skill_levels.get(skill_type_id, 0))
 
         return trained_skill_levels
+
+    def _get_character_standing(self, *, character_id: int, from_type: str, from_id: int | None) -> float:
+        if not from_id:
+            return 0.0
+
+        character = self._get_character(character_id=character_id)
+        standings = getattr(character, "standings", None)
+        if not isinstance(standings, list):
+            return 0.0
+
+        for standing in standings:
+            if not isinstance(standing, dict):
+                continue
+            try:
+                if str(standing.get("from_type") or "") != str(from_type):
+                    continue
+                if int(standing.get("from_id") or 0) != int(from_id):
+                    continue
+                return float(standing.get("standing") or 0.0)
+            except Exception:
+                continue
+        return 0.0
+
+    def _resolve_npc_market_fee_context(
+        self,
+        *,
+        character_id: int | None,
+        market_hub: str,
+        product_price_side: str,
+    ) -> dict[str, Any]:
+        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
+        hub_context = pricing_service._market_hub_context(market_hub)
+        normalized_product_price_side = MarketPricingService.normalize_order_side(product_price_side)
+
+        sales_tax_fraction = None
+        broker_fee_fraction = None
+        broker_fee_applies = normalized_product_price_side == "sell"
+        broker_fee_kind = "order_creation" if broker_fee_applies else "direct_sale"
+        accounting_level = 0
+        broker_relations_level = 0
+        owner_corp_id: int | None = None
+        owner_faction_id: int | None = None
+        faction_standing = 0.0
+        corp_standing = 0.0
+
+        if character_id is not None:
+            trained_skill_levels = self._get_character_trained_skill_levels(character_id=int(character_id))
+            accounting_level = int(trained_skill_levels.get(self._SKILL_ID_ACCOUNTING, 0) or 0)
+            broker_relations_level = int(trained_skill_levels.get(self._SKILL_ID_BROKER_RELATIONS, 0) or 0)
+            sales_tax_fraction = max(0.0, min(1.0, 0.075 * (1.0 - (0.11 * float(accounting_level)))))
+
+            sde_session: Any = self._sessions.sde_session()
+            station = (
+                sde_session.query(NpcStations)
+                .filter(NpcStations.id == int(hub_context.get("station_id") or 0))
+                .first()
+            )
+            if station is not None:
+                try:
+                    owner_corp_id = int(station.ownerID)
+                except Exception:
+                    owner_corp_id = None
+            if owner_corp_id is not None:
+                corporation = (
+                    sde_session.query(NpcCorporations)
+                    .filter(NpcCorporations.id == int(owner_corp_id))
+                    .first()
+                )
+                if corporation is not None and getattr(corporation, "factionID", None) is not None:
+                    try:
+                        owner_faction_id = int(corporation.factionID)
+                    except Exception:
+                        owner_faction_id = None
+
+            faction_standing = self._get_character_standing(
+                character_id=int(character_id),
+                from_type="faction",
+                from_id=owner_faction_id,
+            )
+            corp_standing = self._get_character_standing(
+                character_id=int(character_id),
+                from_type="npc_corp",
+                from_id=owner_corp_id,
+            )
+            broker_fee_fraction = max(
+                0.01,
+                min(
+                    0.03,
+                    0.03
+                    - (0.003 * float(broker_relations_level))
+                    - (0.0003 * float(faction_standing))
+                    - (0.0002 * float(corp_standing)),
+                ),
+            )
+
+        return {
+            "market_hub": hub_context.get("hub"),
+            "market_hub_label": hub_context.get("label"),
+            "station_id": hub_context.get("station_id"),
+            "region_id": hub_context.get("region_id"),
+            "station_type": "npc_station",
+            "output_price_side": normalized_product_price_side,
+            "broker_fee_applies": broker_fee_applies,
+            "broker_fee_kind": broker_fee_kind,
+            "owner_corp_id": owner_corp_id,
+            "owner_faction_id": owner_faction_id,
+            "skills": {
+                "accounting_level": accounting_level,
+                "broker_relations_level": broker_relations_level,
+            },
+            "standings": {
+                "faction_standing": faction_standing,
+                "corp_standing": corp_standing,
+            },
+            "rates": {
+                "sales_tax_fraction": sales_tax_fraction,
+                "broker_fee_fraction": broker_fee_fraction,
+            },
+        }
+
+    def _enrich_product_rows_with_sale_proceeds(
+        self,
+        product_rows: list[dict[str, Any]],
+        *,
+        character_id: int | None,
+        market_hub: str,
+        product_price_side: str,
+    ) -> list[dict[str, Any]]:
+        if not product_rows:
+            return product_rows
+
+        fee_context = self._resolve_npc_market_fee_context(
+            character_id=character_id,
+            market_hub=market_hub,
+            product_price_side=product_price_side,
+        )
+        fee_rates = fee_context.get("rates") or {}
+        sales_tax_fraction = self._as_float(fee_rates.get("sales_tax_fraction"))
+        broker_fee_fraction = self._as_float(fee_rates.get("broker_fee_fraction"))
+        broker_fee_applies = bool(fee_context.get("broker_fee_applies"))
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+
+            market_unit_price = self._as_float(row.get("market_unit_price"))
+            product_quantity = int(row.get("quantity") or 0)
+            if market_unit_price is None or product_quantity <= 0:
+                manufacturing_job["gross_sale_value"] = None
+                manufacturing_job["broker_fee_amount"] = None
+                manufacturing_job["sales_tax_amount"] = None
+                manufacturing_job["net_proceeds"] = None
+                manufacturing_job["market_fee_context"] = fee_context
+                row["gross_sale_value"] = None
+                row["broker_fee_amount"] = None
+                row["sales_tax_amount"] = None
+                row["net_proceeds"] = None
+                continue
+
+            gross_sale_value = float(market_unit_price) * float(product_quantity)
+            broker_fee_amount = (
+                float(gross_sale_value) * float(broker_fee_fraction)
+                if broker_fee_applies and broker_fee_fraction is not None
+                else 0.0
+            )
+            sales_tax_amount = (
+                float(gross_sale_value) * float(sales_tax_fraction)
+                if sales_tax_fraction is not None
+                else None
+            )
+            net_proceeds = None
+            if sales_tax_amount is not None:
+                net_proceeds = float(gross_sale_value) - float(broker_fee_amount or 0.0) - float(sales_tax_amount)
+
+            manufacturing_job["gross_sale_value"] = gross_sale_value
+            manufacturing_job["broker_fee_amount"] = broker_fee_amount if broker_fee_fraction is not None else None
+            manufacturing_job["sales_tax_amount"] = sales_tax_amount
+            manufacturing_job["net_proceeds"] = net_proceeds
+            manufacturing_job["market_fee_context"] = fee_context
+
+            row["gross_sale_value"] = gross_sale_value
+            row["broker_fee_amount"] = broker_fee_amount if broker_fee_fraction is not None else None
+            row["sales_tax_amount"] = sales_tax_amount
+            row["net_proceeds"] = net_proceeds
+
+        return product_rows
+
+    def _enrich_product_rows_with_market_activity(
+        self,
+        product_rows: list[dict[str, Any]],
+        *,
+        market_hub: str,
+    ) -> list[dict[str, Any]]:
+        if not product_rows:
+            return product_rows
+
+        product_type_ids = sorted(
+            {
+                int(row.get("type_id") or 0)
+                for row in product_rows
+                if isinstance(row, dict) and int(row.get("type_id") or 0) > 0
+            }
+        )
+        if not product_type_ids:
+            return product_rows
+
+        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
+        region_daily_volume_map = pricing_service.get_region_daily_volume_map(type_ids=product_type_ids, hub=market_hub)
+        hub_liquidity_map = pricing_service.get_hub_liquidity_map(type_ids=product_type_ids, hub=market_hub)
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+
+            type_id = int(row.get("type_id") or 0)
+            daily_volume = region_daily_volume_map.get(type_id) or {}
+            hub_liquidity = hub_liquidity_map.get(type_id) or {}
+
+            manufacturing_job["region_daily_volume"] = int(daily_volume.get("daily_volume") or 0)
+            manufacturing_job["region_daily_volume_7d_avg"] = self._as_float(daily_volume.get("daily_volume_7d_avg"))
+            manufacturing_job["region_daily_volume_7d_sample_size"] = int(daily_volume.get("daily_volume_7d_sample_size") or 0)
+            manufacturing_job["region_daily_order_count"] = int(daily_volume.get("daily_order_count") or 0)
+            manufacturing_job["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
+            manufacturing_job["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
+            manufacturing_job["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
+            manufacturing_job["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
+            manufacturing_job["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
+
+            row["region_daily_volume"] = int(daily_volume.get("daily_volume") or 0)
+            row["region_daily_volume_7d_avg"] = self._as_float(daily_volume.get("daily_volume_7d_avg"))
+            row["region_daily_volume_7d_sample_size"] = int(daily_volume.get("daily_volume_7d_sample_size") or 0)
+            row["region_daily_order_count"] = int(daily_volume.get("daily_order_count") or 0)
+            row["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
+            row["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
+            row["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
+            row["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
+            row["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
+
+        return product_rows
+
+    def _enrich_product_rows_with_profit_metrics(self, product_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not product_rows:
+            return product_rows
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+
+            net_proceeds = self._as_float(row.get("net_proceeds"))
+            total_cost = self._as_float(manufacturing_job.get("total_cost"))
+            time_seconds = self._as_float(manufacturing_job.get("time_seconds"))
+
+            profit_amount = None
+            margin_fraction = None
+            isk_per_hour = None
+
+            if net_proceeds is not None and total_cost is not None:
+                profit_amount = float(net_proceeds) - float(total_cost)
+                if net_proceeds > 0:
+                    margin_fraction = float(profit_amount) / float(net_proceeds)
+
+            if profit_amount is not None and time_seconds is not None and time_seconds > 0:
+                isk_per_hour = float(profit_amount) / (float(time_seconds) / 3600.0)
+
+            manufacturing_job["profit_amount"] = profit_amount
+            manufacturing_job["profit_margin_fraction"] = margin_fraction
+            manufacturing_job["isk_per_hour"] = isk_per_hour
+
+            row["profit_amount"] = profit_amount
+            row["profit_margin_fraction"] = margin_fraction
+            row["isk_per_hour"] = isk_per_hour
+
+        return product_rows
 
     @staticmethod
     def _normalize_fraction(value: Any) -> float:
@@ -3862,6 +4155,9 @@ class IndustryService:
         build_from_bpc: bool = True,
         have_blueprint_source_only: bool = True,
         include_reactions: bool = False,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
+        product_price_side: str = "sell",
         industry_profile_id: int | None = None,
         owned_blueprints_scope: str = "all_characters",
         character_id: int | None = None,
@@ -3889,14 +4185,20 @@ class IndustryService:
             reaction_row_by_product_type_id,
             invention_row_by_blueprint_type_id,
         ) = self._build_blueprint_row_indexes(blueprint_rows)
+        normalized_market_hub = MarketPricingService.normalize_market_hub(market_hub)
+        normalized_material_price_side = MarketPricingService.normalize_order_side(material_price_side)
+        normalized_product_price_side = MarketPricingService.normalize_order_side(product_price_side)
+        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
         product_sell_price_type_ids = sorted(
             {
                 *[int(type_id) for type_id in manufacturing_row_by_product_type_id.keys()],
                 *[int(type_id) for type_id in reaction_row_by_product_type_id.keys()],
             }
         )
-        product_sell_price_map = MarketPricingService(state=self._state, sessions=self._sessions).get_material_sell_price_map(
-            material_type_ids=product_sell_price_type_ids,
+        product_sell_price_map = pricing_service.get_type_price_map(
+            type_ids=product_sell_price_type_ids,
+            hub=normalized_market_hub,
+            side=normalized_product_price_side,
         )
         blueprint_copy_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
         blueprint_original_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
@@ -5050,6 +5352,7 @@ class IndustryService:
                         total_cost=None,
                         children=[manufacturing_tree],
                     )
+                    product_market_pricing = product_sell_price_map.get(product_type_id) or {}
 
                     product_rows.append(
                         {
@@ -5077,6 +5380,12 @@ class IndustryService:
                                 "estimated_item_value_source": "materials_adjusted_price",
                                 "product_estimated_item_value": product_eiv_total,
                                 "product_estimated_item_value_source": product_eiv_source,
+                                "product_market_price": self._as_float(product_market_pricing.get("unit_price")),
+                                "product_market_price_source": product_market_pricing.get("price_source"),
+                                "product_market_price_side": product_market_pricing.get("side"),
+                                "product_market_price_hub": product_market_pricing.get("hub"),
+                                "product_market_price_hub_label": product_market_pricing.get("hub_label"),
+                                "product_market_volume_total": product_market_pricing.get("volume_total"),
                                 "activity_breakdown": activity_breakdown,
                                 "recursive_activity_breakdown": recursive_prerequisite_plan.get("activity_breakdown") or {},
                                 "procurement_materials": keyed_entries(
@@ -5115,6 +5424,12 @@ class IndustryService:
                                 "blueprint_original": blueprint_original_payload,
                                 "job_tree": product_tree,
                             },
+                            "market_unit_price": self._as_float(product_market_pricing.get("unit_price")),
+                            "market_price_source": product_market_pricing.get("price_source"),
+                            "market_price_side": product_market_pricing.get("side"),
+                            "market_hub": product_market_pricing.get("hub"),
+                            "market_hub_label": product_market_pricing.get("hub_label"),
+                            "market_volume_total": product_market_pricing.get("volume_total"),
                         }
                     )
 
@@ -5127,8 +5442,21 @@ class IndustryService:
 
         product_rows = self._enrich_product_rows_with_material_prices(
             product_rows,
+            market_hub=normalized_market_hub,
+            material_price_side=normalized_material_price_side,
             progress_callback=progress_callback,
         )
+        product_rows = self._enrich_product_rows_with_market_activity(
+            product_rows,
+            market_hub=normalized_market_hub,
+        )
+        product_rows = self._enrich_product_rows_with_sale_proceeds(
+            product_rows,
+            character_id=character_id,
+            market_hub=normalized_market_hub,
+            product_price_side=normalized_product_price_side,
+        )
+        product_rows = self._enrich_product_rows_with_profit_metrics(product_rows)
 
         product_rows.sort(
             key=lambda row: (
@@ -5144,6 +5472,8 @@ class IndustryService:
         self,
         product_rows: list[dict[str, Any]],
         *,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
         progress_callback: ProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
         if not product_rows:
@@ -5169,8 +5499,10 @@ class IndustryService:
             return product_rows
 
         pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
-        price_by_type_id = pricing_service.get_material_sell_price_map(
-            material_type_ids=material_type_ids,
+        price_by_type_id = pricing_service.get_type_price_map(
+            type_ids=material_type_ids,
+            hub=market_hub,
+            side=material_price_side,
             progress_callback=(
                 None
                 if progress_callback is None
@@ -5206,6 +5538,9 @@ class IndustryService:
                     unit_price = pricing.get("unit_price")
                     material["unit_price"] = unit_price
                     material["price_source"] = pricing.get("price_source")
+                    material["price_volume_total"] = pricing.get("volume_total")
+                    material["market_hub"] = pricing.get("hub")
+                    material["market_hub_label"] = pricing.get("hub_label")
                     material["price_sample_size"] = pricing.get("sample_size")
                     material["price_cached"] = pricing.get("cached")
                 line_total = None
