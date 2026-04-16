@@ -76,6 +76,9 @@ def industry_products(character_id: int):
     have_blueprint_source_only = have_blueprint_source_only_raw in {"1", "true", "yes", "y", "on"}
     include_reactions_raw = (request.args.get("include_reactions") or "0").strip().lower()
     include_reactions = include_reactions_raw in {"1", "true", "yes", "y", "on"}
+    market_hub = str(request.args.get("market_hub") or "jita").strip().lower() or "jita"
+    material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
+    product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
     industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
     try:
         industry_profile_id = int(industry_profile_id_raw) if industry_profile_id_raw else None
@@ -93,6 +96,9 @@ def industry_products(character_id: int):
             build_from_bpc=build_from_bpc,
             have_blueprint_source_only=have_blueprint_source_only,
             include_reactions=include_reactions,
+            market_hub=market_hub,
+            material_price_side=material_price_side,
+            product_price_side=product_price_side,
             industry_profile_id=industry_profile_id,
             owned_blueprints_scope=owned_blueprints_scope,
             character_id=int(character_id),
@@ -110,6 +116,9 @@ def industry_products_refresh(character_id: int):
     build_from_bpc = bool(payload.get("build_from_bpc", True))
     have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
     include_reactions = bool(payload.get("include_reactions", False))
+    market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
+    material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
+    product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
     force_refresh = bool(payload.get("force_refresh", True))
     raw_industry_profile_id = payload.get("industry_profile_id")
     try:
@@ -128,6 +137,9 @@ def industry_products_refresh(character_id: int):
             build_from_bpc=build_from_bpc,
             have_blueprint_source_only=have_blueprint_source_only,
             include_reactions=include_reactions,
+            market_hub=market_hub,
+            material_price_side=material_price_side,
+            product_price_side=product_price_side,
             industry_profile_id=industry_profile_id,
             owned_blueprints_scope=owned_blueprints_scope,
             character_id=int(character_id),

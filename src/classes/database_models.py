@@ -2,7 +2,7 @@ from typing import Optional, Any
 from datetime import datetime
 from sqlalchemy.orm import Mapped, mapped_column # pyright: ignore[reportMissingImports]
 from sqlalchemy.sql import func # pyright: ignore[reportMissingImports]
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, Float, Boolean, JSON # pyright: ignore[reportMissingImports]
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, Float, Boolean, JSON, UniqueConstraint # pyright: ignore[reportMissingImports]
 from sqlalchemy.ext.declarative import declarative_base # pyright: ignore[reportMissingImports]
 
 # Base is the declarative base for SQLAlchamy models
@@ -421,6 +421,17 @@ class PublicStructuresScanStateModel(BaseApp):
 
 class MarketOrderbookViewCacheModel(BaseApp):
     __tablename__ = "market_orderbook_view_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "hub",
+            "region_id",
+            "station_id",
+            "side",
+            "type_id",
+            "at_hub",
+            name="uq_market_orderbook_view_cache_key",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
@@ -437,6 +448,8 @@ class MarketOrderbookViewCacheModel(BaseApp):
     # Payload
     depth: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
     levels: Mapped[Optional[list[list[float | int]]]] = mapped_column(JSON, nullable=True)
+    total_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    order_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fetched_at: Mapped[float] = mapped_column(Float, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 

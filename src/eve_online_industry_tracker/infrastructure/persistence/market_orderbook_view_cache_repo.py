@@ -48,7 +48,7 @@ def get_views(
 
     rows = session.execute(
         text(
-            "SELECT type_id, levels, fetched_at, version "
+            "SELECT type_id, levels, total_volume, order_count, fetched_at, version "
             "FROM market_orderbook_view_cache "
             "WHERE hub = :hub AND region_id = :region_id AND station_id = :station_id "
             "AND side = :side AND at_hub = :at_hub AND type_id IN :type_ids "
@@ -66,7 +66,7 @@ def get_views(
     ).fetchall()
 
     out: dict[int, list[tuple[float, int]]] = {}
-    for type_id, levels_raw, fetched_at, version in rows or []:
+    for type_id, levels_raw, total_volume, order_count, fetched_at, version in rows or []:
         try:
             if int(version or 0) != int(_CACHE_VERSION):
                 continue
@@ -110,6 +110,66 @@ def get_views(
     return out
 
 
+def get_liquidity_summaries(
+    session,
+    *,
+    hub: str,
+    region_id: int,
+    station_id: int,
+    side: str,
+    at_hub: bool,
+    type_ids: list[int],
+    ttl_seconds: int,
+) -> dict[int, dict[str, int]]:
+    if session is None:
+        return {}
+
+    ids = sorted({int(t) for t in (type_ids or []) if t is not None and int(t) > 0})
+    if not ids:
+        return {}
+
+    hub_n = _normalize_hub(hub)
+    side_n = str(side or "").strip().lower()
+    if side_n not in {"buy", "sell"}:
+        return {}
+
+    now = time.time()
+    min_fetched_at = float(now) - float(max(0, int(ttl_seconds or 0)))
+
+    rows = session.execute(
+        text(
+            "SELECT type_id, total_volume, order_count, version "
+            "FROM market_orderbook_view_cache "
+            "WHERE hub = :hub AND region_id = :region_id AND station_id = :station_id "
+            "AND side = :side AND at_hub = :at_hub AND type_id IN :type_ids "
+            "AND fetched_at >= :min_fetched_at"
+        ).bindparams(bindparam("type_ids", expanding=True)),
+        {
+            "hub": hub_n,
+            "region_id": int(region_id),
+            "station_id": int(station_id),
+            "side": side_n,
+            "at_hub": 1 if bool(at_hub) else 0,
+            "type_ids": ids,
+            "min_fetched_at": float(min_fetched_at),
+        },
+    ).fetchall()
+
+    out: dict[int, dict[str, int]] = {}
+    for type_id, total_volume, order_count, version in rows or []:
+        try:
+            if int(version or 0) != int(_CACHE_VERSION):
+                continue
+            out[int(type_id)] = {
+                "total_volume": int(total_volume or 0),
+                "order_count": int(order_count or 0),
+            }
+        except Exception:
+            continue
+
+    return out
+
+
 def upsert_views(
     session,
     *,
@@ -120,6 +180,7 @@ def upsert_views(
     at_hub: bool,
     views_by_type_id: dict[int, list[tuple[float, int]]],
     depth: int,
+    liquidity_by_type_id: dict[int, dict[str, int]] | None = None,
 ) -> None:
     """Upsert cached orderbook views.
 
@@ -151,12 +212,14 @@ def upsert_views(
 
     stmt = text(
         "INSERT INTO market_orderbook_view_cache "
-        "(hub, region_id, station_id, side, type_id, at_hub, depth, levels, fetched_at, version) "
-        "VALUES (:hub, :region_id, :station_id, :side, :type_id, :at_hub, :depth, :levels, :fetched_at, :version) "
+        "(hub, region_id, station_id, side, type_id, at_hub, depth, levels, total_volume, order_count, fetched_at, version) "
+        "VALUES (:hub, :region_id, :station_id, :side, :type_id, :at_hub, :depth, :levels, :total_volume, :order_count, :fetched_at, :version) "
         "ON CONFLICT(hub, region_id, station_id, side, type_id, at_hub) "
         "DO UPDATE SET "
         "depth=excluded.depth, "
         "levels=excluded.levels, "
+        "total_volume=excluded.total_volume, "
+        "order_count=excluded.order_count, "
         "fetched_at=excluded.fetched_at, "
         "version=excluded.version"
     )
@@ -171,6 +234,7 @@ def upsert_views(
                 continue
 
             payload = json.dumps([[float(p), int(v)] for (p, v) in (levels or [])])
+            liquidity = (liquidity_by_type_id or {}).get(int(tid)) or {}
 
             conn.execute(
                 stmt,
@@ -183,6 +247,8 @@ def upsert_views(
                     "at_hub": 1 if bool(at_hub) else 0,
                     "depth": int(depth),
                     "levels": payload,
+                    "total_volume": int(liquidity.get("total_volume") or 0),
+                    "order_count": int(liquidity.get("order_count") or 0),
                     "fetched_at": float(now),
                     "version": int(_CACHE_VERSION),
                 },

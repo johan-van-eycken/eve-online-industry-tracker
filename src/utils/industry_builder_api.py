@@ -17,6 +17,9 @@ def fetch_product_overview(
     build_from_bpc: bool = True,
     have_blueprint_source_only: bool = True,
     include_reactions: bool = False,
+    market_hub: str = "jita",
+    material_price_side: str = "sell",
+    product_price_side: str = "sell",
     industry_profile_id: int | None = None,
     owned_blueprints_scope: str = "all_characters",
     character_id: int,
@@ -28,6 +31,9 @@ def fetch_product_overview(
         f"&build_from_bpc={1 if build_from_bpc else 0}"
         f"&have_blueprint_source_only={1 if have_blueprint_source_only else 0}"
         f"&include_reactions={1 if include_reactions else 0}"
+        f"&market_hub={market_hub}"
+        f"&material_price_side={material_price_side}"
+        f"&product_price_side={product_price_side}"
         f"&owned_blueprints_scope={owned_blueprints_scope}"
     )
     if industry_profile_id is not None and int(industry_profile_id) > 0:
@@ -60,6 +66,9 @@ def start_product_overview_refresh(
     build_from_bpc: bool,
     have_blueprint_source_only: bool,
     include_reactions: bool,
+    market_hub: str,
+    material_price_side: str,
+    product_price_side: str,
     industry_profile_id: int | None,
     owned_blueprints_scope: str,
     character_id: int,
@@ -73,6 +82,9 @@ def start_product_overview_refresh(
             "build_from_bpc": bool(build_from_bpc),
             "have_blueprint_source_only": bool(have_blueprint_source_only),
             "include_reactions": bool(include_reactions),
+            "market_hub": str(market_hub),
+            "material_price_side": str(material_price_side),
+            "product_price_side": str(product_price_side),
             "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
             "owned_blueprints_scope": str(owned_blueprints_scope),
         },

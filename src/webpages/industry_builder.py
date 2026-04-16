@@ -51,6 +51,25 @@ def _rerun() -> None:
     st.rerun()
 
 
+_MARKET_HUB_OPTIONS = ["jita", "amarr", "dodixie", "rens", "hek"]
+_MARKET_HUB_LABELS = {
+    "jita": "Jita 4-4",
+    "amarr": "Amarr VIII (Oris)",
+    "dodixie": "Dodixie IX - Moon 20",
+    "rens": "Rens VI - Moon 8",
+    "hek": "Hek VIII - Moon 12",
+}
+_MARKET_ORDER_SIDE_OPTIONS = ["sell", "buy"]
+_INPUT_ORDER_SIDE_LABELS = {
+    "sell": "Buy from Sell Orders",
+    "buy": "Buy with Buy Orders",
+}
+_OUTPUT_ORDER_SIDE_LABELS = {
+    "sell": "Place Sell Orders",
+    "buy": "Sell to Buy Orders",
+}
+
+
 def _load_character_context() -> tuple[
     list[dict[str, Any]],
     dict[int, str],
@@ -166,8 +185,26 @@ def _render_filters_section(
         return set()
 
     ensure_meta_group_filter_state(meta_group_names)
+    ensure_valid_state_value(
+        "industry_builder_market_hub",
+        "jita",
+        valid_values=_MARKET_HUB_OPTIONS,
+        coerce=str,
+    )
+    ensure_valid_state_value(
+        "industry_builder_material_price_side",
+        "sell",
+        valid_values=_MARKET_ORDER_SIDE_OPTIONS,
+        coerce=str,
+    )
+    ensure_valid_state_value(
+        "industry_builder_product_price_side",
+        "sell",
+        valid_values=_MARKET_ORDER_SIDE_OPTIONS,
+        coerce=str,
+    )
 
-    filter_group_col, misc_group_col = st.columns(2)
+    filter_group_col, misc_group_col, market_group_col, profit_group_col = st.columns(4)
     with filter_group_col:
         meta_group_container = st.container(border=True)
         meta_group_container.caption("Meta Group Filters")
@@ -216,6 +253,60 @@ def _render_filters_section(
             )
             if not reactions_allowed_for_profile:
                 st.caption("Reactions disabled: the selected industry profile is in high-sec.")
+
+    with market_group_col:
+        market_container = st.container(border=True)
+        market_container.caption("Market")
+        market_container.selectbox(
+            "Trade Hub",
+            options=_MARKET_HUB_OPTIONS,
+            format_func=lambda value: _MARKET_HUB_LABELS.get(str(value), str(value)),
+            key="industry_builder_market_hub",
+            help="Applied only after Refresh Overview. Uses the selected trade hub for both input and output pricing.",
+        )
+        market_container.selectbox(
+            "Input Pricing",
+            options=_MARKET_ORDER_SIDE_OPTIONS,
+            format_func=lambda value: _INPUT_ORDER_SIDE_LABELS.get(str(value), str(value)),
+            key="industry_builder_material_price_side",
+            help="Choose whether required materials are valued from the hub's sell orders or buy orders.",
+        )
+        market_container.selectbox(
+            "Output Pricing",
+            options=_MARKET_ORDER_SIDE_OPTIONS,
+            format_func=lambda value: _OUTPUT_ORDER_SIDE_LABELS.get(str(value), str(value)),
+            key="industry_builder_product_price_side",
+            help="Choose whether finished goods are valued as sell orders you place or direct sales into buy orders.",
+        )
+        market_container.caption("These market settings are backend-backed and take effect after Refresh Overview.")
+
+    with profit_group_col:
+        profit_container = st.container(border=True)
+        profit_container.caption("Profit Filters")
+        profit_container.checkbox(
+            "Positive profit only",
+            key="industry_builder_positive_profit_only",
+        )
+        profit_container.number_input(
+            "Min Margin (%)",
+            min_value=0.0,
+            step=0.5,
+            key="industry_builder_min_margin_pct",
+        )
+        profit_container.number_input(
+            "Min ISK/Hour",
+            min_value=0.0,
+            step=100000.0,
+            key="industry_builder_min_isk_per_hour",
+        )
+        profit_container.number_input(
+            "Min Region Daily Volume",
+            min_value=0,
+            step=1,
+            key="industry_builder_min_region_daily_volume",
+            help="Most recent daily traded volume from ESI market history for the selected hub's region.",
+        )
+        profit_container.caption("These filters apply immediately to the current snapshot. Hub buy/sell liquidity stays a separate live orderbook signal.")
 
     column_groups = [
         {"Tech I", "Tech II", "Tech III"},
@@ -306,6 +397,10 @@ def _render_overview_grid(
         return
 
     st.caption("Use the AgGrid chevrons in Step to expand or collapse the build tree.")
+    st.caption(
+        "Region Daily Volume is true regional market history from ESI. Hub Buy/Sell Liquidity is live open-order depth at the selected trade hub. "
+        "Hub Buy/Sell Orders counts the number of open hub orders behind that liquidity. The 7d Avg column smooths the latest daily volume over the last 7 reported days."
+    )
     icon_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
 
     gb = runtime.grid_options_builder.from_dataframe(df)
@@ -327,6 +422,15 @@ def _render_overview_grid(
         ("BPO Source", 160),
         ("Meta Group", 130),
         ("Category", 140),
+        ("Market Hub", 140),
+        ("Market Price Source", 180),
+        ("Region Daily Volume", 150),
+        ("Region Daily Volume (7d Avg)", 180),
+        ("Hub Buy Liquidity", 150),
+        ("Hub Sell Liquidity", 150),
+        ("Hub Buy Orders", 135),
+        ("Hub Sell Orders", 135),
+        ("Profit Margin %", 130),
     ]:
         if col in df.columns:
             gb.configure_column(
@@ -373,7 +477,25 @@ def _render_overview_grid(
         if col in df.columns:
             gb.configure_column(col, hide=True)
 
-    for col in ["Material Cost", "Job Cost", "Total Cost"]:
+    for col in [
+        "Material Cost",
+        "Job Cost",
+        "Total Cost",
+        "Market Unit Price",
+        "Gross Sale Value",
+        "Broker Fee",
+        "Sales Tax",
+        "Net Proceeds",
+        "Profit",
+        "Profit Margin %",
+        "ISK/Hour",
+        "Region Daily Volume",
+        "Region Daily Volume (7d Avg)",
+        "Hub Buy Liquidity",
+        "Hub Sell Liquidity",
+        "Hub Buy Orders",
+        "Hub Sell Orders",
+    ]:
         if col in df.columns:
             gb.configure_column(
                 col,
@@ -388,6 +510,16 @@ def _render_overview_grid(
         gb.configure_column(
             "Job Duration",
             minWidth=140,
+            wrapHeaderText=False,
+            autoHeaderHeight=False,
+        )
+
+    if "Market Volume" in df.columns:
+        gb.configure_column(
+            "Market Volume",
+            type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
+            minWidth=120,
             wrapHeaderText=False,
             autoHeaderHeight=False,
         )
@@ -611,7 +743,7 @@ def render() -> None:
 
     st.caption(
         "Manufacturable product overview derived from the SDE blueprints and enriched with type metadata. "
-        "Each product row contains a simplified manufacturing job payload with materials, skills, time, and production limits."
+        "Each product row contains a simplified manufacturing job payload with materials, skills, time, production limits, and selected hub pricing."
     )
 
     enabled_meta_groups = _render_filters_section(
@@ -655,6 +787,10 @@ def render() -> None:
         overview_rows,
         tuple(sorted(enabled_meta_groups)),
         bool(st.session_state.get("industry_builder_have_skills_only", True)),
+        bool(st.session_state.get("industry_builder_positive_profit_only", False)),
+        float(st.session_state.get("industry_builder_min_margin_pct", 0.0) or 0.0),
+        float(st.session_state.get("industry_builder_min_isk_per_hour", 0.0) or 0.0),
+            int(st.session_state.get("industry_builder_min_region_daily_volume", 0) or 0),
     )
     if not filtered_overview_rows:
         st.info("No manufacturable product rows match the current filters.")

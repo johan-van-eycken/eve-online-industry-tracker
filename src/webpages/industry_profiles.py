@@ -295,7 +295,7 @@ def _load_rig_options() -> tuple[dict[int, str], dict[int, dict], list[int]]:
     rig_options = {0: "None"}
     rig_bonus_map: dict[int, dict] = {}
     try:
-        rigs_resp = cached_api_get("/structure_rigs")
+        rigs_resp = cached_api_get("/industry_structure_rigs")
         if rigs_resp and rigs_resp.get("status") == "success":
             rigs = rigs_resp.get("data") or []
             for rig in rigs:

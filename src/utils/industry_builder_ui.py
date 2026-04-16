@@ -243,6 +243,23 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         total_cost = node.get("total_cost")
         if total_cost is None:
             total_cost = job_cost
+        market_unit_price = node.get("unit_price")
+        market_price_source = node.get("price_source")
+        market_volume = node.get("price_volume_total") or node.get("volume_total")
+        market_hub = node.get("market_hub_label") or node.get("market_hub")
+        region_daily_volume = node.get("region_daily_volume")
+        region_daily_volume_7d_avg = node.get("region_daily_volume_7d_avg")
+        hub_buy_liquidity = node.get("hub_buy_liquidity")
+        hub_sell_liquidity = node.get("hub_sell_liquidity")
+        hub_buy_order_count = node.get("hub_buy_order_count")
+        hub_sell_order_count = node.get("hub_sell_order_count")
+        gross_sale_value = node.get("gross_sale_value")
+        broker_fee_amount = node.get("broker_fee_amount")
+        sales_tax_amount = node.get("sales_tax_amount")
+        net_proceeds = node.get("net_proceeds")
+        profit_amount = node.get("profit_amount")
+        profit_margin_fraction = node.get("profit_margin_fraction")
+        isk_per_hour = node.get("isk_per_hour")
         bpc_source = ""
         bpo_source = ""
         meta_group = str(node.get("meta_group_name") or "")
@@ -276,6 +293,23 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             material_cost = manufacturing_job.get("material_cost")
             job_cost = manufacturing_job.get("total_job_cost")
             total_cost = manufacturing_job.get("total_cost")
+            market_unit_price = source_row.get("market_unit_price")
+            market_price_source = source_row.get("market_price_source")
+            market_volume = source_row.get("market_volume_total")
+            market_hub = source_row.get("market_hub_label") or source_row.get("market_hub")
+            region_daily_volume = source_row.get("region_daily_volume")
+            region_daily_volume_7d_avg = source_row.get("region_daily_volume_7d_avg")
+            hub_buy_liquidity = source_row.get("hub_buy_liquidity")
+            hub_sell_liquidity = source_row.get("hub_sell_liquidity")
+            hub_buy_order_count = source_row.get("hub_buy_order_count")
+            hub_sell_order_count = source_row.get("hub_sell_order_count")
+            gross_sale_value = source_row.get("gross_sale_value")
+            broker_fee_amount = source_row.get("broker_fee_amount")
+            sales_tax_amount = source_row.get("sales_tax_amount")
+            net_proceeds = source_row.get("net_proceeds")
+            profit_amount = source_row.get("profit_amount")
+            profit_margin_fraction = source_row.get("profit_margin_fraction")
+            isk_per_hour = source_row.get("isk_per_hour")
             blueprint_copy = manufacturing_job.get("blueprint_copy") or {}
             blueprint_original = manufacturing_job.get("blueprint_original") or {}
             if isinstance(blueprint_copy, dict):
@@ -288,6 +322,23 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             if int(node.get("type_id") or 0) == int(source_row.get("type_id") or 0):
                 material_cost = manufacturing_job.get("material_cost")
                 total_cost = manufacturing_job.get("total_cost")
+                market_unit_price = source_row.get("market_unit_price")
+                market_price_source = source_row.get("market_price_source")
+                market_volume = source_row.get("market_volume_total")
+                market_hub = source_row.get("market_hub_label") or source_row.get("market_hub")
+                region_daily_volume = source_row.get("region_daily_volume")
+                region_daily_volume_7d_avg = source_row.get("region_daily_volume_7d_avg")
+                hub_buy_liquidity = source_row.get("hub_buy_liquidity")
+                hub_sell_liquidity = source_row.get("hub_sell_liquidity")
+                hub_buy_order_count = source_row.get("hub_buy_order_count")
+                hub_sell_order_count = source_row.get("hub_sell_order_count")
+                gross_sale_value = source_row.get("gross_sale_value")
+                broker_fee_amount = source_row.get("broker_fee_amount")
+                sales_tax_amount = source_row.get("sales_tax_amount")
+                net_proceeds = source_row.get("net_proceeds")
+                profit_amount = source_row.get("profit_amount")
+                profit_margin_fraction = source_row.get("profit_margin_fraction")
+                isk_per_hour = source_row.get("isk_per_hour")
                 blueprint_copy = manufacturing_job.get("blueprint_copy") or {}
                 blueprint_original = manufacturing_job.get("blueprint_original") or {}
                 if isinstance(blueprint_copy, dict):
@@ -325,6 +376,23 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Material Cost": material_cost,
                 "Job Cost": job_cost,
                 "Total Cost": total_cost,
+                "Market Unit Price": market_unit_price,
+                "Gross Sale Value": gross_sale_value,
+                "Broker Fee": broker_fee_amount,
+                "Sales Tax": sales_tax_amount,
+                "Net Proceeds": net_proceeds,
+                "Profit": profit_amount,
+                "Profit Margin %": (float(profit_margin_fraction) * 100.0 if profit_margin_fraction is not None else None),
+                "ISK/Hour": isk_per_hour,
+                "Market Price Source": market_price_source,
+                "Market Volume": market_volume,
+                "Region Daily Volume": region_daily_volume,
+                "Region Daily Volume (7d Avg)": region_daily_volume_7d_avg,
+                "Hub Buy Liquidity": hub_buy_liquidity,
+                "Hub Sell Liquidity": hub_sell_liquidity,
+                "Hub Buy Orders": hub_buy_order_count,
+                "Hub Sell Orders": hub_sell_order_count,
+                "Market Hub": market_hub,
                 "BPC Source": bpc_source,
                 "BPO Source": bpo_source,
                 "Meta Group": meta_group,
@@ -394,6 +462,22 @@ def build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
             "material_cost": manufacturing_job.get("material_cost"),
             "total_job_cost": manufacturing_job.get("total_job_cost"),
             "total_cost": manufacturing_job.get("total_cost"),
+            "gross_sale_value": manufacturing_job.get("gross_sale_value"),
+            "broker_fee_amount": manufacturing_job.get("broker_fee_amount"),
+            "sales_tax_amount": manufacturing_job.get("sales_tax_amount"),
+            "net_proceeds": manufacturing_job.get("net_proceeds"),
+            "region_daily_volume": manufacturing_job.get("region_daily_volume"),
+            "region_daily_volume_7d_avg": manufacturing_job.get("region_daily_volume_7d_avg"),
+            "region_daily_volume_7d_sample_size": manufacturing_job.get("region_daily_volume_7d_sample_size"),
+            "region_daily_order_count": manufacturing_job.get("region_daily_order_count"),
+            "region_daily_volume_date": manufacturing_job.get("region_daily_volume_date"),
+            "hub_buy_liquidity": manufacturing_job.get("hub_buy_liquidity"),
+            "hub_sell_liquidity": manufacturing_job.get("hub_sell_liquidity"),
+            "hub_buy_order_count": manufacturing_job.get("hub_buy_order_count"),
+            "hub_sell_order_count": manufacturing_job.get("hub_sell_order_count"),
+            "profit_amount": manufacturing_job.get("profit_amount"),
+            "profit_margin_fraction": manufacturing_job.get("profit_margin_fraction"),
+            "isk_per_hour": manufacturing_job.get("isk_per_hour"),
             "blueprint_source_kind": manufacturing_job.get("blueprint_source_kind"),
             "blueprint_material_efficiency": manufacturing_job.get("blueprint_material_efficiency"),
             "blueprint_time_efficiency": manufacturing_job.get("blueprint_time_efficiency"),
@@ -411,6 +495,10 @@ def filter_overview_rows(
     overview_rows: list[dict[str, Any]],
     enabled_meta_groups: tuple[str, ...],
     have_skills_only: bool,
+    positive_profit_only: bool,
+    min_margin_pct: float,
+    min_isk_per_hour: float,
+    min_region_daily_volume: int,
 ) -> list[dict[str, Any]]:
     enabled_meta_group_set = set(enabled_meta_groups)
     return [
@@ -418,6 +506,15 @@ def filter_overview_rows(
         for row in overview_rows
         if get_meta_group_name(row) in enabled_meta_group_set
         and (not have_skills_only or skill_requirements_met(row))
+        and (
+            not positive_profit_only
+            or ((row.get("profit_amount") is not None) and float(row.get("profit_amount") or 0.0) > 0.0)
+        )
+        and (
+            float(row.get("profit_margin_fraction") or 0.0) >= (float(min_margin_pct or 0.0) / 100.0)
+        )
+        and float(row.get("isk_per_hour") or 0.0) >= float(min_isk_per_hour or 0.0)
+        and int(row.get("region_daily_volume") or 0) >= int(min_region_daily_volume or 0)
     ]
 
 

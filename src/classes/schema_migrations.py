@@ -21,6 +21,44 @@ def _ensure_index(db: DatabaseManager, *, ddl: str, name: str) -> None:
         logging.warning("Failed ensuring index %s: %s", name, str(e))
 
 
+def _ensure_market_orderbook_view_cache_unique_key(db: DatabaseManager) -> None:
+    try:
+        indexes = db.query("PRAGMA index_list(market_orderbook_view_cache);")
+    except Exception as e:
+        logging.warning("Failed reading market_orderbook_view_cache indexes: %s", str(e))
+        return
+
+    for row in indexes:
+        try:
+            if int(row[2] or 0) == 1:
+                cols = db.query(f"PRAGMA index_info({row[1]!r});")
+                names = [str(col[2]) for col in cols]
+                if names == ["hub", "region_id", "station_id", "side", "type_id", "at_hub"]:
+                    return
+        except Exception:
+            continue
+
+    try:
+        db.execute(
+            "DELETE FROM market_orderbook_view_cache "
+            "WHERE id NOT IN ("
+            "SELECT MAX(id) FROM market_orderbook_view_cache "
+            "GROUP BY hub, region_id, station_id, side, type_id, at_hub"
+            ")"
+        )
+    except Exception as e:
+        logging.warning("Failed deduplicating market_orderbook_view_cache: %s", str(e))
+
+    _ensure_index(
+        db,
+        name="uq_market_orderbook_view_cache_key",
+        ddl=(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_market_orderbook_view_cache_key "
+            "ON market_orderbook_view_cache(hub, region_id, station_id, side, type_id, at_hub)"
+        ),
+    )
+
+
 def _table_columns(db: DatabaseManager, table: str) -> set[str]:
     try:
         rows = db.query(f"PRAGMA table_info({table});")
@@ -85,12 +123,16 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "at_hub INTEGER NOT NULL,"
             "depth INTEGER NOT NULL DEFAULT 200,"
             "levels TEXT NULL,"
+            "total_volume INTEGER NOT NULL DEFAULT 0,"
+            "order_count INTEGER NOT NULL DEFAULT 0,"
             "fetched_at REAL NOT NULL,"
             "version INTEGER NOT NULL DEFAULT 1,"
             "UNIQUE(hub, region_id, station_id, side, type_id, at_hub)"
             ")"
         ),
     )
+    _ensure_column(db_app, table="market_orderbook_view_cache", column="total_volume", ddl_type="INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(db_app, table="market_orderbook_view_cache", column="order_count", ddl_type="INTEGER NOT NULL DEFAULT 0")
     _ensure_index(
         db_app,
         name="idx_market_orderbook_view_cache_lookup",
@@ -99,3 +141,4 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "ON market_orderbook_view_cache(hub, region_id, station_id, side, at_hub, type_id)"
         ),
     )
+    _ensure_market_orderbook_view_cache_unique_key(db_app)
