@@ -237,12 +237,14 @@ class MarketPricingService:
             total_ids = len(normalized_type_ids)
 
             for index, type_id in enumerate(normalized_type_ids, start=1):
-                cached_levels = cached_views.get(int(type_id))
+                cached_view = cached_views.get(int(type_id)) or {}
+                cached_levels = cached_view.get("levels") if isinstance(cached_view, dict) else None
                 if cached_levels is None:
                     continue
                 result[int(type_id)] = {
                     **self._summarize_levels([[float(price), int(volume)] for price, volume in cached_levels[:depth]]),
                     "cached": True,
+                    "fetched_at": cached_view.get("fetched_at") if isinstance(cached_view, dict) else None,
                     "hub": normalized_hub,
                     "hub_label": str(hub_context.get("label") or normalized_hub.title()),
                     "side": normalized_side,

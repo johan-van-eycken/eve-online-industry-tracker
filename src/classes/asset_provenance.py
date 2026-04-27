@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+import math
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import desc
@@ -16,6 +17,8 @@ ASSET_SOURCE_UNKNOWN = "unknown"
 
 REFERENCE_TYPE_INDUSTRY_JOB = "industry_job"
 REFERENCE_TYPE_WALLET_TRANSACTION = "wallet_transaction"
+
+_INVENTION_SOURCE_BLUEPRINT_CACHE: dict[int, dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,409 @@ def _parse_date(value: Any) -> Optional[datetime]:
         return datetime.fromisoformat(s)
     except Exception:
         return None
+
+
+def _industry_job_runs(job: Any) -> int:
+    runs = _safe_int(getattr(job, "successful_runs", None)) or _safe_int(getattr(job, "runs", None)) or 1
+    return max(1, int(runs))
+
+
+def _industry_job_raw_payload(job: Any) -> dict[str, Any]:
+    raw = getattr(job, "raw", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _coalesce_float(payload: dict[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        value = _safe_float(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _coalesce_int(payload: dict[str, Any], *keys: str) -> Optional[int]:
+    for key in keys:
+        value = _safe_int(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _round_material_quantity(raw_quantity: float, *, minimum_quantity: int) -> int:
+    if raw_quantity <= 0:
+        return 0
+    return max(int(minimum_quantity), int(math.ceil(raw_quantity)))
+
+
+def build_market_price_map(rows: Iterable[dict[str, Any]] | None) -> dict[int, float]:
+    price_map: dict[int, float] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        type_id = _safe_int(row.get("type_id"))
+        if not type_id:
+            continue
+        average_price = _safe_float(row.get("average_price"))
+        adjusted_price = _safe_float(row.get("adjusted_price"))
+        candidates = [price for price in [average_price, adjusted_price] if price is not None and price > 0]
+        if not candidates:
+            continue
+        price_map[int(type_id)] = float(min(candidates))
+    return price_map
+
+
+def _output_quantity_per_run_for_job(*, sde_session: Any, blueprint_type_id: int, product_type_id: int) -> Optional[int]:
+    if not blueprint_type_id or not product_type_id:
+        return None
+    bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first()
+    if bp is None:
+        return None
+    mfg = _get_mfg_activity(getattr(bp, "activities", None))
+    if not mfg:
+        return None
+    products = mfg.get("products")
+    if not isinstance(products, list) or not products:
+        return None
+    for p in products:
+        if not isinstance(p, dict):
+            continue
+        if _safe_int(p.get("typeID")) == int(product_type_id):
+            quantity = _safe_int(p.get("quantity"))
+            return quantity if quantity and quantity > 0 else None
+    first = products[0]
+    if not isinstance(first, dict):
+        return None
+    quantity = _safe_int(first.get("quantity"))
+    return quantity if quantity and quantity > 0 else None
+
+
+def _estimate_industry_job_materials_cost_total(
+    *,
+    sde_session: Any,
+    blueprint_type_id: int,
+    product_type_id: int,
+    runs: int,
+    market_price_map: dict[int, float],
+    blueprint_material_efficiency: int | None = None,
+) -> Optional[tuple[float, int]]:
+    if not blueprint_type_id or not product_type_id:
+        return None
+    if runs <= 0:
+        runs = 1
+
+    bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first()
+    if bp is None:
+        return None
+
+    mfg = _get_mfg_activity(getattr(bp, "activities", None))
+    if not mfg:
+        return None
+
+    materials = mfg.get("materials")
+    products = mfg.get("products")
+    if not isinstance(materials, list) or not isinstance(products, list):
+        return None
+
+    output_qty_per_run = _output_quantity_per_run_for_job(
+        sde_session=sde_session,
+        blueprint_type_id=int(blueprint_type_id),
+        product_type_id=int(product_type_id),
+    )
+    if not output_qty_per_run or output_qty_per_run <= 0:
+        return None
+
+    material_reduction = 0.0
+    if blueprint_material_efficiency is not None:
+        material_reduction = max(0.0, min(float(blueprint_material_efficiency) / 100.0, 0.99))
+
+    material_cost_total = 0.0
+    for m in materials:
+        if not isinstance(m, dict):
+            continue
+        mat_type_id = _safe_int(m.get("typeID"))
+        qty = _safe_int(m.get("quantity"))
+        if not mat_type_id or not qty or qty <= 0:
+            continue
+        unit_price = market_price_map.get(int(mat_type_id))
+        if unit_price is None:
+            continue
+        base_total_quantity = int(qty) * int(runs)
+        adjusted_total_quantity = _round_material_quantity(
+            float(base_total_quantity) * max(0.0, 1.0 - material_reduction),
+            minimum_quantity=(int(runs) if int(qty) > 0 else 0),
+        )
+        material_cost_total += float(adjusted_total_quantity) * float(unit_price)
+
+    return float(material_cost_total), int(output_qty_per_run) * int(runs)
+
+
+def _invention_probability(invention: dict[str, Any]) -> Optional[float]:
+    probability = _safe_float(invention.get("probability"))
+    if probability is not None and probability > 0:
+        return probability
+    products = invention.get("products") or []
+    raw_probs: list[float] = []
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        prob = _safe_float(product.get("probability"))
+        if prob is not None and prob > 0:
+            raw_probs.append(float(prob))
+    if not raw_probs:
+        return None
+    if len(raw_probs) == 1:
+        return raw_probs[0]
+    if max(raw_probs) - min(raw_probs) < 1e-9:
+        return raw_probs[0]
+    return None
+
+
+def _invention_source_blueprint_by_target_type(sde_session: Any) -> dict[int, dict[str, Any]]:
+    global _INVENTION_SOURCE_BLUEPRINT_CACHE
+    if _INVENTION_SOURCE_BLUEPRINT_CACHE is not None:
+        return _INVENTION_SOURCE_BLUEPRINT_CACHE
+
+    mapping: dict[int, dict[str, Any]] = {}
+    for blueprint in sde_session.query(Blueprints).all():
+        activities = getattr(blueprint, "activities", None)
+        if not isinstance(activities, dict):
+            continue
+        invention = activities.get("invention")
+        if not isinstance(invention, dict):
+            continue
+        for product in invention.get("products") or []:
+            if not isinstance(product, dict):
+                continue
+            target_blueprint_type_id = _safe_int(product.get("typeID"))
+            if not target_blueprint_type_id or target_blueprint_type_id <= 0:
+                continue
+            if int(target_blueprint_type_id) in mapping:
+                continue
+            mapping[int(target_blueprint_type_id)] = {
+                "source_blueprint_type_id": int(getattr(blueprint, "blueprintTypeID", 0) or 0),
+                "invention": invention,
+            }
+    _INVENTION_SOURCE_BLUEPRINT_CACHE = mapping
+    return mapping
+
+
+def _target_blueprint_runs_per_success(sde_session: Any, *, target_blueprint_type_id: int) -> int:
+    blueprint = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(target_blueprint_type_id)).first()
+    if blueprint is None:
+        return 1
+    runs = _safe_int(getattr(blueprint, "maxProductionLimit", None)) or 1
+    return max(1, int(runs))
+
+
+def _estimate_invention_material_cost(
+    *,
+    sde_session: Any,
+    target_blueprint_type_id: int,
+    market_price_map: dict[int, float],
+) -> Optional[dict[str, Any]]:
+    mapping = _invention_source_blueprint_by_target_type(sde_session)
+    payload = mapping.get(int(target_blueprint_type_id))
+    if not isinstance(payload, dict):
+        return None
+    invention = payload.get("invention")
+    if not isinstance(invention, dict):
+        return None
+    material_cost = 0.0
+    has_material_price = False
+    for material in invention.get("materials") or []:
+        if not isinstance(material, dict):
+            continue
+        material_type_id = _safe_int(material.get("typeID"))
+        quantity = _safe_int(material.get("quantity"))
+        if not material_type_id or not quantity or quantity <= 0:
+            continue
+        unit_price = market_price_map.get(int(material_type_id))
+        if unit_price is None:
+            continue
+        has_material_price = True
+        material_cost += float(quantity) * float(unit_price)
+    if not has_material_price:
+        return None
+    return {
+        "material_cost": float(material_cost),
+        "probability": _invention_probability(invention),
+        "target_runs_per_success": _target_blueprint_runs_per_success(
+            sde_session,
+            target_blueprint_type_id=int(target_blueprint_type_id),
+        ),
+    }
+
+
+def build_invention_cost_per_run_by_blueprint_type(
+    *,
+    jobs: Iterable[dict[str, Any]] | None,
+    sde_session: Any,
+    market_price_map: dict[int, float],
+) -> dict[int, dict[str, Any]]:
+    rows_by_target_blueprint_type: dict[int, dict[str, Any]] = {}
+    for job in jobs or []:
+        if not isinstance(job, dict):
+            continue
+        raw = job.get("raw") if isinstance(job.get("raw"), dict) else job
+        activity_id = _safe_int((raw or {}).get("activity_id"))
+        if activity_id != 8:
+            continue
+        target_blueprint_type_id = _safe_int(job.get("product_type_id"))
+        if not target_blueprint_type_id or target_blueprint_type_id <= 0:
+            continue
+        licensed_runs = _safe_int((raw or {}).get("licensed_runs")) or _target_blueprint_runs_per_success(
+            sde_session,
+            target_blueprint_type_id=int(target_blueprint_type_id),
+        )
+        licensed_runs = max(1, int(licensed_runs))
+        estimate = _estimate_invention_material_cost(
+            sde_session=sde_session,
+            target_blueprint_type_id=int(target_blueprint_type_id),
+            market_price_map=market_price_map,
+        )
+        invention_material_cost = float((estimate or {}).get("material_cost") or 0.0)
+        total_cost = float(invention_material_cost) + float(_safe_float(job.get("cost")) or 0.0)
+        completed_date = _parse_date(job.get("completed_date") or job.get("end_date"))
+        current = rows_by_target_blueprint_type.get(int(target_blueprint_type_id))
+        if current is not None:
+            current_dt = _parse_date(current.get("completed_date") or current.get("end_date"))
+            if current_dt is not None and completed_date is not None and current_dt >= completed_date:
+                continue
+        rows_by_target_blueprint_type[int(target_blueprint_type_id)] = {
+            "total_cost": float(total_cost),
+            "unit_cost_per_run": float(total_cost) / float(licensed_runs),
+            "source": "actual_invention_job",
+            "completed_date": job.get("completed_date") or job.get("end_date"),
+        }
+
+    return rows_by_target_blueprint_type
+
+
+def resolve_industry_job_cost_snapshot(
+    *,
+    job: Any,
+    sde_session: Any,
+    market_price_map: dict[int, float] | None,
+    invention_unit_cost_per_run: float | None = None,
+    invention_cost_source: str | None = None,
+) -> dict[str, Any]:
+    blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
+    product_type_id = _safe_int(getattr(job, "product_type_id", None))
+    raw = _industry_job_raw_payload(job)
+    activity_id = _safe_int(raw.get("activity_id"))
+    runs = _industry_job_runs(job)
+
+    output_quantity = (
+        _safe_int(getattr(job, "output_quantity", None))
+        or _coalesce_int(raw, "output_quantity", "product_quantity", "produced")
+    )
+    materials_cost = _safe_float(getattr(job, "materials_cost", None))
+    if materials_cost is None:
+        materials_cost = _coalesce_float(raw, "materials_cost", "materials_cost_total")
+    copy_cost = _safe_float(getattr(job, "copy_cost", None))
+    if copy_cost is None:
+        copy_cost = _coalesce_float(raw, "copy_cost", "copy_cost_total")
+    invention_cost = _safe_float(getattr(job, "invention_cost", None))
+    if invention_cost is None:
+        invention_cost = _coalesce_float(raw, "invention_cost", "invention_cost_total")
+    total_cost = _safe_float(getattr(job, "total_build_cost", None))
+    if total_cost is None:
+        total_cost = _coalesce_float(raw, "total_build_cost", "build_cost_total", "exact_total_cost", "total_cost")
+    unit_cost = _safe_float(getattr(job, "unit_build_cost", None))
+    if unit_cost is None:
+        unit_cost = _coalesce_float(raw, "unit_build_cost", "build_cost_unit", "exact_unit_cost", "unit_cost")
+    build_cost_source = str(
+        getattr(job, "build_cost_source", None) or raw.get("build_cost_source") or raw.get("cost_source") or ""
+    ).strip() or None
+    blueprint_material_efficiency = _safe_int(
+        getattr(job, "blueprint_material_efficiency", None)
+        or raw.get("blueprint_material_efficiency")
+        or raw.get("material_efficiency")
+    )
+
+    if output_quantity is None and blueprint_type_id and product_type_id:
+        qpr = _output_quantity_per_run_for_job(
+            sde_session=sde_session,
+            blueprint_type_id=int(blueprint_type_id),
+            product_type_id=int(product_type_id),
+        )
+        if qpr and qpr > 0:
+            output_quantity = int(qpr) * int(runs)
+
+    resolved_invention_source = invention_cost_source
+    if invention_cost is None and activity_id in {None, 1} and blueprint_type_id and market_price_map:
+        if invention_unit_cost_per_run is not None and invention_unit_cost_per_run > 0:
+            invention_cost = float(invention_unit_cost_per_run) * float(runs)
+            resolved_invention_source = invention_cost_source or "actual_invention_job"
+        else:
+            estimate = _estimate_invention_material_cost(
+                sde_session=sde_session,
+                target_blueprint_type_id=int(blueprint_type_id),
+                market_price_map=market_price_map,
+            )
+            probability = _safe_float((estimate or {}).get("probability"))
+            target_runs_per_success = _safe_int((estimate or {}).get("target_runs_per_success")) or 1
+            material_cost = _safe_float((estimate or {}).get("material_cost"))
+            if material_cost is not None and material_cost > 0 and probability is not None and probability > 0:
+                invention_cost_per_run = (float(material_cost) / float(probability)) / float(max(1, target_runs_per_success))
+                invention_cost = float(invention_cost_per_run) * float(runs)
+                resolved_invention_source = "expected_invention_material_cost"
+
+    if unit_cost is None and total_cost is not None and output_quantity and output_quantity > 0:
+        unit_cost = float(total_cost) / float(output_quantity)
+    if total_cost is None and unit_cost is not None and output_quantity and output_quantity > 0:
+        total_cost = float(unit_cost) * float(output_quantity)
+
+    if unit_cost is not None and unit_cost > 0 and output_quantity and output_quantity > 0:
+        return {
+            "output_quantity": int(output_quantity),
+            "materials_cost": materials_cost,
+            "copy_cost": copy_cost,
+            "invention_cost": invention_cost,
+            "total_cost": float(total_cost or (float(unit_cost) * float(output_quantity))),
+            "unit_cost": float(unit_cost),
+            "source": build_cost_source or "persisted_job_cost_snapshot",
+        }
+
+    if blueprint_type_id and product_type_id and market_price_map:
+        estimated = _estimate_industry_job_materials_cost_total(
+            sde_session=sde_session,
+            blueprint_type_id=int(blueprint_type_id),
+            product_type_id=int(product_type_id),
+            runs=int(_industry_job_runs(job)),
+            market_price_map=market_price_map,
+            blueprint_material_efficiency=blueprint_material_efficiency,
+        )
+        if estimated is not None:
+            estimated_materials_cost, estimated_output_quantity = estimated
+            total_cost = (
+                float(estimated_materials_cost)
+                + float(_safe_float(getattr(job, "cost", None)) or 0.0)
+                + float(copy_cost or 0.0)
+                + float(invention_cost or 0.0)
+            )
+            source = build_cost_source or "market_snapshot_estimate"
+            if resolved_invention_source:
+                source = f"{source}+{resolved_invention_source}"
+            return {
+                "output_quantity": int(estimated_output_quantity),
+                "materials_cost": float(estimated_materials_cost),
+                "copy_cost": copy_cost,
+                "invention_cost": invention_cost,
+                "total_cost": float(total_cost),
+                "unit_cost": float(total_cost) / float(estimated_output_quantity),
+                "source": source,
+            }
+
+    return {
+        "output_quantity": int(output_quantity) if output_quantity and output_quantity > 0 else None,
+        "materials_cost": materials_cost,
+        "copy_cost": copy_cost,
+        "invention_cost": invention_cost,
+        "total_cost": total_cost,
+        "unit_cost": unit_cost,
+        "source": build_cost_source,
+    }
 
 
 def build_fifo_remaining_lots_by_type(
@@ -174,27 +580,22 @@ def build_fifo_remaining_lots_by_type(
             if not product_type_id or not blueprint_type_id:
                 continue
 
-            runs = _safe_int(getattr(job, "successful_runs", None)) or _safe_int(getattr(job, "runs", None)) or 1
-            runs = max(1, int(runs))
-
-            qpr = _output_qty_per_run(int(blueprint_type_id), int(product_type_id))
-            if qpr is None:
-                continue
-            lot_qty = int(qpr) * int(runs)
-            if lot_qty <= 0:
-                continue
-
-            job_cost = _safe_float(getattr(job, "cost", None))
-            unit_cost = estimate_industry_job_unit_cost(
+            snapshot = resolve_industry_job_cost_snapshot(
+                job=job,
                 sde_session=sde_session,
-                blueprint_type_id=int(blueprint_type_id),
-                product_type_id=int(product_type_id),
-                runs=int(runs),
-                job_cost=job_cost,
                 market_price_map=market_price_map,
             )
+            lot_qty = _safe_int(snapshot.get("output_quantity")) or 0
+            unit_cost = _safe_float(snapshot.get("unit_cost"))
             if unit_cost is None or unit_cost <= 0:
                 continue
+            if lot_qty <= 0:
+                qpr = _output_qty_per_run(int(blueprint_type_id), int(product_type_id))
+                if qpr is None:
+                    continue
+                lot_qty = int(qpr) * int(_industry_job_runs(job))
+                if lot_qty <= 0:
+                    continue
 
             date_s = completed_date
             dt = _parse_date(date_s)
@@ -473,62 +874,19 @@ def estimate_industry_job_unit_cost(
     job_cost: float | None,
     market_price_map: dict[int, float],
 ) -> Optional[float]:
-    if not blueprint_type_id or not product_type_id:
-        return None
-    if runs <= 0:
-        runs = 1
-
-    bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first()
-    if bp is None:
-        return None
-
-    mfg = _get_mfg_activity(getattr(bp, "activities", None))
-    if not mfg:
+    estimated = _estimate_industry_job_materials_cost_total(
+        sde_session=sde_session,
+        blueprint_type_id=int(blueprint_type_id),
+        product_type_id=int(product_type_id),
+        runs=int(runs),
+        market_price_map=market_price_map,
+    )
+    if estimated is None:
         return None
 
-    materials = mfg.get("materials")
-    products = mfg.get("products")
-    if not isinstance(materials, list) or not isinstance(products, list):
-        return None
-
-    output_qty_per_run: Optional[int] = None
-    for p in products:
-        if not isinstance(p, dict):
-            continue
-        if _safe_int(p.get("typeID")) == int(product_type_id):
-            output_qty_per_run = _safe_int(p.get("quantity"))
-            break
-    if output_qty_per_run is None and products:
-        # Fallback to first product if blueprint doesn't list product_type_id explicitly.
-        output_qty_per_run = _safe_int(products[0].get("quantity")) if isinstance(products[0], dict) else None
-
-    if not output_qty_per_run or output_qty_per_run <= 0:
-        return None
-
-    material_cost_total = 0.0
-    for m in materials:
-        if not isinstance(m, dict):
-            continue
-        mat_type_id = _safe_int(m.get("typeID"))
-        qty = _safe_int(m.get("quantity"))
-        if not mat_type_id or not qty or qty <= 0:
-            continue
-        unit_price = market_price_map.get(int(mat_type_id))
-        if unit_price is None:
-            continue
-        material_cost_total += float(qty) * float(unit_price)
-
-    # Scale by runs.
-    material_cost_total *= float(runs)
-
-    job_fee = float(job_cost or 0.0)
-    total_cost = material_cost_total + job_fee
-
-    total_output = float(output_qty_per_run) * float(runs)
-    if total_output <= 0:
-        return None
-
-    return total_cost / total_output
+    material_cost_total, total_output = estimated
+    total_cost = float(material_cost_total) + float(job_cost or 0.0)
+    return total_cost / float(total_output)
 
 
 def build_cost_map_for_assets(
@@ -656,24 +1014,18 @@ def build_cost_map_for_assets(
     for tid in type_ids:
         job = last_job_by_type.get(tid)
         if job is not None:
-            blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None)) or 0
-            product_type_id = _safe_int(getattr(job, "product_type_id", None)) or 0
-            runs = _safe_int(getattr(job, "successful_runs", None)) or _safe_int(getattr(job, "runs", None)) or 1
-            job_cost = _safe_float(getattr(job, "cost", None))
-
-            unit_cost = estimate_industry_job_unit_cost(
+            snapshot = resolve_industry_job_cost_snapshot(
+                job=job,
                 sde_session=sde_session,
-                blueprint_type_id=blueprint_type_id,
-                product_type_id=product_type_id,
-                runs=runs,
-                job_cost=job_cost,
                 market_price_map=market_price_map,
             )
+            unit_cost = _safe_float(snapshot.get("unit_cost"))
+            total_cost = _safe_float(snapshot.get("total_cost"))
 
             out[tid] = CostInfo(
                 source=ASSET_SOURCE_INDUSTRY_BUILD,
                 unit_cost=unit_cost,
-                total_cost=None,
+                total_cost=total_cost,
                 reference_type=REFERENCE_TYPE_INDUSTRY_JOB,
                 reference_id=_safe_int(getattr(job, "job_id", None)),
                 acquisition_date=getattr(job, "end_date", None),

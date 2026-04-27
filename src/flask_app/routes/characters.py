@@ -59,3 +59,16 @@ def characters_get_market_orders():
         include_orderbook_comparison=compare,
     )
     return ok(data=refreshed_orders)
+
+
+@characters_bp.get("/characters/realized_profit")
+def characters_get_realized_profit():
+    require_ready(get_state())
+    svc = CharactersService(state=get_state())
+    refresh_raw = (request.args.get("refresh") or "0").strip().lower()
+    refresh = refresh_raw in {"1", "true", "yes", "y", "on"}
+
+    character_id_raw = (request.args.get("character_id") or "").strip()
+    character_id = int(character_id_raw) if character_id_raw.isdigit() else None
+
+    return ok(data=svc.get_realized_profit_ledger(refresh=refresh, character_id=character_id))

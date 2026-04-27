@@ -95,14 +95,24 @@ def format_isk(value: Optional[float]) -> str:
         return "N/A"
 
 def format_isk_short(value):
-    if value >= 1_000_000_000:
-        return f"{value/1_000_000_000:.2f}b"
-    elif value >= 1_000_000:
-        return f"{value/1_000_000:.2f}m"
-    elif value >= 1_000:
-        return f"{value/1_000:.2f}k"
+    if value is None or value == "":
+        value = 0.0
+
+    try:
+        numeric_value = float(value)
+    except Exception:
+        return "N/A"
+
+    absolute_value = abs(numeric_value)
+
+    if absolute_value >= 1_000_000_000:
+        return f"{numeric_value/1_000_000_000:.2f}b"
+    elif absolute_value >= 1_000_000:
+        return f"{numeric_value/1_000_000:.2f}m"
+    elif absolute_value >= 1_000:
+        return f"{numeric_value/1_000:.2f}k"
     else:
-        return f"{value:.2f}"
+        return f"{numeric_value:.2f}"
 
 def format_date_into_age(iso_date: Optional[str]) -> str:
     """Convert ISO8601 (%Y-%m-%dT%H:%M:%SZ) date into Age in years, months, days."""

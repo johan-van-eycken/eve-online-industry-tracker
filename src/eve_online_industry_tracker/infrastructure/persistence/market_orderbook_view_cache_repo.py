@@ -25,7 +25,7 @@ def get_views(
     at_hub: bool,
     type_ids: list[int],
     ttl_seconds: int,
-) -> dict[int, list[tuple[float, int]]]:
+) -> dict[int, dict[str, Any]]:
     """Return cached orderbook price levels for the given keys.
 
     The stored payload is a JSON list of [price, volume] pairs (already sorted).
@@ -65,7 +65,7 @@ def get_views(
         },
     ).fetchall()
 
-    out: dict[int, list[tuple[float, int]]] = {}
+    out: dict[int, dict[str, Any]] = {}
     for type_id, levels_raw, total_volume, order_count, fetched_at, version in rows or []:
         try:
             if int(version or 0) != int(_CACHE_VERSION):
@@ -103,7 +103,12 @@ def get_views(
             continue
 
         try:
-            out[int(type_id)] = levels
+            out[int(type_id)] = {
+                "levels": levels,
+                "fetched_at": float(fetched_at or 0.0) if fetched_at is not None else None,
+                "total_volume": int(total_volume or 0),
+                "order_count": int(order_count or 0),
+            }
         except Exception:
             continue
 
@@ -138,7 +143,7 @@ def get_liquidity_summaries(
 
     rows = session.execute(
         text(
-            "SELECT type_id, total_volume, order_count, version "
+            "SELECT type_id, levels, total_volume, order_count, version "
             "FROM market_orderbook_view_cache "
             "WHERE hub = :hub AND region_id = :region_id AND station_id = :station_id "
             "AND side = :side AND at_hub = :at_hub AND type_id IN :type_ids "
@@ -156,10 +161,37 @@ def get_liquidity_summaries(
     ).fetchall()
 
     out: dict[int, dict[str, int]] = {}
-    for type_id, total_volume, order_count, version in rows or []:
+    for type_id, levels_raw, total_volume, order_count, version in rows or []:
         try:
             if int(version or 0) != int(_CACHE_VERSION):
                 continue
+
+            levels_obj: Any = levels_raw
+            if isinstance(levels_obj, str):
+                try:
+                    levels_obj = json.loads(levels_obj)
+                except Exception:
+                    levels_obj = None
+
+            has_cached_levels = False
+            if isinstance(levels_obj, list):
+                for pair in levels_obj:
+                    if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                        continue
+                    try:
+                        price_f = float(pair[0])
+                        vol_i = int(pair[1])
+                    except Exception:
+                        continue
+                    if price_f > 0 and vol_i > 0:
+                        has_cached_levels = True
+                        break
+
+            # Legacy cache rows may still have valid price levels but zeroed liquidity fields.
+            # Treat those rows as missing so callers refetch and repopulate the summaries.
+            if has_cached_levels and int(total_volume or 0) <= 0 and int(order_count or 0) <= 0:
+                continue
+
             out[int(type_id)] = {
                 "total_volume": int(total_volume or 0),
                 "order_count": int(order_count or 0),

@@ -64,6 +64,7 @@ def render_aggrid_table(
     number_cols_2: list[str] | None = None,
     image_cols: list[str] | None = None,
     image_renderer: Any = None,
+    image_pin_left: bool = True,
     text_right_cols: list[str] | None = None,
     height: int | None = None,
     height_max: int = 700,
@@ -91,7 +92,7 @@ def render_aggrid_table(
                 col,
                 headerName="",
                 width=60,
-                pinned="left",
+                pinned="left" if image_pin_left else None,
                 cellRenderer=image_renderer,
                 suppressSizeToFit=True,
             )

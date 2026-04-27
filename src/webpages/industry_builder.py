@@ -1,8 +1,9 @@
 import time
+from datetime import datetime, timezone
 import streamlit as st
 from typing import Any, cast
 
-from utils.aggrid_formatters import js_eu_number_formatter, js_icon_cell_renderer
+from utils.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
 from utils.characters_api import (
     build_character_options,
     build_owned_blueprint_character_corporation_scope_options,
@@ -49,6 +50,112 @@ from utils.webpage_ui import render_job_status_panel, require_aggrid
 
 def _rerun() -> None:
     st.rerun()
+
+
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _format_elapsed_seconds(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    total_seconds = max(0, int(value))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _refresh_elapsed_seconds(refresh_view: dict[str, Any]) -> float | None:
+    created_at = _parse_iso_timestamp(refresh_view.get("created_at"))
+    if created_at is None:
+        return None
+    now = datetime.now(timezone.utc)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - created_at).total_seconds())
+
+
+def _refresh_stage_copy(stage: str) -> tuple[str, str]:
+    stage_key = str(stage or "refresh").strip().lower()
+    mapping = {
+        "queued": ("Queued", "Your refresh request is waiting to start."),
+        "startup": ("Starting", "The backend is preparing the refresh job and validating the request."),
+        "blueprints": ("Loading Blueprints", "The latest blueprint snapshot is being loaded for this overview."),
+        "context": ("Preparing Context", "Character settings, profile modifiers, and pricing context are being resolved."),
+        "assets": ("Checking Assets", "Owned blueprints and available inventory are being matched to possible builds."),
+        "rows": ("Building Products", "The backend is constructing manufacturable product rows and their base job trees."),
+        "market_history": ("Loading Market History", "Regional historical volume is being loaded to estimate how actively items trade."),
+        "liquidity": ("Loading Hub Liquidity", "Current hub buy and sell order depth is being loaded for market activity signals."),
+        "profit": ("Calculating Profit", "Sale proceeds, fees, total costs, and profitability metrics are being computed."),
+        "finalize": ("Finalizing", "Confidence signals and final payload details are being assembled for the page."),
+        "completed": ("Completed", "The refreshed overview is ready and will be shown automatically."),
+    }
+    return mapping.get(stage_key, (stage_key.replace("_", " ").title() or "Refreshing", "The overview is being refreshed."))
+
+
+def _refresh_step_items() -> list[tuple[int, str]]:
+    return [
+        (1, "Start refresh"),
+        (2, "Load blueprint snapshot"),
+        (3, "Prepare character and profile context"),
+        (4, "Resolve owned assets and inventory"),
+        (5, "Build manufacturable product rows"),
+        (6, "Load regional market history"),
+        (7, "Load hub liquidity signals"),
+        (8, "Calculate costs and profitability"),
+        (9, "Finalize overview payload"),
+    ]
+
+
+def _render_refresh_in_progress(refresh_view: dict[str, Any]) -> None:
+    progress_meta = cast(dict[str, Any], refresh_view.get("progress_meta") or {})
+    elapsed_seconds = _refresh_elapsed_seconds(refresh_view)
+    step = int(progress_meta.get("step") or 0)
+    step_count = int(progress_meta.get("step_count") or 0)
+    stage = str(progress_meta.get("stage") or "refresh")
+    stage_title, stage_description = _refresh_stage_copy(stage)
+    progress_fraction = float(refresh_view.get("progress_fraction") or 0.0)
+    progress_label = str(refresh_view.get("progress_label") or "Refreshing overview...")
+
+    st.markdown("### Refreshing Industry Builder")
+    st.caption("The overview is being rebuilt in the background. The page will resume automatically when the refresh is finished.")
+
+    summary_col_left, summary_col_mid, summary_col_right = st.columns(3)
+    summary_col_left.metric("Elapsed", _format_elapsed_seconds(elapsed_seconds))
+    current_step_label = f"{step}/{step_count}" if step_count > 0 and step > 0 else "Queued"
+    summary_col_mid.metric("Current Step", current_step_label)
+    summary_col_right.metric("Current Stage", stage_title)
+
+    st.progress(int(max(0.0, min(1.0, progress_fraction)) * 100), text=progress_label)
+    st.markdown(f"**Now happening:** {stage_description}")
+
+    info_col, steps_col = st.columns([3, 2])
+    with info_col:
+        st.markdown("**What this refresh updates**")
+        st.write("- Manufacturable product rows and job trees")
+        st.write("- Material pricing and market history")
+        st.write("- Hub liquidity, profitability, and confidence signals")
+        st.write("- Any settings you changed before starting the refresh")
+    with steps_col:
+        st.markdown("**Refresh steps**")
+        for item_step, item_label in _refresh_step_items():
+            if step_count > 0 and item_step < step:
+                prefix = "[done]"
+            elif item_step == step:
+                prefix = "[now]"
+            else:
+                prefix = "[next]"
+            st.write(f"{prefix} {item_label}")
+
+    st.caption("No additional overview content is rendered during the refresh to keep the page stable and reduce UI churn.")
 
 
 _MARKET_HUB_OPTIONS = ["jita", "amarr", "dodixie", "rens", "hek"]
@@ -359,6 +466,184 @@ def _render_job_manager_status(job_manager_status: dict[str, Any]) -> None:
     )
 
 
+def _format_age_minutes(value: Any) -> str:
+    try:
+        minutes = float(value or 0.0)
+    except Exception:
+        return "N/A"
+    if minutes <= 0:
+        return "0 min"
+    if minutes >= 1440:
+        return f"{minutes / 1440.0:.1f} d"
+    if minutes >= 60:
+        return f"{minutes / 60.0:.1f} h"
+    return f"{minutes:.0f} min"
+
+
+def _render_pricing_batch_panel(pricing_batch: dict[str, Any]) -> None:
+    if not pricing_batch:
+        return
+
+    with st.expander("Pricing provenance and freshness", expanded=False):
+        st.caption(
+            "Batch generated: {generated} | Hub: {hub} | Inputs: {inputs} | Outputs: {outputs}".format(
+                generated=str(pricing_batch.get("generated_at") or "N/A"),
+                hub=str(pricing_batch.get("market_hub_label") or pricing_batch.get("market_hub") or "N/A"),
+                inputs=str(pricing_batch.get("material_price_side") or "N/A"),
+                outputs=str(pricing_batch.get("product_price_side") or "N/A"),
+            )
+        )
+
+        left, middle, right = st.columns(3)
+        with left:
+            st.markdown("**Batch settings**")
+            st.write(
+                {
+                    "row_count": pricing_batch.get("row_count"),
+                    "cache_ttl_seconds": pricing_batch.get("cache_ttl_seconds"),
+                    "orderbook_depth": pricing_batch.get("orderbook_depth"),
+                    "orderbook_smoothing": pricing_batch.get("orderbook_smoothing"),
+                }
+            )
+        with middle:
+            st.markdown("**Product pricing batch**")
+            st.write(pricing_batch.get("product_pricing") or {})
+        with right:
+            st.markdown("**Material pricing batch**")
+            st.write(pricing_batch.get("material_pricing") or {})
+
+        confidence_col, activity_col = st.columns(2)
+        with confidence_col:
+            st.markdown("**Confidence distribution**")
+            st.write(pricing_batch.get("confidence_distribution") or {})
+        with activity_col:
+            st.markdown("**Market activity coverage**")
+            st.write(pricing_batch.get("market_activity") or {})
+
+
+def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]) -> None:
+    if not filtered_overview_rows:
+        return
+
+    drilldown_options: dict[str, str] = {}
+    for row in filtered_overview_rows:
+        overview_row_id = str(row.get("overview_row_id") or "")
+        if not overview_row_id:
+            continue
+        drilldown_options[overview_row_id] = "{name} | Profit {profit} | Confidence {confidence}".format(
+            name=str(row.get("type_name") or row.get("type_id") or overview_row_id),
+            profit=(f"{float(row.get('profit_amount') or 0.0):,.0f} ISK" if row.get("profit_amount") is not None else "N/A"),
+            confidence=str(row.get("pricing_confidence") or "N/A"),
+        )
+
+    if not drilldown_options:
+        return
+
+    selected_overview_row_id = st.selectbox(
+        "Why profitable drilldown",
+        options=list(drilldown_options.keys()),
+        format_func=lambda key: drilldown_options.get(str(key), str(key)),
+        key="industry_builder_profitability_drilldown_id",
+    )
+    selected_row = next(
+        (
+            row
+            for row in filtered_overview_rows
+            if str(row.get("overview_row_id") or "") == str(selected_overview_row_id)
+        ),
+        None,
+    )
+    if not isinstance(selected_row, dict):
+        return
+
+    manufacturing_job = cast(dict[str, Any], selected_row.get("manufacturing_job") or {})
+    procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+    if not isinstance(procurement_materials, dict):
+        procurement_materials = {}
+
+    with st.expander("Why profitable", expanded=False):
+        metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
+        metric_col_1.metric("Net Proceeds", f"{float(selected_row.get('net_proceeds') or 0.0):,.2f}" if selected_row.get("net_proceeds") is not None else "N/A")
+        metric_col_2.metric("Total Cost", f"{float((manufacturing_job or {}).get('total_cost') or 0.0):,.2f}" if manufacturing_job.get("total_cost") is not None else "N/A")
+        metric_col_3.metric("Profit", f"{float(selected_row.get('profit_amount') or 0.0):,.2f}" if selected_row.get("profit_amount") is not None else "N/A")
+        metric_col_4.metric("Confidence", str(selected_row.get("pricing_confidence") or "N/A"))
+
+        signal_col_left, signal_col_right = st.columns(2)
+        with signal_col_left:
+            st.markdown("**Price and market signals**")
+            st.write(
+                {
+                    "market_price_source": selected_row.get("market_price_source"),
+                    "market_hub": selected_row.get("market_hub_label") or selected_row.get("market_hub"),
+                    "market_price_age": _format_age_minutes(selected_row.get("market_price_age_minutes")),
+                    "region_daily_volume": selected_row.get("region_daily_volume"),
+                    "region_daily_volume_7d_avg": selected_row.get("region_daily_volume_7d_avg"),
+                    "hub_buy_liquidity": selected_row.get("hub_buy_liquidity"),
+                    "hub_sell_liquidity": selected_row.get("hub_sell_liquidity"),
+                    "hub_buy_orders": selected_row.get("hub_buy_order_count"),
+                    "hub_sell_orders": selected_row.get("hub_sell_order_count"),
+                }
+            )
+        with signal_col_right:
+            st.markdown("**Cost and fees**")
+            st.write(
+                {
+                    "material_cost": manufacturing_job.get("material_cost"),
+                    "job_cost": manufacturing_job.get("total_job_cost"),
+                    "gross_sale_value": selected_row.get("gross_sale_value"),
+                    "broker_fee_amount": selected_row.get("broker_fee_amount"),
+                    "sales_tax_amount": selected_row.get("sales_tax_amount"),
+                    "profit_margin_pct": (
+                        float(selected_row.get("profit_margin_fraction") or 0.0) * 100.0
+                        if selected_row.get("profit_margin_fraction") is not None
+                        else None
+                    ),
+                    "isk_per_hour": selected_row.get("isk_per_hour"),
+                }
+            )
+
+        reasons = selected_row.get("pricing_confidence_reasons") or []
+        if isinstance(reasons, list) and reasons:
+            st.markdown("**Confidence reasoning**")
+            for reason in reasons:
+                st.write(f"- {reason}")
+
+        top_material_rows = sorted(
+            [
+                {
+                    "Type": str(material.get("type_name") or material.get("type_id") or "Material"),
+                    "Qty": int(material.get("quantity") or 0),
+                    "Unit Price": material.get("unit_price"),
+                    "Line Total": material.get("line_total"),
+                    "Source": material.get("price_source"),
+                }
+                for material in procurement_materials.values()
+                if isinstance(material, dict)
+            ],
+            key=lambda row: float(row.get("Line Total") or 0.0),
+            reverse=True,
+        )[:8]
+        if top_material_rows:
+            st.markdown("**Top material cost drivers**")
+            st.dataframe(top_material_rows, width="stretch", hide_index=True)
+
+        activity_breakdown = manufacturing_job.get("activity_breakdown") or {}
+        if isinstance(activity_breakdown, dict) and activity_breakdown:
+            activity_rows = [
+                {
+                    "Activity": str(activity_name),
+                    "Duration (s)": activity_payload.get("duration_seconds"),
+                    "Job Cost": activity_payload.get("total_job_cost") or activity_payload.get("job_cost"),
+                    "Estimated Item Value": activity_payload.get("estimated_item_value"),
+                }
+                for activity_name, activity_payload in activity_breakdown.items()
+                if isinstance(activity_payload, dict)
+            ]
+            if activity_rows:
+                st.markdown("**Activity breakdown**")
+                st.dataframe(activity_rows, width="stretch", hide_index=True)
+
+
 def _ensure_initial_overview_refresh_started(
     *,
     default_character_id_value: int,
@@ -371,7 +656,6 @@ def _ensure_initial_overview_refresh_started(
         return False
 
     clear_industry_builder_caches()
-    fetch_industry_profiles_cached.clear()
     start_overview_refresh_job(
         default_character_id_value=default_character_id_value,
         default_industry_profile_id=default_industry_profile_id,
@@ -430,6 +714,7 @@ def _render_overview_grid(
         ("Hub Sell Liquidity", 150),
         ("Hub Buy Orders", 135),
         ("Hub Sell Orders", 135),
+        ("Pricing Confidence", 140),
         ("Profit Margin %", 130),
     ]:
         if col in df.columns:
@@ -487,12 +772,34 @@ def _render_overview_grid(
         "Sales Tax",
         "Net Proceeds",
         "Profit",
-        "Profit Margin %",
         "ISK/Hour",
-        "Region Daily Volume",
-        "Region Daily Volume (7d Avg)",
         "Hub Buy Liquidity",
         "Hub Sell Liquidity",
+    ]:
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                minWidth=130,
+                wrapHeaderText=False,
+                autoHeaderHeight=False,
+            )
+
+    for col in ["Profit Margin %"]:
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                minWidth=130,
+                wrapHeaderText=False,
+                autoHeaderHeight=False,
+            )
+
+    for col in [
+        "Region Daily Volume",
+        "Region Daily Volume (7d Avg)",
         "Hub Buy Orders",
         "Hub Sell Orders",
     ]:
@@ -500,7 +807,7 @@ def _render_overview_grid(
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
                 minWidth=130,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
@@ -634,6 +941,24 @@ def _render_debug_panel(filtered_overview_rows: list[dict[str, Any]]) -> None:
 
 def render() -> None:
     st.subheader("Industry Builder")
+    ensure_overview_refresh_state()
+
+    refresh_view = overview_refresh_view()
+    if bool(refresh_view.get("is_active")):
+        try:
+            poll_overview_refresh_job(
+                fetch_status_fn=fetch_product_overview_refresh_status,
+                fetch_job_manager_status_fn=fetch_job_manager_status,
+            )
+        except Exception as e:
+            clear_overview_refresh_job(error_message=str(e))
+        refresh_view = overview_refresh_view()
+        if bool(refresh_view.get("is_active")):
+            _render_refresh_in_progress(refresh_view)
+            time.sleep(1.0)
+            _rerun()
+            return
+
     runtime = require_aggrid()
 
     try:
@@ -656,8 +981,6 @@ def render() -> None:
         default_owned_blueprint_scope=default_owned_blueprint_scope,
     )
     ensure_toggle_state()
-    ensure_overview_refresh_state()
-
     try:
         (
             selected_character_id,
@@ -708,15 +1031,6 @@ def render() -> None:
             st.warning(f"Failed to load industry job manager status: {e}")
             st.session_state["industry_builder_job_manager_status"] = {}
 
-    if overview_refresh_is_active():
-        try:
-            poll_overview_refresh_job(
-                fetch_status_fn=fetch_product_overview_refresh_status,
-                fetch_job_manager_status_fn=fetch_job_manager_status,
-            )
-        except Exception as e:
-            clear_overview_refresh_job(error_message=str(e))
-
     _render_job_manager_status(cast(dict[str, Any], st.session_state.get("industry_builder_job_manager_status") or {}))
 
     refresh_view = overview_refresh_view()
@@ -724,6 +1038,7 @@ def render() -> None:
         st.error(str(refresh_view.get("error_message")))
 
     overview_rows = cast(list[dict[str, Any]], st.session_state.get("industry_builder_overview_rows") or [])
+    overview_meta = cast(dict[str, Any], st.session_state.get("industry_builder_overview_meta") or {})
     if not overview_rows:
         if bool(refresh_view.get("is_active")):
             if started_initial_refresh:
@@ -745,6 +1060,7 @@ def render() -> None:
         "Manufacturable product overview derived from the SDE blueprints and enriched with type metadata. "
         "Each product row contains a simplified manufacturing job payload with materials, skills, time, production limits, and selected hub pricing."
     )
+    _render_pricing_batch_panel(cast(dict[str, Any], overview_meta.get("pricing_batch") or overview_meta))
 
     enabled_meta_groups = _render_filters_section(
         overview_rows=overview_rows,
@@ -770,7 +1086,6 @@ def render() -> None:
         ):
             try:
                 clear_industry_builder_caches()
-                fetch_industry_profiles_cached.clear()
                 start_overview_refresh_job(
                     default_character_id_value=default_character_id_value,
                     default_industry_profile_id=default_industry_profile_id,
@@ -800,7 +1115,5 @@ def render() -> None:
         runtime=runtime,
         filtered_overview_rows=filtered_overview_rows,
     )
+    _render_profitability_drilldown(filtered_overview_rows)
     _render_debug_panel(filtered_overview_rows)
-
-    if bool(refresh_view.get("is_active")):
-        _rerun()

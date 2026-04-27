@@ -88,21 +88,23 @@ def industry_products(character_id: int):
         industry_profile_id = None
     owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
+    payload = svc.industry_manufacturing_product_overview_payload(
+        force_refresh=refresh,
+        maximize_bp_runs=maximize_bp_runs,
+        group_identical_bpcs=group_identical_bpcs,
+        build_from_bpc=build_from_bpc,
+        have_blueprint_source_only=have_blueprint_source_only,
+        include_reactions=include_reactions,
+        market_hub=market_hub,
+        material_price_side=material_price_side,
+        product_price_side=product_price_side,
+        industry_profile_id=industry_profile_id,
+        owned_blueprints_scope=owned_blueprints_scope,
+        character_id=int(character_id),
+    )
     return ok(
-        data=svc.industry_manufacturing_product_overview(
-            force_refresh=refresh,
-            maximize_bp_runs=maximize_bp_runs,
-            group_identical_bpcs=group_identical_bpcs,
-            build_from_bpc=build_from_bpc,
-            have_blueprint_source_only=have_blueprint_source_only,
-            include_reactions=include_reactions,
-            market_hub=market_hub,
-            material_price_side=material_price_side,
-            product_price_side=product_price_side,
-            industry_profile_id=industry_profile_id,
-            owned_blueprints_scope=owned_blueprints_scope,
-            character_id=int(character_id),
-        )
+        data=payload.get("rows") or [],
+        meta={"pricing_batch": payload.get("pricing_batch") or {}},
     )
 
 

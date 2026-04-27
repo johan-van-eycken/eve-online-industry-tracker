@@ -111,6 +111,47 @@ class CharacterWalletTransactionsModel(BaseApp):
     unit_price: Mapped[float] = mapped_column(Float, nullable=True)
     total_price: Mapped[float] = mapped_column(Float, nullable=True)
 
+
+class CharacterRealizedSalesLedgerModel(BaseApp):
+    __tablename__ = "character_realized_sales_ledger"
+    __table_args__ = (
+        UniqueConstraint("character_id", "transaction_id", name="uq_character_realized_sales_ledger_tx"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    transaction_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    journal_ref_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gross_revenue: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sales_tax_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    other_fees_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_fees_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_revenue: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    allocated_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_margin_fraction: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    priced_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unpriced_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_mix: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    allocation_details: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
+
+    fee_capture_mode: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    confidence: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    notes: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
 class CharacterMarketOrdersModel(BaseApp):
     __tablename__ = "character_market_orders"
 
@@ -291,6 +332,13 @@ class CharacterIndustryJobsModel(BaseApp):
     output_location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    output_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    materials_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    copy_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    invention_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    unit_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    build_cost_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     raw: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -319,6 +367,13 @@ class CorporationIndustryJobsModel(BaseApp):
     output_location_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    output_quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    materials_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    copy_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    invention_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    unit_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    build_cost_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     raw: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -346,6 +401,47 @@ class CorporationWalletTransactionsModel(BaseApp):
     type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     total_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class CorporationRealizedSalesLedgerModel(BaseApp):
+    __tablename__ = "corporation_realized_sales_ledger"
+    __table_args__ = (
+        UniqueConstraint("corporation_id", "transaction_id", name="uq_corporation_realized_sales_ledger_tx"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    transaction_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    journal_ref_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gross_revenue: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sales_tax_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    other_fees_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_fees_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_revenue: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    allocated_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_profit: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_margin_fraction: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    priced_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unpriced_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_mix: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    allocation_details: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
+
+    fee_capture_mode: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    confidence: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    notes: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

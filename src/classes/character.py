@@ -13,7 +13,12 @@ from classes.database_models import CharacterModel, CharacterWalletJournalModel 
     , NpcCorporations, Bloodlines, Races, Types \
     , Groups, Categories, Factions
 
-from classes.asset_provenance import build_cost_map_for_assets
+from classes.asset_provenance import (
+    build_market_price_map,
+    build_cost_map_for_assets,
+    build_invention_cost_per_run_by_blueprint_type,
+    resolve_industry_job_cost_snapshot,
+)
 
 
 JITA_4_4_STATION_ID = 60003760
@@ -823,6 +828,14 @@ class Character:
                 # No jobs or not authorized
                 return
 
+            market_prices = self._esi_client.esi_get("/markets/prices/")
+            market_price_map = build_market_price_map(market_prices)
+            invention_cost_by_blueprint_type = build_invention_cost_per_run_by_blueprint_type(
+                jobs=jobs,
+                sde_session=self._db_sde.session,
+                market_price_map=market_price_map,
+            )
+
             rows: list[dict[str, Any]] = []
             for j in jobs:
                 if not isinstance(j, dict):
@@ -830,6 +843,20 @@ class Character:
                 job_id = j.get("job_id")
                 if job_id is None:
                     continue
+                snapshot = resolve_industry_job_cost_snapshot(
+                    job=type("IndustryJobPayload", (), j)(),
+                    sde_session=self._db_sde.session,
+                    market_price_map=market_price_map,
+                    invention_unit_cost_per_run=(
+                        float((invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run"))
+                        if (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run") is not None
+                        else None
+                    ),
+                    invention_cost_source=str(
+                        (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("source") or ""
+                    )
+                    or None,
+                )
                 rows.append(
                     {
                         "character_id": int(self.character_id),
@@ -847,6 +874,13 @@ class Character:
                         "location_id": j.get("location_id"),
                         "output_location_id": j.get("output_location_id"),
                         "cost": j.get("cost"),
+                        "output_quantity": snapshot.get("output_quantity"),
+                        "materials_cost": snapshot.get("materials_cost"),
+                        "copy_cost": snapshot.get("copy_cost"),
+                        "invention_cost": snapshot.get("invention_cost"),
+                        "total_build_cost": snapshot.get("total_cost"),
+                        "unit_build_cost": snapshot.get("unit_cost"),
+                        "build_cost_source": snapshot.get("source"),
                         "raw": j,
                     }
                 )

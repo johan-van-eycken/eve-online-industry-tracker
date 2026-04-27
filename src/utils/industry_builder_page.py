@@ -14,6 +14,9 @@ _REFRESH_JOB_ID_KEY = "industry_builder_refresh_job_id"
 _REFRESH_PROGRESS_FRACTION_KEY = "industry_builder_refresh_progress_fraction"
 _REFRESH_PROGRESS_LABEL_KEY = "industry_builder_refresh_progress_label"
 _REFRESH_ERROR_KEY = "industry_builder_refresh_error"
+_REFRESH_CREATED_AT_KEY = "industry_builder_refresh_created_at"
+_REFRESH_UPDATED_AT_KEY = "industry_builder_refresh_updated_at"
+_REFRESH_PROGRESS_META_KEY = "industry_builder_refresh_progress_meta"
 _PREFERENCES_NAMESPACE = "industry_builder"
 _MISC_SETTING_DEFAULTS: dict[str, bool] = {
     "industry_builder_maximize_bp_runs_pending": True,
@@ -219,12 +222,16 @@ def ensure_refresh_state() -> None:
             _REFRESH_PROGRESS_FRACTION_KEY: 0.0,
             _REFRESH_PROGRESS_LABEL_KEY: "",
             _REFRESH_ERROR_KEY: None,
+            _REFRESH_CREATED_AT_KEY: None,
+            _REFRESH_UPDATED_AT_KEY: None,
+            _REFRESH_PROGRESS_META_KEY: {},
         }
     )
 
 
 def ensure_overview_refresh_state() -> None:
     ensure_refresh_state()
+    ensure_state_defaults({"industry_builder_overview_meta": {}})
 
 
 def resolve_profile_security_status(
@@ -345,11 +352,15 @@ def start_overview_refresh_job(
     st.session_state[_REFRESH_PROGRESS_FRACTION_KEY] = 0.0
     st.session_state[_REFRESH_PROGRESS_LABEL_KEY] = "Starting overview refresh..."
     st.session_state[_REFRESH_ERROR_KEY] = None
+    st.session_state[_REFRESH_CREATED_AT_KEY] = refresh_job.get("created_at")
+    st.session_state[_REFRESH_UPDATED_AT_KEY] = refresh_job.get("updated_at")
+    st.session_state[_REFRESH_PROGRESS_META_KEY] = refresh_job.get("progress_meta") or {}
 
 
 def clear_overview_refresh_job(*, error_message: str | None = None) -> None:
     st.session_state[_REFRESH_JOB_ID_KEY] = ""
     st.session_state[_REFRESH_ERROR_KEY] = error_message
+    st.session_state[_REFRESH_PROGRESS_META_KEY] = {}
 
 
 def poll_overview_refresh_job(
@@ -366,11 +377,15 @@ def poll_overview_refresh_job(
     progress_label = str(refresh_status.get("progress_label") or "Refreshing overview...")
     st.session_state[_REFRESH_PROGRESS_FRACTION_KEY] = max(0.0, min(1.0, progress_fraction))
     st.session_state[_REFRESH_PROGRESS_LABEL_KEY] = progress_label
+    st.session_state[_REFRESH_CREATED_AT_KEY] = refresh_status.get("created_at")
+    st.session_state[_REFRESH_UPDATED_AT_KEY] = refresh_status.get("updated_at")
+    st.session_state[_REFRESH_PROGRESS_META_KEY] = refresh_status.get("progress_meta") or {}
 
     status = str(refresh_status.get("status") or "")
     if status == "completed":
         result = refresh_status.get("result") or []
         st.session_state["industry_builder_overview_rows"] = result if isinstance(result, list) else []
+        st.session_state["industry_builder_overview_meta"] = refresh_status.get("result_meta") or {}
         st.session_state["industry_builder_job_manager_status"] = fetch_job_manager_status_fn()
         clear_overview_refresh_job()
         return "completed"
@@ -392,4 +407,7 @@ def overview_refresh_view() -> dict[str, Any]:
         "progress_fraction": float(st.session_state.get(_REFRESH_PROGRESS_FRACTION_KEY) or 0.0),
         "progress_label": str(st.session_state.get(_REFRESH_PROGRESS_LABEL_KEY) or ""),
         "error_message": st.session_state.get(_REFRESH_ERROR_KEY),
+        "created_at": st.session_state.get(_REFRESH_CREATED_AT_KEY),
+        "updated_at": st.session_state.get(_REFRESH_UPDATED_AT_KEY),
+        "progress_meta": st.session_state.get(_REFRESH_PROGRESS_META_KEY) or {},
     }
