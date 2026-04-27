@@ -128,4 +128,3 @@ def fetch_solar_system_security_map() -> dict[int, float]:
 
 def clear_industry_builder_caches() -> None:
     fetch_product_overview.clear()
-    fetch_job_manager_status.clear()

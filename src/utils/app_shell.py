@@ -23,6 +23,7 @@ NAVIGATION_PAGES = (
     PageSpec("Characters", "webpages.characters"),
     PageSpec("Corporations", "webpages.corporations"),
     PageSpec("Industry Builder", "webpages.industry_builder"),
+    PageSpec("Realized Profit", "webpages.realized_profit"),
     PageSpec("Market Orders", "webpages.marketorders"),
     PageSpec("Ore Calculator", "webpages.ore_calculator"),
     PageSpec("Settings", "webpages.industry_profiles"),

@@ -4,6 +4,10 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from eve_online_industry_tracker.application.characters.realized_profit import (
+    CharacterRealizedProfitLedgerService,
+    summarize_realized_profit_rows,
+)
 from eve_online_industry_tracker.infrastructure.oauth_character_repository import (
     OAuthCharacterRepository,
 )
@@ -25,6 +29,28 @@ class CharactersService:
 
     def get_assets(self) -> Any:
         return self._state.char_manager.get_assets()
+
+    def get_realized_profit_ledger(
+        self,
+        *,
+        refresh: bool = False,
+        character_id: int | None = None,
+    ) -> dict[str, Any]:
+        market_prices = self._state.esi_service.get_market_prices()
+        ledger_service = CharacterRealizedProfitLedgerService(
+            app_session=self._state.db_app.session,
+            sde_session=self._state.db_sde.session,
+            market_prices=market_prices if isinstance(market_prices, list) else [],
+        )
+
+        rows = ledger_service.list_rows(character_id=character_id)
+        if refresh or not rows:
+            rows = ledger_service.rebuild(character_id=character_id)
+
+        return {
+            "rows": rows,
+            "summary": summarize_realized_profit_rows(rows),
+        }
 
     def get_market_orders_enriched(
         self,

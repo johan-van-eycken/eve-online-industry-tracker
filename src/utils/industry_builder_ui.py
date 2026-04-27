@@ -260,6 +260,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         profit_amount = node.get("profit_amount")
         profit_margin_fraction = node.get("profit_margin_fraction")
         isk_per_hour = node.get("isk_per_hour")
+        pricing_confidence = node.get("pricing_confidence")
         bpc_source = ""
         bpo_source = ""
         meta_group = str(node.get("meta_group_name") or "")
@@ -310,6 +311,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             profit_amount = source_row.get("profit_amount")
             profit_margin_fraction = source_row.get("profit_margin_fraction")
             isk_per_hour = source_row.get("isk_per_hour")
+            pricing_confidence = source_row.get("pricing_confidence")
             blueprint_copy = manufacturing_job.get("blueprint_copy") or {}
             blueprint_original = manufacturing_job.get("blueprint_original") or {}
             if isinstance(blueprint_copy, dict):
@@ -339,6 +341,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 profit_amount = source_row.get("profit_amount")
                 profit_margin_fraction = source_row.get("profit_margin_fraction")
                 isk_per_hour = source_row.get("isk_per_hour")
+                pricing_confidence = source_row.get("pricing_confidence")
                 blueprint_copy = manufacturing_job.get("blueprint_copy") or {}
                 blueprint_original = manufacturing_job.get("blueprint_original") or {}
                 if isinstance(blueprint_copy, dict):
@@ -384,6 +387,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Profit": profit_amount,
                 "Profit Margin %": (float(profit_margin_fraction) * 100.0 if profit_margin_fraction is not None else None),
                 "ISK/Hour": isk_per_hour,
+                "Pricing Confidence": pricing_confidence,
                 "Market Price Source": market_price_source,
                 "Market Volume": market_volume,
                 "Region Daily Volume": region_daily_volume,
@@ -475,6 +479,9 @@ def build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
             "hub_sell_liquidity": manufacturing_job.get("hub_sell_liquidity"),
             "hub_buy_order_count": manufacturing_job.get("hub_buy_order_count"),
             "hub_sell_order_count": manufacturing_job.get("hub_sell_order_count"),
+            "pricing_confidence": manufacturing_job.get("pricing_confidence"),
+            "pricing_confidence_reasons": manufacturing_job.get("pricing_confidence_reasons"),
+            "market_price_age_minutes": manufacturing_job.get("market_price_age_minutes"),
             "profit_amount": manufacturing_job.get("profit_amount"),
             "profit_margin_fraction": manufacturing_job.get("profit_margin_fraction"),
             "isk_per_hour": manufacturing_job.get("isk_per_hour"),

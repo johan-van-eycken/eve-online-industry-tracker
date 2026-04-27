@@ -157,6 +157,7 @@ class IndustryService:
         progress_fraction: float | None = None,
         progress_label: str | None = None,
         result: list[dict[str, Any]] | None = None,
+        result_meta: dict[str, Any] | None = None,
         error_message: str | None = None,
         progress_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -176,6 +177,8 @@ class IndustryService:
             if result is not None:
                 job["result"] = result
                 job["result_count"] = len(result)
+            if result_meta is not None:
+                job["result_meta"] = dict(result_meta)
             if error_message is not None:
                 job["error_message"] = str(error_message)
             job["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -206,10 +209,15 @@ class IndustryService:
                 "status": "queued",
                 "progress_fraction": 0.0,
                 "progress_label": "Queued",
-                "progress_meta": {},
+                "progress_meta": {
+                    "stage": "queued",
+                    "step": 0,
+                    "step_count": 9,
+                },
                 "created_at": created_at,
                 "updated_at": created_at,
                 "result": None,
+                "result_meta": {},
                 "result_count": 0,
                 "error_message": None,
             }
@@ -237,14 +245,21 @@ class IndustryService:
         )
         register_thread(self._state, thread.name, thread)
         thread.start()
-        return {"job_id": job_id}
+        return {
+            "job_id": job_id,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "progress_label": "Queued",
+            "progress_meta": {"step": 0, "step_count": 9, "stage": "queued"},
+        }
 
     def _run_overview_refresh_job(self, job_id: str, params: dict[str, Any]) -> None:
         self._update_overview_refresh_job(
             job_id,
             status="running",
             progress_fraction=0.01,
-            progress_label="Starting overview refresh",
+            progress_label="Step 1/9: Starting overview refresh",
+            progress_meta={"step": 1, "step_count": 9, "stage": "startup"},
         )
         try:
             def report_progress(
@@ -260,7 +275,7 @@ class IndustryService:
                     progress_meta=progress_meta,
                 )
 
-            result = self.industry_manufacturing_product_overview(
+            payload = self.industry_manufacturing_product_overview_payload(
                 force_refresh=bool(params.get("force_refresh", False)),
                 maximize_bp_runs=bool(params.get("maximize_bp_runs", False)),
                 group_identical_bpcs=bool(params.get("group_identical_bpcs", True)),
@@ -280,7 +295,8 @@ class IndustryService:
                 status="completed",
                 progress_fraction=1.0,
                 progress_label="Overview refresh completed",
-                result=result,
+                result=(payload.get("rows") or []) if isinstance(payload, dict) else [],
+                result_meta=((payload.get("pricing_batch") or {}) if isinstance(payload, dict) else {}),
             )
         except Exception as e:
             self._update_overview_refresh_job(
@@ -1003,6 +1019,7 @@ class IndustryService:
         product_rows: list[dict[str, Any]],
         *,
         market_hub: str,
+        progress_callback: ProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
         if not product_rows:
             return product_rows
@@ -1018,7 +1035,19 @@ class IndustryService:
             return product_rows
 
         pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
+        if progress_callback is not None:
+            progress_callback(
+                0.82,
+                "Step 6/9: Loading regional market history",
+                {"step": 6, "step_count": 9, "stage": "market_history", "type_count": len(product_type_ids)},
+            )
         region_daily_volume_map = pricing_service.get_region_daily_volume_map(type_ids=product_type_ids, hub=market_hub)
+        if progress_callback is not None:
+            progress_callback(
+                0.90,
+                "Step 7/9: Loading hub liquidity snapshots",
+                {"step": 7, "step_count": 9, "stage": "liquidity", "type_count": len(product_type_ids)},
+            )
         hub_liquidity_map = pricing_service.get_hub_liquidity_map(type_ids=product_type_ids, hub=market_hub)
 
         for row in product_rows:
@@ -1051,6 +1080,122 @@ class IndustryService:
             row["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
             row["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
             row["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
+
+        if progress_callback is not None:
+            progress_callback(
+                0.93,
+                "Step 7/9: Applied market activity signals",
+                {"step": 7, "step_count": 9, "stage": "liquidity", "rows": len(product_rows)},
+            )
+
+        return product_rows
+
+    def _enrich_product_rows_with_pricing_confidence(
+        self,
+        product_rows: list[dict[str, Any]],
+        *,
+        product_price_side: str,
+    ) -> list[dict[str, Any]]:
+        if not product_rows:
+            return product_rows
+
+        normalized_product_price_side = MarketPricingService.normalize_order_side(product_price_side)
+        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
+        target_sample_size = max(2, pricing_service.orderbook_depth())
+        ttl_minutes = max(1.0, float(pricing_service.material_price_cache_ttl_seconds()) / 60.0)
+        now = time.time()
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+
+            reasons: list[str] = []
+            score = 0
+
+            market_unit_price = self._as_float(row.get("market_unit_price"))
+            market_price_sample_size = int(row.get("market_price_sample_size") or 0)
+            market_price_fetched_at = self._as_float(row.get("market_price_fetched_at"))
+            market_price_age_minutes = None
+            if market_price_fetched_at is not None and market_price_fetched_at > 0:
+                market_price_age_minutes = max(0.0, (float(now) - float(market_price_fetched_at)) / 60.0)
+
+            if normalized_product_price_side == "buy":
+                relevant_liquidity = int(row.get("hub_buy_liquidity") or 0)
+                relevant_order_count = int(row.get("hub_buy_order_count") or 0)
+            else:
+                relevant_liquidity = int(row.get("hub_sell_liquidity") or 0)
+                relevant_order_count = int(row.get("hub_sell_order_count") or 0)
+
+            region_daily_volume = int(row.get("region_daily_volume") or 0)
+            region_daily_volume_7d_avg = self._as_float(row.get("region_daily_volume_7d_avg"))
+
+            if market_unit_price is not None and market_unit_price > 0:
+                score += 2
+                reasons.append("Product has a usable market price.")
+            else:
+                reasons.append("Product has no usable market price.")
+
+            if market_price_age_minutes is None:
+                reasons.append("Price freshness timestamp is unavailable.")
+            elif market_price_age_minutes <= min(30.0, ttl_minutes):
+                score += 2
+                reasons.append(f"Price snapshot is fresh ({market_price_age_minutes:.0f} min old).")
+            elif market_price_age_minutes <= ttl_minutes:
+                score += 1
+                reasons.append(f"Price snapshot is moderately fresh ({market_price_age_minutes:.0f} min old).")
+            else:
+                reasons.append(f"Price snapshot is aging ({market_price_age_minutes:.0f} min old).")
+
+            if market_price_sample_size >= target_sample_size:
+                score += 2
+                reasons.append(f"Orderbook sample covers {market_price_sample_size} levels.")
+            elif market_price_sample_size > 0:
+                score += 1
+                reasons.append(f"Orderbook sample is thin at {market_price_sample_size} levels.")
+            else:
+                reasons.append("Orderbook sample size is missing.")
+
+            if relevant_liquidity >= 100 or relevant_order_count >= 5:
+                score += 2
+                reasons.append(
+                    f"{normalized_product_price_side.title()}-side hub liquidity is healthy ({relevant_liquidity:,} units / {relevant_order_count} orders)."
+                )
+            elif relevant_liquidity > 0 or relevant_order_count > 0:
+                score += 1
+                reasons.append(
+                    f"{normalized_product_price_side.title()}-side hub liquidity is present but limited ({relevant_liquidity:,} units / {relevant_order_count} orders)."
+                )
+            else:
+                reasons.append(f"No {normalized_product_price_side}-side hub liquidity is currently visible.")
+
+            if (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg >= 20.0) or region_daily_volume >= 20:
+                score += 2
+                reasons.append("Regional trade volume is active.")
+            elif (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg > 0.0) or region_daily_volume > 0:
+                score += 1
+                reasons.append("Regional trade volume exists but is limited.")
+            else:
+                reasons.append("Regional trade volume is absent.")
+
+            if market_unit_price is None or market_unit_price <= 0:
+                confidence = "Low"
+            elif score >= 7:
+                confidence = "High"
+            elif score >= 4:
+                confidence = "Medium"
+            else:
+                confidence = "Low"
+
+            manufacturing_job["pricing_confidence"] = confidence
+            manufacturing_job["pricing_confidence_reasons"] = reasons
+            manufacturing_job["market_price_age_minutes"] = market_price_age_minutes
+
+            row["pricing_confidence"] = confidence
+            row["pricing_confidence_reasons"] = reasons
+            row["market_price_age_minutes"] = market_price_age_minutes
 
         return product_rows
 
@@ -1090,6 +1235,180 @@ class IndustryService:
             row["isk_per_hour"] = isk_per_hour
 
         return product_rows
+
+    @staticmethod
+    def _format_timestamp(value: Any) -> str | None:
+        try:
+            timestamp = float(value or 0.0)
+        except Exception:
+            return None
+        if timestamp <= 0:
+            return None
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+    def _build_overview_batch_meta(
+        self,
+        *,
+        product_rows: list[dict[str, Any]],
+        market_hub: str,
+        material_price_side: str,
+        product_price_side: str,
+    ) -> dict[str, Any]:
+        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
+        hub_context = pricing_service._market_hub_context(market_hub)
+        now = time.time()
+
+        def summarize_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
+            fetched_timestamps = [
+                fetched_at
+                for entry in entries
+                for fetched_at in [self._as_float(entry.get("fetched_at"))]
+                if fetched_at is not None
+            ]
+            cached_count = sum(1 for entry in entries if bool(entry.get("cached")))
+            live_count = sum(1 for entry in entries if entry.get("cached") is False)
+            priced_count = sum(1 for entry in entries if self._as_float(entry.get("unit_price")) is not None)
+            return {
+                "type_count": len(entries),
+                "priced_type_count": priced_count,
+                "missing_type_count": max(0, len(entries) - priced_count),
+                "cached_type_count": cached_count,
+                "live_type_count": live_count,
+                "oldest_fetched_at": self._format_timestamp(min(fetched_timestamps)) if fetched_timestamps else None,
+                "newest_fetched_at": self._format_timestamp(max(fetched_timestamps)) if fetched_timestamps else None,
+                "oldest_age_minutes": (
+                    round(max(0.0, (now - min(fetched_timestamps)) / 60.0), 1) if fetched_timestamps else None
+                ),
+                "newest_age_minutes": (
+                    round(max(0.0, (now - max(fetched_timestamps)) / 60.0), 1) if fetched_timestamps else None
+                ),
+            }
+
+        material_entries_by_type_id: dict[int, dict[str, Any]] = {}
+        product_entries: list[dict[str, Any]] = []
+        confidence_distribution = {"High": 0, "Medium": 0, "Low": 0}
+        positive_region_volume_count = 0
+        positive_buy_liquidity_count = 0
+        positive_sell_liquidity_count = 0
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+            product_entries.append(
+                {
+                    "type_id": int(row.get("type_id") or 0),
+                    "type_name": str(row.get("type_name") or row.get("type_id") or ""),
+                    "fetched_at": self._as_float(row.get("market_price_fetched_at")),
+                    "cached": row.get("market_price_cached"),
+                    "sample_size": int(row.get("market_price_sample_size") or 0),
+                    "unit_price": self._as_float(row.get("market_unit_price")),
+                }
+            )
+
+            confidence = str(row.get("pricing_confidence") or "").strip().title()
+            if confidence in confidence_distribution:
+                confidence_distribution[confidence] += 1
+            if int(row.get("region_daily_volume") or 0) > 0:
+                positive_region_volume_count += 1
+            if int(row.get("hub_buy_liquidity") or 0) > 0:
+                positive_buy_liquidity_count += 1
+            if int(row.get("hub_sell_liquidity") or 0) > 0:
+                positive_sell_liquidity_count += 1
+
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+            procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+            if not isinstance(procurement_materials, dict):
+                continue
+            for material in procurement_materials.values():
+                if not isinstance(material, dict):
+                    continue
+                type_id = int(material.get("type_id") or 0)
+                if type_id <= 0:
+                    continue
+                existing = material_entries_by_type_id.get(type_id)
+                candidate = {
+                    "type_id": type_id,
+                    "type_name": str(material.get("type_name") or type_id),
+                    "fetched_at": self._as_float(material.get("price_fetched_at")),
+                    "cached": material.get("price_cached"),
+                    "sample_size": int(material.get("price_sample_size") or 0),
+                    "unit_price": self._as_float(material.get("unit_price")),
+                }
+                if existing is None:
+                    material_entries_by_type_id[type_id] = candidate
+                else:
+                    if existing.get("fetched_at") is None:
+                        existing["fetched_at"] = candidate.get("fetched_at")
+                    if existing.get("cached") is None:
+                        existing["cached"] = candidate.get("cached")
+                    existing["sample_size"] = max(int(existing.get("sample_size") or 0), int(candidate.get("sample_size") or 0))
+                    if existing.get("unit_price") is None:
+                        existing["unit_price"] = candidate.get("unit_price")
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "market_hub": hub_context.get("hub"),
+            "market_hub_label": hub_context.get("label"),
+            "region_id": hub_context.get("region_id"),
+            "material_price_side": MarketPricingService.normalize_order_side(material_price_side),
+            "product_price_side": MarketPricingService.normalize_order_side(product_price_side),
+            "orderbook_depth": pricing_service.orderbook_depth(),
+            "orderbook_smoothing": pricing_service.orderbook_smoothing(),
+            "cache_ttl_seconds": pricing_service.material_price_cache_ttl_seconds(),
+            "row_count": len(product_rows),
+            "confidence_distribution": confidence_distribution,
+            "material_pricing": summarize_entries(list(material_entries_by_type_id.values())),
+            "product_pricing": summarize_entries(product_entries),
+            "market_activity": {
+                "positive_region_daily_volume_count": positive_region_volume_count,
+                "positive_buy_liquidity_count": positive_buy_liquidity_count,
+                "positive_sell_liquidity_count": positive_sell_liquidity_count,
+            },
+        }
+
+    def industry_manufacturing_product_overview_payload(
+        self,
+        *,
+        force_refresh: bool = False,
+        maximize_bp_runs: bool = False,
+        group_identical_bpcs: bool = True,
+        build_from_bpc: bool = True,
+        have_blueprint_source_only: bool = True,
+        include_reactions: bool = False,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
+        product_price_side: str = "sell",
+        industry_profile_id: int | None = None,
+        owned_blueprints_scope: str = "all_characters",
+        character_id: int | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        rows = self.industry_manufacturing_product_overview(
+            force_refresh=force_refresh,
+            maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
+            build_from_bpc=build_from_bpc,
+            have_blueprint_source_only=have_blueprint_source_only,
+            include_reactions=include_reactions,
+            market_hub=market_hub,
+            material_price_side=material_price_side,
+            product_price_side=product_price_side,
+            industry_profile_id=industry_profile_id,
+            owned_blueprints_scope=owned_blueprints_scope,
+            character_id=character_id,
+            progress_callback=progress_callback,
+        )
+        return {
+            "rows": rows,
+            "pricing_batch": self._build_overview_batch_meta(
+                product_rows=rows,
+                market_hub=market_hub,
+                material_price_side=material_price_side,
+                product_price_side=product_price_side,
+            ),
+        }
 
     @staticmethod
     def _normalize_fraction(value: Any) -> float:
@@ -4165,8 +4484,14 @@ class IndustryService:
     ) -> list[dict[str, Any]]:
         mgr = self._ensure_industry_job_manager()
         if progress_callback is not None:
-            progress_callback(0.05, "Loading blueprint snapshot", None)
+            progress_callback(0.05, "Step 2/9: Loading blueprint snapshot", {"step": 2, "step_count": 9, "stage": "blueprints"})
         blueprint_rows = mgr.get_blueprint_overview(force_refresh=bool(force_refresh))
+        if progress_callback is not None:
+            progress_callback(
+                0.10,
+                "Step 3/9: Resolving character profile and pricing context",
+                {"step": 3, "step_count": 9, "stage": "context"},
+            )
         character_skill_levels = (
             self._get_character_trained_skill_levels(character_id=int(character_id))
             if character_id is not None
@@ -4214,9 +4539,12 @@ class IndustryService:
         ) = self._get_owned_blueprint_assets(owned_blueprints_scope=owned_blueprints_scope)
         if progress_callback is not None:
             progress_callback(
-                0.15,
-                "Resolved owned blueprint assets",
+                0.25,
+                "Step 4/9: Resolved owned blueprint assets",
                 {
+                    "step": 4,
+                    "step_count": 9,
+                    "stage": "assets",
                     "character_assets": len(character_blueprint_assets),
                     "corporation_assets": len(corporation_blueprint_assets),
                 },
@@ -5385,6 +5713,9 @@ class IndustryService:
                                 "product_market_price_side": product_market_pricing.get("side"),
                                 "product_market_price_hub": product_market_pricing.get("hub"),
                                 "product_market_price_hub_label": product_market_pricing.get("hub_label"),
+                                "product_market_price_cached": product_market_pricing.get("cached"),
+                                "product_market_price_fetched_at": product_market_pricing.get("fetched_at"),
+                                "product_market_price_sample_size": product_market_pricing.get("sample_size"),
                                 "product_market_volume_total": product_market_pricing.get("volume_total"),
                                 "activity_breakdown": activity_breakdown,
                                 "recursive_activity_breakdown": recursive_prerequisite_plan.get("activity_breakdown") or {},
@@ -5429,6 +5760,9 @@ class IndustryService:
                             "market_price_side": product_market_pricing.get("side"),
                             "market_hub": product_market_pricing.get("hub"),
                             "market_hub_label": product_market_pricing.get("hub_label"),
+                            "market_price_cached": product_market_pricing.get("cached"),
+                            "market_price_fetched_at": product_market_pricing.get("fetched_at"),
+                            "market_price_sample_size": product_market_pricing.get("sample_size"),
                             "market_volume_total": product_market_pricing.get("volume_total"),
                         }
                     )
@@ -5436,8 +5770,8 @@ class IndustryService:
         if progress_callback is not None:
             progress_callback(
                 0.5,
-                "Built manufacturing product rows",
-                {"rows": len(product_rows)},
+                "Step 5/9: Built manufacturing product rows",
+                {"step": 5, "step_count": 9, "stage": "rows", "rows": len(product_rows)},
             )
 
         product_rows = self._enrich_product_rows_with_material_prices(
@@ -5450,6 +5784,12 @@ class IndustryService:
             product_rows,
             market_hub=normalized_market_hub,
         )
+        if progress_callback is not None:
+            progress_callback(
+                0.95,
+                "Step 8/9: Calculating sale proceeds and profit metrics",
+                {"step": 8, "step_count": 9, "stage": "profit"},
+            )
         product_rows = self._enrich_product_rows_with_sale_proceeds(
             product_rows,
             character_id=character_id,
@@ -5457,6 +5797,16 @@ class IndustryService:
             product_price_side=normalized_product_price_side,
         )
         product_rows = self._enrich_product_rows_with_profit_metrics(product_rows)
+        if progress_callback is not None:
+            progress_callback(
+                0.98,
+                "Step 9/9: Scoring pricing confidence and finalizing payload",
+                {"step": 9, "step_count": 9, "stage": "finalize"},
+            )
+        product_rows = self._enrich_product_rows_with_pricing_confidence(
+            product_rows,
+            product_price_side=normalized_product_price_side,
+        )
 
         product_rows.sort(
             key=lambda row: (
@@ -5465,7 +5815,7 @@ class IndustryService:
             )
         )
         if progress_callback is not None:
-            progress_callback(1.0, "Product overview ready", {"rows": len(product_rows)})
+            progress_callback(1.0, "Step 9/9: Product overview ready", {"step": 9, "step_count": 9, "stage": "completed", "rows": len(product_rows)})
         return product_rows
 
     def _enrich_product_rows_with_material_prices(
@@ -5543,6 +5893,7 @@ class IndustryService:
                     material["market_hub_label"] = pricing.get("hub_label")
                     material["price_sample_size"] = pricing.get("sample_size")
                     material["price_cached"] = pricing.get("cached")
+                    material["price_fetched_at"] = pricing.get("fetched_at")
                 line_total = None
                 if unit_price is not None:
                     line_total = float(unit_price) * int(material.get("quantity") or 0)

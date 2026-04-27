@@ -108,6 +108,15 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     # Character market fee metadata (best-effort JSON blob)
     _ensure_column(db_app, table="characters", column="market_fees", ddl_type="TEXT")
 
+    for table in ("character_industry_jobs", "corporation_industry_jobs"):
+        _ensure_column(db_app, table=table, column="output_quantity", ddl_type="INTEGER")
+        _ensure_column(db_app, table=table, column="materials_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="copy_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="invention_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="total_build_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="unit_build_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="build_cost_source", ddl_type="TEXT")
+
     # Market orderbook view cache (persistent hub pricing aggregates)
     _ensure_table(
         db_app,
@@ -142,3 +151,93 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         ),
     )
     _ensure_market_orderbook_view_cache_unique_key(db_app)
+
+    _ensure_table(
+        db_app,
+        table="character_realized_sales_ledger",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS character_realized_sales_ledger ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "character_id INTEGER NOT NULL,"
+            "transaction_id INTEGER NOT NULL,"
+            "journal_ref_id INTEGER NULL,"
+            "date TEXT NULL,"
+            "type_id INTEGER NULL,"
+            "type_name TEXT NULL,"
+            "type_group_name TEXT NULL,"
+            "type_category_name TEXT NULL,"
+            "quantity INTEGER NOT NULL DEFAULT 0,"
+            "unit_price REAL NULL,"
+            "gross_revenue REAL NULL,"
+            "sales_tax_amount REAL NULL,"
+            "other_fees_amount REAL NULL,"
+            "total_fees_amount REAL NULL,"
+            "net_revenue REAL NULL,"
+            "allocated_cost REAL NULL,"
+            "realized_profit REAL NULL,"
+            "realized_margin_fraction REAL NULL,"
+            "priced_quantity INTEGER NOT NULL DEFAULT 0,"
+            "unpriced_quantity INTEGER NOT NULL DEFAULT 0,"
+            "source_mix JSON NULL,"
+            "allocation_details JSON NULL,"
+            "fee_capture_mode TEXT NULL,"
+            "confidence TEXT NULL,"
+            "notes JSON NULL,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "UNIQUE(character_id, transaction_id)"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_character_realized_sales_ledger_character_date",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_character_realized_sales_ledger_character_date "
+            "ON character_realized_sales_ledger(character_id, date)"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="corporation_realized_sales_ledger",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS corporation_realized_sales_ledger ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "corporation_id INTEGER NOT NULL,"
+            "transaction_id INTEGER NOT NULL,"
+            "journal_ref_id INTEGER NULL,"
+            "date TEXT NULL,"
+            "type_id INTEGER NULL,"
+            "type_name TEXT NULL,"
+            "type_group_name TEXT NULL,"
+            "type_category_name TEXT NULL,"
+            "quantity INTEGER NOT NULL DEFAULT 0,"
+            "unit_price REAL NULL,"
+            "gross_revenue REAL NULL,"
+            "sales_tax_amount REAL NULL,"
+            "other_fees_amount REAL NULL,"
+            "total_fees_amount REAL NULL,"
+            "net_revenue REAL NULL,"
+            "allocated_cost REAL NULL,"
+            "realized_profit REAL NULL,"
+            "realized_margin_fraction REAL NULL,"
+            "priced_quantity INTEGER NOT NULL DEFAULT 0,"
+            "unpriced_quantity INTEGER NOT NULL DEFAULT 0,"
+            "source_mix JSON NULL,"
+            "allocation_details JSON NULL,"
+            "fee_capture_mode TEXT NULL,"
+            "confidence TEXT NULL,"
+            "notes JSON NULL,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "UNIQUE(corporation_id, transaction_id)"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_corporation_realized_sales_ledger_corporation_date",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_corporation_realized_sales_ledger_corporation_date "
+            "ON corporation_realized_sales_ledger(corporation_id, date)"
+        ),
+    )
