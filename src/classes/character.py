@@ -17,7 +17,16 @@ from classes.asset_provenance import (
     build_market_price_map,
     build_cost_map_for_assets,
     build_invention_cost_per_run_by_blueprint_type,
+    industry_job_material_type_ids,
     resolve_industry_job_cost_snapshot,
+)
+from classes.asset_history import (
+    backfill_wallet_buy_acquisitions,
+    build_historical_input_cost_lookup,
+    clear_historical_backfill,
+    lookup_historical_blueprint_provenance,
+    record_historical_acquisition,
+    sync_asset_history,
 )
 
 
@@ -325,6 +334,12 @@ class Character:
                 self.assets.append(new_asset)
             
             if self.assets:
+                sync_asset_history(
+                    app_session=self._db_app.session,
+                    owner_kind="character",
+                    owner_id=int(self.character_id),
+                    asset_rows=asset_list,
+                )
                 # Delete existing assets for this character and add new ones
                 self._db_app.session.query(CharacterAssetsModel).filter_by(character_id=self.character_id).delete()
                 self._db_app.session.bulk_save_objects(self.assets)
@@ -346,7 +361,7 @@ class Character:
         """Refresh all data for the current character."""
         try:
             self.ensure_esi()
-             # Call individual data refresh methods
+            # Call individual data refresh methods
             self.refresh_profile()
             self.refresh_skills()
             self.refresh_market_fees()
@@ -354,8 +369,8 @@ class Character:
             self.refresh_wallet_journal()
             self.refresh_wallet_transactions()
             self.refresh_market_orders()
-            self.refresh_industry_jobs()
             self.refresh_assets()
+            self.refresh_industry_jobs()
 
             logging.debug(f"All data successfully refreshed for {self.character_name}.")
         except Exception as e:
@@ -836,13 +851,111 @@ class Character:
                 market_price_map=market_price_map,
             )
 
+            clear_historical_backfill(
+                app_session=self._db_app.session,
+                owner_kind="character",
+                owner_id=int(self.character_id),
+            )
+            wallet_transactions = (
+                self._db_app.session.query(CharacterWalletTransactionsModel)
+                .filter_by(character_id=int(self.character_id))
+                .all()
+            )
+            backfill_wallet_buy_acquisitions(
+                app_session=self._db_app.session,
+                owner_kind="character",
+                owner_id=int(self.character_id),
+                wallet_transactions=wallet_transactions,
+            )
+
+            completed_statuses = {"delivered", "ready", "completed"}
+            existing_jobs = (
+                self._db_app.session.query(CharacterIndustryJobsModel)
+                .filter_by(character_id=int(self.character_id))
+                .all()
+            )
+            fetched_job_ids = {
+                int(job.get("job_id"))
+                for job in jobs
+                if isinstance(job, dict) and job.get("job_id") is not None
+            }
+
+            historical_job_events: list[tuple[str, int, str, Any]] = []
+            for job in existing_jobs:
+                job_id = int(getattr(job, "job_id", 0) or 0)
+                if job_id <= 0 or job_id in fetched_job_ids:
+                    continue
+                observed_at = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
+                historical_job_events.append((
+                    str(observed_at or ""),
+                    job_id,
+                    "existing",
+                    job,
+                ))
+            for job in jobs:
+                if not isinstance(job, dict) or job.get("job_id") is None:
+                    continue
+                observed_at = job.get("completed_date") or job.get("end_date")
+                historical_job_events.append((
+                    str(observed_at or ""),
+                    int(job.get("job_id") or 0),
+                    "fetched",
+                    job,
+                ))
+
             rows: list[dict[str, Any]] = []
-            for j in jobs:
-                if not isinstance(j, dict):
+            for _, _, entry_kind, payload in sorted(historical_job_events, key=lambda entry: (entry[0], entry[1])):
+                if entry_kind == "existing":
+                    existing_job = payload
+                    status = str(getattr(existing_job, "status", "") or "").lower()
+                    completed_at = getattr(existing_job, "completed_date", None) or getattr(existing_job, "end_date", None)
+                    output_quantity = int(getattr(existing_job, "output_quantity", 0) or 0)
+                    unit_cost = getattr(existing_job, "unit_build_cost", None)
+                    if (
+                        status in completed_statuses
+                        and completed_at
+                        and output_quantity > 0
+                        and unit_cost is not None
+                        and float(unit_cost) > 0
+                    ):
+                        record_historical_acquisition(
+                            app_session=self._db_app.session,
+                            owner_kind="character",
+                            owner_id=int(self.character_id),
+                            observed_at=str(completed_at),
+                            type_id=int(getattr(existing_job, "product_type_id", 0) or 0),
+                            type_name=None,
+                            quantity=output_quantity,
+                            acquisition_source="industry_build",
+                            acquisition_unit_cost=float(unit_cost),
+                            acquisition_total_cost=float(unit_cost) * float(output_quantity),
+                            acquisition_reference_type="industry_job",
+                            acquisition_reference_id=int(getattr(existing_job, "job_id", 0) or 0),
+                        )
                     continue
+
+                j = payload
                 job_id = j.get("job_id")
-                if job_id is None:
-                    continue
+                completed_at = j.get("completed_date") or j.get("end_date")
+                blueprint_type_id = int(j.get("blueprint_type_id") or 0)
+                blueprint_provenance = lookup_historical_blueprint_provenance(
+                    app_session=self._db_app.session,
+                    owner_kind="character",
+                    owner_id=int(self.character_id),
+                    blueprint_item_id=(int(j.get("blueprint_id")) if j.get("blueprint_id") is not None else None),
+                    blueprint_type_id=(blueprint_type_id if blueprint_type_id > 0 else None),
+                    as_of=completed_at,
+                )
+                historical_input_costs = build_historical_input_cost_lookup(
+                    app_session=self._db_app.session,
+                    owner_kind="character",
+                    owner_id=int(self.character_id),
+                    as_of=completed_at,
+                    type_ids=industry_job_material_type_ids(
+                        sde_session=self._db_sde.session,
+                        blueprint_type_id=blueprint_type_id,
+                    ),
+                )
                 snapshot = resolve_industry_job_cost_snapshot(
                     job=type("IndustryJobPayload", (), j)(),
                     sde_session=self._db_sde.session,
@@ -856,6 +969,8 @@ class Character:
                         (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("source") or ""
                     )
                     or None,
+                    blueprint_provenance=blueprint_provenance,
+                    owned_input_unit_cost_by_type_id=historical_input_costs,
                 )
                 rows.append(
                     {
@@ -873,9 +988,20 @@ class Character:
                         "facility_id": j.get("facility_id"),
                         "location_id": j.get("location_id"),
                         "output_location_id": j.get("output_location_id"),
+                        "blueprint_item_id": snapshot.get("blueprint_item_id"),
+                        "blueprint_is_blueprint_copy": snapshot.get("blueprint_is_blueprint_copy"),
+                        "blueprint_runs": snapshot.get("blueprint_runs"),
+                        "blueprint_time_efficiency": snapshot.get("blueprint_time_efficiency"),
+                        "blueprint_material_efficiency": snapshot.get("blueprint_material_efficiency"),
+                        "blueprint_provenance_source": snapshot.get("blueprint_provenance_source"),
+                        "blueprint_provenance_ref_id": snapshot.get("blueprint_provenance_ref_id"),
                         "cost": j.get("cost"),
                         "output_quantity": snapshot.get("output_quantity"),
                         "materials_cost": snapshot.get("materials_cost"),
+                        "historical_materials_cost": snapshot.get("historical_materials_cost"),
+                        "historical_material_cost_source": snapshot.get("historical_material_cost_source"),
+                        "historical_material_coverage_fraction": snapshot.get("historical_material_coverage_fraction"),
+                        "historical_input_costs": snapshot.get("historical_input_costs"),
                         "copy_cost": snapshot.get("copy_cost"),
                         "invention_cost": snapshot.get("invention_cost"),
                         "total_build_cost": snapshot.get("total_cost"),
@@ -884,9 +1010,32 @@ class Character:
                         "raw": j,
                     }
                 )
+                output_quantity = int(snapshot.get("output_quantity") or 0)
+                unit_cost = snapshot.get("unit_cost")
+                status = str(j.get("status") or "").lower()
+                if status in completed_statuses and completed_at and output_quantity > 0 and unit_cost is not None and float(unit_cost) > 0:
+                    record_historical_acquisition(
+                        app_session=self._db_app.session,
+                        owner_kind="character",
+                        owner_id=int(self.character_id),
+                        observed_at=str(completed_at),
+                        type_id=int(j.get("product_type_id") or 0),
+                        type_name=None,
+                        quantity=output_quantity,
+                        acquisition_source="industry_build",
+                        acquisition_unit_cost=float(unit_cost),
+                        acquisition_total_cost=float(unit_cost) * float(output_quantity),
+                        acquisition_reference_type="industry_job",
+                        acquisition_reference_id=int(job_id),
+                    )
 
-            # Replace snapshot for this character.
-            self._db_app.session.query(CharacterIndustryJobsModel).filter_by(character_id=self.character_id).delete()
+            if fetched_job_ids:
+                (
+                    self._db_app.session.query(CharacterIndustryJobsModel)
+                    .filter_by(character_id=self.character_id)
+                    .filter(CharacterIndustryJobsModel.job_id.in_(sorted(fetched_job_ids)))
+                    .delete(synchronize_session=False)
+                )
             self._db_app.session.bulk_save_objects([CharacterIndustryJobsModel(**r) for r in rows])
             self._db_app.session.commit()
         except Exception as e:

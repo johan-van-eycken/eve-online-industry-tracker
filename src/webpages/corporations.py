@@ -1,7 +1,7 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
-from typing import cast
+from typing import Any, cast
 
 from utils.assets_ui import (
     ASSET_FLOAT_COLUMNS,
@@ -12,11 +12,115 @@ from utils.assets_ui import (
     render_ship_cards,
     summarize_asset_items,
 )
-from utils.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age
+from utils.flask_api import api_get
+from utils.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age, type_icon_url
 from utils.session_state import ensure_state_defaults, ensure_valid_state_value
 from utils.streamlit_api import cached_api_get
-from utils.aggrid_formatters import js_icon_cell_renderer
+from utils.aggrid_formatters import js_category_text_style, js_icon_cell_renderer
+from utils.wallet_ui import RANGE_OPTIONS, apply_wallet_location_names, camel_case_header, filter_dataframe_by_range, format_wallet_datetime, load_range_preset, reorder_columns, render_income_expense_tile, save_range_preset
 from utils.webpage_ui import render_aggrid_table, require_aggrid
+
+
+_PREFERENCES_NAMESPACE = "corporations_details"
+
+
+def _build_tooltip(breakdown, category, formatter=format_isk, join_labels=True):
+    if category not in breakdown.index.get_level_values(0):
+        return ""
+
+    items = breakdown.loc[category].abs().sort_values(ascending=False)
+    tooltip_lines = []
+    if isinstance(items.index, pd.MultiIndex):
+        for idx, val in items.items():
+            label = " / ".join(str(x) for x in idx) if join_labels else str(idx[-1])
+            tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
+    else:
+        for label, val in items.items():
+            tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
+
+    return "".join(tooltip_lines)
+
+
+def _range_preset_control(*, label: str, preference_key: str, state_key: str) -> str:
+    persisted_range_preset = load_range_preset(
+        namespace=_PREFERENCES_NAMESPACE,
+        preference_key=preference_key,
+        state_key=state_key,
+    )
+    range_preset = st.segmented_control(
+        label,
+        options=RANGE_OPTIONS,
+        key=state_key,
+        label_visibility="collapsed",
+    )
+    range_preset = str(range_preset or persisted_range_preset or "Past Month")
+    if range_preset != persisted_range_preset:
+        save_range_preset(
+            namespace=_PREFERENCES_NAMESPACE,
+            preference_key=preference_key,
+            preset=range_preset,
+        )
+    return range_preset
+
+
+def _wallet_journal_view(journal_data: list[dict[str, Any]], *, range_preset: str) -> pd.DataFrame:
+    journal_df = pd.DataFrame(journal_data)
+    journal_df["category"] = journal_df["amount"].apply(lambda value: "Income" if float(value or 0.0) > 0 else "Expenses")
+    journal_df = filter_dataframe_by_range(journal_df, date_column="date", preset=range_preset)
+    source_location_column = "location_id" if "location_id" in journal_df.columns else "context_id"
+    journal_df = apply_wallet_location_names(journal_df, source_column=source_location_column)
+    if "date" in journal_df.columns:
+        journal_df["date"] = journal_df["date"].apply(format_wallet_datetime)
+    journal_df = reorder_columns(
+        journal_df,
+        [
+            "date",
+            "category",
+            "location_name",
+            "description",
+            "amount",
+            "balance",
+            "first_party_name",
+            "second_party_name",
+            "reason",
+            "tax_receiver_name",
+            "tax",
+        ],
+    )
+    if "date" in journal_df.columns:
+        journal_df = journal_df.sort_values(by=["date"], ascending=False)
+    return journal_df
+
+
+def _wallet_transactions_view(transactions_data: list[dict[str, Any]], *, range_preset: str) -> pd.DataFrame:
+    transactions_df = pd.DataFrame(transactions_data)
+    transactions_df["category"] = transactions_df.apply(
+        lambda row: "Expenses" if bool(row.get("is_buy")) else "Income", axis=1
+    )
+    transactions_df["Icon"] = transactions_df["type_id"].apply(lambda value: type_icon_url(value, size=32))
+    transactions_df = filter_dataframe_by_range(transactions_df, date_column="date", preset=range_preset)
+    transactions_df = apply_wallet_location_names(transactions_df, source_column="location_id")
+    if "date" in transactions_df.columns:
+        transactions_df["date"] = transactions_df["date"].apply(format_wallet_datetime)
+    transactions_df = reorder_columns(
+        transactions_df,
+        [
+            "date",
+            "category",
+            "Icon",
+            "type_name",
+            "quantity",
+            "total_price",
+            "unit_price",
+            "client_name",
+            "location_name",
+            "type_category_name",
+            "location_id",
+        ],
+    )
+    if "date" in transactions_df.columns:
+        transactions_df = transactions_df.sort_values(by=["date"], ascending=False)
+    return transactions_df
 
 
 def _extract_master_wallet_balance(wallets_raw) -> float:
@@ -65,11 +169,54 @@ def _render_asset_summary(df: pd.DataFrame) -> None:
     )
 
 
+def _fetch_current_corporation_assets(corporation_id: int) -> list[dict]:
+    response = api_get(f"/corporations/assets?corporation_id={int(corporation_id)}", timeout_seconds=180) or {}
+    if response.get("status") != "success":
+        raise RuntimeError(response.get("message") or "Failed to refresh corporation assets")
+
+    data = response.get("data") or []
+    if not isinstance(data, list):
+        return []
+
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        try:
+            if int(row.get("corporation_id") or 0) == int(corporation_id):
+                assets = row.get("assets") or []
+                return assets if isinstance(assets, list) else []
+        except Exception:
+            continue
+
+    return []
+
+
 def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
     st.subheader("Assets")
 
+    selected_corporation_id = int(corp_row.get("corporation_id") or 0)
+    override_key = f"corporation_assets_override_{selected_corporation_id}"
+    status_key = f"corporation_assets_refresh_status_{selected_corporation_id}"
+
+    refresh_col, status_col = st.columns([1, 5])
+    with refresh_col:
+        if st.button("Refresh Assets", key=f"refresh_corporation_assets_{selected_corporation_id}"):
+            try:
+                st.session_state[override_key] = _fetch_current_corporation_assets(selected_corporation_id)
+                st.session_state[status_key] = ("success", "Showing refreshed current assets.")
+            except Exception as exc:
+                st.session_state[status_key] = ("error", f"Failed to refresh current assets: {exc}")
+    with status_col:
+        status_payload = st.session_state.get(status_key)
+        if isinstance(status_payload, tuple) and len(status_payload) == 2:
+            level, message = status_payload
+            if level == "success":
+                st.caption(str(message))
+            elif level == "error":
+                st.error(str(message))
+
     try:
-        corp_assets = corp_row.get("assets", [])
+        corp_assets = st.session_state.get(override_key, corp_row.get("assets", []))
         assets_df = pd.DataFrame(corp_assets)
     except Exception:
         st.warning("No corporation assets data available.")
@@ -252,6 +399,21 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
 def render():
     runtime = require_aggrid()
     img_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
+    wallet_text_style = js_category_text_style(JsCode=runtime.js_code)
+    wallet_right_style = js_category_text_style(JsCode=runtime.js_code, align="right")
+
+    def _wallet_column_configs(df: pd.DataFrame, *, numeric_cols: list[str] | None = None, image_cols: list[str] | None = None) -> dict[str, dict[str, Any]]:
+        numeric_set = set(numeric_cols or [])
+        image_set = set(image_cols or [])
+        configs: dict[str, dict[str, Any]] = {}
+        for column in df.columns:
+            config: dict[str, Any] = {
+                "headerName": camel_case_header(column),
+            }
+            if column not in image_set:
+                config["cellStyle"] = wallet_right_style if column in numeric_set else wallet_text_style
+            configs[column] = config
+        return configs
 
     def _render_aggrid_table(
         df_in: pd.DataFrame,
@@ -261,6 +423,10 @@ def render():
         number_cols_0: list[str] | None = None,
         number_cols_2: list[str] | None = None,
         image_cols: list[str] | None = None,
+        image_pin_left: bool = True,
+        hidden_cols: list[str] | None = None,
+        column_configs: dict[str, dict[str, Any]] | None = None,
+        auto_size_columns: bool = False,
         height: int | None = None,
         height_max: int = 800,
     ) -> None:
@@ -273,6 +439,10 @@ def render():
             number_cols_2=number_cols_2,
             image_cols=image_cols,
             image_renderer=img_renderer,
+            image_pin_left=image_pin_left,
+            hidden_cols=hidden_cols,
+            column_configs=column_configs,
+            auto_size_columns=auto_size_columns,
             height=height,
             height_max=height_max,
         )
@@ -433,7 +603,7 @@ def render():
         st.warning(f"Corporation ({selected_id}) not found.")
         return
 
-    detail_sections = ["Members", "Structures", "Assets"]
+    detail_sections = ["Members", "Wallet Journal", "Wallet Transactions", "Structures", "Assets"]
     ensure_state_defaults({"corporation_details_active_tab": "Members"})
     ensure_valid_state_value(
         "corporation_details_active_tab",
@@ -441,11 +611,29 @@ def render():
         valid_values=detail_sections,
         coerce=str,
     )
-    selected_detail_section = st.segmented_control(
-        "Corporation details",
-        options=detail_sections,
-        key="corporation_details_active_tab",
-    )
+    header_left, header_right = st.columns([3, 2])
+    with header_left:
+        selected_detail_section = st.segmented_control(
+            "Corporation details",
+            options=detail_sections,
+            key="corporation_details_active_tab",
+            label_visibility="collapsed",
+        )
+
+    wallet_range_preset = None
+    with header_right:
+        if selected_detail_section == "Wallet Journal":
+            wallet_range_preset = _range_preset_control(
+                label="Wallet Journal range",
+                preference_key="wallet_journal_range_preset",
+                state_key="corporation_wallet_journal_range_preset",
+            )
+        elif selected_detail_section == "Wallet Transactions":
+            wallet_range_preset = _range_preset_control(
+                label="Wallet Transactions range",
+                preference_key="wallet_transactions_range_preset",
+                state_key="corporation_wallet_transactions_range_preset",
+            )
 
     # --- MEMBERS TAB ---
     if selected_detail_section == "Members":
@@ -570,6 +758,117 @@ def render():
         except Exception as e:
             st.info("No structures found for this corporation.")
             st.error(str(e))
+
+    if selected_detail_section == "Wallet Journal":
+        journal_data = corp_row.get("wallet_journal", [])
+        if not journal_data:
+            st.warning("No wallet journal data found.")
+            st.stop()
+        try:
+            range_preset = str(wallet_range_preset or "Past Month")
+            journal_df = _wallet_journal_view(journal_data, range_preset=range_preset)
+            aggregated_journal = journal_df.groupby("category")["amount"].sum()
+            journal_breakdown = journal_df.groupby(["category", "ref_type"])["amount"].sum()
+            journal_income_tooltip = _build_tooltip(journal_breakdown, "Income")
+            journal_expense_tooltip = _build_tooltip(journal_breakdown, "Expenses")
+
+            render_income_expense_tile(
+                income_label="Total Income",
+                income_value=format_isk(aggregated_journal.get("Income", 0)),
+                income_tooltip=journal_income_tooltip,
+                expense_label="Total Expenses",
+                expense_value=format_isk(-aggregated_journal.get("Expenses", 0)),
+                expense_tooltip=journal_expense_tooltip,
+            )
+
+            _render_aggrid_table(
+                journal_df,
+                key=f"corporation_wallet_journal_{int(selected_id)}",
+                isk_cols=[c for c in ["amount", "balance"] if c in journal_df.columns],
+                hidden_cols=[
+                    column
+                    for column in [
+                        "id",
+                        "corporation_id",
+                        "context_id",
+                        "context_id_type",
+                        "first_party_id",
+                        "ref_type",
+                        "second_party_id",
+                        "tax_receiver_id",
+                        "updated_at",
+                        "wallet_journal_id",
+                    ]
+                    if column in journal_df.columns
+                ],
+                column_configs=_wallet_column_configs(
+                    journal_df,
+                    numeric_cols=[c for c in ["amount", "balance", "tax", "division"] if c in journal_df.columns],
+                ),
+                auto_size_columns=True,
+            )
+        except Exception as e:
+            st.warning(f"No wallet journal data found. {e}")
+            st.stop()
+
+    if selected_detail_section == "Wallet Transactions":
+        transactions_data = corp_row.get("wallet_transactions", [])
+        if not transactions_data:
+            st.warning("No wallet transactions data available.")
+            st.stop()
+        try:
+            range_preset = str(wallet_range_preset or "Past Month")
+            transactions_df = _wallet_transactions_view(transactions_data, range_preset=range_preset)
+            aggregated_transactions = transactions_df.groupby("category")["total_price"].sum()
+            tx_breakdown = transactions_df.groupby(["category", "type_category_name"])["total_price"].sum()
+            tx_income_tooltip = _build_tooltip(tx_breakdown, "Income", join_labels=False)
+            tx_expense_tooltip = _build_tooltip(tx_breakdown, "Expenses", join_labels=False)
+
+            render_income_expense_tile(
+                income_label="Total Income",
+                income_value=format_isk(aggregated_transactions.get("Income", 0)),
+                income_tooltip=tx_income_tooltip,
+                expense_label="Total Expenses",
+                expense_value=format_isk(-aggregated_transactions.get("Expenses", 0)),
+                expense_tooltip=tx_expense_tooltip,
+            )
+
+            _render_aggrid_table(
+                transactions_df,
+                key=f"corporation_wallet_transactions_{int(selected_id)}",
+                isk_cols=[c for c in ["unit_price", "total_price"] if c in transactions_df.columns],
+                number_cols_0=[c for c in ["quantity", "location_id"] if c in transactions_df.columns],
+                image_cols=["Icon"],
+                image_pin_left=False,
+                hidden_cols=[
+                    column
+                    for column in [
+                        "id",
+                        "corporation_id",
+                        "client_id",
+                        "is_buy",
+                        "is_personal",
+                        "journal_ref_id",
+                        "location_id",
+                        "transaction_id",
+                        "type_category_id",
+                        "type_group_id",
+                        "type_id",
+                    ]
+                    if column in transactions_df.columns
+                ],
+                column_configs=_wallet_column_configs(
+                    transactions_df,
+                    numeric_cols=[
+                        c for c in ["division", "quantity", "location_id", "unit_price", "total_price"] if c in transactions_df.columns
+                    ],
+                    image_cols=["Icon"],
+                ),
+                auto_size_columns=True,
+            )
+        except Exception:
+            st.warning("No wallet transactions data available.")
+            st.stop()
         
     # --- CORPORATION ASSETS TAB ---
     if selected_detail_section == "Assets":

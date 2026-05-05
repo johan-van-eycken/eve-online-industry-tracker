@@ -7,15 +7,22 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from utils.aggrid_formatters import js_icon_cell_renderer
+from utils.aggrid_formatters import js_flag_text_style, js_icon_cell_renderer
 from utils.characters_api import build_character_options, fetch_characters
 from utils.formatters import format_isk_eu, format_isk_short, format_pct_eu, type_icon_url
+from utils.page_preferences import load_page_preferences, save_page_preferences
 from utils.realized_profit_api import (
     clear_realized_profit_cache,
     fetch_realized_profit,
     refresh_realized_profit,
 )
+from utils.session_state import ensure_state_defaults, ensure_valid_state_value
 from utils.webpage_ui import render_aggrid_table, require_aggrid
+
+
+_PREFERENCES_NAMESPACE = "realized_profit"
+_RANGE_OPTIONS = ["Past Week", "Past Month", "Past 3 Months", "Year to Date", "Past Year", "All Time"]
+_RANGE_STATE_KEY = "realized_profit_range_preset"
 
 
 def _parse_iso_date(value: Any) -> datetime | None:
@@ -90,31 +97,37 @@ def _source_mix_label(source_mix: Any) -> str:
 
 
 def _profit_type_label(source_mix: Any) -> str:
-    if not isinstance(source_mix, dict) or not source_mix:
-        return "Untracked Inventory"
+    return _primary_profit_bucket(source_mix)
 
-    sources = {str(key) for key in source_mix.keys()}
-    if sources == {"industry_build"}:
-        return "Industry Build Profit"
-    if sources == {"market_buy"}:
-        return "Market Trade Profit"
-    if sources == {"opening_inventory"}:
-        return "Opening Inventory (Estimated Cost Basis)"
-    if sources == {"untracked_inventory"}:
-        return "Untracked Inventory"
-    if "industry_build" in sources:
-        if "untracked_inventory" in sources:
-            return "Mixed (Industry Build + Untracked)"
-        return "Mixed (Includes Industry Build)"
-    if "opening_inventory" in sources:
-        if "untracked_inventory" in sources:
-            return "Mixed (Opening Inventory + Untracked)"
-        return "Mixed (Includes Opening Inventory)"
-    if "market_buy" in sources:
-        if "untracked_inventory" in sources:
-            return "Mixed (Market Trade + Untracked)"
-        return "Mixed (Includes Market Trade)"
-    return "Untracked Inventory"
+
+def _load_range_preset() -> str:
+    persisted_preferences = load_page_preferences(_PREFERENCES_NAMESPACE)
+    filters = persisted_preferences.get("filters") or {}
+    default_value = str(filters.get("range_preset") or "Past Month")
+    ensure_state_defaults({_RANGE_STATE_KEY: default_value})
+    return ensure_valid_state_value(
+        _RANGE_STATE_KEY,
+        default_value,
+        valid_values=_RANGE_OPTIONS,
+        coerce=str,
+    )
+
+
+def _save_range_preset(preset: str) -> None:
+    persisted_preferences = load_page_preferences(_PREFERENCES_NAMESPACE)
+    filters = persisted_preferences.get("filters") or {}
+    if not isinstance(filters, dict):
+        filters = {}
+    save_page_preferences(
+        _PREFERENCES_NAMESPACE,
+        {
+            **persisted_preferences,
+            "filters": {
+                **filters,
+                "range_preset": str(preset),
+            },
+        },
+    )
 
 
 def _default_date_range(rows: list[dict[str, Any]]) -> tuple[date | None, date | None]:
@@ -304,12 +317,28 @@ def _render_stat_card_grid(cards: list[tuple[str, str]], *, key_prefix: str) -> 
     st.markdown(
         """
         <style>
+        .rp-stat-tile {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 0;
+            border: 1px solid rgba(255,255,255,0.10);
+            border-radius: 12px;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.02);
+        }
         .rp-stat-card {
-            background: rgba(24, 24, 27, 0.9);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 10px;
             padding: 12px 14px;
-            min-height: 82px;
+            min-height: 70px;
+            position: relative;
+        }
+        .rp-stat-card:not(:last-child)::after {
+            content: "";
+            position: absolute;
+            top: 14px;
+            right: 0;
+            width: 1px;
+            height: calc(100% - 28px);
+            background: rgba(255,255,255,0.10);
         }
         .rp-stat-card-label {
             color: #d4d4d8;
@@ -328,13 +357,11 @@ def _render_stat_card_grid(cards: list[tuple[str, str]], *, key_prefix: str) -> 
         """,
         unsafe_allow_html=True,
     )
-    columns = st.columns(len(cards))
-    for idx, (label, value) in enumerate(cards):
-        with columns[idx]:
-            st.markdown(
-                f"<div class='rp-stat-card'><div class='rp-stat-card-label'>{label}</div><div class='rp-stat-card-value'>{value}</div></div>",
-                unsafe_allow_html=True,
-            )
+    cards_html = "".join(
+        f"<div class='rp-stat-card'><div class='rp-stat-card-label'>{label}</div><div class='rp-stat-card-value'>{value}</div></div>"
+        for label, value in cards
+    )
+    st.markdown(f"<div class='rp-stat-tile'>{cards_html}</div>", unsafe_allow_html=True)
 
 
 def _profit_bucket_color_scale() -> alt.Scale:
@@ -428,6 +455,7 @@ def _overview_payload(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
         classified_rows.append(
             {
                 "bucket": _primary_profit_bucket(row.get("source_mix")),
+                "type_id": int(row.get("type_id") or 0),
                 "item": str(row.get("type_name") or row.get("type_id") or "-"),
                 "date": dt.date() if dt is not None else None,
                 "hour": dt.replace(minute=0, second=0, microsecond=0) if dt is not None else None,
@@ -475,47 +503,37 @@ def _overview_payload(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     manufacturing = (
         overview_df[overview_df["bucket"] == "Manufacturing"]
-        .groupby("item", as_index=False)
+        .groupby(["type_id", "item"], as_index=False)
         .agg(
             {
                 "quantity": "sum",
-                "net_revenue": "sum",
-                "allocated_cost": "sum",
                 "realized_profit": "sum",
             }
         )
-        .rename(
-            columns={
-                "item": "Item",
-                "quantity": "Qty Sold",
-                "net_revenue": "Net Revenue",
-                "allocated_cost": "Allocated Cost",
-                "realized_profit": "Realized Profit",
-            }
+        .assign(
+            Icon=lambda df: df["type_id"].apply(lambda value: type_icon_url(value, size=32)),
+            _negative_flag=lambda df: df["realized_profit"].astype(float) < 0.0,
         )
+        .rename(columns={"item": "Item", "quantity": "Qty Sold", "realized_profit": "Realized Profit"})
+        [["Icon", "Item", "Qty Sold", "Realized Profit", "_negative_flag"]]
         .sort_values(["Realized Profit", "Qty Sold"], ascending=[False, False])
     )
 
     trade = (
         overview_df[overview_df["bucket"] == "Trade"]
-        .groupby("item", as_index=False)
+        .groupby(["type_id", "item"], as_index=False)
         .agg(
             {
                 "quantity": "sum",
-                "net_revenue": "sum",
-                "allocated_cost": "sum",
                 "realized_profit": "sum",
             }
         )
-        .rename(
-            columns={
-                "item": "Item",
-                "quantity": "Qty Sold",
-                "net_revenue": "Net Revenue",
-                "allocated_cost": "Allocated Cost",
-                "realized_profit": "Realized Profit",
-            }
+        .assign(
+            Icon=lambda df: df["type_id"].apply(lambda value: type_icon_url(value, size=32)),
+            _negative_flag=lambda df: df["realized_profit"].astype(float) < 0.0,
         )
+        .rename(columns={"item": "Item", "quantity": "Qty Sold", "realized_profit": "Realized Profit"})
+        [["Icon", "Item", "Qty Sold", "Realized Profit", "_negative_flag"]]
         .sort_values(["Realized Profit", "Qty Sold"], ascending=[False, False])
     )
 
@@ -546,6 +564,14 @@ def _table_frame(
     table_rows = []
     for row in rows:
         realized_margin_fraction = row.get("realized_margin_fraction")
+        realized_profit = row.get("realized_profit")
+        margin_pct = (float(realized_margin_fraction) * 100.0) if realized_margin_fraction is not None else None
+        negative_flag = (
+            realized_profit is not None
+            and margin_pct is not None
+            and float(realized_profit) < 0.0
+            and float(margin_pct) < 0.0
+        )
         table_rows.append(
             {
                 "Date": _format_table_datetime(row.get("date")),
@@ -553,50 +579,50 @@ def _table_frame(
                 "Icon": type_icon_url(row.get("type_id"), size=32),
                 "Item": str(row.get("type_name") or row.get("type_id") or "-"),
                 "Qty": int(row.get("quantity") or 0),
-                "Profit Type": _profit_type_label(row.get("source_mix")),
                 "Net Revenue": row.get("net_revenue"),
                 "Allocated Cost": row.get("allocated_cost"),
-                "Realized Profit": row.get("realized_profit"),
-                "Margin %": (float(realized_margin_fraction) * 100.0) if realized_margin_fraction is not None else None,
+                "Realized Profit": realized_profit,
+                "Margin %": margin_pct,
                 "Confidence": row.get("confidence"),
                 "Priced Qty": int(row.get("priced_quantity") or 0),
                 "Unpriced Qty": int(row.get("unpriced_quantity") or 0),
-                "Source Mix": _source_mix_label(row.get("source_mix")),
                 "Transaction ID": int(row.get("transaction_id") or 0),
+                "Profit Type": _profit_type_label(row.get("source_mix")),
+                "_negative_flag": bool(negative_flag),
             }
         )
-    return pd.DataFrame(table_rows)
-
-
-def _drilldown_label(
-    row: dict[str, Any],
-    owner_name_by_id: dict[int, str],
-    *,
-    owner_id_key: str,
-) -> str:
-    owner_name = owner_name_by_id.get(int(row.get(owner_id_key) or 0), str(row.get(owner_id_key) or "-"))
-    profit = row.get("realized_profit")
-    profit_label = format_isk_eu(profit, missing="Unpriced") if profit is not None else "Unpriced"
-    return f"{_format_table_datetime(row.get('date')) or 'Unknown'} | {owner_name} | {row.get('type_name') or row.get('type_id')} | {profit_label}"
+    frame = pd.DataFrame(table_rows)
+    if not frame.empty:
+        desired_columns = [
+            "Date",
+            owner_label,
+            "Icon",
+            "Item",
+            "Qty",
+            "Net Revenue",
+            "Allocated Cost",
+            "Realized Profit",
+            "Margin %",
+            "Confidence",
+            "Priced Qty",
+            "Unpriced Qty",
+            "Transaction ID",
+            "Profit Type",
+            "_negative_flag",
+        ]
+        frame = frame[[column for column in desired_columns if column in frame.columns]]
+    return frame
 
 
 def render() -> None:
     st.header("Realized Profit")
     runtime = require_aggrid()
-    st.caption(
-        "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
-        "Character scope supports wallet journal-backed fee capture when linked."
-    )
-    st.caption(
-        "Profit Type distinguishes Industry Build Profit from Trade / Resale Profit. "
-        "Untracked Inventory means the sold item had no matched historical source lot in the ledger, which can happen for loot, mined materials, transfers from another account, donations, or older stock outside the tracked history."
-    )
 
     character_name_by_id = _character_name_map()
     owner_selector_options = _owner_selector_options()
 
-    top_left, top_mid, top_right = st.columns([2, 2, 1])
-    with top_left:
+    controls_owner, controls_range, controls_refresh, controls_about = st.columns([2.5, 4.5, 1.5, 1.0])
+    with controls_owner:
         selected_owner_option = st.selectbox(
             "Owner",
             options=owner_selector_options,
@@ -608,10 +634,20 @@ def render() -> None:
     owner_name_by_id = character_name_by_id
     owner_label = "Character"
     owner_id_key = "character_id"
-    with top_mid:
+    with controls_range:
+        persisted_range_preset = _load_range_preset()
+        range_preset = st.segmented_control(
+            "Range",
+            options=_RANGE_OPTIONS,
+            key=_RANGE_STATE_KEY,
+        )
+        range_preset = str(range_preset or persisted_range_preset or "Past Month")
+        if range_preset != persisted_range_preset:
+            _save_range_preset(range_preset)
+    with controls_refresh:
         st.write("")
         st.write("")
-        if st.button("Refresh Realized Profit Ledger", type="primary"):
+        if st.button("Refresh Ledger", type="primary", width="stretch"):
             with st.spinner("Rebuilding realized profit ledger..."):
                 refresh_realized_profit(
                     owner_scope="character",
@@ -619,12 +655,39 @@ def render() -> None:
                 )
             clear_realized_profit_cache()
             st.rerun()
-    with top_right:
+    with controls_about:
         st.write("")
         st.write("")
-        if st.button("Reload View"):
-            clear_realized_profit_cache()
-            st.rerun()
+        if hasattr(st, "popover"):
+            with st.popover("?", help="About this page"):
+                st.caption(
+                    "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
+                    "Character scope supports wallet journal-backed fee capture when linked."
+                )
+                st.caption(
+                    "Profit Type groups sales into Manufacturing or Trade for readability. "
+                    "Trade includes untracked inventory, older stock outside tracked history, transfers, loot, donations, and similar cases where no historical source lot was matched."
+                )
+                st.caption(
+                    "Confidence indicates how complete the pricing evidence is for a sale. "
+                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support."
+                )
+                st.caption("Coverage excludes rows with missing historical cost basis.")
+        else:
+            with st.expander("?", expanded=False):
+                st.caption(
+                    "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
+                    "Character scope supports wallet journal-backed fee capture when linked."
+                )
+                st.caption(
+                    "Profit Type groups sales into Manufacturing or Trade for readability. "
+                    "Trade includes untracked inventory, older stock outside tracked history, transfers, loot, donations, and similar cases where no historical source lot was matched."
+                )
+                st.caption(
+                    "Confidence indicates how complete the pricing evidence is for a sale. "
+                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support."
+                )
+                st.caption("Coverage excludes rows with missing historical cost basis.")
 
     response = fetch_realized_profit(
         owner_scope="character",
@@ -640,23 +703,12 @@ def render() -> None:
         st.info("No realized sales have been recorded yet for the selected scope.")
         return
 
-    default_start, default_end = _default_date_range(rows)
     min_available_date, max_available_date = _available_date_span(rows)
-
-    filter_left, filter_mid = st.columns([3, 1])
-    with filter_left:
-        range_preset = st.selectbox(
-            "Range",
-            options=["Past Week", "Past Month", "Past 3 Months", "Year to Date", "Past Year", "All Time"],
-            index=1,
-        )
-        start_date, end_date = _resolve_range_preset(
-            str(range_preset),
-            min_date=min_available_date,
-            max_date=max_available_date,
-        )
-    with filter_mid:
-        st.caption("Coverage excludes rows with missing historical cost basis.")
+    start_date, end_date = _resolve_range_preset(
+        str(range_preset),
+        min_date=min_available_date,
+        max_date=max_available_date,
+    )
 
     filtered_rows = _filter_rows(
         rows,
@@ -681,37 +733,27 @@ def render() -> None:
 
     groups_left, groups_right = st.columns([4, 6])
     with groups_left:
-        with st.container(border=True):
-            _render_stat_card_grid(
-                [
-                    (f"{period_label} Net Profit", format_isk_short(summary["total_profit"])),
-                    ("Trade", format_isk_short(square_metrics["trade_profit"])),
-                    ("Manufacturing", format_isk_short(square_metrics["manufacturing_profit"])),
-                ],
-                key_prefix="realized_profit_group1",
-            )
-    with groups_right:
-        with st.container(border=True):
-            _render_stat_card_grid(
-                [
-                    (f"{period_label} Rolling Trade Profit", format_isk_short(square_metrics["rolling_trade_profit"])),
-                    ("Trade Income", format_isk_short(square_metrics["trade_income"])),
-                    ("Trade Purchases", format_isk_short(-square_metrics["trade_purchases"])),
-                    ("Sales Tax", format_isk_short(-square_metrics["sales_tax"])),
-                    ("Broker Fees", format_isk_short(-square_metrics["broker_fees"])),
-                    ("Buy Transactions", f"{int(square_metrics['buy_transactions'])}"),
-                    ("Sell Transactions", f"{int(square_metrics['sell_transactions'])}"),
-                ],
-                key_prefix="realized_profit_group2",
-            )
-
-    st.caption(
-        "Sales shown: {rows} | Fully priced: {fully_priced} | Coverage: {coverage}".format(
-            rows=summary["row_count"],
-            fully_priced=summary["fully_priced_count"],
-            coverage=format_pct_eu(summary["coverage_fraction"] * 100.0, decimals=1),
+        _render_stat_card_grid(
+            [
+                (f"{period_label} Net Profit", format_isk_short(summary["total_profit"])),
+                ("Trade", format_isk_short(square_metrics["trade_profit"])),
+                ("Manufacturing", format_isk_short(square_metrics["manufacturing_profit"])),
+            ],
+            key_prefix="realized_profit_group1",
         )
-    )
+    with groups_right:
+        _render_stat_card_grid(
+            [
+                (f"{period_label} Rolling Trade Profit", format_isk_short(square_metrics["rolling_trade_profit"])),
+                ("Trade Income", format_isk_short(square_metrics["trade_income"])),
+                ("Trade Purchases", format_isk_short(-square_metrics["trade_purchases"])),
+                ("Sales Tax", format_isk_short(-square_metrics["sales_tax"])),
+                ("Broker Fees", format_isk_short(-square_metrics["broker_fees"])),
+                ("Buy Transactions", f"{int(square_metrics['buy_transactions'])}"),
+                ("Sell Transactions", f"{int(square_metrics['sell_transactions'])}"),
+            ],
+            key_prefix="realized_profit_group2",
+        )
 
     st.subheader("Profit Overview")
     chart_left, chart_right = st.columns(2)
@@ -740,8 +782,20 @@ def render() -> None:
                 trade_df,
                 runtime=runtime,
                 key=f"realized_profit_trade_summary_character_{int(selected_owner_id)}",
-                isk_cols=["Net Revenue", "Allocated Cost", "Realized Profit"],
+                isk_cols=["Realized Profit"],
                 number_cols_0=["Qty Sold"],
+                image_cols=["Icon"],
+                image_renderer=js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24),
+                hidden_cols=["_negative_flag"],
+                column_configs={
+                    "Item": {
+                        "minWidth": 220,
+                        "cellStyle": js_flag_text_style(JsCode=runtime.js_code, flag_field="_negative_flag"),
+                    },
+                    "Realized Profit": {
+                        "cellStyle": js_flag_text_style(JsCode=runtime.js_code, flag_field="_negative_flag", align="right"),
+                    },
+                },
                 fit_columns_on_grid_load=False,
                 height_max=340,
             )
@@ -756,8 +810,20 @@ def render() -> None:
                 manufacturing_df,
                 runtime=runtime,
                 key=f"realized_profit_manufacturing_summary_character_{int(selected_owner_id)}",
-                isk_cols=["Net Revenue", "Allocated Cost", "Realized Profit"],
+                isk_cols=["Realized Profit"],
                 number_cols_0=["Qty Sold"],
+                image_cols=["Icon"],
+                image_renderer=js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24),
+                hidden_cols=["_negative_flag"],
+                column_configs={
+                    "Item": {
+                        "minWidth": 220,
+                        "cellStyle": js_flag_text_style(JsCode=runtime.js_code, flag_field="_negative_flag"),
+                    },
+                    "Realized Profit": {
+                        "cellStyle": js_flag_text_style(JsCode=runtime.js_code, flag_field="_negative_flag", align="right"),
+                    },
+                },
                 fit_columns_on_grid_load=False,
                 height_max=340,
             )
@@ -780,91 +846,22 @@ def render() -> None:
         image_cols=["Icon"],
         image_renderer=js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24),
         image_pin_left=False,
+        hidden_cols=["Priced Qty", "Unpriced Qty", "Transaction ID", "_negative_flag"],
+        column_configs={
+            "Item": {
+                "minWidth": 220,
+                "cellStyle": js_flag_text_style(JsCode=runtime.js_code, flag_field="_negative_flag"),
+            },
+            "Realized Profit": {
+                "cellStyle": js_flag_text_style(JsCode=runtime.js_code, flag_field="_negative_flag", align="right"),
+            },
+            "Margin %": {
+                "cellStyle": js_flag_text_style(JsCode=runtime.js_code, flag_field="_negative_flag", align="right"),
+            },
+            "Profit Type": {
+                "minWidth": 130,
+            },
+        },
         fit_columns_on_grid_load=False,
         height_max=720,
     )
-
-    drilldown_map = {int(row.get("transaction_id") or 0): row for row in filtered_rows if int(row.get("transaction_id") or 0) > 0}
-    if not drilldown_map:
-        return
-
-    selected_transaction_id = st.selectbox(
-        "Sale drilldown",
-        options=list(drilldown_map.keys()),
-        format_func=lambda transaction_id: _drilldown_label(
-            drilldown_map[int(transaction_id)],
-            owner_name_by_id,
-            owner_id_key=owner_id_key,
-        ),
-    )
-    selected_row = drilldown_map[int(selected_transaction_id)]
-
-    with st.expander("Realized sale details", expanded=False):
-        left, mid, right, far_right = st.columns(4)
-        left.metric("Gross Revenue", format_isk_eu(selected_row.get("gross_revenue")))
-        mid.metric("Net Revenue", format_isk_eu(selected_row.get("net_revenue")))
-        right.metric("Allocated Cost", format_isk_eu(selected_row.get("allocated_cost")))
-        far_right.metric(
-            "Realized Profit",
-            format_isk_eu(selected_row.get("realized_profit"), missing="Unpriced") if selected_row.get("realized_profit") is not None else "Unpriced",
-        )
-
-        signal_left, signal_right = st.columns(2)
-        with signal_left:
-            st.markdown("**Sale and fee data**")
-            st.write(
-                {
-                    "date": _format_table_datetime(selected_row.get("date")),
-                    "owner_scope": "character",
-                    "quantity": selected_row.get("quantity"),
-                    "unit_price": selected_row.get("unit_price"),
-                    "gross_revenue": selected_row.get("gross_revenue"),
-                    "sales_tax_amount": selected_row.get("sales_tax_amount"),
-                    "other_fees_amount": selected_row.get("other_fees_amount"),
-                    "fee_capture_mode": selected_row.get("fee_capture_mode"),
-                    "confidence": selected_row.get("confidence"),
-                }
-            )
-
-        with signal_right:
-            st.markdown("**Comparison notes**")
-            st.write(
-                {
-                    "fee_capture_mode": selected_row.get("fee_capture_mode"),
-                    "current_margin_definition": "realized_profit / net_revenue",
-                    "broker_fee_note": "Other Fees includes broker fees and, when only estimates are available, estimated order update costs.",
-                }
-            )
-
-        detail_left, detail_right = st.columns(2)
-        with detail_left:
-            st.markdown("**Cost coverage**")
-            st.write(
-                {
-                    "allocated_cost": selected_row.get("allocated_cost"),
-                    "priced_quantity": selected_row.get("priced_quantity"),
-                    "unpriced_quantity": selected_row.get("unpriced_quantity"),
-                    "source_mix": selected_row.get("source_mix") or {},
-                }
-            )
-        with detail_right:
-            st.markdown("**Native ledger details**")
-            st.write(
-                {
-                    "gross_revenue": selected_row.get("gross_revenue"),
-                    "net_revenue": selected_row.get("net_revenue"),
-                    "sales_tax_amount": selected_row.get("sales_tax_amount"),
-                    "other_fees_amount": selected_row.get("other_fees_amount"),
-                }
-            )
-
-        notes = selected_row.get("notes") or []
-        if isinstance(notes, list) and notes:
-            st.markdown("**Notes**")
-            for note in notes:
-                st.write(f"- {note}")
-
-        allocation_details = selected_row.get("allocation_details") or []
-        if isinstance(allocation_details, list) and allocation_details:
-            st.markdown("**FIFO allocation details**")
-            st.dataframe(allocation_details, width="stretch", hide_index=True)

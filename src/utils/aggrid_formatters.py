@@ -125,3 +125,73 @@ def js_icon_cell_renderer(*, JsCode: Any, size_px: int = 24) -> Any:
             }})()
         """
     )
+
+
+def js_flag_text_style(
+    *,
+    JsCode: Any,
+    flag_field: str,
+    align: str | None = None,
+    color: str = "#ef4444",
+    font_weight: int = 600,
+) -> Any:
+    if JsCode is None:
+        return None
+
+    align_value = str(align) if align else ""
+    return JsCode(
+        f"""
+            function(params) {{
+                var baseStyle = {{}};
+                if ('{align_value}') {{
+                    baseStyle.textAlign = '{align_value}';
+                }}
+
+                var data = (params && params.data) ? params.data : null;
+                var isFlagged = Boolean(data && data['{str(flag_field)}']);
+                if (!isFlagged) {{
+                    return baseStyle;
+                }}
+
+                baseStyle.color = '{str(color)}';
+                baseStyle.fontWeight = '{int(font_weight)}';
+                return baseStyle;
+            }}
+        """
+    )
+
+
+def js_category_text_style(
+    *,
+    JsCode: Any,
+    category_field: str = "category",
+    align: str | None = None,
+    income_color: str = "#22c55e",
+    expense_color: str = "#ef4444",
+    font_weight: int = 600,
+) -> Any:
+    if JsCode is None:
+        return None
+
+    align_value = str(align) if align else ""
+    return JsCode(
+        f"""
+            function(params) {{
+                var style = {{}};
+                if ('{align_value}') {{
+                    style.textAlign = '{align_value}';
+                }}
+
+                var row = (params && params.data) ? params.data : null;
+                var category = row ? row['{str(category_field)}'] : null;
+                if (category === 'Income') {{
+                    style.color = '{str(income_color)}';
+                    style.fontWeight = '{int(font_weight)}';
+                }} else if (category === 'Expenses') {{
+                    style.color = '{str(expense_color)}';
+                    style.fontWeight = '{int(font_weight)}';
+                }}
+                return style;
+            }}
+        """
+    )

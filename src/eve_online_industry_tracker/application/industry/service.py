@@ -9,7 +9,15 @@ from typing import Any, Callable, cast
 import uuid
 
 from sqlalchemy import bindparam, text
-from eve_online_industry_tracker.db_models import CharacterAssetsModel, CorporationAssetsModel, NpcCorporations, NpcStations
+from eve_online_industry_tracker.db_models import (
+    Blueprints,
+    CharacterAssetHistoryModel,
+    CharacterAssetsModel,
+    CorporationAssetHistoryModel,
+    CorporationAssetsModel,
+    NpcCorporations,
+    NpcStations,
+)
 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
@@ -1411,6 +1419,217 @@ class IndustryService:
         }
 
     @staticmethod
+    def _portfolio_confidence_penalty(confidence: Any) -> float:
+        normalized = str(confidence or "").strip().lower()
+        if normalized == "high":
+            return 1.0
+        if normalized == "medium":
+            return 0.85
+        if normalized == "low":
+            return 0.65
+        return 0.75
+
+    @classmethod
+    def _owned_input_coverage_fraction(cls, procurement_materials: Any) -> float:
+        if not isinstance(procurement_materials, dict) or not procurement_materials:
+            return 0.0
+        total_quantity = 0
+        owned_quantity = 0
+        for material in procurement_materials.values():
+            if not isinstance(material, dict):
+                continue
+            quantity = max(0, int(material.get("quantity") or 0))
+            if quantity <= 0:
+                continue
+            total_quantity += quantity
+            price_source = str(material.get("price_source") or "").strip().lower()
+            if price_source.startswith("owned_asset"):
+                owned_quantity += quantity
+        if total_quantity <= 0:
+            return 0.0
+        return float(owned_quantity) / float(total_quantity)
+
+    @classmethod
+    def _build_portfolio_candidate(
+        cls,
+        row: dict[str, Any],
+        *,
+        planning_horizon_hours: float,
+    ) -> dict[str, Any]:
+        manufacturing_job = row.get("manufacturing_job") or {}
+        if not isinstance(manufacturing_job, dict):
+            manufacturing_job = {}
+        procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+        if not isinstance(procurement_materials, dict):
+            procurement_materials = {}
+
+        quantity_per_batch = max(0, int(row.get("quantity") or 0))
+        total_cost = cls._as_float(manufacturing_job.get("total_cost"))
+        profit_amount = cls._as_float(row.get("profit_amount"))
+        profit_margin_fraction = cls._as_float(row.get("profit_margin_fraction"))
+        isk_per_hour = cls._as_float(row.get("isk_per_hour"))
+        total_time_seconds = cls._as_float(manufacturing_job.get("time_seconds"))
+        manufacturing_time_seconds = cls._as_float(manufacturing_job.get("manufacturing_time_seconds"))
+        preparation_time_seconds = cls._as_float(manufacturing_job.get("preparation_time_seconds"))
+        region_daily_volume = max(0, int(row.get("region_daily_volume") or 0))
+        region_daily_volume_7d_avg = cls._as_float(row.get("region_daily_volume_7d_avg"))
+        confidence_penalty_factor = cls._portfolio_confidence_penalty(row.get("pricing_confidence"))
+        slot_hours_per_batch = (
+            float(total_time_seconds) / 3600.0
+            if total_time_seconds is not None and total_time_seconds > 0
+            else None
+        )
+        manufacturing_slot_hours_per_batch = (
+            float(manufacturing_time_seconds) / 3600.0
+            if manufacturing_time_seconds is not None and manufacturing_time_seconds > 0
+            else slot_hours_per_batch
+        )
+        preparation_slot_hours_per_batch = (
+            float(preparation_time_seconds) / 3600.0
+            if preparation_time_seconds is not None and preparation_time_seconds > 0
+            else None
+        )
+
+        horizon_days = max(0.0, float(planning_horizon_hours or 0.0)) / 24.0
+        effective_daily_volume = (
+            float(region_daily_volume_7d_avg)
+            if region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg > 0
+            else float(region_daily_volume)
+        )
+        estimated_market_absorption_units = int(math.floor(max(0.0, effective_daily_volume) * horizon_days))
+        max_batches_total = (
+            int(math.floor(float(estimated_market_absorption_units) / float(quantity_per_batch)))
+            if quantity_per_batch > 0 and estimated_market_absorption_units > 0
+            else 0
+        )
+        effective_profit_per_batch = (
+            float(profit_amount) * confidence_penalty_factor
+            if profit_amount is not None
+            else None
+        )
+        effective_isk_per_hour = (
+            float(isk_per_hour) * confidence_penalty_factor
+            if isk_per_hour is not None
+            else None
+        )
+        owned_input_coverage_fraction = cls._owned_input_coverage_fraction(procurement_materials)
+        is_portfolio_candidate = bool(
+            profit_amount is not None
+            and profit_amount > 0
+            and total_cost is not None
+            and total_cost > 0
+            and quantity_per_batch > 0
+            and slot_hours_per_batch is not None
+            and slot_hours_per_batch > 0
+            and max_batches_total > 0
+        )
+
+        return {
+            "overview_row_id": row.get("overview_row_id"),
+            "type_id": int(row.get("type_id") or 0),
+            "type_name": row.get("type_name"),
+            "category_name": row.get("category_name") or row.get("type_category_name"),
+            "meta_group_name": row.get("meta_group_name"),
+            "quantity_per_batch": quantity_per_batch,
+            "profit_amount": profit_amount,
+            "profit_margin_fraction": profit_margin_fraction,
+            "isk_per_hour": isk_per_hour,
+            "net_proceeds": cls._as_float(row.get("net_proceeds")),
+            "cash_outlay_per_batch": total_cost,
+            "material_cost": cls._as_float(manufacturing_job.get("material_cost")),
+            "total_job_cost": cls._as_float(manufacturing_job.get("total_job_cost")),
+            "slot_hours_per_batch": slot_hours_per_batch,
+            "manufacturing_slot_hours_per_batch": manufacturing_slot_hours_per_batch,
+            "preparation_slot_hours_per_batch": preparation_slot_hours_per_batch,
+            "time_seconds": total_time_seconds,
+            "manufacturing_time_seconds": manufacturing_time_seconds,
+            "preparation_time_seconds": preparation_time_seconds,
+            "region_daily_volume": region_daily_volume,
+            "region_daily_volume_7d_avg": region_daily_volume_7d_avg,
+            "hub_buy_liquidity": int(row.get("hub_buy_liquidity") or 0),
+            "hub_sell_liquidity": int(row.get("hub_sell_liquidity") or 0),
+            "pricing_confidence": row.get("pricing_confidence"),
+            "pricing_confidence_reasons": row.get("pricing_confidence_reasons") or [],
+            "market_price_age_minutes": cls._as_float(row.get("market_price_age_minutes")),
+            "estimated_market_absorption_units": estimated_market_absorption_units,
+            "max_batches_total": max_batches_total,
+            "blueprint_source_kind": manufacturing_job.get("blueprint_source_kind"),
+            "owned_input_coverage_fraction": owned_input_coverage_fraction,
+            "confidence_penalty_factor": confidence_penalty_factor,
+            "effective_profit_per_batch": effective_profit_per_batch,
+            "effective_isk_per_hour": effective_isk_per_hour,
+            "is_portfolio_candidate": is_portfolio_candidate,
+        }
+
+    @classmethod
+    def _build_portfolio_candidates(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        planning_horizon_hours: float,
+    ) -> list[dict[str, Any]]:
+        candidates = [
+            cls._build_portfolio_candidate(row, planning_horizon_hours=planning_horizon_hours)
+            for row in rows
+            if isinstance(row, dict)
+        ]
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                float(candidate.get("effective_profit_per_batch") or 0.0),
+                float(candidate.get("effective_isk_per_hour") or 0.0),
+            ),
+            reverse=True,
+        )
+
+    def industry_manufacturing_portfolio_candidates_payload(
+        self,
+        *,
+        force_refresh: bool = False,
+        maximize_bp_runs: bool = False,
+        group_identical_bpcs: bool = True,
+        build_from_bpc: bool = True,
+        have_blueprint_source_only: bool = True,
+        include_reactions: bool = False,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
+        product_price_side: str = "sell",
+        industry_profile_id: int | None = None,
+        owned_blueprints_scope: str = "all_characters",
+        character_id: int | None = None,
+        planning_horizon_hours: float = 24.0,
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        overview_payload = self.industry_manufacturing_product_overview_payload(
+            force_refresh=force_refresh,
+            maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
+            build_from_bpc=build_from_bpc,
+            have_blueprint_source_only=have_blueprint_source_only,
+            include_reactions=include_reactions,
+            market_hub=market_hub,
+            material_price_side=material_price_side,
+            product_price_side=product_price_side,
+            industry_profile_id=industry_profile_id,
+            owned_blueprints_scope=owned_blueprints_scope,
+            character_id=character_id,
+            progress_callback=progress_callback,
+        )
+        rows = cast(list[dict[str, Any]], overview_payload.get("rows") or [])
+        candidates = self._build_portfolio_candidates(rows, planning_horizon_hours=planning_horizon_hours)
+        return {
+            "rows": rows,
+            "candidates": candidates,
+            "pricing_batch": overview_payload.get("pricing_batch") or {},
+            "summary": {
+                "row_count": len(rows),
+                "candidate_count": len(candidates),
+                "portfolio_candidate_count": sum(1 for candidate in candidates if bool(candidate.get("is_portfolio_candidate"))),
+                "planning_horizon_hours": float(planning_horizon_hours or 0.0),
+            },
+        }
+
+    @staticmethod
     def _normalize_fraction(value: Any) -> float:
         try:
             normalized = abs(float(value or 0.0))
@@ -1908,6 +2127,11 @@ class IndustryService:
                     "quantity": quantity,
                     "unit_price": unit_price,
                     "price_source": price_source,
+                    "sourcing_strategy": recommendation_action,
+                    "owned_cost_basis_known": (preferred_owned_unit_cost is not None),
+                    "uses_unknown_owned_cost_basis": bool(
+                        recommendation_action == "take" and preferred_owned_unit_cost is None
+                    ),
                     "line_total": line_total,
                 }
             )
@@ -3727,6 +3951,9 @@ class IndustryService:
                         "quantity": owned_quantity_to_take,
                         "unit_price": take_unit_price,
                         "price_source": take_price_source,
+                        "sourcing_strategy": "take",
+                        "owned_cost_basis_known": (preferred_owned_unit_cost is not None),
+                        "uses_unknown_owned_cost_basis": bool(preferred_owned_unit_cost is None),
                         "line_total": line_total,
                     }
                 )
@@ -3774,6 +4001,9 @@ class IndustryService:
                         "quantity": remaining_material_quantity,
                         "unit_price": buy_unit_price,
                         "price_source": buy_price_source,
+                        "sourcing_strategy": "buy",
+                        "owned_cost_basis_known": False,
+                        "uses_unknown_owned_cost_basis": False,
                         "line_total": line_total,
                     }
                 )
@@ -4144,6 +4374,200 @@ class IndustryService:
             ) or None,
         }
 
+    @staticmethod
+    def _latest_history_rows_by_item(rows: list[Any]) -> list[Any]:
+        latest_by_item_id: dict[int, Any] = {}
+        for row in sorted(
+            rows,
+            key=lambda value: (
+                str(getattr(value, "observed_at", "") or ""),
+                int(getattr(value, "id", 0) or 0),
+            ),
+            reverse=True,
+        ):
+            try:
+                item_id = int(getattr(row, "item_id", 0) or 0)
+            except Exception:
+                item_id = 0
+            if item_id <= 0 or item_id in latest_by_item_id:
+                continue
+            latest_by_item_id[item_id] = row
+        return list(latest_by_item_id.values())
+
+    @staticmethod
+    def _materialize_historical_blueprint_asset(
+        row: CharacterAssetHistoryModel | CorporationAssetHistoryModel,
+        *,
+        owner_kind: str,
+    ) -> CharacterAssetsModel | CorporationAssetsModel | None:
+        try:
+            item_id = int(getattr(row, "item_id", 0) or 0)
+            type_id = int(getattr(row, "type_id", 0) or 0)
+        except Exception:
+            return None
+        if item_id <= 0 or type_id <= 0:
+            return None
+
+        payload = {
+            "item_id": item_id,
+            "type_id": type_id,
+            "type_name": getattr(row, "type_name", None),
+            "type_category_name": "Blueprint",
+            "location_id": int(getattr(row, "location_id", 0) or 0),
+            "location_type": getattr(row, "location_type", None),
+            "location_flag": getattr(row, "location_flag", None),
+            "top_location_id": int(getattr(row, "location_id", 0) or 0) or None,
+            "is_singleton": bool(getattr(row, "is_singleton", True) if getattr(row, "is_singleton", None) is not None else True),
+            "is_blueprint_copy": bool(getattr(row, "is_blueprint_copy", False)),
+            "blueprint_runs": getattr(row, "blueprint_runs", None),
+            "blueprint_time_efficiency": getattr(row, "blueprint_time_efficiency", None),
+            "blueprint_material_efficiency": getattr(row, "blueprint_material_efficiency", None),
+            "quantity": int(getattr(row, "quantity", 1) or 1),
+            "is_container": False,
+            "is_asset_safety_wrap": False,
+            "is_ship": False,
+            "is_office_folder": False,
+            "acquisition_source": getattr(row, "acquisition_source", None),
+            "acquisition_unit_cost": getattr(row, "acquisition_unit_cost", None),
+            "acquisition_total_cost": getattr(row, "acquisition_total_cost", None),
+            "acquisition_reference_type": getattr(row, "acquisition_reference_type", None),
+            "acquisition_reference_id": getattr(row, "acquisition_reference_id", None),
+            "acquisition_date": getattr(row, "acquisition_date", None),
+        }
+
+        if owner_kind == "character":
+            payload["character_id"] = int(getattr(row, "character_id", 0) or 0)
+            return CharacterAssetsModel(**payload)
+
+        payload["corporation_id"] = int(getattr(row, "corporation_id", 0) or 0)
+        return CorporationAssetsModel(**payload)
+
+    def _load_historical_blueprint_assets(
+        self,
+        *,
+        app_session: Any,
+        sde_session: Any,
+        character_ids: list[int],
+        corporation_ids: list[int],
+        current_item_ids: set[int],
+    ) -> tuple[list[CharacterAssetsModel], list[CorporationAssetsModel]]:
+        candidate_character_rows: list[CharacterAssetHistoryModel] = []
+        candidate_corporation_rows: list[CorporationAssetHistoryModel] = []
+
+        normalized_character_ids = sorted({int(owner_id) for owner_id in character_ids if int(owner_id) > 0})
+        normalized_corporation_ids = sorted({int(owner_id) for owner_id in corporation_ids if int(owner_id) > 0})
+
+        if normalized_character_ids:
+            candidate_character_rows = (
+                app_session.query(CharacterAssetHistoryModel)
+                .filter(CharacterAssetHistoryModel.character_id.in_(normalized_character_ids))
+                .all()
+            )
+        if normalized_corporation_ids:
+            candidate_corporation_rows = (
+                app_session.query(CorporationAssetHistoryModel)
+                .filter(CorporationAssetHistoryModel.corporation_id.in_(normalized_corporation_ids))
+                .all()
+            )
+
+        latest_character_rows = self._latest_history_rows_by_item(candidate_character_rows)
+        latest_corporation_rows = self._latest_history_rows_by_item(candidate_corporation_rows)
+        candidate_type_ids = sorted(
+            {
+                int(getattr(row, "type_id", 0) or 0)
+                for row in [*latest_character_rows, *latest_corporation_rows]
+                if int(getattr(row, "type_id", 0) or 0) > 0
+            }
+        )
+        if not candidate_type_ids:
+            return [], []
+
+        blueprint_type_ids = {
+            int(blueprint_type_id)
+            for (blueprint_type_id,) in (
+                sde_session.query(Blueprints.blueprintTypeID)
+                .filter(Blueprints.blueprintTypeID.in_(candidate_type_ids))
+                .all()
+            )
+        }
+        if not blueprint_type_ids:
+            return [], []
+
+        historical_character_assets: list[CharacterAssetsModel] = []
+        for row in latest_character_rows:
+            item_id = int(getattr(row, "item_id", 0) or 0)
+            type_id = int(getattr(row, "type_id", 0) or 0)
+            if item_id <= 0 or type_id not in blueprint_type_ids or item_id in current_item_ids:
+                continue
+            asset = self._materialize_historical_blueprint_asset(row, owner_kind="character")
+            if isinstance(asset, CharacterAssetsModel):
+                historical_character_assets.append(asset)
+
+        historical_corporation_assets: list[CorporationAssetsModel] = []
+        for row in latest_corporation_rows:
+            item_id = int(getattr(row, "item_id", 0) or 0)
+            type_id = int(getattr(row, "type_id", 0) or 0)
+            if item_id <= 0 or type_id not in blueprint_type_ids or item_id in current_item_ids:
+                continue
+            asset = self._materialize_historical_blueprint_asset(row, owner_kind="corporation")
+            if isinstance(asset, CorporationAssetsModel):
+                historical_corporation_assets.append(asset)
+
+        return historical_character_assets, historical_corporation_assets
+
+    def _load_historical_item_unit_costs(
+        self,
+        *,
+        app_session: Any,
+        character_ids: list[int],
+        corporation_ids: list[int],
+        type_ids: list[int],
+    ) -> dict[int, float]:
+        normalized_type_ids = sorted({int(type_id) for type_id in type_ids if int(type_id) > 0})
+        if not normalized_type_ids:
+            return {}
+
+        out: dict[int, float] = {}
+
+        def consume_rows(rows: list[Any]) -> None:
+            for row in sorted(
+                rows,
+                key=lambda value: (
+                    str(getattr(value, "observed_at", "") or ""),
+                    int(getattr(value, "id", 0) or 0),
+                ),
+                reverse=True,
+            ):
+                type_id = int(getattr(row, "type_id", 0) or 0)
+                if type_id <= 0 or type_id in out:
+                    continue
+                unit_cost = self._as_float(getattr(row, "acquisition_unit_cost", None))
+                if unit_cost is None or unit_cost <= 0:
+                    continue
+                out[type_id] = float(unit_cost)
+
+        normalized_character_ids = sorted({int(owner_id) for owner_id in character_ids if int(owner_id) > 0})
+        if normalized_character_ids:
+            consume_rows(
+                app_session.query(CharacterAssetHistoryModel)
+                .filter(CharacterAssetHistoryModel.character_id.in_(normalized_character_ids))
+                .filter(CharacterAssetHistoryModel.type_id.in_(normalized_type_ids))
+                .filter(CharacterAssetHistoryModel.acquisition_unit_cost.isnot(None))
+                .all()
+            )
+
+        normalized_corporation_ids = sorted({int(owner_id) for owner_id in corporation_ids if int(owner_id) > 0})
+        if normalized_corporation_ids:
+            consume_rows(
+                app_session.query(CorporationAssetHistoryModel)
+                .filter(CorporationAssetHistoryModel.corporation_id.in_(normalized_corporation_ids))
+                .filter(CorporationAssetHistoryModel.type_id.in_(normalized_type_ids))
+                .filter(CorporationAssetHistoryModel.acquisition_unit_cost.isnot(None))
+                .all()
+            )
+
+        return out
+
     def _get_owned_blueprint_assets(
         self,
         *,
@@ -4156,6 +4580,7 @@ class IndustryService:
         dict[int, str],
     ]:
         session: Any = self._sessions.app_session()
+        sde_session: Any = self._sessions.sde_session()
         try:
             characters = self._state.char_manager.get_characters() or []
             character_ids: list[int] = []
@@ -4238,6 +4663,14 @@ class IndustryService:
                 except Exception:
                     selected_character_id = 0
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
+                historical_character_assets, _ = self._load_historical_blueprint_assets(
+                    app_session=session,
+                    sde_session=sde_session,
+                    character_ids=[selected_character_id],
+                    corporation_ids=[],
+                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
+                )
+                character_assets.extend(historical_character_assets)
                 top_location_name_by_id = resolve_top_location_name_map(character_assets)
                 return (
                     character_assets,
@@ -4258,6 +4691,18 @@ class IndustryService:
                     selected_corporation_id = 0
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
+                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
+                    app_session=session,
+                    sde_session=sde_session,
+                    character_ids=[selected_character_id],
+                    corporation_ids=[selected_corporation_id],
+                    current_item_ids={
+                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
+                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
+                    },
+                )
+                character_assets.extend(historical_character_assets)
+                corporation_assets.extend(historical_corporation_assets)
                 top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
                 return (
                     character_assets,
@@ -4272,6 +4717,14 @@ class IndustryService:
                 except Exception:
                     selected_corporation_id = 0
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
+                _, historical_corporation_assets = self._load_historical_blueprint_assets(
+                    app_session=session,
+                    sde_session=sde_session,
+                    character_ids=[],
+                    corporation_ids=[selected_corporation_id],
+                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets},
+                )
+                corporation_assets.extend(historical_corporation_assets)
                 top_location_name_by_id = resolve_top_location_name_map(corporation_assets)
                 return (
                     [],
@@ -4282,6 +4735,14 @@ class IndustryService:
                 )
             if normalized_scope == "all_characters":
                 character_assets = blueprints_repo.get_character_blueprints(session)
+                historical_character_assets, _ = self._load_historical_blueprint_assets(
+                    app_session=session,
+                    sde_session=sde_session,
+                    character_ids=character_ids,
+                    corporation_ids=[],
+                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
+                )
+                character_assets.extend(historical_character_assets)
                 top_location_name_by_id = resolve_top_location_name_map(character_assets)
                 return (
                     character_assets,
@@ -4293,6 +4754,18 @@ class IndustryService:
             if normalized_scope == "character_and_corporations":
                 character_assets = blueprints_repo.get_character_blueprints(session)
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, corporation_ids)
+                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
+                    app_session=session,
+                    sde_session=sde_session,
+                    character_ids=character_ids,
+                    corporation_ids=corporation_ids,
+                    current_item_ids={
+                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
+                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
+                    },
+                )
+                character_assets.extend(historical_character_assets)
+                corporation_assets.extend(historical_corporation_assets)
                 top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
                 return (
                     character_assets,
@@ -4303,6 +4776,14 @@ class IndustryService:
                 )
             if normalized_scope == "all_corporations":
                 corporation_assets = blueprints_repo.get_corporation_blueprints(session)
+                _, historical_corporation_assets = self._load_historical_blueprint_assets(
+                    app_session=session,
+                    sde_session=sde_session,
+                    character_ids=[],
+                    corporation_ids=corporation_ids,
+                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets},
+                )
+                corporation_assets.extend(historical_corporation_assets)
                 top_location_name_by_id = resolve_top_location_name_map(corporation_assets)
                 return (
                     [],
@@ -4314,6 +4795,18 @@ class IndustryService:
             if normalized_scope == "all":
                 character_assets = blueprints_repo.get_character_blueprints(session)
                 corporation_assets = blueprints_repo.get_corporation_blueprints(session)
+                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
+                    app_session=session,
+                    sde_session=sde_session,
+                    character_ids=character_ids,
+                    corporation_ids=corporation_ids,
+                    current_item_ids={
+                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
+                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
+                    },
+                )
+                character_assets.extend(historical_character_assets)
+                corporation_assets.extend(historical_corporation_assets)
                 top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
                 return (
                     character_assets,
@@ -4323,6 +4816,14 @@ class IndustryService:
                     top_location_name_by_id,
                 )
             character_assets = blueprints_repo.get_character_blueprints(session)
+            historical_character_assets, _ = self._load_historical_blueprint_assets(
+                app_session=session,
+                sde_session=sde_session,
+                character_ids=character_ids,
+                corporation_ids=[],
+                current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
+            )
+            character_assets.extend(historical_character_assets)
             top_location_name_by_id = resolve_top_location_name_map(character_assets)
             return (
                 character_assets,
@@ -4334,6 +4835,10 @@ class IndustryService:
         finally:
             try:
                 session.close()
+            except Exception:
+                pass
+            try:
+                sde_session.close()
             except Exception:
                 pass
 
@@ -4425,8 +4930,10 @@ class IndustryService:
                 character_assets = query_character_assets(character_ids)
 
             quantity_by_type_id: dict[int, int] = {}
-            cost_total_by_type_id: dict[int, float] = {}
-            cost_quantity_by_type_id: dict[int, int] = {}
+            exact_cost_total_by_type_id: dict[int, float] = {}
+            exact_cost_quantity_by_type_id: dict[int, int] = {}
+            fallback_cost_total_by_type_id: dict[int, float] = {}
+            fallback_cost_quantity_by_type_id: dict[int, int] = {}
             for asset in [*character_assets, *corporation_assets]:
                 try:
                     type_id = int(asset.type_id or 0)
@@ -4443,25 +4950,51 @@ class IndustryService:
                 quantity_by_type_id[type_id] = int(quantity_by_type_id.get(type_id, 0)) + quantity
 
                 unit_cost = self._as_float(getattr(asset, "acquisition_unit_cost", None))
-                if unit_cost is None or unit_cost <= 0:
-                    unit_cost = self._as_float(getattr(asset, "type_average_price", None))
-                if unit_cost is None or unit_cost <= 0:
-                    unit_cost = self._as_float(getattr(asset, "type_adjusted_price", None))
-                if unit_cost is None or unit_cost <= 0:
+                if unit_cost is not None and unit_cost > 0:
+                    exact_cost_total_by_type_id[type_id] = float(exact_cost_total_by_type_id.get(type_id, 0.0)) + (float(unit_cost) * quantity)
+                    exact_cost_quantity_by_type_id[type_id] = int(exact_cost_quantity_by_type_id.get(type_id, 0)) + quantity
                     continue
-                cost_total_by_type_id[type_id] = float(cost_total_by_type_id.get(type_id, 0.0)) + (float(unit_cost) * quantity)
-                cost_quantity_by_type_id[type_id] = int(cost_quantity_by_type_id.get(type_id, 0)) + quantity
+
+                fallback_unit_cost = self._as_float(getattr(asset, "type_average_price", None))
+                if fallback_unit_cost is None or fallback_unit_cost <= 0:
+                    fallback_unit_cost = self._as_float(getattr(asset, "type_adjusted_price", None))
+                if fallback_unit_cost is None or fallback_unit_cost <= 0:
+                    continue
+                fallback_cost_total_by_type_id[type_id] = float(fallback_cost_total_by_type_id.get(type_id, 0.0)) + (float(fallback_unit_cost) * quantity)
+                fallback_cost_quantity_by_type_id[type_id] = int(fallback_cost_quantity_by_type_id.get(type_id, 0)) + quantity
 
             unit_cost_by_type_id: dict[int, float] = {}
-            for type_id, total_cost in cost_total_by_type_id.items():
-                quantity = int(cost_quantity_by_type_id.get(type_id, 0))
+            for type_id, total_cost in exact_cost_total_by_type_id.items():
+                quantity = int(exact_cost_quantity_by_type_id.get(type_id, 0))
                 if quantity > 0:
                     unit_cost_by_type_id[type_id] = float(total_cost) / float(quantity)
+
+            historical_cost_by_type_id = self._load_historical_item_unit_costs(
+                app_session=session,
+                character_ids=[asset.character_id for asset in character_assets if getattr(asset, "character_id", None) is not None],
+                corporation_ids=[asset.corporation_id for asset in corporation_assets if getattr(asset, "corporation_id", None) is not None],
+                type_ids=list(quantity_by_type_id.keys()),
+            )
+            for type_id, quantity in quantity_by_type_id.items():
+                if type_id in unit_cost_by_type_id:
+                    continue
+                historical_unit_cost = self._as_float(historical_cost_by_type_id.get(type_id))
+                if historical_unit_cost is not None and historical_unit_cost > 0:
+                    unit_cost_by_type_id[type_id] = float(historical_unit_cost)
+                    continue
+                fallback_total_cost = float(fallback_cost_total_by_type_id.get(type_id, 0.0))
+                fallback_quantity = int(fallback_cost_quantity_by_type_id.get(type_id, 0))
+                if fallback_quantity > 0:
+                    unit_cost_by_type_id[type_id] = float(fallback_total_cost) / float(fallback_quantity)
 
             return quantity_by_type_id, unit_cost_by_type_id
         finally:
             try:
                 session.close()
+            except Exception:
+                pass
+            try:
+                sde_session.close()
             except Exception:
                 pass
 
@@ -4520,10 +5053,25 @@ class IndustryService:
                 *[int(type_id) for type_id in reaction_row_by_product_type_id.keys()],
             }
         )
+        material_price_type_ids = sorted(
+            {
+                int(entry.get("type_id") or 0)
+                for row in blueprint_rows
+                if isinstance(row, dict)
+                for job_name in ["manufacturing_job", "reaction_job", "invention_job"]
+                for entry in (((row.get(job_name) or {}) if isinstance(row.get(job_name), dict) else {}).get("materials") or [])
+                if isinstance(entry, dict) and int(entry.get("type_id") or 0) > 0
+            }
+        )
         product_sell_price_map = pricing_service.get_type_price_map(
             type_ids=product_sell_price_type_ids,
             hub=normalized_market_hub,
             side=normalized_product_price_side,
+        )
+        material_price_map = pricing_service.get_type_price_map(
+            type_ids=material_price_type_ids,
+            hub=normalized_market_hub,
+            side=normalized_material_price_side,
         )
         blueprint_copy_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
         blueprint_original_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
@@ -5264,7 +5812,7 @@ class IndustryService:
                                 else dict(available_owned_item_quantity_by_type_id)
                             ),
                             owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
-                            sell_price_map=product_sell_price_map,
+                            sell_price_map=material_price_map,
                             adjusted_price_map=adjusted_market_price_map,
                         )
                         activity_breakdown["invention"] = {
@@ -5577,7 +6125,7 @@ class IndustryService:
                         selected_character_modifiers=selected_character_modifiers,
                         character_skill_levels_by_name=character_skill_levels_by_name,
                         adjusted_market_price_map=adjusted_market_price_map,
-                        sell_price_map=product_sell_price_map,
+                        sell_price_map=material_price_map,
                         blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
                         available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
                         available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,

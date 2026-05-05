@@ -27,8 +27,12 @@ class CharactersService:
     def get_wallet_balances(self) -> Any:
         return self._state.char_manager.get_wallet_balances()
 
-    def get_assets(self) -> Any:
-        return self._state.char_manager.get_assets()
+    def get_assets(
+        self,
+        *,
+        character_id: int | None = None,
+    ) -> Any:
+        return self._state.char_manager.get_assets(character_id=character_id)
 
     def get_realized_profit_ledger(
         self,
@@ -36,6 +40,9 @@ class CharactersService:
         refresh: bool = False,
         character_id: int | None = None,
     ) -> dict[str, Any]:
+        if refresh:
+            self._state.char_manager.refresh_realized_profit_inputs(character_id=character_id)
+
         market_prices = self._state.esi_service.get_market_prices()
         ledger_service = CharacterRealizedProfitLedgerService(
             app_session=self._state.db_app.session,

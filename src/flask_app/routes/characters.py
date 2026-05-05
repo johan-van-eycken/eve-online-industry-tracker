@@ -42,7 +42,9 @@ def characters_get_wallet_balances():
 def characters_get_assets():
     require_ready(get_state())
     svc = CharactersService(state=get_state())
-    return ok(data=svc.get_assets())
+    character_id_raw = (request.args.get("character_id") or "").strip()
+    character_id = int(character_id_raw) if character_id_raw.isdigit() else None
+    return ok(data=svc.get_assets(character_id=character_id))
 
 
 @characters_bp.get("/characters/market_orders")

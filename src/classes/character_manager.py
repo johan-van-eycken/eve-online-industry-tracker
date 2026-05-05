@@ -241,3 +241,16 @@ class CharacterManager:
             logging.error(error_message)
             raise Exception(error_message)
 
+    def refresh_industry_jobs(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
+        try:
+            self._refresh_batch("refresh_industry_jobs", character_name, character_id)
+        except Exception as e:
+            error_message = f"Failed to refresh industry jobs: {str(e)}"
+            logging.error(error_message)
+            raise Exception(error_message)
+
+    def refresh_realized_profit_inputs(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
+        self.refresh_wallet_journal(character_name=character_name, character_id=character_id)
+        self.refresh_wallet_transactions(character_name=character_name, character_id=character_id)
+        self.refresh_industry_jobs(character_name=character_name, character_id=character_id)
+
