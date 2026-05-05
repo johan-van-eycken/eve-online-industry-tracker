@@ -15,8 +15,12 @@ class CorporationsService:
     def list_corporations(self) -> Any:
         return self._state.corp_manager.get_corporations()
 
-    def list_assets(self) -> Any:
-        return self._state.corp_manager.get_assets()
+    def list_assets(
+        self,
+        *,
+        corporation_id: int | None = None,
+    ) -> Any:
+        return self._state.corp_manager.get_assets(corporation_id=corporation_id)
 
     def get_realized_profit_ledger(
         self,
@@ -24,6 +28,9 @@ class CorporationsService:
         refresh: bool = False,
         corporation_id: int | None = None,
     ) -> dict[str, Any]:
+        if refresh:
+            self._state.corp_manager.refresh_realized_profit_inputs(corporation_id=corporation_id)
+
         market_prices = self._state.esi_service.get_market_prices()
         ledger_service = CorporationRealizedProfitLedgerService(
             app_session=self._state.db_app.session,

@@ -23,7 +23,9 @@ def corporations():
 def corporations_assets():
     require_ready(get_state())
     svc = CorporationsService(state=get_state())
-    return ok(data=svc.list_assets())
+    corporation_id_raw = (request.args.get("corporation_id") or "").strip()
+    corporation_id = int(corporation_id_raw) if corporation_id_raw.isdigit() else None
+    return ok(data=svc.list_assets(corporation_id=corporation_id))
 
 
 @corporations_bp.get("/corporations/realized_profit")

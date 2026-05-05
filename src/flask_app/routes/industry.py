@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from flask import Blueprint, request
 
+from eve_online_industry_tracker.application.industry.portfolio_service import IndustryPortfolioService
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from flask_app.bootstrap import require_ready, require_sde_ready
 from flask_app.deps import get_state
@@ -155,6 +156,131 @@ def industry_products_refresh_status(job_id: str):
     require_ready(get_state())
     svc = IndustryService(state=get_state())
     return ok(data=svc.industry_manufacturing_product_overview_refresh_status(job_id=job_id))
+
+
+@industry_bp.get("/industry_products/<int:character_id>/portfolio_candidates")
+def industry_portfolio_candidates(character_id: int):
+    require_ready(get_state())
+    require_sde_ready(get_state())
+    maximize_bp_runs_raw = (request.args.get("maximize_bp_runs") or "0").strip().lower()
+    maximize_bp_runs = maximize_bp_runs_raw in {"1", "true", "yes", "y", "on"}
+    group_identical_bpcs_raw = (request.args.get("group_identical_bpcs") or "1").strip().lower()
+    group_identical_bpcs = group_identical_bpcs_raw in {"1", "true", "yes", "y", "on"}
+    build_from_bpc_raw = (request.args.get("build_from_bpc") or "1").strip().lower()
+    build_from_bpc = build_from_bpc_raw in {"1", "true", "yes", "y", "on"}
+    have_blueprint_source_only_raw = (request.args.get("have_blueprint_source_only") or "1").strip().lower()
+    have_blueprint_source_only = have_blueprint_source_only_raw in {"1", "true", "yes", "y", "on"}
+    include_reactions_raw = (request.args.get("include_reactions") or "0").strip().lower()
+    include_reactions = include_reactions_raw in {"1", "true", "yes", "y", "on"}
+    market_hub = str(request.args.get("market_hub") or "jita").strip().lower() or "jita"
+    material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
+    product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
+    planning_horizon_hours_raw = (request.args.get("planning_horizon_hours") or "24").strip()
+    try:
+        planning_horizon_hours = float(planning_horizon_hours_raw or 24.0)
+    except Exception:
+        planning_horizon_hours = 24.0
+    industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
+    try:
+        industry_profile_id = int(industry_profile_id_raw) if industry_profile_id_raw else None
+    except Exception:
+        industry_profile_id = None
+    if industry_profile_id is not None and industry_profile_id <= 0:
+        industry_profile_id = None
+    owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
+    svc = IndustryService(state=get_state())
+    payload = svc.industry_manufacturing_portfolio_candidates_payload(
+        maximize_bp_runs=maximize_bp_runs,
+        group_identical_bpcs=group_identical_bpcs,
+        build_from_bpc=build_from_bpc,
+        have_blueprint_source_only=have_blueprint_source_only,
+        include_reactions=include_reactions,
+        market_hub=market_hub,
+        material_price_side=material_price_side,
+        product_price_side=product_price_side,
+        industry_profile_id=industry_profile_id,
+        owned_blueprints_scope=owned_blueprints_scope,
+        character_id=int(character_id),
+        planning_horizon_hours=planning_horizon_hours,
+    )
+    return ok(
+        data=payload.get("candidates") or [],
+        meta={
+            "summary": payload.get("summary") or {},
+            "pricing_batch": payload.get("pricing_batch") or {},
+        },
+    )
+
+
+@industry_bp.post("/industry_products/<int:character_id>/portfolio_plan")
+def industry_portfolio_plan(character_id: int):
+    require_ready(get_state())
+    require_sde_ready(get_state())
+    payload = request.get_json(silent=True) or {}
+    maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
+    group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
+    build_from_bpc = bool(payload.get("build_from_bpc", True))
+    have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
+    include_reactions = bool(payload.get("include_reactions", False))
+    market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
+    material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
+    product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
+    owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
+    raw_industry_profile_id = payload.get("industry_profile_id")
+    try:
+        industry_profile_id = int(raw_industry_profile_id) if raw_industry_profile_id is not None else None
+    except Exception:
+        industry_profile_id = None
+    if industry_profile_id is not None and industry_profile_id <= 0:
+        industry_profile_id = None
+    try:
+        planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
+    except Exception:
+        planning_horizon_hours = 24.0
+    try:
+        capital_limit_isk = float(payload.get("capital_limit_isk") or 0.0)
+    except Exception:
+        capital_limit_isk = 0.0
+    try:
+        manufacturing_slots_available = int(payload.get("manufacturing_slots_available") or 0)
+    except Exception:
+        manufacturing_slots_available = 0
+
+    svc = IndustryService(state=get_state())
+    candidate_payload = svc.industry_manufacturing_portfolio_candidates_payload(
+        maximize_bp_runs=maximize_bp_runs,
+        group_identical_bpcs=group_identical_bpcs,
+        build_from_bpc=build_from_bpc,
+        have_blueprint_source_only=have_blueprint_source_only,
+        include_reactions=include_reactions,
+        market_hub=market_hub,
+        material_price_side=material_price_side,
+        product_price_side=product_price_side,
+        industry_profile_id=industry_profile_id,
+        owned_blueprints_scope=owned_blueprints_scope,
+        character_id=int(character_id),
+        planning_horizon_hours=planning_horizon_hours,
+    )
+    planner = IndustryPortfolioService()
+    plan = planner.optimize_manufacturing_portfolio(
+        candidates=list(candidate_payload.get("candidates") or []),
+        capital_limit_isk=capital_limit_isk,
+        manufacturing_slots_available=manufacturing_slots_available,
+        planning_horizon_hours=planning_horizon_hours,
+        objective=str(payload.get("objective") or "balanced"),
+        positive_profit_only=bool(payload.get("positive_profit_only", True)),
+        min_margin_pct=float(payload.get("min_margin_pct") or 0.0),
+        min_isk_per_hour=float(payload.get("min_isk_per_hour") or 0.0),
+        min_region_daily_volume=int(payload.get("min_region_daily_volume") or 0),
+        minimum_pricing_confidence=str(payload.get("minimum_pricing_confidence") or "low"),
+    )
+    return ok(
+        data={
+            **plan,
+            "summary": candidate_payload.get("summary") or {},
+            "pricing_batch": candidate_payload.get("pricing_batch") or {},
+        }
+    )
 
 
 @industry_bp.get("/industry_job_manager/status")

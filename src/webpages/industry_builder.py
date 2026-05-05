@@ -15,11 +15,13 @@ from utils.formatters import format_duration
 from utils.industry_builder_api import (
     clear_industry_builder_caches,
     fetch_job_manager_status,
+    fetch_portfolio_plan,
     fetch_product_overview_refresh_status,
     fetch_solar_system_security_map,
     start_product_overview_refresh,
 )
 from utils.industry_builder_page import (
+    current_overview_request_params,
     default_character_id,
     ensure_overview_refresh_state,
     ensure_selection_state,
@@ -644,6 +646,54 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 st.dataframe(activity_rows, width="stretch", hide_index=True)
 
 
+def _build_unknown_opening_stock_rows(filtered_overview_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    audit_rows: list[dict[str, Any]] = []
+    for row in filtered_overview_rows:
+        if not isinstance(row, dict):
+            continue
+        manufacturing_job = cast(dict[str, Any], row.get("manufacturing_job") or {})
+        procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+        if not isinstance(procurement_materials, dict):
+            continue
+        for material in procurement_materials.values():
+            if not isinstance(material, dict):
+                continue
+            if not bool(material.get("uses_unknown_owned_cost_basis")):
+                continue
+            audit_rows.append(
+                {
+                    "Product": str(row.get("type_name") or row.get("type_id") or "Unknown"),
+                    "Material": str(material.get("type_name") or material.get("type_id") or "Unknown"),
+                    "Qty": int(material.get("quantity") or 0),
+                    "Fallback Unit Price": material.get("unit_price"),
+                    "Fallback Line Total": material.get("line_total"),
+                    "Fallback Source": material.get("price_source"),
+                    "Profit": row.get("profit_amount"),
+                    "Confidence": row.get("pricing_confidence"),
+                    "Overview Row Id": str(row.get("overview_row_id") or ""),
+                }
+            )
+    return sorted(audit_rows, key=lambda item: float(item.get("Fallback Line Total") or 0.0), reverse=True)
+
+
+def _render_unknown_opening_stock_audit(filtered_overview_rows: list[dict[str, Any]]) -> None:
+    audit_rows = _build_unknown_opening_stock_rows(filtered_overview_rows)
+    with st.expander("Unknown opening stock audit", expanded=False):
+        if not audit_rows:
+            st.caption("No current overview rows are taking owned inventory with missing cost basis.")
+            return
+        total_line_value = sum(float(row.get("Fallback Line Total") or 0.0) for row in audit_rows)
+        unique_products = len({str(row.get("Overview Row Id") or "") for row in audit_rows})
+        metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
+        metric_col_1.metric("Audit Rows", len(audit_rows))
+        metric_col_2.metric("Affected Products", unique_products)
+        metric_col_3.metric("Fallback Value", f"{total_line_value:,.2f} ISK")
+        st.caption(
+            "These rows consumed owned inventory, but no owned acquisition cost was available, so job costing fell back to market pricing for those units."
+        )
+        st.dataframe(audit_rows, width="stretch", hide_index=True)
+
+
 def _ensure_initial_overview_refresh_started(
     *,
     default_character_id_value: int,
@@ -939,6 +989,121 @@ def _render_debug_panel(filtered_overview_rows: list[dict[str, Any]]) -> None:
             st.write({})
 
 
+def _render_portfolio_planner(
+    *,
+    default_character_id_value: int,
+    default_owned_blueprint_scope: str,
+) -> None:
+    planner_defaults = {
+        "industry_builder_portfolio_capital_limit_isk": 2_000_000_000.0,
+        "industry_builder_portfolio_slots_available": 10,
+        "industry_builder_portfolio_horizon_hours": 24.0,
+        "industry_builder_portfolio_objective": "balanced",
+        "industry_builder_portfolio_minimum_confidence": "low",
+        "industry_builder_portfolio_plan": {},
+    }
+    for key, value in planner_defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    st.caption("Build a simple queue recommendation from the current applied Industry Builder snapshot settings and filters.")
+
+    settings_col, summary_col = st.columns([2, 3])
+    with settings_col:
+        st.number_input(
+            "Capital Limit (ISK)",
+            min_value=0.0,
+            step=100_000_000.0,
+            key="industry_builder_portfolio_capital_limit_isk",
+        )
+        st.number_input(
+            "Manufacturing Slots",
+            min_value=1,
+            step=1,
+            key="industry_builder_portfolio_slots_available",
+        )
+        st.number_input(
+            "Planning Horizon (Hours)",
+            min_value=1.0,
+            step=1.0,
+            key="industry_builder_portfolio_horizon_hours",
+        )
+        st.selectbox(
+            "Objective",
+            options=["balanced", "max_profit", "max_isk_per_hour"],
+            key="industry_builder_portfolio_objective",
+        )
+        st.selectbox(
+            "Minimum Pricing Confidence",
+            options=["low", "medium", "high"],
+            key="industry_builder_portfolio_minimum_confidence",
+        )
+        if st.button("Build Portfolio Plan", key="industry_builder_build_portfolio_plan"):
+            try:
+                request_params = current_overview_request_params(
+                    default_character_id_value=default_character_id_value,
+                    default_owned_blueprint_scope=default_owned_blueprint_scope,
+                )
+                st.session_state["industry_builder_portfolio_plan"] = fetch_portfolio_plan(
+                    maximize_bp_runs=bool(request_params.get("maximize_bp_runs", False)),
+                    group_identical_bpcs=bool(request_params.get("group_identical_bpcs", True)),
+                    build_from_bpc=bool(request_params.get("build_from_bpc", True)),
+                    have_blueprint_source_only=bool(request_params.get("have_blueprint_source_only", True)),
+                    include_reactions=bool(request_params.get("include_reactions", False)),
+                    market_hub=str(request_params.get("market_hub") or "jita"),
+                    material_price_side=str(request_params.get("material_price_side") or "sell"),
+                    product_price_side=str(request_params.get("product_price_side") or "sell"),
+                    industry_profile_id=(
+                        int(request_params.get("industry_profile_id"))
+                        if request_params.get("industry_profile_id") is not None
+                        else None
+                    ),
+                    owned_blueprints_scope=str(request_params.get("owned_blueprints_scope") or default_owned_blueprint_scope),
+                    character_id=int(request_params.get("character_id") or default_character_id_value),
+                    planning_horizon_hours=float(st.session_state.get("industry_builder_portfolio_horizon_hours", 24.0) or 24.0),
+                    capital_limit_isk=float(st.session_state.get("industry_builder_portfolio_capital_limit_isk", 0.0) or 0.0),
+                    manufacturing_slots_available=int(st.session_state.get("industry_builder_portfolio_slots_available", 1) or 1),
+                    objective=str(st.session_state.get("industry_builder_portfolio_objective", "balanced") or "balanced"),
+                    positive_profit_only=bool(st.session_state.get("industry_builder_positive_profit_only", False)),
+                    min_margin_pct=float(st.session_state.get("industry_builder_min_margin_pct", 0.0) or 0.0),
+                    min_isk_per_hour=float(st.session_state.get("industry_builder_min_isk_per_hour", 0.0) or 0.0),
+                    min_region_daily_volume=int(st.session_state.get("industry_builder_min_region_daily_volume", 0) or 0),
+                    minimum_pricing_confidence=str(st.session_state.get("industry_builder_portfolio_minimum_confidence", "low") or "low"),
+                )
+            except Exception as e:
+                st.error(f"Failed to build portfolio plan: {e}")
+
+    plan = cast(dict[str, Any], st.session_state.get("industry_builder_portfolio_plan") or {})
+    with summary_col:
+        if not plan:
+            st.info("No portfolio plan has been built yet.")
+            return
+
+        metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
+        metric_col_1.metric("Selected Items", int(plan.get("selected_count") or 0))
+        metric_col_2.metric("Expected Profit", f"{float(plan.get('total_expected_profit') or 0.0):,.0f} ISK")
+        metric_col_3.metric("Capital Committed", f"{float(plan.get('capital_committed') or 0.0):,.0f} ISK")
+        metric_col_4.metric("Slot Hours", f"{float(plan.get('slot_hours_committed') or 0.0):,.1f}")
+
+        st.caption(
+            "Objective: {objective} | Horizon: {horizon:.0f}h | Candidate rows: {candidates}".format(
+                objective=str(plan.get("objective") or "balanced"),
+                horizon=float(plan.get("planning_horizon_hours") or 0.0),
+                candidates=int(((plan.get("summary") or {}).get("portfolio_candidate_count") or 0)),
+            )
+        )
+
+        selected_items = cast(list[dict[str, Any]], plan.get("selected_items") or [])
+        if selected_items:
+            st.markdown("**Recommended queue**")
+            st.dataframe(selected_items, width="stretch", hide_index=True)
+
+        skipped_items = cast(list[dict[str, Any]], plan.get("skipped_items") or [])
+        if skipped_items:
+            with st.expander("Skipped items", expanded=False):
+                st.dataframe(skipped_items, width="stretch", hide_index=True)
+
+
 def render() -> None:
     st.subheader("Industry Builder")
     ensure_overview_refresh_state()
@@ -1111,9 +1276,18 @@ def render() -> None:
         st.info("No manufacturable product rows match the current filters.")
         return
 
-    _render_overview_grid(
-        runtime=runtime,
-        filtered_overview_rows=filtered_overview_rows,
-    )
-    _render_profitability_drilldown(filtered_overview_rows)
-    _render_debug_panel(filtered_overview_rows)
+    overview_tab, portfolio_tab = st.tabs(["Overview", "Portfolio Planner"])
+    with overview_tab:
+        _render_overview_grid(
+            runtime=runtime,
+            filtered_overview_rows=filtered_overview_rows,
+        )
+        _render_profitability_drilldown(filtered_overview_rows)
+        _render_unknown_opening_stock_audit(filtered_overview_rows)
+        _render_debug_panel(filtered_overview_rows)
+
+    with portfolio_tab:
+        _render_portfolio_planner(
+            default_character_id_value=default_character_id_value,
+            default_owned_blueprint_scope=default_owned_blueprint_scope,
+        )

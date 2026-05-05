@@ -143,7 +143,48 @@ def _estimate_industry_job_materials_cost_total(
     runs: int,
     market_price_map: dict[int, float],
     blueprint_material_efficiency: int | None = None,
-) -> Optional[tuple[float, int]]:
+    owned_input_unit_cost_by_type_id: dict[int, dict[str, Any]] | None = None,
+) -> Optional[dict[str, Any]]:
+    def _consume_historical_lots(
+        *,
+        cost_payload: dict[str, Any],
+        required_quantity: int,
+    ) -> tuple[float, int, list[dict[str, Any]]]:
+        lots = cost_payload.get("lots") or []
+        if not isinstance(lots, list) or required_quantity <= 0:
+            return 0.0, 0, []
+
+        remaining_quantity = int(required_quantity)
+        historical_cost_total = 0.0
+        consumed_quantity = 0
+        consumed_lots: list[dict[str, Any]] = []
+        for raw_lot in lots:
+            if remaining_quantity <= 0 or not isinstance(raw_lot, dict):
+                break
+            available_quantity = _safe_int(raw_lot.get("quantity")) or 0
+            unit_cost = _safe_float(raw_lot.get("unit_cost"))
+            if available_quantity <= 0 or unit_cost is None or unit_cost <= 0:
+                continue
+            take_quantity = min(int(remaining_quantity), int(available_quantity))
+            if take_quantity <= 0:
+                continue
+            remaining_quantity -= int(take_quantity)
+            consumed_quantity += int(take_quantity)
+            historical_cost_total += float(unit_cost) * float(take_quantity)
+            consumed_lots.append(
+                {
+                    "quantity": int(take_quantity),
+                    "unit_cost": float(unit_cost),
+                    "total_cost": float(unit_cost) * float(take_quantity),
+                    "source": raw_lot.get("source"),
+                    "reference_type": raw_lot.get("reference_type"),
+                    "reference_id": raw_lot.get("reference_id"),
+                    "history_id": raw_lot.get("history_id"),
+                    "observed_at": raw_lot.get("observed_at"),
+                }
+            )
+        return historical_cost_total, consumed_quantity, consumed_lots
+
     if not blueprint_type_id or not product_type_id:
         return None
     if runs <= 0:
@@ -175,6 +216,10 @@ def _estimate_industry_job_materials_cost_total(
         material_reduction = max(0.0, min(float(blueprint_material_efficiency) / 100.0, 0.99))
 
     material_cost_total = 0.0
+    historical_material_cost_total = 0.0
+    total_adjusted_quantity = 0
+    historical_adjusted_quantity = 0
+    input_cost_details: dict[str, Any] = {}
     for m in materials:
         if not isinstance(m, dict):
             continue
@@ -182,17 +227,88 @@ def _estimate_industry_job_materials_cost_total(
         qty = _safe_int(m.get("quantity"))
         if not mat_type_id or not qty or qty <= 0:
             continue
-        unit_price = market_price_map.get(int(mat_type_id))
-        if unit_price is None:
-            continue
+        cost_payload = (owned_input_unit_cost_by_type_id or {}).get(int(mat_type_id)) or {}
         base_total_quantity = int(qty) * int(runs)
         adjusted_total_quantity = _round_material_quantity(
             float(base_total_quantity) * max(0.0, 1.0 - material_reduction),
             minimum_quantity=(int(runs) if int(qty) > 0 else 0),
         )
-        material_cost_total += float(adjusted_total_quantity) * float(unit_price)
+        total_adjusted_quantity += int(adjusted_total_quantity)
+        historical_cost_total, historical_quantity, consumed_lots = _consume_historical_lots(
+            cost_payload=cost_payload,
+            required_quantity=int(adjusted_total_quantity),
+        )
+        if historical_quantity > 0:
+            historical_adjusted_quantity += int(historical_quantity)
+            historical_material_cost_total += float(historical_cost_total)
+            weighted_unit_cost = float(historical_cost_total) / float(historical_quantity)
+            input_cost_details[str(int(mat_type_id))] = {
+                "unit_cost": float(weighted_unit_cost),
+                "quantity": int(historical_quantity),
+                "source": "historical_asset_acquisition_cost",
+                "reference_type": (consumed_lots[-1].get("reference_type") if consumed_lots else cost_payload.get("reference_type")),
+                "reference_id": (consumed_lots[-1].get("reference_id") if consumed_lots else cost_payload.get("reference_id")),
+                "history_id": (consumed_lots[-1].get("history_id") if consumed_lots else cost_payload.get("history_id")),
+                "observed_at": (consumed_lots[-1].get("observed_at") if consumed_lots else cost_payload.get("observed_at")),
+                "lots": consumed_lots,
+            }
+        material_cost_total += float(historical_cost_total)
 
-    return float(material_cost_total), int(output_qty_per_run) * int(runs)
+        remaining_quantity = int(adjusted_total_quantity) - int(historical_quantity)
+        if remaining_quantity <= 0:
+            continue
+
+        unit_price = market_price_map.get(int(mat_type_id))
+        if unit_price is None:
+            average_historical_unit_cost = _safe_float(cost_payload.get("unit_cost"))
+            if average_historical_unit_cost is None or average_historical_unit_cost <= 0:
+                continue
+            unit_price = float(average_historical_unit_cost)
+        material_cost_total += float(remaining_quantity) * float(unit_price)
+
+    coverage_fraction = (
+        float(historical_adjusted_quantity) / float(total_adjusted_quantity)
+        if total_adjusted_quantity > 0
+        else 0.0
+    )
+    if historical_adjusted_quantity > 0 and historical_adjusted_quantity == total_adjusted_quantity:
+        material_cost_source = "historical_asset_acquisition_cost"
+    elif historical_adjusted_quantity > 0:
+        material_cost_source = "mixed_historical_and_market_estimate"
+    else:
+        material_cost_source = "market_snapshot_estimate"
+
+    return {
+        "materials_cost": float(material_cost_total),
+        "output_quantity": int(output_qty_per_run) * int(runs),
+        "historical_materials_cost": (float(historical_material_cost_total) if historical_adjusted_quantity > 0 else None),
+        "historical_material_coverage_fraction": float(coverage_fraction),
+        "historical_input_costs": input_cost_details,
+        "material_cost_source": material_cost_source,
+    }
+
+
+def industry_job_material_type_ids(
+    *,
+    sde_session: Any,
+    blueprint_type_id: int,
+) -> list[int]:
+    if not blueprint_type_id:
+        return []
+    bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first()
+    if bp is None:
+        return []
+    mfg = _get_mfg_activity(getattr(bp, "activities", None))
+    if not mfg:
+        return []
+    out: list[int] = []
+    for material in mfg.get("materials") or []:
+        if not isinstance(material, dict):
+            continue
+        type_id = _safe_int(material.get("typeID"))
+        if type_id is not None:
+            out.append(int(type_id))
+    return out
 
 
 def _invention_probability(invention: dict[str, Any]) -> Optional[float]:
@@ -344,6 +460,8 @@ def resolve_industry_job_cost_snapshot(
     market_price_map: dict[int, float] | None,
     invention_unit_cost_per_run: float | None = None,
     invention_cost_source: str | None = None,
+    blueprint_provenance: dict[str, Any] | None = None,
+    owned_input_unit_cost_by_type_id: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
     product_type_id = _safe_int(getattr(job, "product_type_id", None))
@@ -378,6 +496,35 @@ def resolve_industry_job_cost_snapshot(
         or raw.get("blueprint_material_efficiency")
         or raw.get("material_efficiency")
     )
+    if blueprint_material_efficiency is None:
+        blueprint_material_efficiency = _safe_int((blueprint_provenance or {}).get("blueprint_material_efficiency"))
+
+    blueprint_time_efficiency = _safe_int(
+        getattr(job, "blueprint_time_efficiency", None)
+        or raw.get("blueprint_time_efficiency")
+        or raw.get("time_efficiency")
+    )
+    if blueprint_time_efficiency is None:
+        blueprint_time_efficiency = _safe_int((blueprint_provenance or {}).get("blueprint_time_efficiency"))
+
+    blueprint_item_id = _safe_int(
+        getattr(job, "blueprint_item_id", None)
+        or raw.get("blueprint_id")
+        or (blueprint_provenance or {}).get("item_id")
+    )
+    blueprint_is_copy = getattr(job, "blueprint_is_blueprint_copy", None)
+    if blueprint_is_copy is None:
+        blueprint_is_copy = raw.get("is_blueprint_copy")
+    if blueprint_is_copy is None:
+        blueprint_is_copy = (blueprint_provenance or {}).get("is_blueprint_copy")
+    blueprint_runs = _safe_int(
+        getattr(job, "blueprint_runs", None)
+        or raw.get("licensed_runs")
+        or raw.get("blueprint_runs")
+        or (blueprint_provenance or {}).get("blueprint_runs")
+    )
+    blueprint_provenance_source = str((blueprint_provenance or {}).get("source") or "").strip() or None
+    blueprint_provenance_ref_id = _safe_int((blueprint_provenance or {}).get("reference_id"))
 
     if output_quantity is None and blueprint_type_id and product_type_id:
         qpr = _output_quantity_per_run_for_job(
@@ -416,11 +563,22 @@ def resolve_industry_job_cost_snapshot(
         return {
             "output_quantity": int(output_quantity),
             "materials_cost": materials_cost,
+            "historical_materials_cost": _safe_float(getattr(job, "historical_materials_cost", None)) or _coalesce_float(raw, "historical_materials_cost"),
+            "historical_material_cost_source": getattr(job, "historical_material_cost_source", None) or raw.get("historical_material_cost_source"),
+            "historical_material_coverage_fraction": _safe_float(getattr(job, "historical_material_coverage_fraction", None)) or _coalesce_float(raw, "historical_material_coverage_fraction"),
+            "historical_input_costs": getattr(job, "historical_input_costs", None) or raw.get("historical_input_costs"),
             "copy_cost": copy_cost,
             "invention_cost": invention_cost,
             "total_cost": float(total_cost or (float(unit_cost) * float(output_quantity))),
             "unit_cost": float(unit_cost),
             "source": build_cost_source or "persisted_job_cost_snapshot",
+            "blueprint_item_id": blueprint_item_id,
+            "blueprint_is_blueprint_copy": blueprint_is_copy,
+            "blueprint_runs": blueprint_runs,
+            "blueprint_time_efficiency": blueprint_time_efficiency,
+            "blueprint_material_efficiency": blueprint_material_efficiency,
+            "blueprint_provenance_source": blueprint_provenance_source,
+            "blueprint_provenance_ref_id": blueprint_provenance_ref_id,
         }
 
     if blueprint_type_id and product_type_id and market_price_map:
@@ -431,36 +589,60 @@ def resolve_industry_job_cost_snapshot(
             runs=int(_industry_job_runs(job)),
             market_price_map=market_price_map,
             blueprint_material_efficiency=blueprint_material_efficiency,
+            owned_input_unit_cost_by_type_id=owned_input_unit_cost_by_type_id,
         )
         if estimated is not None:
-            estimated_materials_cost, estimated_output_quantity = estimated
+            estimated_materials_cost = _safe_float(estimated.get("materials_cost")) or 0.0
+            estimated_output_quantity = _safe_int(estimated.get("output_quantity")) or 0
             total_cost = (
                 float(estimated_materials_cost)
                 + float(_safe_float(getattr(job, "cost", None)) or 0.0)
                 + float(copy_cost or 0.0)
                 + float(invention_cost or 0.0)
             )
-            source = build_cost_source or "market_snapshot_estimate"
+            source = build_cost_source or str(estimated.get("material_cost_source") or "market_snapshot_estimate")
             if resolved_invention_source:
                 source = f"{source}+{resolved_invention_source}"
             return {
                 "output_quantity": int(estimated_output_quantity),
                 "materials_cost": float(estimated_materials_cost),
+                "historical_materials_cost": _safe_float(estimated.get("historical_materials_cost")),
+                "historical_material_cost_source": estimated.get("material_cost_source"),
+                "historical_material_coverage_fraction": _safe_float(estimated.get("historical_material_coverage_fraction")),
+                "historical_input_costs": estimated.get("historical_input_costs") or None,
                 "copy_cost": copy_cost,
                 "invention_cost": invention_cost,
                 "total_cost": float(total_cost),
                 "unit_cost": float(total_cost) / float(estimated_output_quantity),
                 "source": source,
+                "blueprint_item_id": blueprint_item_id,
+                "blueprint_is_blueprint_copy": blueprint_is_copy,
+                "blueprint_runs": blueprint_runs,
+                "blueprint_time_efficiency": blueprint_time_efficiency,
+                "blueprint_material_efficiency": blueprint_material_efficiency,
+                "blueprint_provenance_source": blueprint_provenance_source,
+                "blueprint_provenance_ref_id": blueprint_provenance_ref_id,
             }
 
     return {
         "output_quantity": int(output_quantity) if output_quantity and output_quantity > 0 else None,
         "materials_cost": materials_cost,
+        "historical_materials_cost": _safe_float(getattr(job, "historical_materials_cost", None)) or _coalesce_float(raw, "historical_materials_cost"),
+        "historical_material_cost_source": getattr(job, "historical_material_cost_source", None) or raw.get("historical_material_cost_source"),
+        "historical_material_coverage_fraction": _safe_float(getattr(job, "historical_material_coverage_fraction", None)) or _coalesce_float(raw, "historical_material_coverage_fraction"),
+        "historical_input_costs": getattr(job, "historical_input_costs", None) or raw.get("historical_input_costs"),
         "copy_cost": copy_cost,
         "invention_cost": invention_cost,
         "total_cost": total_cost,
         "unit_cost": unit_cost,
         "source": build_cost_source,
+        "blueprint_item_id": blueprint_item_id,
+        "blueprint_is_blueprint_copy": blueprint_is_copy,
+        "blueprint_runs": blueprint_runs,
+        "blueprint_time_efficiency": blueprint_time_efficiency,
+        "blueprint_material_efficiency": blueprint_material_efficiency,
+        "blueprint_provenance_source": blueprint_provenance_source,
+        "blueprint_provenance_ref_id": blueprint_provenance_ref_id,
     }
 
 
@@ -884,7 +1066,10 @@ def estimate_industry_job_unit_cost(
     if estimated is None:
         return None
 
-    material_cost_total, total_output = estimated
+    material_cost_total = _safe_float(estimated.get("materials_cost")) or 0.0
+    total_output = _safe_int(estimated.get("output_quantity")) or 0
+    if total_output <= 0:
+        return None
     total_cost = float(material_cost_total) + float(job_cost or 0.0)
     return total_cost / float(total_output)
 

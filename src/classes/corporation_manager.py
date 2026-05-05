@@ -96,9 +96,22 @@ class CorporationManager:
         corporations_data = [c.get_corporation() for c in self._corporations]
         return corporations_data
     
-    def get_assets(self) -> List[Dict[str, object]]:
+    def get_assets(
+        self,
+        corporation_name: Optional[str] = None,
+        corporation_id: Optional[int] = None,
+    ) -> List[Dict[str, object]]:
         all_assets = []
-        for corp in self._corporations:
+        if corporation_id is not None:
+            corporations = [self.get_corporation(corporation_id=corporation_id)]
+        elif corporation_name:
+            corporations = [self.get_corporation(corporation_name=corporation_name)]
+        else:
+            corporations = self._corporations
+
+        corporations = [corp for corp in corporations if corp is not None]
+
+        for corp in corporations:
             try:
                 self._refresh_batch("refresh_assets", corporation_id=corp.corporation_id)
                 corp_assets = corp.get_assets()
@@ -163,3 +176,31 @@ class CorporationManager:
             error_message = f"Failed to refresh all corporation data: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
+    def refresh_wallet_transactions(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
+        try:
+            self._refresh_batch("refresh_wallet_transactions", corporation_name, corporation_id)
+        except Exception as e:
+            error_message = f"Failed to refresh corporation wallet transactions: {str(e)}"
+            logging.error(error_message)
+            raise Exception(error_message)
+
+    def refresh_wallet_journal(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
+        try:
+            self._refresh_batch("refresh_wallet_journal", corporation_name, corporation_id)
+        except Exception as e:
+            error_message = f"Failed to refresh corporation wallet journal: {str(e)}"
+            logging.error(error_message)
+            raise Exception(error_message)
+
+    def refresh_industry_jobs(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
+        try:
+            self._refresh_batch("refresh_industry_jobs", corporation_name, corporation_id)
+        except Exception as e:
+            error_message = f"Failed to refresh corporation industry jobs: {str(e)}"
+            logging.error(error_message)
+            raise Exception(error_message)
+
+    def refresh_realized_profit_inputs(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
+        self.refresh_wallet_transactions(corporation_name=corporation_name, corporation_id=corporation_id)
+        self.refresh_industry_jobs(corporation_name=corporation_name, corporation_id=corporation_id)

@@ -105,12 +105,214 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         _ensure_column(db_app, table=table, column="acquisition_date", ddl_type="TEXT")
         _ensure_column(db_app, table=table, column="acquisition_updated_at", ddl_type="TEXT")
 
+    _ensure_table(
+        db_app,
+        table="character_asset_history",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS character_asset_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "character_id INTEGER NOT NULL,"
+            "item_id INTEGER NOT NULL,"
+            "observed_at TEXT NOT NULL,"
+            "snapshot_source TEXT NULL,"
+            "type_id INTEGER NOT NULL,"
+            "type_name TEXT NULL,"
+            "location_id INTEGER NULL,"
+            "location_type TEXT NULL,"
+            "location_flag TEXT NULL,"
+            "is_singleton INTEGER NULL,"
+            "quantity INTEGER NULL,"
+            "is_blueprint_copy INTEGER NULL,"
+            "blueprint_runs INTEGER NULL,"
+            "blueprint_time_efficiency INTEGER NULL,"
+            "blueprint_material_efficiency INTEGER NULL,"
+            "acquisition_source TEXT NULL,"
+            "acquisition_unit_cost REAL NULL,"
+            "acquisition_total_cost REAL NULL,"
+            "acquisition_reference_type TEXT NULL,"
+            "acquisition_reference_id INTEGER NULL,"
+            "acquisition_date TEXT NULL,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_character_asset_history_owner_item_time",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_character_asset_history_owner_item_time "
+            "ON character_asset_history(character_id, item_id, observed_at)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_character_asset_history_owner_type_time",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_character_asset_history_owner_type_time "
+            "ON character_asset_history(character_id, type_id, observed_at)"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="corporation_asset_history",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS corporation_asset_history ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "corporation_id INTEGER NOT NULL,"
+            "item_id INTEGER NOT NULL,"
+            "observed_at TEXT NOT NULL,"
+            "snapshot_source TEXT NULL,"
+            "type_id INTEGER NOT NULL,"
+            "type_name TEXT NULL,"
+            "location_id INTEGER NULL,"
+            "location_type TEXT NULL,"
+            "location_flag TEXT NULL,"
+            "is_singleton INTEGER NULL,"
+            "quantity INTEGER NULL,"
+            "is_blueprint_copy INTEGER NULL,"
+            "blueprint_runs INTEGER NULL,"
+            "blueprint_time_efficiency INTEGER NULL,"
+            "blueprint_material_efficiency INTEGER NULL,"
+            "acquisition_source TEXT NULL,"
+            "acquisition_unit_cost REAL NULL,"
+            "acquisition_total_cost REAL NULL,"
+            "acquisition_reference_type TEXT NULL,"
+            "acquisition_reference_id INTEGER NULL,"
+            "acquisition_date TEXT NULL,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_corporation_asset_history_owner_item_time",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_corporation_asset_history_owner_item_time "
+            "ON corporation_asset_history(corporation_id, item_id, observed_at)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_corporation_asset_history_owner_type_time",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_corporation_asset_history_owner_type_time "
+            "ON corporation_asset_history(corporation_id, type_id, observed_at)"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="character_asset_events",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS character_asset_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "character_id INTEGER NOT NULL,"
+            "item_id INTEGER NULL,"
+            "type_id INTEGER NULL,"
+            "event_time TEXT NOT NULL,"
+            "event_kind TEXT NOT NULL,"
+            "quantity_delta INTEGER NULL,"
+            "previous_quantity INTEGER NULL,"
+            "new_quantity INTEGER NULL,"
+            "reason TEXT NULL,"
+            "metadata_json JSON NULL,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_character_asset_events_owner_time",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_character_asset_events_owner_time "
+            "ON character_asset_events(character_id, event_time)"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="corporation_asset_events",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS corporation_asset_events ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "corporation_id INTEGER NOT NULL,"
+            "item_id INTEGER NULL,"
+            "type_id INTEGER NULL,"
+            "event_time TEXT NOT NULL,"
+            "event_kind TEXT NOT NULL,"
+            "quantity_delta INTEGER NULL,"
+            "previous_quantity INTEGER NULL,"
+            "new_quantity INTEGER NULL,"
+            "reason TEXT NULL,"
+            "metadata_json JSON NULL,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_corporation_asset_events_owner_time",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_corporation_asset_events_owner_time "
+            "ON corporation_asset_events(corporation_id, event_time)"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="corporation_wallet_journal",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS corporation_wallet_journal ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "corporation_id INTEGER NOT NULL,"
+            "division INTEGER NULL,"
+            "wallet_journal_id INTEGER NOT NULL UNIQUE,"
+            "amount REAL NOT NULL,"
+            "balance REAL NOT NULL,"
+            "context_id INTEGER NULL,"
+            "context_id_type TEXT NULL,"
+            "date TEXT NOT NULL,"
+            "description TEXT NULL,"
+            "reason TEXT NULL,"
+            "ref_type TEXT NOT NULL,"
+            "first_party_id INTEGER NULL,"
+            "first_party_name TEXT NULL,"
+            "second_party_id INTEGER NULL,"
+            "second_party_name TEXT NULL,"
+            "tax REAL NULL,"
+            "tax_receiver_id INTEGER NULL,"
+            "tax_receiver_name TEXT NULL,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ")"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_corporation_wallet_journal_corporation_date",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_corporation_wallet_journal_corporation_date "
+            "ON corporation_wallet_journal(corporation_id, date)"
+        ),
+    )
+
     # Character market fee metadata (best-effort JSON blob)
     _ensure_column(db_app, table="characters", column="market_fees", ddl_type="TEXT")
 
     for table in ("character_industry_jobs", "corporation_industry_jobs"):
+        _ensure_column(db_app, table=table, column="blueprint_item_id", ddl_type="INTEGER")
+        _ensure_column(db_app, table=table, column="blueprint_is_blueprint_copy", ddl_type="BOOLEAN")
+        _ensure_column(db_app, table=table, column="blueprint_runs", ddl_type="INTEGER")
+        _ensure_column(db_app, table=table, column="blueprint_time_efficiency", ddl_type="INTEGER")
+        _ensure_column(db_app, table=table, column="blueprint_material_efficiency", ddl_type="INTEGER")
+        _ensure_column(db_app, table=table, column="blueprint_provenance_source", ddl_type="TEXT")
+        _ensure_column(db_app, table=table, column="blueprint_provenance_ref_id", ddl_type="INTEGER")
         _ensure_column(db_app, table=table, column="output_quantity", ddl_type="INTEGER")
         _ensure_column(db_app, table=table, column="materials_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="historical_materials_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="historical_material_cost_source", ddl_type="TEXT")
+        _ensure_column(db_app, table=table, column="historical_material_coverage_fraction", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="historical_input_costs", ddl_type="JSON")
         _ensure_column(db_app, table=table, column="copy_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="invention_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="total_build_cost", ddl_type="REAL")

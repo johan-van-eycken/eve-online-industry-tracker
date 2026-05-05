@@ -66,6 +66,9 @@ def render_aggrid_table(
     image_renderer: Any = None,
     image_pin_left: bool = True,
     text_right_cols: list[str] | None = None,
+    hidden_cols: list[str] | None = None,
+    column_configs: dict[str, dict[str, Any]] | None = None,
+    auto_size_columns: bool = False,
     height: int | None = None,
     height_max: int = 700,
     fit_columns_on_grid_load: bool = True,
@@ -141,7 +144,45 @@ def render_aggrid_table(
         if col in df_in.columns:
             gb.configure_column(col, cellStyle=right, minWidth=110)
 
+    for col in (hidden_cols or []):
+        if col in df_in.columns:
+            gb.configure_column(col, hide=True)
+
+    for col, config in (column_configs or {}).items():
+        if col in df_in.columns and isinstance(config, dict):
+            gb.configure_column(col, **config)
+
+    if hidden_cols:
+        try:
+            gb.configure_side_bar()
+        except Exception:
+            pass
+
     grid_options = gb.build()
+    if auto_size_columns:
+        grid_options["autoSizeStrategy"] = {
+            "type": "fitCellContents",
+        }
+        grid_options["onFirstDataRendered"] = runtime.js_code(
+            """
+            function(params) {
+                const api = params.api;
+                const columnApi = params.columnApi;
+                if (api && api.autoSizeAllColumns) {
+                    api.autoSizeAllColumns(false);
+                    return;
+                }
+
+                const columns = columnApi && columnApi.getColumns
+                    ? columnApi.getColumns()
+                    : (columnApi && columnApi.getAllColumns ? columnApi.getAllColumns() : []);
+                const columnIds = (columns || []).map((column) => column.getColId ? column.getColId() : column.getId());
+                if (columnApi && columnApi.autoSizeColumns && columnIds.length > 0) {
+                    columnApi.autoSizeColumns(columnIds, false);
+                }
+            }
+            """
+        )
     runtime.aggrid_fn(
         df_in,
         gridOptions=grid_options,
@@ -149,7 +190,7 @@ def render_aggrid_table(
         allow_unsafe_jscode=True,
         theme="streamlit",
         height=height if height is not None else aggrid_height(row_count=len(df_in), height_max=height_max),
-        fit_columns_on_grid_load=fit_columns_on_grid_load,
+        fit_columns_on_grid_load=False if auto_size_columns else fit_columns_on_grid_load,
     )
 
 

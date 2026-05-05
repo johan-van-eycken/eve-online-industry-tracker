@@ -8,14 +8,23 @@ from classes.database_manager import DatabaseManager
 from classes.database_models import CorporationModel, CorporationStructuresModel \
     , CorporationMemberModel, CorporationAssetsModel
 from classes.database_models import Types, Groups, Categories, Factions, Races, NpcCorporations
-from classes.database_models import CorporationWalletTransactionsModel, CorporationIndustryJobsModel
+from classes.database_models import CorporationWalletJournalModel, CorporationWalletTransactionsModel, CorporationIndustryJobsModel
 from classes.character import Character
 from classes.character_manager import CharacterManager
 from classes.asset_provenance import (
     build_market_price_map,
     build_cost_map_for_assets,
     build_invention_cost_per_run_by_blueprint_type,
+    industry_job_material_type_ids,
     resolve_industry_job_cost_snapshot,
+)
+from classes.asset_history import (
+    backfill_wallet_buy_acquisitions,
+    build_historical_input_cost_lookup,
+    clear_historical_backfill,
+    lookup_historical_blueprint_provenance,
+    record_historical_acquisition,
+    sync_asset_history,
 )
 
 class Corporation:
@@ -66,6 +75,8 @@ class Corporation:
             self.image_url: Optional[str] = None
             self.wallets: List[Dict[str, str]] = []
             self.standings: List[Dict[str, str]] = []
+            self.wallet_journal: List[Dict[str, Any]] = []
+            self.wallet_transactions: List[Dict[str, Any]] = []
             self.structures: List[CorporationStructuresModel] = []
             self.members: List[CorporationMemberModel] = []
             self.assets: List[CorporationAssetsModel] = []
@@ -94,6 +105,19 @@ class Corporation:
                 for obj in model_list
             ]
 
+        if not self.wallet_journal:
+            self.wallet_journal = (
+                self._db_app.session.query(CorporationWalletJournalModel)
+                .filter_by(corporation_id=self.corporation_id)
+                .all()
+            )
+        if not self.wallet_transactions:
+            self.wallet_transactions = (
+                self._db_app.session.query(CorporationWalletTransactionsModel)
+                .filter_by(corporation_id=self.corporation_id)
+                .all()
+            )
+
         return {
             "corporation_id": self.corporation_id,
             "corporation_name": self.corporation_name,
@@ -112,6 +136,8 @@ class Corporation:
             "date_founded": self.date_founded,
             "wallets": self.wallets,
             "standings": self.standings,
+            "wallet_journal": serialize_model_list(self.wallet_journal, CorporationWalletJournalModel),
+            "wallet_transactions": serialize_model_list(self.wallet_transactions, CorporationWalletTransactionsModel),
             "structures": serialize_model_list(self.structures, CorporationStructuresModel),
             "members": serialize_model_list(self.members, CorporationMemberModel),
             "assets": serialize_model_list(self.assets, CorporationAssetsModel),
@@ -231,6 +257,12 @@ class Corporation:
                 new_asset = CorporationAssetsModel(**asset)
                 self.assets.append(new_asset)
             if self.assets:
+                sync_asset_history(
+                    app_session=self._db_app.session,
+                    owner_kind="corporation",
+                    owner_id=int(self.corporation_id),
+                    asset_rows=corporation_assets,
+                )
                 self._db_app.session.query(CorporationAssetsModel).filter_by(corporation_id=self.corporation_id).delete()
                 self._db_app.session.bulk_save_objects(self.assets)
                 self._db_app.session.commit()
@@ -251,11 +283,12 @@ class Corporation:
             if hasattr(self._default_esi_character, "ensure_esi"):
                 self._default_esi_character.ensure_esi()
             self.refresh_corporation()
+            self.refresh_wallet_journal()
             self.refresh_wallet_transactions()
-            self.refresh_industry_jobs()
             self.refresh_members()
             self.refresh_structures()
             self.refresh_assets()
+            self.refresh_industry_jobs()
 
             logging.debug(f"All data successfully refreshed for {self.corporation_name}.")
         except Exception as e:
@@ -429,6 +462,153 @@ class Corporation:
             raise Exception(error_message)
 
     # -------------------
+    # Wallet Journal
+    # -------------------
+    def refresh_wallet_journal(self) -> None:
+        """Fetch and store corporation wallet journal entries."""
+        try:
+            if hasattr(self._default_esi_character, "ensure_esi"):
+                self._default_esi_character.ensure_esi()
+
+            corp_wallets = self._default_esi_character._esi_client.esi_get(
+                f"/corporations/{self.corporation_id}/wallets/"
+            )
+            if isinstance(corp_wallets, str):
+                corp_wallets = json.loads(corp_wallets)
+            if not corp_wallets or not isinstance(corp_wallets, list):
+                return
+
+            new_entries: List[Dict[str, Any]] = []
+            for wallet in corp_wallets:
+                if not isinstance(wallet, dict):
+                    continue
+                division = wallet.get("division")
+                if division is None:
+                    continue
+
+                journal_entries = self._default_esi_character._esi_client.esi_get(
+                    f"/corporations/{self.corporation_id}/wallets/{division}/journal/"
+                )
+                if isinstance(journal_entries, str):
+                    journal_entries = json.loads(journal_entries)
+                if not journal_entries or not isinstance(journal_entries, list):
+                    continue
+
+                for entry in journal_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    journal_id = entry.get("id")
+                    if journal_id is None:
+                        continue
+                    exists = (
+                        self._db_app.session.query(CorporationWalletJournalModel)
+                        .filter_by(corporation_id=self.corporation_id, wallet_journal_id=journal_id)
+                        .first()
+                    )
+                    if exists:
+                        continue
+                    entry["division"] = division
+                    new_entries.append(entry)
+
+            party_ids: set[int] = set()
+            for entry in new_entries:
+                for key in ("first_party_id", "second_party_id", "tax_receiver_id"):
+                    pid = entry.get(key)
+                    if isinstance(pid, int):
+                        party_ids.add(pid)
+                    elif isinstance(pid, str) and pid.isdigit():
+                        party_ids.add(int(pid))
+
+            party_names: Dict[int, Optional[str]] = {}
+            for pid in party_ids:
+                name = None
+                try:
+                    id_type = self._default_esi_character._esi_client.get_id_type(pid)
+                except Exception:
+                    id_type = None
+
+                try:
+                    if id_type == "character":
+                        data = self._default_esi_character._esi_client.esi_get(f"/characters/{pid}/")
+                        if data and "name" in data:
+                            name = data["name"]
+                    elif id_type == "alliance":
+                        data = self._default_esi_character._esi_client.esi_get(f"/alliances/{pid}/")
+                        if data and "name" in data:
+                            name = data["name"]
+                    elif id_type == "corporation":
+                        data = self._default_esi_character._esi_client.esi_get(f"/corporations/{pid}/")
+                        if data and "name" in data:
+                            name = data["name"]
+                    elif id_type == "npc_corporation":
+                        npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=pid).first()
+                        name = npc_corp.name[self._db_sde.language] if npc_corp else None
+                except Exception:
+                    name = None
+
+                party_names[pid] = name
+
+            rows: List[Dict[str, Any]] = []
+            for entry in new_entries:
+                for key, name_key in [
+                    ("first_party_id", "first_party_name"),
+                    ("second_party_id", "second_party_name"),
+                    ("tax_receiver_id", "tax_receiver_name"),
+                ]:
+                    pid = entry.get(key)
+                    if isinstance(pid, int):
+                        entry[name_key] = party_names.get(pid)
+                    elif isinstance(pid, str) and pid.isdigit():
+                        entry[name_key] = party_names.get(int(pid))
+                    else:
+                        entry[name_key] = None
+
+                rows.append(
+                    {
+                        "corporation_id": int(self.corporation_id),
+                        "division": entry.get("division"),
+                        "wallet_journal_id": entry.get("id"),
+                        "amount": entry.get("amount", 0.0),
+                        "balance": entry.get("balance", 0.0),
+                        "context_id": entry.get("context_id"),
+                        "context_id_type": entry.get("context_id_type"),
+                        "date": entry.get("date"),
+                        "description": entry.get("description"),
+                        "reason": entry.get("reason"),
+                        "ref_type": entry.get("ref_type"),
+                        "tax": entry.get("tax", 0.0),
+                        "tax_receiver_id": entry.get("tax_receiver_id"),
+                        "tax_receiver_name": entry.get("tax_receiver_name"),
+                        "first_party_id": entry.get("first_party_id"),
+                        "first_party_name": entry.get("first_party_name"),
+                        "second_party_id": entry.get("second_party_id"),
+                        "second_party_name": entry.get("second_party_name"),
+                    }
+                )
+
+            if rows:
+                self._db_app.session.bulk_save_objects([CorporationWalletJournalModel(**row) for row in rows])
+                self._db_app.session.commit()
+
+            corporation_wallet_journal = (
+                self._db_app.session.query(CorporationWalletJournalModel)
+                .filter_by(corporation_id=self.corporation_id)
+                .all()
+            )
+            self.wallet_journal = [
+                {col: getattr(entry, col) for col in CorporationWalletJournalModel.__table__.columns.keys()}
+                for entry in corporation_wallet_journal
+            ]
+        except Exception as e:
+            logging.warning(
+                "Skipping corporation wallet journal refresh for %s (%s): %s",
+                self.corporation_name,
+                self.corporation_id,
+                str(e),
+            )
+            return
+
+    # -------------------
     # Wallet Transactions
     # -------------------
     def refresh_wallet_transactions(self) -> None:
@@ -483,6 +663,15 @@ class Corporation:
                     new_entries.append(entry)
 
             if not new_entries:
+                corporation_wallet_transactions = (
+                    self._db_app.session.query(CorporationWalletTransactionsModel)
+                    .filter_by(corporation_id=self.corporation_id)
+                    .all()
+                )
+                self.wallet_transactions = [
+                    {col: getattr(entry, col) for col in CorporationWalletTransactionsModel.__table__.columns.keys()}
+                    for entry in corporation_wallet_transactions
+                ]
                 return
 
             client_ids: set[int] = set()
@@ -569,6 +758,16 @@ class Corporation:
             if rows:
                 self._db_app.session.bulk_save_objects([CorporationWalletTransactionsModel(**r) for r in rows])
                 self._db_app.session.commit()
+
+            corporation_wallet_transactions = (
+                self._db_app.session.query(CorporationWalletTransactionsModel)
+                .filter_by(corporation_id=self.corporation_id)
+                .all()
+            )
+            self.wallet_transactions = [
+                {col: getattr(entry, col) for col in CorporationWalletTransactionsModel.__table__.columns.keys()}
+                for entry in corporation_wallet_transactions
+            ]
         except Exception as e:
             logging.warning(
                 "Skipping corporation wallet transactions refresh for %s (%s): %s",
@@ -608,13 +807,111 @@ class Corporation:
                 market_price_map=market_price_map,
             )
 
+            clear_historical_backfill(
+                app_session=self._db_app.session,
+                owner_kind="corporation",
+                owner_id=int(self.corporation_id),
+            )
+            wallet_transactions = (
+                self._db_app.session.query(CorporationWalletTransactionsModel)
+                .filter_by(corporation_id=int(self.corporation_id))
+                .all()
+            )
+            backfill_wallet_buy_acquisitions(
+                app_session=self._db_app.session,
+                owner_kind="corporation",
+                owner_id=int(self.corporation_id),
+                wallet_transactions=wallet_transactions,
+            )
+
+            completed_statuses = {"delivered", "ready", "completed"}
+            existing_jobs = (
+                self._db_app.session.query(CorporationIndustryJobsModel)
+                .filter_by(corporation_id=int(self.corporation_id))
+                .all()
+            )
+            fetched_job_ids = {
+                int(job.get("job_id"))
+                for job in jobs
+                if isinstance(job, dict) and job.get("job_id") is not None
+            }
+
+            historical_job_events: List[tuple[str, int, str, Any]] = []
+            for job in existing_jobs:
+                job_id = int(getattr(job, "job_id", 0) or 0)
+                if job_id <= 0 or job_id in fetched_job_ids:
+                    continue
+                observed_at = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
+                historical_job_events.append((
+                    str(observed_at or ""),
+                    job_id,
+                    "existing",
+                    job,
+                ))
+            for job in jobs:
+                if not isinstance(job, dict) or job.get("job_id") is None:
+                    continue
+                observed_at = job.get("completed_date") or job.get("end_date")
+                historical_job_events.append((
+                    str(observed_at or ""),
+                    int(job.get("job_id") or 0),
+                    "fetched",
+                    job,
+                ))
+
             rows: List[Dict[str, Any]] = []
-            for j in jobs:
-                if not isinstance(j, dict):
+            for _, _, entry_kind, payload in sorted(historical_job_events, key=lambda entry: (entry[0], entry[1])):
+                if entry_kind == "existing":
+                    existing_job = payload
+                    status = str(getattr(existing_job, "status", "") or "").lower()
+                    completed_at = getattr(existing_job, "completed_date", None) or getattr(existing_job, "end_date", None)
+                    output_quantity = int(getattr(existing_job, "output_quantity", 0) or 0)
+                    unit_cost = getattr(existing_job, "unit_build_cost", None)
+                    if (
+                        status in completed_statuses
+                        and completed_at
+                        and output_quantity > 0
+                        and unit_cost is not None
+                        and float(unit_cost) > 0
+                    ):
+                        record_historical_acquisition(
+                            app_session=self._db_app.session,
+                            owner_kind="corporation",
+                            owner_id=int(self.corporation_id),
+                            observed_at=str(completed_at),
+                            type_id=int(getattr(existing_job, "product_type_id", 0) or 0),
+                            type_name=None,
+                            quantity=output_quantity,
+                            acquisition_source="industry_build",
+                            acquisition_unit_cost=float(unit_cost),
+                            acquisition_total_cost=float(unit_cost) * float(output_quantity),
+                            acquisition_reference_type="industry_job",
+                            acquisition_reference_id=int(getattr(existing_job, "job_id", 0) or 0),
+                        )
                     continue
+
+                j = payload
                 job_id = j.get("job_id")
-                if job_id is None:
-                    continue
+                completed_at = j.get("completed_date") or j.get("end_date")
+                blueprint_type_id = int(j.get("blueprint_type_id") or 0)
+                blueprint_provenance = lookup_historical_blueprint_provenance(
+                    app_session=self._db_app.session,
+                    owner_kind="corporation",
+                    owner_id=int(self.corporation_id),
+                    blueprint_item_id=(int(j.get("blueprint_id")) if j.get("blueprint_id") is not None else None),
+                    blueprint_type_id=(blueprint_type_id if blueprint_type_id > 0 else None),
+                    as_of=completed_at,
+                )
+                historical_input_costs = build_historical_input_cost_lookup(
+                    app_session=self._db_app.session,
+                    owner_kind="corporation",
+                    owner_id=int(self.corporation_id),
+                    as_of=completed_at,
+                    type_ids=industry_job_material_type_ids(
+                        sde_session=self._db_sde.session,
+                        blueprint_type_id=blueprint_type_id,
+                    ),
+                )
                 snapshot = resolve_industry_job_cost_snapshot(
                     job=type("IndustryJobPayload", (), j)(),
                     sde_session=self._db_sde.session,
@@ -628,6 +925,8 @@ class Corporation:
                         (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("source") or ""
                     )
                     or None,
+                    blueprint_provenance=blueprint_provenance,
+                    owned_input_unit_cost_by_type_id=historical_input_costs,
                 )
                 rows.append(
                     {
@@ -645,9 +944,20 @@ class Corporation:
                         "facility_id": j.get("facility_id"),
                         "location_id": j.get("location_id"),
                         "output_location_id": j.get("output_location_id"),
+                        "blueprint_item_id": snapshot.get("blueprint_item_id"),
+                        "blueprint_is_blueprint_copy": snapshot.get("blueprint_is_blueprint_copy"),
+                        "blueprint_runs": snapshot.get("blueprint_runs"),
+                        "blueprint_time_efficiency": snapshot.get("blueprint_time_efficiency"),
+                        "blueprint_material_efficiency": snapshot.get("blueprint_material_efficiency"),
+                        "blueprint_provenance_source": snapshot.get("blueprint_provenance_source"),
+                        "blueprint_provenance_ref_id": snapshot.get("blueprint_provenance_ref_id"),
                         "cost": j.get("cost"),
                         "output_quantity": snapshot.get("output_quantity"),
                         "materials_cost": snapshot.get("materials_cost"),
+                        "historical_materials_cost": snapshot.get("historical_materials_cost"),
+                        "historical_material_cost_source": snapshot.get("historical_material_cost_source"),
+                        "historical_material_coverage_fraction": snapshot.get("historical_material_coverage_fraction"),
+                        "historical_input_costs": snapshot.get("historical_input_costs"),
                         "copy_cost": snapshot.get("copy_cost"),
                         "invention_cost": snapshot.get("invention_cost"),
                         "total_build_cost": snapshot.get("total_cost"),
@@ -656,8 +966,32 @@ class Corporation:
                         "raw": j,
                     }
                 )
+                output_quantity = int(snapshot.get("output_quantity") or 0)
+                unit_cost = snapshot.get("unit_cost")
+                status = str(j.get("status") or "").lower()
+                if status in completed_statuses and completed_at and output_quantity > 0 and unit_cost is not None and float(unit_cost) > 0:
+                    record_historical_acquisition(
+                        app_session=self._db_app.session,
+                        owner_kind="corporation",
+                        owner_id=int(self.corporation_id),
+                        observed_at=str(completed_at),
+                        type_id=int(j.get("product_type_id") or 0),
+                        type_name=None,
+                        quantity=output_quantity,
+                        acquisition_source="industry_build",
+                        acquisition_unit_cost=float(unit_cost),
+                        acquisition_total_cost=float(unit_cost) * float(output_quantity),
+                        acquisition_reference_type="industry_job",
+                        acquisition_reference_id=int(job_id),
+                    )
 
-            self._db_app.session.query(CorporationIndustryJobsModel).filter_by(corporation_id=self.corporation_id).delete()
+            if fetched_job_ids:
+                (
+                    self._db_app.session.query(CorporationIndustryJobsModel)
+                    .filter_by(corporation_id=self.corporation_id)
+                    .filter(CorporationIndustryJobsModel.job_id.in_(sorted(fetched_job_ids)))
+                    .delete(synchronize_session=False)
+                )
             self._db_app.session.bulk_save_objects([CorporationIndustryJobsModel(**r) for r in rows])
             self._db_app.session.commit()
         except Exception as e:
