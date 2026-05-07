@@ -157,6 +157,200 @@ class IndustryService:
             raise RuntimeError("Industry overview refresh state is not initialized")
         return jobs_state.industry_overview_refresh
 
+    def _get_industry_portfolio_candidates_store(self) -> Any:
+        jobs_state = getattr(self._state, "jobs", None)
+        if jobs_state is None or not hasattr(jobs_state, "industry_portfolio_candidates"):
+            raise RuntimeError("Industry portfolio candidates state is not initialized")
+        return jobs_state.industry_portfolio_candidates
+
+    @staticmethod
+    def _normalize_overview_refresh_params(
+        *,
+        force_refresh: bool = False,
+        maximize_bp_runs: bool = False,
+        group_identical_bpcs: bool = True,
+        build_from_bpc: bool = True,
+        have_blueprint_source_only: bool = True,
+        include_reactions: bool = False,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
+        product_price_side: str = "sell",
+        industry_profile_id: int | None = None,
+        owned_blueprints_scope: str = "all_characters",
+        character_id: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "force_refresh": bool(force_refresh),
+            "maximize_bp_runs": bool(maximize_bp_runs),
+            "group_identical_bpcs": bool(group_identical_bpcs),
+            "build_from_bpc": bool(build_from_bpc),
+            "have_blueprint_source_only": bool(have_blueprint_source_only),
+            "include_reactions": bool(include_reactions),
+            "market_hub": MarketPricingService.normalize_market_hub(market_hub),
+            "material_price_side": MarketPricingService.normalize_order_side(material_price_side),
+            "product_price_side": MarketPricingService.normalize_order_side(product_price_side),
+            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
+            "owned_blueprints_scope": str(owned_blueprints_scope),
+            "character_id": int(character_id) if character_id is not None else None,
+        }
+
+    @staticmethod
+    def _overview_refresh_job_is_active(job: dict[str, Any]) -> bool:
+        return str(job.get("status") or "").strip().lower() in {"queued", "running"}
+
+    @staticmethod
+    def _portfolio_candidates_job_is_active(job: dict[str, Any]) -> bool:
+        return str(job.get("status") or "").strip().lower() in {"queued", "running"}
+
+    @staticmethod
+    def _exclude_from_product_overview(row: dict[str, Any]) -> bool:
+        type_name = str(row.get("type_name") or "").strip().lower()
+        if not type_name:
+            return False
+        return "expired" in type_name
+
+    @staticmethod
+    def _normalized_overview_meta_group_name(row: dict[str, Any]) -> str:
+        raw_name = str(row.get("meta_group_name") or "").strip()
+        normalized = raw_name.lower()
+        if normalized in {"tech i", "structure tech i", "abyssal"}:
+            return "Tech I"
+        if normalized in {"tech ii", "structure tech ii"}:
+            return "Tech II"
+        if normalized in {"tech iii", "structure tech iii"}:
+            return "Tech III"
+        if normalized in {"faction", "structure faction"}:
+            return "Faction"
+        if normalized in {"storyline", "limited time"}:
+            return "Storyline"
+        return raw_name
+
+    @staticmethod
+    def _overview_row_skill_requirements_met(row: dict[str, Any]) -> bool:
+        manufacturing_job = row.get("manufacturing_job") or {}
+        if not isinstance(manufacturing_job, dict):
+            return False
+        skills = manufacturing_job.get("skills") or {}
+        if not isinstance(skills, dict):
+            return False
+        return bool(skills.get("skill_requirements_met", False))
+
+    @classmethod
+    def _filter_overview_rows_for_portfolio_candidates(
+        cls,
+        overview_rows: list[dict[str, Any]],
+        *,
+        enabled_meta_groups: list[str] | tuple[str, ...] | None = None,
+        have_skills_only: bool = False,
+        positive_profit_only: bool = False,
+        min_margin_pct: float = 0.0,
+        min_isk_per_hour: float = 0.0,
+        min_region_daily_volume: int = 0,
+    ) -> list[dict[str, Any]]:
+        enabled_meta_group_set = set(enabled_meta_groups) if enabled_meta_groups is not None else None
+        filtered_rows: list[dict[str, Any]] = []
+        for row in overview_rows:
+            if enabled_meta_group_set is not None and cls._normalized_overview_meta_group_name(row) not in enabled_meta_group_set:
+                continue
+            if have_skills_only and not cls._overview_row_skill_requirements_met(row):
+                continue
+            if positive_profit_only and float(row.get("profit_amount") or 0.0) <= 0.0:
+                continue
+            if float(row.get("profit_margin_fraction") or 0.0) < (float(min_margin_pct or 0.0) / 100.0):
+                continue
+            if float(row.get("isk_per_hour") or 0.0) < float(min_isk_per_hour or 0.0):
+                continue
+            if int(row.get("region_daily_volume") or 0) < int(min_region_daily_volume or 0):
+                continue
+            filtered_rows.append(row)
+        return filtered_rows
+
+    @staticmethod
+    def _normalize_portfolio_candidates_params(
+        *,
+        force_refresh: bool = False,
+        maximize_bp_runs: bool = False,
+        group_identical_bpcs: bool = True,
+        build_from_bpc: bool = True,
+        have_blueprint_source_only: bool = True,
+        include_reactions: bool = False,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
+        product_price_side: str = "sell",
+        industry_profile_id: int | None = None,
+        owned_blueprints_scope: str = "all_characters",
+        character_id: int | None = None,
+        planning_horizon_hours: float = 24.0,
+        enabled_meta_groups: list[str] | tuple[str, ...] | None = None,
+        have_skills_only: bool = False,
+        positive_profit_only: bool = False,
+        min_margin_pct: float = 0.0,
+        min_isk_per_hour: float = 0.0,
+        min_region_daily_volume: int = 0,
+    ) -> dict[str, Any]:
+        if enabled_meta_groups is None:
+            normalized_enabled_meta_groups = None
+        else:
+            normalized_enabled_meta_groups = tuple(
+                sorted(
+                    {
+                        str(meta_group_name or "").strip()
+                        for meta_group_name in enabled_meta_groups
+                        if str(meta_group_name or "").strip()
+                    },
+                    key=str.lower,
+                )
+            )
+        return {
+            **IndustryService._normalize_overview_refresh_params(
+                force_refresh=force_refresh,
+                maximize_bp_runs=maximize_bp_runs,
+                group_identical_bpcs=group_identical_bpcs,
+                build_from_bpc=build_from_bpc,
+                have_blueprint_source_only=have_blueprint_source_only,
+                include_reactions=include_reactions,
+                market_hub=market_hub,
+                material_price_side=material_price_side,
+                product_price_side=product_price_side,
+                industry_profile_id=industry_profile_id,
+                owned_blueprints_scope=owned_blueprints_scope,
+                character_id=character_id,
+            ),
+            "planning_horizon_hours": float(planning_horizon_hours or 0.0),
+            "enabled_meta_groups": normalized_enabled_meta_groups,
+            "have_skills_only": bool(have_skills_only),
+            "positive_profit_only": bool(positive_profit_only),
+            "min_margin_pct": float(min_margin_pct or 0.0),
+            "min_isk_per_hour": float(min_isk_per_hour or 0.0),
+            "min_region_daily_volume": int(min_region_daily_volume or 0),
+        }
+
+    def _find_matching_overview_refresh_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
+        store = self._get_industry_overview_refresh_store()
+        with store.lock:
+            for job in store.jobs.values():
+                if not isinstance(job, dict):
+                    continue
+                if not self._overview_refresh_job_is_active(job):
+                    continue
+                if dict(job.get("request_params") or {}) != params:
+                    continue
+                return dict(job)
+        return None
+
+    def _find_matching_portfolio_candidates_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
+        store = self._get_industry_portfolio_candidates_store()
+        with store.lock:
+            for job in store.jobs.values():
+                if not isinstance(job, dict):
+                    continue
+                if not self._portfolio_candidates_job_is_active(job):
+                    continue
+                if dict(job.get("request_params") or {}) != params:
+                    continue
+                return dict(job)
+        return None
+
     def _update_overview_refresh_job(
         self,
         job_id: str,
@@ -192,6 +386,41 @@ class IndustryService:
             job["updated_at"] = datetime.now(timezone.utc).isoformat()
             return dict(job)
 
+    def _update_portfolio_candidates_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        progress_fraction: float | None = None,
+        progress_label: str | None = None,
+        result: list[dict[str, Any]] | None = None,
+        result_meta: dict[str, Any] | None = None,
+        error_message: str | None = None,
+        progress_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        store = self._get_industry_portfolio_candidates_store()
+        with store.lock:
+            job = store.jobs.get(str(job_id))
+            if job is None:
+                raise RuntimeError(f"Unknown portfolio candidates job: {job_id}")
+            if status is not None:
+                job["status"] = str(status)
+            if progress_fraction is not None:
+                job["progress_fraction"] = max(0.0, min(1.0, float(progress_fraction)))
+            if progress_label is not None:
+                job["progress_label"] = str(progress_label)
+            if progress_meta is not None:
+                job["progress_meta"] = dict(progress_meta)
+            if result is not None:
+                job["result"] = result
+                job["result_count"] = len(result)
+            if result_meta is not None:
+                job["result_meta"] = dict(result_meta)
+            if error_message is not None:
+                job["error_message"] = str(error_message)
+            job["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return dict(job)
+
     def start_industry_manufacturing_product_overview_refresh(
         self,
         *,
@@ -208,12 +437,37 @@ class IndustryService:
         owned_blueprints_scope: str = "all_characters",
         character_id: int | None = None,
     ) -> dict[str, Any]:
+        params = self._normalize_overview_refresh_params(
+            force_refresh=force_refresh,
+            maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
+            build_from_bpc=build_from_bpc,
+            have_blueprint_source_only=have_blueprint_source_only,
+            include_reactions=include_reactions,
+            market_hub=market_hub,
+            material_price_side=material_price_side,
+            product_price_side=product_price_side,
+            industry_profile_id=industry_profile_id,
+            owned_blueprints_scope=owned_blueprints_scope,
+            character_id=character_id,
+        )
+        existing_job = self._find_matching_overview_refresh_job(params=params)
+        if existing_job is not None:
+            return {
+                "job_id": str(existing_job.get("job_id") or ""),
+                "created_at": existing_job.get("created_at"),
+                "updated_at": existing_job.get("updated_at"),
+                "progress_label": str(existing_job.get("progress_label") or "Queued"),
+                "progress_meta": dict(existing_job.get("progress_meta") or {}),
+            }
+
         job_id = str(uuid.uuid4())
         store = self._get_industry_overview_refresh_store()
         created_at = datetime.now(timezone.utc).isoformat()
         with store.lock:
             store.jobs[job_id] = {
                 "job_id": job_id,
+                "request_params": dict(params),
                 "status": "queued",
                 "progress_fraction": 0.0,
                 "progress_label": "Queued",
@@ -229,21 +483,6 @@ class IndustryService:
                 "result_count": 0,
                 "error_message": None,
             }
-
-        params = {
-            "force_refresh": bool(force_refresh),
-            "maximize_bp_runs": bool(maximize_bp_runs),
-            "group_identical_bpcs": bool(group_identical_bpcs),
-            "build_from_bpc": bool(build_from_bpc),
-            "have_blueprint_source_only": bool(have_blueprint_source_only),
-            "include_reactions": bool(include_reactions),
-            "market_hub": MarketPricingService.normalize_market_hub(market_hub),
-            "material_price_side": MarketPricingService.normalize_order_side(material_price_side),
-            "product_price_side": MarketPricingService.normalize_order_side(product_price_side),
-            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
-            "owned_blueprints_scope": str(owned_blueprints_scope),
-            "character_id": int(character_id) if character_id is not None else None,
-        }
 
         thread = threading.Thread(
             target=self._run_overview_refresh_job,
@@ -321,6 +560,214 @@ class IndustryService:
             if job is None:
                 raise ServiceError(f"Unknown overview refresh job: {job_id}", status_code=404)
             return dict(job)
+
+    def start_industry_manufacturing_portfolio_candidates_refresh(
+        self,
+        *,
+        force_refresh: bool = False,
+        maximize_bp_runs: bool = False,
+        group_identical_bpcs: bool = True,
+        build_from_bpc: bool = True,
+        have_blueprint_source_only: bool = True,
+        include_reactions: bool = False,
+        market_hub: str = "jita",
+        material_price_side: str = "sell",
+        product_price_side: str = "sell",
+        industry_profile_id: int | None = None,
+        owned_blueprints_scope: str = "all_characters",
+        character_id: int | None = None,
+        planning_horizon_hours: float = 24.0,
+        enabled_meta_groups: list[str] | tuple[str, ...] | None = None,
+        have_skills_only: bool = False,
+        positive_profit_only: bool = False,
+        min_margin_pct: float = 0.0,
+        min_isk_per_hour: float = 0.0,
+        min_region_daily_volume: int = 0,
+    ) -> dict[str, Any]:
+        params = self._normalize_portfolio_candidates_params(
+            force_refresh=force_refresh,
+            maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
+            build_from_bpc=build_from_bpc,
+            have_blueprint_source_only=have_blueprint_source_only,
+            include_reactions=include_reactions,
+            market_hub=market_hub,
+            material_price_side=material_price_side,
+            product_price_side=product_price_side,
+            industry_profile_id=industry_profile_id,
+            owned_blueprints_scope=owned_blueprints_scope,
+            character_id=character_id,
+            planning_horizon_hours=planning_horizon_hours,
+            enabled_meta_groups=enabled_meta_groups,
+            have_skills_only=have_skills_only,
+            positive_profit_only=positive_profit_only,
+            min_margin_pct=min_margin_pct,
+            min_isk_per_hour=min_isk_per_hour,
+            min_region_daily_volume=min_region_daily_volume,
+        )
+        existing_job = self._find_matching_portfolio_candidates_job(params=params)
+        if existing_job is not None:
+            return {
+                "job_id": str(existing_job.get("job_id") or ""),
+                "created_at": existing_job.get("created_at"),
+                "updated_at": existing_job.get("updated_at"),
+                "progress_label": str(existing_job.get("progress_label") or "Queued"),
+                "progress_meta": dict(existing_job.get("progress_meta") or {}),
+            }
+
+        job_id = str(uuid.uuid4())
+        store = self._get_industry_portfolio_candidates_store()
+        created_at = datetime.now(timezone.utc).isoformat()
+        with store.lock:
+            store.jobs[job_id] = {
+                "job_id": job_id,
+                "request_params": dict(params),
+                "status": "queued",
+                "progress_fraction": 0.0,
+                "progress_label": "Queued",
+                "progress_meta": {
+                    "stage": "queued",
+                    "step": 0,
+                    "step_count": 11,
+                },
+                "created_at": created_at,
+                "updated_at": created_at,
+                "result": None,
+                "result_meta": {},
+                "result_count": 0,
+                "error_message": None,
+            }
+
+        thread = threading.Thread(
+            target=self._run_portfolio_candidates_refresh_job,
+            args=(job_id, params),
+            daemon=True,
+            name=f"industry-portfolio-candidates-{job_id[:8]}",
+        )
+        register_thread(self._state, thread.name, thread)
+        thread.start()
+        return {
+            "job_id": job_id,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "progress_label": "Queued",
+            "progress_meta": {"step": 0, "step_count": 11, "stage": "queued"},
+        }
+
+    def _run_portfolio_candidates_refresh_job(self, job_id: str, params: dict[str, Any]) -> None:
+        self._update_portfolio_candidates_job(
+            job_id,
+            status="running",
+            progress_fraction=0.01,
+            progress_label="Step 1/11: Starting portfolio candidate build",
+            progress_meta={"step": 1, "step_count": 11, "stage": "startup"},
+        )
+        try:
+            def report_progress(
+                progress_fraction: float,
+                progress_label: str,
+                progress_meta: dict[str, Any] | None = None,
+            ) -> None:
+                self._update_portfolio_candidates_job(
+                    job_id,
+                    status="running",
+                    progress_fraction=progress_fraction,
+                    progress_label=progress_label,
+                    progress_meta=progress_meta,
+                )
+
+            payload = self.industry_manufacturing_portfolio_candidates_payload(
+                force_refresh=bool(params.get("force_refresh", False)),
+                maximize_bp_runs=bool(params.get("maximize_bp_runs", False)),
+                group_identical_bpcs=bool(params.get("group_identical_bpcs", True)),
+                build_from_bpc=bool(params.get("build_from_bpc", True)),
+                have_blueprint_source_only=bool(params.get("have_blueprint_source_only", True)),
+                include_reactions=bool(params.get("include_reactions", False)),
+                market_hub=str(params.get("market_hub") or "jita"),
+                material_price_side=str(params.get("material_price_side") or "sell"),
+                product_price_side=str(params.get("product_price_side") or "sell"),
+                industry_profile_id=params.get("industry_profile_id"),
+                owned_blueprints_scope=str(params.get("owned_blueprints_scope") or "all_characters"),
+                character_id=params.get("character_id"),
+                planning_horizon_hours=float(params.get("planning_horizon_hours") or 24.0),
+                enabled_meta_groups=params.get("enabled_meta_groups"),
+                have_skills_only=bool(params.get("have_skills_only", False)),
+                positive_profit_only=bool(params.get("positive_profit_only", False)),
+                min_margin_pct=float(params.get("min_margin_pct") or 0.0),
+                min_isk_per_hour=float(params.get("min_isk_per_hour") or 0.0),
+                min_region_daily_volume=int(params.get("min_region_daily_volume") or 0),
+                progress_callback=report_progress,
+            )
+            self._update_portfolio_candidates_job(
+                job_id,
+                status="completed",
+                progress_fraction=1.0,
+                progress_label="Portfolio candidates ready",
+                result=(payload.get("candidates") or []) if isinstance(payload, dict) else [],
+                result_meta={
+                    "summary": (payload.get("summary") or {}) if isinstance(payload, dict) else {},
+                    "pricing_batch": (payload.get("pricing_batch") or {}) if isinstance(payload, dict) else {},
+                },
+            )
+        except Exception as e:
+            self._update_portfolio_candidates_job(
+                job_id,
+                status="failed",
+                progress_label="Portfolio candidate build failed",
+                error_message=str(e),
+            )
+
+    def industry_manufacturing_portfolio_candidates_refresh_status(self, *, job_id: str) -> dict[str, Any]:
+        store = self._get_industry_portfolio_candidates_store()
+        with store.lock:
+            job = store.jobs.get(str(job_id))
+            if job is None:
+                raise ServiceError(f"Unknown portfolio candidates job: {job_id}", status_code=404)
+            return dict(job)
+
+    def industry_manufacturing_portfolio_candidate_snapshot(
+        self,
+        *,
+        snapshot_id: str,
+        character_id: int | None = None,
+    ) -> dict[str, Any]:
+        normalized_snapshot_id = str(snapshot_id or "").strip()
+        if not normalized_snapshot_id:
+            raise ServiceError("Candidate snapshot id is required.", status_code=400)
+
+        store = self._get_industry_portfolio_candidates_store()
+        with store.lock:
+            job = store.jobs.get(normalized_snapshot_id)
+            if job is None:
+                raise ServiceError(f"Unknown portfolio candidates snapshot: {normalized_snapshot_id}", status_code=404)
+            snapshot_job = dict(job)
+
+        status = str(snapshot_job.get("status") or "")
+        if status != "completed":
+            if status == "failed":
+                raise ServiceError(
+                    str(snapshot_job.get("error_message") or "Candidate snapshot build failed."),
+                    status_code=409,
+                )
+            raise ServiceError("Candidate snapshot is not ready yet.", status_code=409)
+
+        request_params = dict(snapshot_job.get("request_params") or {})
+        if character_id is not None:
+            request_character_id = int(request_params.get("character_id") or 0)
+            if request_character_id > 0 and request_character_id != int(character_id):
+                raise ServiceError("Candidate snapshot does not belong to the requested character.", status_code=400)
+
+        result_meta = dict(snapshot_job.get("result_meta") or {})
+        return {
+            "snapshot_id": normalized_snapshot_id,
+            "created_at": snapshot_job.get("created_at"),
+            "updated_at": snapshot_job.get("updated_at"),
+            "request_params": request_params,
+            "candidates": list(snapshot_job.get("result") or []),
+            "summary": dict(result_meta.get("summary") or {}),
+            "pricing_batch": dict(result_meta.get("pricing_batch") or {}),
+            "result_count": int(snapshot_job.get("result_count") or 0),
+        }
 
     # -----------------
     # Endpoints logic
@@ -1598,8 +2045,20 @@ class IndustryService:
         owned_blueprints_scope: str = "all_characters",
         character_id: int | None = None,
         planning_horizon_hours: float = 24.0,
+        enabled_meta_groups: list[str] | tuple[str, ...] | None = None,
+        have_skills_only: bool = False,
+        positive_profit_only: bool = False,
+        min_margin_pct: float = 0.0,
+        min_isk_per_hour: float = 0.0,
+        min_region_daily_volume: int = 0,
         progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        if progress_callback is not None:
+            progress_callback(
+                0.03,
+                "Step 2/11: Preparing portfolio candidate request",
+                {"step": 2, "step_count": 11, "stage": "startup"},
+            )
         overview_payload = self.industry_manufacturing_product_overview_payload(
             force_refresh=force_refresh,
             maximize_bp_runs=maximize_bp_runs,
@@ -1613,10 +2072,47 @@ class IndustryService:
             industry_profile_id=industry_profile_id,
             owned_blueprints_scope=owned_blueprints_scope,
             character_id=character_id,
-            progress_callback=progress_callback,
+            progress_callback=(
+                None
+                if progress_callback is None
+                else lambda progress_fraction, progress_label, progress_meta=None: progress_callback(
+                    0.05 + (0.82 * float(progress_fraction)),
+                    str(progress_label),
+                    {
+                        **(dict(progress_meta) if isinstance(progress_meta, dict) else {}),
+                        "step_count": 11,
+                    },
+                )
+            ),
         )
-        rows = cast(list[dict[str, Any]], overview_payload.get("rows") or [])
+        rows = self._filter_overview_rows_for_portfolio_candidates(
+            cast(list[dict[str, Any]], overview_payload.get("rows") or []),
+            enabled_meta_groups=enabled_meta_groups,
+            have_skills_only=have_skills_only,
+            positive_profit_only=positive_profit_only,
+            min_margin_pct=min_margin_pct,
+            min_isk_per_hour=min_isk_per_hour,
+            min_region_daily_volume=min_region_daily_volume,
+        )
+        if progress_callback is not None:
+            progress_callback(
+                0.90,
+                "Step 10/11: Building portfolio candidates",
+                {"step": 10, "step_count": 11, "stage": "candidates", "rows": len(rows)},
+            )
         candidates = self._build_portfolio_candidates(rows, planning_horizon_hours=planning_horizon_hours)
+        if progress_callback is not None:
+            progress_callback(
+                1.0,
+                "Step 11/11: Portfolio candidates ready",
+                {
+                    "step": 11,
+                    "step_count": 11,
+                    "stage": "completed",
+                    "rows": len(rows),
+                    "candidate_count": len(candidates),
+                },
+            )
         return {
             "rows": rows,
             "candidates": candidates,
@@ -4646,7 +5142,11 @@ class IndustryService:
                 out: dict[int, str] = {}
                 for top_location_id in sorted(top_location_ids):
                     try:
-                        location_info = self._state.esi_service.get_location_info(int(top_location_id))
+                        location_info = self._state.esi_service.get_location_info(
+                            int(top_location_id),
+                            suppress_forbidden_log=True,
+                            suppress_not_found_log=True,
+                        )
                     except Exception:
                         continue
                     if not isinstance(location_info, dict):
@@ -6314,6 +6814,10 @@ class IndustryService:
                             "market_volume_total": product_market_pricing.get("volume_total"),
                         }
                     )
+
+        product_rows = [
+            row for row in product_rows if isinstance(row, dict) and not self._exclude_from_product_overview(row)
+        ]
 
         if progress_callback is not None:
             progress_callback(

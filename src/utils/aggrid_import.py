@@ -10,6 +10,8 @@ class AgGridImports:
     AgGrid: Any | None
     GridOptionsBuilder: Any | None
     JsCode: Any | None
+    GridUpdateMode: Any | None
+    DataReturnMode: Any | None
     import_error: str | None
 
 
@@ -21,12 +23,14 @@ def import_aggrid() -> AgGridImports:
     """
 
     try:
-        from st_aggrid import AgGrid, GridOptionsBuilder, JsCode  # type: ignore
+        from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode  # type: ignore
     except Exception:  # pragma: no cover
         return AgGridImports(
             AgGrid=None,
             GridOptionsBuilder=None,
             JsCode=None,
+            GridUpdateMode=None,
+            DataReturnMode=None,
             import_error=traceback.format_exc(),
         )
 
@@ -34,5 +38,7 @@ def import_aggrid() -> AgGridImports:
         AgGrid=AgGrid,
         GridOptionsBuilder=GridOptionsBuilder,
         JsCode=JsCode,
+        GridUpdateMode=GridUpdateMode,
+        DataReturnMode=DataReturnMode,
         import_error=None,
     )

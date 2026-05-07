@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from flask import Blueprint, request
 
-from eve_online_industry_tracker.application.industry.portfolio_service import IndustryPortfolioService
+from eve_online_industry_tracker.application.industry.portfolio_service import (
+    IndustryPortfolioService,
+    PortfolioCandidateDirective,
+    PortfolioCandidateScope,
+    PortfolioPlanRequest,
+)
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from flask_app.bootstrap import require_ready, require_sde_ready
 from flask_app.deps import get_state
@@ -10,6 +15,101 @@ from flask_app.http import ok
 
 
 industry_bp = Blueprint("industry", __name__)
+
+
+def _string_list_payload(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        item_value = str(item or "").strip()
+        if item_value:
+            normalized.append(item_value)
+    return normalized
+
+
+def _candidate_directives_payload(value: object) -> list[PortfolioCandidateDirective]:
+    if not isinstance(value, list):
+        return []
+    directives: list[PortfolioCandidateDirective] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        overview_row_id = str(entry.get("overview_row_id") or "").strip()
+        if not overview_row_id:
+            continue
+
+        def _optional_int(raw_value: object) -> int | None:
+            try:
+                parsed = int(raw_value) if raw_value is not None else None
+            except Exception:
+                return None
+            return parsed if parsed is not None and parsed > 0 else None
+
+        directives.append(
+            PortfolioCandidateDirective(
+                overview_row_id=overview_row_id,
+                force_include=bool(entry.get("force_include", False)),
+                exclude=bool(entry.get("exclude", False)),
+                lock_required=bool(entry.get("lock_required", False)),
+                max_batches_override=_optional_int(entry.get("max_batches_override")),
+                target_batches_override=_optional_int(entry.get("target_batches_override")),
+                target_units_override=_optional_int(entry.get("target_units_override")),
+            )
+        )
+    return directives
+
+
+def _portfolio_plan_request_from_payload(payload: dict[str, object]) -> PortfolioPlanRequest:
+    try:
+        planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
+    except Exception:
+        planning_horizon_hours = 24.0
+    try:
+        capital_limit_isk = float(payload.get("capital_limit_isk") or 0.0)
+    except Exception:
+        capital_limit_isk = 0.0
+    try:
+        manufacturing_slots_available = int(payload.get("manufacturing_slots_available") or 0)
+    except Exception:
+        manufacturing_slots_available = 0
+    try:
+        min_margin_pct = float(payload.get("min_margin_pct") or 0.0)
+    except Exception:
+        min_margin_pct = 0.0
+    try:
+        min_isk_per_hour = float(payload.get("min_isk_per_hour") or 0.0)
+    except Exception:
+        min_isk_per_hour = 0.0
+    try:
+        min_region_daily_volume = int(payload.get("min_region_daily_volume") or 0)
+    except Exception:
+        min_region_daily_volume = 0
+    try:
+        min_owned_input_coverage_pct = float(payload.get("min_owned_input_coverage_pct") or 0.0)
+    except Exception:
+        min_owned_input_coverage_pct = 0.0
+
+    return PortfolioPlanRequest(
+        candidate_snapshot_id=str(payload.get("candidate_snapshot_id") or "").strip(),
+        capital_limit_isk=capital_limit_isk,
+        manufacturing_slots_available=manufacturing_slots_available,
+        planning_horizon_hours=planning_horizon_hours,
+        objective=str(payload.get("objective") or "balanced"),
+        minimum_pricing_confidence=str(payload.get("minimum_pricing_confidence") or "low"),
+        candidate_directives=_candidate_directives_payload(payload.get("candidate_directives")),
+        candidate_scope=PortfolioCandidateScope(
+            categories=_string_list_payload(payload.get("candidate_categories")),
+            meta_groups=_string_list_payload(payload.get("candidate_meta_groups")),
+            pricing_confidences=_string_list_payload(payload.get("candidate_pricing_confidences")),
+            blueprint_sources=_string_list_payload(payload.get("candidate_blueprint_sources")),
+            positive_profit_only=bool(payload.get("positive_profit_only", False)),
+            min_margin_pct=min_margin_pct,
+            min_isk_per_hour=min_isk_per_hour,
+            min_region_daily_volume=min_region_daily_volume,
+            min_owned_input_coverage_pct=min_owned_input_coverage_pct,
+        ),
+    )
 
 
 @industry_bp.get("/structure_type_bonuses/<int:type_id>")
@@ -158,6 +258,57 @@ def industry_products_refresh_status(job_id: str):
     return ok(data=svc.industry_manufacturing_product_overview_refresh_status(job_id=job_id))
 
 
+@industry_bp.post("/industry_products/<int:character_id>/portfolio_candidates/start")
+def industry_portfolio_candidates_start(character_id: int):
+    require_ready(get_state())
+    require_sde_ready(get_state())
+    payload = request.get_json(silent=True) or {}
+    maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
+    group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
+    build_from_bpc = bool(payload.get("build_from_bpc", True))
+    have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
+    include_reactions = bool(payload.get("include_reactions", False))
+    market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
+    material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
+    product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
+    owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
+    raw_industry_profile_id = payload.get("industry_profile_id")
+    try:
+        industry_profile_id = int(raw_industry_profile_id) if raw_industry_profile_id is not None else None
+    except Exception:
+        industry_profile_id = None
+    if industry_profile_id is not None and industry_profile_id <= 0:
+        industry_profile_id = None
+    try:
+        planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
+    except Exception:
+        planning_horizon_hours = 24.0
+
+    svc = IndustryService(state=get_state())
+    refresh_job = svc.start_industry_manufacturing_portfolio_candidates_refresh(
+        maximize_bp_runs=maximize_bp_runs,
+        group_identical_bpcs=group_identical_bpcs,
+        build_from_bpc=build_from_bpc,
+        have_blueprint_source_only=have_blueprint_source_only,
+        include_reactions=include_reactions,
+        market_hub=market_hub,
+        material_price_side=material_price_side,
+        product_price_side=product_price_side,
+        industry_profile_id=industry_profile_id,
+        owned_blueprints_scope=owned_blueprints_scope,
+        character_id=int(character_id),
+        planning_horizon_hours=planning_horizon_hours,
+    )
+    return ok(data=refresh_job, status_code=202)
+
+
+@industry_bp.get("/industry_products/portfolio_candidates/<job_id>")
+def industry_portfolio_candidates_status(job_id: str):
+    require_ready(get_state())
+    svc = IndustryService(state=get_state())
+    return ok(data=svc.industry_manufacturing_portfolio_candidates_refresh_status(job_id=job_id))
+
+
 @industry_bp.get("/industry_products/<int:character_id>/portfolio_candidates")
 def industry_portfolio_candidates(character_id: int):
     require_ready(get_state())
@@ -217,68 +368,82 @@ def industry_portfolio_plan(character_id: int):
     require_ready(get_state())
     require_sde_ready(get_state())
     payload = request.get_json(silent=True) or {}
-    maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
-    group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
-    build_from_bpc = bool(payload.get("build_from_bpc", True))
-    have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
-    include_reactions = bool(payload.get("include_reactions", False))
-    market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
-    material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
-    product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
-    owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
-    raw_industry_profile_id = payload.get("industry_profile_id")
-    try:
-        industry_profile_id = int(raw_industry_profile_id) if raw_industry_profile_id is not None else None
-    except Exception:
-        industry_profile_id = None
-    if industry_profile_id is not None and industry_profile_id <= 0:
-        industry_profile_id = None
-    try:
-        planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
-    except Exception:
-        planning_horizon_hours = 24.0
-    try:
-        capital_limit_isk = float(payload.get("capital_limit_isk") or 0.0)
-    except Exception:
-        capital_limit_isk = 0.0
-    try:
-        manufacturing_slots_available = int(payload.get("manufacturing_slots_available") or 0)
-    except Exception:
-        manufacturing_slots_available = 0
+    plan_request = _portfolio_plan_request_from_payload(payload)
 
     svc = IndustryService(state=get_state())
-    candidate_payload = svc.industry_manufacturing_portfolio_candidates_payload(
-        maximize_bp_runs=maximize_bp_runs,
-        group_identical_bpcs=group_identical_bpcs,
-        build_from_bpc=build_from_bpc,
-        have_blueprint_source_only=have_blueprint_source_only,
-        include_reactions=include_reactions,
-        market_hub=market_hub,
-        material_price_side=material_price_side,
-        product_price_side=product_price_side,
-        industry_profile_id=industry_profile_id,
-        owned_blueprints_scope=owned_blueprints_scope,
-        character_id=int(character_id),
-        planning_horizon_hours=planning_horizon_hours,
-    )
+    if plan_request.candidate_snapshot_id:
+        candidate_snapshot = svc.industry_manufacturing_portfolio_candidate_snapshot(
+            snapshot_id=plan_request.candidate_snapshot_id,
+            character_id=int(character_id),
+        )
+    else:
+        maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
+        group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
+        build_from_bpc = bool(payload.get("build_from_bpc", True))
+        have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
+        include_reactions = bool(payload.get("include_reactions", False))
+        market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
+        material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
+        product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
+        owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
+        raw_industry_profile_id = payload.get("industry_profile_id")
+        try:
+            industry_profile_id = int(raw_industry_profile_id) if raw_industry_profile_id is not None else None
+        except Exception:
+            industry_profile_id = None
+        if industry_profile_id is not None and industry_profile_id <= 0:
+            industry_profile_id = None
+
+        candidate_payload = svc.industry_manufacturing_portfolio_candidates_payload(
+            maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
+            build_from_bpc=build_from_bpc,
+            have_blueprint_source_only=have_blueprint_source_only,
+            include_reactions=include_reactions,
+            market_hub=market_hub,
+            material_price_side=material_price_side,
+            product_price_side=product_price_side,
+            industry_profile_id=industry_profile_id,
+            owned_blueprints_scope=owned_blueprints_scope,
+            character_id=int(character_id),
+            planning_horizon_hours=float(plan_request.planning_horizon_hours or 24.0),
+        )
+        candidate_snapshot = {
+            "snapshot_id": "",
+            "created_at": None,
+            "updated_at": None,
+            "request_params": {
+                "maximize_bp_runs": maximize_bp_runs,
+                "group_identical_bpcs": group_identical_bpcs,
+                "build_from_bpc": build_from_bpc,
+                "have_blueprint_source_only": have_blueprint_source_only,
+                "include_reactions": include_reactions,
+                "market_hub": market_hub,
+                "material_price_side": material_price_side,
+                "product_price_side": product_price_side,
+                "industry_profile_id": industry_profile_id,
+                "owned_blueprints_scope": owned_blueprints_scope,
+                "character_id": int(character_id),
+            },
+            "candidates": list(candidate_payload.get("candidates") or []),
+            "summary": candidate_payload.get("summary") or {},
+            "pricing_batch": candidate_payload.get("pricing_batch") or {},
+        }
+
     planner = IndustryPortfolioService()
     plan = planner.optimize_manufacturing_portfolio(
-        candidates=list(candidate_payload.get("candidates") or []),
-        capital_limit_isk=capital_limit_isk,
-        manufacturing_slots_available=manufacturing_slots_available,
-        planning_horizon_hours=planning_horizon_hours,
-        objective=str(payload.get("objective") or "balanced"),
-        positive_profit_only=bool(payload.get("positive_profit_only", True)),
-        min_margin_pct=float(payload.get("min_margin_pct") or 0.0),
-        min_isk_per_hour=float(payload.get("min_isk_per_hour") or 0.0),
-        min_region_daily_volume=int(payload.get("min_region_daily_volume") or 0),
-        minimum_pricing_confidence=str(payload.get("minimum_pricing_confidence") or "low"),
+        candidates=list(candidate_snapshot.get("candidates") or []),
+        plan_request=plan_request,
     )
     return ok(
         data={
             **plan,
-            "summary": candidate_payload.get("summary") or {},
-            "pricing_batch": candidate_payload.get("pricing_batch") or {},
+            "summary": candidate_snapshot.get("summary") or {},
+            "pricing_batch": candidate_snapshot.get("pricing_batch") or {},
+            "candidate_snapshot_id": candidate_snapshot.get("snapshot_id") or plan_request.candidate_snapshot_id,
+            "candidate_snapshot_created_at": candidate_snapshot.get("created_at"),
+            "candidate_snapshot_updated_at": candidate_snapshot.get("updated_at"),
+            "candidate_snapshot_request_params": candidate_snapshot.get("request_params") or {},
         }
     )
 

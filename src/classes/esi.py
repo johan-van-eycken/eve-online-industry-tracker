@@ -628,6 +628,8 @@ class ESIClient:
         paginate: bool = False,
         return_headers: bool = False,
         timeout_seconds: float = 15,
+        suppress_forbidden_log: bool = False,
+        suppress_not_found_log: bool = False,
     ) -> Any:
         """
         Issue a GET request to the ESI API with optional query params and caching.
@@ -727,10 +729,12 @@ class ESIClient:
                         # Still update limiter from headers (done above).
                         return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
                     elif response.status_code == 403:
-                        logging.warning(f"ESI GET 403 Forbidden: {paged_url}")
+                        if not suppress_forbidden_log:
+                            logging.warning(f"ESI GET 403 Forbidden: {paged_url}")
                         return None
                     elif response.status_code == 404:
-                        logging.warning(f"ESI GET 404 Not Found: {paged_url}")
+                        if not suppress_not_found_log:
+                            logging.warning(f"ESI GET 404 Not Found: {paged_url}")
                         return None
                     elif response.status_code in (420, 429, 500, 502, 503, 504):
                         retry_after = _parse_retry_after_seconds(response.headers)
@@ -850,10 +854,12 @@ class ESIClient:
                 elif response.status_code == 304:
                     return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
                 elif response.status_code == 403:
-                    logging.warning(f"ESI 403 GET Forbidden: {url}")
+                    if not suppress_forbidden_log:
+                        logging.warning(f"ESI 403 GET Forbidden: {url}")
                     return None
                 elif response.status_code == 404:
-                    logging.warning(f"ESI 404 GET Not Found: {url}")
+                    if not suppress_not_found_log:
+                        logging.warning(f"ESI 404 GET Not Found: {url}")
                     return None
                 elif response.status_code in (420, 429, 500, 502, 503, 504):
                     retry_after = _parse_retry_after_seconds(response.headers)

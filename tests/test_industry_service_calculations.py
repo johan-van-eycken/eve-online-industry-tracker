@@ -55,7 +55,11 @@ def _build_service(
         service,
     )
     service._enrich_product_rows_with_material_prices = MethodType(  # type: ignore[attr-defined]
-        lambda self, product_rows, progress_callback=None: product_rows,
+        lambda self, product_rows, progress_callback=None, **kwargs: product_rows,
+        service,
+    )
+    service._enrich_product_rows_with_sale_proceeds = MethodType(  # type: ignore[attr-defined]
+        lambda self, product_rows, **kwargs: product_rows,
         service,
     )
     return service
@@ -95,6 +99,28 @@ def _blueprint_row() -> dict:
         "research_material_job": {"time_seconds": 105},
         "research_time_job": {"time_seconds": 105},
     }
+
+
+def _expired_blueprint_rows() -> list[dict]:
+    valid_row = _blueprint_row()
+    expired_row = _blueprint_row()
+    expired_row["blueprint_type_id"] = 9002
+    expired_row["blueprint"] = {"type_id": 9002, "type_name": "Expired Blueprint", "base_price": 1000.0}
+    expired_row["manufacturing_job"] = {
+        **dict(expired_row["manufacturing_job"]),
+        "products": [
+            {
+                "type_id": 88202,
+                "type_name": "Expired Sanctified Vidette Filament",
+                "quantity": 1,
+                "base_price": 100.0,
+                "group_name": "Filament",
+                "category_name": "Abyssal",
+                "meta_group_name": "Tech I",
+            }
+        ],
+    }
+    return [valid_row, expired_row]
 
 
 def _recursive_t2_blueprint_rows() -> list[dict]:
@@ -413,6 +439,27 @@ def test_blueprint_sde_fallback_adds_me_te_research_chain() -> None:
     assert manufacturing_job["total_job_cost"] > manufacturing_job["manufacturing_job_cost"]
 
 
+def test_product_overview_excludes_expired_product_names() -> None:
+    service = _build_service(
+        blueprint_rows=_expired_blueprint_rows(),
+        profile=None,
+        character_modifiers=None,
+        trained_skill_levels={},
+        owned_assets=([], [], {}, {}, {}),
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}, 88202: {"adjusted_price": 100.0}},
+    )
+
+    rows = service.industry_manufacturing_product_overview(
+        build_from_bpc=False,
+        have_blueprint_source_only=False,
+        maximize_bp_runs=False,
+        character_id=1,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["type_name"] == "Test Module"
+
+
 def test_t2_recursive_plan_adds_invention_and_reaction_chains() -> None:
     profile = {
         "installation_cost_modifier": 0.10,
@@ -560,8 +607,8 @@ def test_recursive_plan_prefers_buy_when_market_cheaper(monkeypatch) -> None:
     }
     monkeypatch.setattr(
         MarketPricingService,
-        "get_material_sell_price_map",
-        lambda self, *, material_type_ids, progress_callback=None: {
+        "get_type_price_map",
+        lambda self, *, type_ids, hub="jita", side="sell", progress_callback=None: {
             7001: {"unit_price": 10.0, "price_source": "test_market"}
         },
     )
@@ -585,6 +632,46 @@ def test_recursive_plan_prefers_buy_when_market_cheaper(monkeypatch) -> None:
     manufacturing_job = next(row["manufacturing_job"] for row in rows if row.get("type_id") == 5002)
     assert "reaction:7001" not in manufacturing_job["recursive_activity_breakdown"]
     assert manufacturing_job["procurement_materials"]["7001"]["unit_price"] == 10.0
+
+
+def test_recursive_plan_marks_unknown_owned_cost_basis_when_inventory_has_no_cost() -> None:
+    profile = {
+        "installation_cost_modifier": 0.10,
+        "material_efficiency_bonus": 0.0,
+        "time_efficiency_bonus": 0.0,
+        "facility_cost_bonus": 0.0,
+        "system_security_status": 0.1,
+        "system_cost_indices": [
+            {"activity": "manufacturing", "cost_index": 0.05},
+            {"activity": "reaction", "cost_index": 0.04},
+            {"activity": "copying", "cost_index": 0.03},
+            {"activity": "invention", "cost_index": 0.02},
+        ],
+        "structure_rigs": [],
+    }
+    service = _build_service(
+        blueprint_rows=_recursive_t2_blueprint_rows(),
+        profile=profile,
+        character_modifiers={"modifier_skills": [], "implants": []},
+        trained_skill_levels={},
+        owned_assets=([], [], {}, {}, {}),
+        owned_item_inventory=({7001: 2}, {}),
+        adjusted_price_map={35: {"adjusted_price": 8.0}, 204: {"adjusted_price": 100.0}, 7001: {"adjusted_price": 50.0}},
+    )
+
+    rows = service.industry_manufacturing_product_overview(
+        build_from_bpc=True,
+        have_blueprint_source_only=False,
+        include_reactions=True,
+        maximize_bp_runs=False,
+        character_id=1,
+    )
+
+    manufacturing_job = next(row["manufacturing_job"] for row in rows if row.get("type_id") == 5002)
+    material = manufacturing_job["procurement_materials"]["7001"]
+    assert material["sourcing_strategy"] == "take"
+    assert material["owned_cost_basis_known"] is False
+    assert material["uses_unknown_owned_cost_basis"] is True
 
 
 def test_nested_unowned_bpc_build_includes_copying_row(monkeypatch) -> None:

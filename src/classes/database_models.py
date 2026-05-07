@@ -1,9 +1,8 @@
 from typing import Optional, Any
 from datetime import datetime
-from sqlalchemy.orm import Mapped, mapped_column # pyright: ignore[reportMissingImports]
+from sqlalchemy.orm import Mapped, declarative_base, mapped_column # pyright: ignore[reportMissingImports]
 from sqlalchemy.sql import func # pyright: ignore[reportMissingImports]
 from sqlalchemy import BigInteger, DateTime, Integer, String, Text, Float, Boolean, JSON, UniqueConstraint # pyright: ignore[reportMissingImports]
-from sqlalchemy.ext.declarative import declarative_base # pyright: ignore[reportMissingImports]
 
 # Base is the declarative base for SQLAlchamy models
 BaseOauth = declarative_base()
@@ -768,6 +767,7 @@ class Types(BaseSde):
     marketGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     capacity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     metaGroupID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    metaLevel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     variationParentTypeID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

@@ -96,10 +96,59 @@ def start_product_overview_refresh(
     return data if isinstance(data, dict) else {}
 
 
+def start_portfolio_candidates_refresh(
+    *,
+    maximize_bp_runs: bool,
+    group_identical_bpcs: bool,
+    build_from_bpc: bool,
+    have_blueprint_source_only: bool,
+    include_reactions: bool,
+    market_hub: str,
+    material_price_side: str,
+    product_price_side: str,
+    industry_profile_id: int | None,
+    owned_blueprints_scope: str,
+    character_id: int,
+    planning_horizon_hours: float,
+) -> dict[str, Any]:
+    response = api_post(
+        f"/industry_products/{int(character_id)}/portfolio_candidates/start",
+        {
+            "maximize_bp_runs": bool(maximize_bp_runs),
+            "group_identical_bpcs": bool(group_identical_bpcs),
+            "build_from_bpc": bool(build_from_bpc),
+            "have_blueprint_source_only": bool(have_blueprint_source_only),
+            "include_reactions": bool(include_reactions),
+            "market_hub": str(market_hub),
+            "material_price_side": str(material_price_side),
+            "product_price_side": str(product_price_side),
+            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
+            "owned_blueprints_scope": str(owned_blueprints_scope),
+            "planning_horizon_hours": float(planning_horizon_hours),
+        },
+    ) or {}
+    if response.get("status") != "success":
+        raise RuntimeError(response.get("message") or "Failed to start industry portfolio candidates refresh")
+
+    data = response.get("data") or {}
+    return data if isinstance(data, dict) else {}
+
+
+@st.cache_data(ttl=1, show_spinner=False)
 def fetch_product_overview_refresh_status(job_id: str) -> dict[str, Any]:
     response = api_get(f"/industry_products/refresh/{job_id}", timeout_seconds=30) or {}
     if response.get("status") != "success":
         raise RuntimeError(response.get("message") or "Failed to load industry product overview refresh status")
+
+    data = response.get("data") or {}
+    return data if isinstance(data, dict) else {}
+
+
+@st.cache_data(ttl=1, show_spinner=False)
+def fetch_portfolio_candidates_refresh_status(job_id: str) -> dict[str, Any]:
+    response = api_get(f"/industry_products/portfolio_candidates/{job_id}", timeout_seconds=30) or {}
+    if response.get("status") != "success":
+        raise RuntimeError(response.get("message") or "Failed to load industry portfolio candidate status")
 
     data = response.get("data") or {}
     return data if isinstance(data, dict) else {}
@@ -150,17 +199,8 @@ def fetch_portfolio_candidates(
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_portfolio_plan(
     *,
-    maximize_bp_runs: bool,
-    group_identical_bpcs: bool,
-    build_from_bpc: bool,
-    have_blueprint_source_only: bool,
-    include_reactions: bool,
-    market_hub: str,
-    material_price_side: str,
-    product_price_side: str,
-    industry_profile_id: int | None,
-    owned_blueprints_scope: str,
     character_id: int,
+    candidate_snapshot_id: str,
     planning_horizon_hours: float,
     capital_limit_isk: float,
     manufacturing_slots_available: int,
@@ -170,20 +210,17 @@ def fetch_portfolio_plan(
     min_isk_per_hour: float,
     min_region_daily_volume: int,
     minimum_pricing_confidence: str,
+    candidate_categories: list[str],
+    candidate_meta_groups: list[str],
+    candidate_pricing_confidences: list[str],
+    candidate_blueprint_sources: list[str],
+    min_owned_input_coverage_pct: float,
+    candidate_directives: list[dict[str, Any]],
 ) -> dict[str, Any]:
     response = api_post(
         f"/industry_products/{int(character_id)}/portfolio_plan",
         {
-            "maximize_bp_runs": bool(maximize_bp_runs),
-            "group_identical_bpcs": bool(group_identical_bpcs),
-            "build_from_bpc": bool(build_from_bpc),
-            "have_blueprint_source_only": bool(have_blueprint_source_only),
-            "include_reactions": bool(include_reactions),
-            "market_hub": str(market_hub),
-            "material_price_side": str(material_price_side),
-            "product_price_side": str(product_price_side),
-            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
-            "owned_blueprints_scope": str(owned_blueprints_scope),
+            "candidate_snapshot_id": str(candidate_snapshot_id),
             "planning_horizon_hours": float(planning_horizon_hours),
             "capital_limit_isk": float(capital_limit_isk),
             "manufacturing_slots_available": int(manufacturing_slots_available),
@@ -193,6 +230,12 @@ def fetch_portfolio_plan(
             "min_isk_per_hour": float(min_isk_per_hour),
             "min_region_daily_volume": int(min_region_daily_volume),
             "minimum_pricing_confidence": str(minimum_pricing_confidence),
+            "candidate_categories": [str(value) for value in candidate_categories],
+            "candidate_meta_groups": [str(value) for value in candidate_meta_groups],
+            "candidate_pricing_confidences": [str(value) for value in candidate_pricing_confidences],
+            "candidate_blueprint_sources": [str(value) for value in candidate_blueprint_sources],
+            "min_owned_input_coverage_pct": float(min_owned_input_coverage_pct),
+            "candidate_directives": [dict(value) for value in candidate_directives if isinstance(value, dict)],
         },
     ) or {}
     if response.get("status") != "success":
