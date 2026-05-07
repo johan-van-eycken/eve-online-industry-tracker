@@ -484,9 +484,22 @@ class ESIService:
 
         return result
 
-    def get_location_info(self, location_id: Union[int, List[int]]) -> Union[Dict[str, Any], Dict[int, Dict[str, Any]]]:
+    def get_location_info(
+        self,
+        location_id: Union[int, List[int]],
+        *,
+        suppress_forbidden_log: bool = False,
+        suppress_not_found_log: bool = False,
+    ) -> Union[Dict[str, Any], Dict[int, Dict[str, Any]]]:
         if isinstance(location_id, list):
-            return {loc: self.get_location_info(loc) for loc in location_id}
+            return {
+                loc: self.get_location_info(
+                    loc,
+                    suppress_forbidden_log=suppress_forbidden_log,
+                    suppress_not_found_log=suppress_not_found_log,
+                )
+                for loc in location_id
+            }
 
         if not location_id or not isinstance(location_id, int):
             return {}
@@ -496,7 +509,11 @@ class ESIService:
             if id_type == "station":
                 return self._public_esi_get(f"/universe/stations/{location_id}/")
             if id_type == "structure":
-                return self._esi_client.esi_get(f"/universe/structures/{location_id}/")
+                return self._esi_client.esi_get(
+                    f"/universe/structures/{location_id}/",
+                    suppress_forbidden_log=suppress_forbidden_log,
+                    suppress_not_found_log=suppress_not_found_log,
+                )
             if id_type == "region":
                 return self._public_esi_get(f"/universe/regions/{location_id}/")
             if id_type == "constellation":
@@ -507,7 +524,14 @@ class ESIService:
         except Exception as e:
             raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
 
-    def get_universe_structure(self, structure_id: int, *, timeout_seconds: float = 15.0) -> Dict[str, Any]:
+    def get_universe_structure(
+        self,
+        structure_id: int,
+        *,
+        timeout_seconds: float = 15.0,
+        suppress_forbidden_log: bool = False,
+        suppress_not_found_log: bool = False,
+    ) -> Dict[str, Any]:
         """Return /universe/structures/{structure_id}/.
 
         This endpoint is gated by ACLs (requires auth). Callers should use this
@@ -522,6 +546,8 @@ class ESIService:
                 f"/universe/structures/{structure_id}/",
                 use_cache=False,
                 timeout_seconds=float(timeout_seconds),
+                suppress_forbidden_log=suppress_forbidden_log,
+                suppress_not_found_log=suppress_not_found_log,
             )
         except Exception as e:
             raise RuntimeError(f"ESI request failed for universe structure {structure_id}: {e}")
@@ -772,9 +798,10 @@ class ESIService:
                 try:
                     # Disable DB-backed caching here; ESIClient cache uses a shared SQLAlchemy
                     # session which is not thread-safe under ThreadPoolExecutor.
-                    structure_data = self._esi_client.esi_get(
-                        f"/universe/structures/{structure_id}/",
-                        use_cache=False,
+                    structure_data = self.get_universe_structure(
+                        int(structure_id),
+                        suppress_forbidden_log=True,
+                        suppress_not_found_log=True,
                     )
                     if isinstance(structure_data, dict) and structure_data.get("solar_system_id") == system_id:
                         # Normalize keys to match NPC stations output shape.

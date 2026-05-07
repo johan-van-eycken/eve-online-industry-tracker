@@ -68,9 +68,16 @@ class IndustryOverviewRefreshJobState:
 
 
 @dataclass
+class IndustryPortfolioCandidatesJobState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
 class JobsState:
     public_structures: PublicStructuresJobState = field(default_factory=PublicStructuresJobState)
     industry_overview_refresh: IndustryOverviewRefreshJobState = field(default_factory=IndustryOverviewRefreshJobState)
+    industry_portfolio_candidates: IndustryPortfolioCandidatesJobState = field(default_factory=IndustryPortfolioCandidatesJobState)
 
 
 @dataclass

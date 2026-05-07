@@ -20,6 +20,8 @@ class AgGridRuntime:
     aggrid_fn: Any
     grid_options_builder: Any
     js_code: Any
+    grid_update_mode: Any | None
+    data_return_mode: Any | None
     locale: str = "nl-NL"
 
 
@@ -28,6 +30,8 @@ def require_aggrid(*, locale: str = "nl-NL") -> AgGridRuntime:
     aggrid_fn = ag.AgGrid
     grid_options_builder = ag.GridOptionsBuilder
     js_code = ag.JsCode
+    grid_update_mode = ag.GridUpdateMode
+    data_return_mode = ag.DataReturnMode
     import_error = ag.import_error
 
     if aggrid_fn is None or grid_options_builder is None or js_code is None:
@@ -45,6 +49,8 @@ def require_aggrid(*, locale: str = "nl-NL") -> AgGridRuntime:
         aggrid_fn=aggrid_fn,
         grid_options_builder=grid_options_builder,
         js_code=js_code,
+        grid_update_mode=grid_update_mode,
+        data_return_mode=data_return_mode,
         locale=locale,
     )
 
@@ -74,7 +80,9 @@ def render_aggrid_table(
     fit_columns_on_grid_load: bool = True,
     empty_message: str = "No data.",
     default_wrap_text: bool = False,
-) -> None:
+    editable: bool = False,
+    return_grid_response: bool = False,
+) -> Any | None:
     if df_in is None or df_in.empty:
         st.info(empty_message)
         return
@@ -183,15 +191,23 @@ def render_aggrid_table(
             }
             """
         )
-    runtime.aggrid_fn(
+    aggrid_kwargs: dict[str, Any] = {
+        "gridOptions": grid_options,
+        "key": key,
+        "allow_unsafe_jscode": True,
+        "theme": "streamlit",
+        "height": height if height is not None else aggrid_height(row_count=len(df_in), height_max=height_max),
+        "fit_columns_on_grid_load": False if auto_size_columns else fit_columns_on_grid_load,
+    }
+    if editable and runtime.grid_update_mode is not None and runtime.data_return_mode is not None:
+        aggrid_kwargs["update_mode"] = runtime.grid_update_mode.VALUE_CHANGED
+        aggrid_kwargs["data_return_mode"] = runtime.data_return_mode.AS_INPUT
+
+    response = runtime.aggrid_fn(
         df_in,
-        gridOptions=grid_options,
-        key=key,
-        allow_unsafe_jscode=True,
-        theme="streamlit",
-        height=height if height is not None else aggrid_height(row_count=len(df_in), height_max=height_max),
-        fit_columns_on_grid_load=False if auto_size_columns else fit_columns_on_grid_load,
+        **aggrid_kwargs,
     )
+    return response if return_grid_response else None
 
 
 def render_job_status_panel(
