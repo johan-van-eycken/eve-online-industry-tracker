@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 import time
 
-from eve_online_industry_tracker.esi_service import ESIService
+from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 
 from eve_online_industry_tracker.infrastructure.static_data.facility_repo import get_facility
 from eve_online_industry_tracker.infrastructure.sde.static_data import build_all_materials, build_all_ores

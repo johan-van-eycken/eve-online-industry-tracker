@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from classes.database_models import (  # noqa: E402
+from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
     BaseApp,
     BaseSde,
     Blueprints,
@@ -21,7 +21,7 @@ from classes.database_models import (  # noqa: E402
     CorporationRealizedSalesLedgerModel,
     CorporationWalletTransactionsModel,
 )
-from classes.asset_provenance import build_market_price_map, resolve_industry_job_cost_snapshot  # noqa: E402
+from eve_online_industry_tracker.application.characters.asset_provenance import build_market_price_map, resolve_industry_job_cost_snapshot  # noqa: E402
 from eve_online_industry_tracker.application.characters.realized_profit import (  # noqa: E402
     CharacterRealizedProfitLedgerService,
     CorporationRealizedProfitLedgerService,

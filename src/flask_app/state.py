@@ -19,6 +19,7 @@ class RuntimeState:
     corp_manager: Any = None
     esi_service: Any = None
     industry_job_manager: Any = None
+    admin_settings: Any = None
 
 
 @dataclass
@@ -163,6 +164,14 @@ class AppState:
     @industry_job_manager.setter
     def industry_job_manager(self, v: Any) -> None:
         self.runtime.industry_job_manager = v
+
+    @property
+    def admin_settings(self) -> Any:
+        return self.runtime.admin_settings
+
+    @admin_settings.setter
+    def admin_settings(self, v: Any) -> None:
+        self.runtime.admin_settings = v
 
     @property
     def materials_cache(self) -> Any:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from eve_online_industry_tracker.esi_service import ESIService
+from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.infrastructure.sde.blueprints import get_blueprint_manufacturing_data

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-"""Compatibility boundary for legacy ORM models.
+"""Public re-export surface for ORM models.
 
-This module centralizes imports from `classes.database_models` so the rest of the
-codebase doesn't need to import from `classes.*` directly.
+Centralizes model imports so consumers use a single stable path:
+``from eve_online_industry_tracker.db_models import <Model>``
 """
 
-from classes.database_models import (
+from eve_online_industry_tracker.infrastructure.models import (
     BaseApp,
     BaseOauth,
     BaseSde,
@@ -38,6 +38,7 @@ from classes.database_models import (
     OAuthCharacter,
     PublicStructuresModel,
     PublicStructuresScanStateModel,
+    StructureNameCacheModel,
     MarketOrderbookViewCacheModel,
     Races,
     StationOperations,
@@ -78,6 +79,7 @@ __all__ = [
     "OAuthCharacter",
     "PublicStructuresModel",
     "PublicStructuresScanStateModel",
+    "StructureNameCacheModel",
     "MarketOrderbookViewCacheModel",
     "Races",
     "StationOperations",

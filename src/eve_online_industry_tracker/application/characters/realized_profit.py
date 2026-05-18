@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 from typing import Any
 
-from classes.asset_provenance import (
+from eve_online_industry_tracker.application.characters.asset_provenance import (
     ASSET_SOURCE_INDUSTRY_BUILD,
     ASSET_SOURCE_MARKET_BUY,
     FifoLot,

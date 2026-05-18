@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import threading
 import time
+import dataclasses
+from dataclasses import dataclass
 from typing import Any, Callable, cast
 import uuid
 
@@ -48,6 +52,56 @@ from eve_online_industry_tracker.infrastructure.persistence import blueprints_re
 
 
 ProgressCallback = Callable[[float, str, dict[str, Any] | None], None]
+
+
+def _camel_to_words(s: str) -> str:
+    """Convert camelCase to space-separated words (e.g. 'rigLargeShip' → 'rig Large Ship')."""
+    out: list[str] = []
+    buf = ""
+    for ch in s:
+        if buf and ch.isupper() and (not buf[-1].isupper()):
+            out.append(buf)
+            buf = ch
+        else:
+            buf += ch
+    if buf:
+        out.append(buf)
+    return " ".join(out).strip()
+
+
+@dataclass
+class _ProductPlanningContext:
+    """Immutable context shared across all product plans within a single refresh."""
+    selected_industry_profile: Any
+    selected_character_modifiers: Any
+    character_skill_levels: dict
+    character_skill_levels_by_name: dict
+    adjusted_market_price_map: dict
+    material_price_map: dict
+    product_sell_price_map: dict
+    manufacturing_row_by_product_type_id: dict
+    reaction_row_by_product_type_id: dict
+    invention_row_by_blueprint_type_id: dict
+    blueprint_copy_assets_by_type_id: dict
+    blueprint_original_assets_by_type_id: dict
+    owned_item_unit_cost_by_type_id: dict
+    character_name_by_id: Any
+    corporation_name_by_id: Any
+    top_location_name_by_id: Any
+    available_blueprint_copy_runs_by_type_id_base: dict
+    available_owned_item_quantity_by_type_id_base: dict
+    build_from_bpc: bool
+    include_reactions: bool
+    maximize_bp_runs: bool
+    group_identical_bpcs: bool
+    have_blueprint_source_only: bool
+    installation_surcharge: float
+    blueprint_rows: list
+    character_id: Any = None
+    # Per-refresh memoization cache for _compute_activity_job results.
+    # Key: (activity, base_time_seconds, runs, process_value, manufacturing_group, bp_me, bp_te)
+    # Thread-safe on CPython (dict get/set are atomic under GIL).
+    activity_job_cache: dict[tuple, dict[str, Any]] = dataclasses.field(default_factory=dict)
 
 
 class IndustryService:
@@ -143,6 +197,17 @@ class IndustryService:
         self._state = state
         self._sessions = sessions or StateSessionProvider(state=state)
 
+    @property
+    def _admin(self):
+        return getattr(self._state, "admin_settings", None)
+
+    def _adm(self, category: str, key: str, fallback: Any = None) -> Any:
+        """Read an admin setting, returning *fallback* when the manager is unavailable."""
+        admin = self._admin
+        if admin is None:
+            return fallback
+        return admin.get(category, key)
+
     def _ensure_industry_job_manager(self) -> IndustryJobManager:
         mgr = getattr(self._state, "industry_job_manager", None)
         if mgr is None:
@@ -195,12 +260,11 @@ class IndustryService:
         }
 
     @staticmethod
-    def _overview_refresh_job_is_active(job: dict[str, Any]) -> bool:
+    def _job_is_active(job: dict[str, Any]) -> bool:
         return str(job.get("status") or "").strip().lower() in {"queued", "running"}
 
-    @staticmethod
-    def _portfolio_candidates_job_is_active(job: dict[str, Any]) -> bool:
-        return str(job.get("status") or "").strip().lower() in {"queued", "running"}
+    _overview_refresh_job_is_active = _job_is_active
+    _portfolio_candidates_job_is_active = _job_is_active
 
     @staticmethod
     def _exclude_from_product_overview(row: dict[str, Any]) -> bool:
@@ -325,36 +389,30 @@ class IndustryService:
             "min_region_daily_volume": int(min_region_daily_volume or 0),
         }
 
-    def _find_matching_overview_refresh_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
-        store = self._get_industry_overview_refresh_store()
+    def _find_matching_job(self, *, store: Any, params: dict[str, Any]) -> dict[str, Any] | None:
         with store.lock:
             for job in store.jobs.values():
                 if not isinstance(job, dict):
                     continue
-                if not self._overview_refresh_job_is_active(job):
+                if not self._job_is_active(job):
                     continue
                 if dict(job.get("request_params") or {}) != params:
                     continue
                 return dict(job)
         return None
+
+    def _find_matching_overview_refresh_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
+        return self._find_matching_job(store=self._get_industry_overview_refresh_store(), params=params)
 
     def _find_matching_portfolio_candidates_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
-        store = self._get_industry_portfolio_candidates_store()
-        with store.lock:
-            for job in store.jobs.values():
-                if not isinstance(job, dict):
-                    continue
-                if not self._portfolio_candidates_job_is_active(job):
-                    continue
-                if dict(job.get("request_params") or {}) != params:
-                    continue
-                return dict(job)
-        return None
+        return self._find_matching_job(store=self._get_industry_portfolio_candidates_store(), params=params)
 
-    def _update_overview_refresh_job(
+    def _update_job(
         self,
+        store: Any,
         job_id: str,
         *,
+        job_kind: str = "job",
         status: str | None = None,
         progress_fraction: float | None = None,
         progress_label: str | None = None,
@@ -363,11 +421,10 @@ class IndustryService:
         error_message: str | None = None,
         progress_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        store = self._get_industry_overview_refresh_store()
         with store.lock:
             job = store.jobs.get(str(job_id))
             if job is None:
-                raise RuntimeError(f"Unknown overview refresh job: {job_id}")
+                raise RuntimeError(f"Unknown {job_kind}: {job_id}")
             if status is not None:
                 job["status"] = str(status)
             if progress_fraction is not None:
@@ -386,40 +443,11 @@ class IndustryService:
             job["updated_at"] = datetime.now(timezone.utc).isoformat()
             return dict(job)
 
-    def _update_portfolio_candidates_job(
-        self,
-        job_id: str,
-        *,
-        status: str | None = None,
-        progress_fraction: float | None = None,
-        progress_label: str | None = None,
-        result: list[dict[str, Any]] | None = None,
-        result_meta: dict[str, Any] | None = None,
-        error_message: str | None = None,
-        progress_meta: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        store = self._get_industry_portfolio_candidates_store()
-        with store.lock:
-            job = store.jobs.get(str(job_id))
-            if job is None:
-                raise RuntimeError(f"Unknown portfolio candidates job: {job_id}")
-            if status is not None:
-                job["status"] = str(status)
-            if progress_fraction is not None:
-                job["progress_fraction"] = max(0.0, min(1.0, float(progress_fraction)))
-            if progress_label is not None:
-                job["progress_label"] = str(progress_label)
-            if progress_meta is not None:
-                job["progress_meta"] = dict(progress_meta)
-            if result is not None:
-                job["result"] = result
-                job["result_count"] = len(result)
-            if result_meta is not None:
-                job["result_meta"] = dict(result_meta)
-            if error_message is not None:
-                job["error_message"] = str(error_message)
-            job["updated_at"] = datetime.now(timezone.utc).isoformat()
-            return dict(job)
+    def _update_overview_refresh_job(self, job_id: str, **kwargs: Any) -> dict[str, Any]:
+        return self._update_job(self._get_industry_overview_refresh_store(), job_id, job_kind="overview refresh job", **kwargs)
+
+    def _update_portfolio_candidates_job(self, job_id: str, **kwargs: Any) -> dict[str, Any]:
+        return self._update_job(self._get_industry_portfolio_candidates_store(), job_id, job_kind="portfolio candidates job", **kwargs)
 
     def start_industry_manufacturing_product_overview_refresh(
         self,
@@ -505,8 +533,8 @@ class IndustryService:
             job_id,
             status="running",
             progress_fraction=0.01,
-            progress_label="Step 1/9: Starting overview refresh",
-            progress_meta={"step": 1, "step_count": 9, "stage": "startup"},
+            progress_label="Starting overview refresh",
+            progress_meta={"stage": "startup"},
         )
         try:
             def report_progress(
@@ -1328,7 +1356,7 @@ class IndustryService:
             trained_skill_levels = self._get_character_trained_skill_levels(character_id=int(character_id))
             accounting_level = int(trained_skill_levels.get(self._SKILL_ID_ACCOUNTING, 0) or 0)
             broker_relations_level = int(trained_skill_levels.get(self._SKILL_ID_BROKER_RELATIONS, 0) or 0)
-            sales_tax_fraction = max(0.0, min(1.0, 0.075 * (1.0 - (0.11 * float(accounting_level)))))
+            sales_tax_fraction = max(0.0, min(1.0, float(self._adm("industry", "base_sales_tax_rate", 0.075)) * (1.0 - (float(self._adm("industry", "accounting_skill_reduction", 0.11)) * float(accounting_level)))))
 
             sde_session: Any = self._sessions.sde_session()
             station = (
@@ -1363,14 +1391,19 @@ class IndustryService:
                 from_type="npc_corp",
                 from_id=owner_corp_id,
             )
+            _fee_min = float(self._adm("industry", "broker_fee_min", 0.01))
+            _fee_base = float(self._adm("industry", "broker_fee_base", 0.03))
+            _br_red = float(self._adm("industry", "broker_relations_reduction_per_level", 0.003))
+            _fac_red = float(self._adm("industry", "faction_standing_reduction_per_point", 0.0003))
+            _corp_red = float(self._adm("industry", "corp_standing_reduction_per_point", 0.0002))
             broker_fee_fraction = max(
-                0.01,
+                _fee_min,
                 min(
-                    0.03,
-                    0.03
-                    - (0.003 * float(broker_relations_level))
-                    - (0.0003 * float(faction_standing))
-                    - (0.0002 * float(corp_standing)),
+                    _fee_base,
+                    _fee_base
+                    - (_br_red * float(broker_relations_level))
+                    - (_fac_red * float(faction_standing))
+                    - (_corp_red * float(corp_standing)),
                 ),
             )
 
@@ -1492,18 +1525,15 @@ class IndustryService:
         pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
         if progress_callback is not None:
             progress_callback(
-                0.82,
-                "Step 6/9: Loading regional market history",
-                {"step": 6, "step_count": 9, "stage": "market_history", "type_count": len(product_type_ids)},
+                0.91,
+                "Loading regional market history and hub liquidity",
+                {"stage": "market_activity", "type_count": len(product_type_ids)},
             )
-        region_daily_volume_map = pricing_service.get_region_daily_volume_map(type_ids=product_type_ids, hub=market_hub)
-        if progress_callback is not None:
-            progress_callback(
-                0.90,
-                "Step 7/9: Loading hub liquidity snapshots",
-                {"step": 7, "step_count": 9, "stage": "liquidity", "type_count": len(product_type_ids)},
-            )
-        hub_liquidity_map = pricing_service.get_hub_liquidity_map(type_ids=product_type_ids, hub=market_hub)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            volume_future = pool.submit(pricing_service.get_region_daily_volume_map, type_ids=product_type_ids, hub=market_hub)
+            liquidity_future = pool.submit(pricing_service.get_hub_liquidity_map, type_ids=product_type_ids, hub=market_hub)
+            region_daily_volume_map = volume_future.result()
+            hub_liquidity_map = liquidity_future.result()
 
         for row in product_rows:
             if not isinstance(row, dict):
@@ -1538,9 +1568,9 @@ class IndustryService:
 
         if progress_callback is not None:
             progress_callback(
-                0.93,
-                "Step 7/9: Applied market activity signals",
-                {"step": 7, "step_count": 9, "stage": "liquidity", "rows": len(product_rows)},
+                0.92,
+                "Applied market activity signals",
+                {"stage": "liquidity", "rows": len(product_rows)},
             )
 
         return product_rows
@@ -1613,7 +1643,9 @@ class IndustryService:
             else:
                 reasons.append("Orderbook sample size is missing.")
 
-            if relevant_liquidity >= 100 or relevant_order_count >= 5:
+            _liq_threshold = int(self._adm("industry", "portfolio_liquidity_threshold", 100))
+            _ord_threshold = int(self._adm("industry", "portfolio_order_count_threshold", 5))
+            if relevant_liquidity >= _liq_threshold or relevant_order_count >= _ord_threshold:
                 score += 2
                 reasons.append(
                     f"{normalized_product_price_side.title()}-side hub liquidity is healthy ({relevant_liquidity:,} units / {relevant_order_count} orders)."
@@ -1652,6 +1684,43 @@ class IndustryService:
             row["pricing_confidence_reasons"] = reasons
             row["market_price_age_minutes"] = market_price_age_minutes
 
+            # Material-side pricing confidence (#5)
+            procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+            if isinstance(procurement_materials, dict):
+                mat_total = 0
+                mat_priced = 0
+                mat_with_known_cost = 0
+                for mat in procurement_materials.values():
+                    if not isinstance(mat, dict):
+                        continue
+                    mat_total += 1
+                    if self._as_float(mat.get("unit_price")) is not None:
+                        mat_priced += 1
+                    if not bool(mat.get("uses_unknown_owned_cost_basis", False)):
+                        mat_with_known_cost += 1
+                if mat_total == 0:
+                    material_confidence = "Low"
+                elif mat_priced == mat_total and mat_with_known_cost == mat_total:
+                    material_confidence = "High"
+                elif mat_priced >= mat_total * 0.8:
+                    material_confidence = "Medium"
+                else:
+                    material_confidence = "Low"
+            else:
+                material_confidence = "Low"
+
+            overall_confidence_map = {"High": 2, "Medium": 1, "Low": 0}
+            overall_score = min(
+                overall_confidence_map.get(confidence, 0),
+                overall_confidence_map.get(material_confidence, 0),
+            )
+            overall_confidence = {2: "High", 1: "Medium"}.get(overall_score, "Low")
+
+            manufacturing_job["material_pricing_confidence"] = material_confidence
+            manufacturing_job["overall_pricing_confidence"] = overall_confidence
+            row["material_pricing_confidence"] = material_confidence
+            row["overall_pricing_confidence"] = overall_confidence
+
         return product_rows
 
     def _enrich_product_rows_with_profit_metrics(self, product_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1688,6 +1757,87 @@ class IndustryService:
             row["profit_amount"] = profit_amount
             row["profit_margin_fraction"] = margin_fraction
             row["isk_per_hour"] = isk_per_hour
+
+        return product_rows
+
+    def _score_inventory_allocation_priority(self, product_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Score inventory allocation priority based on ISK/hr ranking (#3).
+
+        Products that consume owned inventory are ranked by profitability.
+        Products using owned materials but with lower ISK/hr than other products
+        that need the same materials get flagged with an inventory_priority_rank.
+        """
+        if not product_rows:
+            return product_rows
+
+        material_consumers: dict[int, list[tuple[int, float]]] = {}
+        for row_index, row in enumerate(product_rows):
+            if not isinstance(row, dict):
+                continue
+            isk_per_hour = self._as_float(row.get("isk_per_hour")) or 0.0
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+            procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+            if not isinstance(procurement_materials, dict):
+                continue
+            for material in procurement_materials.values():
+                if not isinstance(material, dict):
+                    continue
+                if str(material.get("sourcing_strategy") or "").lower() == "take":
+                    type_id = int(material.get("type_id") or 0)
+                    if type_id > 0:
+                        material_consumers.setdefault(type_id, []).append((row_index, isk_per_hour))
+
+        contended_materials: set[int] = set()
+        for type_id, consumers in material_consumers.items():
+            if len(consumers) > 1:
+                contended_materials.add(type_id)
+
+        if not contended_materials:
+            for row in product_rows:
+                if isinstance(row, dict):
+                    row.setdefault("inventory_allocation_optimal", True)
+                    manufacturing_job = row.get("manufacturing_job")
+                    if isinstance(manufacturing_job, dict):
+                        manufacturing_job.setdefault("inventory_allocation_optimal", True)
+            return product_rows
+
+        ranked_rows = sorted(
+            enumerate(product_rows),
+            key=lambda item: -(self._as_float(item[1].get("isk_per_hour")) or 0.0),
+        )
+        rank_by_row_index: dict[int, int] = {row_index: rank + 1 for rank, (row_index, _) in enumerate(ranked_rows)}
+
+        for row_index, row in enumerate(product_rows):
+            if not isinstance(row, dict):
+                continue
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+            procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
+            if not isinstance(procurement_materials, dict):
+                continue
+
+            uses_contended = False
+            for material in procurement_materials.values():
+                if not isinstance(material, dict):
+                    continue
+                if str(material.get("sourcing_strategy") or "").lower() == "take":
+                    type_id = int(material.get("type_id") or 0)
+                    if type_id in contended_materials:
+                        consumers = material_consumers[type_id]
+                        best_isk_per_hour = max(c[1] for c in consumers)
+                        current_isk_per_hour = self._as_float(row.get("isk_per_hour")) or 0.0
+                        if current_isk_per_hour < best_isk_per_hour:
+                            uses_contended = True
+                            break
+
+            is_optimal = not uses_contended
+            row["inventory_allocation_optimal"] = is_optimal
+            row["inventory_priority_rank"] = rank_by_row_index.get(row_index)
+            manufacturing_job["inventory_allocation_optimal"] = is_optimal
+            manufacturing_job["inventory_priority_rank"] = rank_by_row_index.get(row_index)
 
         return product_rows
 
@@ -2145,6 +2295,18 @@ class IndustryService:
             multiplier *= max(0.0, 1.0 - reduction)
         return max(0.0, min(1.0 - multiplier, 0.99))
 
+    _reduction_memo: dict[tuple, float] = {}
+
+    @classmethod
+    def _combine_reductions_memo(cls, reductions: list[Any]) -> float:
+        key = tuple(reductions)
+        cached = cls._reduction_memo.get(key)
+        if cached is not None:
+            return cached
+        result = cls._combine_reductions(reductions)
+        cls._reduction_memo[key] = result
+        return result
+
     @staticmethod
     def _round_duration_seconds(raw_seconds: float) -> int:
         if raw_seconds <= 0:
@@ -2276,8 +2438,24 @@ class IndustryService:
         except Exception:
             return 0.0
 
+    _manufacturing_group_cache: dict[tuple[int, int, int], str | None] = {}
+
     @staticmethod
     def _infer_manufacturing_group(product_entry: dict[str, Any]) -> str | None:
+        group_id = int(product_entry.get("group_id") or 0)
+        category_id = int(product_entry.get("category_id") or 0)
+        meta_group_id = int(product_entry.get("meta_group_id") or product_entry.get("type_meta_group_id") or 0)
+        cache_key = (group_id, category_id, meta_group_id)
+        cached = IndustryService._manufacturing_group_cache.get(cache_key)
+        if cached is not None:
+            return cached if cached != "" else None
+
+        result = IndustryService._infer_manufacturing_group_uncached(product_entry)
+        IndustryService._manufacturing_group_cache[cache_key] = result if result is not None else ""
+        return result
+
+    @staticmethod
+    def _infer_manufacturing_group_uncached(product_entry: dict[str, Any]) -> str | None:
         group_name = str(product_entry.get("group_name") or "").lower()
         category_name = str(product_entry.get("category_name") or "").lower()
         meta_group_name = str(product_entry.get("meta_group_name") or "").lower()
@@ -2405,7 +2583,7 @@ class IndustryService:
     def _get_adjusted_market_price_map(self) -> dict[int, dict[str, Any]]:
         now = time.time()
         cache = getattr(self._state, "_industry_adjusted_market_price_cache", None)
-        if cache and isinstance(cache, tuple) and len(cache) == 2 and (now - float(cache[0]) < 3600):
+        if cache and isinstance(cache, tuple) and len(cache) == 2 and (now - float(cache[0]) < 86400):
             return cache[1]
 
         if self._state.esi_service is None:
@@ -3190,8 +3368,8 @@ class IndustryService:
                     blueprint_time_efficiency = int(matched_blueprint_originals[0].blueprint_time_efficiency or 0)
                     blueprint_source_kind = "owned_blueprint_original"
                 else:
-                    blueprint_material_efficiency = self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY
-                    blueprint_time_efficiency = self._MAX_BLUEPRINT_TIME_EFFICIENCY
+                    blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency", self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY))
+                    blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency", self._MAX_BLUEPRINT_TIME_EFFICIENCY))
                     blueprint_source_kind = "blueprint_sde_fallback"
                     include_sde_research_chain = True
 
@@ -3202,73 +3380,21 @@ class IndustryService:
         ]
         manufacturing_group = self._infer_manufacturing_group(selected_product) if activity == "manufacturing" else None
 
-        material_reduction = self._combine_reductions(
-            [
-                (float(blueprint_material_efficiency) / 100.0) if activity == "manufacturing" else 0.0,
-                self._profile_base_reduction(
-                    profile_payload=selected_industry_profile,
-                    activity=activity,
-                    metric="material",
-                ),
-                self._profile_rig_reduction(
-                    profile_payload=selected_industry_profile,
-                    activity=activity,
-                    metric="material",
-                    manufacturing_group=manufacturing_group,
-                ),
-                self._implant_reduction(
-                    character_modifier_payload=selected_character_modifiers,
-                    activity=activity,
-                    metric="material",
-                ),
-            ]
+        _main_act = self._compute_activity_job(
+            activity=activity,
+            base_time_seconds=0, runs=0, process_value=None,
+            selected_industry_profile=selected_industry_profile,
+            selected_character_modifiers=selected_character_modifiers,
+            character_skill_levels_by_name=character_skill_levels_by_name,
+            manufacturing_group=manufacturing_group,
+            required_skill_entries=required_skill_entries,
+            blueprint_material_efficiency=blueprint_material_efficiency,
+            blueprint_time_efficiency=blueprint_time_efficiency,
+            installation_surcharge=None,
         )
-        time_reduction = self._combine_reductions(
-            [
-                (float(blueprint_time_efficiency) / 100.0) if activity == "manufacturing" else 0.0,
-                self._skill_time_reduction(
-                    activity=activity,
-                    skill_levels_by_name=character_skill_levels_by_name,
-                    required_skill_entries=required_skill_entries,
-                ),
-                self._profile_base_reduction(
-                    profile_payload=selected_industry_profile,
-                    activity=activity,
-                    metric="time",
-                ),
-                self._profile_rig_reduction(
-                    profile_payload=selected_industry_profile,
-                    activity=activity,
-                    metric="time",
-                    manufacturing_group=manufacturing_group,
-                ),
-                self._implant_reduction(
-                    character_modifier_payload=selected_character_modifiers,
-                    activity=activity,
-                    metric="time",
-                ),
-            ]
-        )
-        cost_reduction = self._combine_reductions(
-            [
-                self._profile_base_reduction(
-                    profile_payload=selected_industry_profile,
-                    activity=activity,
-                    metric="cost",
-                ),
-                self._profile_rig_reduction(
-                    profile_payload=selected_industry_profile,
-                    activity=activity,
-                    metric="cost",
-                    manufacturing_group=manufacturing_group,
-                ),
-                self._implant_reduction(
-                    character_modifier_payload=selected_character_modifiers,
-                    activity=activity,
-                    metric="cost",
-                ),
-            ]
-        )
+        material_reduction = _main_act.get("material_reduction", 0.0)
+        time_reduction = _main_act["time_reduction"]
+        cost_reduction = _main_act["cost_reduction"]
 
         adjusted_material_entries: list[dict[str, Any]] = []
         base_material_entries: list[dict[str, Any]] = []
@@ -3368,67 +3494,24 @@ class IndustryService:
                 )
 
         if include_copying_job and missing_blueprint_copy_runs > 0:
-            copying_time_reduction = self._combine_reductions(
-                [
-                    self._skill_time_reduction(
-                        activity="copying",
-                        skill_levels_by_name=character_skill_levels_by_name,
-                    ),
-                    self._profile_base_reduction(
-                        profile_payload=selected_industry_profile,
-                        activity="copying",
-                        metric="time",
-                    ),
-                    self._profile_rig_reduction(
-                        profile_payload=selected_industry_profile,
-                        activity="copying",
-                        metric="time",
-                    ),
-                    self._implant_reduction(
-                        character_modifier_payload=selected_character_modifiers,
-                        activity="copying",
-                        metric="time",
-                    ),
-                ]
-            )
-            copying_cost_reduction = self._combine_reductions(
-                [
-                    self._profile_base_reduction(
-                        profile_payload=selected_industry_profile,
-                        activity="copying",
-                        metric="cost",
-                    ),
-                    self._profile_rig_reduction(
-                        profile_payload=selected_industry_profile,
-                        activity="copying",
-                        metric="cost",
-                    ),
-                    self._implant_reduction(
-                        character_modifier_payload=selected_character_modifiers,
-                        activity="copying",
-                        metric="cost",
-                    ),
-                ]
-            )
-            copying_cost_index = self._system_cost_index(
-                profile_payload=selected_industry_profile,
-                activity="copying",
-            )
-            base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0)) * missing_blueprint_copy_runs
+            base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0))
             copy_process_value = (
-                float(per_run_material_eiv or 0.0) * missing_blueprint_copy_runs * 0.02
+                float(per_run_material_eiv or 0.0) * missing_blueprint_copy_runs * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02))
                 if per_run_material_eiv is not None
                 else None
             )
-            copying_job_cost = self._job_cost_total(
+            _copy_act = self._compute_activity_job(
+                activity="copying",
+                base_time_seconds=base_copy_time_seconds,
+                runs=missing_blueprint_copy_runs,
                 process_value=copy_process_value,
-                cost_index=copying_cost_index,
-                cost_reduction=copying_cost_reduction,
+                selected_industry_profile=selected_industry_profile,
+                selected_character_modifiers=selected_character_modifiers,
+                character_skill_levels_by_name=character_skill_levels_by_name,
                 installation_surcharge=installation_surcharge,
             )
-            copying_duration_seconds = self._round_duration_seconds(
-                float(base_copy_time_seconds) * max(0.0, 1.0 - copying_time_reduction)
-            )
+            copying_job_cost = _copy_act
+            copying_duration_seconds = _copy_act["duration_seconds"]
             total_time_seconds += copying_duration_seconds
             if copying_job_cost.get("total_job_cost") is not None:
                 total_job_cost += float(copying_job_cost.get("total_job_cost") or 0.0)
@@ -3470,64 +3553,23 @@ class IndustryService:
                 )
                 if target_duration_seconds <= 0:
                     continue
-                research_time_reduction = self._combine_reductions(
-                    [
-                        self._skill_time_reduction(
-                            activity=activity_name,
-                            skill_levels_by_name=character_skill_levels_by_name,
-                        ),
-                        self._profile_base_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity=activity_name,
-                            metric="time",
-                        ),
-                        self._profile_rig_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity=activity_name,
-                            metric="time",
-                        ),
-                        self._implant_reduction(
-                            character_modifier_payload=selected_character_modifiers,
-                            activity=activity_name,
-                            metric="time",
-                        ),
-                    ]
+                research_process_value = (
+                    float(per_run_material_eiv or 0.0) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * float(target_duration_seconds)
+                    if per_run_material_eiv is not None
+                    else None
                 )
-                research_cost_reduction = self._combine_reductions(
-                    [
-                        self._profile_base_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity=activity_name,
-                            metric="cost",
-                        ),
-                        self._profile_rig_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity=activity_name,
-                            metric="cost",
-                        ),
-                        self._implant_reduction(
-                            character_modifier_payload=selected_character_modifiers,
-                            activity=activity_name,
-                            metric="cost",
-                        ),
-                    ]
-                )
-                research_job_cost = self._job_cost_total(
-                    process_value=(
-                        float(per_run_material_eiv or 0.0) * 0.02105 * float(target_duration_seconds)
-                        if per_run_material_eiv is not None
-                        else None
-                    ),
-                    cost_index=self._system_cost_index(
-                        profile_payload=selected_industry_profile,
-                        activity=activity_name,
-                    ),
-                    cost_reduction=research_cost_reduction,
+                _res_act = self._compute_activity_job(
+                    activity=activity_name,
+                    base_time_seconds=target_duration_seconds,
+                    runs=1,
+                    process_value=research_process_value,
+                    selected_industry_profile=selected_industry_profile,
+                    selected_character_modifiers=selected_character_modifiers,
+                    character_skill_levels_by_name=character_skill_levels_by_name,
                     installation_surcharge=installation_surcharge,
                 )
-                research_duration_seconds = self._round_duration_seconds(
-                    float(target_duration_seconds) * max(0.0, 1.0 - research_time_reduction)
-                )
+                research_job_cost = _res_act
+                research_duration_seconds = _res_act["duration_seconds"]
                 total_time_seconds += research_duration_seconds
                 if research_job_cost.get("total_job_cost") is not None:
                     total_job_cost += float(research_job_cost.get("total_job_cost") or 0.0)
@@ -3864,7 +3906,7 @@ class IndustryService:
                 )
                 invention_attempts = max(
                     successful_invention_jobs,
-                    int(math.ceil(float(successful_invention_jobs) / max(probability, 0.01))),
+                    int(math.ceil(float(successful_invention_jobs) / max(probability, float(self._adm("industry", "invention_probability_floor", 0.01))))),
                 )
                 invention_materials = [
                     dict(entry)
@@ -3876,54 +3918,18 @@ class IndustryService:
                     quantity_key="quantity",
                     adjusted_price_map=adjusted_market_price_map,
                 )
-                invention_time_reduction = self._combine_reductions(
-                    [
-                        self._skill_time_reduction(activity="invention", skill_levels_by_name=character_skill_levels_by_name),
-                        self._profile_base_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="time",
-                        ),
-                        self._profile_rig_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="time",
-                        ),
-                        self._implant_reduction(
-                            character_modifier_payload=selected_character_modifiers,
-                            activity="invention",
-                            metric="time",
-                        ),
-                    ]
-                )
-                invention_cost_reduction = self._combine_reductions(
-                    [
-                        self._profile_base_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="cost",
-                        ),
-                        self._profile_rig_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="cost",
-                        ),
-                        self._implant_reduction(
-                            character_modifier_payload=selected_character_modifiers,
-                            activity="invention",
-                            metric="cost",
-                        ),
-                    ]
-                )
-                invention_job_cost = self._job_cost_total(
+                _inv_act = self._compute_activity_job(
+                    activity="invention",
+                    base_time_seconds=int(invention_job.get("time_seconds") or 0),
+                    runs=invention_attempts,
                     process_value=invention_process_value,
-                    cost_index=self._system_cost_index(profile_payload=selected_industry_profile, activity="invention"),
-                    cost_reduction=invention_cost_reduction,
+                    selected_industry_profile=selected_industry_profile,
+                    selected_character_modifiers=selected_character_modifiers,
+                    character_skill_levels_by_name=character_skill_levels_by_name,
                     installation_surcharge=installation_surcharge,
                 )
-                invention_duration_seconds = self._round_duration_seconds(
-                    int(invention_job.get("time_seconds") or 0) * invention_attempts * max(0.0, 1.0 - invention_time_reduction)
-                )
+                invention_job_cost = _inv_act
+                invention_duration_seconds = _inv_act["duration_seconds"]
                 total_time_seconds += invention_duration_seconds
                 if invention_job_cost.get("total_job_cost") is not None:
                     total_job_cost += float(invention_job_cost.get("total_job_cost") or 0.0)
@@ -4002,62 +4008,22 @@ class IndustryService:
                         quantity_key="quantity",
                         adjusted_price_map=adjusted_market_price_map,
                     )
-                    source_copy_job_cost = self._job_cost_total(
+                    _src_copy = self._compute_activity_job(
+                        activity="copying",
+                        base_time_seconds=int(source_copying_job.get("time_seconds") or 0),
+                        runs=missing_source_copy_runs,
                         process_value=(
-                            float(source_copy_process_value) * float(missing_source_copy_runs) * 0.02
+                            float(source_copy_process_value) * float(missing_source_copy_runs) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02))
                             if source_copy_process_value is not None
                             else None
                         ),
-                        cost_index=self._system_cost_index(profile_payload=selected_industry_profile, activity="copying"),
-                        cost_reduction=self._combine_reductions(
-                            [
-                                self._profile_base_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                                self._profile_rig_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                                self._implant_reduction(
-                                    character_modifier_payload=selected_character_modifiers,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                            ]
-                        ),
+                        selected_industry_profile=selected_industry_profile,
+                        selected_character_modifiers=selected_character_modifiers,
+                        character_skill_levels_by_name=character_skill_levels_by_name,
                         installation_surcharge=installation_surcharge,
                     )
-                    source_copy_duration_seconds = self._round_duration_seconds(
-                        int(source_copying_job.get("time_seconds") or 0)
-                        * missing_source_copy_runs
-                        * max(
-                            0.0,
-                            1.0
-                            - self._combine_reductions(
-                                [
-                                    self._skill_time_reduction(activity="copying", skill_levels_by_name=character_skill_levels_by_name),
-                                    self._profile_base_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity="copying",
-                                        metric="time",
-                                    ),
-                                    self._profile_rig_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity="copying",
-                                        metric="time",
-                                    ),
-                                    self._implant_reduction(
-                                        character_modifier_payload=selected_character_modifiers,
-                                        activity="copying",
-                                        metric="time",
-                                    ),
-                                ]
-                            ),
-                        )
-                    )
+                    source_copy_job_cost = _src_copy
+                    source_copy_duration_seconds = _src_copy["duration_seconds"]
                     total_time_seconds += source_copy_duration_seconds
                     if source_copy_job_cost.get("total_job_cost") is not None:
                         total_job_cost += float(source_copy_job_cost.get("total_job_cost") or 0.0)
@@ -4221,7 +4187,7 @@ class IndustryService:
                     if isinstance((target_entry or {}).get("product"), dict)
                     else ""
                 ).strip() or str(blueprint_type_id)
-                invention_attempts = max(1, int(math.ceil(1.0 / max(probability, 0.01))))
+                invention_attempts = max(1, int(math.ceil(1.0 / max(probability, float(self._adm("industry", "invention_probability_floor", 0.01))))))
                 invention_materials = [
                     {**dict(entry), "quantity": int(entry.get("quantity") or 0) * invention_attempts}
                     for entry in (invention_job.get("materials") or [])
@@ -4232,55 +4198,18 @@ class IndustryService:
                     quantity_key="quantity",
                     adjusted_price_map=adjusted_market_price_map,
                 )
-                invention_time_reduction = self._combine_reductions(
-                    [
-                        self._skill_time_reduction(activity="invention", skill_levels_by_name=character_skill_levels_by_name),
-                        self._profile_base_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="time",
-                        ),
-                        self._profile_rig_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="time",
-                        ),
-                        self._implant_reduction(
-                            character_modifier_payload=selected_character_modifiers,
-                            activity="invention",
-                            metric="time",
-                        ),
-                    ]
-                )
-                invention_cost_reduction = self._combine_reductions(
-                    [
-                        self._profile_base_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="cost",
-                        ),
-                        self._profile_rig_reduction(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                            metric="cost",
-                        ),
-                        self._implant_reduction(
-                            character_modifier_payload=selected_character_modifiers,
-                            activity="invention",
-                            metric="cost",
-                        ),
-                    ]
-                )
-                installation_surcharge = self._profile_installation_surcharge(selected_industry_profile)
-                invention_job_cost = self._job_cost_total(
+                _inv_act = self._compute_activity_job(
+                    activity="invention",
+                    base_time_seconds=int(invention_job.get("time_seconds") or 0),
+                    runs=invention_attempts,
                     process_value=invention_process_value,
-                    cost_index=self._system_cost_index(profile_payload=selected_industry_profile, activity="invention"),
-                    cost_reduction=invention_cost_reduction,
+                    selected_industry_profile=selected_industry_profile,
+                    selected_character_modifiers=selected_character_modifiers,
+                    character_skill_levels_by_name=character_skill_levels_by_name,
                     installation_surcharge=installation_surcharge,
                 )
-                invention_duration_seconds = self._round_duration_seconds(
-                    int(invention_job.get("time_seconds") or 0) * invention_attempts * max(0.0, 1.0 - invention_time_reduction)
-                )
+                invention_job_cost = _inv_act
+                invention_duration_seconds = _inv_act["duration_seconds"]
                 planned_invention_materials, invention_material_nodes = self._plan_take_or_buy_material_nodes(
                     invention_materials,
                     available_owned_item_quantity_by_type_id=available_owned_item_quantities,
@@ -4337,58 +4266,18 @@ class IndustryService:
                         quantity_key="quantity",
                         adjusted_price_map=adjusted_market_price_map,
                     )
-                    source_copy_job_cost = self._job_cost_total(
-                        process_value=(float(source_copy_process_value) * 0.02 if source_copy_process_value is not None else None),
-                        cost_index=self._system_cost_index(profile_payload=selected_industry_profile, activity="copying"),
-                        cost_reduction=self._combine_reductions(
-                            [
-                                self._profile_base_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                                self._profile_rig_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                                self._implant_reduction(
-                                    character_modifier_payload=selected_character_modifiers,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                            ]
-                        ),
+                    _src_copy = self._compute_activity_job(
+                        activity="copying",
+                        base_time_seconds=int(source_copying_job.get("time_seconds") or 0),
+                        runs=invention_attempts,
+                        process_value=(float(source_copy_process_value) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)) if source_copy_process_value is not None else None),
+                        selected_industry_profile=selected_industry_profile,
+                        selected_character_modifiers=selected_character_modifiers,
+                        character_skill_levels_by_name=character_skill_levels_by_name,
                         installation_surcharge=installation_surcharge,
                     )
-                    source_copy_duration_seconds = self._round_duration_seconds(
-                        int(source_copying_job.get("time_seconds") or 0)
-                        * invention_attempts
-                        * max(
-                            0.0,
-                            1.0
-                            - self._combine_reductions(
-                                [
-                                    self._skill_time_reduction(activity="copying", skill_levels_by_name=character_skill_levels_by_name),
-                                    self._profile_base_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity="copying",
-                                        metric="time",
-                                    ),
-                                    self._profile_rig_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity="copying",
-                                        metric="time",
-                                    ),
-                                    self._implant_reduction(
-                                        character_modifier_payload=selected_character_modifiers,
-                                        activity="copying",
-                                        metric="time",
-                                    ),
-                                ]
-                            ),
-                        )
-                    )
+                    source_copy_job_cost = _src_copy
+                    source_copy_duration_seconds = _src_copy["duration_seconds"]
                     total_time_seconds += source_copy_duration_seconds
                     if source_copy_job_cost.get("total_job_cost") is not None:
                         total_job_cost += float(source_copy_job_cost.get("total_job_cost") or 0.0)
@@ -5498,6 +5387,925 @@ class IndustryService:
             except Exception:
                 pass
 
+    # ----------------------------------------------------------------
+    # Extracted helper methods for product overview (Steps 1-6 refactor)
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _compact_material_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "base_price": entry.get("base_price"),
+            "category_icon_id": entry.get("category_icon_id"),
+            "category_id": entry.get("category_id"),
+            "category_name": entry.get("category_name"),
+            "group_icon_id": entry.get("group_icon_id"),
+            "group_id": entry.get("group_id"),
+            "group_name": entry.get("group_name"),
+            "group_repackaged_volume": entry.get("group_repackaged_volume"),
+            "group_use_base_price": entry.get("group_use_base_price"),
+            "icon_id": entry.get("icon_id"),
+            "portion_size": entry.get("portion_size"),
+            "quantity": entry.get("quantity"),
+            "repackaged_volume": entry.get("repackaged_volume"),
+            "type_id": entry.get("type_id"),
+            "type_name": entry.get("type_name"),
+            "volume": entry.get("volume"),
+        }
+
+    @staticmethod
+    def _compact_skill_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "icon_id": entry.get("icon_id"),
+            "level": entry.get("level"),
+            "type_id": entry.get("type_id"),
+            "type_name": entry.get("type_name"),
+            "description": entry.get("description"),
+        }
+
+    @staticmethod
+    def _compact_required_skill_entry(
+        entry: dict[str, Any], character_skill_levels: dict[int, int],
+    ) -> dict[str, Any]:
+        skill = {
+            "icon_id": entry.get("icon_id"),
+            "level": entry.get("level"),
+            "type_id": entry.get("type_id"),
+            "type_name": entry.get("type_name"),
+            "description": entry.get("description"),
+        }
+        skill_type_id = int(skill.get("type_id") or 0)
+        required_level = int(skill.get("level") or 0)
+        trained = int(character_skill_levels.get(skill_type_id, 0))
+        return {**skill, "trained_skill_level": trained, "skill_requirement_met": trained >= required_level}
+
+    @staticmethod
+    def _overview_keyed_entries(
+        entries: list[dict[str, Any]], *, compactor: Any,
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                type_id = int(entry.get("type_id") or 0)
+            except Exception:
+                continue
+            if type_id <= 0:
+                continue
+            out[str(type_id)] = compactor(entry)
+        return out
+
+    @staticmethod
+    def _compact_invention_product_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            product = entry.get("product") or {}
+            if not isinstance(product, dict):
+                product = {}
+            probability = product.get("probability")
+            if probability is None:
+                try:
+                    probability = float(entry.get("probability_pct") or 0.0) / 100.0
+                except Exception:
+                    probability = None
+            out.append({"probability": probability, "quantity": entry.get("quantity"), "type_id": product.get("type_id"), "type_name": product.get("type_name")})
+        return out
+
+    def _compute_activity_job(
+        self,
+        *,
+        activity: str,
+        base_time_seconds: int,
+        runs: int,
+        process_value: float | None,
+        selected_industry_profile: dict[str, Any] | None,
+        selected_character_modifiers: dict[str, Any] | None,
+        character_skill_levels_by_name: dict[str, int],
+        manufacturing_group: str | None = None,
+        required_skill_entries: list[dict[str, Any]] | None = None,
+        blueprint_material_efficiency: int = 0,
+        blueprint_time_efficiency: int = 0,
+        installation_surcharge: float | None = None,
+    ) -> dict[str, Any]:
+        """Unified activity cost calculator (context-free version)."""
+        if installation_surcharge is None:
+            installation_surcharge = self._profile_installation_surcharge(selected_industry_profile)
+        material_reduction = None
+        if activity in ("manufacturing", "reaction"):
+            material_reduction = self._combine_reductions([
+                float(blueprint_material_efficiency) / 100.0,
+                self._profile_base_reduction(profile_payload=selected_industry_profile, activity=activity, metric="material"),
+                self._profile_rig_reduction(profile_payload=selected_industry_profile, activity=activity, metric="material", manufacturing_group=manufacturing_group),
+                self._implant_reduction(character_modifier_payload=selected_character_modifiers, activity=activity, metric="material"),
+            ])
+        time_factors: list[Any] = []
+        if blueprint_time_efficiency > 0:
+            time_factors.append(float(blueprint_time_efficiency) / 100.0)
+        time_factors.extend([
+            self._skill_time_reduction(activity=activity, skill_levels_by_name=character_skill_levels_by_name, required_skill_entries=required_skill_entries),
+            self._profile_base_reduction(profile_payload=selected_industry_profile, activity=activity, metric="time"),
+            self._profile_rig_reduction(profile_payload=selected_industry_profile, activity=activity, metric="time", manufacturing_group=manufacturing_group),
+            self._implant_reduction(character_modifier_payload=selected_character_modifiers, activity=activity, metric="time"),
+        ])
+        time_reduction = self._combine_reductions(time_factors)
+        cost_reduction = self._combine_reductions([
+            self._profile_base_reduction(profile_payload=selected_industry_profile, activity=activity, metric="cost"),
+            self._profile_rig_reduction(profile_payload=selected_industry_profile, activity=activity, metric="cost", manufacturing_group=manufacturing_group),
+            self._implant_reduction(character_modifier_payload=selected_character_modifiers, activity=activity, metric="cost"),
+        ])
+        cost_index = self._system_cost_index(profile_payload=selected_industry_profile, activity=activity)
+        job_cost = self._job_cost_total(process_value=process_value, cost_index=cost_index, cost_reduction=cost_reduction, installation_surcharge=installation_surcharge)
+        duration_seconds = self._round_duration_seconds(base_time_seconds * runs * max(0.0, 1.0 - time_reduction))
+        result: dict[str, Any] = {
+            "activity": activity, "duration_seconds": duration_seconds,
+            "base_duration_seconds": base_time_seconds * runs,
+            "time_reduction": time_reduction, "cost_reduction": cost_reduction,
+            "cost_index": cost_index, **job_cost,
+        }
+        if material_reduction is not None:
+            result["material_reduction"] = material_reduction
+        return result
+    def _plan_activity_costs(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        activity: str,
+        base_time_seconds: int,
+        runs: int,
+        process_value: float | None,
+        manufacturing_group: str | None = None,
+        required_skill_entries: list[dict[str, Any]] | None = None,
+        blueprint_material_efficiency: int = 0,
+        blueprint_time_efficiency: int = 0,
+    ) -> dict[str, Any]:
+        """Unified activity cost calculator — delegates to _compute_activity_job with per-refresh caching."""
+        cache_key = (activity, base_time_seconds, runs, process_value, manufacturing_group, blueprint_material_efficiency, blueprint_time_efficiency)
+        cached = ctx.activity_job_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+        result = self._compute_activity_job(
+            activity=activity,
+            base_time_seconds=base_time_seconds,
+            runs=runs,
+            process_value=process_value,
+            selected_industry_profile=ctx.selected_industry_profile,
+            selected_character_modifiers=ctx.selected_character_modifiers,
+            character_skill_levels_by_name=ctx.character_skill_levels_by_name,
+            manufacturing_group=manufacturing_group,
+            required_skill_entries=required_skill_entries,
+            blueprint_material_efficiency=blueprint_material_efficiency,
+            blueprint_time_efficiency=blueprint_time_efficiency,
+            installation_surcharge=ctx.installation_surcharge,
+        )
+        ctx.activity_job_cache[cache_key] = result
+        return dict(result)
+
+    def _build_planning_context(
+        self,
+        *,
+        force_refresh: bool,
+        build_from_bpc: bool,
+        include_reactions: bool,
+        maximize_bp_runs: bool,
+        group_identical_bpcs: bool,
+        have_blueprint_source_only: bool,
+        market_hub: str,
+        material_price_side: str,
+        product_price_side: str,
+        industry_profile_id: int | None,
+        owned_blueprints_scope: str,
+        character_id: int | None,
+        progress_callback: ProgressCallback | None,
+    ) -> _ProductPlanningContext:
+        """Build the immutable context shared by all product plans (Step 1)."""
+        mgr = self._ensure_industry_job_manager()
+        if progress_callback is not None:
+            progress_callback(0.02, "Loading blueprint snapshot", {"stage": "blueprints"})
+        blueprint_rows = mgr.get_blueprint_overview(force_refresh=bool(force_refresh))
+        if progress_callback is not None:
+            progress_callback(0.08, "Resolving character profile and skills", {"stage": "profile", "blueprints": len(blueprint_rows)})
+
+        character_skill_levels = (
+            self._get_character_trained_skill_levels(character_id=int(character_id))
+            if character_id is not None else {}
+        )
+        selected_industry_profile = self._resolve_industry_profile_context(
+            character_id=character_id, industry_profile_id=industry_profile_id,
+        )
+        effective_include_reactions = bool(include_reactions) and self._reactions_allowed_for_profile(selected_industry_profile)
+        selected_character_modifiers = self._get_character_industry_modifier_payload(character_id=character_id)
+        character_skill_levels_by_name = self._skill_levels_by_name(selected_character_modifiers)
+        adjusted_market_price_map = self._get_adjusted_market_price_map()
+        if progress_callback is not None:
+            progress_callback(0.15, "Fetching adjusted market prices", {"stage": "adjusted_prices"})
+        (
+            manufacturing_row_by_product_type_id,
+            reaction_row_by_product_type_id,
+            invention_row_by_blueprint_type_id,
+        ) = self._build_blueprint_row_indexes(blueprint_rows)
+        normalized_market_hub = MarketPricingService.normalize_market_hub(market_hub)
+        normalized_material_price_side = MarketPricingService.normalize_order_side(material_price_side)
+        normalized_product_price_side = MarketPricingService.normalize_order_side(product_price_side)
+        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
+        product_sell_price_type_ids = sorted({
+            *[int(tid) for tid in manufacturing_row_by_product_type_id.keys()],
+            *[int(tid) for tid in reaction_row_by_product_type_id.keys()],
+        })
+        material_price_type_ids = sorted({
+            int(entry.get("type_id") or 0)
+            for row in blueprint_rows if isinstance(row, dict)
+            for job_name in ["manufacturing_job", "reaction_job", "invention_job"]
+            for entry in (((row.get(job_name) or {}) if isinstance(row.get(job_name), dict) else {}).get("materials") or [])
+            if isinstance(entry, dict) and int(entry.get("type_id") or 0) > 0
+        })
+        if progress_callback is not None:
+            progress_callback(0.18, "Fetching product sell prices from market hub", {"stage": "product_prices", "product_types": len(product_sell_price_type_ids)})
+        product_sell_price_map = pricing_service.get_type_price_map(
+            type_ids=product_sell_price_type_ids, hub=normalized_market_hub, side=normalized_product_price_side,
+        )
+        if progress_callback is not None:
+            progress_callback(0.30, "Fetching material prices from market hub", {"stage": "material_prices", "product_types": len(product_sell_price_type_ids), "material_types": len(material_price_type_ids)})
+        material_price_map = pricing_service.get_type_price_map(
+            type_ids=material_price_type_ids, hub=normalized_market_hub, side=normalized_material_price_side,
+        )
+        if progress_callback is not None:
+            progress_callback(0.45, "Loading owned item inventory", {"stage": "inventory"})
+        blueprint_copy_assets_by_type_id: dict[int, list] = {}
+        blueprint_original_assets_by_type_id: dict[int, list] = {}
+        available_owned_item_quantity_by_type_id_base, owned_item_unit_cost_by_type_id = self._get_owned_item_inventory(
+            owned_blueprints_scope=owned_blueprints_scope,
+        )
+        (
+            character_blueprint_assets, corporation_blueprint_assets,
+            character_name_by_id, corporation_name_by_id, top_location_name_by_id,
+        ) = self._get_owned_blueprint_assets(owned_blueprints_scope=owned_blueprints_scope)
+        if progress_callback is not None:
+            progress_callback(0.55, "Resolved owned blueprint assets", {
+                "stage": "assets",
+                "character_assets": len(character_blueprint_assets),
+                "corporation_assets": len(corporation_blueprint_assets),
+            })
+        for asset in [*character_blueprint_assets, *corporation_blueprint_assets]:
+            try:
+                bp_type_id = int(asset.type_id)
+            except Exception:
+                continue
+            if bp_type_id <= 0:
+                continue
+            if bool(getattr(asset, "is_blueprint_copy", False)):
+                if not bool(build_from_bpc):
+                    continue
+                blueprint_copy_assets_by_type_id.setdefault(bp_type_id, []).append(asset)
+            else:
+                blueprint_original_assets_by_type_id.setdefault(bp_type_id, []).append(asset)
+        for assets in blueprint_copy_assets_by_type_id.values():
+            assets.sort(key=lambda a: (-int(a.blueprint_material_efficiency or 0), -int(a.blueprint_time_efficiency or 0), -int(a.blueprint_runs or 0), int(a.item_id or 0)))
+        for assets in blueprint_original_assets_by_type_id.values():
+            assets.sort(key=lambda a: (-int(a.blueprint_material_efficiency or 0), -int(a.blueprint_time_efficiency or 0), int(a.item_id or 0)))
+        available_blueprint_copy_runs_by_type_id_base: dict[int, int] = {
+            int(bp_type_id): sum(max(0, int(a.blueprint_runs or 0)) for a in assets)
+            for bp_type_id, assets in blueprint_copy_assets_by_type_id.items()
+        }
+        return _ProductPlanningContext(
+            selected_industry_profile=selected_industry_profile,
+            selected_character_modifiers=selected_character_modifiers,
+            character_skill_levels=character_skill_levels,
+            character_skill_levels_by_name=character_skill_levels_by_name,
+            adjusted_market_price_map=adjusted_market_price_map,
+            material_price_map=material_price_map,
+            product_sell_price_map=product_sell_price_map,
+            manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
+            reaction_row_by_product_type_id=reaction_row_by_product_type_id,
+            invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
+            blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
+            blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
+            owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
+            character_name_by_id=character_name_by_id,
+            corporation_name_by_id=corporation_name_by_id,
+            top_location_name_by_id=top_location_name_by_id,
+            available_blueprint_copy_runs_by_type_id_base=available_blueprint_copy_runs_by_type_id_base,
+            available_owned_item_quantity_by_type_id_base=available_owned_item_quantity_by_type_id_base,
+            build_from_bpc=build_from_bpc,
+            include_reactions=effective_include_reactions,
+            maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs,
+            have_blueprint_source_only=have_blueprint_source_only,
+            installation_surcharge=self._profile_installation_surcharge(selected_industry_profile),
+            blueprint_rows=blueprint_rows,
+            character_id=character_id,
+        )
+
+    def _iter_product_variants(
+        self, ctx: _ProductPlanningContext,
+    ) -> list[tuple[int, int, dict[str, Any], dict[str, Any], list, Any, int]]:
+        """Flatten the triple loop into a list of (row_idx, prod_idx, row, product, copy_assets, original_asset, effective_runs) (Step 6)."""
+        results: list[tuple[int, int, dict[str, Any], dict[str, Any], list, Any, int]] = []
+        for row_index, row in enumerate(ctx.blueprint_rows, start=1):
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                continue
+            blueprint_type_id = int(row.get("blueprint_type_id") or 0)
+            matched_copies = ctx.blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
+            matched_originals = ctx.blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
+            raw_products = manufacturing_job.get("products") or []
+            if not isinstance(raw_products, list) or not raw_products:
+                continue
+            for product_index, raw_product in enumerate(raw_products, start=1):
+                if not isinstance(raw_product, dict):
+                    continue
+                if int(raw_product.get("type_id") or 0) <= 0:
+                    continue
+                max_production_limit = int(manufacturing_job.get("max_production_limit") or 0)
+                # Variant selection
+                if bool(ctx.build_from_bpc) and matched_copies:
+                    if bool(ctx.group_identical_bpcs):
+                        variants = [{"blueprint_copy_assets": list(matched_copies), "blueprint_original_asset": None}]
+                    else:
+                        variants = [{"blueprint_copy_assets": [c], "blueprint_original_asset": None} for c in matched_copies]
+                elif matched_originals:
+                    variants = [{"blueprint_copy_assets": [], "blueprint_original_asset": o} for o in matched_originals]
+                else:
+                    variants = [{"blueprint_copy_assets": [], "blueprint_original_asset": None}]
+                if bool(ctx.have_blueprint_source_only):
+                    variants = [v for v in variants if (v.get("blueprint_copy_assets") or []) or v.get("blueprint_original_asset") is not None]
+                    if not variants:
+                        continue
+                for variant in variants:
+                    copy_assets = cast(list, list(variant.get("blueprint_copy_assets") or []))
+                    original_asset = variant.get("blueprint_original_asset")
+                    copy_runs = sum(max(0, int(getattr(a, "blueprint_runs", 0) or 0)) for a in copy_assets)
+                    effective_runs = 1
+                    if bool(ctx.maximize_bp_runs):
+                        if copy_runs > 0:
+                            effective_runs = copy_runs
+                        elif max_production_limit > 0:
+                            effective_runs = max_production_limit
+                    results.append((row_index, product_index, row, raw_product, copy_assets, original_asset, effective_runs))
+        return results
+
+    def _plan_copying_for_variant(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        row: dict[str, Any],
+        blueprint_type_id: int,
+        per_run_material_eiv: float | None,
+        missing_copy_runs: int,
+        requires_copying_job: bool,
+        owned_target_copy_runs_used: int,
+        compact_product: dict[str, Any],
+        has_invention_path: bool,
+        matched_blueprint_originals: list,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Plan the copying activity for a variant (Step 4)."""
+        copying_job_data = row.get("copying_job") or {}
+        base_copy_time = int((copying_job_data.get("time_seconds") or 0))
+        if base_copy_time <= 0 or (has_invention_path and not matched_blueprint_originals):
+            return None, []
+
+        costs = self._plan_activity_costs(ctx, activity="copying", base_time_seconds=base_copy_time, runs=max(0, missing_copy_runs), process_value=(float(per_run_material_eiv or 0.0) * max(0, missing_copy_runs) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)) if per_run_material_eiv is not None else None))
+        bp_name = str(((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("type_name") or ((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("name") or blueprint_type_id or "Blueprint")
+        costs["runs"] = max(0, missing_copy_runs)
+        costs["estimated_item_value"] = per_run_material_eiv
+
+        tree_nodes: list[dict[str, Any]] = []
+        if requires_copying_job or owned_target_copy_runs_used <= 0:
+            tree_nodes.append(self._job_tree_node(
+                label=self._ACTIVITY_LABELS["copying"], node_type="activity", activity="copying",
+                blueprint_name=bp_name, quantity=1, runs=max(0, missing_copy_runs),
+                duration_seconds=costs["duration_seconds"], direct_duration_seconds=costs["duration_seconds"],
+                job_cost=costs.get("total_job_cost"), total_job_cost=costs.get("total_job_cost"),
+                category_name=str(compact_product.get("category_name") or "") or None,
+                meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                recommendation_action="copy", children=[],
+            ))
+        return costs, tree_nodes
+
+    def _plan_invention_chain_for_variant(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        row: dict[str, Any],
+        blueprint_type_id: int,
+        missing_top_level_copy_runs: int,
+        requires_invention_chain: bool,
+        owned_target_copy_runs_used: int,
+        max_production_limit: int,
+        compact_product: dict[str, Any],
+        available_blueprint_copy_runs_by_type_id: dict[int, int],
+        available_owned_item_quantity_by_type_id: dict[int, int],
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+        """Plan the invention chain for a variant (Step 4). Returns (invention_costs, tree_nodes, procurement_materials, source_copy_costs)."""
+        invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
+        invention_job = ((invention_source_row or {}).get("invention_job") or {})
+        if not (invention_source_row and isinstance(invention_job, dict)):
+            return None, [], [], None
+
+        invention_bp_payload = invention_source_row.get("blueprint") or {}
+        if not isinstance(invention_bp_payload, dict):
+            invention_bp_payload = {}
+        invention_bp_name = str(invention_bp_payload.get("type_name") or invention_bp_payload.get("name") or invention_source_row.get("blueprint_type_id") or "Blueprint")
+
+        target_entry = None
+        for product in invention_job.get("products") or []:
+            if not isinstance(product, dict):
+                continue
+            inv_product = product.get("product") or {}
+            if not isinstance(inv_product, dict):
+                inv_product = {}
+            if int(inv_product.get("type_id") or product.get("type_id") or 0) == int(blueprint_type_id):
+                target_entry = product
+                break
+
+        probability = 0.0
+        if isinstance(target_entry, dict):
+            try:
+                probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
+            except Exception:
+                probability = 0.0
+        target_bp_name = str(((target_entry or {}).get("product") or {}).get("type_name") if isinstance((target_entry or {}).get("product"), dict) else "").strip() or str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id)
+
+        successful_jobs = max(1, int(math.ceil(float(max(1, missing_top_level_copy_runs)) / float(max(1, max_production_limit or 1))))) if requires_invention_chain else 0
+        invention_attempts = max(successful_jobs, int(math.ceil(float(successful_jobs) / max(probability, float(self._adm("industry", "invention_probability_floor", 0.01)))))) if successful_jobs > 0 else 0
+
+        invention_materials = [{**dict(e), "quantity": int(e.get("quantity") or 0) * invention_attempts} for e in (invention_job.get("materials") or []) if isinstance(e, dict)]
+        invention_process_value, _ = self._sum_estimated_item_value(invention_materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+
+        costs = self._plan_activity_costs(ctx, activity="invention", base_time_seconds=int(invention_job.get("time_seconds") or 0), runs=invention_attempts if invention_attempts > 0 else 0, process_value=invention_process_value)
+        costs["runs"] = invention_attempts
+        costs["estimated_item_value"] = invention_process_value
+        if invention_attempts == 0:
+            costs["duration_seconds"] = 0
+
+        planned_inv_materials, inv_material_nodes = self._plan_take_or_buy_material_nodes(
+            invention_materials,
+            available_owned_item_quantity_by_type_id=(available_owned_item_quantity_by_type_id if requires_invention_chain else dict(available_owned_item_quantity_by_type_id)),
+            owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+            sell_price_map=ctx.material_price_map,
+            adjusted_price_map=ctx.adjusted_market_price_map,
+        )
+
+        tree_nodes: list[dict[str, Any]] = []
+        if requires_invention_chain or owned_target_copy_runs_used <= 0:
+            tree_nodes.append(self._job_tree_node(
+                label=self._ACTIVITY_LABELS["invention"], node_type="activity", activity="invention",
+                blueprint_name=target_bp_name, blueprint_type_id=blueprint_type_id,
+                runs=invention_attempts, duration_seconds=costs["duration_seconds"],
+                direct_duration_seconds=costs["duration_seconds"],
+                job_cost=costs.get("total_job_cost"), total_job_cost=costs.get("total_job_cost"),
+                category_name=str(compact_product.get("category_name") or "") or None,
+                meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                recommendation_action=("invent" if invention_attempts > 0 else "take"),
+                children=([self._job_tree_node(label=self._ACTIVITY_LABELS["materials"], node_type="materials", activity="materials", children=inv_material_nodes)] if invention_attempts > 0 and inv_material_nodes else []),
+            ))
+
+        # Source blueprint copying for invention
+        source_copy_costs = None
+        source_copying_job = (invention_source_row.get("copying_job") or {}) if isinstance(invention_source_row, dict) else {}
+        source_bp_type_id = int((invention_source_row or {}).get("blueprint_type_id") or 0)
+        available_source_runs = int(available_blueprint_copy_runs_by_type_id.get(source_bp_type_id, 0))
+        source_runs_used = min(max(0, available_source_runs), invention_attempts)
+        available_blueprint_copy_runs_by_type_id[source_bp_type_id] = max(0, available_source_runs - source_runs_used)
+        missing_source_runs = max(0, invention_attempts - source_runs_used)
+
+        if requires_invention_chain and isinstance(source_copying_job, dict) and int(source_copying_job.get("time_seconds") or 0) > 0:
+            source_mfg_materials = [dict(e) for e in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or []) if isinstance(e, dict)]
+            source_pv, _ = self._sum_estimated_item_value(source_mfg_materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+            source_copy_costs = self._plan_activity_costs(
+                ctx, activity="copying",
+                base_time_seconds=int(source_copying_job.get("time_seconds") or 0),
+                runs=max(0, missing_source_runs),
+                process_value=(float(source_pv) * float(max(0, missing_source_runs)) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)) if source_pv is not None else None),
+            )
+            tree_nodes.append(self._job_tree_node(
+                label=self._ACTIVITY_LABELS["copying"], node_type="activity", activity="copying",
+                blueprint_name=invention_bp_name, runs=max(0, missing_source_runs),
+                duration_seconds=source_copy_costs["duration_seconds"],
+                direct_duration_seconds=source_copy_costs["duration_seconds"],
+                job_cost=source_copy_costs.get("total_job_cost"), total_job_cost=source_copy_costs.get("total_job_cost"),
+                category_name=str(compact_product.get("category_name") or "") or None,
+                meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                recommendation_action="copy", children=[],
+            ))
+
+        return costs, tree_nodes, planned_inv_materials if requires_invention_chain else [], source_copy_costs
+
+    def _plan_research_chain_for_variant(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        row: dict[str, Any],
+        per_run_material_eiv: float | None,
+    ) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+        """Plan ME/TE research activities (Step 4). Returns list of (activity_name, costs, tree_node)."""
+        results: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        for activity_name, source_field in [("research_material", "research_material_job"), ("research_time", "research_time_job")]:
+            base_level_one = int(((row.get(source_field) or {}).get("time_seconds") or 0))
+            target_duration = self._research_target_duration_seconds(level_one_duration_seconds=base_level_one, target_level=self._MAX_RESEARCH_LEVEL)
+            if target_duration <= 0:
+                continue
+            process_value = float(per_run_material_eiv or 0.0) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * float(target_duration) if per_run_material_eiv is not None else None
+            costs = self._plan_activity_costs(ctx, activity=activity_name, base_time_seconds=target_duration, runs=1, process_value=process_value)
+            costs["estimated_item_value"] = per_run_material_eiv
+            tree_node = self._job_tree_node(
+                label=self._ACTIVITY_LABELS.get(activity_name, activity_name),
+                node_type="activity", activity=activity_name, runs=None,
+                duration_seconds=costs["duration_seconds"], direct_duration_seconds=costs["duration_seconds"],
+                job_cost=costs.get("total_job_cost"), total_job_cost=costs.get("total_job_cost"), children=[],
+            )
+            results.append((activity_name, costs, tree_node))
+        return results
+
+    def _build_single_product_row(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        row: dict[str, Any],
+        raw_product: dict[str, Any],
+        row_index: int,
+        product_index: int,
+        blueprint_copy_assets: list,
+        blueprint_original_asset: Any,
+        effective_runs: int,
+    ) -> dict[str, Any] | None:
+        """Build a single product row from a blueprint variant (Step 3)."""
+        manufacturing_job = row.get("manufacturing_job") or {}
+        if not isinstance(manufacturing_job, dict):
+            return None
+        blueprint_type_id = int(row.get("blueprint_type_id") or 0)
+        matched_blueprint_originals = ctx.blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
+        blueprint_copy_asset = blueprint_copy_assets[0] if blueprint_copy_assets else None
+        blueprint_copy_runs = sum(max(0, int(getattr(a, "blueprint_runs", 0) or 0)) for a in blueprint_copy_assets)
+        product_type_id = int(raw_product.get("type_id") or 0)
+        product_quantity_per_run = int(raw_product.get("quantity") or 0)
+        max_production_limit = int(manufacturing_job.get("max_production_limit") or 0)
+
+        # Per-variant mutable state (each variant gets its own copy)
+        available_blueprint_copy_runs_by_type_id = dict(ctx.available_blueprint_copy_runs_by_type_id_base)
+        available_owned_item_quantity_by_type_id = dict(ctx.available_owned_item_quantity_by_type_id_base)
+        if bool(ctx.build_from_bpc):
+            if blueprint_copy_assets:
+                available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, blueprint_copy_runs)
+            elif blueprint_original_asset is not None:
+                available_blueprint_copy_runs_by_type_id[blueprint_type_id] = 0
+
+        compact_product = dict(raw_product)
+        compact_product["quantity"] = product_quantity_per_run * effective_runs
+
+        # Blueprint SDE payload
+        blueprint_sde_payload: dict[str, Any] = {
+            **dict(row.get("blueprint") or {}),
+            "blueprint_type_id": blueprint_type_id,
+            "copying": {"time": int(((row.get("copying_job") or {}).get("time_seconds") or 0))},
+            "research_material": {"time": int(((row.get("research_material_job") or {}).get("time_seconds") or 0))},
+            "research_time": {"time": int(((row.get("research_time_job") or {}).get("time_seconds") or 0))},
+        }
+        inv_job_raw = row.get("invention_job") or {}
+        if isinstance(inv_job_raw, dict) and inv_job_raw:
+            blueprint_sde_payload["invention"] = {
+                "materials": self._overview_keyed_entries([dict(e) for e in (inv_job_raw.get("materials") or [])], compactor=self._compact_material_entry),
+                "products": self._compact_invention_product_entries([dict(e) for e in (inv_job_raw.get("products") or [])]),
+                "skills": self._overview_keyed_entries([dict(e) for e in (inv_job_raw.get("skill_entries") or [])], compactor=self._compact_skill_entry),
+                "time": int(inv_job_raw.get("time_seconds") or 0),
+            }
+
+        # Skills
+        skill_compactor = lambda entry: self._compact_required_skill_entry(entry, ctx.character_skill_levels)
+        manufacturing_skill_entries = self._overview_keyed_entries(
+            [dict(e) for e in (manufacturing_job.get("skill_entries") or [])], compactor=skill_compactor,
+        )
+        manufacturing_skill_requirements_met = all(
+            bool(se.get("skill_requirement_met", False)) for se in manufacturing_skill_entries.values() if isinstance(se, dict)
+        )
+        manufacturing_skills: dict[str, Any] = {**manufacturing_skill_entries, "skill_requirements_met": manufacturing_skill_requirements_met}
+        manufacturing_skill_entry_list = [se for se in manufacturing_skill_entries.values() if isinstance(se, dict)]
+
+        # Blueprint source resolution (Step 3a)
+        blueprint_material_efficiency = 0
+        blueprint_time_efficiency = 0
+        blueprint_source_kind = "unowned"
+        include_copying_job = False
+        include_sde_research_chain = False
+        if bool(ctx.build_from_bpc):
+            if blueprint_copy_asset is not None:
+                blueprint_material_efficiency = int(blueprint_copy_asset.blueprint_material_efficiency or 0)
+                blueprint_time_efficiency = int(blueprint_copy_asset.blueprint_time_efficiency or 0)
+                blueprint_source_kind = "owned_blueprint_copy"
+                include_copying_job = max(0, blueprint_copy_runs) < effective_runs and bool(matched_blueprint_originals)
+            elif blueprint_original_asset is not None:
+                blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
+                blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
+                blueprint_source_kind = "copied_from_owned_blueprint_original"
+                include_copying_job = True
+            else:
+                blueprint_source_kind = "unowned_blueprint_copy"
+        else:
+            if blueprint_original_asset is not None:
+                blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
+                blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
+                blueprint_source_kind = "owned_blueprint_original"
+            else:
+                blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency", self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY))
+                blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency", self._MAX_BLUEPRINT_TIME_EFFICIENCY))
+                blueprint_source_kind = "blueprint_sde_fallback"
+                include_sde_research_chain = True
+
+        # Manufacturing costs via unified calculator (Step 2)
+        manufacturing_group = self._infer_manufacturing_group(compact_product)
+        mfg_costs = self._plan_activity_costs(
+            ctx, activity="manufacturing",
+            base_time_seconds=int(manufacturing_job.get("time_seconds") or 0),
+            runs=effective_runs, process_value=None,  # process_value computed below
+            manufacturing_group=manufacturing_group,
+            required_skill_entries=manufacturing_skill_entry_list,
+            blueprint_material_efficiency=blueprint_material_efficiency,
+            blueprint_time_efficiency=blueprint_time_efficiency,
+        )
+        manufacturing_material_reduction = mfg_costs.get("material_reduction", 0.0)
+        manufacturing_time_reduction = mfg_costs["time_reduction"]
+        manufacturing_cost_reduction = mfg_costs["cost_reduction"]
+
+        # Material adjustment
+        base_material_entries: list[dict[str, Any]] = []
+        adjusted_material_entries: list[dict[str, Any]] = []
+        for raw_mat in [dict(e) for e in (manufacturing_job.get("materials") or [])]:
+            mat = self._compact_material_entry(raw_mat)
+            qty_per_run = int(mat.get("quantity") or 0)
+            base_total = qty_per_run * effective_runs
+            adjusted_total = self._round_material_quantity(float(base_total) * max(0.0, 1.0 - manufacturing_material_reduction), minimum_quantity=(effective_runs if qty_per_run > 0 else 0))
+            mat["quantity_per_run"] = qty_per_run
+            mat["base_quantity"] = base_total
+            mat["quantity"] = adjusted_total
+            mat["material_reduction"] = manufacturing_material_reduction
+            adjusted_material_entries.append(mat)
+            base_material_entries.append({**mat, "quantity": base_total})
+
+        # EIV calculations
+        base_material_eiv_total, base_material_eiv_priced_count = self._sum_estimated_item_value(base_material_entries, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+        per_run_material_eiv, _ = self._sum_estimated_item_value(adjusted_material_entries, quantity_key="quantity_per_run", adjusted_price_map=ctx.adjusted_market_price_map)
+        product_eiv_unit, product_eiv_source = self._resolve_eiv_pricing(type_id=product_type_id, type_payload=compact_product, adjusted_price_map=ctx.adjusted_market_price_map)
+        product_eiv_total = float(product_eiv_unit) * int(compact_product.get("quantity") or 0) if product_eiv_unit is not None else None
+
+        # Recompute manufacturing job cost with actual process value
+        manufacturing_cost_index = self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="manufacturing")
+        manufacturing_job_cost = self._job_cost_total(process_value=base_material_eiv_total, cost_index=manufacturing_cost_index, cost_reduction=manufacturing_cost_reduction, installation_surcharge=ctx.installation_surcharge)
+        direct_manufacturing_time_seconds = self._round_duration_seconds(int(manufacturing_job.get("time_seconds") or 0) * effective_runs * max(0.0, 1.0 - manufacturing_time_reduction))
+
+        # Activity breakdown
+        activity_breakdown: dict[str, Any] = {
+            "manufacturing": {
+                "activity": "manufacturing", "duration_seconds": direct_manufacturing_time_seconds,
+                "base_duration_seconds": int(manufacturing_job.get("time_seconds") or 0) * effective_runs,
+                "time_reduction": manufacturing_time_reduction, "material_reduction": manufacturing_material_reduction,
+                "cost_reduction": manufacturing_cost_reduction, "cost_index": manufacturing_cost_index,
+                "estimated_item_value": base_material_eiv_total,
+                "estimated_item_value_priced_material_count": base_material_eiv_priced_count,
+                **manufacturing_job_cost,
+            }
+        }
+        total_time_seconds = direct_manufacturing_time_seconds
+        total_job_cost = float(manufacturing_job_cost.get("total_job_cost") or 0.0)
+        priced_job_count = 1 if manufacturing_job_cost.get("total_job_cost") is not None else 0
+        prerequisite_tree_nodes: list[dict[str, Any]] = []
+        top_level_procurement_materials = cast(list[dict[str, Any]], [*adjusted_material_entries])
+
+        # BPC allocation + prerequisite handling
+        invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
+        invention_job = (invention_source_row or {}).get("invention_job") or {}
+        has_top_level_invention_path = invention_source_row and isinstance(invention_job, dict)
+        available_target_copy_runs = int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) if bool(ctx.build_from_bpc) else 0
+        owned_target_copy_runs_used = min(max(0, available_target_copy_runs), effective_runs) if bool(ctx.build_from_bpc) else 0
+        if bool(ctx.build_from_bpc):
+            available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, available_target_copy_runs - owned_target_copy_runs_used)
+        missing_top_level_copy_runs = max(0, effective_runs - owned_target_copy_runs_used) if bool(ctx.build_from_bpc) else 0
+        requires_copying_job = bool(include_copying_job) and missing_top_level_copy_runs > 0
+        requires_invention_chain = missing_top_level_copy_runs > 0 and not matched_blueprint_originals
+        owned_top_level_copy_allocations = self._allocate_owned_blueprint_copy_run_usage(blueprint_copy_assets, requested_runs=owned_target_copy_runs_used, available_total_runs=owned_target_copy_runs_used)
+
+        if bool(ctx.build_from_bpc) and owned_top_level_copy_allocations:
+            for consumed_asset, consumed_runs in owned_top_level_copy_allocations:
+                fields = self._owned_blueprint_copy_node_fields(
+                    consumed_asset, blueprint_name=str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id),
+                    recommendation_action="take", runs_required=consumed_runs,
+                    category_name=str(compact_product.get("category_name") or "") or None,
+                    meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
+                    use_invention_label=bool(has_top_level_invention_path),
+                    character_name_by_id=ctx.character_name_by_id, corporation_name_by_id=ctx.corporation_name_by_id,
+                )
+                prerequisite_tree_nodes.append(self._job_tree_node(
+                    label=(self._ACTIVITY_LABELS["invention"] if has_top_level_invention_path else self._ACTIVITY_LABELS["copying"]),
+                    **fields,
+                ))
+
+        # Copying (Step 4)
+        copying_costs, copying_tree = self._plan_copying_for_variant(
+            ctx, row=row, blueprint_type_id=blueprint_type_id, per_run_material_eiv=per_run_material_eiv,
+            missing_copy_runs=missing_top_level_copy_runs, requires_copying_job=requires_copying_job,
+            owned_target_copy_runs_used=owned_target_copy_runs_used, compact_product=compact_product,
+            has_invention_path=bool(has_top_level_invention_path), matched_blueprint_originals=matched_blueprint_originals,
+        )
+        if copying_costs is not None:
+            activity_breakdown["copying"] = copying_costs
+            if requires_copying_job:
+                total_time_seconds += copying_costs["duration_seconds"]
+                if copying_costs.get("total_job_cost") is not None:
+                    total_job_cost += float(copying_costs.get("total_job_cost") or 0.0)
+                    priced_job_count += 1
+            else:
+                activity_breakdown.pop("copying", None)
+        prerequisite_tree_nodes.extend(copying_tree)
+
+        # Invention (Step 4)
+        inv_costs, inv_tree, inv_procurement, source_copy_costs = self._plan_invention_chain_for_variant(
+            ctx, row=row, blueprint_type_id=blueprint_type_id,
+            missing_top_level_copy_runs=missing_top_level_copy_runs,
+            requires_invention_chain=requires_invention_chain,
+            owned_target_copy_runs_used=owned_target_copy_runs_used,
+            max_production_limit=max_production_limit, compact_product=compact_product,
+            available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
+            available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+        )
+        if inv_costs is not None:
+            activity_breakdown["invention"] = inv_costs
+            if requires_invention_chain:
+                total_time_seconds += inv_costs["duration_seconds"]
+                if inv_costs.get("total_job_cost") is not None:
+                    total_job_cost += float(inv_costs.get("total_job_cost") or 0.0)
+                    priced_job_count += 1
+                top_level_procurement_materials.extend(inv_procurement)
+                generated_runs = (max(1, int(math.ceil(float(max(1, missing_top_level_copy_runs)) / float(max(1, max_production_limit or 1))))) if requires_invention_chain else 0) * max(1, max_production_limit or 1)
+                if generated_runs > missing_top_level_copy_runs:
+                    available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) + (generated_runs - missing_top_level_copy_runs))
+            else:
+                activity_breakdown.pop("invention", None)
+        prerequisite_tree_nodes.extend(inv_tree)
+        if source_copy_costs is not None and requires_invention_chain and source_copy_costs.get("duration_seconds", 0) > 0:
+            total_time_seconds += source_copy_costs["duration_seconds"]
+            if source_copy_costs.get("total_job_cost") is not None:
+                total_job_cost += float(source_copy_costs.get("total_job_cost") or 0.0)
+                priced_job_count += 1
+
+        # Research (Step 4)
+        if include_sde_research_chain:
+            for act_name, res_costs, res_node in self._plan_research_chain_for_variant(ctx, row=row, per_run_material_eiv=per_run_material_eiv):
+                activity_breakdown[act_name] = res_costs
+                total_time_seconds += res_costs["duration_seconds"]
+                if res_costs.get("total_job_cost") is not None:
+                    total_job_cost += float(res_costs.get("total_job_cost") or 0.0)
+                    priced_job_count += 1
+                prerequisite_tree_nodes.append(res_node)
+
+        # Blueprint metadata
+        selected_bp_copy_asset = owned_top_level_copy_allocations[0][0] if owned_top_level_copy_allocations else blueprint_copy_asset
+        blueprint_copy_payload = self._compact_owned_blueprint_assets(
+            blueprint_copy_assets if len(blueprint_copy_assets) > 1 else ([selected_bp_copy_asset] if selected_bp_copy_asset is not None else []),
+            character_name_by_id=ctx.character_name_by_id, corporation_name_by_id=ctx.corporation_name_by_id, top_location_name_by_id=ctx.top_location_name_by_id,
+        )
+        bp_copy_variant_key = "-".join(str(int(getattr(a, "item_id", 0) or 0)) for a in blueprint_copy_assets if int(getattr(a, "item_id", 0) or 0) > 0) or "none"
+        uses_bp_original = blueprint_source_kind in {"copied_from_owned_blueprint_original", "owned_blueprint_original"} or requires_copying_job
+        blueprint_original_payload = self._compact_owned_blueprint_asset(
+            blueprint_original_asset if uses_bp_original else None,
+            character_name_by_id=ctx.character_name_by_id, corporation_name_by_id=ctx.corporation_name_by_id, top_location_name_by_id=ctx.top_location_name_by_id,
+        )
+        bp_original_item_id = int(blueprint_original_asset.item_id) if uses_bp_original and blueprint_original_asset is not None else None
+
+        # Recursive prerequisite plan
+        recursive_prerequisite_plan = self._build_recursive_prerequisite_plan(
+            adjusted_material_entries=adjusted_material_entries, blueprint_type_id=blueprint_type_id,
+            build_from_bpc=ctx.build_from_bpc, include_reactions=ctx.include_reactions,
+            selected_industry_profile=ctx.selected_industry_profile,
+            selected_character_modifiers=ctx.selected_character_modifiers,
+            character_skill_levels_by_name=ctx.character_skill_levels_by_name,
+            adjusted_market_price_map=ctx.adjusted_market_price_map,
+            sell_price_map=ctx.material_price_map,
+            blueprint_copy_assets_by_type_id=ctx.blueprint_copy_assets_by_type_id,
+            available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
+            available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+            owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+            blueprint_original_assets_by_type_id=ctx.blueprint_original_assets_by_type_id,
+            character_name_by_id=ctx.character_name_by_id, corporation_name_by_id=ctx.corporation_name_by_id,
+            manufacturing_row_by_product_type_id=ctx.manufacturing_row_by_product_type_id,
+            reaction_row_by_product_type_id=ctx.reaction_row_by_product_type_id,
+            invention_row_by_blueprint_type_id=ctx.invention_row_by_blueprint_type_id,
+            include_current_blueprint_prerequisites=False,
+        )
+        top_level_procurement_materials = cast(list[dict[str, Any]], recursive_prerequisite_plan.get("procurement_materials") or top_level_procurement_materials)
+        total_time_seconds += int(recursive_prerequisite_plan.get("time_seconds") or 0)
+        if recursive_prerequisite_plan.get("job_cost") is not None:
+            total_job_cost += float(recursive_prerequisite_plan.get("job_cost") or 0.0)
+            priced_job_count += int(recursive_prerequisite_plan.get("priced_job_count") or 0)
+        if recursive_prerequisite_plan.get("enabled"):
+            activity_breakdown["recursive_prerequisites"] = {
+                "activity": "recursive_prerequisites",
+                "duration_seconds": int(recursive_prerequisite_plan.get("time_seconds") or 0),
+                "total_job_cost": recursive_prerequisite_plan.get("job_cost"),
+                "reactions_enabled": bool(recursive_prerequisite_plan.get("reactions_enabled", False)),
+                "activities": recursive_prerequisite_plan.get("activity_breakdown") or {},
+            }
+        prerequisite_tree_nodes.extend([n for n in (recursive_prerequisite_plan.get("tree_children") or []) if isinstance(n, dict)])
+        top_level_material_nodes = cast(list[dict[str, Any]], recursive_prerequisite_plan.get("material_nodes") or [])
+        if not top_level_material_nodes:
+            top_level_material_nodes = [
+                self._job_tree_node(
+                    label=str(m.get("type_name") or m.get("type_id") or "Material"), node_type="material", activity="material",
+                    sourcing_strategy=("take_or_buy_reaction_available" if not (bool(ctx.include_reactions) and self._reactions_allowed_for_profile(ctx.selected_industry_profile)) and int(m.get("type_id") or 0) in ctx.reaction_row_by_product_type_id else "take_or_buy"),
+                    category_name=str(m.get("category_name") or "") or None, meta_group_name=str(m.get("meta_group_name") or "") or None,
+                    type_id=int(m.get("type_id") or 0), quantity=int(m.get("quantity") or 0),
+                    runs=None, duration_seconds=None, job_cost=None, total_job_cost=None, children=[],
+                ) for m in adjusted_material_entries if isinstance(m, dict)
+            ]
+
+        # Assemble job tree
+        manufacturing_tree = self._job_tree_node(
+            label=self._ACTIVITY_LABELS["manufacturing"], node_type="activity", activity="manufacturing",
+            blueprint_type_id=blueprint_type_id, type_id=product_type_id,
+            quantity=int(compact_product.get("quantity") or 0), runs=effective_runs,
+            duration_seconds=total_time_seconds, direct_duration_seconds=direct_manufacturing_time_seconds,
+            job_cost=manufacturing_job_cost.get("total_job_cost"),
+            total_job_cost=(total_job_cost if priced_job_count > 0 else None),
+            blueprint_source_kind=blueprint_source_kind,
+            children=[*prerequisite_tree_nodes, self._job_tree_node(label=self._ACTIVITY_LABELS["materials"], node_type="materials", activity="materials", children=top_level_material_nodes)],
+        )
+        product_tree = self._job_tree_node(
+            label=str(compact_product.get("type_name") or compact_product.get("type_id") or "Product"),
+            node_type="product", activity="product", type_id=product_type_id,
+            quantity=int(compact_product.get("quantity") or 0), runs=effective_runs,
+            duration_seconds=total_time_seconds,
+            job_cost=(total_job_cost if priced_job_count > 0 else None),
+            total_job_cost=(total_job_cost if priced_job_count > 0 else None),
+            material_cost=None, total_cost=None, children=[manufacturing_tree],
+        )
+        product_market_pricing = ctx.product_sell_price_map.get(product_type_id) or {}
+
+        return {
+            **compact_product,
+            "overview_row_id": f"product:{row_index}:{product_index}:bpc:{bp_copy_variant_key}:bpo:{bp_original_item_id or 'none'}",
+            "manufacturing_job": {
+                "materials": self._overview_keyed_entries(adjusted_material_entries, compactor=lambda e: e),
+                "skills": manufacturing_skills,
+                "character_modifiers": ctx.selected_character_modifiers,
+                "time_seconds": total_time_seconds,
+                "manufacturing_time_seconds": direct_manufacturing_time_seconds,
+                "preparation_time_seconds": max(0, total_time_seconds - direct_manufacturing_time_seconds),
+                "max_production_limit": max_production_limit,
+                "runs": effective_runs,
+                "product_quantity_per_run": product_quantity_per_run,
+                "material_reduction": manufacturing_material_reduction,
+                "time_reduction": manufacturing_time_reduction,
+                "cost_reduction": manufacturing_cost_reduction,
+                "job_cost": manufacturing_job_cost.get("total_job_cost"),
+                "manufacturing_job_cost": manufacturing_job_cost.get("total_job_cost"),
+                "total_job_cost": (total_job_cost if priced_job_count > 0 else None),
+                "estimated_item_value": base_material_eiv_total,
+                "estimated_item_value_source": "materials_adjusted_price",
+                "product_estimated_item_value": product_eiv_total,
+                "product_estimated_item_value_source": product_eiv_source,
+                "product_market_price": self._as_float(product_market_pricing.get("unit_price")),
+                "product_market_price_source": product_market_pricing.get("price_source"),
+                "product_market_price_side": product_market_pricing.get("side"),
+                "product_market_price_hub": product_market_pricing.get("hub"),
+                "product_market_price_hub_label": product_market_pricing.get("hub_label"),
+                "product_market_price_cached": product_market_pricing.get("cached"),
+                "product_market_price_fetched_at": product_market_pricing.get("fetched_at"),
+                "product_market_price_sample_size": product_market_pricing.get("sample_size"),
+                "product_market_volume_total": product_market_pricing.get("volume_total"),
+                "activity_breakdown": activity_breakdown,
+                "recursive_activity_breakdown": recursive_prerequisite_plan.get("activity_breakdown") or {},
+                "procurement_materials": self._overview_keyed_entries(top_level_procurement_materials, compactor=lambda e: e),
+                "activity_cost_indices": {
+                    "manufacturing": manufacturing_cost_index,
+                    "copying": self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="copying"),
+                    "research_material": self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="research_material"),
+                    "research_time": self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="research_time"),
+                    "invention": self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="invention"),
+                    "reaction": self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="reaction"),
+                },
+                "blueprint_material_efficiency": blueprint_material_efficiency,
+                "blueprint_time_efficiency": blueprint_time_efficiency,
+                "blueprint_source_kind": blueprint_source_kind,
+                "industry_profile": ctx.selected_industry_profile,
+                "blueprint_sde": blueprint_sde_payload,
+                "blueprint_copy": blueprint_copy_payload,
+                "blueprint_original": blueprint_original_payload,
+                "job_tree": product_tree,
+            },
+            "market_unit_price": self._as_float(product_market_pricing.get("unit_price")),
+            "market_price_source": product_market_pricing.get("price_source"),
+            "market_price_side": product_market_pricing.get("side"),
+            "market_hub": product_market_pricing.get("hub"),
+            "market_hub_label": product_market_pricing.get("hub_label"),
+            "market_price_cached": product_market_pricing.get("cached"),
+            "market_price_fetched_at": product_market_pricing.get("fetched_at"),
+            "market_price_sample_size": product_market_pricing.get("sample_size"),
+            "market_volume_total": product_market_pricing.get("volume_total"),
+        }
+
+    # ----------------------------------------------------------------
+    # Rewritten orchestrator (Step 5 + 6)
+    # ----------------------------------------------------------------
+
     def industry_manufacturing_product_overview(
         self,
         *,
@@ -5515,1360 +6323,101 @@ class IndustryService:
         character_id: int | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
-        mgr = self._ensure_industry_job_manager()
-        if progress_callback is not None:
-            progress_callback(0.05, "Step 2/9: Loading blueprint snapshot", {"step": 2, "step_count": 9, "stage": "blueprints"})
-        blueprint_rows = mgr.get_blueprint_overview(force_refresh=bool(force_refresh))
-        if progress_callback is not None:
-            progress_callback(
-                0.10,
-                "Step 3/9: Resolving character profile and pricing context",
-                {"step": 3, "step_count": 9, "stage": "context"},
-            )
-        character_skill_levels = (
-            self._get_character_trained_skill_levels(character_id=int(character_id))
-            if character_id is not None
-            else {}
+        overview_input_hash = hashlib.sha256(
+            json.dumps({
+                "maximize_bp_runs": maximize_bp_runs, "group_identical_bpcs": group_identical_bpcs,
+                "build_from_bpc": build_from_bpc, "have_blueprint_source_only": have_blueprint_source_only,
+                "include_reactions": include_reactions, "market_hub": market_hub,
+                "material_price_side": material_price_side, "product_price_side": product_price_side,
+                "industry_profile_id": industry_profile_id, "owned_blueprints_scope": owned_blueprints_scope,
+                "character_id": character_id,
+            }, sort_keys=True).encode()
+        ).hexdigest()
+
+        if not force_refresh:
+            cached = getattr(self._state, "_overview_result_cache", None)
+            if isinstance(cached, dict) and cached.get("hash") == overview_input_hash:
+                cached_rows = cached.get("rows")
+                if isinstance(cached_rows, list):
+                    if progress_callback is not None:
+                        progress_callback(1.0, "Returned cached overview (no input changes)", {"stage": "cached"})
+                    return [dict(row) for row in cached_rows]
+
+        # Step 1: Build immutable planning context
+        ctx = self._build_planning_context(
+            force_refresh=force_refresh, build_from_bpc=build_from_bpc,
+            include_reactions=include_reactions, maximize_bp_runs=maximize_bp_runs,
+            group_identical_bpcs=group_identical_bpcs, have_blueprint_source_only=have_blueprint_source_only,
+            market_hub=market_hub, material_price_side=material_price_side,
+            product_price_side=product_price_side, industry_profile_id=industry_profile_id,
+            owned_blueprints_scope=owned_blueprints_scope, character_id=character_id,
+            progress_callback=progress_callback,
         )
-        selected_industry_profile = self._resolve_industry_profile_context(
-            character_id=character_id,
-            industry_profile_id=industry_profile_id,
-        )
-        include_reactions = bool(include_reactions) and self._reactions_allowed_for_profile(selected_industry_profile)
-        selected_character_modifiers = self._get_character_industry_modifier_payload(character_id=character_id)
-        character_skill_levels_by_name = self._skill_levels_by_name(selected_character_modifiers)
-        adjusted_market_price_map = self._get_adjusted_market_price_map()
-        (
-            manufacturing_row_by_product_type_id,
-            reaction_row_by_product_type_id,
-            invention_row_by_blueprint_type_id,
-        ) = self._build_blueprint_row_indexes(blueprint_rows)
         normalized_market_hub = MarketPricingService.normalize_market_hub(market_hub)
         normalized_material_price_side = MarketPricingService.normalize_order_side(material_price_side)
         normalized_product_price_side = MarketPricingService.normalize_order_side(product_price_side)
-        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
-        product_sell_price_type_ids = sorted(
-            {
-                *[int(type_id) for type_id in manufacturing_row_by_product_type_id.keys()],
-                *[int(type_id) for type_id in reaction_row_by_product_type_id.keys()],
-            }
-        )
-        material_price_type_ids = sorted(
-            {
-                int(entry.get("type_id") or 0)
-                for row in blueprint_rows
-                if isinstance(row, dict)
-                for job_name in ["manufacturing_job", "reaction_job", "invention_job"]
-                for entry in (((row.get(job_name) or {}) if isinstance(row.get(job_name), dict) else {}).get("materials") or [])
-                if isinstance(entry, dict) and int(entry.get("type_id") or 0) > 0
-            }
-        )
-        product_sell_price_map = pricing_service.get_type_price_map(
-            type_ids=product_sell_price_type_ids,
-            hub=normalized_market_hub,
-            side=normalized_product_price_side,
-        )
-        material_price_map = pricing_service.get_type_price_map(
-            type_ids=material_price_type_ids,
-            hub=normalized_market_hub,
-            side=normalized_material_price_side,
-        )
-        blueprint_copy_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
-        blueprint_original_assets_by_type_id: dict[int, list[CharacterAssetsModel | CorporationAssetsModel]] = {}
-        available_owned_item_quantity_by_type_id_base, owned_item_unit_cost_by_type_id = self._get_owned_item_inventory(
-            owned_blueprints_scope=owned_blueprints_scope,
-        )
-        (
-            character_blueprint_assets,
-            corporation_blueprint_assets,
-            character_name_by_id,
-            corporation_name_by_id,
-            top_location_name_by_id,
-        ) = self._get_owned_blueprint_assets(owned_blueprints_scope=owned_blueprints_scope)
-        if progress_callback is not None:
-            progress_callback(
-                0.25,
-                "Step 4/9: Resolved owned blueprint assets",
-                {
-                    "step": 4,
-                    "step_count": 9,
-                    "stage": "assets",
-                    "character_assets": len(character_blueprint_assets),
-                    "corporation_assets": len(corporation_blueprint_assets),
-                },
+
+        # Step 6: Flatten iteration and build product rows (parallelized)
+        variants = list(self._iter_product_variants(ctx))
+        variant_count = len(variants)
+        product_rows: list[dict[str, Any]] = [None] * variant_count  # type: ignore[list-item]
+        completed_count = 0
+        completed_lock = threading.Lock()
+
+        def _build_variant(index: int, variant: tuple) -> tuple[int, dict[str, Any] | None]:
+            row_idx, prod_idx, row, raw_product, copy_assets, original_asset, eff_runs = variant
+            return index, self._build_single_product_row(
+                ctx, row=row, raw_product=raw_product,
+                row_index=row_idx, product_index=prod_idx,
+                blueprint_copy_assets=copy_assets,
+                blueprint_original_asset=original_asset,
+                effective_runs=eff_runs,
             )
 
-        for asset in [*character_blueprint_assets, *corporation_blueprint_assets]:
-            try:
-                blueprint_type_id = int(asset.type_id)
-            except Exception:
-                continue
-            if blueprint_type_id <= 0:
-                continue
-            if bool(getattr(asset, "is_blueprint_copy", False)):
-                if not bool(build_from_bpc):
-                    continue
-                blueprint_copy_assets_by_type_id.setdefault(blueprint_type_id, []).append(asset)
-            else:
-                blueprint_original_assets_by_type_id.setdefault(blueprint_type_id, []).append(asset)
-
-        for assets in blueprint_copy_assets_by_type_id.values():
-            assets.sort(
-                key=lambda asset: (
-                    -int(asset.blueprint_material_efficiency or 0),
-                    -int(asset.blueprint_time_efficiency or 0),
-                    -int(asset.blueprint_runs or 0),
-                    int(asset.item_id or 0),
-                )
-            )
-        for assets in blueprint_original_assets_by_type_id.values():
-            assets.sort(
-                key=lambda asset: (
-                    -int(asset.blueprint_material_efficiency or 0),
-                    -int(asset.blueprint_time_efficiency or 0),
-                    int(asset.item_id or 0),
-                )
-            )
-
-        available_blueprint_copy_runs_by_type_id_base: dict[int, int] = {
-            int(blueprint_type_id): sum(max(0, int(asset.blueprint_runs or 0)) for asset in assets)
-            for blueprint_type_id, assets in blueprint_copy_assets_by_type_id.items()
-        }
-
-        def compact_material(entry: dict[str, Any]) -> dict[str, Any]:
-            return {
-                "base_price": entry.get("base_price"),
-                "category_icon_id": entry.get("category_icon_id"),
-                "category_id": entry.get("category_id"),
-                "category_name": entry.get("category_name"),
-                "group_icon_id": entry.get("group_icon_id"),
-                "group_id": entry.get("group_id"),
-                "group_name": entry.get("group_name"),
-                "group_repackaged_volume": entry.get("group_repackaged_volume"),
-                "group_use_base_price": entry.get("group_use_base_price"),
-                "icon_id": entry.get("icon_id"),
-                "portion_size": entry.get("portion_size"),
-                "quantity": entry.get("quantity"),
-                "repackaged_volume": entry.get("repackaged_volume"),
-                "type_id": entry.get("type_id"),
-                "type_name": entry.get("type_name"),
-                "volume": entry.get("volume"),
-            }
-
-        def compact_skill(entry: dict[str, Any]) -> dict[str, Any]:
-            return {
-                "icon_id": entry.get("icon_id"),
-                "level": entry.get("level"),
-                "type_id": entry.get("type_id"),
-                "type_name": entry.get("type_name"),
-                "description": entry.get("description"),
-            }
-
-        def compact_required_skill(entry: dict[str, Any]) -> dict[str, Any]:
-            required_skill = compact_skill(entry)
-            skill_type_id = int(required_skill.get("type_id") or 0)
-            required_level = int(required_skill.get("level") or 0)
-            trained_skill_level = int(character_skill_levels.get(skill_type_id, 0))
-            return {
-                **required_skill,
-                "trained_skill_level": trained_skill_level,
-                "skill_requirement_met": trained_skill_level >= required_level,
-            }
-
-        def keyed_entries(entries: list[dict[str, Any]], *, compactor) -> dict[str, dict[str, Any]]:
-            out: dict[str, dict[str, Any]] = {}
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                try:
-                    type_id = int(entry.get("type_id") or 0)
-                except Exception:
-                    continue
-                if type_id <= 0:
-                    continue
-                out[str(type_id)] = compactor(entry)
-            return out
-
-        def compact_invention_products(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            out: list[dict[str, Any]] = []
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                product = entry.get("product") or {}
-                if not isinstance(product, dict):
-                    product = {}
-                probability = product.get("probability")
-                if probability is None:
-                    try:
-                        probability = float(entry.get("probability_pct") or 0.0) / 100.0
-                    except Exception:
-                        probability = None
-                out.append(
-                    {
-                        "probability": probability,
-                        "quantity": entry.get("quantity"),
-                        "type_id": product.get("type_id"),
-                        "type_name": product.get("type_name"),
-                    }
-                )
-            return out
-
-        product_rows: list[dict[str, Any]] = []
-        for row_index, row in enumerate(blueprint_rows, start=1):
-            manufacturing_job = row.get("manufacturing_job") or {}
-            if not isinstance(manufacturing_job, dict):
-                continue
-
-            blueprint_type_id = int(row.get("blueprint_type_id") or 0)
-            matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
-            matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
-
-            raw_products = manufacturing_job.get("products") or []
-            if not isinstance(raw_products, list) or not raw_products:
-                continue
-
-            for product_index, raw_product in enumerate(raw_products, start=1):
-                if not isinstance(raw_product, dict):
-                    continue
-
-                product_type_id = int(raw_product.get("type_id") or 0)
-                if product_type_id <= 0:
-                    continue
-
-                product_quantity_per_run = int(raw_product.get("quantity") or 0)
-                max_production_limit = int(manufacturing_job.get("max_production_limit") or 0)
-
-                blueprint_sde_payload: dict[str, Any] = {
-                    **dict(row.get("blueprint") or {}),
-                    "blueprint_type_id": blueprint_type_id,
-                    "copying": {"time": int(((row.get("copying_job") or {}).get("time_seconds") or 0))},
-                    "research_material": {"time": int(((row.get("research_material_job") or {}).get("time_seconds") or 0))},
-                    "research_time": {"time": int(((row.get("research_time_job") or {}).get("time_seconds") or 0))},
-                }
-
-                invention_job = row.get("invention_job") or {}
-                if isinstance(invention_job, dict) and invention_job:
-                    blueprint_sde_payload["invention"] = {
-                        "materials": keyed_entries(
-                            [dict(entry) for entry in (invention_job.get("materials") or [])],
-                            compactor=compact_material,
-                        ),
-                        "products": compact_invention_products(
-                            [dict(entry) for entry in (invention_job.get("products") or [])]
-                        ),
-                        "skills": keyed_entries(
-                            [dict(entry) for entry in (invention_job.get("skill_entries") or [])],
-                            compactor=compact_skill,
-                        ),
-                        "time": int(invention_job.get("time_seconds") or 0),
-                    }
-
-                if bool(build_from_bpc) and matched_blueprint_copies:
-                    if bool(group_identical_bpcs):
-                        selected_blueprint_variants: list[dict[str, Any]] = [
-                            {
-                                "blueprint_copy_assets": list(matched_blueprint_copies),
-                                "blueprint_original_asset": None,
-                            }
-                        ]
-                    else:
-                        selected_blueprint_variants = [
-                            {
-                                "blueprint_copy_assets": [blueprint_copy_asset],
-                                "blueprint_original_asset": None,
-                            }
-                            for blueprint_copy_asset in matched_blueprint_copies
-                        ]
-                elif matched_blueprint_originals:
-                    selected_blueprint_variants = [
-                        {
-                            "blueprint_copy_assets": [],
-                            "blueprint_original_asset": blueprint_original_asset,
-                        }
-                        for blueprint_original_asset in matched_blueprint_originals
-                    ]
-                else:
-                    selected_blueprint_variants = [
-                        {
-                            "blueprint_copy_assets": [],
-                            "blueprint_original_asset": None,
-                        }
-                    ]
-
-                if bool(have_blueprint_source_only):
-                    selected_blueprint_variants = [
-                        variant
-                        for variant in selected_blueprint_variants
-                        if (variant.get("blueprint_copy_assets") or []) or variant.get("blueprint_original_asset") is not None
-                    ]
-                    if not selected_blueprint_variants:
-                        continue
-
-                for blueprint_variant in selected_blueprint_variants:
-                    blueprint_copy_assets = cast(
-                        list[CharacterAssetsModel | CorporationAssetsModel],
-                        list(blueprint_variant.get("blueprint_copy_assets") or []),
-                    )
-                    blueprint_original_asset = cast(
-                        CharacterAssetsModel | CorporationAssetsModel | None,
-                        blueprint_variant.get("blueprint_original_asset"),
-                    )
-                    blueprint_copy_asset = blueprint_copy_assets[0] if blueprint_copy_assets else None
-                    blueprint_copy_runs = sum(
-                        max(0, int(getattr(copy_asset, "blueprint_runs", 0) or 0))
-                        for copy_asset in blueprint_copy_assets
-                    )
-                    effective_runs = 1
-                    if bool(maximize_bp_runs):
-                        if blueprint_copy_runs > 0:
-                            effective_runs = blueprint_copy_runs
-                        elif max_production_limit > 0:
-                            effective_runs = max_production_limit
-
-                    available_blueprint_copy_runs_by_type_id = dict(available_blueprint_copy_runs_by_type_id_base)
-                    available_owned_item_quantity_by_type_id = dict(available_owned_item_quantity_by_type_id_base)
-                    if bool(build_from_bpc):
-                        if blueprint_copy_assets:
-                            available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, blueprint_copy_runs)
-                        elif blueprint_original_asset is not None:
-                            available_blueprint_copy_runs_by_type_id[blueprint_type_id] = 0
-
-                    compact_product = dict(raw_product)
-                    compact_product["quantity"] = product_quantity_per_run * effective_runs
-
-                    manufacturing_skill_entries = keyed_entries(
-                        [dict(entry) for entry in (manufacturing_job.get("skill_entries") or [])],
-                        compactor=compact_required_skill,
-                    )
-                    manufacturing_skill_requirements_met = all(
-                        bool(skill_entry.get("skill_requirement_met", False))
-                        for skill_entry in manufacturing_skill_entries.values()
-                        if isinstance(skill_entry, dict)
-                    )
-                    manufacturing_skills: dict[str, Any] = {
-                        **manufacturing_skill_entries,
-                        "skill_requirements_met": manufacturing_skill_requirements_met,
-                    }
-                    manufacturing_skill_entry_list = [
-                        skill_entry
-                        for skill_entry in manufacturing_skill_entries.values()
-                        if isinstance(skill_entry, dict)
-                    ]
-
-                    blueprint_material_efficiency = 0
-                    blueprint_time_efficiency = 0
-                    blueprint_source_kind = "unowned"
-                    include_copying_job = False
-                    include_sde_research_chain = False
-                    if bool(build_from_bpc):
-                        if blueprint_copy_asset is not None:
-                            blueprint_material_efficiency = int(blueprint_copy_asset.blueprint_material_efficiency or 0)
-                            blueprint_time_efficiency = int(blueprint_copy_asset.blueprint_time_efficiency or 0)
-                            blueprint_source_kind = "owned_blueprint_copy"
-                            include_copying_job = max(0, blueprint_copy_runs) < effective_runs and bool(matched_blueprint_originals)
-                        elif blueprint_original_asset is not None:
-                            blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
-                            blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
-                            blueprint_source_kind = "copied_from_owned_blueprint_original"
-                            include_copying_job = True
-                        else:
-                            blueprint_source_kind = "unowned_blueprint_copy"
-                    else:
-                        if blueprint_original_asset is not None:
-                            blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
-                            blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
-                            blueprint_source_kind = "owned_blueprint_original"
-                        else:
-                            blueprint_material_efficiency = self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY
-                            blueprint_time_efficiency = self._MAX_BLUEPRINT_TIME_EFFICIENCY
-                            blueprint_source_kind = "blueprint_sde_fallback"
-                            include_sde_research_chain = True
-
-                    manufacturing_group = self._infer_manufacturing_group(compact_product)
-                    manufacturing_material_reduction = self._combine_reductions(
-                        [
-                            float(blueprint_material_efficiency) / 100.0,
-                            self._profile_base_reduction(
-                                profile_payload=selected_industry_profile,
-                                activity="manufacturing",
-                                metric="material",
-                            ),
-                            self._profile_rig_reduction(
-                                profile_payload=selected_industry_profile,
-                                activity="manufacturing",
-                                metric="material",
-                                manufacturing_group=manufacturing_group,
-                            ),
-                            self._implant_reduction(
-                                character_modifier_payload=selected_character_modifiers,
-                                activity="manufacturing",
-                                metric="material",
-                            ),
-                        ]
-                    )
-                    manufacturing_time_reduction = self._combine_reductions(
-                        [
-                            float(blueprint_time_efficiency) / 100.0,
-                            self._skill_time_reduction(
-                                activity="manufacturing",
-                                skill_levels_by_name=character_skill_levels_by_name,
-                                required_skill_entries=manufacturing_skill_entry_list,
-                            ),
-                            self._profile_base_reduction(
-                                profile_payload=selected_industry_profile,
-                                activity="manufacturing",
-                                metric="time",
-                            ),
-                            self._profile_rig_reduction(
-                                profile_payload=selected_industry_profile,
-                                activity="manufacturing",
-                                metric="time",
-                                manufacturing_group=manufacturing_group,
-                            ),
-                            self._implant_reduction(
-                                character_modifier_payload=selected_character_modifiers,
-                                activity="manufacturing",
-                                metric="time",
-                            ),
-                        ]
-                    )
-                    manufacturing_cost_reduction = self._combine_reductions(
-                        [
-                            self._profile_base_reduction(
-                                profile_payload=selected_industry_profile,
-                                activity="manufacturing",
-                                metric="cost",
-                            ),
-                            self._profile_rig_reduction(
-                                profile_payload=selected_industry_profile,
-                                activity="manufacturing",
-                                metric="cost",
-                                manufacturing_group=manufacturing_group,
-                            ),
-                            self._implant_reduction(
-                                character_modifier_payload=selected_character_modifiers,
-                                activity="manufacturing",
-                                metric="cost",
-                            ),
-                        ]
-                    )
-
-                    base_material_entries: list[dict[str, Any]] = []
-                    adjusted_material_entries: list[dict[str, Any]] = []
-                    for raw_material in [dict(entry) for entry in (manufacturing_job.get("materials") or [])]:
-                        material = compact_material(raw_material)
-                        quantity_per_run = int(material.get("quantity") or 0)
-                        base_total_quantity = quantity_per_run * effective_runs
-                        adjusted_total_quantity = self._round_material_quantity(
-                            float(base_total_quantity) * max(0.0, 1.0 - manufacturing_material_reduction),
-                            minimum_quantity=(effective_runs if quantity_per_run > 0 else 0),
-                        )
-                        material["quantity_per_run"] = quantity_per_run
-                        material["base_quantity"] = base_total_quantity
-                        material["quantity"] = adjusted_total_quantity
-                        material["material_reduction"] = manufacturing_material_reduction
-                        adjusted_material_entries.append(material)
-                        base_material_entries.append({**material, "quantity": base_total_quantity})
-
-                    base_material_eiv_total, base_material_eiv_priced_count = self._sum_estimated_item_value(
-                        base_material_entries,
-                        quantity_key="quantity",
-                        adjusted_price_map=adjusted_market_price_map,
-                    )
-                    per_run_material_eiv, _ = self._sum_estimated_item_value(
-                        adjusted_material_entries,
-                        quantity_key="quantity_per_run",
-                        adjusted_price_map=adjusted_market_price_map,
-                    )
-                    product_eiv_unit, product_eiv_source = self._resolve_eiv_pricing(
-                        type_id=product_type_id,
-                        type_payload=compact_product,
-                        adjusted_price_map=adjusted_market_price_map,
-                    )
-                    product_eiv_total = (
-                        float(product_eiv_unit) * int(compact_product.get("quantity") or 0)
-                        if product_eiv_unit is not None
-                        else None
-                    )
-
-                    manufacturing_cost_index = self._system_cost_index(
-                        profile_payload=selected_industry_profile,
-                        activity="manufacturing",
-                    )
-                    installation_surcharge = self._profile_installation_surcharge(selected_industry_profile)
-                    manufacturing_job_cost = self._job_cost_total(
-                        process_value=base_material_eiv_total,
-                        cost_index=manufacturing_cost_index,
-                        cost_reduction=manufacturing_cost_reduction,
-                        installation_surcharge=installation_surcharge,
-                    )
-
-                    direct_manufacturing_time_seconds = self._round_duration_seconds(
-                        int(manufacturing_job.get("time_seconds") or 0)
-                        * effective_runs
-                        * max(0.0, 1.0 - manufacturing_time_reduction)
-                    )
-
-                    activity_breakdown: dict[str, Any] = {
-                        "manufacturing": {
-                            "activity": "manufacturing",
-                            "duration_seconds": direct_manufacturing_time_seconds,
-                            "base_duration_seconds": int(manufacturing_job.get("time_seconds") or 0) * effective_runs,
-                            "time_reduction": manufacturing_time_reduction,
-                            "material_reduction": manufacturing_material_reduction,
-                            "cost_reduction": manufacturing_cost_reduction,
-                            "cost_index": manufacturing_cost_index,
-                            "estimated_item_value": base_material_eiv_total,
-                            "estimated_item_value_priced_material_count": base_material_eiv_priced_count,
-                            **manufacturing_job_cost,
-                        }
-                    }
-                    total_time_seconds = direct_manufacturing_time_seconds
-                    total_job_cost = float(manufacturing_job_cost.get("total_job_cost") or 0.0)
-                    priced_job_count = 1 if manufacturing_job_cost.get("total_job_cost") is not None else 0
-                    prerequisite_tree_nodes: list[dict[str, Any]] = []
-                    top_level_procurement_materials = cast(list[dict[str, Any]], [*adjusted_material_entries])
-                    invention_source_row = invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
-                    invention_job = (invention_source_row or {}).get("invention_job") or {}
-                    has_top_level_invention_path = invention_source_row and isinstance(invention_job, dict)
-                    available_target_copy_runs = (
-                        int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) if bool(build_from_bpc) else 0
-                    )
-                    owned_target_copy_runs_used = min(max(0, available_target_copy_runs), effective_runs) if bool(build_from_bpc) else 0
-                    if bool(build_from_bpc):
-                        available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(
-                            0,
-                            available_target_copy_runs - owned_target_copy_runs_used,
-                        )
-                    missing_top_level_copy_runs = max(0, effective_runs - owned_target_copy_runs_used) if bool(build_from_bpc) else 0
-                    requires_copying_job = bool(include_copying_job) and missing_top_level_copy_runs > 0
-                    requires_invention_chain = missing_top_level_copy_runs > 0 and not matched_blueprint_originals
-                    owned_top_level_copy_allocations = self._allocate_owned_blueprint_copy_run_usage(
-                        blueprint_copy_assets,
-                        requested_runs=owned_target_copy_runs_used,
-                        available_total_runs=owned_target_copy_runs_used,
-                    )
-
-                    if bool(build_from_bpc) and owned_top_level_copy_allocations:
-                        for consumed_blueprint_copy_asset, consumed_copy_runs in owned_top_level_copy_allocations:
-                            current_copy_node_fields = self._owned_blueprint_copy_node_fields(
-                                consumed_blueprint_copy_asset,
-                                blueprint_name=str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id),
-                                recommendation_action="take",
-                                runs_required=consumed_copy_runs,
-                                category_name=str(compact_product.get("category_name") or "") or None,
-                                meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
-                                use_invention_label=bool(has_top_level_invention_path),
-                                character_name_by_id=character_name_by_id,
-                                corporation_name_by_id=corporation_name_by_id,
-                            )
-                            prerequisite_tree_nodes.append(
-                                self._job_tree_node(
-                                    label=(self._ACTIVITY_LABELS["invention"] if has_top_level_invention_path else self._ACTIVITY_LABELS["copying"]),
-                                    **current_copy_node_fields,
-                                )
+        _admin = getattr(self._state, "admin_settings", None)
+        _cfg_max_workers = _admin.get("performance", "product_row_build_max_workers") if _admin else 8
+        max_workers = min(_cfg_max_workers, max(1, variant_count))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_build_variant, i, v) for i, v in enumerate(variants)]
+            for fut in as_completed(futures):
+                idx, result = fut.result()
+                product_rows[idx] = result  # type: ignore[assignment]
+                if progress_callback is not None and variant_count > 0:
+                    with completed_lock:
+                        completed_count += 1
+                        if completed_count % max(1, variant_count // 10) == 0:
+                            progress_callback(
+                                0.60 + 0.20 * (completed_count / variant_count),
+                                f"Building product rows ({completed_count}/{variant_count})",
+                                {"stage": "rows", "variant": completed_count, "variant_count": variant_count},
                             )
 
-                    if int(((row.get("copying_job") or {}).get("time_seconds") or 0)) > 0 and not (
-                        has_top_level_invention_path and not matched_blueprint_originals
-                    ):
-                        copying_time_reduction = self._combine_reductions(
-                            [
-                                self._skill_time_reduction(
-                                    activity="copying",
-                                    skill_levels_by_name=character_skill_levels_by_name,
-                                ),
-                                self._profile_base_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="time",
-                                ),
-                                self._profile_rig_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="time",
-                                ),
-                                self._implant_reduction(
-                                    character_modifier_payload=selected_character_modifiers,
-                                    activity="copying",
-                                    metric="time",
-                                ),
-                            ]
-                        )
-                        copying_cost_reduction = self._combine_reductions(
-                            [
-                                self._profile_base_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                                self._profile_rig_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                                self._implant_reduction(
-                                    character_modifier_payload=selected_character_modifiers,
-                                    activity="copying",
-                                    metric="cost",
-                                ),
-                            ]
-                        )
-                        copying_cost_index = self._system_cost_index(
-                            profile_payload=selected_industry_profile,
-                            activity="copying",
-                        )
-                        base_copy_time_seconds = int(((row.get("copying_job") or {}).get("time_seconds") or 0)) * max(
-                            0,
-                            missing_top_level_copy_runs,
-                        )
-                        copy_process_value = (
-                            float(per_run_material_eiv or 0.0) * max(0, missing_top_level_copy_runs) * 0.02
-                            if per_run_material_eiv is not None
-                            else None
-                        )
-                        copying_job_cost = self._job_cost_total(
-                            process_value=copy_process_value,
-                            cost_index=copying_cost_index,
-                            cost_reduction=copying_cost_reduction,
-                            installation_surcharge=installation_surcharge,
-                        )
-                        copying_duration_seconds = self._round_duration_seconds(
-                            float(base_copy_time_seconds) * max(0.0, 1.0 - copying_time_reduction)
-                        )
-                        activity_breakdown["copying"] = {
-                            "activity": "copying",
-                            "duration_seconds": copying_duration_seconds,
-                            "base_duration_seconds": base_copy_time_seconds,
-                            "time_reduction": copying_time_reduction,
-                            "cost_reduction": copying_cost_reduction,
-                            "cost_index": copying_cost_index,
-                            "estimated_item_value": per_run_material_eiv,
-                            "runs": max(0, missing_top_level_copy_runs),
-                            **copying_job_cost,
-                        }
-                        if requires_copying_job:
-                            total_time_seconds += copying_duration_seconds
-                            if copying_job_cost.get("total_job_cost") is not None:
-                                total_job_cost += float(copying_job_cost.get("total_job_cost") or 0.0)
-                                priced_job_count += 1
-                        else:
-                            activity_breakdown.pop("copying", None)
-                        if requires_copying_job or owned_target_copy_runs_used <= 0:
-                            prerequisite_tree_nodes.append(
-                                self._job_tree_node(
-                                    label=self._ACTIVITY_LABELS["copying"],
-                                    node_type="activity",
-                                    activity="copying",
-                                    blueprint_name=str(
-                                        ((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("type_name")
-                                        or ((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("name")
-                                        or blueprint_type_id
-                                        or "Blueprint"
-                                    ),
-                                    quantity=1,
-                                    runs=max(0, missing_top_level_copy_runs),
-                                    duration_seconds=copying_duration_seconds,
-                                    direct_duration_seconds=copying_duration_seconds,
-                                    job_cost=copying_job_cost.get("total_job_cost"),
-                                    total_job_cost=copying_job_cost.get("total_job_cost"),
-                                    category_name=str(compact_product.get("category_name") or "") or None,
-                                    meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
-                                    recommendation_action="copy",
-                                    children=[],
-                                )
-                            )
+        product_rows = [r for r in product_rows if r is not None]  # type: ignore[misc]
 
-                    if invention_source_row and isinstance(invention_job, dict):
-                        invention_blueprint_payload = invention_source_row.get("blueprint") or {}
-                        if not isinstance(invention_blueprint_payload, dict):
-                            invention_blueprint_payload = {}
-                        invention_blueprint_name = str(
-                            invention_blueprint_payload.get("type_name")
-                            or invention_blueprint_payload.get("name")
-                            or invention_source_row.get("blueprint_type_id")
-                            or "Blueprint"
-                        )
-                        target_entry = None
-                        for product in invention_job.get("products") or []:
-                            if not isinstance(product, dict):
-                                continue
-                            invention_product = product.get("product") or {}
-                            if not isinstance(invention_product, dict):
-                                invention_product = {}
-                            if int(invention_product.get("type_id") or product.get("type_id") or 0) == int(blueprint_type_id):
-                                target_entry = product
-                                break
-
-                        probability = 0.0
-                        if isinstance(target_entry, dict):
-                            try:
-                                probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
-                            except Exception:
-                                probability = 0.0
-                        target_blueprint_name = str(
-                            ((target_entry or {}).get("product") or {}).get("type_name")
-                            if isinstance((target_entry or {}).get("product"), dict)
-                            else ""
-                        ).strip() or str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id)
-
-                        successful_invention_jobs = (
-                            max(
-                                1,
-                                int(
-                                    math.ceil(
-                                        float(max(1, missing_top_level_copy_runs))
-                                        / float(max(1, max_production_limit or 1))
-                                    )
-                                ),
-                            )
-                            if requires_invention_chain
-                            else 0
-                        )
-                        invention_attempts = (
-                            max(
-                                successful_invention_jobs,
-                                int(math.ceil(float(successful_invention_jobs) / max(probability, 0.01))),
-                            )
-                            if successful_invention_jobs > 0
-                            else 0
-                        )
-                        invention_materials = [
-                            {**dict(entry), "quantity": int(entry.get("quantity") or 0) * invention_attempts}
-                            for entry in (invention_job.get("materials") or [])
-                            if isinstance(entry, dict)
-                        ]
-                        invention_process_value, _ = self._sum_estimated_item_value(
-                            invention_materials,
-                            quantity_key="quantity",
-                            adjusted_price_map=adjusted_market_price_map,
-                        )
-                        invention_time_reduction = self._combine_reductions(
-                            [
-                                self._skill_time_reduction(
-                                    activity="invention",
-                                    skill_levels_by_name=character_skill_levels_by_name,
-                                ),
-                                self._profile_base_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="invention",
-                                    metric="time",
-                                ),
-                                self._profile_rig_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="invention",
-                                    metric="time",
-                                ),
-                                self._implant_reduction(
-                                    character_modifier_payload=selected_character_modifiers,
-                                    activity="invention",
-                                    metric="time",
-                                ),
-                            ]
-                        )
-                        invention_cost_index = self._system_cost_index(
-                            profile_payload=selected_industry_profile,
-                            activity="invention",
-                        )
-                        invention_cost_reduction = self._combine_reductions(
-                            [
-                                self._profile_base_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="invention",
-                                    metric="cost",
-                                ),
-                                self._profile_rig_reduction(
-                                    profile_payload=selected_industry_profile,
-                                    activity="invention",
-                                    metric="cost",
-                                ),
-                                self._implant_reduction(
-                                    character_modifier_payload=selected_character_modifiers,
-                                    activity="invention",
-                                    metric="cost",
-                                ),
-                            ]
-                        )
-                        invention_job_cost = self._job_cost_total(
-                            process_value=invention_process_value,
-                            cost_index=invention_cost_index,
-                            cost_reduction=invention_cost_reduction,
-                            installation_surcharge=installation_surcharge,
-                        )
-                        invention_duration_seconds = (
-                            self._round_duration_seconds(
-                                int(invention_job.get("time_seconds") or 0)
-                                * invention_attempts
-                                * max(0.0, 1.0 - invention_time_reduction)
-                            )
-                            if invention_attempts > 0
-                            else 0
-                        )
-                        planned_invention_materials, invention_material_nodes = self._plan_take_or_buy_material_nodes(
-                            invention_materials,
-                            available_owned_item_quantity_by_type_id=(
-                                available_owned_item_quantity_by_type_id
-                                if requires_invention_chain
-                                else dict(available_owned_item_quantity_by_type_id)
-                            ),
-                            owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
-                            sell_price_map=material_price_map,
-                            adjusted_price_map=adjusted_market_price_map,
-                        )
-                        activity_breakdown["invention"] = {
-                            "activity": "invention",
-                            "duration_seconds": invention_duration_seconds,
-                            "base_duration_seconds": int(invention_job.get("time_seconds") or 0) * invention_attempts,
-                            "time_reduction": invention_time_reduction,
-                            "cost_reduction": invention_cost_reduction,
-                            "cost_index": invention_cost_index,
-                            "estimated_item_value": invention_process_value,
-                            "runs": invention_attempts,
-                            **invention_job_cost,
-                        }
-                        if requires_invention_chain:
-                            total_time_seconds += invention_duration_seconds
-                            if invention_job_cost.get("total_job_cost") is not None:
-                                total_job_cost += float(invention_job_cost.get("total_job_cost") or 0.0)
-                                priced_job_count += 1
-                            top_level_procurement_materials.extend(planned_invention_materials)
-                            generated_target_copy_runs = successful_invention_jobs * max(1, max_production_limit or 1)
-                            if generated_target_copy_runs > missing_top_level_copy_runs:
-                                available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(
-                                    0,
-                                    int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0))
-                                    + (generated_target_copy_runs - missing_top_level_copy_runs),
-                                )
-                        else:
-                            activity_breakdown.pop("invention", None)
-                        if requires_invention_chain or owned_target_copy_runs_used <= 0:
-                            prerequisite_tree_nodes.append(
-                                self._job_tree_node(
-                                    label=self._ACTIVITY_LABELS["invention"],
-                                    node_type="activity",
-                                    activity="invention",
-                                    blueprint_name=target_blueprint_name,
-                                    blueprint_type_id=blueprint_type_id,
-                                    runs=invention_attempts,
-                                    duration_seconds=invention_duration_seconds,
-                                    direct_duration_seconds=invention_duration_seconds,
-                                    job_cost=invention_job_cost.get("total_job_cost"),
-                                    total_job_cost=invention_job_cost.get("total_job_cost"),
-                                    category_name=str(compact_product.get("category_name") or "") or None,
-                                    meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
-                                    recommendation_action=("invent" if invention_attempts > 0 else "take"),
-                                    children=(
-                                        [
-                                            self._job_tree_node(
-                                                label=self._ACTIVITY_LABELS["materials"],
-                                                node_type="materials",
-                                                activity="materials",
-                                                children=invention_material_nodes,
-                                            )
-                                        ]
-                                        if invention_attempts > 0 and invention_material_nodes
-                                        else []
-                                    ),
-                                )
-                            )
-
-                        source_copying_job = (
-                            (invention_source_row.get("copying_job") or {}) if isinstance(invention_source_row, dict) else {}
-                        )
-                        source_blueprint_type_id = int((invention_source_row or {}).get("blueprint_type_id") or 0)
-                        available_source_copy_runs = int(available_blueprint_copy_runs_by_type_id.get(source_blueprint_type_id, 0))
-                        source_copy_runs_used = min(max(0, available_source_copy_runs), invention_attempts)
-                        available_blueprint_copy_runs_by_type_id[source_blueprint_type_id] = max(
-                            0,
-                            available_source_copy_runs - source_copy_runs_used,
-                        )
-                        missing_source_copy_runs = max(0, invention_attempts - source_copy_runs_used)
-                        if requires_invention_chain and isinstance(source_copying_job, dict) and int(source_copying_job.get("time_seconds") or 0) > 0:
-                                source_manufacturing_materials = [
-                                    dict(entry)
-                                    for entry in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or [])
-                                    if isinstance(entry, dict)
-                                ]
-                                source_copy_process_value, _ = self._sum_estimated_item_value(
-                                    source_manufacturing_materials,
-                                    quantity_key="quantity",
-                                    adjusted_price_map=adjusted_market_price_map,
-                                )
-                                source_copy_job_cost = self._job_cost_total(
-                                    process_value=(
-                                        float(source_copy_process_value) * float(max(0, missing_source_copy_runs)) * 0.02
-                                        if source_copy_process_value is not None
-                                        else None
-                                    ),
-                                    cost_index=self._system_cost_index(
-                                        profile_payload=selected_industry_profile,
-                                        activity="copying",
-                                    ),
-                                    cost_reduction=self._combine_reductions(
-                                        [
-                                            self._profile_base_reduction(
-                                                profile_payload=selected_industry_profile,
-                                                activity="copying",
-                                                metric="cost",
-                                            ),
-                                            self._profile_rig_reduction(
-                                                profile_payload=selected_industry_profile,
-                                                activity="copying",
-                                                metric="cost",
-                                            ),
-                                            self._implant_reduction(
-                                                character_modifier_payload=selected_character_modifiers,
-                                                activity="copying",
-                                                metric="cost",
-                                            ),
-                                        ]
-                                    ),
-                                    installation_surcharge=installation_surcharge,
-                                )
-                                source_copy_duration_seconds = (
-                                    self._round_duration_seconds(
-                                        int(source_copying_job.get("time_seconds") or 0)
-                                        * max(0, missing_source_copy_runs)
-                                        * max(
-                                            0.0,
-                                            1.0
-                                            - self._combine_reductions(
-                                                [
-                                                    self._skill_time_reduction(
-                                                        activity="copying",
-                                                        skill_levels_by_name=character_skill_levels_by_name,
-                                                    ),
-                                                    self._profile_base_reduction(
-                                                        profile_payload=selected_industry_profile,
-                                                        activity="copying",
-                                                        metric="time",
-                                                    ),
-                                                    self._profile_rig_reduction(
-                                                        profile_payload=selected_industry_profile,
-                                                        activity="copying",
-                                                        metric="time",
-                                                    ),
-                                                    self._implant_reduction(
-                                                        character_modifier_payload=selected_character_modifiers,
-                                                        activity="copying",
-                                                        metric="time",
-                                                    ),
-                                                ]
-                                            ),
-                                        )
-                                    )
-                                    if missing_source_copy_runs > 0
-                                    else 0
-                                )
-                                if requires_invention_chain and missing_source_copy_runs > 0:
-                                    total_time_seconds += source_copy_duration_seconds
-                                    if source_copy_job_cost.get("total_job_cost") is not None:
-                                        total_job_cost += float(source_copy_job_cost.get("total_job_cost") or 0.0)
-                                        priced_job_count += 1
-                                prerequisite_tree_nodes.append(
-                                    self._job_tree_node(
-                                        label=self._ACTIVITY_LABELS["copying"],
-                                        node_type="activity",
-                                        activity="copying",
-                                        blueprint_name=invention_blueprint_name,
-                                        runs=max(0, missing_source_copy_runs),
-                                        duration_seconds=source_copy_duration_seconds,
-                                        direct_duration_seconds=source_copy_duration_seconds,
-                                        job_cost=source_copy_job_cost.get("total_job_cost"),
-                                        total_job_cost=source_copy_job_cost.get("total_job_cost"),
-                                        category_name=str(compact_product.get("category_name") or "") or None,
-                                        meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
-                                        recommendation_action="copy",
-                                        children=[],
-                                    )
-                                )
-
-                    if include_sde_research_chain:
-                        for activity_name, source_field in [
-                            ("research_material", "research_material_job"),
-                            ("research_time", "research_time_job"),
-                        ]:
-                            base_level_one_duration = int(((row.get(source_field) or {}).get("time_seconds") or 0))
-                            target_duration_seconds = self._research_target_duration_seconds(
-                                level_one_duration_seconds=base_level_one_duration,
-                                target_level=self._MAX_RESEARCH_LEVEL,
-                            )
-                            if target_duration_seconds <= 0:
-                                continue
-                            research_time_reduction = self._combine_reductions(
-                                [
-                                    self._skill_time_reduction(
-                                        activity=activity_name,
-                                        skill_levels_by_name=character_skill_levels_by_name,
-                                    ),
-                                    self._profile_base_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity=activity_name,
-                                        metric="time",
-                                    ),
-                                    self._profile_rig_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity=activity_name,
-                                        metric="time",
-                                    ),
-                                    self._implant_reduction(
-                                        character_modifier_payload=selected_character_modifiers,
-                                        activity=activity_name,
-                                        metric="time",
-                                    ),
-                                ]
-                            )
-                            research_cost_reduction = self._combine_reductions(
-                                [
-                                    self._profile_base_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity=activity_name,
-                                        metric="cost",
-                                    ),
-                                    self._profile_rig_reduction(
-                                        profile_payload=selected_industry_profile,
-                                        activity=activity_name,
-                                        metric="cost",
-                                    ),
-                                    self._implant_reduction(
-                                        character_modifier_payload=selected_character_modifiers,
-                                        activity=activity_name,
-                                        metric="cost",
-                                    ),
-                                ]
-                            )
-                            research_cost_index = self._system_cost_index(
-                                profile_payload=selected_industry_profile,
-                                activity=activity_name,
-                            )
-                            research_process_value = (
-                                float(per_run_material_eiv or 0.0) * 0.02105 * float(target_duration_seconds)
-                                if per_run_material_eiv is not None
-                                else None
-                            )
-                            research_job_cost = self._job_cost_total(
-                                process_value=research_process_value,
-                                cost_index=research_cost_index,
-                                cost_reduction=research_cost_reduction,
-                                installation_surcharge=installation_surcharge,
-                            )
-                            research_duration_seconds = self._round_duration_seconds(
-                                float(target_duration_seconds) * max(0.0, 1.0 - research_time_reduction)
-                            )
-                            activity_breakdown[activity_name] = {
-                                "activity": activity_name,
-                                "duration_seconds": research_duration_seconds,
-                                "base_duration_seconds": target_duration_seconds,
-                                "time_reduction": research_time_reduction,
-                                "cost_reduction": research_cost_reduction,
-                                "cost_index": research_cost_index,
-                                "estimated_item_value": per_run_material_eiv,
-                                **research_job_cost,
-                            }
-                            total_time_seconds += research_duration_seconds
-                            if research_job_cost.get("total_job_cost") is not None:
-                                total_job_cost += float(research_job_cost.get("total_job_cost") or 0.0)
-                                priced_job_count += 1
-                            prerequisite_tree_nodes.append(
-                                self._job_tree_node(
-                                    label=self._ACTIVITY_LABELS.get(activity_name, activity_name),
-                                    node_type="activity",
-                                    activity=activity_name,
-                                    runs=None,
-                                    duration_seconds=research_duration_seconds,
-                                    direct_duration_seconds=research_duration_seconds,
-                                    job_cost=research_job_cost.get("total_job_cost"),
-                                    total_job_cost=research_job_cost.get("total_job_cost"),
-                                    children=[],
-                                )
-                            )
-
-                    selected_blueprint_copy_asset = (
-                        owned_top_level_copy_allocations[0][0]
-                        if owned_top_level_copy_allocations
-                        else blueprint_copy_asset
-                    )
-                    blueprint_copy_payload = self._compact_owned_blueprint_assets(
-                        blueprint_copy_assets if len(blueprint_copy_assets) > 1 else ([selected_blueprint_copy_asset] if selected_blueprint_copy_asset is not None else []),
-                        character_name_by_id=character_name_by_id,
-                        corporation_name_by_id=corporation_name_by_id,
-                        top_location_name_by_id=top_location_name_by_id,
-                    )
-                    blueprint_copy_variant_key = (
-                        "-".join(
-                            str(int(getattr(copy_asset, "item_id", 0) or 0))
-                            for copy_asset in blueprint_copy_assets
-                            if int(getattr(copy_asset, "item_id", 0) or 0) > 0
-                        )
-                        or "none"
-                    )
-                    uses_blueprint_original = (
-                        blueprint_source_kind in {"copied_from_owned_blueprint_original", "owned_blueprint_original"}
-                        or requires_copying_job
-                    )
-                    blueprint_original_payload = self._compact_owned_blueprint_asset(
-                        blueprint_original_asset if uses_blueprint_original else None,
-                        character_name_by_id=character_name_by_id,
-                        corporation_name_by_id=corporation_name_by_id,
-                        top_location_name_by_id=top_location_name_by_id,
-                    )
-                    blueprint_original_item_id = (
-                        int(blueprint_original_asset.item_id) if uses_blueprint_original and blueprint_original_asset is not None else None
-                    )
-
-                    recursive_prerequisite_plan = self._build_recursive_prerequisite_plan(
-                        adjusted_material_entries=adjusted_material_entries,
-                        blueprint_type_id=blueprint_type_id,
-                        build_from_bpc=build_from_bpc,
-                        include_reactions=include_reactions,
-                        selected_industry_profile=selected_industry_profile,
-                        selected_character_modifiers=selected_character_modifiers,
-                        character_skill_levels_by_name=character_skill_levels_by_name,
-                        adjusted_market_price_map=adjusted_market_price_map,
-                        sell_price_map=material_price_map,
-                        blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
-                        available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
-                        available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
-                        owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
-                        blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
-                        character_name_by_id=character_name_by_id,
-                        corporation_name_by_id=corporation_name_by_id,
-                        manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
-                        reaction_row_by_product_type_id=reaction_row_by_product_type_id,
-                        invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
-                        include_current_blueprint_prerequisites=False,
-                    )
-                    top_level_procurement_materials = cast(
-                        list[dict[str, Any]],
-                        recursive_prerequisite_plan.get("procurement_materials") or top_level_procurement_materials,
-                    )
-                    total_time_seconds += int(recursive_prerequisite_plan.get("time_seconds") or 0)
-                    if recursive_prerequisite_plan.get("job_cost") is not None:
-                        total_job_cost += float(recursive_prerequisite_plan.get("job_cost") or 0.0)
-                        priced_job_count += int(recursive_prerequisite_plan.get("priced_job_count") or 0)
-                    if recursive_prerequisite_plan.get("enabled"):
-                        activity_breakdown["recursive_prerequisites"] = {
-                            "activity": "recursive_prerequisites",
-                            "duration_seconds": int(recursive_prerequisite_plan.get("time_seconds") or 0),
-                            "total_job_cost": recursive_prerequisite_plan.get("job_cost"),
-                            "reactions_enabled": bool(recursive_prerequisite_plan.get("reactions_enabled", False)),
-                            "activities": recursive_prerequisite_plan.get("activity_breakdown") or {},
-                        }
-
-                    prerequisite_tree_nodes.extend(
-                        [
-                            node
-                            for node in (recursive_prerequisite_plan.get("tree_children") or [])
-                            if isinstance(node, dict)
-                        ]
-                    )
-                    top_level_material_nodes = cast(
-                        list[dict[str, Any]],
-                        recursive_prerequisite_plan.get("material_nodes") or [],
-                    )
-                    if not top_level_material_nodes:
-                        top_level_material_nodes = [
-                            self._job_tree_node(
-                                label=str(material.get("type_name") or material.get("type_id") or "Material"),
-                                node_type="material",
-                                activity="material",
-                                sourcing_strategy=(
-                                    "take_or_buy_reaction_available"
-                                    if not (bool(include_reactions) and self._reactions_allowed_for_profile(selected_industry_profile))
-                                    and int(material.get("type_id") or 0) in reaction_row_by_product_type_id
-                                    else "take_or_buy"
-                                ),
-                                category_name=str(material.get("category_name") or "") or None,
-                                meta_group_name=str(material.get("meta_group_name") or "") or None,
-                                type_id=int(material.get("type_id") or 0),
-                                quantity=int(material.get("quantity") or 0),
-                                runs=None,
-                                duration_seconds=None,
-                                job_cost=None,
-                                total_job_cost=None,
-                                children=[],
-                            )
-                            for material in adjusted_material_entries
-                            if isinstance(material, dict)
-                        ]
-                    manufacturing_tree = self._job_tree_node(
-                        label=self._ACTIVITY_LABELS["manufacturing"],
-                        node_type="activity",
-                        activity="manufacturing",
-                        blueprint_type_id=blueprint_type_id,
-                        type_id=product_type_id,
-                        quantity=int(compact_product.get("quantity") or 0),
-                        runs=effective_runs,
-                        duration_seconds=total_time_seconds,
-                        direct_duration_seconds=direct_manufacturing_time_seconds,
-                        job_cost=manufacturing_job_cost.get("total_job_cost"),
-                        total_job_cost=(total_job_cost if priced_job_count > 0 else None),
-                        blueprint_source_kind=blueprint_source_kind,
-                        children=[
-                            *prerequisite_tree_nodes,
-                            self._job_tree_node(
-                                label=self._ACTIVITY_LABELS["materials"],
-                                node_type="materials",
-                                activity="materials",
-                                children=top_level_material_nodes,
-                            ),
-                        ],
-                    )
-                    product_tree = self._job_tree_node(
-                        label=str(compact_product.get("type_name") or compact_product.get("type_id") or "Product"),
-                        node_type="product",
-                        activity="product",
-                        type_id=product_type_id,
-                        quantity=int(compact_product.get("quantity") or 0),
-                        runs=effective_runs,
-                        duration_seconds=total_time_seconds,
-                        job_cost=(total_job_cost if priced_job_count > 0 else None),
-                        total_job_cost=(total_job_cost if priced_job_count > 0 else None),
-                        material_cost=None,
-                        total_cost=None,
-                        children=[manufacturing_tree],
-                    )
-                    product_market_pricing = product_sell_price_map.get(product_type_id) or {}
-
-                    product_rows.append(
-                        {
-                            **compact_product,
-                            "overview_row_id": (
-                                f"product:{row_index}:{product_index}:bpc:{blueprint_copy_variant_key}:bpo:{blueprint_original_item_id or 'none'}"
-                            ),
-                            "manufacturing_job": {
-                                "materials": keyed_entries(adjusted_material_entries, compactor=lambda entry: entry),
-                                "skills": manufacturing_skills,
-                                "character_modifiers": selected_character_modifiers,
-                                "time_seconds": total_time_seconds,
-                                "manufacturing_time_seconds": direct_manufacturing_time_seconds,
-                                "preparation_time_seconds": max(0, total_time_seconds - direct_manufacturing_time_seconds),
-                                "max_production_limit": max_production_limit,
-                                "runs": effective_runs,
-                                "product_quantity_per_run": product_quantity_per_run,
-                                "material_reduction": manufacturing_material_reduction,
-                                "time_reduction": manufacturing_time_reduction,
-                                "cost_reduction": manufacturing_cost_reduction,
-                                "job_cost": manufacturing_job_cost.get("total_job_cost"),
-                                "manufacturing_job_cost": manufacturing_job_cost.get("total_job_cost"),
-                                "total_job_cost": (total_job_cost if priced_job_count > 0 else None),
-                                "estimated_item_value": base_material_eiv_total,
-                                "estimated_item_value_source": "materials_adjusted_price",
-                                "product_estimated_item_value": product_eiv_total,
-                                "product_estimated_item_value_source": product_eiv_source,
-                                "product_market_price": self._as_float(product_market_pricing.get("unit_price")),
-                                "product_market_price_source": product_market_pricing.get("price_source"),
-                                "product_market_price_side": product_market_pricing.get("side"),
-                                "product_market_price_hub": product_market_pricing.get("hub"),
-                                "product_market_price_hub_label": product_market_pricing.get("hub_label"),
-                                "product_market_price_cached": product_market_pricing.get("cached"),
-                                "product_market_price_fetched_at": product_market_pricing.get("fetched_at"),
-                                "product_market_price_sample_size": product_market_pricing.get("sample_size"),
-                                "product_market_volume_total": product_market_pricing.get("volume_total"),
-                                "activity_breakdown": activity_breakdown,
-                                "recursive_activity_breakdown": recursive_prerequisite_plan.get("activity_breakdown") or {},
-                                "procurement_materials": keyed_entries(
-                                    top_level_procurement_materials,
-                                    compactor=lambda entry: entry,
-                                ),
-                                "activity_cost_indices": {
-                                    "manufacturing": manufacturing_cost_index,
-                                    "copying": self._system_cost_index(
-                                        profile_payload=selected_industry_profile,
-                                        activity="copying",
-                                    ),
-                                    "research_material": self._system_cost_index(
-                                        profile_payload=selected_industry_profile,
-                                        activity="research_material",
-                                    ),
-                                    "research_time": self._system_cost_index(
-                                        profile_payload=selected_industry_profile,
-                                        activity="research_time",
-                                    ),
-                                    "invention": self._system_cost_index(
-                                        profile_payload=selected_industry_profile,
-                                        activity="invention",
-                                    ),
-                                    "reaction": self._system_cost_index(
-                                        profile_payload=selected_industry_profile,
-                                        activity="reaction",
-                                    ),
-                                },
-                                "blueprint_material_efficiency": blueprint_material_efficiency,
-                                "blueprint_time_efficiency": blueprint_time_efficiency,
-                                "blueprint_source_kind": blueprint_source_kind,
-                                "industry_profile": selected_industry_profile,
-                                "blueprint_sde": blueprint_sde_payload,
-                                "blueprint_copy": blueprint_copy_payload,
-                                "blueprint_original": blueprint_original_payload,
-                                "job_tree": product_tree,
-                            },
-                            "market_unit_price": self._as_float(product_market_pricing.get("unit_price")),
-                            "market_price_source": product_market_pricing.get("price_source"),
-                            "market_price_side": product_market_pricing.get("side"),
-                            "market_hub": product_market_pricing.get("hub"),
-                            "market_hub_label": product_market_pricing.get("hub_label"),
-                            "market_price_cached": product_market_pricing.get("cached"),
-                            "market_price_fetched_at": product_market_pricing.get("fetched_at"),
-                            "market_price_sample_size": product_market_pricing.get("sample_size"),
-                            "market_volume_total": product_market_pricing.get("volume_total"),
-                        }
-                    )
-
-        product_rows = [
-            row for row in product_rows if isinstance(row, dict) and not self._exclude_from_product_overview(row)
-        ]
+        # Filter and enrich (inventory allocation is separate from planning)
+        product_rows = [row for row in product_rows if isinstance(row, dict) and not self._exclude_from_product_overview(row)]
 
         if progress_callback is not None:
-            progress_callback(
-                0.5,
-                "Step 5/9: Built manufacturing product rows",
-                {"step": 5, "step_count": 9, "stage": "rows", "rows": len(product_rows)},
-            )
+            progress_callback(0.82, "Built manufacturing product rows", {"stage": "rows_done", "rows": len(product_rows)})
 
-        product_rows = self._enrich_product_rows_with_material_prices(
-            product_rows,
-            market_hub=normalized_market_hub,
-            material_price_side=normalized_material_price_side,
-            progress_callback=progress_callback,
-        )
-        product_rows = self._enrich_product_rows_with_market_activity(
-            product_rows,
-            market_hub=normalized_market_hub,
-        )
+        product_rows = self._enrich_product_rows_with_material_prices(product_rows, market_hub=normalized_market_hub, material_price_side=normalized_material_price_side, progress_callback=progress_callback)
+        product_rows = self._enrich_product_rows_with_market_activity(product_rows, market_hub=normalized_market_hub)
         if progress_callback is not None:
-            progress_callback(
-                0.95,
-                "Step 8/9: Calculating sale proceeds and profit metrics",
-                {"step": 8, "step_count": 9, "stage": "profit"},
-            )
-        product_rows = self._enrich_product_rows_with_sale_proceeds(
-            product_rows,
-            character_id=character_id,
-            market_hub=normalized_market_hub,
-            product_price_side=normalized_product_price_side,
-        )
+            progress_callback(0.93, "Calculating sale proceeds and profit metrics", {"stage": "profit"})
+        product_rows = self._enrich_product_rows_with_sale_proceeds(product_rows, character_id=character_id, market_hub=normalized_market_hub, product_price_side=normalized_product_price_side)
         product_rows = self._enrich_product_rows_with_profit_metrics(product_rows)
+        product_rows = self._score_inventory_allocation_priority(product_rows)
         if progress_callback is not None:
-            progress_callback(
-                0.98,
-                "Step 9/9: Scoring pricing confidence and finalizing payload",
-                {"step": 9, "step_count": 9, "stage": "finalize"},
-            )
-        product_rows = self._enrich_product_rows_with_pricing_confidence(
-            product_rows,
-            product_price_side=normalized_product_price_side,
-        )
+            progress_callback(0.97, "Scoring pricing confidence", {"stage": "finalize"})
+        product_rows = self._enrich_product_rows_with_pricing_confidence(product_rows, product_price_side=normalized_product_price_side)
 
-        product_rows.sort(
-            key=lambda row: (
-                str(row.get("type_name") or "").lower(),
-                str(row.get("overview_row_id") or ""),
-            )
-        )
+        product_rows.sort(key=lambda row: (str(row.get("type_name") or "").lower(), str(row.get("overview_row_id") or "")))
         if progress_callback is not None:
-            progress_callback(1.0, "Step 9/9: Product overview ready", {"step": 9, "step_count": 9, "stage": "completed", "rows": len(product_rows)})
+            progress_callback(1.0, "Product overview ready", {"stage": "completed", "rows": len(product_rows)})
+
+        self._state._overview_result_cache = {"hash": overview_input_hash, "rows": product_rows}
         return product_rows
+
 
     def _enrich_product_rows_with_material_prices(
         self,
@@ -6893,8 +6442,8 @@ class IndustryService:
         )
         if progress_callback is not None:
             progress_callback(
-                0.55,
-                "Collected unique manufacturing materials",
+                0.83,
+                "Enriching material prices",
                 {"material_type_count": len(material_type_ids)},
             )
         if not material_type_ids:
@@ -6909,7 +6458,7 @@ class IndustryService:
                 None
                 if progress_callback is None
                 else lambda progress_fraction, progress_label, progress_meta=None: progress_callback(
-                    0.55 + (0.4 * progress_fraction),
+                    0.83 + (0.07 * progress_fraction),
                     progress_label,
                     progress_meta,
                 )
@@ -6927,6 +6476,8 @@ class IndustryService:
             if not isinstance(procurement_materials, dict):
                 procurement_materials = materials
             material_cost = 0.0
+            certain_material_cost = 0.0
+            estimated_material_cost = 0.0
             priced_material_count = 0
             for material in procurement_materials.values():
                 if not isinstance(material, dict):
@@ -6951,22 +6502,38 @@ class IndustryService:
                     line_total = float(unit_price) * int(material.get("quantity") or 0)
                     material_cost += float(line_total)
                     priced_material_count += 1
+                    price_source = str(material.get("price_source") or "").lower()
+                    is_certain = (
+                        price_source.startswith("owned_asset_item_value")
+                        or price_source.startswith("market_")
+                        or price_source.startswith("explicit")
+                    )
+                    if is_certain:
+                        certain_material_cost += float(line_total)
+                    else:
+                        estimated_material_cost += float(line_total)
                 material["line_total"] = line_total
             manufacturing_job["material_cost"] = material_cost if priced_material_count > 0 else None
+            manufacturing_job["certain_material_cost"] = certain_material_cost if priced_material_count > 0 else None
+            manufacturing_job["estimated_material_cost"] = estimated_material_cost if priced_material_count > 0 else None
             manufacturing_job["priced_material_count"] = priced_material_count
             manufacturing_job["material_type_count"] = len(procurement_materials)
             total_job_cost = manufacturing_job.get("total_job_cost")
             if total_job_cost is not None or priced_material_count > 0:
                 manufacturing_job["total_cost"] = float(total_job_cost or 0.0) + float(material_cost or 0.0)
+                manufacturing_job["certain_cost"] = float(total_job_cost or 0.0) + float(certain_material_cost or 0.0)
+                manufacturing_job["estimated_cost"] = float(estimated_material_cost or 0.0)
             else:
                 manufacturing_job["total_cost"] = None
+                manufacturing_job["certain_cost"] = None
+                manufacturing_job["estimated_cost"] = None
 
             job_tree = manufacturing_job.get("job_tree") or {}
             if isinstance(job_tree, dict) and job_tree:
                 self._apply_material_pricing_to_job_tree(job_tree, price_by_type_id=price_by_type_id)
 
         if progress_callback is not None:
-            progress_callback(0.97, "Applied material prices to manufacturing rows", {"rows": len(product_rows)})
+            progress_callback(0.90, "Applied material prices to manufacturing rows", {"rows": len(product_rows)})
 
         return product_rows
 
@@ -7002,20 +6569,6 @@ class IndustryService:
         if "tax" not in out:
             out["tax"] = None
         return out
-
-    @staticmethod
-    def _camel_to_words(s: str) -> str:
-        out: list[str] = []
-        buf = ""
-        for ch in s:
-            if buf and ch.isupper() and (not buf[-1].isupper()):
-                out.append(buf)
-                buf = ch
-            else:
-                buf += ch
-        if buf:
-            out.append(buf)
-        return " ".join(out).strip()
 
     @classmethod
     def _parse_rig_effect(cls, effect_name: str) -> tuple[str | None, str | None, str | None]:
@@ -7075,7 +6628,7 @@ class IndustryService:
             and isinstance(cache, tuple)
             and len(cache) == 3
             and cache[1] == self._STRUCTURE_RIGS_CACHE_VERSION
-            and (now - cache[0] < self._STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS)
+            and (now - cache[0] < int(self._adm("cache_ttl", "structure_rig_cache_ttl_seconds", self._STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS)))
         ):
             return cache[2]
 
@@ -7198,7 +6751,7 @@ class IndustryService:
                 if not group_token:
                     group = "All"
                 else:
-                    group = self._RIG_GROUP_TOKEN_LABELS.get(group_token) or self._camel_to_words(group_token)
+                    group = self._RIG_GROUP_TOKEN_LABELS.get(group_token) or _camel_to_words(group_token)
 
                 effects_out.append(
                     {
