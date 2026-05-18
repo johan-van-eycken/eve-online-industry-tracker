@@ -86,7 +86,7 @@ class IndustryJobManager:
     def request_refresh(self) -> None:
         self._refresh_requested.set()
 
-    def get_blueprint_overview(self, *, force_refresh: bool = False) -> list[dict[str, Any]]:
+    def get_blueprint_overview(self, *, force_refresh: bool = False, type_ids: set[int] | None = None) -> list[dict[str, Any]]:
         with self._snapshot_lock:
             has_snapshot = bool(self._blueprint_overview)
             snapshot_at = self._last_snapshot_at
@@ -101,7 +101,29 @@ class IndustryJobManager:
                 self.request_refresh()
 
         with self._snapshot_lock:
+            if type_ids is not None:
+                return [
+                    dict(row) for row in self._blueprint_overview
+                    if self._blueprint_matches_type_ids(row, type_ids)
+                ]
             return [dict(row) for row in self._blueprint_overview]
+
+    @staticmethod
+    def _blueprint_matches_type_ids(row: dict[str, Any], type_ids: set[int]) -> bool:
+        blueprint_type_id = int(row.get("blueprint_type_id") or 0)
+        if blueprint_type_id in type_ids:
+            return True
+        for job_key in ("manufacturing_job", "reaction_job"):
+            job = row.get(job_key)
+            if not isinstance(job, dict):
+                continue
+            for product in (job.get("products") or []):
+                if isinstance(product, dict) and int(product.get("type_id") or 0) in type_ids:
+                    return True
+            for material in (job.get("materials") or []):
+                if isinstance(material, dict) and int(material.get("type_id") or 0) in type_ids:
+                    return True
+        return False
 
     def get_status(self) -> dict[str, Any]:
         with self._snapshot_lock:

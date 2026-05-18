@@ -5,7 +5,7 @@ SQLAlchemy==2.0.19
 streamlit==1.52.2
 streamlit-aggrid==1.2.1.post2
 pyyaml==6.0.2
-flask==2.3.3
+flask==3.1.1
 matplotlib==3.9.4
 scipy==1.15.3
 pulp==3.3.0

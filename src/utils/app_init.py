@@ -2,10 +2,10 @@ import logging
 
 from config.schemas import CONFIG_SCHEMA
 from config.paths import app_config_path, app_secret_path
-from classes.config_manager import ConfigManager
-from classes.database_manager import DatabaseManager
-from classes.character_manager import CharacterManager
-from classes.corporation_manager import CorporationManager
+from eve_online_industry_tracker.config.config_manager import ConfigManager
+from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
+from eve_online_industry_tracker.application.characters.character_manager import CharacterManager
+from eve_online_industry_tracker.application.corporations.corporation_manager import CorporationManager
 
 
 def _user_friendly_error(e: Exception) -> str | None:
@@ -124,8 +124,8 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
     """
     Initialize Databases and Schemas
     """
-    from classes.database_models import BaseOauth, BaseApp
-    from classes.schema_migrations import ensure_app_schema
+    from eve_online_industry_tracker.infrastructure.models import BaseOauth, BaseApp
+    from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
 
     try:
         cfg = cfgManager.all()

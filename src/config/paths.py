@@ -33,3 +33,12 @@ def streamlit_preferences_path() -> str:
     """
 
     return _env("STREAMLIT_PREFERENCES_PATH", "database/streamlit_preferences.json")
+
+
+def admin_settings_path() -> str:
+    """Path to the admin settings JSON.
+
+    Controlled by ADMIN_SETTINGS_PATH.
+    """
+
+    return _env("ADMIN_SETTINGS_PATH", "database/admin_settings.json")

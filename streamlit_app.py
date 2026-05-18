@@ -1,4 +1,4 @@
-from utils.app_shell import render_application
+from streamlit_ui.shell import render_application
 
 
 render_application()

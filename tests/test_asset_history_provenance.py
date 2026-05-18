@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from classes.asset_history import (  # noqa: E402
+from eve_online_industry_tracker.application.characters.asset_history import (  # noqa: E402
     backfill_wallet_buy_acquisitions,
     build_historical_input_cost_lookup,
     clear_historical_backfill,
@@ -17,10 +17,10 @@ from classes.asset_history import (  # noqa: E402
     record_historical_acquisition,
     sync_asset_history,
 )
-import classes.character as character_module  # noqa: E402
-from classes.character import Character  # noqa: E402
-from classes.asset_provenance import resolve_industry_job_cost_snapshot  # noqa: E402
-from classes.database_models import (  # noqa: E402
+import eve_online_industry_tracker.application.characters.character as character_module  # noqa: E402
+from eve_online_industry_tracker.application.characters.character import Character  # noqa: E402
+from eve_online_industry_tracker.application.characters.asset_provenance import resolve_industry_job_cost_snapshot  # noqa: E402
+from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
     BaseApp,
     BaseSde,
     Blueprints,

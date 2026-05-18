@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import statistics
 import time
+import threading
 from typing import Any, Callable
 
 from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo as market_orderbook_cache_repo
@@ -20,9 +21,18 @@ class MarketPricingService:
         "hek": {"label": "Hek VIII - Moon 12", "region_id": 10000042, "station_id": 60005686},
     }
 
+    _REGION_VOLUME_CACHE_TTL_SECONDS = 6 * 3600
+    _region_volume_cache_lock = threading.Lock()
+    _region_volume_cache: dict[str, tuple[float, dict[int, dict[str, Any]]]] = {}
+
     def __init__(self, *, state: Any, sessions: SessionProvider | None = None):
         self._state = state
         self._sessions = sessions or StateSessionProvider(state=state)
+
+    @property
+    def _region_volume_ttl(self) -> int:
+        admin = getattr(self._state, "admin_settings", None)
+        return int(admin.get("cache_ttl", "region_volume_cache_ttl_seconds")) if admin else self._REGION_VOLUME_CACHE_TTL_SECONDS
 
     @classmethod
     def normalize_market_hub(cls, hub: str | None) -> str:
@@ -39,8 +49,11 @@ class MarketPricingService:
         configured = dict(self._MARKET_HUBS.get(normalized_hub) or {})
 
         esi_service = getattr(self._state, "esi_service", None)
-        default_region_id = int(getattr(esi_service, "_region_id", 10000002) or 10000002)
-        default_station_id = int(getattr(esi_service, "_station_id", 60003760) or 60003760)
+        admin = getattr(self._state, "admin_settings", None)
+        fallback_region = int(admin.get("market_defaults", "default_region_id")) if admin else 10000002
+        fallback_station = int(admin.get("market_defaults", "default_station_id")) if admin else 60003760
+        default_region_id = int(getattr(esi_service, "_region_id", fallback_region) or fallback_region)
+        default_station_id = int(getattr(esi_service, "_station_id", fallback_station) or fallback_station)
 
         return {
             "hub": normalized_hub,
@@ -448,11 +461,31 @@ class MarketPricingService:
         normalized_hub = str(hub_context.get("hub") or "jita")
         region_id = int(hub_context.get("region_id") or 10000002)
 
-        history_by_type_id = esi_service.get_market_history(normalized_type_ids, region_id=region_id)
-        total_ids = len(normalized_type_ids)
+        now = time.time()
+        cache_key = f"{normalized_hub}:{region_id}"
         result: dict[int, dict[str, Any]] = {}
+        missing_type_ids: list[int] = []
 
-        for index, type_id in enumerate(normalized_type_ids, start=1):
+        with self._region_volume_cache_lock:
+            cached_entry = self._region_volume_cache.get(cache_key)
+            if cached_entry and (now - cached_entry[0]) < self._region_volume_ttl:
+                cached_map = cached_entry[1]
+                for type_id in normalized_type_ids:
+                    if type_id in cached_map:
+                        result[type_id] = cached_map[type_id]
+                    else:
+                        missing_type_ids.append(type_id)
+            else:
+                missing_type_ids = list(normalized_type_ids)
+
+        if not missing_type_ids:
+            return result
+
+        history_by_type_id = esi_service.get_market_history(missing_type_ids, region_id=region_id)
+        total_ids = len(missing_type_ids)
+        fetched_results: dict[int, dict[str, Any]] = {}
+
+        for index, type_id in enumerate(missing_type_ids, start=1):
             history_rows = history_by_type_id.get(int(type_id)) or []
             latest_row = history_rows[-1] if history_rows else {}
             trailing_rows = history_rows[-7:] if history_rows else []
@@ -466,7 +499,7 @@ class MarketPricingService:
                 if trailing_volumes
                 else 0.0
             )
-            result[int(type_id)] = {
+            fetched_results[int(type_id)] = {
                 "hub": normalized_hub,
                 "hub_label": str(hub_context.get("label") or normalized_hub.title()),
                 "region_id": region_id,
@@ -483,6 +516,14 @@ class MarketPricingService:
                     {"completed": index, "total": total_ids},
                 )
 
+        with self._region_volume_cache_lock:
+            cached_entry = self._region_volume_cache.get(cache_key)
+            if cached_entry and (now - cached_entry[0]) < self._region_volume_ttl:
+                cached_entry[1].update(fetched_results)
+            else:
+                self._region_volume_cache[cache_key] = (now, dict(fetched_results))
+
+        result.update(fetched_results)
         return result
 
     def get_material_sell_price_map(
