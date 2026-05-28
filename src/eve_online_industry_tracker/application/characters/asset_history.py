@@ -507,3 +507,53 @@ def build_historical_input_cost_lookup(
         payload["history_id"] = latest_lot.get("history_id")
         payload["observed_at"] = latest_lot.get("observed_at")
     return out
+
+
+def enrich_assets_with_acquisition_costs(
+    *,
+    app_session: Any,
+    owner_kind: str,
+    owner_id: int,
+    asset_list: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Enrich asset_list with acquisition costs from historical records.
+
+    For each asset, looks up the most recent acquisition cost from CharacterAssetHistoryModel
+    and populates acquisition_unit_cost, acquisition_total_cost, acquisition_source, etc.
+    """
+    if not asset_list:
+        return asset_list
+
+    type_ids = {_safe_int(asset.get("type_id")) for asset in asset_list}
+    type_ids.discard(None)
+    if not type_ids:
+        return asset_list
+
+    cost_lookup = build_historical_input_cost_lookup(
+        app_session=app_session,
+        owner_kind=owner_kind,
+        owner_id=int(owner_id),
+        as_of=None,
+        type_ids=type_ids,
+    )
+
+    enriched = []
+    for asset in asset_list:
+        enriched_asset = dict(asset)
+        type_id = _safe_int(asset.get("type_id"))
+        if type_id and type_id in cost_lookup:
+            cost_data = cost_lookup[type_id]
+            enriched_asset["acquisition_unit_cost"] = cost_data.get("unit_cost")
+            enriched_asset["acquisition_source"] = cost_data.get("source")
+            enriched_asset["acquisition_reference_type"] = cost_data.get("reference_type")
+            enriched_asset["acquisition_reference_id"] = cost_data.get("reference_id")
+            enriched_asset["acquisition_date"] = cost_data.get("observed_at")
+
+            quantity = _safe_int(asset.get("quantity")) or 0
+            unit_cost = _safe_float(cost_data.get("unit_cost"))
+            if quantity > 0 and unit_cost and unit_cost > 0:
+                enriched_asset["acquisition_total_cost"] = float(quantity * unit_cost)
+
+        enriched.append(enriched_asset)
+
+    return enriched

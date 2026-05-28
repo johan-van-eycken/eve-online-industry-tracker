@@ -736,6 +736,24 @@ class IndustryProfilesModel(BaseApp):
     def __repr__(self) -> str:
         return f"<IndustryProfile(id={self.id}, profile_name='{self.profile_name}', character_id={self.character_id})>"
 
+class MarketHistoryModel(BaseApp):
+    __tablename__ = "market_history"
+    __table_args__ = (
+        UniqueConstraint("type_id", "region_id", "date", name="uq_market_history_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    region_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    date: Mapped[str] = mapped_column(String, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=True)
+    low: Mapped[float] = mapped_column(Float, nullable=True)
+    volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    order_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
 # --------------------------
 # SDE
 # --------------------------

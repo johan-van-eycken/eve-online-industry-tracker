@@ -29,6 +29,7 @@ from eve_online_industry_tracker.application.characters.asset_history import (
     lookup_historical_blueprint_provenance,
     record_historical_acquisition,
     sync_asset_history,
+    enrich_assets_with_acquisition_costs,
 )
 
 
@@ -354,17 +355,24 @@ class Character:
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
+                enriched_assets = enrich_assets_with_acquisition_costs(
+                    app_session=self._db_app.session,
+                    owner_kind="character",
+                    owner_id=int(self.character_id),
+                    asset_list=asset_list,
+                )
+
                 self.assets = []
-                for asset in asset_list:
+                for asset in enriched_assets:
                     new_asset = CharacterAssetsModel(**asset)
                     self.assets.append(new_asset)
-                
+
                 if self.assets:
                     sync_asset_history(
                         app_session=self._db_app.session,
                         owner_kind="character",
                         owner_id=int(self.character_id),
-                        asset_rows=asset_list,
+                        asset_rows=enriched_assets,
                     )
                     # Delete existing assets for this character and add new ones
                     self._db_app.session.query(CharacterAssetsModel).filter_by(character_id=self.character_id).delete()

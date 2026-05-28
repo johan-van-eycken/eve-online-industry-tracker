@@ -8,6 +8,12 @@ from eve_online_industry_tracker.application.characters.realized_profit import (
     CharacterRealizedProfitLedgerService,
     summarize_realized_profit_rows,
 )
+from eve_online_industry_tracker.application.market_analysis.pricing_suggestion_service import (
+    PricingSuggestionService,
+)
+from eve_online_industry_tracker.application.market_analysis.market_history_service import (
+    MarketHistoryService,
+)
 from eve_online_industry_tracker.infrastructure.oauth_character_repository import (
     OAuthCharacterRepository,
 )
@@ -73,6 +79,10 @@ class CharactersService:
         buy_order_book: dict[int, list[dict[str, Any]]] = {}
         sell_order_book: dict[int, list[dict[str, Any]]] = {}
 
+        # Initialize pricing suggestion service for sell price analysis
+        pricing_svc = PricingSuggestionService(state=self._state)
+        market_history_svc = MarketHistoryService(state=self._state)
+
         if include_orderbook_comparison:
             buy_type_ids: set[int] = set()
             sell_type_ids: set[int] = set()
@@ -97,6 +107,13 @@ class CharactersService:
                     sell_order_book = self._state.esi_service.get_type_sellprices(sorted(sell_type_ids))
             except Exception:
                 sell_order_book = {}
+
+            # Fetch and cache market history for sell orders
+            try:
+                for type_id in sell_type_ids:
+                    market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
+            except Exception:
+                pass
 
         for character in refreshed_data:
             for order in (character or {}).get("market_orders", []):
@@ -162,32 +179,54 @@ class CharactersService:
                     except Exception:
                         region_name = None
 
-                enriched_orders.append(
-                    {
-                        "owner": order.get("owner"),
-                        "type_id": type_id,
-                        "type_name": order.get("type_name"),
-                        "price": order.get("price"),
-                        "price_status": price_status,
-                        "price_difference": price_difference,
-                        "volume": str(order.get("volume_remain")) + "/" + str(order.get("volume_total")),
-                        "total_price": order_price * float(order.get("volume_remain") or 0),
-                        "range": order.get("range"),
-                        "min_volume": order.get("min_volume"),
-                        "expires_in": expires_in,
-                        "escrow_remaining": order.get("escrow", 0),
-                        "station": order.get("station_name")
-                        or order.get("location_name")
-                        or f"Location {order.get('location_id', 'Unknown')}",
-                        "region": region_name
-                        or (f"Region {order.get('region_id')}" if order.get("region_id") else "Unknown"),
-                        "is_buy_order": order.get("is_buy_order"),
-                        "type_group_id": order.get("type_group_id", -1),
-                        "type_group_name": order.get("type_group_name", "Unknown"),
-                        "type_category_id": order.get("type_category_id", -1),
-                        "type_category_name": order.get("type_category_name", "Unknown"),
-                        "is_blueprint_copy": False,
-                    }
-                )
+                # Get pricing suggestion for sell orders
+                advised_price_data = None
+                character_id = order.get("character_id") or (character or {}).get("character_id")
+                if not order.get("is_buy_order") and isinstance(type_id, int) and isinstance(character_id, int):
+                    try:
+                        advised_price_data = pricing_svc.suggest_price(
+                            character_id=character_id,
+                            type_id=type_id,
+                            current_price=order_price,
+                        )
+                    except Exception:
+                        advised_price_data = None
+
+                enriched_order = {
+                    "owner": order.get("owner"),
+                    "type_id": type_id,
+                    "type_name": order.get("type_name"),
+                    "price": order.get("price"),
+                    "price_status": price_status,
+                    "price_difference": price_difference,
+                    "volume": str(order.get("volume_remain")) + "/" + str(order.get("volume_total")),
+                    "total_price": order_price * float(order.get("volume_remain") or 0),
+                    "range": order.get("range"),
+                    "min_volume": order.get("min_volume"),
+                    "expires_in": expires_in,
+                    "escrow_remaining": order.get("escrow", 0),
+                    "station": order.get("station_name")
+                    or order.get("location_name")
+                    or f"Location {order.get('location_id', 'Unknown')}",
+                    "region": region_name
+                    or (f"Region {order.get('region_id')}" if order.get("region_id") else "Unknown"),
+                    "is_buy_order": order.get("is_buy_order"),
+                    "type_group_id": order.get("type_group_id", -1),
+                    "type_group_name": order.get("type_group_name", "Unknown"),
+                    "type_category_id": order.get("type_category_id", -1),
+                    "type_category_name": order.get("type_category_name", "Unknown"),
+                    "is_blueprint_copy": False,
+                }
+
+                # Add pricing suggestion if available
+                if advised_price_data:
+                    enriched_order["advised_price"] = advised_price_data.get("advised_price")
+                    enriched_order["advised_price_confidence"] = advised_price_data.get("confidence")
+                    enriched_order["pricing_breakdown"] = advised_price_data.get("breakdown")
+                    enriched_order["pricing_reasoning"] = advised_price_data.get("reasoning")
+                    enriched_order["cost_basis"] = advised_price_data.get("cost_basis")
+                    enriched_order["acquisition_source"] = advised_price_data.get("acquisition_source")
+
+                enriched_orders.append(enriched_order)
 
         return enriched_orders
