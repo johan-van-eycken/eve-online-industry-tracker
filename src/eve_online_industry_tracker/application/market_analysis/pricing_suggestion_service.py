@@ -71,9 +71,11 @@ class PricingSuggestionService:
 
     def _get_hub_price(self, *, type_id: int, hub: str = "jita") -> float | None:
         """Get current hub price from market pricing service."""
+        import logging
         try:
             pricing_service = getattr(self._state, "market_pricing_service", None)
             if pricing_service is None:
+                logging.debug(f"Hub price: market_pricing_service not available (type_id={type_id})")
                 return None
 
             price_map = pricing_service.get_type_price_map(
@@ -82,9 +84,13 @@ class PricingSuggestionService:
                 side="sell",
             )
             if type_id in price_map:
-                return float(price_map[type_id].get("unit_price") or 0)
-        except Exception:
-            pass
+                hub_price = float(price_map[type_id].get("unit_price") or 0)
+                logging.debug(f"Hub price (type_id={type_id}, {hub}): {hub_price}")
+                return hub_price
+            else:
+                logging.debug(f"Hub price: type_id {type_id} not in price_map")
+        except Exception as e:
+            logging.debug(f"Hub price error (type_id={type_id}): {e}")
         return None
 
     def _get_cost_basis(self, *, character_id: int, type_id: int) -> tuple[float | None, str | None]:
@@ -92,6 +98,7 @@ class PricingSuggestionService:
 
         Returns: (cost_basis, acquisition_source)
         """
+        import logging
         app_session = self._sessions.app_session()
         try:
             assets = app_session.query(CharacterAssetsModel).filter(
@@ -102,6 +109,7 @@ class PricingSuggestionService:
             ).all()
 
             if not assets:
+                logging.debug(f"Cost basis: no assets found (char_id={character_id}, type_id={type_id})")
                 return None, None
 
             total_cost = 0.0
@@ -128,8 +136,10 @@ class PricingSuggestionService:
                 elif sources:
                     source = list(sources)[0]
 
+                logging.debug(f"Cost basis found: {avg_cost} ({source}), char_id={character_id}, type_id={type_id}")
                 return avg_cost, source
 
+            logging.debug(f"Cost basis: found {len(assets)} asset(s) but none with costs, char_id={character_id}, type_id={type_id}")
             return None, None
         finally:
             try:
