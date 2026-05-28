@@ -74,6 +74,14 @@ def _portfolio_plan_request_from_payload(payload: dict[str, object]) -> Portfoli
     except Exception:
         manufacturing_slots_available = 0
     try:
+        research_slots_available = int(payload.get("research_slots_available") or 0)
+    except Exception:
+        research_slots_available = 0
+    try:
+        reaction_slots_available = int(payload.get("reaction_slots_available") or 0)
+    except Exception:
+        reaction_slots_available = 0
+    try:
         min_margin_pct = float(payload.get("min_margin_pct") or 0.0)
     except Exception:
         min_margin_pct = 0.0
@@ -94,6 +102,8 @@ def _portfolio_plan_request_from_payload(payload: dict[str, object]) -> Portfoli
         candidate_snapshot_id=str(payload.get("candidate_snapshot_id") or "").strip(),
         capital_limit_isk=capital_limit_isk,
         manufacturing_slots_available=manufacturing_slots_available,
+        research_slots_available=research_slots_available,
+        reaction_slots_available=reaction_slots_available,
         planning_horizon_hours=planning_horizon_hours,
         objective=str(payload.get("objective") or "balanced"),
         minimum_pricing_confidence=str(payload.get("minimum_pricing_confidence") or "low"),
@@ -283,6 +293,7 @@ def industry_portfolio_candidates_start(character_id: int):
         planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
     except Exception:
         planning_horizon_hours = 24.0
+    have_skills_only = bool(payload.get("have_skills_only", True))
 
     svc = IndustryService(state=get_state())
     refresh_job = svc.start_industry_manufacturing_portfolio_candidates_refresh(
@@ -298,6 +309,7 @@ def industry_portfolio_candidates_start(character_id: int):
         owned_blueprints_scope=owned_blueprints_scope,
         character_id=int(character_id),
         planning_horizon_hours=planning_horizon_hours,
+        have_skills_only=have_skills_only,
     )
     return ok(data=refresh_job, status_code=202)
 
@@ -501,3 +513,12 @@ def delete_industry_profile(profile_id: int):
     svc = IndustryService(state=get_state())
     svc.delete_industry_profile(profile_id=profile_id)
     return ok(message="Industry profile deleted successfully.")
+
+
+@industry_bp.get("/industry_active_jobs")
+def industry_active_jobs():
+    require_ready(get_state())
+    character_id_raw = (request.args.get("character_id") or "").strip()
+    character_id = int(character_id_raw) if character_id_raw.isdigit() else None
+    svc = IndustryService(state=get_state())
+    return ok(data=svc.industry_active_jobs(character_id=character_id))

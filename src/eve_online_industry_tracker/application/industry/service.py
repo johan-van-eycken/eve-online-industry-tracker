@@ -299,6 +299,50 @@ class IndustryService:
             return False
         return bool(skills.get("skill_requirements_met", False))
 
+    # Manufacturing groups that require a capital-capable facility (Azbel / Sotiyo).
+    _CAPITAL_MANUFACTURING_GROUPS: frozenset[str] = frozenset({
+        "Capital Ships",
+        "Capital Components",
+        "Advanced Capital Components",
+    })
+
+    @classmethod
+    def _facility_can_manufacture_group(cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None) -> bool:
+        """Return True if the industry profile's facility can manufacture items of the given manufacturing group."""
+        if manufacturing_group is None or manufacturing_group not in cls._CAPITAL_MANUFACTURING_GROUPS:
+            return True
+        if profile_payload is None:
+            return True  # No profile constraint — assume capable.
+        structure_type_id = profile_payload.get("structure_type_id")
+        facility_type = str(profile_payload.get("facility_type") or "").strip().lower()
+        location_type = str(profile_payload.get("location_type") or "").strip().lower()
+        # NPC stations cannot build capitals.
+        if location_type == "station" or facility_type == "npc_station":
+            return False
+        # Player structures: determine by structure size via type name or known type IDs.
+        if structure_type_id is not None:
+            structure_type_id_int = int(structure_type_id)
+            # Known medium engineering complexes (cannot build capitals).
+            _MEDIUM_ENGINEERING_COMPLEXES = {35825}  # Raitaru
+            # Known large/XL engineering complexes (can build capitals).
+            _LARGE_XL_ENGINEERING_COMPLEXES = {35826, 35827}  # Azbel, Sotiyo
+            if structure_type_id_int in _MEDIUM_ENGINEERING_COMPLEXES:
+                return False
+            if structure_type_id_int in _LARGE_XL_ENGINEERING_COMPLEXES:
+                return True
+            # Fallback: infer from structure type name stored on profile.
+            structure_type_name = str(profile_payload.get("structure_type_name") or "").lower()
+            if not structure_type_name:
+                # Try bonuses payload for type name lookup.
+                bonuses = profile_payload.get("structure_type_bonuses") or {}
+                structure_type_name = str(bonuses.get("type_name") or "").lower()
+            if any(x in structure_type_name for x in ("raitaru", "athanor", "astra")):
+                return False
+            if any(x in structure_type_name for x in ("azbel", "sotiyo", "tatara", "fortizar", "keepstar")):
+                return True
+        # Unknown facility — conservatively allow.
+        return True
+
     @classmethod
     def _filter_overview_rows_for_portfolio_candidates(
         cls,
@@ -310,6 +354,7 @@ class IndustryService:
         min_margin_pct: float = 0.0,
         min_isk_per_hour: float = 0.0,
         min_region_daily_volume: int = 0,
+        industry_profile_payload: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         enabled_meta_group_set = set(enabled_meta_groups) if enabled_meta_groups is not None else None
         filtered_rows: list[dict[str, Any]] = []
@@ -317,6 +362,11 @@ class IndustryService:
             if enabled_meta_group_set is not None and cls._normalized_overview_meta_group_name(row) not in enabled_meta_group_set:
                 continue
             if have_skills_only and not cls._overview_row_skill_requirements_met(row):
+                continue
+            if industry_profile_payload is not None and not cls._facility_can_manufacture_group(
+                manufacturing_group=row.get("manufacturing_group"),
+                profile_payload=industry_profile_payload,
+            ):
                 continue
             if positive_profit_only and float(row.get("profit_amount") or 0.0) <= 0.0:
                 continue
@@ -2151,6 +2201,8 @@ class IndustryService:
             "estimated_market_absorption_units": estimated_market_absorption_units,
             "max_batches_total": max_batches_total,
             "blueprint_source_kind": manufacturing_job.get("blueprint_source_kind"),
+            "manufacturing_group": row.get("manufacturing_group"),
+            "skill_requirements_met": cls._overview_row_skill_requirements_met(row),
             "owned_input_coverage_fraction": owned_input_coverage_fraction,
             "confidence_penalty_factor": confidence_penalty_factor,
             "effective_profit_per_batch": effective_profit_per_batch,
@@ -2243,6 +2295,10 @@ class IndustryService:
             min_margin_pct=min_margin_pct,
             min_isk_per_hour=min_isk_per_hour,
             min_region_daily_volume=min_region_daily_volume,
+            industry_profile_payload=self._resolve_industry_profile_context(
+                character_id=character_id,
+                industry_profile_id=industry_profile_id,
+            ),
         )
         if progress_callback is not None:
             progress_callback(
@@ -6242,6 +6298,7 @@ class IndustryService:
         return {
             **compact_product,
             "overview_row_id": f"product:{row_index}:{product_index}:bpc:{bp_copy_variant_key}:bpo:{bp_original_item_id or 'none'}",
+            "manufacturing_group": manufacturing_group,
             "manufacturing_job": {
                 "materials": self._overview_keyed_entries(adjusted_material_entries, compactor=lambda e: e),
                 "skills": manufacturing_skills,
@@ -6794,3 +6851,179 @@ class IndustryService:
     def delete_industry_profile(self, *, profile_id: int) -> None:
         session: Any = self._sessions.app_session()
         industry_profile_delete(session, profile_id)
+
+    _ACTIVITY_ID_TO_NAME = {
+        1: "Manufacturing",
+        3: "TE Research",
+        4: "ME Research",
+        5: "Copying",
+        8: "Invention",
+        9: "Reaction",
+    }
+
+    # EVE skill IDs that grant additional industry slots
+    _SKILL_MASS_PRODUCTION = 3387          # +1 manufacturing slot per level
+    _SKILL_ADV_MASS_PRODUCTION = 24625     # +1 manufacturing slot per level
+    _SKILL_LABORATORY_OPERATION = 3406     # +1 research/copy/invention slot per level
+    _SKILL_ADV_LABORATORY_OPERATION = 24624  # +1 research/copy/invention slot per level
+    _SKILL_REACTIONS = 45746               # +1 reaction slot per level
+    _SKILL_MASS_REACTIONS = 45748          # +1 reaction slot per level
+
+    def _character_slot_capacities(self) -> dict[int, dict[str, int]]:
+        """Return max industry slots per character based on skills.
+
+        Slot formula per category:
+        - Manufacturing: 1 (base) + Mass Production lvl + Advanced Mass Production lvl
+        - Research/Copy/Invention: 1 (base) + Laboratory Operation lvl + Advanced Laboratory Operation lvl
+        - Reactions: 1 (base) + Reactions lvl + Mass Reactions lvl
+        """
+        char_manager = getattr(self._state, "char_manager", None)
+        if char_manager is None:
+            return {}
+
+        try:
+            characters = char_manager.get_characters() or []
+        except Exception:
+            return {}
+
+        slot_skill_ids = {
+            self._SKILL_MASS_PRODUCTION,
+            self._SKILL_ADV_MASS_PRODUCTION,
+            self._SKILL_LABORATORY_OPERATION,
+            self._SKILL_ADV_LABORATORY_OPERATION,
+            self._SKILL_REACTIONS,
+            self._SKILL_MASS_REACTIONS,
+        }
+
+        capacities: dict[int, dict[str, int]] = {}
+        for char in characters:
+            cid = int(char.get("character_id") or 0)
+            if cid <= 0:
+                continue
+
+            skills_data = char.get("skills") or {}
+            skill_list = skills_data.get("skills") or [] if isinstance(skills_data, dict) else []
+
+            skill_levels: dict[int, int] = {}
+            for s in skill_list:
+                sid = s.get("skill_id")
+                if sid in slot_skill_ids:
+                    skill_levels[sid] = int(s.get("trained_skill_level") or 0)
+
+            manufacturing_slots = (
+                1
+                + skill_levels.get(self._SKILL_MASS_PRODUCTION, 0)
+                + skill_levels.get(self._SKILL_ADV_MASS_PRODUCTION, 0)
+            )
+            research_slots = (
+                1
+                + skill_levels.get(self._SKILL_LABORATORY_OPERATION, 0)
+                + skill_levels.get(self._SKILL_ADV_LABORATORY_OPERATION, 0)
+            )
+            reaction_slots = (
+                1
+                + skill_levels.get(self._SKILL_REACTIONS, 0)
+                + skill_levels.get(self._SKILL_MASS_REACTIONS, 0)
+            )
+
+            capacities[cid] = {
+                "manufacturing_max": manufacturing_slots,
+                "research_max": research_slots,
+                "reaction_max": reaction_slots,
+            }
+
+        return capacities
+
+    def industry_active_jobs(self, *, character_id: int | None = None) -> dict[str, Any]:
+        """Return active industry jobs and slot capacities, optionally filtered by character."""
+        from eve_online_industry_tracker.infrastructure.models import CharacterIndustryJobsModel
+        from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
+
+        session: Any = self._sessions.app_session()
+        query = session.query(CharacterIndustryJobsModel).filter(
+            CharacterIndustryJobsModel.status == "active"
+        )
+        if character_id is not None:
+            query = query.filter(CharacterIndustryJobsModel.character_id == int(character_id))
+
+        jobs = query.all()
+
+        # Slot capacities (always include even with no active jobs)
+        all_capacities = self._character_slot_capacities()
+        if character_id is not None:
+            slot_capacities = {str(character_id): all_capacities.get(int(character_id), {})}
+        else:
+            slot_capacities = {str(k): v for k, v in all_capacities.items()}
+
+        if not jobs:
+            return {"jobs": [], "slot_capacities": slot_capacities}
+
+        # Collect type IDs for name resolution
+        type_ids: set[int] = set()
+        for job in jobs:
+            bp_type_id = getattr(job, "blueprint_type_id", None)
+            prod_type_id = getattr(job, "product_type_id", None)
+            if bp_type_id:
+                type_ids.add(int(bp_type_id))
+            if prod_type_id:
+                type_ids.add(int(prod_type_id))
+
+        sde_session = self._sessions.sde_session()
+        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+        type_data_map: dict[int, dict] = {}
+        if type_ids:
+            type_data_map = get_type_data(sde_session, language, sorted(type_ids))
+
+        # Resolve character names
+        char_ids: set[int] = {int(getattr(j, "character_id", 0)) for j in jobs if getattr(j, "character_id", None)}
+        char_name_map: dict[int, str] = {}
+        if char_ids:
+            char_manager = getattr(self._state, "char_manager", None)
+            if char_manager is not None:
+                try:
+                    characters = char_manager.get_characters() or []
+                    for c in characters:
+                        cid = c.get("character_id")
+                        if cid and int(cid) in char_ids:
+                            char_name_map[int(cid)] = c.get("character_name") or str(cid)
+                except Exception:
+                    pass
+
+        rows: list[dict[str, Any]] = []
+        for job in jobs:
+            raw = getattr(job, "raw", None) or {}
+            activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
+            activity_name = self._ACTIVITY_ID_TO_NAME.get(activity_id, f"Unknown ({activity_id})")
+
+            bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
+            prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
+
+            bp_name = (type_data_map.get(bp_type_id) or {}).get("type_name", str(bp_type_id)) if bp_type_id else ""
+            prod_name = (type_data_map.get(prod_type_id) or {}).get("type_name", str(prod_type_id)) if prod_type_id else ""
+
+            cid = int(getattr(job, "character_id", 0) or 0)
+
+            rows.append({
+                "job_id": int(getattr(job, "job_id", 0) or 0),
+                "character_id": cid,
+                "character_name": char_name_map.get(cid, str(cid)),
+                "activity_id": activity_id,
+                "activity_name": activity_name,
+                "blueprint_type_id": bp_type_id,
+                "blueprint_name": bp_name,
+                "product_type_id": prod_type_id,
+                "product_name": prod_name,
+                "runs": int(getattr(job, "runs", 0) or 0),
+                "output_quantity": int(getattr(job, "output_quantity", 0) or 0),
+                "cost": float(getattr(job, "cost", 0) or 0),
+                "start_date": getattr(job, "start_date", None),
+                "end_date": getattr(job, "end_date", None),
+                "facility_id": int(getattr(job, "facility_id", 0) or 0),
+                "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
+                "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
+                "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
+                "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
+            })
+
+        rows.sort(key=lambda r: r.get("end_date") or "")
+        return {"jobs": rows, "slot_capacities": slot_capacities}

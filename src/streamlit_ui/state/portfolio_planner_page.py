@@ -197,6 +197,8 @@ def _portfolio_plan_request_payload(
         "planning_horizon_hours": _current_planning_horizon_hours(),
         "capital_limit_isk": float(st.session_state.get("industry_builder_portfolio_capital_limit_isk", 0.0) or 0.0),
         "manufacturing_slots_available": int(st.session_state.get("industry_builder_portfolio_slots_available", 1) or 1),
+        "research_slots_available": int(st.session_state.get("industry_builder_portfolio_research_slots_available", 1) or 1),
+        "reaction_slots_available": int(st.session_state.get("industry_builder_portfolio_reaction_slots_available", 0) or 0),
         "objective": str(st.session_state.get("industry_builder_portfolio_objective", "balanced") or "balanced"),
         "positive_profit_only": bool(st.session_state.get("industry_builder_portfolio_candidate_positive_profit_only", False)),
         "min_margin_pct": float(st.session_state.get("industry_builder_portfolio_candidate_min_margin_pct", 0.0) or 0.0),
@@ -206,7 +208,7 @@ def _portfolio_plan_request_payload(
         "candidate_categories": _selected_string_list("industry_builder_portfolio_candidate_categories"),
         "candidate_meta_groups": _selected_string_list("industry_builder_portfolio_candidate_meta_groups"),
         "candidate_pricing_confidences": [value.lower() for value in _selected_string_list("industry_builder_portfolio_candidate_confidences")],
-        "candidate_blueprint_sources": [value.lower() for value in _selected_string_list("industry_builder_portfolio_candidate_blueprint_sources")],
+        "candidate_blueprint_sources": [value.replace(" ", "_").lower() for value in _selected_string_list("industry_builder_portfolio_candidate_blueprint_sources")],
         "min_owned_input_coverage_pct": float(
             st.session_state.get("industry_builder_portfolio_candidate_min_owned_input_coverage_pct", 0.0) or 0.0
         ),
@@ -473,6 +475,7 @@ def _start_candidate_job(
         owned_blueprints_scope=str(request_params.get("owned_blueprints_scope") or default_owned_blueprint_scope),
         character_id=int(request_params.get("character_id") or default_character_id_value),
         planning_horizon_hours=float(st.session_state.get("industry_builder_portfolio_horizon_hours", 24.0) or 24.0),
+        have_skills_only=True,
     )
     refresh_job_id = str(refresh_job.get("job_id") or "")
     if not refresh_job_id:
@@ -545,8 +548,10 @@ def _candidate_table_frame(candidates: list[dict[str, Any]], *, directives: dict
                 "Market Absorption Units": _safe_int(candidate.get("estimated_market_absorption_units")),
                 "Max Batches": _safe_int(candidate.get("max_batches_total")),
                 "Blueprint Source": _title_label(str(candidate.get("blueprint_source_kind") or "")),
+                "Manufacturing Group": str(candidate.get("manufacturing_group") or ""),
                 "Owned Input Coverage": _safe_float(candidate.get("owned_input_coverage_fraction")),
                 "Pricing Confidence": _title_label(str(candidate.get("pricing_confidence") or "")),
+                "Skills Met": bool(candidate.get("skill_requirements_met", True)),
                 "Portfolio Eligible": bool(candidate.get("is_portfolio_candidate", False)),
                 "Forced": bool(directive.get("force_include", False)),
                 "Excluded": bool(directive.get("exclude", False)),
@@ -764,6 +769,8 @@ def render_portfolio_planner(
     planner_defaults = {
         "industry_builder_portfolio_capital_limit_isk": 2_000_000_000.0,
         "industry_builder_portfolio_slots_available": 10,
+        "industry_builder_portfolio_research_slots_available": 10,
+        "industry_builder_portfolio_reaction_slots_available": 0,
         "industry_builder_portfolio_horizon_hours": 24.0,
         "industry_builder_portfolio_objective": "balanced",
         "industry_builder_portfolio_minimum_confidence": "low",
@@ -784,6 +791,46 @@ def render_portfolio_planner(
     for key, value in planner_defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    # Auto-populate slot counts from character skills minus active jobs
+    _prev_auto_pop_char = st.session_state.get("_portfolio_slots_auto_populated_char_id")
+    if _prev_auto_pop_char != default_character_id_value:
+        try:
+            from streamlit_ui.api.industry_jobs import fetch_active_industry_jobs
+
+            jobs_data = fetch_active_industry_jobs(character_id=default_character_id_value)
+            slot_caps = jobs_data.get("slot_capacities") or {}
+            char_caps = slot_caps.get(str(default_character_id_value)) or {}
+            mfg_max = int(char_caps.get("manufacturing_max") or 0)
+            research_max = int(char_caps.get("research_max") or 0)
+            reaction_max = int(char_caps.get("reaction_max") or 0)
+
+            if mfg_max > 0 or research_max > 0:
+                # Count active (non-ready) jobs by category
+                mfg_active = 0
+                research_active = 0
+                reaction_active = 0
+                for job in jobs_data.get("jobs") or []:
+                    if str(job.get("status")) == "ready":
+                        continue
+                    activity_id = int(job.get("activity_id") or 0)
+                    char_id = int(job.get("installer_id") or job.get("character_id") or 0)
+                    if char_id != default_character_id_value:
+                        continue
+                    if activity_id == 1:
+                        mfg_active += 1
+                    elif activity_id in (3, 4, 5, 8):
+                        research_active += 1
+                    elif activity_id == 9:
+                        reaction_active += 1
+
+                st.session_state["industry_builder_portfolio_slots_available"] = max(1, mfg_max - mfg_active)
+                st.session_state["industry_builder_portfolio_research_slots_available"] = max(1, research_max - research_active)
+                st.session_state["industry_builder_portfolio_reaction_slots_available"] = max(0, reaction_max - reaction_active)
+                st.session_state["_portfolio_slots_auto_populated_char_id"] = default_character_id_value
+        except Exception:
+            pass  # Fall back to defaults
+
     _ensure_portfolio_candidate_job_state()
 
     if _portfolio_candidate_job_is_active():
@@ -881,6 +928,18 @@ def render_portfolio_planner(
             min_value=1,
             step=1,
             key="industry_builder_portfolio_slots_available",
+        )
+        st.number_input(
+            "Research/Invention Slots",
+            min_value=1,
+            step=1,
+            key="industry_builder_portfolio_research_slots_available",
+        )
+        st.number_input(
+            "Reaction Slots",
+            min_value=0,
+            step=1,
+            key="industry_builder_portfolio_reaction_slots_available",
         )
         st.number_input(
             "Planning Horizon (Hours)",

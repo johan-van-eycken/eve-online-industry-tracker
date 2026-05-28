@@ -110,6 +110,7 @@ def start_portfolio_candidates_refresh(
     owned_blueprints_scope: str,
     character_id: int,
     planning_horizon_hours: float,
+    have_skills_only: bool = True,
 ) -> dict[str, Any]:
     response = api_post(
         f"/industry_products/{int(character_id)}/portfolio_candidates/start",
@@ -125,6 +126,7 @@ def start_portfolio_candidates_refresh(
             "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
             "owned_blueprints_scope": str(owned_blueprints_scope),
             "planning_horizon_hours": float(planning_horizon_hours),
+            "have_skills_only": bool(have_skills_only),
         },
     ) or {}
     if response.get("status") != "success":
@@ -204,6 +206,8 @@ def fetch_portfolio_plan(
     planning_horizon_hours: float,
     capital_limit_isk: float,
     manufacturing_slots_available: int,
+    research_slots_available: int = 0,
+    reaction_slots_available: int = 0,
     objective: str,
     positive_profit_only: bool,
     min_margin_pct: float,
@@ -224,6 +228,8 @@ def fetch_portfolio_plan(
             "planning_horizon_hours": float(planning_horizon_hours),
             "capital_limit_isk": float(capital_limit_isk),
             "manufacturing_slots_available": int(manufacturing_slots_available),
+            "research_slots_available": int(research_slots_available),
+            "reaction_slots_available": int(reaction_slots_available),
             "objective": str(objective),
             "positive_profit_only": bool(positive_profit_only),
             "min_margin_pct": float(min_margin_pct),
