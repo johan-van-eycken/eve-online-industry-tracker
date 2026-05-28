@@ -60,7 +60,12 @@ def _build_order_rows(all_orders: list[dict]) -> tuple[list[dict], list[dict]]:
                 }
             )
         else:
-            sell_orders.append(common_fields)
+            sell_order = dict(common_fields)
+            # Add advised price if available
+            if order.get("advised_price"):
+                sell_order["Advised Price"] = order.get("advised_price", 0)
+                sell_order["Advice Confidence"] = order.get("advised_price_confidence", "N/A")
+            sell_orders.append(sell_order)
     return sell_orders, buy_orders
 
 
@@ -168,11 +173,15 @@ def render():
             unsafe_allow_html=True,
         )
 
+        isk_cols = ["Price", "Total Price", "Price Difference"]
+        if "Advised Price" in df.columns:
+            isk_cols.append("Advised Price")
+
         _render_orders_grid(
             df,
             runtime=runtime,
             img_renderer=img_renderer,
-            isk_cols=["Price", "Total Price", "Price Difference"],
+            isk_cols=isk_cols,
             min_volume=False,
             key="market_orders_sell",
         )
@@ -210,4 +219,82 @@ def render():
         )
     else:
         st.info("No market buy orders found.")
+
+    # Details section for pricing analysis (sell orders)
+    if sell_orders:
+        st.divider()
+        st.subheader("📊 Pricing Analysis")
+
+        # Rebuild full dataframe with order data for selection
+        full_sell_orders = []
+        for order in all_orders:
+            if not order.get("is_buy_order"):
+                full_sell_orders.append(order)
+
+        if full_sell_orders:
+            order_options = [
+                f"{o.get('type_name', 'Unknown')} @ {o.get('station', 'Unknown')} - {format_isk_short(o.get('price', 0))}/unit"
+                for o in full_sell_orders
+            ]
+
+            selected_idx = st.selectbox(
+                "Select order to view detailed pricing analysis",
+                range(len(order_options)),
+                format_func=lambda i: order_options[i],
+            )
+
+            selected_order = full_sell_orders[selected_idx]
+
+            if selected_order.get("pricing_breakdown"):
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric("Current Price", format_isk_short(selected_order.get("price", 0)))
+                    if selected_order.get("advised_price"):
+                        advised = selected_order.get("advised_price", 0)
+                        st.metric("Advised Price", format_isk_short(advised))
+                        diff = advised - selected_order.get("price", 0)
+                        diff_pct = selected_order.get("price_difference_pct", 0)
+                        st.metric("Difference", format_isk_short(diff), f"{diff_pct:+.1f}%")
+
+                with col2:
+                    st.metric("Confidence", selected_order.get("advised_price_confidence", "N/A"))
+                    st.caption(selected_order.get("pricing_reasoning", ""))
+
+                with col3:
+                    if selected_order.get("cost_basis"):
+                        cost_basis = selected_order.get("cost_basis", 0)
+                        source = selected_order.get("acquisition_source", "unknown")
+                        source_label = "Built" if source == "manufactured" else "Bought" if source == "bought" else source.title()
+                        st.metric("Your Cost", format_isk_short(cost_basis))
+                        st.caption(f"({source_label})")
+                    else:
+                        st.caption("No cost data")
+
+                # Show breakdown components
+                st.write("**Pricing Components:**")
+                breakdown = selected_order.get("pricing_breakdown", {})
+                components = breakdown.get("components", {})
+
+                for comp_name, comp_data in components.items():
+                    value = comp_data.get("value", 0)
+                    weight = comp_data.get("weight", 0) * 100
+
+                    friendly_name = comp_name.replace("_", " ").title()
+                    st.write(
+                        f"• {friendly_name}: {format_isk_short(value)} ({weight:.0f}% weight)",
+                        unsafe_allow_html=True
+                    )
+
+                    if comp_name == "your_cost_basis" and comp_data.get("raw_cost"):
+                        source = selected_order.get("acquisition_source", "unknown")
+                        source_label = "Built" if source == "manufactured" else "Bought" if source == "bought" else source.title()
+                        margin = comp_data.get("margin_pct", 5)
+                        st.caption(f"  Raw cost: {format_isk_short(comp_data['raw_cost'])}, with {margin}% margin ({source_label})")
+                    elif comp_name == "your_recent_sales" and comp_data.get("sample_size"):
+                        st.caption(f"  Based on {comp_data['sample_size']} recent sales ({comp_data.get('confidence', 'N/A')} confidence)")
+                    elif comp_name == "market_trend" and comp_data.get("trend_pct"):
+                        st.caption(f"  42w avg: {format_isk_short(comp_data.get('avg_42w', 0))}, 7d avg: {format_isk_short(comp_data.get('avg_7d', 0))}, trend: {comp_data['trend_pct']:+.1f}%")
+            else:
+                st.info("No pricing analysis available for this order yet.")
 
