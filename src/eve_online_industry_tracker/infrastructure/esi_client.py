@@ -624,13 +624,19 @@ class ESIClient:
     def save_to_cache(self, endpoint: str, etag: Optional[str], data: Dict[str, Any]) -> None:
         try:
             serialized_data = jsonlib.dumps(data)
-            cache_entry = EsiCache(
-                endpoint=endpoint,
-                etag=etag,
-                data=serialized_data,
-                last_updated=int(time.time()),
-            )
-            self.db_oauth.session.merge(cache_entry)
+            cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == endpoint).first()
+            if cache_entry:
+                cache_entry.etag = etag
+                cache_entry.data = serialized_data
+                cache_entry.last_updated = int(time.time())
+            else:
+                cache_entry = EsiCache(
+                    endpoint=endpoint,
+                    etag=etag,
+                    data=serialized_data,
+                    last_updated=int(time.time()),
+                )
+                self.db_oauth.session.add(cache_entry)
             self.db_oauth.session.commit()
             logging.debug(f"Cache updated for {endpoint}.")
         except Exception as e:
