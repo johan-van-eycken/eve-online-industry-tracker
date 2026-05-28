@@ -1,5 +1,4 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Dict
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
@@ -199,14 +198,8 @@ class CharacterManager:
                     logging.error(error_message)
                     raise Exception(error_message)
 
-            if len(chars) > 1:
-                with ThreadPoolExecutor(max_workers=len(chars)) as pool:
-                    futures = [pool.submit(_run_one, c) for c in chars]
-                    for f in as_completed(futures):
-                        f.result()
-            else:
-                for char in chars:
-                    _run_one(char)
+            for char in chars:
+                _run_one(char)
         except Exception as e:
             error_message = f"Batch refresh error in {method_name}: {e}"
             logging.error(error_message)
