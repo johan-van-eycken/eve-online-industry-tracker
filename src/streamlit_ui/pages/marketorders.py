@@ -265,11 +265,21 @@ def render():
                     if selected_order.get("cost_basis"):
                         cost_basis = selected_order.get("cost_basis", 0)
                         source = selected_order.get("acquisition_source", "unknown")
-                        source_label = "Built" if source == "manufactured" else "Bought" if source == "bought" else source.title()
+                        cost_source = selected_order.get("cost_basis_source", "asset")
+
+                        if cost_source == "market_order_fallback":
+                            source_label = "Order Price (ESI Data Issue)"
+                        else:
+                            source_label = "Built" if source == "manufactured" else "Bought" if source == "bought" else source.title()
+
                         st.metric("Your Cost", format_isk_short(cost_basis))
-                        st.caption(f"({source_label})")
+
+                        if cost_source == "market_order_fallback":
+                            st.warning("⚠️ Asset missing from inventory. Using order price as cost estimate.")
+                        else:
+                            st.caption(f"({source_label})")
                     else:
-                        st.caption("No cost data")
+                        st.caption("No cost data available")
 
                 # Show breakdown components
                 st.write("**Pricing Components:**")

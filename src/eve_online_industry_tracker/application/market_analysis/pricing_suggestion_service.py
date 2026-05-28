@@ -34,12 +34,17 @@ class PricingSuggestionService:
         - confidence: high/medium/low
         - breakdown: detailed component analysis for UI
         - reasoning: human-readable explanation
+        - cost_basis_source: 'asset' or 'market_order_fallback' or None
         """
         # Get all inputs
         my_sales = self._sales_history.suggest_sell_price(character_id=character_id, type_id=type_id)
         market_data = self._market_history.get_price_stats(type_id=type_id, region_id=region_id)
         volume_data = self._market_history.get_volume_stats(type_id=type_id, region_id=region_id)
-        cost_basis, acquisition_source = self._get_cost_basis(character_id=character_id, type_id=type_id)
+        cost_basis, acquisition_source, cost_source = self._get_cost_basis(
+            character_id=character_id,
+            type_id=type_id,
+            fallback_price=current_price
+        )
 
         # Fetch current market hub price
         hub_price = self._get_hub_price(type_id=type_id, hub=hub)
@@ -65,6 +70,7 @@ class PricingSuggestionService:
             "price_difference_pct": ((advised_price - current_price) / current_price * 100) if current_price > 0 else 0,
             "cost_basis": cost_basis,
             "acquisition_source": acquisition_source,
+            "cost_basis_source": cost_source,
             "breakdown": breakdown,
             "reasoning": self._build_reasoning(breakdown, confidence),
         }
@@ -93,10 +99,11 @@ class PricingSuggestionService:
             logging.debug(f"Hub price error (type_id={type_id}): {e}")
         return None
 
-    def _get_cost_basis(self, *, character_id: int, type_id: int) -> tuple[float | None, str | None]:
+    def _get_cost_basis(self, *, character_id: int, type_id: int, fallback_price: float | None = None) -> tuple[float | None, str | None, str | None]:
         """Get average acquisition cost and source for items in inventory.
 
-        Returns: (cost_basis, acquisition_source)
+        Returns: (cost_basis, acquisition_source, cost_source)
+        where cost_source is 'asset', 'market_order_fallback', or None
         """
         import logging
         app_session = self._sessions.app_session()
@@ -110,7 +117,11 @@ class PricingSuggestionService:
 
             if not assets:
                 logging.debug(f"Cost basis: no assets found (char_id={character_id}, type_id={type_id})")
-                return None, None
+                # Fallback to market order price if available (ESI data inconsistency workaround)
+                if fallback_price and fallback_price > 0:
+                    logging.debug(f"Cost basis: using market order price as fallback ({fallback_price})")
+                    return fallback_price, "market_order_fallback", "market_order_fallback"
+                return None, None, None
 
             total_cost = 0.0
             total_quantity = 0
@@ -137,10 +148,14 @@ class PricingSuggestionService:
                     source = list(sources)[0]
 
                 logging.debug(f"Cost basis found: {avg_cost} ({source}), char_id={character_id}, type_id={type_id}")
-                return avg_cost, source
+                return avg_cost, source, "asset"
 
             logging.debug(f"Cost basis: found {len(assets)} asset(s) but none with costs, char_id={character_id}, type_id={type_id}")
-            return None, None
+            # Fallback to market order price if no cost data on assets
+            if fallback_price and fallback_price > 0:
+                logging.debug(f"Cost basis: using market order price as fallback for assetless item ({fallback_price})")
+                return fallback_price, "market_order_fallback", "market_order_fallback"
+            return None, None, None
         finally:
             try:
                 app_session.close()
