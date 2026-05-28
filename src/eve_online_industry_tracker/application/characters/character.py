@@ -1439,6 +1439,19 @@ class Character:
         try:
             self.ensure_esi()
             assets = self._esi_client.esi_get(f"/characters/{self.character_id}/assets/", paginate=True)
+            logging.debug(f"ESI assets fetched for {self.character_name}: {len(assets) if assets else 0} items")
+            print(f"[DEBUG] ESI assets for {self.character_name}: {len(assets) if assets else 0} items")
+
+            # Check for Draugur (type_id 52254) in ESI response
+            if assets:
+                draugur_in_esi = [a for a in assets if isinstance(a, dict) and a.get("type_id") == 52254]
+                if draugur_in_esi:
+                    print(f"[DEBUG] Draugur found in ESI: {len(draugur_in_esi)} items")
+                    for d in draugur_in_esi:
+                        print(f"[DEBUG]   item_id={d.get('item_id')}, flag={d.get('location_flag')}, location={d.get('location_id')}")
+                else:
+                    print(f"[DEBUG] Draugur NOT in ESI response")
+
             blueprints = self._esi_client.esi_get(f"/characters/{self.character_id}/blueprints/", paginate=True)
             market_prices = self._esi_client.esi_get(f"/markets/prices/")
 
@@ -1639,6 +1652,13 @@ class Character:
             for asset in asset_list:
                 asset["top_location_id"] = resolve_top_location_id(asset)
 
+            # Check for Draugur before saving
+            draugur_before_save = [a for a in asset_list if a.get("type_id") == 52254]
+            if draugur_before_save:
+                logging.debug(f"Draugur in asset_list before save_assets(): {len(draugur_before_save)} item(s)")
+            else:
+                logging.debug(f"Draugur NOT in asset_list before save_assets()")
+
             self.save_assets(asset_list)
 
             # Assign loaded entries to self.assets for runtime access
@@ -1647,6 +1667,13 @@ class Character:
                 {col: getattr(entry, col) for col in CharacterAssetsModel.__table__.columns.keys()}
                 for entry in character_assets
             ]
+
+            # Check for Draugur after save
+            draugur_after_save = [a for a in self.assets if a.get("type_id") == 52254]
+            if draugur_after_save:
+                logging.debug(f"Draugur in database after save_assets(): {len(draugur_after_save)} item(s)")
+            else:
+                logging.debug(f"Draugur NOT in database after save_assets()")
 
             logging.debug(f"Assets successfully updated for {self.character_name}. Total assets: {len(asset_list)}")
         except Exception as e:
