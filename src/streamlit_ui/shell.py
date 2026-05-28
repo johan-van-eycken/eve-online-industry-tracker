@@ -23,6 +23,7 @@ NAVIGATION_PAGES = (
     PageSpec("Characters", "streamlit_ui.pages.characters"),
     PageSpec("Corporations", "streamlit_ui.pages.corporations"),
     PageSpec("Industry Builder", "streamlit_ui.pages.industry_builder"),
+    PageSpec("Industry Slots", "streamlit_ui.pages.industry_jobs"),
     PageSpec("Portfolio Planner", "streamlit_ui.pages.portfolio_planner"),
     PageSpec("Realized Profit", "streamlit_ui.pages.realized_profit"),
     PageSpec("Market Orders", "streamlit_ui.pages.marketorders"),

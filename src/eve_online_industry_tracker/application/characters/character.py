@@ -321,20 +321,22 @@ class Character:
             return
 
         try:
-            self.market_orders = []
+            model_objects = []
             for order in market_orders:
                 new_order = CharacterMarketOrdersModel(**order)
-                self.market_orders.append(new_order)
+                model_objects.append(new_order)
 
-            if self.market_orders:
+            if model_objects:
                 # Delete existing orders for this character and add new ones
                 self._db_app.session.query(CharacterMarketOrdersModel).filter_by(character_id=self.character_id).delete()
-                self._db_app.session.bulk_save_objects(self.market_orders)
+                self._db_app.session.bulk_save_objects(model_objects)
                 self._db_app.session.commit()
             else:
                 logging.debug(f"No new market orders to save for {self.character_name}.")
 
-            logging.debug(f"Market orders saved ({len(self.market_orders)}) for {self.character_name}.")
+            self.market_orders = market_orders
+
+            logging.debug(f"Market orders saved ({len(model_objects)}) for {self.character_name}.")
         except Exception as e:
             error_message = f"Failed to save market orders for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)

@@ -458,7 +458,7 @@ def render_job_manager_status(job_manager_status: dict[str, Any]) -> None:
     queue_counts = job_manager_status.get("queue_counts") or {}
     last_snapshot_at = job_manager_status.get("last_snapshot_at") or "Not built yet"
     st.caption(
-        "Snapshot rows: {rows} | Last snapshot: {snapshot} | Queues -> MFG: {mfg}, React: {react}, Copy: {copy}, Invention: {inv}".format(
+        "Snapshot rows: {rows} | Last snapshot: {snapshot} | Active Jobs -> MFG: {mfg}, React: {react}, Copy: {copy}, Invention: {inv}".format(
             rows=job_manager_status.get("snapshot_count", 0),
             snapshot=last_snapshot_at,
             mfg=queue_counts.get("manufacturing", 0),

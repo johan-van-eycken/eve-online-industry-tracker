@@ -34,6 +34,8 @@ class PortfolioPlanRequest:
     candidate_snapshot_id: str = ""
     capital_limit_isk: float = 0.0
     manufacturing_slots_available: int = 0
+    research_slots_available: int = 0
+    reaction_slots_available: int = 0
     planning_horizon_hours: float = 24.0
     objective: str = "balanced"
     minimum_pricing_confidence: str = "low"
@@ -203,8 +205,13 @@ class IndustryPortfolioService:
             0.0,
             float(plan_request.manufacturing_slots_available or 0) * float(plan_request.planning_horizon_hours or 0.0),
         )
+        total_research_slot_hours_budget = max(
+            0.0,
+            float(plan_request.research_slots_available or 0) * float(plan_request.planning_horizon_hours or 0.0),
+        )
         remaining_capital = max(0.0, float(plan_request.capital_limit_isk or 0.0))
         remaining_slot_hours = total_slot_hours_budget
+        remaining_research_slot_hours = total_research_slot_hours_budget
 
         selected_items: list[dict[str, Any]] = []
         selected_item_by_row_id: dict[str, dict[str, Any]] = {}
@@ -274,6 +281,8 @@ class IndustryPortfolioService:
                 reasons.append("Below minimum owned input coverage")
             if not bypass_scope and cls._confidence_rank_value(candidate.get("pricing_confidence")) < minimum_confidence_rank:
                 reasons.append("Below minimum pricing confidence")
+            if not bypass_scope and candidate.get("skill_requirements_met") is False:
+                reasons.append("Missing required manufacturing skills")
             if not bool(candidate.get("is_portfolio_candidate", False)):
                 reasons.append("Not portfolio-eligible")
 
@@ -370,11 +379,12 @@ class IndustryPortfolioService:
             minimum_batches: int = 0,
             pass_name: str,
         ) -> bool:
-            nonlocal remaining_capital, remaining_slot_hours
+            nonlocal remaining_capital, remaining_slot_hours, remaining_research_slot_hours
 
             overview_row_id = str(candidate.get("overview_row_id") or "")
             cash_outlay_per_batch = cls._safe_float(candidate.get("cash_outlay_per_batch"))
-            slot_hours_per_batch = cls._safe_float(candidate.get("slot_hours_per_batch"))
+            slot_hours_per_batch = cls._safe_float(candidate.get("manufacturing_slot_hours_per_batch")) or cls._safe_float(candidate.get("slot_hours_per_batch"))
+            preparation_slot_hours_per_batch = cls._safe_float(candidate.get("preparation_slot_hours_per_batch")) or 0.0
             units_per_batch = max(1, cls._safe_int(candidate.get("quantity_per_batch") or 1))
             already_allocated = allocated_batches_by_row_id.get(overview_row_id, 0)
             effective_max_batches = cls._effective_max_batches(candidate=candidate, directive=directive)
@@ -413,7 +423,12 @@ class IndustryPortfolioService:
 
             max_by_capital = int(math.floor(remaining_capital / cash_outlay_per_batch)) if cash_outlay_per_batch > 0 else 0
             max_by_slots = int(math.floor(remaining_slot_hours / slot_hours_per_batch)) if slot_hours_per_batch > 0 else 0
-            feasible_batches = min(remaining_candidate_batches, max_by_capital, max_by_slots)
+            max_by_research_slots = (
+                int(math.floor(remaining_research_slot_hours / preparation_slot_hours_per_batch))
+                if preparation_slot_hours_per_batch > 0 and total_research_slot_hours_budget > 0
+                else max_by_slots  # no research constraint if no prep time or no research budget configured
+            )
+            feasible_batches = min(remaining_candidate_batches, max_by_capital, max_by_slots, max_by_research_slots)
 
             if feasible_batches < int(minimum_batches):
                 return False
@@ -432,6 +447,8 @@ class IndustryPortfolioService:
 
             remaining_capital = max(0.0, remaining_capital - (float(cash_outlay_per_batch) * float(allocatable_batches)))
             remaining_slot_hours = max(0.0, remaining_slot_hours - (float(slot_hours_per_batch) * float(allocatable_batches)))
+            if preparation_slot_hours_per_batch > 0:
+                remaining_research_slot_hours = max(0.0, remaining_research_slot_hours - (float(preparation_slot_hours_per_batch) * float(allocatable_batches)))
             allocated_batches_by_row_id[overview_row_id] = already_allocated + int(allocatable_batches)
             record_selected_item(
                 candidate=candidate,
@@ -541,10 +558,13 @@ class IndustryPortfolioService:
             "candidate_snapshot_id": str(plan_request.candidate_snapshot_id or ""),
             "planning_horizon_hours": float(plan_request.planning_horizon_hours or 0.0),
             "manufacturing_slots_available": int(plan_request.manufacturing_slots_available or 0),
+            "research_slots_available": int(plan_request.research_slots_available or 0),
             "capital_limit_isk": float(plan_request.capital_limit_isk or 0.0),
             "slot_hours_budget": total_slot_hours_budget,
             "slot_hours_committed": slot_hours_committed,
             "slot_hours_remaining": remaining_slot_hours,
+            "research_slot_hours_budget": total_research_slot_hours_budget,
+            "research_slot_hours_remaining": remaining_research_slot_hours,
             "capital_committed": total_required_capital,
             "capital_remaining": remaining_capital,
             "total_expected_profit": total_expected_profit,

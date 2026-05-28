@@ -125,6 +125,46 @@ class IndustryJobManager:
                     return True
         return False
 
+    _ACTIVITY_ID_TO_KEY = {
+        1: "manufacturing",
+        3: "research_time",
+        4: "research_material",
+        5: "copying",
+        8: "invention",
+        9: "reaction",
+    }
+
+    def _active_job_counts(self) -> dict[str, int]:
+        """Query character_industry_jobs for active (in-progress) jobs grouped by activity type."""
+        counts: dict[str, int] = {
+            "manufacturing": 0,
+            "reaction": 0,
+            "copying": 0,
+            "research_material": 0,
+            "research_time": 0,
+            "invention": 0,
+        }
+        try:
+            from eve_online_industry_tracker.infrastructure.models import CharacterIndustryJobsModel
+            db_app = getattr(self._state, "db_app", None)
+            if db_app is None:
+                return counts
+            session = db_app.session
+            active_jobs = (
+                session.query(CharacterIndustryJobsModel)
+                .filter(CharacterIndustryJobsModel.status == "active")
+                .all()
+            )
+            for job in active_jobs:
+                raw = getattr(job, "raw", None) or {}
+                activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
+                key = self._ACTIVITY_ID_TO_KEY.get(activity_id)
+                if key and key in counts:
+                    counts[key] += 1
+        except Exception as exc:
+            logging.debug("Failed to query active industry job counts: %s", exc)
+        return counts
+
     def get_status(self) -> dict[str, Any]:
         with self._snapshot_lock:
             snapshot_count = len(self._blueprint_overview)
@@ -133,8 +173,7 @@ class IndustryJobManager:
             last_refresh_finished_at = self._last_refresh_finished_at
             last_refresh_error = self._last_refresh_error
 
-        with self._queue_lock:
-            queue_counts = {name: len(items) for name, items in self._job_queues.items()}
+        queue_counts = self._active_job_counts()
 
         return {
             "managed_activity_types": [
