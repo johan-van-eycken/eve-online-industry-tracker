@@ -226,6 +226,7 @@ class CharactersService:
                     enriched_order["pricing_reasoning"] = advised_price_data.get("reasoning")
                     enriched_order["cost_basis"] = advised_price_data.get("cost_basis")
                     enriched_order["acquisition_source"] = advised_price_data.get("acquisition_source")
+                    enriched_order["cost_basis_source"] = advised_price_data.get("cost_basis_source")
 
                 enriched_orders.append(enriched_order)
 
