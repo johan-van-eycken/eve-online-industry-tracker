@@ -127,20 +127,6 @@ def _refresh_stage_copy(stage: str) -> tuple[str, str]:
     return mapping.get(stage_key, (stage_key.replace("_", " ").title() or "Refreshing", "The overview is being refreshed."))
 
 
-def _refresh_step_items() -> list[tuple[int, str]]:
-    return [
-        (1, "Start refresh"),
-        (2, "Load blueprint snapshot"),
-        (3, "Prepare character and profile context"),
-        (4, "Resolve owned assets and inventory"),
-        (5, "Build manufacturable product rows"),
-        (6, "Load regional market history"),
-        (7, "Load hub liquidity signals"),
-        (8, "Calculate costs and profitability"),
-        (9, "Finalize overview payload"),
-    ]
-
-
 def render_refresh_in_progress(refresh_view: dict[str, Any]) -> None:
     progress_meta = cast(dict[str, Any], refresh_view.get("progress_meta") or {})
     elapsed_seconds = _refresh_elapsed_seconds(refresh_view)
@@ -149,39 +135,23 @@ def render_refresh_in_progress(refresh_view: dict[str, Any]) -> None:
     stage = str(progress_meta.get("stage") or "refresh")
     stage_title, stage_description = _refresh_stage_copy(stage)
     progress_fraction = float(refresh_view.get("progress_fraction") or 0.0)
-    progress_label = str(refresh_view.get("progress_label") or "Refreshing overview...")
+    progress_pct = int(max(0.0, min(1.0, progress_fraction)) * 100)
 
-    st.markdown("### Refreshing Industry Builder")
-    st.caption("The overview is being rebuilt in the background. The page will resume automatically when the refresh is finished.")
-
-    summary_col_left, summary_col_mid, summary_col_right = st.columns(3)
-    summary_col_left.metric("Elapsed", _format_elapsed_seconds(elapsed_seconds))
-    current_step_label = f"{step}/{step_count}" if step_count > 0 and step > 0 else "Queued"
-    summary_col_mid.metric("Current Step", current_step_label)
-    summary_col_right.metric("Current Stage", stage_title)
-
-    st.progress(int(max(0.0, min(1.0, progress_fraction)) * 100), text=progress_label)
-    st.markdown(f"**Now happening:** {stage_description}")
-
-    info_col, steps_col = st.columns([3, 2])
-    with info_col:
-        st.markdown("**What this refresh updates**")
-        st.write("- Manufacturable product rows and job trees")
-        st.write("- Material pricing and market history")
-        st.write("- Hub liquidity, profitability, and confidence signals")
-        st.write("- Any settings you changed before starting the refresh")
-    with steps_col:
-        st.markdown("**Refresh steps**")
-        for item_step, item_label in _refresh_step_items():
-            if step_count > 0 and item_step < step:
-                prefix = "[done]"
-            elif item_step == step:
-                prefix = "[now]"
-            else:
-                prefix = "[next]"
-            st.write(f"{prefix} {item_label}")
-
-    st.caption("No additional overview content is rendered during the refresh to keep the page stable and reduce UI churn.")
+    with st.container(border=True):
+        title_col, elapsed_col = st.columns([6, 1])
+        with title_col:
+            st.markdown(f"**Refreshing** — {stage_title}")
+            st.caption(stage_description)
+        with elapsed_col:
+            if elapsed_seconds is not None:
+                st.caption(_format_elapsed_seconds(elapsed_seconds))
+        st.progress(progress_pct)
+        if step > 0 and step_count > 0:
+            dots = " ".join(
+                "●" if i < step else ("◉" if i == step else "○")
+                for i in range(1, step_count + 1)
+            )
+            st.caption(dots)
 
 
 def load_character_context() -> tuple[
