@@ -1442,16 +1442,6 @@ class Character:
             logging.debug(f"ESI assets fetched for {self.character_name}: {len(assets) if assets else 0} items")
             print(f"[DEBUG] ESI assets for {self.character_name}: {len(assets) if assets else 0} items")
 
-            # Check for Draugur (type_id 52254) in ESI response
-            if assets:
-                draugur_in_esi = [a for a in assets if isinstance(a, dict) and a.get("type_id") == 52254]
-                if draugur_in_esi:
-                    print(f"[DEBUG] Draugur found in ESI: {len(draugur_in_esi)} items")
-                    for d in draugur_in_esi:
-                        print(f"[DEBUG]   item_id={d.get('item_id')}, flag={d.get('location_flag')}, location={d.get('location_id')}")
-                else:
-                    print(f"[DEBUG] Draugur NOT in ESI response")
-
             blueprints = self._esi_client.esi_get(f"/characters/{self.character_id}/blueprints/", paginate=True)
             market_prices = self._esi_client.esi_get(f"/markets/prices/")
 
