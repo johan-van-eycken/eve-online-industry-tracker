@@ -211,11 +211,6 @@ def _render_overview_grid(
         st.info("No overview rows available for the current selection.")
         return
 
-    st.caption("Use the AgGrid chevrons in Step to expand or collapse the build tree.")
-    st.caption(
-        "Region Daily Volume is true regional market history from ESI. Hub Buy/Sell Liquidity is live open-order depth at the selected trade hub. "
-        "Hub Buy/Sell Orders counts the number of open hub orders behind that liquidity. The 7d Avg column smooths the latest daily volume over the last 7 reported days."
-    )
     icon_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
 
     gb = runtime.grid_options_builder.from_dataframe(df)
@@ -470,19 +465,57 @@ def _render_debug_panel(filtered_overview_rows: list[dict[str, Any]]) -> None:
             st.write({})
 
 
+def _render_page_about() -> None:
+    def _content() -> None:
+        st.caption(
+            "Shows everything you can manufacture based on your owned blueprints, "
+            "valued against your chosen trade hub. Each product row contains the full build tree — "
+            "materials, required skills, job duration, costs, and profitability."
+        )
+        st.caption(
+            "**Owned Blueprints** — Scope the blueprint inventory to a single character, "
+            "a character plus its corporation hangar, one corporation, or all of the above."
+        )
+        st.caption(
+            "**Character Skills** — Determines manufacturing time and whether skill requirements are met. "
+            "Does not affect which blueprints are visible."
+        )
+        st.caption(
+            "**Industry Profile** — Your saved facility setup: system cost index, facility tax, "
+            "and structure rig bonuses. Changes take effect after Refresh Overview."
+        )
+        st.caption(
+            "**Filters** — All filter and setting changes take effect only after clicking Refresh Overview."
+        )
+        st.caption(
+            "**Build tree** — Use the chevrons in the Step column to expand sub-jobs "
+            "(invention chains, reaction intermediates, component manufacturing)."
+        )
+        st.caption(
+            "**Volume columns** — Region Daily Volume is true regional market history from ESI. "
+            "Hub Buy/Sell Liquidity is live order-book depth at the selected hub. "
+            "The 7d Avg smooths the latest daily volume over 7 reported days."
+        )
+
+    if hasattr(st, "popover"):
+        with st.popover("?", help="About this page"):
+            _content()
+    else:
+        with st.expander("?", expanded=False):
+            _content()
+
+
 def render() -> None:
     runtime = require_aggrid()
     try:
         page_context = prepare_shared_industry_snapshot_page(
             title="Industry Builder",
-            intro_caption=(
-                "Manufacturable product overview derived from the SDE blueprints and enriched with type metadata. "
-                "Each product row contains a simplified manufacturing job payload with materials, skills, time, production limits, and selected hub pricing."
-            ),
-            refresh_caption="Backend-backed changes are applied only after clicking Refresh Overview.",
+            intro_caption="",
+            refresh_caption="",
             refresh_button_label="Refresh Overview",
             refresh_button_key="industry_builder_refresh_overview",
             no_rows_message="No manufacturable product rows are available yet.",
+            render_about_fn=_render_page_about,
         )
     except Exception as e:
         st.error(str(e))
@@ -490,14 +523,19 @@ def render() -> None:
     if page_context is None:
         return
 
+    _applied_meta_groups = (
+        st.session_state.get("industry_builder_enabled_meta_groups_applied")
+        or set(st.session_state.get("industry_builder_enabled_meta_groups_pending") or set())
+        or page_context.enabled_meta_groups
+    )
     filtered_overview_rows = filter_overview_rows(
         page_context.overview_rows,
-        tuple(sorted(page_context.enabled_meta_groups)),
-        bool(st.session_state.get("industry_builder_have_skills_only", True)),
-        bool(st.session_state.get("industry_builder_positive_profit_only", False)),
-        float(st.session_state.get("industry_builder_min_margin_pct", 0.0) or 0.0),
-        float(st.session_state.get("industry_builder_min_isk_per_hour", 0.0) or 0.0),
-        int(st.session_state.get("industry_builder_min_region_daily_volume", 0) or 0),
+        tuple(sorted(_applied_meta_groups)),
+        bool(st.session_state.get("industry_builder_have_skills_only_applied", True)),
+        bool(st.session_state.get("industry_builder_positive_profit_only_applied", False)),
+        float(st.session_state.get("industry_builder_min_margin_pct_applied", 0.0) or 0.0),
+        float(st.session_state.get("industry_builder_min_isk_per_hour_applied", 0.0) or 0.0),
+        int(st.session_state.get("industry_builder_min_region_daily_volume_applied", 0) or 0),
     )
     if not filtered_overview_rows:
         st.info("No manufacturable product rows match the current filters.")

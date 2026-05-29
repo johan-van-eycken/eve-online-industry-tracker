@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import time
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import streamlit as st
 
@@ -211,18 +210,20 @@ def render_selector_section(
     character_options: dict[int, str],
     owned_blueprint_scope_options: list[str],
     owned_blueprint_scope_labels: dict[str, str],
+    render_about_fn: Callable | None = None,
 ) -> tuple[int, int, list[dict[str, Any]], int]:
     character_ids = list(character_options.keys())
-    selector_col_left, selector_col_mid, selector_col_right = st.columns(3)
+    if render_about_fn:
+        selector_col_left, selector_col_mid, selector_col_right, selector_col_about = st.columns([3, 3, 3, 1])
+    else:
+        selector_col_left, selector_col_mid, selector_col_right = st.columns(3)
+
     with selector_col_left:
         st.selectbox(
             "Owned Blueprints",
             options=owned_blueprint_scope_options,
             format_func=lambda x: owned_blueprint_scope_labels.get(str(x), str(x)),
             key="industry_builder_owned_blueprints_scope",
-        )
-        st.caption(
-            "Pick one character, one character plus its corporation, one corporation, or all characters and corporations."
         )
 
     with selector_col_mid:
@@ -252,9 +253,13 @@ def render_selector_section(
             key="industry_builder_industry_profile_id",
         )
         if len(industry_profiles) == 0:
-            st.caption("No saved industry profiles for this character. The backend will continue without facility-specific modifiers.")
-        else:
-            st.caption("Applied only after Refresh Overview. Used for system cost indices, facility tax, and structure rig modifiers.")
+            st.caption("No saved industry profiles for this character.")
+
+    if render_about_fn:
+        with selector_col_about:
+            st.write("")
+            st.write("")
+            render_about_fn()
 
     return int(selected_character_id), int(selected_industry_profile_id), industry_profiles, int(default_industry_profile_id)
 
@@ -288,56 +293,55 @@ def render_filters_section(
         coerce=str,
     )
 
-    filter_group_col, misc_group_col, market_group_col, profit_group_col = st.columns(4)
-    with filter_group_col:
+    left_col, market_group_col, profit_group_col = st.columns([2, 1, 1])
+    with left_col:
         meta_group_container = st.container(border=True)
         meta_group_container.caption("Meta Group Filters")
         filter_columns = meta_group_container.columns(3)
 
-    with misc_group_col:
         misc_container = st.container(border=True)
         misc_container.caption("Misc")
-        misc_container.caption("Checkboxes marked ↺ require Refresh Overview.")
-        misc_col_left, misc_col_right = misc_container.columns(2)
-        with misc_col_left:
+        misc_c1, misc_c2, misc_c3 = misc_container.columns(3)
+        with misc_c1:
             st.checkbox(
-                "Maximize BP runs ↺",
+                "Maximize BP runs",
                 key="industry_builder_maximize_bp_runs_pending",
-                help="Applied only after Refresh Overview. Uses the blueprint's max production limit as the number of manufacturing runs.",
+                help="Uses the blueprint's max production limit as the number of manufacturing runs.",
             )
             st.checkbox(
-                "Group identical BPCs ↺",
-                key="industry_builder_group_identical_bpcs",
-                help="Applied only after Refresh Overview. When enabled, identical owned blueprint copies for the same product are shown as one aggregated product row. Disable to show one top-level product row per owned BPC.",
-            )
-            st.checkbox(
-                "Build from BPC ↺",
-                key="industry_builder_build_from_bpc",
-                help="Applied only after Refresh Overview. Prefer blueprint copies. If none exist, fallback to owned blueprint originals.",
-            )
-            st.checkbox(
-                "I have a BPC/BPO ↺",
+                "I have a BPC/BPO",
                 key="industry_builder_have_blueprint_source_only",
-                help="Applied only after Refresh Overview. Returns only products where the backend identified a BPC or BPO source.",
+                help="Returns only products where the backend identified a BPC or BPO source.",
             )
-        with misc_col_right:
+        with misc_c2:
+            st.checkbox(
+                "Group identical BPCs",
+                key="industry_builder_group_identical_bpcs",
+                help="Identical owned blueprint copies for the same product are shown as one aggregated row. Disable to show one row per owned BPC.",
+            )
             st.checkbox(
                 "I have the skills",
                 key="industry_builder_have_skills_only",
-                help="Applies immediately to the current snapshot. Show only products for which the selected character meets all manufacturing skill requirements.",
+                help="Show only products for which the selected character meets all manufacturing skill requirements.",
+            )
+        with misc_c3:
+            st.checkbox(
+                "Build from BPC",
+                key="industry_builder_build_from_bpc",
+                help="Prefer blueprint copies. If none exist, fallback to owned blueprint originals.",
             )
             st.checkbox(
                 "Include reactions",
                 key="industry_builder_include_reactions",
                 disabled=not reactions_allowed_for_profile,
                 help=(
-                    "Applied only after Refresh Overview. Includes recursive reaction planning for reaction-based materials."
+                    "Includes recursive reaction planning for reaction-based materials."
                     if reactions_allowed_for_profile
                     else "Reactions are only available in low-sec or null-sec systems for the selected industry profile."
                 ),
             )
             if not reactions_allowed_for_profile:
-                st.caption("Reactions disabled: the selected industry profile is in high-sec.")
+                st.caption("Reactions disabled: high-sec profile.")
 
     with market_group_col:
         market_container = st.container(border=True)
@@ -347,23 +351,22 @@ def render_filters_section(
             options=_MARKET_HUB_OPTIONS,
             format_func=lambda value: _MARKET_HUB_LABELS.get(str(value), str(value)),
             key="industry_builder_market_hub",
-            help="Applied only after Refresh Overview. Uses the selected trade hub for both input and output pricing.",
+            help="Uses the selected trade hub for both input and output pricing.",
         )
         market_container.selectbox(
             "Input Pricing",
             options=_MARKET_ORDER_SIDE_OPTIONS,
             format_func=lambda value: _INPUT_ORDER_SIDE_LABELS.get(str(value), str(value)),
             key="industry_builder_material_price_side",
-            help="Choose whether required materials are valued from the hub's sell orders or buy orders.",
+            help="Whether required materials are valued from the hub's sell orders or buy orders.",
         )
         market_container.selectbox(
             "Output Pricing",
             options=_MARKET_ORDER_SIDE_OPTIONS,
             format_func=lambda value: _OUTPUT_ORDER_SIDE_LABELS.get(str(value), str(value)),
             key="industry_builder_product_price_side",
-            help="Choose whether finished goods are valued as sell orders you place or direct sales into buy orders.",
+            help="Whether finished goods are valued as sell orders you place or direct sales into buy orders.",
         )
-        market_container.caption("These market settings are backend-backed and take effect after Refresh Overview.")
 
     with profit_group_col:
         profit_container = st.container(border=True)
@@ -391,32 +394,20 @@ def render_filters_section(
             key="industry_builder_min_region_daily_volume",
             help="Most recent daily traded volume from ESI market history for the selected hub's region.",
         )
-        profit_container.caption("These filters apply immediately to the current snapshot. Hub buy/sell liquidity stays a separate live orderbook signal.")
 
-    column_groups = [
-        {"Tech I", "Tech II", "Tech III"},
-        {"Faction", "Storyline", "Officer"},
-        {"Other"},
-    ]
     enabled_meta_groups: set[str] = set()
-    for meta_group_name in meta_group_names:
+    for i, meta_group_name in enumerate(meta_group_names):
         toggle_key = meta_group_toggle_key(meta_group_name)
         label = meta_group_label(meta_group_name)
-
-        target_column_index = 2
-        for index, group in enumerate(column_groups):
-            if label in group:
-                target_column_index = index
-                break
-
-        with filter_columns[target_column_index]:
-            enabled = st.toggle(
-                label,
-                key=toggle_key,
-            )
+        with filter_columns[i % 3]:
+            enabled = st.toggle(label, key=toggle_key)
         if enabled:
             enabled_meta_groups.add(meta_group_name)
 
+    st.session_state["industry_builder_enabled_meta_groups_pending"] = set(enabled_meta_groups)
+    if "industry_builder_enabled_meta_groups_applied" not in st.session_state:
+        st.session_state["industry_builder_enabled_meta_groups_applied"] = set(enabled_meta_groups)
+    st.session_state.pop("_industry_builder_post_refresh", None)
     persist_filter_preferences(meta_group_names)
     return enabled_meta_groups
 
@@ -503,6 +494,24 @@ def render_pricing_batch_panel(pricing_batch: dict[str, Any]) -> None:
             )
 
 
+@st.fragment(run_every=1)
+def _refresh_status_fragment() -> None:
+    if not overview_refresh_is_active():
+        st.rerun()
+        return
+    try:
+        poll_overview_refresh_job(
+            fetch_status_fn=fetch_product_overview_refresh_status,
+            fetch_job_manager_status_fn=fetch_job_manager_status,
+        )
+    except Exception as exc:
+        clear_overview_refresh_job(error_message=str(exc))
+    if overview_refresh_is_active():
+        render_refresh_in_progress(overview_refresh_view())
+    else:
+        st.rerun()
+
+
 def _ensure_initial_overview_refresh_started(
     *,
     default_character_id_value: int,
@@ -536,25 +545,15 @@ def prepare_shared_industry_snapshot_page(
     use_collapsed_advanced_snapshot_section: bool = False,
     context_heading: str | None = None,
     advanced_snapshot_heading: str | None = None,
+    render_about_fn: Callable | None = None,
 ) -> SharedIndustrySnapshotContext | None:
     st.subheader(title)
     ensure_overview_refresh_state()
 
     refresh_view = overview_refresh_view()
     if bool(refresh_view.get("is_active")):
-        try:
-            poll_overview_refresh_job(
-                fetch_status_fn=fetch_product_overview_refresh_status,
-                fetch_job_manager_status_fn=fetch_job_manager_status,
-            )
-        except Exception as exc:
-            clear_overview_refresh_job(error_message=str(exc))
-        refresh_view = overview_refresh_view()
-        if bool(refresh_view.get("is_active")):
-            render_refresh_in_progress(refresh_view)
-            time.sleep(1.0)
-            _rerun()
-            return None
+        _refresh_status_fragment()
+        return None
 
     (
         _characters,
@@ -585,6 +584,7 @@ def prepare_shared_industry_snapshot_page(
         character_options=character_options,
         owned_blueprint_scope_options=owned_blueprint_scope_options,
         owned_blueprint_scope_labels=owned_blueprint_scope_labels,
+        render_about_fn=render_about_fn,
     )
 
     solar_system_security_map: dict[int, float] = {}
@@ -630,20 +630,13 @@ def prepare_shared_industry_snapshot_page(
         if bool(refresh_view.get("is_active")):
             if started_initial_refresh:
                 st.info("Preparing the initial product overview in the background.")
-            render_job_status_panel(
-                title="Preparing initial overview",
-                is_running=True,
-                progress_fraction=float(refresh_view.get("progress_fraction") or 0.0),
-                progress_text=str(refresh_view.get("progress_label") or "Refreshing overview..."),
-            )
-            st.caption("The initial product overview is being prepared in the background. This page will update automatically when the snapshot is ready.")
-            time.sleep(1.0)
-            _rerun()
-
+            _refresh_status_fragment()
+            return None
         st.info(no_rows_message)
         return None
 
-    st.caption(intro_caption)
+    if intro_caption:
+        st.caption(intro_caption)
 
     if use_collapsed_advanced_snapshot_section:
         summary_parts = [
@@ -674,7 +667,8 @@ def prepare_shared_industry_snapshot_page(
 
     refresh_col_left, refresh_col_right = st.columns([6, 1])
     with refresh_col_left:
-        st.caption(refresh_caption)
+        if refresh_caption:
+            st.caption(refresh_caption)
         if bool(refresh_view.get("is_active")):
             render_job_status_panel(
                 title="Overview refresh",
@@ -691,6 +685,8 @@ def prepare_shared_industry_snapshot_page(
         ):
             try:
                 clear_industry_builder_caches()
+                st.session_state["industry_builder_overview_rows"] = []
+                st.session_state["industry_builder_overview_meta"] = {}
                 start_overview_refresh_job(
                     default_character_id_value=default_character_id_value,
                     default_industry_profile_id=default_industry_profile_id,
