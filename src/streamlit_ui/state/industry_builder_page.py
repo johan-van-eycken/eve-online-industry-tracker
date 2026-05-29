@@ -167,13 +167,21 @@ def ensure_meta_group_filter_state(meta_group_names: list[str]) -> None:
     if not isinstance(persisted_meta_group_filters, dict):
         persisted_meta_group_filters = {}
 
+    applied_meta_groups: set[str] = set(
+        st.session_state.get("industry_builder_enabled_meta_groups_applied") or set()
+    )
+    has_applied_state = "industry_builder_enabled_meta_groups_applied" in st.session_state and bool(applied_meta_groups)
+
     for meta_group_name in meta_group_names:
         toggle_key = meta_group_toggle_key(meta_group_name)
-        if toggle_key in st.session_state:
+        if has_applied_state:
+            st.session_state[toggle_key] = meta_group_name in applied_meta_groups
+        elif toggle_key in st.session_state:
             continue
-        st.session_state[toggle_key] = bool(
-            persisted_meta_group_filters.get(meta_group_name, meta_group_label(meta_group_name) == "Tech I")
-        )
+        else:
+            st.session_state[toggle_key] = bool(
+                persisted_meta_group_filters.get(meta_group_name, meta_group_label(meta_group_name) == "Tech I")
+            )
 
 
 def persist_filter_preferences(meta_group_names: list[str]) -> None:
