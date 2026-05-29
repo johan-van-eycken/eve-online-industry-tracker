@@ -11,7 +11,6 @@ from streamlit_ui.api.streamlit_client import cached_api_get
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_product_overview(
     *,
-    force_refresh: bool = False,
     maximize_bp_runs: bool = False,
     group_identical_bpcs: bool = True,
     build_from_bpc: bool = True,
@@ -38,10 +37,8 @@ def fetch_product_overview(
     )
     if industry_profile_id is not None and int(industry_profile_id) > 0:
         path += f"&industry_profile_id={int(industry_profile_id)}"
-    if force_refresh:
-        path += "&refresh=1"
 
-    response = api_get(path, timeout_seconds=120 if force_refresh else 60) or {}
+    response = api_get(path, timeout_seconds=60) or {}
     if response.get("status") != "success":
         raise RuntimeError(response.get("message") or "Failed to load industry product overview")
 
@@ -136,7 +133,6 @@ def start_portfolio_candidates_refresh(
     return data if isinstance(data, dict) else {}
 
 
-@st.cache_data(ttl=1, show_spinner=False)
 def fetch_product_overview_refresh_status(job_id: str) -> dict[str, Any]:
     response = api_get(f"/industry_products/refresh/{job_id}", timeout_seconds=30) or {}
     if response.get("status") != "success":
@@ -146,7 +142,6 @@ def fetch_product_overview_refresh_status(job_id: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-@st.cache_data(ttl=1, show_spinner=False)
 def fetch_portfolio_candidates_refresh_status(job_id: str) -> dict[str, Any]:
     response = api_get(f"/industry_products/portfolio_candidates/{job_id}", timeout_seconds=30) or {}
     if response.get("status") != "success":

@@ -327,25 +327,26 @@ def render_filters_section(
     with misc_group_col:
         misc_container = st.container(border=True)
         misc_container.caption("Misc")
+        misc_container.caption("Checkboxes marked ↺ require Refresh Overview.")
         misc_col_left, misc_col_right = misc_container.columns(2)
         with misc_col_left:
             st.checkbox(
-                "Maximize BP runs",
+                "Maximize BP runs ↺",
                 key="industry_builder_maximize_bp_runs_pending",
                 help="Applied only after Refresh Overview. Uses the blueprint's max production limit as the number of manufacturing runs.",
             )
             st.checkbox(
-                "Group identical BPCs",
+                "Group identical BPCs ↺",
                 key="industry_builder_group_identical_bpcs",
                 help="Applied only after Refresh Overview. When enabled, identical owned blueprint copies for the same product are shown as one aggregated product row. Disable to show one top-level product row per owned BPC.",
             )
             st.checkbox(
-                "Build from BPC",
+                "Build from BPC ↺",
                 key="industry_builder_build_from_bpc",
                 help="Applied only after Refresh Overview. Prefer blueprint copies. If none exist, fallback to owned blueprint originals.",
             )
             st.checkbox(
-                "I have a BPC/BPO",
+                "I have a BPC/BPO ↺",
                 key="industry_builder_have_blueprint_source_only",
                 help="Applied only after Refresh Overview. Returns only products where the backend identified a BPC or BPO source.",
             )
@@ -353,7 +354,7 @@ def render_filters_section(
             st.checkbox(
                 "I have the skills",
                 key="industry_builder_have_skills_only",
-                help="Show only products for which the selected character meets all manufacturing skill requirements.",
+                help="Applies immediately to the current snapshot. Show only products for which the selected character meets all manufacturing skill requirements.",
             )
             st.checkbox(
                 "Include reactions",
@@ -431,8 +432,6 @@ def render_filters_section(
     for meta_group_name in meta_group_names:
         toggle_key = meta_group_toggle_key(meta_group_name)
         label = meta_group_label(meta_group_name)
-        if toggle_key not in st.session_state:
-            st.session_state[toggle_key] = label == "Tech I"
 
         target_column_index = 2
         for index, group in enumerate(column_groups):

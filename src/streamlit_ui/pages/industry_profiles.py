@@ -47,19 +47,16 @@ def _describe_profile_location(profile: dict, *, resolved_structure_type_name: s
 
 def _compute_combined_reduction(reductions: list[float]) -> float:
     # Combine multiplicatively: total = 1 - Π(1 - r_i)
+    # Values must be fractions in [0, 1] (e.g. 0.024 for 2.4%). Values > 1 are
+    # treated as out-of-range and clamped to 1.0 rather than silently divided.
     total = 0.0
     try:
         mul = 1.0
         for r in reductions:
             r = float(r or 0.0)
-
-            # Defensive normalization: accept percent-style inputs too.
-            # Example: 2.4 may mean 2.4% (0.024).
-            while r > 1.0:
-                r /= 100.0
-
             if r <= 0:
                 continue
+            r = min(r, 1.0)
             mul *= (1.0 - r)
         total = 1.0 - mul
     except Exception:
@@ -443,9 +440,10 @@ def _render_existing_profiles(
                 else:
                     stored_ci = profile.get("manufacturing_cost_index")
                     if stored_ci is None:
-                        st.write("**System Cost Index (live):** N/A")
+                        st.write("**System Cost Index:** N/A")
                     else:
                         st.write(f"**System Cost Index (stored):** {float(stored_ci):.2%}")
+                        st.caption("Cost index could not be loaded live — stored value may be stale. Open the system's profile and re-select it to refresh.")
 
                 facility_tax = profile.get("facility_tax")
                 scc_surcharge = profile.get("scc_surcharge")
@@ -597,7 +595,7 @@ def _render_create_profile_section(
         if npc_stations_response is None or npc_stations_response.get("status") != "success":
             message = npc_stations_response.get("message") if npc_stations_response else "API connection failed"
             st.error(f"Failed to load NPC stations: {message}")
-            st.stop()
+            return
 
         if public_structures is None or public_structures.get("status") != "success":
             message = public_structures.get("message") if public_structures else "API connection failed"
@@ -641,7 +639,7 @@ def _render_create_profile_section(
         st.warning(f"Failed to load stations/structures: {e}")
     except Exception as e:
         st.error(f"Failed to load stations/structures: {e}")
-        st.stop()
+        return
 
     station_options = {"none": "No Station (Structure)"}
     for station in stations:

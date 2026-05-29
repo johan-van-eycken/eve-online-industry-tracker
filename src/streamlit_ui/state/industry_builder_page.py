@@ -373,6 +373,8 @@ def poll_overview_refresh_job(
         return "idle"
 
     refresh_status = fetch_status_fn(refresh_job_id)
+    if refresh_status is None:
+        return "running"
     progress_fraction = float(refresh_status.get("progress_fraction") or 0.0)
     progress_label = str(refresh_status.get("progress_label") or "Refreshing overview...")
     st.session_state[_REFRESH_PROGRESS_FRACTION_KEY] = max(0.0, min(1.0, progress_fraction))
