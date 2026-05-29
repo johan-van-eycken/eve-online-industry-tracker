@@ -290,7 +290,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             if child_bpo_source and not bpo_source:
                 bpo_source = child_bpo_source
 
-        if node_type == "product":
+        if node_type == "product" and int(node.get("type_id") or 0) == int(source_row.get("type_id") or 0):
             material_cost = manufacturing_job.get("material_cost")
             job_cost = manufacturing_job.get("total_job_cost")
             total_cost = manufacturing_job.get("total_cost")
@@ -550,15 +550,11 @@ def _format_blueprint_owner_source(asset: dict[str, Any]) -> str:
         return corporation_name
     owner_type = str(asset.get("owner_type") or "").strip().lower()
     if owner_type == "character":
-        owner_id = int(asset.get("character_id") or 0)
-        return f"character {owner_id}" if owner_id > 0 else "character"
+        return "Unknown Character"
     if owner_type == "corporation":
-        owner_id = int(asset.get("corporation_id") or 0)
-        return f"corporation {owner_id}" if owner_id > 0 else "corporation"
-    character_id = int(asset.get("character_id") or 0)
-    if character_id > 0:
-        return f"character {character_id}"
-    corporation_id = int(asset.get("corporation_id") or 0)
-    if corporation_id > 0:
-        return f"corporation {corporation_id}"
+        return "Unknown Corporation"
+    if int(asset.get("character_id") or 0) > 0:
+        return "Unknown Character"
+    if int(asset.get("corporation_id") or 0) > 0:
+        return "Unknown Corporation"
     return ""

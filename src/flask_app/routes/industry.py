@@ -11,7 +11,7 @@ from eve_online_industry_tracker.application.industry.portfolio_service import (
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from flask_app.bootstrap import require_ready, require_sde_ready
 from flask_app.deps import get_state
-from flask_app.http import ok
+from flask_app.http import error, ok
 
 
 industry_bp = Blueprint("industry", __name__)
@@ -191,11 +191,14 @@ def industry_products(character_id: int):
     material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
     product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
     industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
-    try:
-        industry_profile_id = int(industry_profile_id_raw) if industry_profile_id_raw else None
-    except Exception:
-        industry_profile_id = None
-    if industry_profile_id is not None and industry_profile_id <= 0:
+    if industry_profile_id_raw:
+        try:
+            industry_profile_id = int(industry_profile_id_raw)
+        except (ValueError, TypeError):
+            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
+        if industry_profile_id <= 0:
+            industry_profile_id = None
+    else:
         industry_profile_id = None
     owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
@@ -234,11 +237,14 @@ def industry_products_refresh(character_id: int):
     product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
     force_refresh = bool(payload.get("force_refresh", True))
     raw_industry_profile_id = payload.get("industry_profile_id")
-    try:
-        industry_profile_id = int(raw_industry_profile_id) if raw_industry_profile_id is not None else None
-    except Exception:
-        industry_profile_id = None
-    if industry_profile_id is not None and industry_profile_id <= 0:
+    if raw_industry_profile_id is not None:
+        try:
+            industry_profile_id = int(raw_industry_profile_id)
+        except (ValueError, TypeError):
+            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
+        if industry_profile_id <= 0:
+            industry_profile_id = None
+    else:
         industry_profile_id = None
     owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
@@ -264,6 +270,8 @@ def industry_products_refresh(character_id: int):
 @industry_bp.get("/industry_products/refresh/<job_id>")
 def industry_products_refresh_status(job_id: str):
     require_ready(get_state())
+    if not job_id or not job_id.strip():
+        return error(message="job_id is required.", status_code=400)
     svc = IndustryService(state=get_state())
     return ok(data=svc.industry_manufacturing_product_overview_refresh_status(job_id=job_id))
 
@@ -283,11 +291,14 @@ def industry_portfolio_candidates_start(character_id: int):
     product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
     owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     raw_industry_profile_id = payload.get("industry_profile_id")
-    try:
-        industry_profile_id = int(raw_industry_profile_id) if raw_industry_profile_id is not None else None
-    except Exception:
-        industry_profile_id = None
-    if industry_profile_id is not None and industry_profile_id <= 0:
+    if raw_industry_profile_id is not None:
+        try:
+            industry_profile_id = int(raw_industry_profile_id)
+        except (ValueError, TypeError):
+            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
+        if industry_profile_id <= 0:
+            industry_profile_id = None
+    else:
         industry_profile_id = None
     try:
         planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
@@ -317,6 +328,8 @@ def industry_portfolio_candidates_start(character_id: int):
 @industry_bp.get("/industry_products/portfolio_candidates/<job_id>")
 def industry_portfolio_candidates_status(job_id: str):
     require_ready(get_state())
+    if not job_id or not job_id.strip():
+        return error(message="job_id is required.", status_code=400)
     svc = IndustryService(state=get_state())
     return ok(data=svc.industry_manufacturing_portfolio_candidates_refresh_status(job_id=job_id))
 
@@ -344,11 +357,14 @@ def industry_portfolio_candidates(character_id: int):
     except Exception:
         planning_horizon_hours = 24.0
     industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
-    try:
-        industry_profile_id = int(industry_profile_id_raw) if industry_profile_id_raw else None
-    except Exception:
-        industry_profile_id = None
-    if industry_profile_id is not None and industry_profile_id <= 0:
+    if industry_profile_id_raw:
+        try:
+            industry_profile_id = int(industry_profile_id_raw)
+        except (ValueError, TypeError):
+            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
+        if industry_profile_id <= 0:
+            industry_profile_id = None
+    else:
         industry_profile_id = None
     owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
@@ -375,11 +391,29 @@ def industry_portfolio_candidates(character_id: int):
     )
 
 
+_VALID_OBJECTIVES = {"balanced", "max_isk_per_hour"}
+_VALID_PRICING_CONFIDENCES = {"low", "medium", "high"}
+
+
 @industry_bp.post("/industry_products/<int:character_id>/portfolio_plan")
 def industry_portfolio_plan(character_id: int):
     require_ready(get_state())
     require_sde_ready(get_state())
     payload = request.get_json(silent=True) or {}
+
+    raw_objective = str(payload.get("objective") or "").strip().lower()
+    if raw_objective and raw_objective not in _VALID_OBJECTIVES:
+        return error(
+            message=f"Invalid objective '{raw_objective}'. Must be one of: {sorted(_VALID_OBJECTIVES)}.",
+            status_code=400,
+        )
+    raw_confidence = str(payload.get("minimum_pricing_confidence") or "").strip().lower()
+    if raw_confidence and raw_confidence not in _VALID_PRICING_CONFIDENCES:
+        return error(
+            message=f"Invalid minimum_pricing_confidence '{raw_confidence}'. Must be one of: {sorted(_VALID_PRICING_CONFIDENCES)}.",
+            status_code=400,
+        )
+
     plan_request = _portfolio_plan_request_from_payload(payload)
 
     svc = IndustryService(state=get_state())
@@ -399,11 +433,14 @@ def industry_portfolio_plan(character_id: int):
         product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
         owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
         raw_industry_profile_id = payload.get("industry_profile_id")
-        try:
-            industry_profile_id = int(raw_industry_profile_id) if raw_industry_profile_id is not None else None
-        except Exception:
-            industry_profile_id = None
-        if industry_profile_id is not None and industry_profile_id <= 0:
+        if raw_industry_profile_id is not None:
+            try:
+                industry_profile_id = int(raw_industry_profile_id)
+            except (ValueError, TypeError):
+                return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
+            if industry_profile_id <= 0:
+                industry_profile_id = None
+        else:
             industry_profile_id = None
 
         candidate_payload = svc.industry_manufacturing_portfolio_candidates_payload(
@@ -493,6 +530,9 @@ def industry_structure_rigs():
 def create_industry_profile():
     require_ready(get_state())
     data = request.get_json(silent=True) or {}
+    profile_name = str(data.get("profile_name") or "").strip()
+    if not profile_name:
+        return error(message="profile_name is required and must be non-empty.", status_code=400)
     svc = IndustryService(state=get_state())
     profile_id = svc.create_industry_profile(data=data)
     return ok(data={"id": profile_id}, status_code=201)
@@ -502,6 +542,8 @@ def create_industry_profile():
 def update_industry_profile(profile_id: int):
     require_ready(get_state())
     data = request.get_json(silent=True) or {}
+    if "profile_name" in data and not str(data.get("profile_name") or "").strip():
+        return error(message="profile_name must be non-empty when provided.", status_code=400)
     svc = IndustryService(state=get_state())
     svc.update_industry_profile(profile_id=profile_id, data=data)
     return ok(message="Industry profile updated successfully.")

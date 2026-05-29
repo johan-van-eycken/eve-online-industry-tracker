@@ -322,13 +322,15 @@ class IndustryService:
         # Player structures: determine by structure size via type name or known type IDs.
         if structure_type_id is not None:
             structure_type_id_int = int(structure_type_id)
-            # Known medium engineering complexes (cannot build capitals).
-            _MEDIUM_ENGINEERING_COMPLEXES = {35825}  # Raitaru
-            # Known large/XL engineering complexes (can build capitals).
-            _LARGE_XL_ENGINEERING_COMPLEXES = {35826, 35827}  # Azbel, Sotiyo
-            if structure_type_id_int in _MEDIUM_ENGINEERING_COMPLEXES:
+            # Structures that cannot build capital ships.
+            # Includes: Raitaru (35825), Astrahus (35832), Fortizar (35833),
+            #           Keepstar (35834), Athanor (35835), Tatara (35836).
+            _NON_CAPITAL_STRUCTURES = {35825, 35832, 35833, 35834, 35835, 35836}
+            # Engineering complexes that can build capital ships: Azbel (35826), Sotiyo (35827).
+            _CAPITAL_ENGINEERING_COMPLEXES = {35826, 35827}
+            if structure_type_id_int in _NON_CAPITAL_STRUCTURES:
                 return False
-            if structure_type_id_int in _LARGE_XL_ENGINEERING_COMPLEXES:
+            if structure_type_id_int in _CAPITAL_ENGINEERING_COMPLEXES:
                 return True
             # Fallback: infer from structure type name stored on profile.
             structure_type_name = str(profile_payload.get("structure_type_name") or "").lower()
@@ -336,9 +338,11 @@ class IndustryService:
                 # Try bonuses payload for type name lookup.
                 bonuses = profile_payload.get("structure_type_bonuses") or {}
                 structure_type_name = str(bonuses.get("type_name") or "").lower()
-            if any(x in structure_type_name for x in ("raitaru", "athanor", "astra")):
+            # Non-capital structures by name (citadels, refineries, medium ECs).
+            if any(x in structure_type_name for x in ("raitaru", "athanor", "astra", "fortizar", "keepstar", "tatara")):
                 return False
-            if any(x in structure_type_name for x in ("azbel", "sotiyo", "tatara", "fortizar", "keepstar")):
+            # Only Azbel and Sotiyo (engineering complexes) can manufacture capitals.
+            if any(x in structure_type_name for x in ("azbel", "sotiyo")):
                 return True
         # Unknown facility — conservatively allow.
         return True
