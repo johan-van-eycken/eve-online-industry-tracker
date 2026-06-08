@@ -261,6 +261,23 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         profit_margin_fraction = node.get("profit_margin_fraction")
         isk_per_hour = node.get("isk_per_hour")
         pricing_confidence = node.get("pricing_confidence")
+        days_of_supply = node.get("days_of_supply")
+        sell_through_rate = node.get("sell_through_rate")
+        liquidity_indicator = node.get("liquidity_indicator")
+        liquidity_score = node.get("liquidity_score")
+        price_anomaly_risk = node.get("price_anomaly_risk")
+        price_anomaly_reasons = node.get("price_anomaly_reasons")
+        price_vs_material_ratio = node.get("price_vs_material_ratio")
+        price_vs_history_ratio = node.get("price_vs_history_ratio")
+        history_7d_avg = node.get("history_7d_avg")
+        return_on_capital = node.get("return_on_capital")
+        manufacture_window_ok = node.get("manufacture_window_ok")
+        blueprint_me = node.get("blueprint_me")
+        prep_time_fraction_pct = node.get("prep_time_fraction_pct")
+        fragile_margin = node.get("fragile_margin")
+        blueprint_sde_fallback = node.get("blueprint_sde_fallback")
+        material_contention = node.get("material_contention")
+        manufacturing_cost_index = node.get("manufacturing_cost_index")
         bpc_source = ""
         bpo_source = ""
         meta_group = str(node.get("meta_group_name") or "")
@@ -312,6 +329,23 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             profit_margin_fraction = source_row.get("profit_margin_fraction")
             isk_per_hour = source_row.get("isk_per_hour")
             pricing_confidence = source_row.get("pricing_confidence")
+            days_of_supply = source_row.get("days_of_supply")
+            sell_through_rate = source_row.get("sell_through_rate")
+            liquidity_indicator = source_row.get("liquidity_indicator")
+            liquidity_score = source_row.get("liquidity_score")
+            price_anomaly_risk = source_row.get("price_anomaly_risk")
+            price_anomaly_reasons = source_row.get("price_anomaly_reasons")
+            price_vs_material_ratio = source_row.get("price_vs_material_ratio")
+            price_vs_history_ratio = source_row.get("price_vs_history_ratio")
+            history_7d_avg = source_row.get("history_7d_avg")
+            return_on_capital = source_row.get("return_on_capital")
+            manufacture_window_ok = source_row.get("manufacture_window_ok")
+            blueprint_me = source_row.get("blueprint_me")
+            prep_time_fraction_pct = source_row.get("prep_time_fraction_pct")
+            fragile_margin = source_row.get("fragile_margin")
+            blueprint_sde_fallback = source_row.get("blueprint_sde_fallback")
+            material_contention = source_row.get("material_contention")
+            manufacturing_cost_index = source_row.get("manufacturing_cost_index")
             blueprint_copy = manufacturing_job.get("blueprint_copy") or {}
             blueprint_original = manufacturing_job.get("blueprint_original") or {}
             if isinstance(blueprint_copy, dict):
@@ -342,6 +376,10 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 profit_margin_fraction = source_row.get("profit_margin_fraction")
                 isk_per_hour = source_row.get("isk_per_hour")
                 pricing_confidence = source_row.get("pricing_confidence")
+                days_of_supply = source_row.get("days_of_supply")
+                sell_through_rate = source_row.get("sell_through_rate")
+                liquidity_indicator = source_row.get("liquidity_indicator")
+                liquidity_score = source_row.get("liquidity_score")
                 blueprint_copy = manufacturing_job.get("blueprint_copy") or {}
                 blueprint_original = manufacturing_job.get("blueprint_original") or {}
                 if isinstance(blueprint_copy, dict):
@@ -367,7 +405,6 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "ID": display_id,
                 "Step": tree_node_step_label(source_row, node),
                 "Icon": tree_node_icon_url(source_row, node),
-                "Type": tree_node_type_label(node),
                 "Activity": tree_node_activity_label(node),
                 "Qty": node.get("quantity"),
                 "Runs": node.get("runs"),
@@ -376,17 +413,18 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                     if duration_seconds is not None and int(duration_seconds or 0) > 0
                     else ""
                 ),
-                "Material Cost": material_cost,
-                "Job Cost": job_cost,
-                "Total Cost": total_cost,
-                "Market Unit Price": market_unit_price,
-                "Gross Sale Value": gross_sale_value,
-                "Broker Fee": broker_fee_amount,
-                "Sales Tax": sales_tax_amount,
-                "Net Proceeds": net_proceeds,
                 "Profit": profit_amount,
                 "Profit Margin %": (float(profit_margin_fraction) * 100.0 if profit_margin_fraction is not None else None),
                 "ISK/Hour": isk_per_hour,
+                "Net Proceeds": net_proceeds,
+                "Total Cost": total_cost,
+                "Material Cost": material_cost,
+                "Job Cost": job_cost,
+                "Broker Fee": broker_fee_amount,
+                "Sales Tax": sales_tax_amount,
+                "Market Unit Price": market_unit_price,
+                "Gross Sale Value": gross_sale_value,
+                "Type": tree_node_type_label(node),
                 "Pricing Confidence": pricing_confidence,
                 "Market Price Source": market_price_source,
                 "Market Volume": market_volume,
@@ -396,6 +434,29 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Hub Sell Liquidity": hub_sell_liquidity,
                 "Hub Buy Orders": hub_buy_order_count,
                 "Hub Sell Orders": hub_sell_order_count,
+                "Days of Supply": days_of_supply,
+                "Sell-Through Rate %": sell_through_rate,
+                "Liquidity Indicator": liquidity_indicator,
+                "Liquidity Score": liquidity_score,
+                "Price Anomaly Risk": price_anomaly_risk,
+                "Price Anomaly Reasons": (
+                    "; ".join(price_anomaly_reasons) if isinstance(price_anomaly_reasons, list) and price_anomaly_reasons else None
+                ),
+                "Price vs Material Ratio": price_vs_material_ratio,
+                "Price vs History Ratio": price_vs_history_ratio,
+                "History 7d Avg": history_7d_avg,
+                "Return on Capital %": (float(return_on_capital) * 100.0 if return_on_capital is not None else None),
+                "Manufacture Window": (
+                    "OK" if manufacture_window_ok is True
+                    else "⚠ At Risk" if manufacture_window_ok is False
+                    else None
+                ),
+                "Blueprint ME": blueprint_me,
+                "Prep Time %": prep_time_fraction_pct,
+                "Fragile Margin": ("⚠ Yes" if fragile_margin else None),
+                "SDE Fallback": ("⚠ No Blueprint" if blueprint_sde_fallback else None),
+                "Material Contention": ("⚠ Yes" if material_contention else None),
+                "Mfg Cost Index %": (float(manufacturing_cost_index) * 100.0 if manufacturing_cost_index is not None else None),
                 "Market Hub": market_hub,
                 "BPC Source": bpc_source,
                 "BPO Source": bpo_source,
@@ -506,8 +567,12 @@ def filter_overview_rows(
     min_margin_pct: float,
     min_isk_per_hour: float,
     min_region_daily_volume: int,
+    excluded_liquidity_indicators: tuple[str, ...] = (),
+    excluded_anomaly_risks: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     enabled_meta_group_set = set(enabled_meta_groups)
+    excluded_liq_set = set(excluded_liquidity_indicators)
+    excluded_anomaly_set = set(excluded_anomaly_risks)
     return [
         row
         for row in overview_rows
@@ -522,6 +587,8 @@ def filter_overview_rows(
         )
         and float(row.get("isk_per_hour") or 0.0) >= float(min_isk_per_hour or 0.0)
         and int(row.get("region_daily_volume") or 0) >= int(min_region_daily_volume or 0)
+        and str(row.get("liquidity_indicator") or "Unknown") not in excluded_liq_set
+        and str(row.get("price_anomaly_risk") or "None") not in excluded_anomaly_set
     ]
 
 

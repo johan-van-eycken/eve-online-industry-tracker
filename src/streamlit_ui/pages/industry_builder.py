@@ -8,8 +8,20 @@ from streamlit_ui.state.industry_builder_ui import (
     build_debug_payload_preview,
     filter_overview_rows,
 )
-from streamlit_ui.state.industry_snapshot_page import prepare_shared_industry_snapshot_page
+from streamlit_ui.state.industry_snapshot_page import (
+    format_scope_refreshed_at,
+    prepare_shared_industry_snapshot_page,
+    render_pricing_batch_panel,
+)
+from streamlit_ui.state.industry_builder_ui import meta_group_label, ordered_meta_group_names, get_meta_group_name
 from streamlit_ui.components.webpage_ui import require_aggrid
+from streamlit_ui.api.industry_profiles import build_industry_profile_options
+from streamlit_ui.state.industry_builder_page import (
+    fetch_industry_profiles_cached,
+    start_overview_refresh_job,
+)
+from streamlit_ui.api.industry_builder import start_product_overview_refresh
+from typing import cast, Any
 
 
 def _format_age_minutes(value: Any) -> str:
@@ -149,54 +161,6 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 st.dataframe(activity_rows, width="stretch", hide_index=True)
 
 
-def _build_unknown_opening_stock_rows(filtered_overview_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    audit_rows: list[dict[str, Any]] = []
-    for row in filtered_overview_rows:
-        if not isinstance(row, dict):
-            continue
-        manufacturing_job = cast(dict[str, Any], row.get("manufacturing_job") or {})
-        procurement_materials = manufacturing_job.get("procurement_materials") or manufacturing_job.get("materials") or {}
-        if not isinstance(procurement_materials, dict):
-            continue
-        for material in procurement_materials.values():
-            if not isinstance(material, dict):
-                continue
-            if not bool(material.get("uses_unknown_owned_cost_basis")):
-                continue
-            audit_rows.append(
-                {
-                    "Product": str(row.get("type_name") or row.get("type_id") or "Unknown"),
-                    "Material": str(material.get("type_name") or material.get("type_id") or "Unknown"),
-                    "Qty": int(material.get("quantity") or 0),
-                    "Fallback Unit Price": material.get("unit_price"),
-                    "Fallback Line Total": material.get("line_total"),
-                    "Fallback Source": material.get("price_source"),
-                    "Profit": row.get("profit_amount"),
-                    "Confidence": row.get("pricing_confidence"),
-                    "Overview Row Id": str(row.get("overview_row_id") or ""),
-                }
-            )
-    return sorted(audit_rows, key=lambda item: float(item.get("Fallback Line Total") or 0.0), reverse=True)
-
-
-def _render_unknown_opening_stock_audit(filtered_overview_rows: list[dict[str, Any]]) -> None:
-    audit_rows = _build_unknown_opening_stock_rows(filtered_overview_rows)
-    with st.expander("Unknown opening stock audit", expanded=False):
-        if not audit_rows:
-            st.caption("No current overview rows are taking owned inventory with missing cost basis.")
-            return
-        total_line_value = sum(float(row.get("Fallback Line Total") or 0.0) for row in audit_rows)
-        unique_products = len({str(row.get("Overview Row Id") or "") for row in audit_rows})
-        metric_col_1, metric_col_2, metric_col_3 = st.columns(3)
-        metric_col_1.metric("Audit Rows", len(audit_rows))
-        metric_col_2.metric("Affected Products", unique_products)
-        metric_col_3.metric("Fallback Value", f"{total_line_value:,.2f} ISK")
-        st.caption(
-            "These rows consumed owned inventory, but no owned acquisition cost was available, so job costing fell back to market pricing for those units."
-        )
-        st.dataframe(audit_rows, width="stretch", hide_index=True)
-
-
 def _render_overview_grid(
     *,
     runtime: Any,
@@ -323,6 +287,17 @@ def _render_overview_grid(
                 autoHeaderHeight=False,
             )
 
+    for col in ["Days of Supply", "Sell-Through Rate %", "Liquidity Score"]:
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                minWidth=130,
+                wrapHeaderText=False,
+                autoHeaderHeight=False,
+            )
+
     for col in [
         "Region Daily Volume",
         "Region Daily Volume (7d Avg)",
@@ -337,6 +312,142 @@ def _render_overview_grid(
                 minWidth=130,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
+            )
+
+    if "Liquidity Indicator" in df.columns:
+        gb.configure_column(
+            "Liquidity Indicator",
+            minWidth=140,
+            wrapHeaderText=False,
+            autoHeaderHeight=False,
+            cellStyle=runtime.js_code(
+                """
+                function(params) {
+                    var v = params.value;
+                    if (!v) return {};
+                    if (v === 'Very High') return { color: '#22c55e', fontWeight: '700' };
+                    if (v === 'High')      return { color: '#86efac', fontWeight: '600' };
+                    if (v === 'Medium')    return { color: '#facc15', fontWeight: '500' };
+                    if (v === 'Low')       return { color: '#f97316', fontWeight: '600' };
+                    if (v === 'Very Low')  return { color: '#ef4444', fontWeight: '700' };
+                    return { color: '#9ca3af' };
+                }
+                """
+            ),
+        )
+
+    if "Price Anomaly Risk" in df.columns:
+        gb.configure_column(
+            "Price Anomaly Risk",
+            minWidth=140,
+            wrapHeaderText=False,
+            autoHeaderHeight=False,
+            cellStyle=runtime.js_code(
+                """
+                function(params) {
+                    var v = params.value;
+                    if (!v) return {};
+                    if (v === 'High')   return { color: '#ef4444', fontWeight: '700' };
+                    if (v === 'Medium') return { color: '#f97316', fontWeight: '600' };
+                    if (v === 'Low')    return { color: '#eab308', fontWeight: '500' };
+                    return {};
+                }
+                """
+            ),
+        )
+
+    for col in ["Price Anomaly Reasons"]:
+        if col in df.columns:
+            gb.configure_column(col, minWidth=300, wrapHeaderText=False, autoHeaderHeight=False)
+
+    for col in ["Price vs Material Ratio", "Price vs History Ratio"]:
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+                minWidth=150,
+                wrapHeaderText=False,
+                autoHeaderHeight=False,
+            )
+
+    if "History 7d Avg" in df.columns:
+        gb.configure_column(
+            "History 7d Avg",
+            type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+            minWidth=140,
+            wrapHeaderText=False,
+            autoHeaderHeight=False,
+        )
+
+    for col in ["Return on Capital %", "Prep Time %", "Mfg Cost Index %"]:
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                minWidth=130,
+                wrapHeaderText=False,
+                autoHeaderHeight=False,
+            )
+
+    if "Blueprint ME" in df.columns:
+        gb.configure_column(
+            "Blueprint ME",
+            type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
+            minWidth=110,
+            wrapHeaderText=False,
+            autoHeaderHeight=False,
+            cellStyle=runtime.js_code(
+                """
+                function(params) {
+                    var v = params.value;
+                    if (v === null || v === undefined || v === '') return {};
+                    var n = Number(v);
+                    if (n >= 10) return { color: '#22c55e', fontWeight: '700' };
+                    if (n >= 7)  return { color: '#86efac' };
+                    if (n >= 4)  return { color: '#facc15' };
+                    return { color: '#f97316', fontWeight: '600' };
+                }
+                """
+            ),
+        )
+
+    if "Manufacture Window" in df.columns:
+        gb.configure_column(
+            "Manufacture Window",
+            minWidth=140,
+            wrapHeaderText=False,
+            autoHeaderHeight=False,
+            cellStyle=runtime.js_code(
+                """
+                function(params) {
+                    var v = String(params.value || '');
+                    if (v === 'OK')        return { color: '#22c55e', fontWeight: '600' };
+                    if (v.indexOf('Risk') >= 0) return { color: '#f97316', fontWeight: '600' };
+                    return {};
+                }
+                """
+            ),
+        )
+
+    for col in ["Fragile Margin", "SDE Fallback", "Material Contention"]:
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                minWidth=140,
+                wrapHeaderText=False,
+                autoHeaderHeight=False,
+                cellStyle=runtime.js_code(
+                    """
+                    function(params) {
+                        if (params.value) return { color: '#f97316', fontWeight: '600' };
+                        return {};
+                    }
+                    """
+                ),
             )
 
     if "Job Duration" in df.columns:
@@ -417,6 +528,13 @@ def _render_overview_grid(
             ),
         },
     }
+    grid_options["onFirstDataRendered"] = runtime.js_code(
+        """
+        function(params) {
+            params.api.autoSizeAllColumns();
+        }
+        """
+    )
 
     runtime.aggrid_fn(
         df,
@@ -427,7 +545,7 @@ def _render_overview_grid(
         enable_enterprise_modules=True,
         theme="streamlit",
         height=height,
-        fit_columns_on_grid_load=True,
+        fit_columns_on_grid_load=False,
         key=f"industry_builder_products_overview_{grid_state_key}",
     )
 
@@ -463,6 +581,122 @@ def _render_debug_panel(filtered_overview_rows: list[dict[str, Any]]) -> None:
     else:
         with st.expander("Raw data (for debugging)", expanded=False):
             st.write({})
+
+
+def _render_overview_columns_about() -> None:
+    def _content() -> None:
+        st.markdown("**Days of Supply**")
+        st.caption(
+            "Hub sell orderbook depth ÷ 7-day average daily region volume. "
+            "How many days it would take to sell through all current hub sell orders at the recent daily sales pace. "
+            "Blank if the 7-day average is zero or missing."
+        )
+        st.markdown("**Sell-Through Rate %**")
+        st.caption(
+            "7-day average daily region volume ÷ hub sell orderbook depth × 100. "
+            "The inverse of Days of Supply — what fraction of the hub orderbook turns over per day. "
+            "Blank if hub sell liquidity is zero."
+        )
+        st.markdown("**Liquidity Indicator**")
+        st.caption("Text label derived from Days of Supply:")
+        st.markdown(
+            "| DOS | Label |\n"
+            "|---|---|\n"
+            "| < 1 day | Very High |\n"
+            "| 1–3 days | High |\n"
+            "| 3–7 days | Medium |\n"
+            "| 7–30 days | Low |\n"
+            "| ≥ 30 days | Very Low |\n"
+            "| 7d avg missing | Unknown |"
+        )
+        st.markdown("**Liquidity Score**")
+        st.caption(
+            "Composite 0–100 score. "
+            "70% from Days of Supply (linear: 1 day → 96.7, 30 days → 0) "
+            "and 30% from hub sell order count (linear: 100 orders → 100, capped). "
+            "Returns 0 if the 7-day average is missing."
+        )
+        st.markdown("**Price Anomaly Risk**")
+        st.caption(
+            "Flags products where the current market price looks manipulated or unreliable. "
+            "Checked against two signals: how many times higher the price is vs. material cost (Tier 1), "
+            "and how far it deviates from the 7-day historical average (Tier 2). "
+            "High = strong manipulation signal (e.g. price is 1,000×+ material cost or 5×+ historical average). "
+            "Medium = elevated but less extreme. Low = thin orderbook only. None = no anomaly detected."
+        )
+        st.markdown("**Price Anomaly Reasons**")
+        st.caption(
+            "Human-readable explanation of what triggered the anomaly flag. "
+            "Shows the specific ratios and thresholds that were breached."
+        )
+        st.markdown("**Price vs Material Ratio**")
+        st.caption(
+            "Current market price ÷ unit material cost. "
+            "A ratio above ~1.2 is a normal margin. Above 100 is suspicious. Above 1,000 strongly suggests manipulation."
+        )
+        st.markdown("**Price vs History Ratio**")
+        st.caption(
+            "Current market price ÷ 7-day historical average price (from ESI market history). "
+            "A ratio above 2 means the price is elevated vs. recent history. Above 5 is a strong manipulation signal."
+        )
+        st.markdown("**History 7d Avg**")
+        st.caption(
+            "The mean closing price over the last 7 days of ESI market history for this item in the selected hub's region. "
+            "Lags by 1 day — today's manipulated price does not affect this baseline."
+        )
+        st.markdown("**Return on Capital %**")
+        st.caption(
+            "Profit ÷ total manufacturing cost × 100. "
+            "Tells you how efficiently your capital is working — a 200M build returning 5M (2.5% ROC) is less attractive "
+            "than a 10M build returning 2M (20% ROC), even if absolute ISK/hour is similar."
+        )
+        st.markdown("**Manufacture Window**")
+        st.caption(
+            "OK = the hub sell orderbook will last longer than your build time. "
+            "⚠ At Risk = the current supply sells through before you finish — the market may already be restocked by the time you list. "
+            "Blank if Days of Supply or build time is unavailable."
+        )
+        st.markdown("**Blueprint ME**")
+        st.caption(
+            "Material Efficiency level of the blueprint being used (0–10). "
+            "ME10 is maximum — every level below increases material cost. "
+            "Green = ME10, yellow = ME4–6, orange = ME0–3. "
+            "A low ME may be the reason a product shows a thin margin."
+        )
+        st.markdown("**Prep Time %**")
+        st.caption(
+            "What fraction of total job time is spent on prerequisite activities (invention, copying, research) "
+            "rather than the manufacturing step itself. "
+            "60% prep means most of your slot time is overhead, not production."
+        )
+        st.markdown("**Fragile Margin**")
+        st.caption(
+            "⚠ flagged when profit margin is between 0% and 5%. "
+            "A single undercut or small price move can eliminate the profit entirely. "
+            "High execution risk."
+        )
+        st.markdown("**SDE Fallback**")
+        st.caption(
+            "⚠ flagged when the row uses SDE blueprint defaults rather than an owned blueprint. "
+            "This means you don't actually have a BPC or BPO — the row is theoretical only."
+        )
+        st.markdown("**Material Contention**")
+        st.caption(
+            "⚠ flagged when this product competes for the same owned inventory as a higher-ranked build. "
+            "Profit may be overstated if materials are allocated to a more profitable product first."
+        )
+        st.markdown("**Mfg Cost Index %**")
+        st.caption(
+            "The system manufacturing cost index as a percentage of the job's estimated item value. "
+            "Higher = more expensive system. A 5% cost index is roughly neutral; above 8% starts eroding margins significantly."
+        )
+
+    if hasattr(st, "popover"):
+        with st.popover("?", help="About the data columns"):
+            _content()
+    else:
+        with st.expander("?", expanded=False):
+            _content()
 
 
 def _render_page_about() -> None:
@@ -516,6 +750,9 @@ def render() -> None:
             refresh_button_key="industry_builder_refresh_overview",
             no_rows_message="No manufacturable product rows are available yet.",
             render_about_fn=_render_page_about,
+            render_refresh_button=False,
+            render_selector_section_ui=False,
+            render_status_panels=False,
         )
     except Exception as e:
         st.error(str(e))
@@ -523,29 +760,308 @@ def render() -> None:
     if page_context is None:
         return
 
-    _applied_meta_groups = (
-        st.session_state.get("industry_builder_enabled_meta_groups_applied")
-        or set(st.session_state.get("industry_builder_enabled_meta_groups_pending") or set())
-        or page_context.enabled_meta_groups
+    # Extract all meta groups from overview data
+    all_meta_groups = {"Tech I", "Tech II", "Tech III", "Faction", "Storyline", "Other"}
+
+    # Get selector data for form
+    character_options = page_context.character_options
+    selected_character_id = int(st.session_state.get("industry_builder_character_id", page_context.default_character_id_value))
+    owned_blueprint_scope_options = page_context.owned_blueprint_scope_options
+    owned_blueprint_scope_labels = page_context.owned_blueprint_scope_labels
+
+    industry_profiles = fetch_industry_profiles_cached(character_id=int(selected_character_id))
+    industry_profile_options, industry_profile_labels, default_industry_profile_id = build_industry_profile_options(
+        cast(list[dict[str, Any]], industry_profiles)
     )
+
+    # Create filter form with 3-column layout
+    with st.form("industry_builder_filters"):
+        # SELECTOR ROW: Owned Blueprints, Character Skills, Industry Profile
+        selector_cols = st.columns(3, gap="large")
+
+        with selector_cols[0]:
+            default_scope = str(st.session_state.get("industry_builder_owned_blueprints_scope", page_context.default_owned_blueprint_scope))
+            scope_index = owned_blueprint_scope_options.index(default_scope) if default_scope in owned_blueprint_scope_options else 0
+            owned_blueprint_scope = st.selectbox(
+                "Owned Blueprints",
+                options=owned_blueprint_scope_options,
+                format_func=lambda x: owned_blueprint_scope_labels.get(str(x), str(x)),
+                index=scope_index,
+                key="form_owned_blueprints_scope",
+            )
+            refreshed_at = page_context.scope_last_refreshed_at.get(str(owned_blueprint_scope))
+            st.caption(f"Data: {format_scope_refreshed_at(refreshed_at)}")
+
+        with selector_cols[1]:
+            default_char_id = int(st.session_state.get("industry_builder_character_id", selected_character_id))
+            char_options = list(character_options.keys())
+            char_index = char_options.index(default_char_id) if default_char_id in char_options else 0
+            character_id = st.selectbox(
+                "Character Skills",
+                options=char_options,
+                format_func=lambda x: character_options.get(int(x), str(x)),
+                index=char_index,
+                key="form_character_id",
+            )
+            # Update industry profiles when character changes
+            if character_id != selected_character_id:
+                industry_profiles = fetch_industry_profiles_cached(character_id=int(character_id))
+                industry_profile_options, industry_profile_labels, default_industry_profile_id = build_industry_profile_options(
+                    cast(list[dict[str, Any]], industry_profiles)
+                )
+
+        with selector_cols[2]:
+            default_profile_id = int(st.session_state.get("industry_builder_industry_profile_id", page_context.default_industry_profile_id))
+            profile_index = industry_profile_options.index(default_profile_id) if default_profile_id in industry_profile_options else 0
+            industry_profile_id = st.selectbox(
+                "Industry Profile",
+                options=industry_profile_options,
+                format_func=lambda x: industry_profile_labels.get(int(x), str(x)),
+                index=profile_index,
+                key="form_industry_profile_id",
+            )
+            if not industry_profiles:
+                st.caption("No saved profiles")
+
+        st.divider()
+
+        # FILTER ROWS: Meta Groups, Misc, Market, Profit Filters, Quality Filters
+        left_col, market_col, profit_col, quality_col = st.columns([2, 1, 1, 1], gap="large")
+
+        # LEFT COLUMN: Meta Groups + Misc
+        with left_col:
+            st.caption("**Meta Group Filters**")
+            meta_cols = st.columns(3)
+            meta_group_selections = {}
+            for i, meta_group_name in enumerate(ordered_meta_group_names(all_meta_groups)):
+                with meta_cols[i % 3]:
+                    default_value = meta_group_name in {"Tech I", "Tech II", "Faction", "Storyline", "Other"}
+                    enabled = st.toggle(
+                        meta_group_label(meta_group_name),
+                        value=default_value,
+                        key=f"form_meta_{meta_group_name}",
+                    )
+                    if enabled:
+                        meta_group_selections[meta_group_name] = True
+
+            st.markdown("<hr style='margin: 0.25rem 0;'/>", unsafe_allow_html=True)
+            st.caption("**Misc**")
+            misc_cols = st.columns(3)
+
+            with misc_cols[0]:
+                maximize_bp_runs = st.toggle(
+                    "Maximize BP runs",
+                    value=bool(st.session_state.get("industry_builder_maximize_bp_runs_pending", True)),
+                    key="form_maximize_bp",
+                )
+                have_bpc_bpo = st.toggle("I have a BPC/BPO", value=True, key="form_have_bpc")
+
+            with misc_cols[1]:
+                group_bpcs = st.toggle(
+                    "Group identical BPCs",
+                    value=bool(st.session_state.get("industry_builder_group_identical_bpcs", True)),
+                    key="form_group_bpcs",
+                )
+                have_skills = st.toggle(
+                    "I have the skills",
+                    value=bool(st.session_state.get("industry_builder_have_skills_only", True)),
+                    key="form_have_skills",
+                )
+
+            with misc_cols[2]:
+                build_from_bpc = st.toggle(
+                    "Build from BPC",
+                    value=bool(st.session_state.get("industry_builder_build_from_bpc", True)),
+                    key="form_build_bpc",
+                )
+                include_reactions = st.toggle(
+                    "Include reactions",
+                    value=bool(st.session_state.get("industry_builder_include_reactions", False)),
+                    disabled=not page_context.reactions_allowed_for_profile,
+                    key="form_reactions",
+                )
+
+        # MIDDLE COLUMN: Market
+        with market_col:
+            st.caption("**Market**")
+            hub_options = ["jita", "amarr", "dodixie", "rens", "hek"]
+            default_hub = str(st.session_state.get("industry_builder_market_hub", "jita"))
+            hub_index = hub_options.index(default_hub) if default_hub in hub_options else 0
+            market_hub = st.selectbox(
+                "Trade Hub",
+                options=hub_options,
+                format_func=lambda v: {
+                    "jita": "Jita 4-4",
+                    "amarr": "Amarr VIII (Oris)",
+                    "dodixie": "Dodixie IX - Moon 20",
+                    "rens": "Rens VI - Moon 8",
+                    "hek": "Hek VIII - Moon 12",
+                }[v],
+                index=hub_index,
+                key="form_market_hub",
+            )
+
+            material_options = ["sell", "buy"]
+            default_material = str(st.session_state.get("industry_builder_material_price_side", "sell"))
+            material_index = material_options.index(default_material) if default_material in material_options else 0
+            material_side = st.selectbox(
+                "Input Pricing",
+                options=material_options,
+                format_func=lambda v: "Buy from Sell Orders" if v == "sell" else "Buy with Buy Orders",
+                index=material_index,
+                key="form_material_side",
+            )
+
+            product_options = ["sell", "buy"]
+            default_product = str(st.session_state.get("industry_builder_product_price_side", "sell"))
+            product_index = product_options.index(default_product) if default_product in product_options else 0
+            product_side = st.selectbox(
+                "Output Pricing",
+                options=product_options,
+                format_func=lambda v: "Place Sell Orders" if v == "sell" else "Sell to Buy Orders",
+                index=product_index,
+                key="form_product_side",
+            )
+
+        # RIGHT COLUMN: Profit Filters
+        with profit_col:
+            st.caption("**Profit Filters**")
+            positive_only = st.toggle(
+                "Positive profit only",
+                value=bool(st.session_state.get("industry_builder_positive_profit_only", False)),
+                key="form_positive_profit",
+            )
+
+            min_margin = st.number_input(
+                "Min Margin (%)",
+                min_value=0.0,
+                step=0.5,
+                value=float(st.session_state.get("industry_builder_min_margin_pct", 0.0)),
+                key="form_min_margin",
+            )
+
+            min_isk_hour = st.number_input(
+                "Min ISK/Hour",
+                min_value=0.0,
+                step=100000.0,
+                value=float(st.session_state.get("industry_builder_min_isk_per_hour", 0.0)),
+                key="form_min_isk",
+            )
+
+            min_volume = st.number_input(
+                "Min Region Daily Volume",
+                min_value=0,
+                step=1,
+                value=int(st.session_state.get("industry_builder_min_region_daily_volume", 0)),
+                key="form_min_volume",
+            )
+
+        # RIGHT-MOST COLUMN: Quality Filters
+        with quality_col:
+            st.caption("**Exclude Liquidity**")
+            _liq_options = ["Very High", "High", "Medium", "Low", "Very Low", "Unknown"]
+            _liq_default = list(st.session_state.get("industry_builder_liquidity_exclude", ["Very Low", "Unknown"]))
+            liquidity_exclude = st.multiselect(
+                "Exclude Liquidity",
+                options=_liq_options,
+                default=_liq_default,
+                key="form_liquidity_exclude",
+                label_visibility="collapsed",
+            )
+
+            st.caption("**Exclude Price Anomaly Risk**")
+            _anomaly_options = ["None", "Low", "Medium", "High"]
+            _anomaly_default = list(st.session_state.get("industry_builder_anomaly_exclude", ["High"]))
+            anomaly_exclude = st.multiselect(
+                "Exclude Price Anomaly Risk",
+                options=_anomaly_options,
+                default=_anomaly_default,
+                key="form_anomaly_exclude",
+                label_visibility="collapsed",
+            )
+
+        # Form submit button
+        submitted = st.form_submit_button("Refresh Overview", use_container_width=True)
+
+    # Apply selectors and filters when form is submitted
+    if submitted:
+        # Store selector values in session state
+        st.session_state["industry_builder_owned_blueprints_scope"] = owned_blueprint_scope
+        st.session_state["industry_builder_character_id"] = int(character_id)
+        st.session_state["industry_builder_industry_profile_id"] = int(industry_profile_id)
+
+        # Store misc filter values in session state
+        st.session_state["industry_builder_maximize_bp_runs_pending"] = maximize_bp_runs
+        st.session_state["industry_builder_group_identical_bpcs"] = group_bpcs
+        st.session_state["industry_builder_build_from_bpc"] = build_from_bpc
+        st.session_state["industry_builder_have_blueprint_source_only"] = True
+        st.session_state["industry_builder_have_skills_only"] = have_skills
+        st.session_state["industry_builder_include_reactions"] = include_reactions
+
+        # Store market filter values in session state
+        st.session_state["industry_builder_market_hub"] = market_hub
+        st.session_state["industry_builder_material_price_side"] = material_side
+        st.session_state["industry_builder_product_price_side"] = product_side
+
+        # Store profit filter values in session state
+        st.session_state["industry_builder_positive_profit_only"] = positive_only
+        st.session_state["industry_builder_min_margin_pct"] = min_margin
+        st.session_state["industry_builder_min_isk_per_hour"] = min_isk_hour
+        st.session_state["industry_builder_min_region_daily_volume"] = min_volume
+
+        # Store quality filter values in session state
+        st.session_state["industry_builder_liquidity_exclude"] = liquidity_exclude
+        st.session_state["industry_builder_anomaly_exclude"] = anomaly_exclude
+
+        # Start a refresh job to fetch new overview data with the selected filters
+        try:
+            start_overview_refresh_job(
+                default_character_id_value=page_context.default_character_id_value,
+                default_industry_profile_id=page_context.default_industry_profile_id,
+                default_owned_blueprint_scope=page_context.default_owned_blueprint_scope,
+                reactions_allowed_for_profile=page_context.reactions_allowed_for_profile,
+                start_refresh_fn=start_product_overview_refresh,
+            )
+        except Exception as e:
+            st.error(f"Failed to start refresh: {e}")
+            return
+
+        # Rerun to show refresh progress
+        st.rerun()
+
+    enabled_meta_groups = set(meta_group_selections.keys())
     filtered_overview_rows = filter_overview_rows(
         page_context.overview_rows,
-        tuple(sorted(_applied_meta_groups)),
-        bool(st.session_state.get("industry_builder_have_skills_only_applied", True)),
-        bool(st.session_state.get("industry_builder_positive_profit_only_applied", False)),
-        float(st.session_state.get("industry_builder_min_margin_pct_applied", 0.0) or 0.0),
-        float(st.session_state.get("industry_builder_min_isk_per_hour_applied", 0.0) or 0.0),
-        int(st.session_state.get("industry_builder_min_region_daily_volume_applied", 0) or 0),
+        tuple(sorted(enabled_meta_groups)),
+        have_skills,
+        positive_only,
+        min_margin,
+        min_isk_hour,
+        min_volume,
+        tuple(sorted(liquidity_exclude)) if liquidity_exclude else (),
+        tuple(sorted(anomaly_exclude)) if anomaly_exclude else (),
     )
+
     if not filtered_overview_rows:
         st.info("No manufacturable product rows match the current filters.")
         return
+
+    # Render pricing info with job manager status below form
+    overview_meta = cast(dict[str, Any], st.session_state.get("industry_builder_overview_meta") or {})
+    job_manager_status = cast(dict[str, Any], st.session_state.get("industry_builder_job_manager_status") or {})
+    pricing_panel_col, about_col = st.columns([20, 1])
+    with pricing_panel_col:
+        render_pricing_batch_panel(
+            cast(dict[str, Any], overview_meta.get("pricing_batch") or overview_meta),
+            job_manager_status=job_manager_status,
+        )
+    with about_col:
+        _render_overview_columns_about()
 
     _render_overview_grid(
         runtime=runtime,
         filtered_overview_rows=filtered_overview_rows,
     )
     _render_profitability_drilldown(filtered_overview_rows)
-    _render_unknown_opening_stock_audit(filtered_overview_rows)
     _render_debug_panel(filtered_overview_rows)
 
