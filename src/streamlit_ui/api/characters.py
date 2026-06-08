@@ -99,6 +99,29 @@ def build_owned_blueprint_character_corporation_scope_options(
     return option_values, label_by_value, default_value
 
 
+def build_scope_refreshed_at_map(characters: list[dict[str, Any]]) -> dict[str, str | None]:
+    """Map each scope value to the character's updated_at timestamp."""
+    result: dict[str, str | None] = {}
+    for character in characters:
+        if not isinstance(character, dict):
+            continue
+        try:
+            character_id = int(character.get("character_id") or 0)
+        except Exception:
+            character_id = 0
+        if character_id <= 0:
+            continue
+        updated_at = character.get("updated_at")
+        result[f"character:{character_id}"] = updated_at
+        try:
+            corporation_id = int(character.get("corporation_id") or 0)
+        except Exception:
+            corporation_id = 0
+        if corporation_id > 0:
+            result[f"character_and_corporation:{character_id}:{corporation_id}"] = updated_at
+    return result
+
+
 def fetch_characters() -> list[dict]:
     """Fetch character list from the Flask API.
 

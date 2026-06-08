@@ -24,6 +24,7 @@ from eve_online_industry_tracker.db_models import (
 )
 
 from eve_online_industry_tracker.application.errors import ServiceError
+from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 from flask_app.background_jobs import register_thread
 from eve_online_industry_tracker.infrastructure.session_provider import (
@@ -1629,6 +1630,179 @@ class IndustryService:
 
         return product_rows
 
+    def _enrich_product_rows_with_liquidity_metrics(
+        self,
+        product_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not product_rows:
+            return product_rows
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+
+            manufacturing_job = row.get("manufacturing_job") or {}
+            hub_sell_liquidity = int(manufacturing_job.get("hub_sell_liquidity") or 0)
+            region_daily_volume_7d_avg = self._as_float(manufacturing_job.get("region_daily_volume_7d_avg"))
+            hub_sell_orders = int(manufacturing_job.get("hub_sell_order_count") or 0)
+
+            row["days_of_supply"] = self._calculate_days_of_supply(
+                hub_sell_liquidity=hub_sell_liquidity,
+                region_daily_volume_7d_avg=region_daily_volume_7d_avg,
+            )
+            row["sell_through_rate"] = self._calculate_sell_through_rate(
+                region_daily_volume_7d_avg=region_daily_volume_7d_avg,
+                hub_sell_liquidity=hub_sell_liquidity,
+            )
+            row["liquidity_indicator"] = self._calculate_liquidity_indicator(
+                hub_sell_liquidity=hub_sell_liquidity,
+                region_daily_volume_7d_avg=region_daily_volume_7d_avg,
+                hub_sell_orders=hub_sell_orders,
+            )
+            row["liquidity_score"] = self._calculate_liquidity_score(
+                hub_sell_liquidity=hub_sell_liquidity,
+                region_daily_volume_7d_avg=region_daily_volume_7d_avg,
+                hub_sell_orders=hub_sell_orders,
+            )
+
+        return product_rows
+
+    def _enrich_product_rows_with_price_anomaly(
+        self,
+        product_rows: list[dict[str, Any]],
+        *,
+        market_hub: str,
+    ) -> list[dict[str, Any]]:
+        if not product_rows:
+            return product_rows
+
+        pricing_service = MarketPricingService(state=self._state, sessions=self._sessions)
+        hub_context = pricing_service._market_hub_context(market_hub)
+        region_id = int(hub_context.get("region_id") or 10000002)
+
+        history_service = MarketHistoryService(state=self._state, sessions=self._sessions)
+
+        type_ids = sorted({
+            int(row.get("type_id") or 0)
+            for row in product_rows
+            if isinstance(row, dict) and int(row.get("type_id") or 0) > 0
+        })
+
+        # Fetch ESI history for any type_id not yet in the DB (runs once; subsequent calls hit the DB)
+        missing: list[int] = []
+        for tid in type_ids:
+            stats = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
+            if not stats.get("has_data"):
+                missing.append(tid)
+
+        if missing:
+            with ThreadPoolExecutor(max_workers=20) as pool:
+                futures = {
+                    pool.submit(history_service.fetch_and_store_history, type_id=tid, region_id=region_id): tid
+                    for tid in missing
+                }
+                for f in as_completed(futures):
+                    try:
+                        f.result()
+                    except Exception:
+                        pass
+
+        # Load price stats for all type_ids
+        price_stats: dict[int, dict[str, Any]] = {}
+        for tid in type_ids:
+            try:
+                price_stats[tid] = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
+            except Exception:
+                price_stats[tid] = {"has_data": False}
+
+        _risk_order: dict[str, int] = {"High": 3, "Medium": 2, "Low": 1}
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                manufacturing_job = {}
+
+            type_id = int(row.get("type_id") or 0)
+            market_unit_price = self._as_float(row.get("market_unit_price"))
+            quantity = max(1, int(row.get("quantity") or 1))
+            material_cost = self._as_float(manufacturing_job.get("material_cost"))
+            hub_sell_order_count = int(row.get("hub_sell_order_count") or 0)
+
+            anomaly_reasons: list[str] = []
+            risk_level: str | None = None
+
+            def upgrade(level: str) -> str | None:
+                if _risk_order.get(level, 0) > _risk_order.get(risk_level or "", 0):
+                    return level
+                return risk_level
+
+            price_vs_material_ratio: float | None = None
+            price_vs_history_ratio: float | None = None
+            history_7d_avg: float | None = None
+
+            if market_unit_price is not None and market_unit_price > 0:
+                # Tier 1a: price vs unit material cost
+                if material_cost is not None and material_cost > 0:
+                    unit_material_cost = material_cost / quantity
+                    if unit_material_cost > 0:
+                        price_vs_material_ratio = market_unit_price / unit_material_cost
+                        if price_vs_material_ratio > 1000:
+                            anomaly_reasons.append(
+                                f"Price is {price_vs_material_ratio:,.0f}× material cost — likely manipulated or data error"
+                            )
+                            risk_level = upgrade("High")
+                        elif price_vs_material_ratio > 100:
+                            anomaly_reasons.append(
+                                f"Price is {price_vs_material_ratio:,.0f}× material cost — unusually high markup"
+                            )
+                            risk_level = upgrade("Medium")
+                    if market_unit_price < material_cost / quantity:
+                        anomaly_reasons.append("Market price is below manufacturing material cost")
+                        risk_level = upgrade("Medium")
+
+                # Tier 1b: thin orderbook
+                if hub_sell_order_count < 3:
+                    anomaly_reasons.append(
+                        f"Only {hub_sell_order_count} sell order(s) at hub — thin market, easy to manipulate"
+                    )
+                    risk_level = upgrade("Low")
+
+                # Tier 2: historical price comparison
+                stats = price_stats.get(type_id) or {}
+                if stats.get("has_data"):
+                    avg_7d = self._as_float(stats.get("avg_7d"))
+                    avg_60d = self._as_float(stats.get("avg_42w"))  # avg over the 60-day window
+                    baseline = avg_7d or avg_60d
+                    history_7d_avg = avg_7d
+                    if baseline and baseline > 0:
+                        price_vs_history_ratio = market_unit_price / baseline
+                        if price_vs_history_ratio > 5:
+                            anomaly_reasons.append(
+                                f"Price is {price_vs_history_ratio:.1f}× 7-day historical average — strong manipulation signal"
+                            )
+                            risk_level = upgrade("High")
+                        elif price_vs_history_ratio > 2:
+                            anomaly_reasons.append(
+                                f"Price is {price_vs_history_ratio:.1f}× 7-day historical average — elevated"
+                            )
+                            risk_level = upgrade("Medium")
+                        elif price_vs_history_ratio < 0.3:
+                            anomaly_reasons.append(
+                                f"Price is {price_vs_history_ratio:.2f}× 7-day historical average — significantly below historical norm"
+                            )
+                            risk_level = upgrade("Medium")
+
+            row["price_anomaly_risk"] = risk_level
+            row["price_anomaly_reasons"] = anomaly_reasons
+            row["price_vs_material_ratio"] = price_vs_material_ratio
+            row["price_vs_history_ratio"] = price_vs_history_ratio
+            row["history_7d_avg"] = history_7d_avg
+
+        return product_rows
+
     def _enrich_product_rows_with_pricing_confidence(
         self,
         product_rows: list[dict[str, Any]],
@@ -1721,6 +1895,31 @@ class IndustryService:
             else:
                 reasons.append("Regional trade volume is absent.")
 
+            # Liquidity quality signal
+            liquidity_indicator = str(row.get("liquidity_indicator") or "")
+            if liquidity_indicator in ("Very High", "High"):
+                score += 2
+                reasons.append(f"Market liquidity is {liquidity_indicator.lower()} — sell-through is reliable.")
+            elif liquidity_indicator == "Medium":
+                score += 1
+                reasons.append("Market liquidity is medium — some sell-side uncertainty.")
+            elif liquidity_indicator in ("Low", "Very Low"):
+                reasons.append(f"Market liquidity is {liquidity_indicator.lower()} — pricing may be unreliable.")
+
+            # Price anomaly / manipulation signal
+            price_anomaly_risk = str(row.get("price_anomaly_risk") or "")
+            price_anomaly_reasons_list = row.get("price_anomaly_reasons") or []
+            if price_anomaly_risk == "High":
+                score = max(0, score - 6)
+                detail = ("; ".join(price_anomaly_reasons_list[:1])) if price_anomaly_reasons_list else "see Price Anomaly Reasons column"
+                reasons.append(f"High price anomaly risk — market may be manipulated ({detail}).")
+            elif price_anomaly_risk == "Medium":
+                score = max(0, score - 3)
+                reasons.append("Price anomaly signals detected — treat pricing with caution.")
+            elif price_anomaly_risk == "Low":
+                score = max(0, score - 1)
+                reasons.append("Minor price anomaly signal (thin orderbook).")
+
             if market_unit_price is None or market_unit_price <= 0:
                 confidence = "Low"
             elif score >= 7:
@@ -1811,6 +2010,92 @@ class IndustryService:
             row["profit_amount"] = profit_amount
             row["profit_margin_fraction"] = margin_fraction
             row["isk_per_hour"] = isk_per_hour
+
+        return product_rows
+
+    def _enrich_product_rows_with_manufacturing_signals(
+        self,
+        product_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not product_rows:
+            return product_rows
+
+        for row in product_rows:
+            if not isinstance(row, dict):
+                continue
+            manufacturing_job = row.get("manufacturing_job") or {}
+            if not isinstance(manufacturing_job, dict):
+                manufacturing_job = {}
+
+            profit_amount = self._as_float(row.get("profit_amount"))
+            total_cost = self._as_float(manufacturing_job.get("total_cost"))
+            time_seconds = self._as_float(manufacturing_job.get("time_seconds"))
+            preparation_time_seconds = self._as_float(manufacturing_job.get("preparation_time_seconds"))
+            profit_margin_fraction = self._as_float(row.get("profit_margin_fraction"))
+            days_of_supply = self._as_float(row.get("days_of_supply"))
+            blueprint_source_kind = str(manufacturing_job.get("blueprint_source_kind") or row.get("blueprint_source_kind") or "")
+            quantity = max(1, int(row.get("quantity") or 1))
+
+            # Return on capital: profit / total_cost
+            return_on_capital: float | None = None
+            if profit_amount is not None and total_cost is not None and total_cost > 0:
+                return_on_capital = profit_amount / total_cost
+
+            # Manufacture window: will the hub sell through before the build finishes?
+            manufacture_window_ok: bool | None = None
+            if days_of_supply is not None and time_seconds is not None and time_seconds > 0:
+                build_time_days = time_seconds / 86400.0
+                manufacture_window_ok = days_of_supply >= build_time_days
+
+            # Blueprint ME level
+            blueprint_me: int | None = None
+            raw_me = manufacturing_job.get("blueprint_material_efficiency")
+            if raw_me is not None:
+                try:
+                    blueprint_me = int(raw_me)
+                except (TypeError, ValueError):
+                    pass
+
+            # Prep time fraction
+            prep_time_fraction_pct: float | None = None
+            if time_seconds is not None and time_seconds > 0:
+                prep_secs = float(preparation_time_seconds or 0.0)
+                prep_time_fraction_pct = (prep_secs / time_seconds) * 100.0
+
+            # Fragile margin: profitable but margin < 5 %
+            fragile_margin = (
+                profit_margin_fraction is not None
+                and profit_margin_fraction > 0
+                and profit_margin_fraction < 0.05
+            )
+
+            # Blueprint SDE fallback: theoretical row, no owned blueprint
+            blueprint_sde_fallback = blueprint_source_kind == "blueprint_sde_fallback"
+
+            # Material contention: competing with higher-ranked builds for same owned stock
+            material_contention = not bool(row.get("inventory_allocation_optimal", True))
+
+            # Manufacturing cost index from activity breakdown
+            manufacturing_cost_index: float | None = None
+            activity_breakdown = manufacturing_job.get("activity_breakdown") or {}
+            if isinstance(activity_breakdown, dict):
+                mfg_activity = activity_breakdown.get("manufacturing") or {}
+                if isinstance(mfg_activity, dict):
+                    raw_ci = mfg_activity.get("cost_index")
+                    if raw_ci is not None:
+                        try:
+                            manufacturing_cost_index = float(raw_ci)
+                        except (TypeError, ValueError):
+                            pass
+
+            row["return_on_capital"] = return_on_capital
+            row["manufacture_window_ok"] = manufacture_window_ok
+            row["blueprint_me"] = blueprint_me
+            row["prep_time_fraction_pct"] = prep_time_fraction_pct
+            row["fragile_margin"] = fragile_margin
+            row["blueprint_sde_fallback"] = blueprint_sde_fallback
+            row["material_contention"] = material_contention
+            row["manufacturing_cost_index"] = manufacturing_cost_index
 
         return product_rows
 
@@ -2199,6 +2484,24 @@ class IndustryService:
             "region_daily_volume_7d_avg": region_daily_volume_7d_avg,
             "hub_buy_liquidity": int(row.get("hub_buy_liquidity") or 0),
             "hub_sell_liquidity": int(row.get("hub_sell_liquidity") or 0),
+            "days_of_supply": cls._calculate_days_of_supply(
+                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
+            ),
+            "sell_through_rate": cls._calculate_sell_through_rate(
+                region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
+                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+            ),
+            "liquidity_indicator": cls._calculate_liquidity_indicator(
+                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
+                hub_sell_orders=int(row.get("hub_sell_order_count") or 0),
+            ),
+            "liquidity_score": cls._calculate_liquidity_score(
+                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
+                hub_sell_orders=int(row.get("hub_sell_order_count") or 0),
+            ),
             "pricing_confidence": row.get("pricing_confidence"),
             "pricing_confidence_reasons": row.get("pricing_confidence_reasons") or [],
             "market_price_age_minutes": cls._as_float(row.get("market_price_age_minutes")),
@@ -3132,6 +3435,68 @@ class IndustryService:
             return float(value)
         except Exception:
             return None
+
+    @staticmethod
+    def _calculate_days_of_supply(hub_sell_liquidity: int, region_daily_volume_7d_avg: float | None) -> float | None:
+        """Calculate Days of Supply (DOS) = Hub Sell Liquidity / Region Daily Volume (7d avg)"""
+        try:
+            if region_daily_volume_7d_avg is None or float(region_daily_volume_7d_avg) <= 0:
+                return None
+            return float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    @staticmethod
+    def _calculate_sell_through_rate(region_daily_volume_7d_avg: float | None, hub_sell_liquidity: int) -> float | None:
+        """Calculate Sell-Through Rate (%) = (Region Daily Volume 7d avg / Hub Sell Liquidity) * 100"""
+        try:
+            if region_daily_volume_7d_avg is None or hub_sell_liquidity is None or hub_sell_liquidity <= 0:
+                return None
+            return (float(region_daily_volume_7d_avg) / float(hub_sell_liquidity)) * 100.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    @staticmethod
+    def _calculate_liquidity_indicator(hub_sell_liquidity: int, region_daily_volume_7d_avg: float | None, hub_sell_orders: int) -> str:
+        """Calculate liquidity indicator based on DOS ranges: Very High, High, Medium, Low, Very Low"""
+        try:
+            if region_daily_volume_7d_avg is None or float(region_daily_volume_7d_avg) <= 0:
+                return "Unknown"
+            dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
+
+            if dos < 1:
+                return "Very High"
+            elif dos < 3:
+                return "High"
+            elif dos < 7:
+                return "Medium"
+            elif dos < 30:
+                return "Low"
+            else:
+                return "Very Low"
+        except (TypeError, ValueError, ZeroDivisionError):
+            return "Unknown"
+
+    @staticmethod
+    def _calculate_liquidity_score(hub_sell_liquidity: int, region_daily_volume_7d_avg: float, hub_sell_orders: int) -> float:
+        """Calculate combined liquidity score (0-100) based on DOS and order count"""
+        try:
+            if region_daily_volume_7d_avg is None or region_daily_volume_7d_avg <= 0:
+                return 0.0
+
+            dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
+
+            # DOS score: lower DOS is better (1 day = 100, 30 days = 0, linear scale)
+            dos_score = max(0.0, min(100.0, 100.0 - (dos / 30.0 * 100.0)))
+
+            # Order count score: more orders is better (log scale, 100 orders = 100)
+            order_count_score = min(100.0, (float(hub_sell_orders) / 100.0) * 100.0) if hub_sell_orders > 0 else 0.0
+
+            # Combined score: 70% DOS, 30% order count
+            liquidity_score = (dos_score * 0.7) + (order_count_score * 0.3)
+            return round(liquidity_score, 2)
+        except Exception:
+            return 0.0
 
     @classmethod
     def _apply_material_pricing_to_job_tree(
@@ -4938,11 +5303,44 @@ class IndustryService:
         if not blueprint_type_ids:
             return [], []
 
+        # Only include historical blueprints that are currently locked inside an
+        # active industry job.  A blueprint absent from both current assets and
+        # any active job has been consumed (1-run BPC) or sold — not available.
+        from eve_online_industry_tracker.infrastructure.models import (
+            CharacterIndustryJobsModel,
+            CorporationIndustryJobsModel,
+        )
+
+        _active_statuses = {"active", "paused", "ready"}
+        in_active_job_item_ids: set[int] = set()
+
+        if normalized_character_ids:
+            for (bp_item_id,) in (
+                app_session.query(CharacterIndustryJobsModel.blueprint_item_id)
+                .filter(CharacterIndustryJobsModel.character_id.in_(normalized_character_ids))
+                .filter(CharacterIndustryJobsModel.status.in_(_active_statuses))
+                .filter(CharacterIndustryJobsModel.blueprint_item_id.isnot(None))
+                .all()
+            ):
+                in_active_job_item_ids.add(int(bp_item_id))
+
+        if normalized_corporation_ids:
+            for (bp_item_id,) in (
+                app_session.query(CorporationIndustryJobsModel.blueprint_item_id)
+                .filter(CorporationIndustryJobsModel.corporation_id.in_(normalized_corporation_ids))
+                .filter(CorporationIndustryJobsModel.status.in_(_active_statuses))
+                .filter(CorporationIndustryJobsModel.blueprint_item_id.isnot(None))
+                .all()
+            ):
+                in_active_job_item_ids.add(int(bp_item_id))
+
         historical_character_assets: list[CharacterAssetsModel] = []
         for row in latest_character_rows:
             item_id = int(getattr(row, "item_id", 0) or 0)
             type_id = int(getattr(row, "type_id", 0) or 0)
             if item_id <= 0 or type_id not in blueprint_type_ids or item_id in current_item_ids:
+                continue
+            if item_id not in in_active_job_item_ids:
                 continue
             asset = self._materialize_historical_blueprint_asset(row, owner_kind="character")
             if isinstance(asset, CharacterAssetsModel):
@@ -4953,6 +5351,8 @@ class IndustryService:
             item_id = int(getattr(row, "item_id", 0) or 0)
             type_id = int(getattr(row, "type_id", 0) or 0)
             if item_id <= 0 or type_id not in blueprint_type_ids or item_id in current_item_ids:
+                continue
+            if item_id not in in_active_job_item_ids:
                 continue
             asset = self._materialize_historical_blueprint_asset(row, owner_kind="corporation")
             if isinstance(asset, CorporationAssetsModel):
@@ -6463,11 +6863,14 @@ class IndustryService:
 
         product_rows = self._enrich_product_rows_with_material_prices(product_rows, market_hub=normalized_market_hub, material_price_side=normalized_material_price_side, progress_callback=progress_callback)
         product_rows = self._enrich_product_rows_with_market_activity(product_rows, market_hub=normalized_market_hub)
+        product_rows = self._enrich_product_rows_with_liquidity_metrics(product_rows)
+        product_rows = self._enrich_product_rows_with_price_anomaly(product_rows, market_hub=normalized_market_hub)
         if progress_callback is not None:
             progress_callback(0.93, "Calculating sale proceeds and profit metrics", {"stage": "profit"})
         product_rows = self._enrich_product_rows_with_sale_proceeds(product_rows, character_id=character_id, market_hub=normalized_market_hub, product_price_side=normalized_product_price_side)
         product_rows = self._enrich_product_rows_with_profit_metrics(product_rows)
         product_rows = self._score_inventory_allocation_priority(product_rows)
+        product_rows = self._enrich_product_rows_with_manufacturing_signals(product_rows)
         if progress_callback is not None:
             progress_callback(0.97, "Scoring pricing confidence", {"stage": "finalize"})
         product_rows = self._enrich_product_rows_with_pricing_confidence(product_rows, product_price_side=normalized_product_price_side)

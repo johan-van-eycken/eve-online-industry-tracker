@@ -5,8 +5,6 @@ from typing import Any, Callable, cast
 import streamlit as st
 
 from streamlit_ui.api.industry_profiles import fetch_industry_profiles
-from streamlit_ui.state.industry_builder_ui import meta_group_label, meta_group_toggle_key
-from streamlit_ui.state.page_preferences import load_page_preferences, save_page_preferences
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
 
 
@@ -20,7 +18,7 @@ _REFRESH_PROGRESS_META_KEY = "industry_builder_refresh_progress_meta"
 _PREFERENCES_NAMESPACE = "industry_builder"
 _MISC_SETTING_DEFAULTS: dict[str, bool] = {
     "industry_builder_maximize_bp_runs_pending": True,
-    "industry_builder_group_identical_bpcs": True,
+    "industry_builder_group_identical_bpcs": False,
     "industry_builder_build_from_bpc": True,
     "industry_builder_have_blueprint_source_only": True,
     "industry_builder_have_skills_only": True,
@@ -32,7 +30,7 @@ _MARKET_SETTING_DEFAULTS: dict[str, str] = {
     "industry_builder_product_price_side": "sell",
 }
 _PROFIT_FILTER_DEFAULTS: dict[str, Any] = {
-    "industry_builder_positive_profit_only": False,
+    "industry_builder_positive_profit_only": True,
     "industry_builder_min_margin_pct": 0.0,
     "industry_builder_min_isk_per_hour": 0.0,
     "industry_builder_min_region_daily_volume": 0,
@@ -86,141 +84,11 @@ def ensure_selection_state(
         {
             "industry_builder_owned_blueprints_scope_applied": default_owned_blueprint_scope,
             "industry_builder_character_id_applied": int(default_character_id_value),
-            "industry_builder_industry_profile_id": 0,
             "industry_builder_industry_profile_id_applied": 0,
         }
     )
 
 
-def ensure_toggle_state() -> None:
-    persisted_preferences = load_page_preferences(_PREFERENCES_NAMESPACE)
-    persisted_misc_settings = persisted_preferences.get("misc") or {}
-    if not isinstance(persisted_misc_settings, dict):
-        persisted_misc_settings = {}
-    persisted_market_settings = persisted_preferences.get("market") or {}
-    if not isinstance(persisted_market_settings, dict):
-        persisted_market_settings = {}
-    persisted_profit_filters = persisted_preferences.get("profit_filters") or {}
-    if not isinstance(persisted_profit_filters, dict):
-        persisted_profit_filters = {}
-
-    ensure_state_defaults(
-        {
-            "industry_builder_maximize_bp_runs_pending": bool(
-                persisted_misc_settings.get("industry_builder_maximize_bp_runs_pending", True)
-            ),
-            "industry_builder_maximize_bp_runs_applied": True,
-            "industry_builder_group_identical_bpcs": bool(
-                persisted_misc_settings.get("industry_builder_group_identical_bpcs", True)
-            ),
-            "industry_builder_group_identical_bpcs_applied": True,
-            "industry_builder_build_from_bpc": bool(
-                persisted_misc_settings.get("industry_builder_build_from_bpc", True)
-            ),
-            "industry_builder_build_from_bpc_applied": True,
-            "industry_builder_have_blueprint_source_only": bool(
-                persisted_misc_settings.get("industry_builder_have_blueprint_source_only", True)
-            ),
-            "industry_builder_have_blueprint_source_only_applied": True,
-            "industry_builder_include_reactions": bool(
-                persisted_misc_settings.get("industry_builder_include_reactions", False)
-            ),
-            "industry_builder_include_reactions_applied": False,
-            "industry_builder_have_skills_only": bool(
-                persisted_misc_settings.get("industry_builder_have_skills_only", True)
-            ),
-            "industry_builder_market_hub": str(
-                persisted_market_settings.get("industry_builder_market_hub", "jita") or "jita"
-            ),
-            "industry_builder_market_hub_applied": "jita",
-            "industry_builder_material_price_side": str(
-                persisted_market_settings.get("industry_builder_material_price_side", "sell") or "sell"
-            ),
-            "industry_builder_material_price_side_applied": "sell",
-            "industry_builder_product_price_side": str(
-                persisted_market_settings.get("industry_builder_product_price_side", "sell") or "sell"
-            ),
-            "industry_builder_product_price_side_applied": "sell",
-            "industry_builder_positive_profit_only": bool(
-                persisted_profit_filters.get("industry_builder_positive_profit_only", False)
-            ),
-            "industry_builder_min_margin_pct": float(
-                persisted_profit_filters.get("industry_builder_min_margin_pct", 0.0) or 0.0
-            ),
-            "industry_builder_min_isk_per_hour": float(
-                persisted_profit_filters.get("industry_builder_min_isk_per_hour", 0.0) or 0.0
-            ),
-            "industry_builder_min_region_daily_volume": int(
-                persisted_profit_filters.get(
-                    "industry_builder_min_region_daily_volume",
-                    persisted_profit_filters.get("industry_builder_min_market_volume", 0),
-                )
-                or 0
-            ),
-        }
-    )
-
-
-def ensure_meta_group_filter_state(meta_group_names: list[str]) -> None:
-    persisted_preferences = load_page_preferences(_PREFERENCES_NAMESPACE)
-    persisted_meta_group_filters = persisted_preferences.get("meta_group_filters") or {}
-    if not isinstance(persisted_meta_group_filters, dict):
-        persisted_meta_group_filters = {}
-
-    applied_meta_groups: set[str] = set(
-        st.session_state.get("industry_builder_enabled_meta_groups_applied") or set()
-    )
-    has_applied_state = "industry_builder_enabled_meta_groups_applied" in st.session_state and bool(applied_meta_groups)
-
-    for meta_group_name in meta_group_names:
-        toggle_key = meta_group_toggle_key(meta_group_name)
-        if has_applied_state:
-            st.session_state[toggle_key] = meta_group_name in applied_meta_groups
-        elif toggle_key in st.session_state:
-            continue
-        else:
-            st.session_state[toggle_key] = bool(
-                persisted_meta_group_filters.get(meta_group_name, meta_group_label(meta_group_name) == "Tech I")
-            )
-
-
-def persist_filter_preferences(meta_group_names: list[str]) -> None:
-    persisted_preferences = load_page_preferences(_PREFERENCES_NAMESPACE)
-    misc_preferences = {
-        key: bool(st.session_state.get(key, default_value))
-        for key, default_value in _MISC_SETTING_DEFAULTS.items()
-    }
-    market_preferences = {
-        key: str(st.session_state.get(key, default_value) or default_value)
-        for key, default_value in _MARKET_SETTING_DEFAULTS.items()
-    }
-    profit_filter_preferences = {
-        "industry_builder_positive_profit_only": bool(st.session_state.get("industry_builder_positive_profit_only", False)),
-        "industry_builder_min_margin_pct": float(st.session_state.get("industry_builder_min_margin_pct", 0.0) or 0.0),
-        "industry_builder_min_isk_per_hour": float(st.session_state.get("industry_builder_min_isk_per_hour", 0.0) or 0.0),
-        "industry_builder_min_region_daily_volume": int(
-            st.session_state.get("industry_builder_min_region_daily_volume", 0) or 0
-        ),
-    }
-    meta_group_preferences = {
-        meta_group_name: bool(
-            st.session_state.get(
-                meta_group_toggle_key(meta_group_name),
-                meta_group_label(meta_group_name) == "Tech I",
-            )
-        )
-        for meta_group_name in meta_group_names
-    }
-    save_page_preferences(
-        _PREFERENCES_NAMESPACE,
-        {
-            **persisted_preferences,
-            "misc": misc_preferences,
-            "market": market_preferences,
-            "profit_filters": profit_filter_preferences,
-            "meta_group_filters": meta_group_preferences,
-        },
-    )
 
 
 def ensure_refresh_state() -> None:

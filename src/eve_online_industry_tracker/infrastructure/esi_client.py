@@ -24,6 +24,8 @@ except Exception:  # pragma: no cover
     jwt = None
     RSAAlgorithm = None
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert  # pyright: ignore[reportMissingModuleSource]
+
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.models import EsiCache, OAuthCharacter
@@ -624,19 +626,16 @@ class ESIClient:
     def save_to_cache(self, endpoint: str, etag: Optional[str], data: Dict[str, Any]) -> None:
         try:
             serialized_data = jsonlib.dumps(data)
-            cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == endpoint).first()
-            if cache_entry:
-                cache_entry.etag = etag
-                cache_entry.data = serialized_data
-                cache_entry.last_updated = int(time.time())
-            else:
-                cache_entry = EsiCache(
-                    endpoint=endpoint,
-                    etag=etag,
-                    data=serialized_data,
-                    last_updated=int(time.time()),
+            last_updated = int(time.time())
+            stmt = (
+                sqlite_insert(EsiCache)
+                .values(endpoint=endpoint, etag=etag, data=serialized_data, last_updated=last_updated)
+                .on_conflict_do_update(
+                    index_elements=["endpoint"],
+                    set_=dict(etag=etag, data=serialized_data, last_updated=last_updated),
                 )
-                self.db_oauth.session.add(cache_entry)
+            )
+            self.db_oauth.session.execute(stmt)
             self.db_oauth.session.commit()
             logging.debug(f"Cache updated for {endpoint}.")
         except Exception as e:
