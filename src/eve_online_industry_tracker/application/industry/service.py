@@ -17,10 +17,18 @@ from eve_online_industry_tracker.db_models import (
     Blueprints,
     CharacterAssetHistoryModel,
     CharacterAssetsModel,
+    CharacterIndustryJobsModel,
+    CharacterWalletTransactionsModel,
     CorporationAssetHistoryModel,
     CorporationAssetsModel,
+    CorporationIndustryJobsModel,
+    CorporationWalletTransactionsModel,
     NpcCorporations,
     NpcStations,
+)
+from eve_online_industry_tracker.application.characters.asset_provenance import (
+    build_fifo_remaining_lots_by_type,
+    fifo_allocate_cost,
 )
 
 from eve_online_industry_tracker.application.errors import ServiceError
@@ -1943,13 +1951,16 @@ class IndustryService:
                 mat_total = 0
                 mat_priced = 0
                 mat_with_known_cost = 0
+                unknown_cost_basis_count = 0
                 for mat in procurement_materials.values():
                     if not isinstance(mat, dict):
                         continue
                     mat_total += 1
                     if self._as_float(mat.get("unit_price")) is not None:
                         mat_priced += 1
-                    if not bool(mat.get("uses_unknown_owned_cost_basis", False)):
+                    if bool(mat.get("uses_unknown_owned_cost_basis", False)):
+                        unknown_cost_basis_count += 1
+                    else:
                         mat_with_known_cost += 1
                 if mat_total == 0:
                     material_confidence = "Low"
@@ -1959,8 +1970,14 @@ class IndustryService:
                     material_confidence = "Medium"
                 else:
                     material_confidence = "Low"
+                if unknown_cost_basis_count > 0:
+                    reasons.append(
+                        f"{unknown_cost_basis_count} of {mat_total} material(s) are taken from inventory "
+                        f"with no acquisition cost on record — cost estimated at market price."
+                    )
             else:
                 material_confidence = "Low"
+                unknown_cost_basis_count = 0
 
             overall_confidence_map = {"High": 2, "Medium": 1, "Low": 0}
             overall_score = min(
@@ -1971,8 +1988,10 @@ class IndustryService:
 
             manufacturing_job["material_pricing_confidence"] = material_confidence
             manufacturing_job["overall_pricing_confidence"] = overall_confidence
+            manufacturing_job["unknown_cost_basis_material_count"] = unknown_cost_basis_count
             row["material_pricing_confidence"] = material_confidence
             row["overall_pricing_confidence"] = overall_confidence
+            row["unknown_cost_basis_material_count"] = unknown_cost_basis_count
 
         return product_rows
 
@@ -5306,11 +5325,6 @@ class IndustryService:
         # Only include historical blueprints that are currently locked inside an
         # active industry job.  A blueprint absent from both current assets and
         # any active job has been consumed (1-run BPC) or sold — not available.
-        from eve_online_industry_tracker.infrastructure.models import (
-            CharacterIndustryJobsModel,
-            CorporationIndustryJobsModel,
-        )
-
         _active_statuses = {"active", "paused", "ready"}
         in_active_job_item_ids: set[int] = set()
 
@@ -5697,6 +5711,7 @@ class IndustryService:
         owned_blueprints_scope: str,
     ) -> tuple[dict[int, int], dict[int, float]]:
         session: Any = self._sessions.app_session()
+        sde_session: Any = self._sessions.sde_session()
         try:
             characters = self._state.char_manager.get_characters() or []
             character_ids: list[int] = []
@@ -5778,11 +5793,8 @@ class IndustryService:
             else:
                 character_assets = query_character_assets(character_ids)
 
+            # Build on-hand quantity map (excluding blueprints)
             quantity_by_type_id: dict[int, int] = {}
-            exact_cost_total_by_type_id: dict[int, float] = {}
-            exact_cost_quantity_by_type_id: dict[int, int] = {}
-            fallback_cost_total_by_type_id: dict[int, float] = {}
-            fallback_cost_quantity_by_type_id: dict[int, int] = {}
             for asset in [*character_assets, *corporation_assets]:
                 try:
                     type_id = int(asset.type_id or 0)
@@ -5798,43 +5810,128 @@ class IndustryService:
                     continue
                 quantity_by_type_id[type_id] = int(quantity_by_type_id.get(type_id, 0)) + quantity
 
-                unit_cost = self._as_float(getattr(asset, "acquisition_unit_cost", None))
-                if unit_cost is not None and unit_cost > 0:
-                    exact_cost_total_by_type_id[type_id] = float(exact_cost_total_by_type_id.get(type_id, 0.0)) + (float(unit_cost) * quantity)
-                    exact_cost_quantity_by_type_id[type_id] = int(exact_cost_quantity_by_type_id.get(type_id, 0)) + quantity
-                    continue
+            if not quantity_by_type_id:
+                return {}, {}
 
-                fallback_unit_cost = self._as_float(getattr(asset, "type_average_price", None))
-                if fallback_unit_cost is None or fallback_unit_cost <= 0:
-                    fallback_unit_cost = self._as_float(getattr(asset, "type_adjusted_price", None))
-                if fallback_unit_cost is None or fallback_unit_cost <= 0:
-                    continue
-                fallback_cost_total_by_type_id[type_id] = float(fallback_cost_total_by_type_id.get(type_id, 0.0)) + (float(fallback_unit_cost) * quantity)
-                fallback_cost_quantity_by_type_id[type_id] = int(fallback_cost_quantity_by_type_id.get(type_id, 0)) + quantity
+            type_ids_list = list(quantity_by_type_id.keys())
+            scoped_character_ids = sorted({int(getattr(a, "character_id")) for a in character_assets if getattr(a, "character_id", None) is not None})
+            scoped_corporation_ids = sorted({int(getattr(a, "corporation_id")) for a in corporation_assets if getattr(a, "corporation_id", None) is not None})
 
-            unit_cost_by_type_id: dict[int, float] = {}
-            for type_id, total_cost in exact_cost_total_by_type_id.items():
-                quantity = int(exact_cost_quantity_by_type_id.get(type_id, 0))
-                if quantity > 0:
-                    unit_cost_by_type_id[type_id] = float(total_cost) / float(quantity)
+            # Fetch wallet transactions and completed industry jobs for FIFO lot reconstruction
+            wallet_transactions: list[Any] = []
+            if scoped_character_ids:
+                wallet_transactions.extend(
+                    session.query(CharacterWalletTransactionsModel)
+                    .filter(CharacterWalletTransactionsModel.character_id.in_(scoped_character_ids))
+                    .filter(CharacterWalletTransactionsModel.type_id.in_(type_ids_list))
+                    .all()
+                )
+            if scoped_corporation_ids:
+                wallet_transactions.extend(
+                    session.query(CorporationWalletTransactionsModel)
+                    .filter(CorporationWalletTransactionsModel.corporation_id.in_(scoped_corporation_ids))
+                    .filter(CorporationWalletTransactionsModel.type_id.in_(type_ids_list))
+                    .all()
+                )
 
-            historical_cost_by_type_id = self._load_historical_item_unit_costs(
-                app_session=session,
-                character_ids=[asset.character_id for asset in character_assets if getattr(asset, "character_id", None) is not None],
-                corporation_ids=[asset.corporation_id for asset in corporation_assets if getattr(asset, "corporation_id", None) is not None],
-                type_ids=list(quantity_by_type_id.keys()),
+            industry_jobs: list[Any] = []
+            if scoped_character_ids:
+                industry_jobs.extend(
+                    session.query(CharacterIndustryJobsModel)
+                    .filter(CharacterIndustryJobsModel.character_id.in_(scoped_character_ids))
+                    .filter(CharacterIndustryJobsModel.product_type_id.in_(type_ids_list))
+                    .all()
+                )
+            if scoped_corporation_ids:
+                industry_jobs.extend(
+                    session.query(CorporationIndustryJobsModel)
+                    .filter(CorporationIndustryJobsModel.corporation_id.in_(scoped_corporation_ids))
+                    .filter(CorporationIndustryJobsModel.product_type_id.in_(type_ids_list))
+                    .all()
+                )
+
+            # Build FIFO lots per type aligned to current on-hand quantity.
+            # Jobs with a persisted unit_build_cost are used directly as lots;
+            # market_prices=None means jobs without a snapshot are skipped rather
+            # than estimated (acceptable — estimation is the fallback path below).
+            fifo_lots_by_type = build_fifo_remaining_lots_by_type(
+                wallet_transactions=wallet_transactions,
+                industry_jobs=industry_jobs,
+                sde_session=sde_session,
+                market_prices=None,
+                on_hand_quantities_by_type=quantity_by_type_id,
             )
-            for type_id, quantity in quantity_by_type_id.items():
-                if type_id in unit_cost_by_type_id:
+
+            # Derive FIFO-weighted average unit cost per type from the aligned lots
+            unit_cost_by_type_id: dict[int, float] = {}
+            for type_id, on_hand in quantity_by_type_id.items():
+                lots = fifo_lots_by_type.get(type_id) or []
+                if not lots:
                     continue
-                historical_unit_cost = self._as_float(historical_cost_by_type_id.get(type_id))
-                if historical_unit_cost is not None and historical_unit_cost > 0:
-                    unit_cost_by_type_id[type_id] = float(historical_unit_cost)
-                    continue
-                fallback_total_cost = float(fallback_cost_total_by_type_id.get(type_id, 0.0))
-                fallback_quantity = int(fallback_cost_quantity_by_type_id.get(type_id, 0))
-                if fallback_quantity > 0:
-                    unit_cost_by_type_id[type_id] = float(fallback_total_cost) / float(fallback_quantity)
+                total_cost, priced_qty = fifo_allocate_cost(lots=lots, quantity=on_hand)
+                if priced_qty > 0 and total_cost > 0:
+                    unit_cost_by_type_id[type_id] = total_cost / priced_qty
+
+            # For types the FIFO rebuild couldn't price (no transaction/job history),
+            # fall back to acquisition_unit_cost on the asset record → historical
+            # snapshot → type average/adjusted price (existing behaviour).
+            fallback_needed = [tid for tid in quantity_by_type_id if tid not in unit_cost_by_type_id]
+            if fallback_needed:
+                exact_cost_total: dict[int, float] = {}
+                exact_cost_qty: dict[int, int] = {}
+                fallback_cost_total: dict[int, float] = {}
+                fallback_cost_qty: dict[int, int] = {}
+
+                for asset in [*character_assets, *corporation_assets]:
+                    try:
+                        type_id = int(asset.type_id or 0)
+                    except Exception:
+                        type_id = 0
+                    if type_id not in fallback_needed:
+                        continue
+                    try:
+                        quantity = int(getattr(asset, "quantity", 0) or 0)
+                    except Exception:
+                        quantity = 0
+                    if quantity <= 0:
+                        continue
+
+                    unit_cost = self._as_float(getattr(asset, "acquisition_unit_cost", None))
+                    if unit_cost is not None and unit_cost > 0:
+                        exact_cost_total[type_id] = float(exact_cost_total.get(type_id, 0.0)) + float(unit_cost) * quantity
+                        exact_cost_qty[type_id] = int(exact_cost_qty.get(type_id, 0)) + quantity
+                        continue
+
+                    fallback_unit_cost = self._as_float(getattr(asset, "type_average_price", None))
+                    if fallback_unit_cost is None or fallback_unit_cost <= 0:
+                        fallback_unit_cost = self._as_float(getattr(asset, "type_adjusted_price", None))
+                    if fallback_unit_cost is None or fallback_unit_cost <= 0:
+                        continue
+                    fallback_cost_total[type_id] = float(fallback_cost_total.get(type_id, 0.0)) + float(fallback_unit_cost) * quantity
+                    fallback_cost_qty[type_id] = int(fallback_cost_qty.get(type_id, 0)) + quantity
+
+                for type_id, total_cost in exact_cost_total.items():
+                    qty = int(exact_cost_qty.get(type_id, 0))
+                    if qty > 0:
+                        unit_cost_by_type_id[type_id] = total_cost / qty
+
+                historical_costs = self._load_historical_item_unit_costs(
+                    app_session=session,
+                    character_ids=scoped_character_ids,
+                    corporation_ids=scoped_corporation_ids,
+                    type_ids=fallback_needed,
+                )
+                for type_id in fallback_needed:
+                    if type_id in unit_cost_by_type_id:
+                        continue
+                    hist = self._as_float(historical_costs.get(type_id))
+                    if hist is not None and hist > 0:
+                        unit_cost_by_type_id[type_id] = hist
+                        continue
+                    fb_total = float(fallback_cost_total.get(type_id, 0.0))
+                    fb_qty = int(fallback_cost_qty.get(type_id, 0))
+                    if fb_qty > 0:
+                        unit_cost_by_type_id[type_id] = fb_total / fb_qty
 
             return quantity_by_type_id, unit_cost_by_type_id
         finally:
@@ -7343,7 +7440,6 @@ class IndustryService:
 
     def industry_active_jobs(self, *, character_id: int | None = None) -> dict[str, Any]:
         """Return active industry jobs and slot capacities, optionally filtered by character."""
-        from eve_online_industry_tracker.infrastructure.models import CharacterIndustryJobsModel
         from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
         session: Any = self._sessions.app_session()

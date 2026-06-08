@@ -133,6 +133,7 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                     "Unit Price": material.get("unit_price"),
                     "Line Total": material.get("line_total"),
                     "Source": material.get("price_source"),
+                    "Est. Cost?": "⚠ est." if bool(material.get("uses_unknown_owned_cost_basis")) else "",
                 }
                 for material in procurement_materials.values()
                 if isinstance(material, dict)
