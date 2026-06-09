@@ -3166,11 +3166,31 @@ class IndustryService:
             recommendation_action = "buy"
             unit_price = buy_unit_price
             price_source = buy_price_source
+            take_quantity = 0
+            buy_quantity = quantity
+
             if available_owned_quantity >= quantity:
+                # Full take from owned inventory
                 available_owned_quantities[type_id] = max(0, available_owned_quantity - quantity)
                 unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
                 price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
                 recommendation_action = "take"
+                take_quantity = quantity
+                buy_quantity = 0
+            elif available_owned_quantity > 0:
+                # Partial: take what we own at FIFO cost, buy the remainder at market
+                take_quantity = available_owned_quantity
+                buy_quantity = quantity - take_quantity
+                available_owned_quantities[type_id] = 0
+                take_unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
+                if take_unit_price is not None and buy_unit_price is not None:
+                    unit_price = (float(take_unit_price) * take_quantity + float(buy_unit_price) * buy_quantity) / quantity
+                elif buy_unit_price is not None:
+                    unit_price = buy_unit_price
+                else:
+                    unit_price = take_unit_price
+                price_source = "split_owned_and_market"
+                recommendation_action = "split"
 
             line_total = (
                 float(unit_price) * float(quantity)
@@ -3181,12 +3201,14 @@ class IndustryService:
                 {
                     **dict(entry),
                     "quantity": quantity,
+                    "take_quantity": take_quantity,
+                    "buy_quantity": buy_quantity,
                     "unit_price": unit_price,
                     "price_source": price_source,
                     "sourcing_strategy": recommendation_action,
                     "owned_cost_basis_known": (preferred_owned_unit_cost is not None),
                     "uses_unknown_owned_cost_basis": bool(
-                        recommendation_action == "take" and preferred_owned_unit_cost is None
+                        recommendation_action in ("take", "split") and preferred_owned_unit_cost is None
                     ),
                     "line_total": line_total,
                 }
@@ -5709,6 +5731,7 @@ class IndustryService:
         self,
         *,
         owned_blueprints_scope: str,
+        material_price_map: dict[int, dict[str, Any]] | None = None,
     ) -> tuple[dict[int, int], dict[int, float]]:
         session: Any = self._sessions.app_session()
         sde_session: Any = self._sessions.sde_session()
@@ -5859,18 +5882,64 @@ class IndustryService:
                 industry_jobs=industry_jobs,
                 sde_session=sde_session,
                 market_prices=None,
+                market_price_map_direct=flat_market_price_map,
                 on_hand_quantities_by_type=quantity_by_type_id,
             )
 
-            # Derive FIFO-weighted average unit cost per type from the aligned lots
+            # Extract a flat {type_id: sell_price} map from the planning price map.
+            # Used to (a) estimate build costs for jobs without a persisted unit_build_cost,
+            # and (b) as a fallback before CCP type_average_price in the chain below.
+            flat_market_price_map: dict[int, float] | None = None
+            if material_price_map:
+                flat_market_price_map = {
+                    int(tid): float(v)
+                    for tid, entry in material_price_map.items()
+                    if (v := self._as_float((entry or {}).get("unit_price"))) and v > 0
+                } or None
+
+            # Build a weighted-average acquisition_unit_cost per type from asset records.
+            # This is used below to back-fill FIFO gaps caused by ESI's 30-day transaction cap.
+            asset_acq_cost_total: dict[int, float] = {}
+            asset_acq_cost_qty: dict[int, int] = {}
+            for asset in [*character_assets, *corporation_assets]:
+                try:
+                    a_type_id = int(asset.type_id or 0)
+                except Exception:
+                    a_type_id = 0
+                if a_type_id <= 0 or a_type_id not in quantity_by_type_id:
+                    continue
+                acq_cost = self._as_float(getattr(asset, "acquisition_unit_cost", None))
+                if acq_cost is None or acq_cost <= 0:
+                    continue
+                try:
+                    a_qty = int(getattr(asset, "quantity", 0) or 0)
+                except Exception:
+                    a_qty = 0
+                if a_qty <= 0:
+                    continue
+                asset_acq_cost_total[a_type_id] = float(asset_acq_cost_total.get(a_type_id, 0.0)) + acq_cost * a_qty
+                asset_acq_cost_qty[a_type_id] = int(asset_acq_cost_qty.get(a_type_id, 0)) + a_qty
+
+            # Derive FIFO-weighted average unit cost per type from the aligned lots.
+            # When FIFO lots cover fewer units than are on hand (ESI transaction history gap),
+            # back-fill the unpriced units using acquisition_unit_cost from asset records.
             unit_cost_by_type_id: dict[int, float] = {}
             for type_id, on_hand in quantity_by_type_id.items():
                 lots = fifo_lots_by_type.get(type_id) or []
                 if not lots:
                     continue
                 total_cost, priced_qty = fifo_allocate_cost(lots=lots, quantity=on_hand)
-                if priced_qty > 0 and total_cost > 0:
-                    unit_cost_by_type_id[type_id] = total_cost / priced_qty
+                if priced_qty <= 0 or total_cost <= 0:
+                    continue
+                unpriced = on_hand - priced_qty
+                if unpriced > 0:
+                    acq_total = float(asset_acq_cost_total.get(type_id, 0.0))
+                    acq_qty = int(asset_acq_cost_qty.get(type_id, 0))
+                    if acq_qty > 0 and acq_total > 0:
+                        backfill_unit = acq_total / acq_qty
+                        total_cost += backfill_unit * unpriced
+                        priced_qty += unpriced
+                unit_cost_by_type_id[type_id] = total_cost / priced_qty
 
             # For types the FIFO rebuild couldn't price (no transaction/job history),
             # fall back to acquisition_unit_cost on the asset record → historical
@@ -5928,6 +5997,11 @@ class IndustryService:
                     if hist is not None and hist > 0:
                         unit_cost_by_type_id[type_id] = hist
                         continue
+                    if flat_market_price_map:
+                        market_price_val = flat_market_price_map.get(type_id)
+                        if market_price_val is not None and market_price_val > 0:
+                            unit_cost_by_type_id[type_id] = market_price_val
+                            continue
                     fb_total = float(fallback_cost_total.get(type_id, 0.0))
                     fb_qty = int(fallback_cost_qty.get(type_id, 0))
                     if fb_qty > 0:
@@ -6193,6 +6267,7 @@ class IndustryService:
         blueprint_original_assets_by_type_id: dict[int, list] = {}
         available_owned_item_quantity_by_type_id_base, owned_item_unit_cost_by_type_id = self._get_owned_item_inventory(
             owned_blueprints_scope=owned_blueprints_scope,
+            material_price_map=material_price_map,
         )
         (
             character_blueprint_assets, corporation_blueprint_assets,

@@ -72,6 +72,10 @@ Steps:
 
   3. Query completed industry jobs whose product_type_id is in the type set.
      Jobs become "buy" lots at their unit_build_cost.
+     If unit_build_cost was not persisted on the job (e.g. the app was offline
+     when the job completed), the build cost is estimated from SDE materials ×
+     current market sell prices. This ensures manufactured sub-components always
+     carry a cost basis in the FIFO inventory, even without a stored snapshot.
 
   4. Pass everything to build_fifo_remaining_lots_by_type():
 
@@ -93,18 +97,39 @@ Steps:
 
          unit_cost = total_cost / priced_qty
 
-  6. For types with no FIFO data (no transaction or job history at all),
+  5b. Back-filling FIFO gaps caused by ESI's 30-day transaction cap:
+
+         When FIFO lot reconstruction results in priced_qty < on_hand (some
+         units have no traceable transaction history), the weighted average is
+         extended using acquisition_unit_cost stored on the asset record:
+
+             unpriced_units = on_hand - priced_qty
+             backfill_unit  = weighted avg of asset.acquisition_unit_cost
+             total_cost    += backfill_unit × unpriced_units
+             priced_qty    += unpriced_units
+
+         This means items bought before the ESI window still contribute their
+         stored acquisition cost to the weighted average, rather than being
+         silently dropped and forcing a fallback to CCP type averages.
+
+  6. For types with no FIFO data at all (no transaction or job history):
      fall back through this chain:
 
          acquisition_unit_cost on the current asset record
            ↓ null or zero
          Most recent acquisition_unit_cost in CharacterAssetHistoryModel
            ↓ null or zero
+         Current market sell price at the selected hub (Jita/Amarr/etc.)
+           ↓ null or zero
          type_average_price (CCP market-wide average price)
            ↓ null or zero
          type_adjusted_price (CCP adjusted price used for job fees)
            ↓ null or zero
          ESI estimated item value (last resort)
+
+     The market sell price step was added because CCP's type_average_price is a
+     30-day cross-region trailing average that can be significantly off from
+     the price you'd actually pay at your trade hub.
 
      Items that fall back to levels 3–5 are flagged as
      uses_unknown_owned_cost_basis = True (see Phase 4).
@@ -126,6 +151,8 @@ For each required material:
       sourcing_strategy = "take"
       unit_price        = unit_cost_by_type_id[type_id]   ← FIFO-weighted avg
       price_source      = "owned_asset_item_value"
+      take_quantity     = required
+      buy_quantity      = 0
 
       If no cost is known (type not in unit_cost_by_type_id):
           unit_price    = market buy price
@@ -135,13 +162,25 @@ For each required material:
       (prevents the same stock from being counted for two different products
        in the same refresh).
 
-  IF owned_qty < required:
+  IF 0 < owned_qty < required  (partial ownership):
+      sourcing_strategy = "split"
+      take_quantity     = owned_qty
+      buy_quantity      = required - owned_qty
+      unit_price        = blended average:
+                          (fifo_price × take_qty + market_price × buy_qty) / required
+      price_source      = "split_owned_and_market"
+
+      available_owned_quantities[type_id] is set to 0.
+
+      If no FIFO cost is known for the owned portion, market price is used for
+      both halves and uses_unknown_owned_cost_basis = True.
+
+  IF owned_qty == 0:
       sourcing_strategy = "buy"
       unit_price        = current market sell price
       price_source      = e.g. "market_sell_price_jita"
-
-Partial ownership (you own 40, need 100) currently resolves the whole material
-as a "buy" — there is no split-sourcing within a single material line.
+      take_quantity     = 0
+      buy_quantity      = required
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -154,7 +193,9 @@ as a "buy" — there is no split-sourcing within a single material line.
                     ESI-reported job cost)
   copy_cost      = amortised BPC copying cost (if applicable)
   invention_cost = expected invention material cost per run, adjusted for
-                   probability (T2 items only)
+                   probability (T2 items only).
+                   Datacores and decryptors are priced at their FIFO-weighted
+                   owned cost when available; market price is the fallback.
 
   total_cost     = material_cost + job_fee + copy_cost + invention_cost
 
@@ -189,23 +230,30 @@ Three signals are combined into an overall confidence rating (High / Medium / Lo
     • Is regional volume active (7-day average)?     (+/- score)
     • Is hub liquidity high (days-of-supply metric)? (+/- score)
 
+    Price anomaly risk feeds directly into this score by subtracting points:
+      • Price vs unit material cost ratio
+        > 1000×   → High risk  (large score penalty, strong manipulation signal)
+        > 100×    → Medium risk
+      • Price vs 7-day / 60-day historical average
+        > 5×      → High risk
+        > 2×      → Medium risk
+        < 0.3×    → Medium risk (suspiciously cheap)
+      • Thin orderbook (< 3 sell orders) → Low risk
+
+    Anomaly risk is NOT a separate cap applied after the fact — it is baked into
+    the market confidence score itself, which then flows into the overall rating.
+
   Material pricing confidence
     • Are all materials priced?
     • Do any materials have uses_unknown_owned_cost_basis = True?
-      If so → reason text is added and confidence is capped at Medium.
+      If so → reason text is added, and the "all have known cost basis" condition
+      fails, preventing the material confidence from reaching High. However, the
+      resulting level may be Medium OR Low depending on the fraction of priced
+      materials (≥ 80% priced → Medium, otherwise → Low). There is no hard cap
+      to Medium — unknown cost basis only blocks High.
 
-  Price anomaly risk
-    • Price vs unit material cost ratio
-      > 1000×   → High risk  (−6 score, strong manipulation signal)
-      > 100×    → Medium risk
-    • Price vs 7-day / 60-day historical average
-      > 5×      → High risk
-      > 2×      → Medium risk
-      < 0.3×    → Medium risk (suspiciously cheap)
-    • Thin orderbook (< 3 sell orders) → Low risk
-
-  Overall = min(market_confidence, material_confidence), then capped downward
-  by price anomaly risk.
+  Overall = min(market_confidence, material_confidence)
+  (anomaly risk is already reflected in market_confidence via score penalties)
 
   The full list of reasons behind the score is shown in the drilldown panel
   when you click a row in the Industry Builder.
@@ -217,6 +265,7 @@ Three signals are combined into an overall confidence rating (High / Medium / Lo
 
   "owned_asset_item_value"            FIFO-weighted average of what you paid
   "owned_asset_acquisition_cost"      Single acquisition_unit_cost from asset record
+  "split_owned_and_market"            Blended: take_qty at FIFO avg + buy_qty at market
   "market_sell_price_<hub>"           Current best-N sell orders at hub
   "asset_average_price"               CCP market-wide average (type_average_price)
   "asset_adjusted_price"              CCP adjusted price (used for job fee EIV)
@@ -232,19 +281,21 @@ Three signals are combined into an overall confidence rating (High / Medium / Lo
 ────────────────────────────────────────────────────────────────────────────────
 
   1. ESI wallet transaction history is capped at ~30 days.
-     Items bought earlier than that will have no FIFO lots and will fall back
-     to the asset record or type average price.
+     Items bought earlier than that have no wallet transaction lots. The FIFO
+     gap is mitigated by:
+       - Back-filling unpriced units from acquisition_unit_cost on the asset
+         record (Phase 2, step 5b).
+       - Estimating build costs for industry jobs without a persisted snapshot
+         using current market sell prices (Phase 2, step 3).
+     Units with none of the above still fall back to market sell price, then
+     to CCP type_average_price as a last resort.
 
-  2. Partial sourcing is not modelled.
-     If you own 40 units of a material but need 100, the whole line is costed
-     at market price, not 40 at FIFO + 60 at market.
-
-  3. Unit cost is a FIFO-weighted average across the whole on-hand stock,
+  2. Unit cost is a FIFO-weighted average across the whole on-hand stock,
      not a per-lot assignment to a specific job.
      Two jobs planned in the same refresh both see the same per-unit average,
      not "job A gets your cheapest lot, job B gets the more expensive one".
 
-  4. The inventory snapshot is taken once at refresh time and is not updated
+  3. The inventory snapshot is taken once at refresh time and is not updated
      when a job is submitted.  Re-run the refresh after starting new jobs to
      see updated availability.
 
