@@ -374,6 +374,7 @@ def _estimate_invention_material_cost(
     sde_session: Any,
     target_blueprint_type_id: int,
     market_price_map: dict[int, float],
+    owned_cost_map: dict[int, float] | None = None,
 ) -> Optional[dict[str, Any]]:
     mapping = _invention_source_blueprint_by_target_type(sde_session)
     payload = mapping.get(int(target_blueprint_type_id))
@@ -391,7 +392,7 @@ def _estimate_invention_material_cost(
         quantity = _safe_int(material.get("quantity"))
         if not material_type_id or not quantity or quantity <= 0:
             continue
-        unit_price = market_price_map.get(int(material_type_id))
+        unit_price = (owned_cost_map or {}).get(int(material_type_id)) or market_price_map.get(int(material_type_id))
         if unit_price is None:
             continue
         has_material_price = True
@@ -541,10 +542,18 @@ def resolve_industry_job_cost_snapshot(
             invention_cost = float(invention_unit_cost_per_run) * float(runs)
             resolved_invention_source = invention_cost_source or "actual_invention_job"
         else:
+            _invention_owned_cost_map: dict[int, float] | None = None
+            if owned_input_unit_cost_by_type_id:
+                _invention_owned_cost_map = {
+                    int(tid): float(uc)
+                    for tid, payload in owned_input_unit_cost_by_type_id.items()
+                    if (uc := _safe_float((payload or {}).get("unit_cost"))) and uc > 0
+                } or None
             estimate = _estimate_invention_material_cost(
                 sde_session=sde_session,
                 target_blueprint_type_id=int(blueprint_type_id),
                 market_price_map=market_price_map,
+                owned_cost_map=_invention_owned_cost_map,
             )
             probability = _safe_float((estimate or {}).get("probability"))
             target_runs_per_success = _safe_int((estimate or {}).get("target_runs_per_success")) or 1
@@ -652,6 +661,7 @@ def build_fifo_remaining_lots_by_type(
     industry_jobs: Iterable[Any] | None = None,
     sde_session: Any | None = None,
     market_prices: list[dict[str, Any]] | None = None,
+    market_price_map_direct: dict[int, float] | None = None,
     on_hand_quantities_by_type: dict[int, int],
 ) -> dict[int, list[FifoLot]]:
     """Return remaining FIFO lots per type_id, aligned to current on-hand quantities.
@@ -668,7 +678,7 @@ def build_fifo_remaining_lots_by_type(
       quantity has unknown cost basis).
     """
 
-    market_price_map = _build_price_map(market_prices)
+    market_price_map = market_price_map_direct if market_price_map_direct else _build_price_map(market_prices)
 
     tx_by_type: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for tx in wallet_transactions or []:
