@@ -833,13 +833,17 @@ def render() -> None:
         with left_col:
             st.caption("**Meta Group Filters**")
             meta_cols = st.columns(3)
+            _saved_meta_groups: dict[str, bool] = st.session_state.get("industry_builder_meta_groups") or {}
             meta_group_selections = {}
             for i, meta_group_name in enumerate(ordered_meta_group_names(all_meta_groups)):
                 with meta_cols[i % 3]:
-                    default_value = meta_group_name in {"Tech I", "Tech II", "Faction", "Storyline", "Other"}
+                    _default_meta = _saved_meta_groups.get(
+                        meta_group_name,
+                        meta_group_name in {"Tech I", "Tech II", "Faction", "Storyline", "Other"},
+                    )
                     enabled = st.toggle(
                         meta_group_label(meta_group_name),
-                        value=default_value,
+                        value=_default_meta,
                         key=f"form_meta_{meta_group_name}",
                     )
                     if enabled:
@@ -855,7 +859,11 @@ def render() -> None:
                     value=bool(st.session_state.get("industry_builder_maximize_bp_runs_pending", True)),
                     key="form_maximize_bp",
                 )
-                have_bpc_bpo = st.toggle("I have a BPC/BPO", value=True, key="form_have_bpc")
+                have_bpc_bpo = st.toggle(
+                    "I have a BPC/BPO",
+                    value=bool(st.session_state.get("industry_builder_have_blueprint_source_only", True)),
+                    key="form_have_bpc",
+                )
 
             with misc_cols[1]:
                 group_bpcs = st.toggle(
@@ -995,9 +1003,10 @@ def render() -> None:
         st.session_state["industry_builder_maximize_bp_runs_pending"] = maximize_bp_runs
         st.session_state["industry_builder_group_identical_bpcs"] = group_bpcs
         st.session_state["industry_builder_build_from_bpc"] = build_from_bpc
-        st.session_state["industry_builder_have_blueprint_source_only"] = True
+        st.session_state["industry_builder_have_blueprint_source_only"] = have_bpc_bpo
         st.session_state["industry_builder_have_skills_only"] = have_skills
         st.session_state["industry_builder_include_reactions"] = include_reactions
+        st.session_state["industry_builder_meta_groups"] = meta_group_selections
 
         # Store market filter values in session state
         st.session_state["industry_builder_market_hub"] = market_hub
