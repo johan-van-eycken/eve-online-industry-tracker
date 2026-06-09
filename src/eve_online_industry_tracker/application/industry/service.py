@@ -5873,19 +5873,6 @@ class IndustryService:
                     .all()
                 )
 
-            # Build FIFO lots per type aligned to current on-hand quantity.
-            # Jobs with a persisted unit_build_cost are used directly as lots;
-            # market_prices=None means jobs without a snapshot are skipped rather
-            # than estimated (acceptable — estimation is the fallback path below).
-            fifo_lots_by_type = build_fifo_remaining_lots_by_type(
-                wallet_transactions=wallet_transactions,
-                industry_jobs=industry_jobs,
-                sde_session=sde_session,
-                market_prices=None,
-                market_price_map_direct=flat_market_price_map,
-                on_hand_quantities_by_type=quantity_by_type_id,
-            )
-
             # Extract a flat {type_id: sell_price} map from the planning price map.
             # Used to (a) estimate build costs for jobs without a persisted unit_build_cost,
             # and (b) as a fallback before CCP type_average_price in the chain below.
@@ -5896,6 +5883,18 @@ class IndustryService:
                     for tid, entry in material_price_map.items()
                     if (v := self._as_float((entry or {}).get("unit_price"))) and v > 0
                 } or None
+
+            # Build FIFO lots per type aligned to current on-hand quantity.
+            # Jobs with a persisted unit_build_cost are used directly as lots;
+            # jobs without one are estimated via flat_market_price_map when available.
+            fifo_lots_by_type = build_fifo_remaining_lots_by_type(
+                wallet_transactions=wallet_transactions,
+                industry_jobs=industry_jobs,
+                sde_session=sde_session,
+                market_prices=None,
+                market_price_map_direct=flat_market_price_map,
+                on_hand_quantities_by_type=quantity_by_type_id,
+            )
 
             # Build a weighted-average acquisition_unit_cost per type from asset records.
             # This is used below to back-fill FIFO gaps caused by ESI's 30-day transaction cap.
