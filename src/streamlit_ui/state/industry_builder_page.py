@@ -108,6 +108,36 @@ def ensure_refresh_state() -> None:
 def ensure_overview_refresh_state() -> None:
     ensure_refresh_state()
     ensure_state_defaults({"industry_builder_overview_meta": {}})
+    # Initialise both pending (widget) and applied (backend) filter keys with the
+    # same defaults so the toggles always reflect the state used to generate the data,
+    # even before the user has submitted the form for the first time.
+    ensure_state_defaults(
+        {
+            "industry_builder_maximize_bp_runs_pending": True,
+            "industry_builder_maximize_bp_runs_applied": True,
+            "industry_builder_group_identical_bpcs": False,
+            "industry_builder_group_identical_bpcs_applied": False,
+            "industry_builder_build_from_bpc": True,
+            "industry_builder_build_from_bpc_applied": True,
+            "industry_builder_have_blueprint_source_only": True,
+            "industry_builder_have_blueprint_source_only_applied": True,
+            "industry_builder_have_skills_only": True,
+            "industry_builder_include_reactions": False,
+            "industry_builder_include_reactions_applied": False,
+            "industry_builder_market_hub": "jita",
+            "industry_builder_market_hub_applied": "jita",
+            "industry_builder_material_price_side": "sell",
+            "industry_builder_material_price_side_applied": "sell",
+            "industry_builder_product_price_side": "sell",
+            "industry_builder_product_price_side_applied": "sell",
+            "industry_builder_positive_profit_only": True,
+            "industry_builder_min_margin_pct": 0.0,
+            "industry_builder_min_isk_per_hour": 0.0,
+            "industry_builder_min_region_daily_volume": 0,
+            "industry_builder_liquidity_exclude": ["Very Low", "Unknown"],
+            "industry_builder_anomaly_exclude": ["High"],
+        }
+    )
 
 
 def resolve_profile_security_status(
@@ -137,8 +167,8 @@ def current_overview_request_params(
     default_owned_blueprint_scope: str,
 ) -> dict[str, Any]:
     return {
-        "maximize_bp_runs": bool(st.session_state.get("industry_builder_maximize_bp_runs_applied", False)),
-        "group_identical_bpcs": bool(st.session_state.get("industry_builder_group_identical_bpcs_applied", True)),
+        "maximize_bp_runs": bool(st.session_state.get("industry_builder_maximize_bp_runs_applied", True)),
+        "group_identical_bpcs": bool(st.session_state.get("industry_builder_group_identical_bpcs_applied", False)),
         "build_from_bpc": bool(st.session_state.get("industry_builder_build_from_bpc_applied", True)),
         "have_blueprint_source_only": bool(
             st.session_state.get("industry_builder_have_blueprint_source_only_applied", True)
@@ -167,10 +197,10 @@ def apply_pending_overview_request_params(
     reactions_allowed_for_profile: bool,
 ) -> dict[str, Any]:
     st.session_state["industry_builder_maximize_bp_runs_applied"] = bool(
-        st.session_state.get("industry_builder_maximize_bp_runs_pending", False)
+        st.session_state.get("industry_builder_maximize_bp_runs_pending", True)
     )
     st.session_state["industry_builder_group_identical_bpcs_applied"] = bool(
-        st.session_state.get("industry_builder_group_identical_bpcs", True)
+        st.session_state.get("industry_builder_group_identical_bpcs", False)
     )
     st.session_state["industry_builder_build_from_bpc_applied"] = bool(
         st.session_state.get("industry_builder_build_from_bpc", True)

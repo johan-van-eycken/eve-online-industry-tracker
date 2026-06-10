@@ -846,8 +846,7 @@ def render() -> None:
                         value=_default_meta,
                         key=f"form_meta_{meta_group_name}",
                     )
-                    if enabled:
-                        meta_group_selections[meta_group_name] = True
+                    meta_group_selections[meta_group_name] = enabled
 
             st.markdown("<hr style='margin: 0.25rem 0;'/>", unsafe_allow_html=True)
             st.caption("**Misc**")
@@ -868,7 +867,7 @@ def render() -> None:
             with misc_cols[1]:
                 group_bpcs = st.toggle(
                     "Group identical BPCs",
-                    value=bool(st.session_state.get("industry_builder_group_identical_bpcs", True)),
+                    value=bool(st.session_state.get("industry_builder_group_identical_bpcs", False)),
                     key="form_group_bpcs",
                 )
                 have_skills = st.toggle(
@@ -937,7 +936,7 @@ def render() -> None:
             st.caption("**Profit Filters**")
             positive_only = st.toggle(
                 "Positive profit only",
-                value=bool(st.session_state.get("industry_builder_positive_profit_only", False)),
+                value=bool(st.session_state.get("industry_builder_positive_profit_only", True)),
                 key="form_positive_profit",
             )
 
@@ -1039,7 +1038,7 @@ def render() -> None:
         # Rerun to show refresh progress
         st.rerun()
 
-    enabled_meta_groups = set(meta_group_selections.keys())
+    enabled_meta_groups = {k for k, v in meta_group_selections.items() if v}
     filtered_overview_rows = filter_overview_rows(
         page_context.overview_rows,
         tuple(sorted(enabled_meta_groups)),

@@ -228,7 +228,7 @@ def render_misc_filters(reactions_allowed_for_profile: bool) -> dict[str, bool]:
 
     misc_filters = {
         "maximize_bp_runs": bool(st.session_state.get("industry_builder_maximize_bp_runs_pending", True)),
-        "group_identical_bpcs": bool(st.session_state.get("industry_builder_group_identical_bpcs", True)),
+        "group_identical_bpcs": bool(st.session_state.get("industry_builder_group_identical_bpcs", False)),
         "build_from_bpc": bool(st.session_state.get("industry_builder_build_from_bpc", True)),
         "have_blueprint_source_only": bool(st.session_state.get("industry_builder_have_blueprint_source_only", True)),
         "have_skills_only": bool(st.session_state.get("industry_builder_have_skills_only", True)),
@@ -700,7 +700,7 @@ def prepare_shared_industry_snapshot_page(
             "Reactions: On" if bool(st.session_state.get("industry_builder_include_reactions", False)) else "Reactions: Off",
             "Build from BPC" if bool(st.session_state.get("industry_builder_build_from_bpc", True)) else "Build from BPO/SDE",
             "Profit filters active" if bool(
-                st.session_state.get("industry_builder_positive_profit_only", False)
+                st.session_state.get("industry_builder_positive_profit_only", True)
                 or float(st.session_state.get("industry_builder_min_margin_pct", 0.0) or 0.0) > 0.0
                 or float(st.session_state.get("industry_builder_min_isk_per_hour", 0.0) or 0.0) > 0.0
                 or int(st.session_state.get("industry_builder_min_region_daily_volume", 0) or 0) > 0
