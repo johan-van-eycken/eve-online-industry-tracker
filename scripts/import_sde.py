@@ -3,6 +3,13 @@ import os
 import sys
 import zipfile
 import shutil
+
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 import requests  # pyright: ignore[reportMissingModuleSource]
 import pandas as pd  # pyright: ignore[reportMissingModuleSource]
 import yaml  # pyright: ignore[reportMissingModuleSource]

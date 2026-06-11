@@ -8,6 +8,15 @@ import time
 
 import requests
 
+# Inject macOS Keychain certificates into Python's ssl module so corporate proxies
+# (e.g. Zscaler) work. Must run before any subprocess is spawned so child processes
+# inherit the patched ssl module on fork, or re-inject themselves on spawn.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 from flask_app.app import create_app
 from flask_app.bootstrap import start_background_initialization
 from flask_app.settings import (
@@ -22,6 +31,14 @@ from utils.logging_setup import configure_logging
 
 
 def run_flask() -> None:
+    # Re-inject here: multiprocessing 'spawn' starts a fresh interpreter that
+    # does not inherit the parent's patched ssl module.
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except ImportError:
+        pass
+
     app = create_app()
     start_background_initialization(app_state=app.extensions.get("app_state"), refresh_metadata=refresh_metadata_on_startup())
     app.run(host=flask_host(), port=flask_port(), debug=flask_debug(), use_reloader=False)
