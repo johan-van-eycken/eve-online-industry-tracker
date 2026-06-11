@@ -25,7 +25,9 @@ from utils.app_init import (
     _user_friendly_error,
 )
 
-from eve_online_industry_tracker.esi_service import ESIService
+from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
+from eve_online_industry_tracker.infrastructure.esi_service import ESIService
+from eve_online_industry_tracker.config.admin_settings import AdminSettingsManager
 
 from eve_online_industry_tracker.infrastructure.public_structures_cache_service import trigger_global_public_structures_scan
 
@@ -50,6 +52,10 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Loading config...")
         state.init_state = "Loading Config"
         state.cfg_manager = load_config()
+
+        logging.info("Loading admin settings...")
+        from config.paths import admin_settings_path
+        state.admin_settings = AdminSettingsManager(admin_settings_path())
 
         if getattr(state, "shutdown_event", None) is not None and state.shutdown_event.is_set():
             state.init_state = "Shutdown"
@@ -118,6 +124,14 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         state.init_state = "Initializing Data Adapters"
         main_character = state.char_manager.get_main_character()
         state.esi_service = ESIService(main_character.esi_client)
+        state.esi_service._admin_settings = state.admin_settings
+
+        # Wire admin settings into ESI error rate limiter (module-level singleton).
+        from eve_online_industry_tracker.infrastructure.esi_client import _ESI_ERROR_LIMITER
+        _ESI_ERROR_LIMITER._admin_settings = state.admin_settings
+
+        state.industry_job_manager = IndustryJobManager(state=state)
+        state.industry_job_manager.start()
         # Adapters no longer keep module-level globals; they read from state + request-scoped sessions.
 
         # Start background global scan to populate public_structures. This is best-effort and

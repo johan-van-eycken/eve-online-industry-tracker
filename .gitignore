@@ -5,6 +5,9 @@ config/secret.json
 
 # database files
 database/*.db
+database/*.db-shm
+database/*.db-wal
+database/streamlit_preferences.json
 database/data/db_exports/
 database/data/tmp_sde/
 
@@ -218,3 +221,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Claude Code
+.claude/

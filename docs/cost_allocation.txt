@@ -1,0 +1,302 @@
+================================================================================
+  COST ALLOCATION — HOW THE INDUSTRY TRACKER PRICES MATERIALS AND JOBS
+================================================================================
+
+This document describes the full lifecycle of a material or finished product,
+from the moment you acquire it to the moment a manufacturing profit figure
+appears in the Industry Builder.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  PHASE 1 — ACQUIRING ITEMS (what creates cost records)
+────────────────────────────────────────────────────────────────────────────────
+
+Two events create an acquisition cost record for an item:
+
+  A) Market buy
+     ─────────
+     When ESI syncs your wallet, every buy transaction is read from
+     CharacterWalletTransactionsModel (or the corp equivalent).
+
+     backfill_wallet_buy_acquisitions() reads those transactions and writes a
+     row to CharacterAssetHistoryModel:
+
+         acquisition_source        = "wallet_transaction"
+         acquisition_unit_cost     = unit_price you actually paid
+         acquisition_total_cost    = unit_price × quantity
+         acquisition_reference_id  = wallet transaction_id
+         observed_at               = transaction date
+
+     This is the authoritative buy price for that lot.
+
+  B) Manufacturing job completion
+     ─────────────────────────────
+     When a job's status moves to "delivered" or "ready", the tracker resolves
+     its cost snapshot via resolve_industry_job_cost_snapshot():
+
+         1. If unit_build_cost is already persisted on the job row
+            (stored when the job was last synced), use it directly.
+         2. Otherwise, estimate from SDE blueprint materials × market prices,
+            applying ME reduction and the actual ESI job fee.
+
+     The resolved unit_build_cost is then written to CharacterAssetHistoryModel:
+
+         acquisition_source        = "industry_build"
+         acquisition_unit_cost     = total_build_cost / output_quantity
+         acquisition_reference_type = "industry_job"
+         acquisition_reference_id  = job_id
+
+     This means manufactured items carry their actual build cost, not a market
+     price, as their acquisition cost.
+
+  Note: sells are NOT acquisition events — they consume existing lots.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  PHASE 2 — BUILDING THE FIFO INVENTORY SNAPSHOT
+────────────────────────────────────────────────────────────────────────────────
+
+When the Industry Builder refreshes, _get_owned_item_inventory() runs once and
+produces two maps that are shared across every product calculation:
+
+    quantity_by_type_id        → how many units of each type you hold right now
+    unit_cost_by_type_id       → the FIFO-weighted average unit cost per type
+
+Steps:
+
+  1. Query CharacterAssetsModel (+ corp) → build quantity_by_type_id
+     (blueprints are excluded — they are handled separately).
+
+  2. Query wallet transactions for those type_ids (character + corp).
+     These are the raw buy/sell events ESI reported.
+
+  3. Query completed industry jobs whose product_type_id is in the type set.
+     Jobs become "buy" lots at their unit_build_cost.
+     If unit_build_cost was not persisted on the job (e.g. the app was offline
+     when the job completed), the build cost is estimated from SDE materials ×
+     current market sell prices. This ensures manufactured sub-components always
+     carry a cost basis in the FIFO inventory, even without a stored snapshot.
+
+  4. Pass everything to build_fifo_remaining_lots_by_type():
+
+         For each type_id:
+           a. Sort all buy events (market + job) by date, oldest first.
+           b. For each sell event, consume lots FIFO (oldest lot first).
+           c. Align remaining lots to current on-hand quantity:
+              - If lots total > on-hand: trim oldest excess (missing sells
+                that ESI no longer reports are assumed to have consumed the
+                oldest stock).
+              - If lots total < on-hand: leave as-is (those extra units
+                have no traceable cost basis).
+
+         Result: a list of remaining FIFO lots per type_id, each carrying:
+           { quantity, unit_price, acquisition_date, source }
+
+  5. For each type, fifo_allocate_cost(lots, on_hand_qty) returns
+     (total_cost, priced_qty). Divide to get the FIFO-weighted average:
+
+         unit_cost = total_cost / priced_qty
+
+  5b. Back-filling FIFO gaps caused by ESI's 30-day transaction cap:
+
+         When FIFO lot reconstruction results in priced_qty < on_hand (some
+         units have no traceable transaction history), the weighted average is
+         extended using acquisition_unit_cost stored on the asset record:
+
+             unpriced_units = on_hand - priced_qty
+             backfill_unit  = weighted avg of asset.acquisition_unit_cost
+             total_cost    += backfill_unit × unpriced_units
+             priced_qty    += unpriced_units
+
+         This means items bought before the ESI window still contribute their
+         stored acquisition cost to the weighted average, rather than being
+         silently dropped and forcing a fallback to CCP type averages.
+
+  6. For types with no FIFO data at all (no transaction or job history):
+     fall back through this chain:
+
+         acquisition_unit_cost on the current asset record
+           ↓ null or zero
+         Most recent acquisition_unit_cost in CharacterAssetHistoryModel
+           ↓ null or zero
+         Current market sell price at the selected hub (Jita/Amarr/etc.)
+           ↓ null or zero
+         type_average_price (CCP market-wide average price)
+           ↓ null or zero
+         type_adjusted_price (CCP adjusted price used for job fees)
+           ↓ null or zero
+         ESI estimated item value (last resort)
+
+     The market sell price step was added because CCP's type_average_price is a
+     30-day cross-region trailing average that can be significantly off from
+     the price you'd actually pay at your trade hub.
+
+     Items that fall back to levels 3–5 are flagged as
+     uses_unknown_owned_cost_basis = True (see Phase 4).
+
+
+────────────────────────────────────────────────────────────────────────────────
+  PHASE 3 — PLANNING A MANUFACTURING JOB (take-or-buy decision)
+────────────────────────────────────────────────────────────────────────────────
+
+For every product in the builder, _plan_take_or_buy_material_nodes() runs
+against the SDE material list for that blueprint.
+
+For each required material:
+
+  owned_qty  = quantity_by_type_id.get(material_type_id, 0)
+  required   = adjusted_quantity_after_ME_reduction
+
+  IF owned_qty >= required:
+      sourcing_strategy = "take"
+      unit_price        = unit_cost_by_type_id[type_id]   ← FIFO-weighted avg
+      price_source      = "owned_asset_item_value"
+      take_quantity     = required
+      buy_quantity      = 0
+
+      If no cost is known (type not in unit_cost_by_type_id):
+          unit_price    = market buy price
+          uses_unknown_owned_cost_basis = True             ← warning flag
+
+      Decrement available_owned_quantities[type_id] by required
+      (prevents the same stock from being counted for two different products
+       in the same refresh).
+
+  IF 0 < owned_qty < required  (partial ownership):
+      sourcing_strategy = "split"
+      take_quantity     = owned_qty
+      buy_quantity      = required - owned_qty
+      unit_price        = blended average:
+                          (fifo_price × take_qty + market_price × buy_qty) / required
+      price_source      = "split_owned_and_market"
+
+      available_owned_quantities[type_id] is set to 0.
+
+      If no FIFO cost is known for the owned portion, market price is used for
+      both halves and uses_unknown_owned_cost_basis = True.
+
+  IF owned_qty == 0:
+      sourcing_strategy = "buy"
+      unit_price        = current market sell price
+      price_source      = e.g. "market_sell_price_jita"
+      take_quantity     = 0
+      buy_quantity      = required
+
+
+────────────────────────────────────────────────────────────────────────────────
+  PHASE 4 — TOTAL JOB COST
+────────────────────────────────────────────────────────────────────────────────
+
+  material_cost  = Σ (unit_price × adjusted_quantity) for all materials
+  job_fee        = facility_tax × Estimated Item Value of inputs
+                   (EIV is CCP's adjusted_price × quantity, used for the
+                    ESI-reported job cost)
+  copy_cost      = amortised BPC copying cost (if applicable)
+  invention_cost = expected invention material cost per run, adjusted for
+                   probability (T2 items only).
+                   Datacores and decryptors are priced at their FIFO-weighted
+                   owned cost when available; market price is the fallback.
+
+  total_cost     = material_cost + job_fee + copy_cost + invention_cost
+
+  unit_build_cost = total_cost / output_quantity
+
+
+────────────────────────────────────────────────────────────────────────────────
+  PHASE 5 — SALE PROCEEDS AND PROFIT
+────────────────────────────────────────────────────────────────────────────────
+
+  gross_revenue  = sell_price × output_quantity
+  sales_tax      = gross_revenue × effective_sales_tax_rate
+                   (base rate reduced by Accounting skill level)
+  broker_fee     = gross_revenue × effective_broker_fee_rate
+                   (base rate reduced by Broker Relations skill + standings)
+  net_proceeds   = gross_revenue - sales_tax - broker_fee
+
+  profit_amount           = net_proceeds - total_cost
+  profit_margin_fraction  = profit_amount / net_proceeds
+  isk_per_hour            = profit_amount / time_seconds × 3600
+
+
+────────────────────────────────────────────────────────────────────────────────
+  PHASE 6 — PRICING CONFIDENCE
+────────────────────────────────────────────────────────────────────────────────
+
+Three signals are combined into an overall confidence rating (High / Medium / Low):
+
+  Market sell price confidence
+    • How many sell orders exist at the hub?         (+/- score)
+    • How old is the cached orderbook?               (+/- score)
+    • Is regional volume active (7-day average)?     (+/- score)
+    • Is hub liquidity high (days-of-supply metric)? (+/- score)
+
+    Price anomaly risk feeds directly into this score by subtracting points:
+      • Price vs unit material cost ratio
+        > 1000×   → High risk  (large score penalty, strong manipulation signal)
+        > 100×    → Medium risk
+      • Price vs 7-day / 60-day historical average
+        > 5×      → High risk
+        > 2×      → Medium risk
+        < 0.3×    → Medium risk (suspiciously cheap)
+      • Thin orderbook (< 3 sell orders) → Low risk
+
+    Anomaly risk is NOT a separate cap applied after the fact — it is baked into
+    the market confidence score itself, which then flows into the overall rating.
+
+  Material pricing confidence
+    • Are all materials priced?
+    • Do any materials have uses_unknown_owned_cost_basis = True?
+      If so → reason text is added, and the "all have known cost basis" condition
+      fails, preventing the material confidence from reaching High. However, the
+      resulting level may be Medium OR Low depending on the fraction of priced
+      materials (≥ 80% priced → Medium, otherwise → Low). There is no hard cap
+      to Medium — unknown cost basis only blocks High.
+
+  Overall = min(market_confidence, material_confidence)
+  (anomaly risk is already reflected in market_confidence via score penalties)
+
+  The full list of reasons behind the score is shown in the drilldown panel
+  when you click a row in the Industry Builder.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  COST SOURCE LABELS (visible in the material drilldown table)
+────────────────────────────────────────────────────────────────────────────────
+
+  "owned_asset_item_value"            FIFO-weighted average of what you paid
+  "owned_asset_acquisition_cost"      Single acquisition_unit_cost from asset record
+  "split_owned_and_market"            Blended: take_qty at FIFO avg + buy_qty at market
+  "market_sell_price_<hub>"           Current best-N sell orders at hub
+  "asset_average_price"               CCP market-wide average (type_average_price)
+  "asset_adjusted_price"              CCP adjusted price (used for job fee EIV)
+  "market_snapshot_estimate"          Estimated from SDE + adjusted prices
+
+  "Est. Cost?" column in the drilldown: ⚠ est.
+  Means the material was taken from inventory but no purchase or build record
+  could be found — market price was used as a substitute.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  IMPORTANT LIMITATIONS
+────────────────────────────────────────────────────────────────────────────────
+
+  1. ESI wallet transaction history is capped at ~30 days.
+     Items bought earlier than that have no wallet transaction lots. The FIFO
+     gap is mitigated by:
+       - Back-filling unpriced units from acquisition_unit_cost on the asset
+         record (Phase 2, step 5b).
+       - Estimating build costs for industry jobs without a persisted snapshot
+         using current market sell prices (Phase 2, step 3).
+     Units with none of the above still fall back to market sell price, then
+     to CCP type_average_price as a last resort.
+
+  2. Unit cost is a FIFO-weighted average across the whole on-hand stock,
+     not a per-lot assignment to a specific job.
+     Two jobs planned in the same refresh both see the same per-unit average,
+     not "job A gets your cheapest lot, job B gets the more expensive one".
+
+  3. The inventory snapshot is taken once at refresh time and is not updated
+     when a job is submitted.  Re-run the refresh after starting new jobs to
+     see updated availability.
+
+================================================================================

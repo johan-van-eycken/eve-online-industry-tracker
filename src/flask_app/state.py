@@ -18,6 +18,8 @@ class RuntimeState:
     char_manager: Any = None
     corp_manager: Any = None
     esi_service: Any = None
+    industry_job_manager: Any = None
+    admin_settings: Any = None
 
 
 @dataclass
@@ -61,18 +63,22 @@ class PublicStructuresJobState:
 
 
 @dataclass
-class IndustryBuilderJobState:
+class IndustryOverviewRefreshJobState:
     lock: threading.Lock = field(default_factory=threading.Lock)
-    # job_id -> job dict (status/progress/result)
-    jobs: dict[str, dict] = field(default_factory=dict)
-    # key (character/profile/maximize_runs) -> job_id (latest)
-    jobs_by_key: dict[str, str] = field(default_factory=dict)
+    jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
+class IndustryPortfolioCandidatesJobState:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
 class JobsState:
     public_structures: PublicStructuresJobState = field(default_factory=PublicStructuresJobState)
-    industry_builder: IndustryBuilderJobState = field(default_factory=IndustryBuilderJobState)
+    industry_overview_refresh: IndustryOverviewRefreshJobState = field(default_factory=IndustryOverviewRefreshJobState)
+    industry_portfolio_candidates: IndustryPortfolioCandidatesJobState = field(default_factory=IndustryPortfolioCandidatesJobState)
 
 
 @dataclass
@@ -150,6 +156,22 @@ class AppState:
     @esi_service.setter
     def esi_service(self, v: Any) -> None:
         self.runtime.esi_service = v
+
+    @property
+    def industry_job_manager(self) -> Any:
+        return self.runtime.industry_job_manager
+
+    @industry_job_manager.setter
+    def industry_job_manager(self, v: Any) -> None:
+        self.runtime.industry_job_manager = v
+
+    @property
+    def admin_settings(self) -> Any:
+        return self.runtime.admin_settings
+
+    @admin_settings.setter
+    def admin_settings(self, v: Any) -> None:
+        self.runtime.admin_settings = v
 
     @property
     def materials_cache(self) -> Any:
@@ -315,19 +337,6 @@ class AppState:
     @property
     def public_structures_global_scan_stop_event(self) -> threading.Event:
         return self.jobs.public_structures.global_scan_stop_event
-
-    # Industry builder job legacy fields
-    @property
-    def industry_builder_jobs_lock(self) -> threading.Lock:
-        return self.jobs.industry_builder.lock
-
-    @property
-    def industry_builder_jobs(self) -> dict[str, dict]:
-        return self.jobs.industry_builder.jobs
-
-    @property
-    def industry_builder_jobs_by_key(self) -> dict[str, str]:
-        return self.jobs.industry_builder.jobs_by_key
 
 
 state = AppState()

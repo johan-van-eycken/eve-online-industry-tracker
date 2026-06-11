@@ -125,19 +125,45 @@ def main():
         streamlit_proc = run_streamlit()
 
         # Main loop: monitor and restart Flask as needed
+        flask_restart_delay = 0
+        max_restart_delay = 30
+        max_consecutive_failures = 10
+        consecutive_failures = 0
+
         while True:
             time.sleep(5)
 
             # Check if Flask died
             if not flask_proc.is_alive():
-                logging.warning("Flask process died unexpectedly. Restarting...")
+                consecutive_failures += 1
+                if consecutive_failures > max_consecutive_failures:
+                    logging.error(
+                        "Flask has crashed %d times consecutively. Giving up.",
+                        consecutive_failures - 1,
+                    )
+                    raise RuntimeError("Flask exceeded maximum consecutive restart attempts.")
+
+                flask_restart_delay = min(2 ** consecutive_failures, max_restart_delay)
+                logging.warning(
+                    "Flask process died unexpectedly (attempt %d/%d). "
+                    "Restarting in %ds...",
+                    consecutive_failures,
+                    max_consecutive_failures,
+                    flask_restart_delay,
+                )
+                time.sleep(flask_restart_delay)
 
                 # Restart Flask
                 flask_proc = multiprocessing.Process(target=run_flask)
                 flask_proc.start()
 
                 logging.info("Waiting for Flask to become ready...")
-                wait_for_flask_ready(flask_proc=flask_proc, timeout=health_poll_timeout_seconds())
+                try:
+                    wait_for_flask_ready(flask_proc=flask_proc, timeout=health_poll_timeout_seconds())
+                    consecutive_failures = 0  # Reset on successful start
+                except RuntimeError:
+                    logging.error("Flask failed to become ready after restart.")
+                    continue
 
             # Check if Streamlit died (optional)
             if streamlit_proc.poll() is not None:

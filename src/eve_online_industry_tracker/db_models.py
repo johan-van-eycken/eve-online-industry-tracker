@@ -1,23 +1,30 @@
 from __future__ import annotations
 
-"""Compatibility boundary for legacy ORM models.
+"""Public re-export surface for ORM models.
 
-This module centralizes imports from `classes.database_models` so the rest of the
-codebase doesn't need to import from `classes.*` directly.
+Centralizes model imports so consumers use a single stable path:
+``from eve_online_industry_tracker.db_models import <Model>``
 """
 
-from classes.database_models import (
+from eve_online_industry_tracker.infrastructure.models import (
     BaseApp,
     BaseOauth,
+    BaseSde,
     Blueprints,
     Categories,
+    CharacterAssetHistoryModel,
     CharacterAssetsModel,
     CharacterIndustryJobsModel,
     CharacterModel,
+    CharacterRealizedSalesLedgerModel,
+    CharacterWalletJournalModel,
     CharacterWalletTransactionsModel,
+    CorporationAssetHistoryModel,
     CorporationAssetsModel,
     CorporationIndustryJobsModel,
     CorporationModel,
+    CorporationWalletJournalModel,
+    CorporationRealizedSalesLedgerModel,
     CorporationStructuresModel,
     CorporationWalletTransactionsModel,
     Factions,
@@ -31,6 +38,8 @@ from classes.database_models import (
     OAuthCharacter,
     PublicStructuresModel,
     PublicStructuresScanStateModel,
+    StructureNameCacheModel,
+    MarketOrderbookViewCacheModel,
     Races,
     StationOperations,
     StationServices,
@@ -41,15 +50,22 @@ from classes.database_models import (
 __all__ = [
     "BaseApp",
     "BaseOauth",
+    "BaseSde",
     "Blueprints",
     "Categories",
+    "CharacterAssetHistoryModel",
     "CharacterAssetsModel",
     "CharacterIndustryJobsModel",
     "CharacterModel",
+    "CharacterRealizedSalesLedgerModel",
+    "CharacterWalletJournalModel",
     "CharacterWalletTransactionsModel",
+    "CorporationAssetHistoryModel",
     "CorporationAssetsModel",
     "CorporationIndustryJobsModel",
     "CorporationModel",
+    "CorporationWalletJournalModel",
+    "CorporationRealizedSalesLedgerModel",
     "CorporationStructuresModel",
     "CorporationWalletTransactionsModel",
     "Factions",
@@ -63,6 +79,8 @@ __all__ = [
     "OAuthCharacter",
     "PublicStructuresModel",
     "PublicStructuresScanStateModel",
+    "StructureNameCacheModel",
+    "MarketOrderbookViewCacheModel",
     "Races",
     "StationOperations",
     "StationServices",

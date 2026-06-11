@@ -25,10 +25,9 @@ dependencies = {file = ["requirements.txt"]}
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-  "classes*",
   "utils*",
   "flask_app*",
-  "webpages*",
+  "streamlit_ui*",
   "config*",
   "eve_online_industry_tracker*",
 ]
