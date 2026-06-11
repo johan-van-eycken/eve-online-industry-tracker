@@ -22,6 +22,7 @@ from utils.app_init import (
     init_db_managers,
     init_char_manager,
     init_corp_manager,
+    _user_friendly_error,
 )
 
 from eve_online_industry_tracker.esi_service import ESIService
@@ -77,7 +78,11 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
                 state.init_warnings.append(f"Character refresh failed: {e}")
             except Exception:
                 pass
-            logging.warning("Character refresh failed; continuing startup: %s", e, exc_info=True)
+            friendly = _user_friendly_error(e)
+            if friendly:
+                logging.warning("Character refresh warning (startup continues):\n  %s", friendly.replace("\n", "\n  "))
+            else:
+                logging.warning("Character refresh failed; continuing startup: %s", e, exc_info=True)
 
         if getattr(state, "shutdown_event", None) is not None and state.shutdown_event.is_set():
             state.init_state = "Shutdown"
@@ -99,7 +104,11 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
                 state.init_warnings.append(f"Corporation refresh failed: {e}")
             except Exception:
                 pass
-            logging.warning("Corporation refresh failed; continuing startup: %s", e, exc_info=True)
+            friendly = _user_friendly_error(e)
+            if friendly:
+                logging.warning("Corporation refresh warning (startup continues):\n  %s", friendly.replace("\n", "\n  "))
+            else:
+                logging.warning("Corporation refresh failed; continuing startup: %s", e, exc_info=True)
 
         if getattr(state, "shutdown_event", None) is not None and state.shutdown_event.is_set():
             state.init_state = "Shutdown"
@@ -132,7 +141,15 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         state.init_error = None
     except Exception as e:
         state.init_error = str(e)
-        logging.error("Failed to initialize application: %s", e, exc_info=True)
+        friendly = _user_friendly_error(e)
+        if friendly:
+            logging.error(
+                "Initialization failed at '%s':\n  %s",
+                state.init_state,
+                friendly.replace("\n", "\n  "),
+            )
+        else:
+            logging.error("Failed to initialize application: %s", e, exc_info=True)
         state.init_state = f"Initialization Failed at step: {state.init_state}"
 
 

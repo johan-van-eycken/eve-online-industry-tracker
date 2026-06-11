@@ -7,6 +7,59 @@ from classes.database_manager import DatabaseManager
 from classes.character_manager import CharacterManager
 from classes.corporation_manager import CorporationManager
 
+
+def _user_friendly_error(e: Exception) -> str | None:
+    """Return a clean, actionable message for known error types, or None for unexpected ones."""
+    msg = str(e)
+    etype = type(e).__name__
+
+    if "CERTIFICATE_VERIFY_FAILED" in msg or "SSLError" in etype:
+        return (
+            "SSL certificate verification failed.\n"
+            "  Likely cause: corporate proxy (e.g. Zscaler) intercepting HTTPS.\n"
+            "  Fix: pip install truststore  (uses macOS Keychain certificates)"
+        )
+
+    if "no such table" in msg.lower():
+        table = msg.split("no such table: ")[-1].strip().split()[0] if "no such table: " in msg else "unknown"
+        return (
+            f'SDE database is missing table "{table}".\n'
+            "  The EVE Static Data Export has not been imported yet.\n"
+            "  Fix: python3 scripts/import_sde.py --download --import --force"
+        )
+
+    if "UNIQUE constraint failed" in msg:
+        field = msg.split("UNIQUE constraint failed: ")[-1].strip().split("\n")[0] if "UNIQUE constraint failed: " in msg else ""
+        detail = f" ({field})" if field else ""
+        return (
+            f"Duplicate record{detail} — a character may already be registered.\n"
+            "  This is usually safe to ignore on startup."
+        )
+
+    if "NOT NULL constraint failed" in msg:
+        field = msg.split("NOT NULL constraint failed: ")[-1].strip().split("\n")[0] if "NOT NULL constraint failed: " in msg else ""
+        detail = f" ({field})" if field else ""
+        return (
+            f"Database error: required field is empty{detail}.\n"
+            "  ESI returned incomplete data for this character. Try re-running the app."
+        )
+
+    if "Invalid character configuration" in msg:
+        return (
+            "Invalid character configuration in config/secret.json.\n"
+            "  Each character must be a dict, for example:\n"
+            '    {"character_name": "Your Name", "is_main": true, "is_corp_director": false}'
+        )
+
+    if "No characters found in config" in msg:
+        return (
+            f"No characters configured in {app_secret_path()}.\n"
+            "  Add at least one character to the 'characters' list."
+        )
+
+    return None
+
+
 def load_config() -> ConfigManager:
     """
     Load Configurations
@@ -95,8 +148,12 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
 
         return db_oauth, db_app, db_sde
     except Exception as e:
-        logging.error(f"Database and schema initializations failed. {e}", exc_info=True)
-        raise e
+        friendly = _user_friendly_error(e)
+        if friendly:
+            logging.error("Database initialization failed:\n  %s", friendly.replace("\n", "\n  "))
+        else:
+            logging.error("Database initialization failed: %s", e, exc_info=True)
+        raise
 
 def init_char_manager(cfgManager: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager) -> CharacterManager:
     """
