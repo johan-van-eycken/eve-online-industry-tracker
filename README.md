@@ -1,196 +1,215 @@
 # EVE Online Industry Tracker
 
-Local-first EVE Online helper app that combines:
+A local-first EVE Online helper app for industry and market analysis. Combines a Flask API backend with a Streamlit UI frontend, all backed by local SQLite databases.
 
-- A Flask API backend (data refresh + background jobs)
-- A Streamlit UI frontend
-- Local SQLite databases for app data, OAuth tokens, and EVE SDE
+## Features
 
-The main “batteries included” entrypoint starts both backend and UI and keeps them running.
+- **EVE SSO OAuth** — multi-character authentication via the official EVE login flow
+- **Industry Builder** — full manufacturing cost calculator with invention support, FIFO inventory cost basis, submanufacturing chains, and live market order pricing
+- **Realised Profit** — ledger view of wallet journal and transaction history per character/corporation
+- **Market Analysis** — liquidity metrics, price anomaly detection, and manufacturing signals
+- **Corporation Support** — director-level access to corp wallet, assets, and industry jobs
+- **SDE Integration** — local import of the EVE Static Data Export for offline game data lookups
+- **Public Structures Cache** — background scan to resolve player-owned structure names
+- **ESI Monitoring** — admin panel for tracking ESI request rates and error budgets
 
-## Quickstart (Windows)
+---
 
-Requirements:
+## Prerequisites
 
-- Python 3.10–3.12 (Python 3.13 is currently not supported due to pinned deps/wheels).
+- Python 3.10–3.12 (3.13+ not yet supported due to pinned dependencies)
+- An [EVE Online developer application](https://developers.eveonline.com/applications) with the following scopes:
+
+```
+esi-industry.read_character_jobs.v1
+esi-industry.read_corporation_jobs.v1
+esi-assets.read_assets.v1
+esi-assets.read_corporation_assets.v1
+esi-wallet.read_character_wallet.v1
+esi-wallet.read_corporation_wallets.v1
+esi-markets.read_character_orders.v1
+esi-corporations.read_structures.v1
+esi-universe.read_structures.v1
+```
+
+Set the callback URL to: `http://localhost:8765/callback`
+
+---
+
+## Quickstart
+
+### macOS / Linux
+
+```bash
+git clone https://github.com/johan-van-eycken/eve-online-industry-tracker.git
+cd eve-online-industry-tracker
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -U pip setuptools wheel
+pip install -e . --no-build-isolation
+
+# Import the EVE Static Data Export (required on first run)
+python3 scripts/import_sde.py --download --import
+
+# Start the app
+python3 -m eve_online_industry_tracker
+```
+
+### Windows
 
 ```powershell
-# From repo root
-py -3.10 -m venv .venv
-./.venv/Scripts/Activate.ps1
+git clone https://github.com/johan-van-eycken/eve-online-industry-tracker.git
+cd eve-online-industry-tracker
+
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
 python -m pip install -U pip setuptools wheel
-
-# This repo uses a src/ layout; editable install is the simplest way to run it
 python -m pip install -e . --no-build-isolation
 
-# First run will initialize databases and may take a bit
+# Import the EVE Static Data Export (required on first run)
+python scripts/import_sde.py --download --import
+
+# Start the app
 python -m eve_online_industry_tracker
 ```
 
-## Installation
+Once running, open **http://localhost:8501** in your browser.
 
-1) Clone the repository:
-
-```bash
-git clone https://github.com/jveyc/eve-online-industry-tracker.git
-cd eve-online-industry-tracker
-```
-
-2) Create a virtualenv and install (recommended approach):
-
-```bash
-python -m venv .venv
-
-# Linux/macOS
-source .venv/bin/activate
-
-# Windows
-.venv\Scripts\activate
-
-python -m pip install -U pip setuptools wheel
-python -m pip install -e . --no-build-isolation
-```
-
-If pip fails with `SSLCertVerificationError`, you likely need to configure your corporate proxy/trust store (or use an internal PyPI mirror).
-
-As a pragmatic fallback (less isolated, but often works without downloads), you can create the venv with system site-packages:
-
-```bash
-python -m venv --system-site-packages .venv
-```
+---
 
 ## Configuration
 
-This project expects a few JSON config files under `config/`.
+### `config/secret.json`
 
-- `config/config.json` (tracked)
-- `config/secret.json` (should be gitignored; contains EVE client secret + optional character list)
-- `config/import_sde.json` (tables + SDE download settings for the importer)
+Create this file before first launch (it is gitignored):
 
-By default, the app reads the main config from `config/config.json` and secrets from `config/secret.json`.
-You can override these paths via environment variables:
+```json
+{
+    "client_id": "your_eve_app_client_id",
+    "client_secret": "your_eve_app_client_secret",
+    "characters": [
+        {
+            "character_name": "Your Main",
+            "is_main": true,
+            "is_corp_director": true
+        },
+        {
+            "character_name": "Your Alt",
+            "is_main": false,
+            "is_corp_director": false
+        }
+    ]
+}
+```
 
-- `APP_CONFIG_PATH` (default: `config/config.json`)
-- `APP_SECRET_PATH` (default: `config/secret.json`)
+### `config/config.json`
 
-If `config/secret.json` is missing, the app will create a placeholder and ask you to fill in the EVE `client_secret`.
+Tracked in the repo. Contains app settings, database paths, and ESI configuration. Most defaults work out of the box.
+
+### `config/import_sde.json`
+
+Controls which SDE tables are imported and where the SQLite file is stored.
+
+### Environment variable overrides
+
+| Variable | Default | Description |
+|---|---|---|
+| `APP_CONFIG_PATH` | `config/config.json` | Path to main config |
+| `APP_SECRET_PATH` | `config/secret.json` | Path to secrets file |
+| `LOG_LEVEL` | `DEBUG` | Logging verbosity |
+| `FLASK_HOST` | `localhost` | Flask bind host |
+| `FLASK_PORT` | `5000` | Flask bind port |
+| `FLASK_DEBUG` | `false` | Flask debug mode |
+| `FLASK_HEALTH_POLL_TIMEOUT` | `300` | Max seconds to wait for backend readiness |
+| `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN` | `true` | Scan for public structures at startup |
+| `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_CAP` | `5000` | Max structures to scan |
+| `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_TIME_BUDGET` | `60` | Max seconds for startup scan |
+
+---
 
 ## Usage
 
-### Run the full app (recommended)
+### Full app (recommended)
 
-Runs Flask + Streamlit and restarts either process if it crashes:
+Starts Flask + Streamlit and automatically restarts either process if it crashes:
 
 ```bash
 python -m eve_online_industry_tracker
 ```
 
-After an editable install, you can also run the console script:
+CLI options:
 
 ```bash
-eve-online-industry-tracker
-```
-
-CLI flags:
-
-```bash
+python -m eve_online_industry_tracker --no-streamlit       # API only, no UI
+python -m eve_online_industry_tracker --log-level INFO     # reduce log noise
 python -m eve_online_industry_tracker --help
-python -m eve_online_industry_tracker --no-streamlit
-python -m eve_online_industry_tracker --log-level INFO
 ```
 
-### Run backend only
-
-Option A (via the supervisor, no UI):
+### SDE import
 
 ```bash
-python -m eve_online_industry_tracker --no-streamlit
+# Download, import, and clean up in one step
+python scripts/import_sde.py --all
+
+# Or step by step
+python scripts/import_sde.py --download
+python scripts/import_sde.py --import
+
+# Check if a newer SDE version is available
+python scripts/import_sde.py --check-version
+
+# Force re-import even if version is current
+python scripts/import_sde.py --download --import --force
 ```
 
-Option B (run Flask directly):
-
-```bash
-python -m flask_app
-```
-
-### Run UI only
-
-```bash
-streamlit run streamlit_app.py
-```
-
-Note: the Streamlit UI expects the Flask API to be reachable (defaults to `http://localhost:5000`).
-
-### Import / update the EVE SDE
-
-The importer downloads the EVE Static Data Export and imports selected YAML tables into a local SQLite DB.
-
-```bash
-python ./scripts/import_sde.py --help
-
-# Download + import + cleanup
-python ./scripts/import_sde.py --all
-```
-
-The default list of tables comes from `config/import_sde.json`.
-
-## Runtime settings (environment variables)
-
-General:
-
-- `LOG_LEVEL` (overrides default logging level; e.g. `DEBUG`, `INFO`)
-- `LOG_FORCE` (set to `0`/`false` to avoid reconfiguring logging)
-
-Flask server:
-
-- `FLASK_HOST` (default: `localhost`)
-- `FLASK_PORT` (default: `5000`)
-- `FLASK_DEBUG` (default: `false`)
-- `FLASK_REFRESH_METADATA` (default: `true`) – best-effort DB metadata initialization during startup
-
-Supervisor / health checks:
-
-- `FLASK_HEALTH_POLL_TIMEOUT` (default: `120`) – max time to wait for backend readiness
-- `FLASK_HEALTH_REQUEST_TIMEOUT` (default: `2`) – per-request timeout for `/health`
-- `FLASK_API_REQUEST_TIMEOUT` (default: `10`) – UI → API request timeout
-
-Public structures caching & global scan:
-
-- `FLASK_PUBLIC_STRUCTURES_TTL` (default: `3600`) – cache freshness window (seconds)
-- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN` (default: `true`) – enable a bounded background global scan at startup
-- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_WORKERS` (default: `10`)
-- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_CAP` (default: `5000`)
-- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_TIME_BUDGET` (default: `60`)
-- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_BATCH_SIZE` (default: `100`)
-- `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_PAUSE` (default: `5`)
-- `FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT` (default: `5`) – per-ESI-request timeout during scans
+---
 
 ## Project layout
 
-```text
+```
 .
 ├── src/
 │   ├── eve_online_industry_tracker/   # main package + CLI entrypoint
-│   ├── flask_app/                    # Flask API app
-│   ├── webpages/                     # Streamlit pages
-│   ├── classes/                      # legacy domain/services (gradually being wrapped)
-│   ├── config/                       # config schema + path helpers
+│   ├── flask_app/                     # Flask API
+│   ├── webpages/                      # Streamlit pages
+│   ├── classes/                       # domain classes (ESI client, DB manager, etc.)
+│   ├── config/                        # config schemas and path helpers
 │   └── utils/
 ├── config/
 │   ├── config.json
-│   ├── secret.json                   # expected locally; should not be committed
+│   ├── secret.json                    # gitignored — create locally
 │   └── import_sde.json
-├── database/                         # local SQLite DBs
+├── database/                          # local SQLite databases (gitignored)
 ├── scripts/
 │   └── import_sde.py
 ├── streamlit_app.py
-├── main.py                           # legacy runner (kept for compatibility)
-└── README.md
+└── main.py                            # alternative entrypoint
 ```
+
+---
 
 ## Troubleshooting
 
-- `No module named eve_online_industry_tracker`: you likely didn’t install the project. Use `python -m pip install -e . --no-build-isolation`.
-- `SSLCertVerificationError`: configure your proxy/trust store or use a trusted/internal package index. As a fallback you can create the venv with `--system-site-packages`.
-- Startup shows `/health` 503 for a while: initialization is intentionally done in the background; wait until it reports `status=OK`.
+**`No module named eve_online_industry_tracker`**
+Run `pip install -e . --no-build-isolation` from the repo root with your venv active.
+
+**`SDE database is missing table "races"`**
+The SDE hasn't been imported yet. Run:
+```bash
+python scripts/import_sde.py --download --import --force
+```
+
+**`SSL certificate verification failed`**
+You are likely behind a corporate proxy (e.g. Zscaler). Install truststore so Python uses your system certificate store:
+```bash
+pip install truststore
+```
+
+**Startup shows `/health` 503 for a while**
+Normal — initialization runs in the background. Wait until the log shows `Flask is ready!` or open http://localhost:8501 and it will load once ready.
+
+**`UNIQUE constraint failed: oauth_characters.character_id`**
+A character is already registered in the OAuth database. Safe to ignore on startup.
