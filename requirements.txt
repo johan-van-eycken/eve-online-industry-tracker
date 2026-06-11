@@ -14,8 +14,5 @@ tqdm==4.66.1
 # EVE SSO JWT validation
 PyJWT[crypto]==2.10.1
 
-# macOS system keychain SSL (needed behind Zscaler/corporate proxies)
-truststore
-
 # pip install --upgrade pip setuptools wheel
 # pip install -r requirements.txt
