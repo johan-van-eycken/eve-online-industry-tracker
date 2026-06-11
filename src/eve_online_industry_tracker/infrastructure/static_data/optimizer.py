@@ -18,12 +18,14 @@ def optimize_ore_tiered(
     materials,
     order_book,
     max_ore_types=None,
+    mode="min_cost",
 ):
     prob = LpProblem("TieredOreOptimization", LpMinimize)
 
     order_book = _prune_and_merge_order_book(order_book, ores, demands)
 
     y = {o["id"]: LpVariable(f"y_{o['id']}", 0, 1, LpBinary) for o in ores}
+    ore_batch_volume = {o["id"]: float(o.get("batch_volume", 0.0) or 0.0) for o in ores}
 
     tier_vars = {}
     for o in ores:
@@ -66,9 +68,24 @@ def optimize_ore_tiered(
             cost_terms.append(tv["var"] * tv["batch_size"] * tv["price"])
 
     base_cost = lpSum(cost_terms)
+    total_ore_volume = lpSum(tv["var"] * ore_batch_volume.get(oid, 0.0) for oid, tvs in tier_vars.items() for tv in tvs)
+    ore_type_count = lpSum(y[oid] for oid in y)
 
     penalty = 1e-6
-    objective = base_cost + penalty * lpSum(s[m] for m in materials)
+    overflow_penalty = penalty * lpSum(s[m] for m in materials)
+
+    if mode == "min_volume":
+        objective = total_ore_volume + (1e-9 * base_cost) + overflow_penalty
+    elif mode == "min_ore_types":
+        objective = ore_type_count + (1e-9 * base_cost) + overflow_penalty
+    elif mode == "balanced":
+        cost_upper_bound = sum(tv["max_batches"] * tv["batch_size"] * tv["price"] for tvs in tier_vars.values() for tv in tvs)
+        volume_upper_bound = sum(tv["max_batches"] * ore_batch_volume.get(oid, 0.0) for oid, tvs in tier_vars.items() for tv in tvs)
+        normalized_cost_weight = 1.0 / max(float(cost_upper_bound or 0.0), 1.0)
+        normalized_volume_weight = 1.0 / max(float(volume_upper_bound or 0.0), 1.0)
+        objective = (normalized_cost_weight * base_cost) + (normalized_volume_weight * total_ore_volume) + overflow_penalty
+    else:
+        objective = base_cost + overflow_penalty
     prob += objective
 
     if max_ore_types is not None:
@@ -106,6 +123,7 @@ def optimize_ore_tiered(
                 tiers_used.append(
                     {
                         "order_id": tv["order_id"],
+                        "location_id": tv.get("location_id"),
                         "batches": val_int,
                         "ore_units": ore_units,
                         "unit_price": tv["price"],
@@ -127,13 +145,17 @@ def optimize_ore_tiered(
 
     total_cost = sum(o["cost"] for o in per_ore.values())
     surplus_out = {m: s[m].value() for m in materials}
+    total_volume_m3 = sum(ore_batch_volume.get(oid, 0.0) * data["batches"] for oid, data in per_ore.items())
 
     return {
         "status": "ok",
         "total_cost": total_cost,
+        "total_ore_volume_m3": total_volume_m3,
+        "selected_ore_type_count": sum(1 for data in per_ore.values() if data.get("selected")),
         "solution": list(per_ore.values()),
         "surplus": surplus_out,
         "pricing_mode": "tiered_orders",
+        "optimization_mode": str(mode),
     }
 
 

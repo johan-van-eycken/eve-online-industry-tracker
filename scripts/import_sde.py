@@ -18,13 +18,15 @@ import json
 from datetime import datetime
 from tqdm import tqdm
 
-# Add project root to sys.path
+# Add project root and src/ to sys.path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SRC_DIR = os.path.join(ROOT_DIR, "src")
 sys.path.append(ROOT_DIR)
+sys.path.append(SRC_DIR)
 
-from classes.config_manager import ConfigManager
+from eve_online_industry_tracker.config.config_manager import ConfigManager
 from config.schemas import IMPORT_SDE_SCHEMA, SDE_VERSION_SCHEMA
-from classes.database_manager import DatabaseManager
+from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 
 
 # ----------------------------

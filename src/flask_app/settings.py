@@ -49,7 +49,7 @@ def get_settings() -> FlaskSettings:
         flask_port=int(os.getenv("FLASK_PORT", "5000")),
         flask_debug=_bool("FLASK_DEBUG", default=False),
         refresh_metadata_on_startup=_bool("FLASK_REFRESH_METADATA", default=True),
-        health_poll_timeout_seconds=_int("FLASK_HEALTH_POLL_TIMEOUT", default=120),
+        health_poll_timeout_seconds=_int("FLASK_HEALTH_POLL_TIMEOUT", default=300),
         health_request_timeout_seconds=_int("FLASK_HEALTH_REQUEST_TIMEOUT", default=2),
         api_request_timeout_seconds=_int("FLASK_API_REQUEST_TIMEOUT", default=10),
         public_structures_cache_ttl_seconds=_int("FLASK_PUBLIC_STRUCTURES_TTL", default=3600),
@@ -61,7 +61,7 @@ def get_settings() -> FlaskSettings:
         ),
         public_structures_startup_scan_batch_size=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_BATCH_SIZE", default=100),
         public_structures_startup_scan_pause_seconds=_int("FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_PAUSE", default=5),
-        public_structures_esi_request_timeout_seconds=_int("FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT", default=5),
+        public_structures_esi_request_timeout_seconds=_int("FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT", default=15),
     )
 
 
