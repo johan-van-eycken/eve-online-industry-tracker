@@ -1,0 +1,326 @@
+================================================================================
+  MARKET ORDER PRICING ADVISORY — HOW ADVISED PRICES AND CONFIDENCE ARE COMPUTED
+================================================================================
+
+The Market Orders page shows an "Advised Price", "Advice Confidence", estimated
+sell days, and ISK/day for each sell order. This document explains where those
+values come from, how they are calculated, and what they mean.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  OVERVIEW
+────────────────────────────────────────────────────────────────────────────────
+
+The advised price is a weighted average of up to five independent inputs
+("components"). Components that cannot be computed for a given item are silently
+excluded, and the remaining weights are renormalised so they still sum to 100%.
+
+Confidence is assessed separately from the price calculation. It measures how
+much data was available, not whether the resulting price is a good idea.
+
+All values are computed by PricingSuggestionService (see
+src/eve_online_industry_tracker/application/market_analysis/
+pricing_suggestion_service.py) and returned by the Flask endpoint:
+
+    GET /characters/market_orders?refresh=0|1&compare=0|1
+
+The Streamlit UI surfaces these values in two places:
+  - Sell-orders grid: "Advised Price", "Advice Confidence", "Est. Days (Adv.)",
+    "ISK/day (Adv.)" columns
+  - Pricing Analysis panel (bottom of page): full breakdown per selected order
+
+
+────────────────────────────────────────────────────────────────────────────────
+  THE FIVE PRICE COMPONENTS
+────────────────────────────────────────────────────────────────────────────────
+
+Component 0 — Your Cost Basis  (15% weight)
+────────────────────────────────────────────
+  Source: CharacterAssetsModel.acquisition_unit_cost for the character + type_id.
+  If multiple asset rows exist, a quantity-weighted average is computed.
+
+  A 5% margin is added on top of cost before this value enters the weighted
+  average (cost_with_margin = acquisition_unit_cost × 1.05).
+
+  This component also acts as a hard floor. After the weighted average is
+  computed, if the result falls below cost × 1.05, it is clamped upward.
+
+  Fallback: if no assets exist or none have cost data, the component falls back
+  to the current market order price. This fallback is labelled
+  "market_order_fallback" in the UI and triggers a warning banner, because it
+  means the asset is missing from the tracked inventory (ESI data lag).
+
+  acquisition_source values:
+    "manufactured"          → item was built; cost = unit_build_cost from job
+    "bought"                → item was purchased on the market
+    "market_order_fallback" → no asset record found; order price used as proxy
+
+Component 1 — Your Recent Sales  (20% weight)
+──────────────────────────────────────────────
+  Source: SalesHistoryService.suggest_sell_price() — median of recent wallet
+  sell transactions for the same type_id.
+
+  Carries its own sub-confidence ("high", "medium", "low", "none") based on
+  sample size, which feeds into the overall confidence score (see below).
+
+Component 2 — Current Market Hub Price  (35% weight)
+─────────────────────────────────────────────────────
+  Source: market_pricing_service.get_type_price_map(side="sell", hub="jita") —
+  the current lowest sell order(s) at Jita 4-4 (region 10000002).
+
+  Highest-weight component. If unavailable (pricing cache not populated), its
+  35% weight is redistributed proportionally across the other components.
+
+Component 3 — Market Trend  (15% weight)
+─────────────────────────────────────────
+  Source: MarketHistoryService.get_price_stats() — Jita daily OHLC from
+  MarketHistoryModel.
+
+      adjustment_factor = 1.0 + (trend_pct / 100 × 0.5)
+      market_trend_price = avg_42w × adjustment_factor
+
+  where trend_pct = ((avg_7d - avg_42w) / avg_42w) × 100.
+
+  A rising market nudges the advised price up by half the observed trend rate;
+  a falling market nudges it down.
+
+Component 4 — Liquidity Adjustment  (15% weight)
+──────────────────────────────────────────────────
+  Source: MarketHistoryService.get_volume_stats() — average daily traded volume.
+
+      avg_daily_volume < 100     → current_price × 0.95  (thin market)
+      avg_daily_volume > 10,000  → current_price × 1.02  (high liquidity)
+      otherwise                  → current_price (neutral)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  WEIGHT REDISTRIBUTION
+────────────────────────────────────────────────────────────────────────────────
+
+The nominal weights sum to 1.0. When one or more components are absent, the
+weighted price divides by the sum of weights that ARE present, so remaining
+components each gain proportionally more influence.
+
+If no components are available, the advised price equals the current order price.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  CONFIDENCE SCORING
+────────────────────────────────────────────────────────────────────────────────
+
+Confidence is an additive score from 0 to 10. Final band:
+
+    score ≥ 8  →  "high"
+    score ≥ 4  →  "medium"
+    score < 4  →  "low"
+
+The four signals and their point contributions:
+
+  1. Cost basis availability               +2 if cost_basis > 0
+
+  2. Sales history confidence
+       "high"    →  +3
+       "medium"  →  +2
+       "low"     →  +1
+       "none"    →  +0
+
+  3. Market data completeness (record_count from MarketHistoryService)
+       > 100 records  →  +3
+       > 30 records   →  +2
+       > 7 records    →  +1
+       ≤ 7 records    →  +0
+
+  4. Volume data                           +2 if avg_daily_volume > 100
+
+Maximum reachable score is 10 (2 + 3 + 3 + 2 = 10).
+
+
+────────────────────────────────────────────────────────────────────────────────
+  PROFITABILITY METRICS (after fees)
+────────────────────────────────────────────────────────────────────────────────
+
+These metrics are computed for both the advised price and the current order price
+to help decide whether to relist.
+
+  Fee inputs
+    sales_tax_fraction   — read from CharacterModel.market_fees (set by
+                           refresh_market_fees(): base 7.5%, reduced by
+                           Accounting skill level at 11% per level).
+    broker_fee_fraction  — read from CharacterModel.market_fees (base varies by
+                           Broker Relations skill and station standings, capped
+                           at 3%).
+    Defaults if unavailable: 7.5% tax, 3% broker fee.
+
+  Break-even price
+    The minimum list price to recover cost after fees:
+        break_even = cost_basis / (1 - sales_tax_fraction - broker_fee_fraction)
+    Items listed below this price result in a net loss.
+
+  Net margin %
+        net_proceeds = price × (1 - sales_tax - broker_fee)
+        net_margin   = (net_proceeds - cost_basis) / price × 100
+    Shown for both advised and current price.
+
+  ISK/day
+        profit_per_unit = price × (1 - sales_tax - broker_fee) - cost_basis
+        isk_per_day     = profit_per_unit × quantity / estimated_sell_days
+    The primary decision metric: combines margin and sell velocity.
+    A slightly lower price that sells 3× faster typically yields much better
+    ISK/day than a higher price that sits on the market.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ESTIMATED SELL DAYS
+────────────────────────────────────────────────────────────────────────────────
+
+Computed for both the advised price and the current order price.
+
+Data sources:
+  - MarketOrderbookViewCacheModel / market_orderbook_cache_repo:
+    cached Jita 4-4 sell orderbook levels [[price, volume], ...].
+  - MarketHistoryModel avg_daily_volume: total market daily volume for the item.
+
+Formula (two stages):
+
+  Stage A — days until our order is effectively at the front of the queue:
+      volume_ahead = sum of volumes from sell orders priced < target_price
+      days_until_front = volume_ahead / avg_daily_volume
+
+  Stage B — days for our own units to sell once at the front:
+      volume_at_level = competing volume listed at ≈ our price level
+      capture_rate    = quantity / (quantity + volume_at_level),
+                        clamped to [5%, 50%]  (we will not capture all daily volume)
+      days_for_our_units = quantity / (avg_daily_volume × capture_rate)
+
+  total_estimated_days = days_until_front + days_for_our_units
+
+Caveats:
+  - The orderbook cache stores only the top N levels (configurable, default 5).
+    If our price sits above those levels, volume_ahead is underestimated and the
+    sell date is optimistic (treat it as a lower bound).
+  - If the orderbook cache is empty (not yet populated for this item), the
+    queue is assumed to be empty and we capture up to 35% of daily volume.
+  - The estimate is for trading days of market activity, not calendar days.
+
+The "Est. Days (Adv.)" column in the sell-orders grid shows the estimate for
+the advised price. The full panel shows both estimates side by side.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  HOLD SIGNAL
+────────────────────────────────────────────────────────────────────────────────
+
+When the market trend is rising significantly (trend_pct > 5%), the system
+computes whether waiting 7 days would yield more total ISK than selling now.
+
+  daily_rate    = trend_pct / (42 × 7)   (daily drift implied by 42w baseline)
+  price_in_7d   = hub_price × (1 + daily_rate × 7)
+  gain_per_unit = price_in_7d - hub_price
+  total_gain    = gain_per_unit × quantity
+
+  opportunity_cost_7d = isk_per_day_advised × 7   (what you'd earn by selling now)
+
+  Hold suggested if: total_gain > opportunity_cost_7d AND total_gain > 0
+
+The hold signal is shown as an info banner in the Pricing Analysis panel. It is
+a heuristic — the linear extrapolation does not account for volatility, large
+buy/sell walls, or game events that can move prices discontinuously.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  RELIST RISK
+────────────────────────────────────────────────────────────────────────────────
+
+If estimated_sell_days_advised > order_duration_days (from the ESI order's
+"duration" field, typically 90 days), the order is flagged as at risk of
+expiring before selling.
+
+  unsold_fraction        = 1 - (order_duration_days / estimated_sell_days)
+  estimated_unsold_qty   = quantity × unsold_fraction
+  estimated_relist_cost  = price × broker_fee_fraction × estimated_unsold_qty
+
+The relist cost is an approximation: it assumes you relist at the same price and
+do not receive a partial broker credit (EVE does grant a partial credit but the
+exact amount depends on how much of the order filled before expiry).
+
+A warning banner is shown in the Pricing Analysis panel when at_risk = True.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  HUMAN-READABLE REASONING STRING
+────────────────────────────────────────────────────────────────────────────────
+
+The "reasoning" caption lists which components contributed and the confidence
+band. For example:
+
+    "Based on: Your cost basis (floor), Your recent sales (12 samples),
+     Current market hub price, Market rising (+3.2%). Confidence: high."
+
+
+────────────────────────────────────────────────────────────────────────────────
+  UI SURFACE — WHERE THE ADVISORY APPEARS
+────────────────────────────────────────────────────────────────────────────────
+
+Sell Orders grid  (marketorders.py:_build_order_rows)
+  "Advised Price"       — advised_price in ISK
+  "Advice Confidence"   — "high", "medium", or "low"
+  "Est. Days (Adv.)"    — estimated_sell_days_advised, rounded to 1 decimal
+  "ISK/day (Adv.)"      — isk_per_day_advised in ISK
+
+  These columns are only added when the API returns a non-null advised_price.
+  Buy orders do not receive advised pricing.
+
+Pricing Analysis panel  (marketorders.py:_render_pricing_analysis)
+  Row 1: Current Price / Advised Price / Difference | Confidence + reasoning |
+          Your Cost / Break-even Price
+  Row 2: Net Margin % (advised vs current) | Est. Days (advised vs current) |
+          ISK/day (advised vs current)
+  Hold signal banner (info)  — when trend favours holding
+  Relist risk banner (warning) — when est. sell days > order duration
+  Pricing Components list    — one line per present component with weight
+
+
+────────────────────────────────────────────────────────────────────────────────
+  RELATIONSHIP TO INDUSTRY BUILDER CONFIDENCE
+────────────────────────────────────────────────────────────────────────────────
+
+The market order advisory confidence (this document) is SEPARATE from the
+Industry Builder's pricing confidence (documented in cost_allocation.txt,
+Phase 6).
+
+  Industry Builder confidence measures how reliably the input material costs
+  and the market sell price for the product are known, combining market_sell
+  confidence (orderbook depth, anomaly risk) with material_pricing confidence
+  (FIFO coverage, unknown cost basis flags).
+
+  Market order advisory confidence measures how much supporting data exists to
+  suggest an optimal re-listing price for inventory you already hold: your own
+  cost basis, your own sales history, market history depth, and volume.
+
+The two scores use different inputs, different scales, and serve different
+screens. They are not derived from each other.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  FUTURE IMPROVEMENTS (not yet implemented)
+────────────────────────────────────────────────────────────────────────────────
+
+  ML-based price forecasting (7/14/30 day):
+    MarketHistoryModel has daily OHLC + volume going back years — a ready-made
+    time series per item. Prophet (Facebook/Meta) or statsmodels ARIMA could
+    produce a price forecast with a confidence interval, improving the trend
+    component and the hold signal.
+
+  ML sell-velocity prediction:
+    A regression model trained on (price, market conditions) → days_to_sell
+    would replace the orderbook queue heuristic. Requires "listing date" to be
+    recorded when an order first appears in ESI (add first_seen_at to the market
+    orders model). After 4–8 weeks of labelled data, a scikit-learn gradient
+    boosted regressor is a practical fit.
+
+  Both ML paths require EVE-specific guards:
+    - Median/IQR-based feature engineering to suppress manipulation spikes
+    - Minimum daily volume threshold (< ~20/day → fall back to heuristic)
+    - Prophet changepoint detection for patch-driven step changes
+
+================================================================================
