@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import statistics
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_
@@ -30,8 +32,9 @@ class PricingSuggestionService:
         region_id: int = 10000002,
         quantity: int = 0,
         order_duration_days: int = 90,
+        days_remaining: int | None = None,
     ) -> dict[str, Any]:
-        """Suggest a sell price with detailed breakdown and three-tier price band."""
+        """Suggest a sell price with detailed breakdown, three-tier price band, and urgency signals."""
         my_sales = self._sales_history.suggest_sell_price(character_id=character_id, type_id=type_id)
         market_data = self._market_history.get_price_stats(type_id=type_id, region_id=region_id)
         volume_data = self._market_history.get_volume_stats(type_id=type_id, region_id=region_id)
@@ -41,8 +44,15 @@ class PricingSuggestionService:
         hub_price = self._get_hub_price(type_id=type_id, hub=hub)
         hub_buy_price = self._get_hub_buy_price(type_id=type_id, hub=hub)
         sales_tax, broker_fee = self._get_fees(character_id=character_id)
-        orderbook_levels = self._get_orderbook_levels(type_id=type_id, region_id=region_id)
+        raw_orderbook = self._get_orderbook_levels(type_id=type_id, region_id=region_id)
+        orderbook_levels = self._filter_orderbook_outliers(raw_orderbook)
         min_target_margin = self._get_min_target_margin()
+
+        fill_rate = self._get_fill_rate_velocity(
+            character_id=character_id, type_id=type_id,
+            current_price=current_price, lookback_days=90,
+        )
+        seller_concentration = self._get_seller_concentration(orderbook_levels=orderbook_levels)
 
         breakdown = self._calculate_breakdown(
             my_sales=my_sales,
@@ -65,27 +75,30 @@ class PricingSuggestionService:
             min_target_margin=min_target_margin,
         )
 
-        # Floor 1: break-even — never advise a loss after fees
+        # Floor 1: break-even
         if break_even and advised_price < break_even:
             advised_price = break_even
             breakdown["weighted_price"] = advised_price
             breakdown["floored_to_break_even"] = True
 
-        # Floor 2: minimum target margin — respect configured profit target
+        # Floor 2: minimum target margin
         if min_target_price and advised_price < min_target_price:
             advised_price = min_target_price
             breakdown["weighted_price"] = advised_price
             breakdown["floored_to_target_margin"] = True
             breakdown["min_target_margin_pct"] = round(min_target_margin * 100, 1)
 
+        floor = min_target_price or break_even or advised_price
+
         net_margin_advised = self._calc_net_margin(price=advised_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
         net_margin_current = self._calc_net_margin(price=current_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
-        est_days_advised = self._estimate_sell_days(target_price=advised_price, quantity=quantity, orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol)
-        est_days_current = self._estimate_sell_days(target_price=current_price, quantity=quantity, orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol)
+        est_days_advised = self._estimate_sell_days(target_price=advised_price, quantity=quantity, orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol, fill_rate=fill_rate)
+        est_days_current = self._estimate_sell_days(target_price=current_price, quantity=quantity, orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol, fill_rate=fill_rate)
         isk_per_day_advised = self._calc_isk_per_day(price=advised_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee, quantity=quantity, est_days=est_days_advised)
         isk_per_day_current = self._calc_isk_per_day(price=current_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee, quantity=quantity, est_days=est_days_current)
         hold_signal = self._calc_hold_signal(market_data=market_data, hub_price=hub_price, quantity=quantity, isk_per_day_advised=isk_per_day_advised)
         relist_risk = self._calc_relist_risk(est_days=est_days_advised, order_duration_days=order_duration_days, broker_fee=broker_fee, price=advised_price, quantity=quantity)
+
         price_band = self._calc_price_band(
             target_price=advised_price,
             min_target_price=min_target_price,
@@ -99,7 +112,36 @@ class PricingSuggestionService:
             broker_fee=broker_fee,
             quantity=quantity,
             avg_daily_vol=avg_daily_vol,
+            fill_rate=fill_rate,
         )
+
+        # Expiry urgency: if the order will likely expire before selling, blend toward aggressive
+        expiry_urgency = False
+        expiry_urgency_detail: dict[str, Any] = {}
+        if days_remaining is not None and days_remaining >= 0 and est_days_advised is not None and est_days_advised > 0:
+            if days_remaining < est_days_advised * 0.5:
+                expiry_urgency = True
+                # urgency_ratio 0.0 = just entered danger zone, 1.0 = expiry tomorrow
+                urgency_ratio = max(0.0, 1.0 - (days_remaining / max(1.0, est_days_advised * 0.5)))
+                blend = min(0.5, urgency_ratio)  # cap at 50% blend toward aggressive
+                aggressive_price = (price_band or {}).get("aggressive", {}).get("price") or advised_price
+                urgency_price = max(floor, advised_price * (1.0 - blend) + aggressive_price * blend)
+                expiry_urgency_detail = {
+                    "days_remaining": int(days_remaining),
+                    "est_days_advised": round(est_days_advised, 1),
+                    "urgency_blend": round(blend, 3),
+                    "urgency_ratio": round(urgency_ratio, 3),
+                    "original_advised": float(advised_price),
+                    "urgency_adjusted_price": float(urgency_price),
+                    "reason": (
+                        f"Order expires in {days_remaining}d but est. {est_days_advised:.0f}d to sell — "
+                        f"advised price moved {blend*100:.0f}% toward aggressive tier."
+                    ),
+                }
+                advised_price = urgency_price
+                breakdown["weighted_price"] = advised_price
+                breakdown["urgency_adjusted"] = True
+                breakdown["urgency_blend"] = round(blend, 3)
 
         return {
             "advised_price": advised_price,
@@ -125,12 +167,16 @@ class PricingSuggestionService:
             "hold_signal": hold_signal,
             "relist_risk": relist_risk,
             "price_band": price_band,
+            "fill_rate_velocity": fill_rate,
+            "seller_concentration": seller_concentration,
+            "expiry_urgency": expiry_urgency,
+            "expiry_urgency_detail": expiry_urgency_detail if expiry_urgency else None,
+            "outlier_levels_removed": len(raw_orderbook) - len(orderbook_levels),
         }
 
     # ── Data retrieval ────────────────────────────────────────────────────────
 
     def _get_hub_price(self, *, type_id: int, hub: str = "jita") -> float | None:
-        """Current best Jita sell price from market pricing service."""
         try:
             svc = getattr(self._state, "market_pricing_service", None)
             if svc is None:
@@ -158,16 +204,6 @@ class PricingSuggestionService:
     def _get_cost_basis(
         self, *, character_id: int, type_id: int, fallback_price: float | None = None
     ) -> tuple[float | None, str | None, str | None]:
-        """Weighted-average acquisition cost for an item.
-
-        Priority:
-          1. Current CharacterAssetsModel rows (item in hangar)
-          2. Most recent CharacterAssetHistoryModel row (item on market — ESI removes
-             active sell orders from the assets snapshot)
-          3. Current order price as last resort (unreliable; triggers warning)
-
-        Returns (cost_basis, acquisition_source, cost_source).
-        """
         app_session = self._sessions.app_session()
         try:
             assets = app_session.query(CharacterAssetsModel).filter(
@@ -223,7 +259,6 @@ class PricingSuggestionService:
                 pass
 
     def _get_fees(self, *, character_id: int) -> tuple[float, float]:
-        """(sales_tax_fraction, broker_fee_fraction) — falls back to EVE defaults."""
         try:
             app_session = self._sessions.app_session()
             try:
@@ -241,7 +276,6 @@ class PricingSuggestionService:
         return 0.075, 0.03
 
     def _get_orderbook_levels(self, *, type_id: int, region_id: int = 10000002) -> list[list[float]]:
-        """Cached Jita 4-4 sell orderbook [[price, volume], ...] sorted ascending."""
         try:
             from eve_online_industry_tracker.infrastructure.persistence.market_orderbook_cache_repo import get_cached_orderbook_levels
             app_session = self._sessions.app_session()
@@ -261,7 +295,6 @@ class PricingSuggestionService:
         return []
 
     def _get_min_target_margin(self) -> float:
-        """Minimum acceptable net profit margin (fraction). Configurable via cfg_manager."""
         try:
             cfg_manager = getattr(self._state, "cfg_manager", None)
             if cfg_manager:
@@ -271,7 +304,135 @@ class PricingSuggestionService:
                     return max(0.0, min(0.50, float(advisory_cfg["min_target_margin_pct"]) / 100))
         except Exception:
             pass
-        return 0.08  # 8 % default
+        return 0.08
+
+    # ── Orderbook preprocessing ───────────────────────────────────────────────
+
+    def _filter_orderbook_outliers(self, levels: list[list[float]]) -> list[list[float]]:
+        """Remove manipulation walls using IQR fencing on the price axis.
+
+        A single large-volume order at an extreme price can inflate days_of_supply
+        and make the market appear oversupplied when it isn't. Only upper outliers
+        are removed — lower prices are legitimate undercuts.
+        """
+        if len(levels) < 4:
+            return levels
+        prices = [float(lv[0]) for lv in levels]
+        qs = statistics.quantiles(prices, n=4)  # [Q1, median, Q3]
+        q1, q3 = qs[0], qs[2]
+        iqr = q3 - q1
+        if iqr <= 0:
+            return levels
+        upper_fence = q3 + 2.0 * iqr
+        filtered = [lv for lv in levels if float(lv[0]) <= upper_fence]
+        return filtered if len(filtered) >= 2 else levels[:2]
+
+    # ── Market microstructure signals ─────────────────────────────────────────
+
+    def _get_seller_concentration(self, *, orderbook_levels: list[list[float]]) -> dict[str, Any]:
+        """Detect sniper risk by measuring how concentrated the front of the queue is.
+
+        In EVE a single seller can instantly reset the queue by repricing. We use
+        front-level volume fraction as a proxy: if one or two levels own >60-80%
+        of visible supply, the advised aggressive undercut may not last.
+        """
+        if not orderbook_levels:
+            return {"sniper_risk": False, "risk_label": "No orderbook data", "note": ""}
+
+        total_vol = sum(int(lv[1]) for lv in orderbook_levels)
+        if total_vol == 0:
+            return {"sniper_risk": False, "risk_label": "Empty orderbook", "note": ""}
+
+        front_1_vol = int(orderbook_levels[0][1])
+        front_2_vol = sum(int(lv[1]) for lv in orderbook_levels[:2])
+        front_1_fraction = front_1_vol / total_vol
+        front_2_fraction = front_2_vol / total_vol
+        num_levels = len(orderbook_levels)
+
+        sniper_risk = (front_1_fraction > 0.60 and num_levels >= 2) or \
+                      (front_2_fraction > 0.80 and num_levels >= 3)
+
+        if sniper_risk:
+            risk_label = "Sniper risk"
+            note = "Dominant seller controls front of queue — undercutting by 0.01 ISK may not stick"
+        elif front_2_fraction > 0.60:
+            risk_label = "Moderate concentration"
+            note = "A few large sell walls dominate; check how often they reprice"
+        else:
+            risk_label = "Distributed"
+            note = "Multiple sellers at varied levels — normal market"
+
+        return {
+            "sniper_risk": sniper_risk,
+            "front_1_volume_pct": round(front_1_fraction * 100, 1),
+            "front_2_volume_pct": round(front_2_fraction * 100, 1),
+            "num_price_levels": num_levels,
+            "total_visible_volume": int(total_vol),
+            "risk_label": risk_label,
+            "note": note,
+        }
+
+    # ── Wallet fill-rate velocity ─────────────────────────────────────────────
+
+    def _get_fill_rate_velocity(
+        self,
+        *,
+        character_id: int,
+        type_id: int,
+        current_price: float,
+        lookback_days: int = 90,
+    ) -> dict[str, Any] | None:
+        """Estimate actual daily sell velocity from wallet transaction history.
+
+        Uses your own completed sales rather than the market-wide orderbook
+        heuristic, reflecting your real historical throughput at this station.
+        A simple price-elasticity factor adjusts for the difference between your
+        median historical sell price and the current target price.
+        """
+        history = self._sales_history.get_sold_history(
+            character_id=character_id, type_id=type_id, days=lookback_days
+        )
+        if len(history) < 2:
+            return None
+
+        total_qty = sum(tx["quantity"] for tx in history)
+        if total_qty <= 0:
+            return None
+
+        # Infer actual date span (not just the lookback window)
+        dates = [tx["date"] for tx in history if tx["date"]]
+        try:
+            oldest = datetime.fromisoformat(str(dates[-1]).replace("Z", "+00:00"))
+            newest = datetime.fromisoformat(str(dates[0]).replace("Z", "+00:00"))
+            day_span = max(1.0, float((newest - oldest).days + 1))
+        except Exception:
+            day_span = float(lookback_days)
+
+        daily_velocity_raw = total_qty / day_span
+
+        # Price-elasticity: each 1% above median historical sell price
+        # reduces expected velocity by ~0.5% (conservative linear approximation)
+        prices = [tx["unit_price"] for tx in history if tx["unit_price"] > 0]
+        median_price = float(statistics.median(prices)) if prices else current_price
+        if median_price > 0 and current_price > 0:
+            premium_pct = (current_price - median_price) / median_price * 100
+            elasticity_factor = max(0.20, 1.0 - premium_pct * 0.005)
+        else:
+            elasticity_factor = 1.0
+
+        adjusted_velocity = max(0.001, daily_velocity_raw * elasticity_factor)
+        transaction_count = len(history)
+        confidence = "high" if transaction_count >= 10 else "medium" if transaction_count >= 4 else "low"
+
+        return {
+            "daily_velocity_raw": round(daily_velocity_raw, 3),
+            "daily_velocity_adjusted": round(adjusted_velocity, 4),
+            "median_historical_price": float(median_price),
+            "transaction_count": transaction_count,
+            "day_span": int(day_span),
+            "confidence": confidence,
+            "elasticity_factor": round(elasticity_factor, 3),
+        }
 
     # ── Core price calculation ────────────────────────────────────────────────
 
@@ -287,17 +448,9 @@ class PricingSuggestionService:
         current_price: float,
         orderbook_levels: list[list[float]],
     ) -> dict[str, Any]:
-        """Build weighted-price components.
-
-        Improvements vs original:
-          B — Hub price weight dampened by volatility (high vol = less hub anchoring)
-          A — Days-of-supply replaces the old three-bucket liquidity adjustment
-          C — Buy-sell spread added as a demand-pressure signal
-        """
         components: dict[str, Any] = {}
         volatility_pct = float(market_data.get("volatility_pct") or 0) if market_data.get("has_data") else 0.0
 
-        # Component 0: Your cost basis (15% weight) — soft floor
         if cost_basis and cost_basis > 0:
             components["your_cost_basis"] = {
                 "value": float(cost_basis * 1.05),
@@ -306,7 +459,6 @@ class PricingSuggestionService:
                 "margin_pct": 5,
             }
 
-        # Component 1: Your recent sales median (20% weight)
         my_sales_price = my_sales.get("suggested_price")
         if my_sales_price and my_sales_price > 0:
             components["your_recent_sales"] = {
@@ -316,8 +468,6 @@ class PricingSuggestionService:
                 "confidence": my_sales.get("confidence", "none"),
             }
 
-        # Component 2: Hub price — B: weight dampened by volatility
-        # High volatility → hub snapshot is less reliable → redistribute to other signals
         if hub_price and hub_price > 0:
             hub_weight = max(0.15, 0.35 / (1.0 + volatility_pct / 100.0))
             components["market_hub_price"] = {
@@ -327,10 +477,8 @@ class PricingSuggestionService:
                 "volatility_dampened": volatility_pct > 10,
             }
 
-        # Component 3: Market trend (15% weight)
         if market_data.get("has_data"):
             avg_42w = market_data.get("avg_42w") or 0
-            avg_7d = market_data.get("avg_7d") or 0
             trend_pct = market_data.get("trend_pct") or 0
             adjustment_factor = 1.0 + (trend_pct / 100.0 * 0.5)
             trend_price = avg_42w * adjustment_factor if avg_42w > 0 else None
@@ -340,10 +488,9 @@ class PricingSuggestionService:
                     "weight": 0.15,
                     "trend_pct": trend_pct,
                     "avg_42w": float(avg_42w),
-                    "avg_7d": float(avg_7d),
+                    "avg_7d": float(market_data.get("avg_7d") or 0),
                 }
 
-        # Component 4: A — Days-of-supply (replaces three-bucket liquidity adjustment)
         supply_signal = self._calc_supply_demand_signal(
             orderbook_levels=orderbook_levels,
             volume_data=volume_data,
@@ -353,7 +500,6 @@ class PricingSuggestionService:
         if supply_signal:
             components["supply_demand"] = supply_signal
 
-        # Component 5: C — Buy-sell spread demand pressure (if buy price available)
         spread_signal = self._calc_buy_sell_spread_signal(
             hub_sell_price=hub_price,
             hub_buy_price=hub_buy_price,
@@ -361,7 +507,6 @@ class PricingSuggestionService:
         if spread_signal:
             components["buy_sell_spread"] = spread_signal
 
-        # Weighted price — renormalise across present components
         total_weight = sum(c.get("weight", 0) for c in components.values())
         if total_weight > 0:
             weighted_price = sum(
@@ -370,7 +515,6 @@ class PricingSuggestionService:
         else:
             weighted_price = current_price
 
-        # Soft floor: cost + 5% (fee-aware hard floors applied in suggest_price)
         if cost_basis and cost_basis > 0:
             weighted_price = max(weighted_price, cost_basis * 1.05)
 
@@ -388,13 +532,6 @@ class PricingSuggestionService:
         hub_price: float | None,
         current_price: float,
     ) -> dict[str, Any] | None:
-        """A — Days-of-supply signal replacing the old liquidity bucket.
-
-        days_of_supply = total sell volume in orderbook / avg daily volume
-          > 30 days → oversupplied  → price conservatively
-          7–30 days → balanced      → price at reference
-          < 7 days  → undersupplied → can hold above reference
-        """
         if not volume_data.get("has_data"):
             return None
         avg_daily_volume = float(volume_data.get("avg_daily_volume") or 0)
@@ -433,12 +570,6 @@ class PricingSuggestionService:
         hub_sell_price: float | None,
         hub_buy_price: float | None,
     ) -> dict[str, Any] | None:
-        """C — Buy-sell spread as a demand pressure signal.
-
-        Tight spread (<5%)  → buyers are close to the ask → demand is strong
-        Normal spread (5-25%) → neutral
-        Wide spread (>25%)  → thin demand → price more conservatively
-        """
         if not hub_sell_price or hub_sell_price <= 0 or not hub_buy_price or hub_buy_price <= 0:
             return None
         if hub_buy_price >= hub_sell_price:
@@ -447,11 +578,9 @@ class PricingSuggestionService:
         spread_pct = (hub_sell_price - hub_buy_price) / hub_sell_price * 100
 
         if spread_pct < 5:
-            # Tight: buyers close to ask — slight premium possible
             signal_price = hub_sell_price * 1.01
             label = f"tight spread ({spread_pct:.1f}%) — strong demand"
         elif spread_pct > 25:
-            # Wide: thin demand — approach midpoint pricing
             midpoint = (hub_sell_price + hub_buy_price) / 2
             signal_price = midpoint
             label = f"wide spread ({spread_pct:.1f}%) — thin demand, price conservatively"
@@ -486,7 +615,6 @@ class PricingSuggestionService:
         broker_fee: float,
         min_target_margin: float,
     ) -> float | None:
-        """Minimum list price to achieve the configured profit margin after fees."""
         if not cost_basis or cost_basis <= 0 or min_target_margin <= 0:
             return None
         net_rate = 1.0 - min_target_margin - sales_tax - broker_fee
@@ -526,19 +654,37 @@ class PricingSuggestionService:
         quantity: int,
         orderbook_levels: list[list[float]],
         avg_daily_volume: float,
+        fill_rate: dict[str, Any] | None = None,
     ) -> float | None:
-        if not quantity or quantity <= 0 or not avg_daily_volume or avg_daily_volume <= 0:
-            return None
-        volume_ahead = sum(int(vol) for price, vol in orderbook_levels if price < target_price)
-        volume_at_level = sum(
-            int(vol) for price, vol in orderbook_levels
-            if target_price <= price <= target_price * 1.001
-        )
-        days_until_front = volume_ahead / avg_daily_volume
-        total_at_level = quantity + volume_at_level
-        capture_rate = min(0.50, max(0.05, quantity / total_at_level))
-        days_for_our_units = quantity / (avg_daily_volume * capture_rate)
-        return float(days_until_front + days_for_our_units)
+        """Blend orderbook queue heuristic with wallet fill-rate history.
+
+        Fill-rate weight by confidence:
+          high (≥10 txns)   → 65% fill-rate, 35% heuristic
+          medium (4-9 txns) → 45% fill-rate, 55% heuristic
+          low (2-3 txns)    → 25% fill-rate, 75% heuristic
+        """
+        heuristic_days: float | None = None
+        if quantity > 0 and avg_daily_volume > 0:
+            volume_ahead = sum(int(vol) for price, vol in orderbook_levels if price < target_price)
+            volume_at_level = sum(
+                int(vol) for price, vol in orderbook_levels
+                if target_price <= price <= target_price * 1.001
+            )
+            days_until_front = volume_ahead / avg_daily_volume
+            total_at_level = quantity + volume_at_level
+            capture_rate = min(0.50, max(0.05, quantity / total_at_level)) if total_at_level > 0 else 0.35
+            days_for_our_units = quantity / (avg_daily_volume * capture_rate)
+            heuristic_days = float(days_until_front + days_for_our_units)
+
+        if fill_rate and fill_rate.get("daily_velocity_adjusted", 0) > 0 and quantity > 0:
+            fill_days = float(quantity / fill_rate["daily_velocity_adjusted"])
+            confidence = fill_rate.get("confidence", "low")
+            fill_weight = {"high": 0.65, "medium": 0.45, "low": 0.25}.get(confidence, 0.25)
+            if heuristic_days is not None:
+                return float(heuristic_days * (1.0 - fill_weight) + fill_days * fill_weight)
+            return fill_days
+
+        return heuristic_days
 
     # ── Price band ────────────────────────────────────────────────────────────
 
@@ -557,43 +703,24 @@ class PricingSuggestionService:
         broker_fee: float,
         quantity: int,
         avg_daily_vol: float,
+        fill_rate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """F — Three-tier price band: aggressive / target / premium.
-
-        Aggressive — fastest sell, at or above minimum target margin floor.
-          • If our current price is already at or below the cheapest queue entry
-            (we're at the front), aggressive = target (no need to undercut further).
-          • Otherwise, undercut the cheapest competing sell by 0.01 ISK, but never
-            below the minimum target margin price.
-
-        Target — optimal ISK/day; the current advised price after all floors.
-
-        Premium — best margin, slower sell.
-          • Projects the market trend forward 14 days.
-          • Capped at hub_price × 1.25 to avoid absurd suggestions.
-          • Only offered when trend_pct > 2 %; otherwise equals target.
-        """
         floor = min_target_price or break_even_price or target_price
 
-        # Aggressive
         if orderbook_levels:
             cheapest_competing = orderbook_levels[0][0]
             if current_price <= cheapest_competing:
-                # We're already at the front — don't go lower
                 price_aggressive = max(floor, current_price)
             else:
                 price_aggressive = max(floor, cheapest_competing - 0.01)
         else:
             price_aggressive = floor
 
-        # Aggressive is always ≤ target (it's the fast-sell option, not a premium)
         price_aggressive = min(price_aggressive, target_price)
         price_aggressive = max(price_aggressive, floor)
 
-        # Target (= advised price)
         price_target = target_price
 
-        # Premium
         trend_pct = float(market_data.get("trend_pct") or 0) if market_data.get("has_data") else 0.0
         if hub_price and hub_price > 0 and trend_pct > 2:
             daily_rate = trend_pct / (42 * 7)
@@ -605,48 +732,23 @@ class PricingSuggestionService:
             price_premium = price_target
             premium_label = "Market not trending up — same as target"
 
-        # Compute sell days and ISK/day for aggressive and premium for UI context
-        est_days_aggressive = self._estimate_sell_days(
-            target_price=price_aggressive, quantity=quantity,
-            orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol,
-        )
-        est_days_premium = self._estimate_sell_days(
-            target_price=price_premium, quantity=quantity,
-            orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol,
-        )
-        isk_day_aggressive = self._calc_isk_per_day(
-            price=price_aggressive, cost_basis=cost_basis, sales_tax=sales_tax,
-            broker_fee=broker_fee, quantity=quantity, est_days=est_days_aggressive,
-        )
-        isk_day_premium = self._calc_isk_per_day(
-            price=price_premium, cost_basis=cost_basis, sales_tax=sales_tax,
-            broker_fee=broker_fee, quantity=quantity, est_days=est_days_premium,
-        )
-        margin_aggressive = self._calc_net_margin(price=price_aggressive, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
-        margin_premium = self._calc_net_margin(price=price_premium, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
+        def _tier_metrics(price: float) -> dict[str, Any]:
+            est_d = self._estimate_sell_days(
+                target_price=price, quantity=quantity,
+                orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol,
+                fill_rate=fill_rate,
+            )
+            isk_d = self._calc_isk_per_day(
+                price=price, cost_basis=cost_basis, sales_tax=sales_tax,
+                broker_fee=broker_fee, quantity=quantity, est_days=est_d,
+            )
+            margin = self._calc_net_margin(price=price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
+            return {"estimated_sell_days": est_d, "isk_per_day": isk_d, "net_margin_pct": margin}
 
         return {
-            "aggressive": {
-                "price": float(price_aggressive),
-                "label": "Aggressive — fastest sell",
-                "estimated_sell_days": est_days_aggressive,
-                "isk_per_day": isk_day_aggressive,
-                "net_margin_pct": margin_aggressive,
-            },
-            "target": {
-                "price": float(price_target),
-                "label": "Target — optimal ISK/day",
-                "estimated_sell_days": None,  # shown in main metrics already
-                "isk_per_day": None,
-                "net_margin_pct": None,
-            },
-            "premium": {
-                "price": float(price_premium),
-                "label": premium_label,
-                "estimated_sell_days": est_days_premium,
-                "isk_per_day": isk_day_premium,
-                "net_margin_pct": margin_premium,
-            },
+            "aggressive": {"price": float(price_aggressive), "label": "Aggressive — fastest sell", **_tier_metrics(price_aggressive)},
+            "target": {"price": float(price_target), "label": "Target — optimal ISK/day", "estimated_sell_days": None, "isk_per_day": None, "net_margin_pct": None},
+            "premium": {"price": float(price_premium), "label": premium_label, **_tier_metrics(price_premium)},
         }
 
     # ── Signals ───────────────────────────────────────────────────────────────
@@ -746,8 +848,7 @@ class PricingSuggestionService:
             n = components["your_recent_sales"].get("sample_size", 0)
             parts.append(f"Your recent sales ({n} samples)")
         if "market_hub_price" in components:
-            comp = components["market_hub_price"]
-            dampened = comp.get("volatility_dampened", False)
+            dampened = components["market_hub_price"].get("volatility_dampened", False)
             parts.append(f"Hub price{'  (volatility-dampened)' if dampened else ''}")
         if "market_trend" in components:
             t = components["market_trend"].get("trend_pct", 0)
@@ -763,4 +864,7 @@ class PricingSuggestionService:
         if breakdown.get("floored_to_target_margin"):
             m = breakdown.get("min_target_margin_pct", 8)
             reasoning += f" (Price raised to meet {m}% target margin.)"
+        if breakdown.get("urgency_adjusted"):
+            blend_pct = round((breakdown.get("urgency_blend", 0)) * 100)
+            reasoning += f" (Expiry urgency: price moved {blend_pct}% toward aggressive tier.)"
         return reasoning

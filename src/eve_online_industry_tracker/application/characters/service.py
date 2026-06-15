@@ -183,6 +183,9 @@ class CharactersService:
                 advised_price_data = None
                 character_id = order.get("character_id") or (character or {}).get("character_id")
                 if not order.get("is_buy_order") and isinstance(type_id, int) and isinstance(character_id, int):
+                    days_remaining_int: int | None = None
+                    if expires_in_td.total_seconds() > 0:
+                        days_remaining_int = max(0, expires_in_td.days)
                     try:
                         advised_price_data = pricing_svc.suggest_price(
                             character_id=character_id,
@@ -190,6 +193,7 @@ class CharactersService:
                             current_price=order_price,
                             quantity=int(order.get("volume_remain") or 0),
                             order_duration_days=duration_days_int or 90,
+                            days_remaining=days_remaining_int,
                         )
                     except Exception:
                         advised_price_data = None
@@ -242,7 +246,40 @@ class CharactersService:
                     enriched_order["relist_risk"] = advised_price_data.get("relist_risk")
                     enriched_order["price_band"] = advised_price_data.get("price_band")
                     enriched_order["min_target_margin_pct"] = advised_price_data.get("min_target_margin_pct")
+                    enriched_order["fill_rate_velocity"] = advised_price_data.get("fill_rate_velocity")
+                    enriched_order["seller_concentration"] = advised_price_data.get("seller_concentration")
+                    enriched_order["expiry_urgency"] = advised_price_data.get("expiry_urgency")
+                    enriched_order["expiry_urgency_detail"] = advised_price_data.get("expiry_urgency_detail")
 
                 enriched_orders.append(enriched_order)
+
+        # Compute repricing priority score for sell orders
+        for order in enriched_orders:
+            if order.get("is_buy_order") or not order.get("advised_price"):
+                order["reprice_priority_score"] = 0.0
+                continue
+            score = 0.0
+            # Critical: losing money after fees
+            if (order.get("net_margin_pct_current") or 0) < 0:
+                score += 100.0
+            # ISK/day improvement opportunity
+            adv_day = order.get("isk_per_day_advised") or 0
+            cur_day = order.get("isk_per_day_current") or 0
+            if adv_day > cur_day and adv_day > 0:
+                daily_gain_m = (adv_day - cur_day) / 1_000_000
+                score += min(50.0, daily_gain_m * 5)
+            # Expiry urgency
+            if order.get("expiry_urgency"):
+                score += 40.0
+            # Relist risk
+            if (order.get("relist_risk") or {}).get("at_risk"):
+                score += 25.0
+            # Being undercut at current price
+            price = float(order.get("price") or 0)
+            advised = float(order.get("advised_price") or price)
+            if price > 0 and advised < price:
+                undercut_pct = (price - advised) / price * 100
+                score += min(20.0, undercut_pct * 2)
+            order["reprice_priority_score"] = round(score, 1)
 
         return enriched_orders
