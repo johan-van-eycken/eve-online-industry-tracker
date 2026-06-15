@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 from sqlalchemy import and_
 from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
-from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel
+from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel, CharacterModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
 
@@ -26,6 +28,8 @@ class PricingSuggestionService:
         current_price: float,
         hub: str = "jita",
         region_id: int = 10000002,
+        quantity: int = 0,
+        order_duration_days: int = 90,
     ) -> dict[str, Any]:
         """Suggest a sell price with detailed breakdown.
 
@@ -35,6 +39,12 @@ class PricingSuggestionService:
         - breakdown: detailed component analysis for UI
         - reasoning: human-readable explanation
         - cost_basis_source: 'asset' or 'market_order_fallback' or None
+        - break_even_price: minimum list price for profit after fees
+        - net_margin_pct_advised / net_margin_pct_current: margin % after fees
+        - estimated_sell_days_advised / estimated_sell_days_current
+        - isk_per_day_advised / isk_per_day_current
+        - hold_signal: dict with hold recommendation and reasoning
+        - relist_risk: dict flagging if order may expire before selling
         """
         # Get all inputs
         my_sales = self._sales_history.suggest_sell_price(character_id=character_id, type_id=type_id)
@@ -49,6 +59,10 @@ class PricingSuggestionService:
         # Fetch current market hub price
         hub_price = self._get_hub_price(type_id=type_id, hub=hub)
 
+        # Fetch character fees and orderbook queue for profitability metrics
+        sales_tax, broker_fee = self._get_fees(character_id=character_id)
+        orderbook_levels = self._get_orderbook_levels(type_id=type_id, region_id=region_id)
+
         # Calculate weighted price
         breakdown = self._calculate_breakdown(
             my_sales=my_sales,
@@ -62,6 +76,18 @@ class PricingSuggestionService:
         advised_price = breakdown["weighted_price"]
         confidence = self._assess_confidence(my_sales, market_data, volume_data, cost_basis)
 
+        # Profitability and velocity metrics
+        avg_daily_vol = float(volume_data.get("avg_daily_volume", 0)) if volume_data.get("has_data") else 0.0
+        break_even = self._calc_break_even(cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
+        net_margin_advised = self._calc_net_margin(price=advised_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
+        net_margin_current = self._calc_net_margin(price=current_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
+        est_days_advised = self._estimate_sell_days(target_price=advised_price, quantity=quantity, orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol)
+        est_days_current = self._estimate_sell_days(target_price=current_price, quantity=quantity, orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol)
+        isk_per_day_advised = self._calc_isk_per_day(price=advised_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee, quantity=quantity, est_days=est_days_advised)
+        isk_per_day_current = self._calc_isk_per_day(price=current_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee, quantity=quantity, est_days=est_days_current)
+        hold_signal = self._calc_hold_signal(market_data=market_data, hub_price=hub_price, quantity=quantity, isk_per_day_advised=isk_per_day_advised)
+        relist_risk = self._calc_relist_risk(est_days=est_days_advised, order_duration_days=order_duration_days, broker_fee=broker_fee, price=advised_price, quantity=quantity)
+
         return {
             "advised_price": advised_price,
             "confidence": confidence,
@@ -73,11 +99,26 @@ class PricingSuggestionService:
             "cost_basis_source": cost_source,
             "breakdown": breakdown,
             "reasoning": self._build_reasoning(breakdown, confidence),
+            # Fee metadata
+            "sales_tax_fraction": sales_tax,
+            "broker_fee_fraction": broker_fee,
+            # Profitability
+            "break_even_price": break_even,
+            "net_margin_pct_advised": net_margin_advised,
+            "net_margin_pct_current": net_margin_current,
+            # Sell velocity
+            "estimated_sell_days_advised": est_days_advised,
+            "estimated_sell_days_current": est_days_current,
+            # Combined metric
+            "isk_per_day_advised": isk_per_day_advised,
+            "isk_per_day_current": isk_per_day_current,
+            # Signals
+            "hold_signal": hold_signal,
+            "relist_risk": relist_risk,
         }
 
     def _get_hub_price(self, *, type_id: int, hub: str = "jita") -> float | None:
         """Get current hub price from market pricing service."""
-        import logging
         try:
             pricing_service = getattr(self._state, "market_pricing_service", None)
             if pricing_service is None:
@@ -105,7 +146,6 @@ class PricingSuggestionService:
         Returns: (cost_basis, acquisition_source, cost_source)
         where cost_source is 'asset', 'market_order_fallback', or None
         """
-        import logging
         app_session = self._sessions.app_session()
         try:
             assets = app_session.query(CharacterAssetsModel).filter(
@@ -117,7 +157,6 @@ class PricingSuggestionService:
 
             if not assets:
                 logging.debug(f"Cost basis: no assets found (char_id={character_id}, type_id={type_id})")
-                # Fallback to market order price if available (ESI data inconsistency workaround)
                 if fallback_price and fallback_price > 0:
                     logging.debug(f"Cost basis: using market order price as fallback ({fallback_price})")
                     return fallback_price, "market_order_fallback", "market_order_fallback"
@@ -138,7 +177,6 @@ class PricingSuggestionService:
 
             if total_quantity > 0:
                 avg_cost = total_cost / total_quantity
-                # Prefer more specific sources
                 source = None
                 if "manufactured" in sources:
                     source = "manufactured"
@@ -151,7 +189,6 @@ class PricingSuggestionService:
                 return avg_cost, source, "asset"
 
             logging.debug(f"Cost basis: found {len(assets)} asset(s) but none with costs, char_id={character_id}, type_id={type_id}")
-            # Fallback to market order price if no cost data on assets
             if fallback_price and fallback_price > 0:
                 logging.debug(f"Cost basis: using market order price as fallback for assetless item ({fallback_price})")
                 return fallback_price, "market_order_fallback", "market_order_fallback"
@@ -161,6 +198,52 @@ class PricingSuggestionService:
                 app_session.close()
             except Exception:
                 pass
+
+    def _get_fees(self, *, character_id: int) -> tuple[float, float]:
+        """Return (sales_tax_fraction, broker_fee_fraction) for the character.
+
+        Falls back to EVE defaults (7.5% tax, 3% broker) if not found.
+        """
+        try:
+            app_session = self._sessions.app_session()
+            try:
+                char = app_session.query(CharacterModel).filter(
+                    CharacterModel.character_id == character_id
+                ).first()
+                if char and char.market_fees:
+                    fees = json.loads(char.market_fees) if isinstance(char.market_fees, str) else char.market_fees
+                    if isinstance(fees, dict):
+                        return float(fees.get("sales_tax_fraction", 0.075)), float(fees.get("broker_fee_fraction", 0.03))
+            finally:
+                app_session.close()
+        except Exception as exc:
+            logging.debug(f"_get_fees error (char_id={character_id}): {exc}")
+        return 0.075, 0.03
+
+    def _get_orderbook_levels(self, *, type_id: int, region_id: int = 10000002) -> list[list[float]]:
+        """Return cached Jita sell orderbook levels [[price, volume], ...] sorted ascending by price."""
+        try:
+            from eve_online_industry_tracker.infrastructure.persistence.market_orderbook_cache_repo import get_cached_orderbook_levels
+            app_session = self._sessions.app_session()
+            try:
+                result = get_cached_orderbook_levels(
+                    app_session,
+                    hub="jita",
+                    region_id=region_id,
+                    station_id=60003760,  # Jita 4-4
+                    side="sell",
+                    type_id=type_id,
+                    at_hub=True,
+                    ttl_seconds=3600,
+                )
+                if result is not None:
+                    levels, _ = result
+                    return sorted(levels, key=lambda lv: lv[0])
+            finally:
+                app_session.close()
+        except Exception as exc:
+            logging.debug(f"_get_orderbook_levels error (type_id={type_id}): {exc}")
+        return []
 
     def _calculate_breakdown(
         self,
@@ -232,7 +315,7 @@ class PricingSuggestionService:
                 "reasoning": "Based on market volume and order activity",
             }
 
-        # Calculate weighted price
+        # Calculate weighted price (renormalise weights for missing components)
         total_weight = sum(c.get("weight", 0) for c in components.values())
         if total_weight > 0:
             weighted_price = sum(
@@ -274,6 +357,155 @@ class PricingSuggestionService:
         else:
             # Medium liquidity - neutral
             return current_price
+
+    def _estimate_sell_days(
+        self,
+        *,
+        target_price: float,
+        quantity: int,
+        orderbook_levels: list[list[float]],
+        avg_daily_volume: float,
+    ) -> float | None:
+        """Estimate trading days to sell `quantity` units listed at `target_price`.
+
+        Uses the cached Jita sell orderbook to compute queue depth ahead of our
+        price, then estimates our proportional share of remaining daily volume.
+        """
+        if not quantity or quantity <= 0 or not avg_daily_volume or avg_daily_volume <= 0:
+            return None
+
+        # Volume from sell orders priced strictly below our target (must clear before ours)
+        volume_ahead = sum(int(vol) for price, vol in orderbook_levels if price < target_price)
+
+        # Volume listed at or just above our price (we compete with them for daily demand)
+        volume_at_level = sum(
+            int(vol) for price, vol in orderbook_levels
+            if target_price <= price <= target_price * 1.001
+        )
+
+        # Days until our order reaches the effective front of the queue
+        days_until_front = volume_ahead / avg_daily_volume
+
+        # Proportional share of daily demand: our units vs all units at our level
+        total_at_level = quantity + volume_at_level
+        capture_rate = min(0.50, max(0.05, quantity / total_at_level))
+
+        days_for_our_units = quantity / (avg_daily_volume * capture_rate)
+        return float(days_until_front + days_for_our_units)
+
+    def _calc_break_even(
+        self, *, cost_basis: float | None, sales_tax: float, broker_fee: float
+    ) -> float | None:
+        """Minimum list price to recover cost after sales tax and broker fee."""
+        if not cost_basis or cost_basis <= 0:
+            return None
+        net_rate = 1.0 - sales_tax - broker_fee
+        return float(cost_basis / net_rate) if net_rate > 0 else None
+
+    def _calc_net_margin(
+        self,
+        *,
+        price: float,
+        cost_basis: float | None,
+        sales_tax: float,
+        broker_fee: float,
+    ) -> float | None:
+        """Net profit margin (%) at `price` after sales tax and broker fee."""
+        if not cost_basis or cost_basis <= 0 or not price or price <= 0:
+            return None
+        net_proceeds = price * (1.0 - sales_tax - broker_fee)
+        return float((net_proceeds - cost_basis) / price * 100)
+
+    def _calc_isk_per_day(
+        self,
+        *,
+        price: float,
+        cost_basis: float | None,
+        sales_tax: float,
+        broker_fee: float,
+        quantity: int,
+        est_days: float | None,
+    ) -> float | None:
+        """Total profit ISK per day for this order batch at the given price and sell velocity."""
+        if not cost_basis or cost_basis <= 0 or not quantity or quantity <= 0:
+            return None
+        if not est_days or est_days <= 0:
+            return None
+        profit_per_unit = price * (1.0 - sales_tax - broker_fee) - cost_basis
+        return float(profit_per_unit * quantity / est_days)
+
+    def _calc_hold_signal(
+        self,
+        *,
+        market_data: dict[str, Any],
+        hub_price: float | None,
+        quantity: int,
+        isk_per_day_advised: float | None,
+    ) -> dict[str, Any] | None:
+        """Suggest whether to delay listing when the market trend strongly favours holding."""
+        if not market_data.get("has_data") or not hub_price or hub_price <= 0:
+            return None
+
+        trend_pct = float(market_data.get("trend_pct") or 0)
+        if trend_pct <= 5:
+            return {"suggested": False, "reason": "Market not trending up significantly"}
+
+        # Linear extrapolation: spread the observed 7d-vs-42w trend over 7 calendar days
+        # trend_pct = ((avg_7d - avg_42w) / avg_42w) * 100 — represents drift over 42 weeks
+        daily_rate = trend_pct / (42 * 7)
+        price_in_7d = hub_price * (1.0 + daily_rate * 7)
+        gain_per_unit = price_in_7d - hub_price
+        total_gain = gain_per_unit * max(0, quantity)
+        opportunity_cost_7d = float(isk_per_day_advised or 0) * 7
+
+        if total_gain > opportunity_cost_7d and total_gain > 0:
+            return {
+                "suggested": True,
+                "reason": f"Market +{trend_pct:.1f}% trend; est. +{gain_per_unit:,.0f} ISK/unit in 7d outweighs selling now",
+                "estimated_price_7d": float(price_in_7d),
+                "estimated_gain_total": float(total_gain),
+                "opportunity_cost_7d": float(opportunity_cost_7d),
+            }
+
+        reason = (
+            f"Selling now ({isk_per_day_advised:,.0f} ISK/day) beats waiting for +{trend_pct:.1f}% trend"
+            if isk_per_day_advised
+            else f"Trend +{trend_pct:.1f}% not significant enough to delay"
+        )
+        return {
+            "suggested": False,
+            "reason": reason,
+            "estimated_gain_total": float(total_gain),
+            "opportunity_cost_7d": float(opportunity_cost_7d),
+        }
+
+    def _calc_relist_risk(
+        self,
+        *,
+        est_days: float | None,
+        order_duration_days: int,
+        broker_fee: float,
+        price: float,
+        quantity: int,
+    ) -> dict[str, Any] | None:
+        """Flag if the order is likely to expire before fully selling."""
+        if est_days is None:
+            return None
+        if est_days <= order_duration_days:
+            return {"at_risk": False}
+
+        unsold_fraction = max(0.0, 1.0 - (order_duration_days / est_days))
+        unsold_quantity = max(0, int(quantity * unsold_fraction))
+        relist_cost_estimate = float(price * broker_fee * unsold_quantity)
+
+        return {
+            "at_risk": True,
+            "estimated_sell_days": float(est_days),
+            "order_duration_days": order_duration_days,
+            "estimated_unsold_quantity": unsold_quantity,
+            "estimated_relist_cost": relist_cost_estimate,
+            "reason": f"Est. {est_days:.0f}d to sell exceeds {order_duration_days}d order duration",
+        }
 
     def _assess_confidence(
         self,
