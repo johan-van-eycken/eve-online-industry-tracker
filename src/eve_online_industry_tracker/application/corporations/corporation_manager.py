@@ -115,7 +115,7 @@ class CorporationManager:
             try:
                 self._refresh_batch("refresh_assets", corporation_id=corp.corporation_id)
                 corp_assets = corp.get_assets()
-                all_assets.extend(corp_assets)
+                all_assets.append(corp_assets)
             except Exception as e:
                 logging.error(f"Error retrieving assets for corporation {corp.corporation_name}: {e}")
         return all_assets

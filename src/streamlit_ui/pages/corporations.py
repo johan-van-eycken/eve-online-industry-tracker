@@ -251,6 +251,9 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
         st.warning("No corporation assets data available.")
         st.stop()
 
+    if assets_df.empty or "location_type" not in assets_df.columns:
+        st.warning("No corporation assets data available.")
+        st.stop()
     assets_df = assets_df[assets_df["location_type"] != "solar_system"]
     assets_df, location_names = apply_location_names(assets_df)
     sorted_location_ids = sorted(location_names.keys(), key=lambda location_id: location_names[location_id].lower())

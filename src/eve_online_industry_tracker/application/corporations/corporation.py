@@ -118,6 +118,12 @@ class Corporation:
                 .filter_by(corporation_id=self.corporation_id)
                 .all()
             )
+        if not self.assets:
+            self.assets = (
+                self._db_app.session.query(CorporationAssetsModel)
+                .filter_by(corporation_id=self.corporation_id)
+                .all()
+            )
 
         return {
             "corporation_id": self.corporation_id,
