@@ -18,6 +18,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     build_invention_cost_per_run_by_blueprint_type,
     industry_job_material_type_ids,
     resolve_industry_job_cost_snapshot,
+    backfill_historical_market_costs,
 )
 from eve_online_industry_tracker.application.characters.asset_history import (
     backfill_wallet_buy_acquisitions,
@@ -1013,6 +1014,14 @@ class Corporation:
                 )
             self._db_app.session.bulk_save_objects([CorporationIndustryJobsModel(**r) for r in rows])
             self._db_app.session.commit()
+
+            backfill_historical_market_costs(
+                app_session=self._db_app.session,
+                sde_session=self._db_sde.session,
+                esi_service=self._default_esi_character.esi_service,
+                job_model=CorporationIndustryJobsModel,
+                owner_filter={"corporation_id": int(self.corporation_id)},
+            )
         except Exception as e:
             logging.warning(
                 "Skipping corporation industry jobs refresh for %s (%s): %s",

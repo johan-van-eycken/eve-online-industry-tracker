@@ -3,12 +3,13 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 import math
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import desc
 
-from eve_online_industry_tracker.infrastructure.models import Blueprints
+from eve_online_industry_tracker.infrastructure.models import Blueprints, MarketHistoryModel
 
 
 ASSET_SOURCE_INDUSTRY_BUILD = "industry_build"
@@ -1251,3 +1252,215 @@ def build_cost_map_for_assets(
         )
 
     return out
+
+
+def _get_or_fetch_market_price_on_date(
+    *,
+    type_id: int,
+    target_date: str,
+    app_session: Any,
+    esi_service: Any,
+    region_id: int = 10000002,
+) -> Optional[float]:
+    """Return the closest daily average price on or before target_date for type_id.
+
+    Checks the market_history DB first; fetches from ESI and caches if missing.
+    """
+    row = (
+        app_session.query(MarketHistoryModel)
+        .filter(
+            MarketHistoryModel.type_id == type_id,
+            MarketHistoryModel.region_id == region_id,
+            MarketHistoryModel.date <= target_date,
+        )
+        .order_by(MarketHistoryModel.date.desc())
+        .first()
+    )
+    if row and row.close and float(row.close) > 0:
+        return float(row.close)
+
+    try:
+        history_rows = esi_service.get_market_history([type_id], region_id=region_id)
+        items = (history_rows or {}).get(int(type_id), [])
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            date_str = str(item.get("date", "")).strip()
+            if not date_str:
+                continue
+            existing = (
+                app_session.query(MarketHistoryModel)
+                .filter(
+                    MarketHistoryModel.type_id == type_id,
+                    MarketHistoryModel.region_id == region_id,
+                    MarketHistoryModel.date == date_str,
+                )
+                .first()
+            )
+            if existing:
+                existing.close = float(item.get("average", item.get("close", 0)))
+                existing.high = float(item.get("highest", 0))
+                existing.low = float(item.get("lowest", 0))
+                existing.volume = int(item.get("volume", 0))
+                existing.order_count = int(item.get("order_count", 0))
+            else:
+                app_session.add(MarketHistoryModel(
+                    type_id=type_id,
+                    region_id=region_id,
+                    date=date_str,
+                    close=float(item.get("average", item.get("close", 0))),
+                    high=float(item.get("highest", 0)),
+                    low=float(item.get("lowest", 0)),
+                    volume=int(item.get("volume", 0)),
+                    order_count=int(item.get("order_count", 0)),
+                ))
+        app_session.flush()
+    except Exception as e:
+        logging.warning("Failed to fetch market history for type_id=%s: %s", type_id, e)
+        return None
+
+    row = (
+        app_session.query(MarketHistoryModel)
+        .filter(
+            MarketHistoryModel.type_id == type_id,
+            MarketHistoryModel.region_id == region_id,
+            MarketHistoryModel.date <= target_date,
+        )
+        .order_by(MarketHistoryModel.date.desc())
+        .first()
+    )
+    return float(row.close) if row and row.close and float(row.close) > 0 else None
+
+
+def backfill_historical_market_costs(
+    *,
+    app_session: Any,
+    sde_session: Any,
+    esi_service: Any,
+    job_model: Any,
+    owner_filter: dict,
+    region_id: int = 10000002,
+) -> None:
+    """Re-estimate material costs for jobs that used market_snapshot_estimate at 0% coverage.
+
+    For each such job, fetches daily average prices from ESI market history for the
+    job's start_date and stores a per-material breakdown in historical_input_costs.
+    This makes cost estimates for jobs that completed while the tool was offline
+    far more accurate than using current ESI prices.
+    """
+    jobs_to_fix = (
+        app_session.query(job_model)
+        .filter_by(**owner_filter)
+        .filter(
+            job_model.build_cost_source.like("market_snapshot_estimate%"),
+            job_model.historical_material_coverage_fraction == 0.0,
+            job_model.historical_input_costs.in_(["null", "{}", "", None]),
+            job_model.blueprint_type_id != None,  # noqa: E711
+        )
+        .all()
+    )
+
+    if not jobs_to_fix:
+        return
+
+    for job in jobs_to_fix:
+        try:
+            start_date = str(getattr(job, "start_date", "") or "")[:10]
+            if not start_date or len(start_date) < 10:
+                continue
+
+            blueprint_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
+            product_type_id = int(getattr(job, "product_type_id", 0) or 0)
+            runs = int(getattr(job, "runs", 1) or 1)
+            me = int(getattr(job, "blueprint_material_efficiency", 0) or 0)
+            output_quantity = int(getattr(job, "output_quantity", 0) or 0)
+
+            if not blueprint_type_id or not product_type_id or output_quantity <= 0:
+                continue
+
+            material_type_ids = industry_job_material_type_ids(
+                sde_session=sde_session,
+                blueprint_type_id=blueprint_type_id,
+            )
+            if not material_type_ids:
+                continue
+
+            bp = sde_session.query(Blueprints).filter_by(blueprintTypeID=blueprint_type_id).first()
+            if bp is None:
+                continue
+            mfg = _get_mfg_activity(getattr(bp, "activities", None))
+            if not mfg:
+                continue
+            materials = mfg.get("materials") or []
+
+            material_reduction = max(0.0, min(float(me) / 100.0, 0.99))
+            total_materials_cost = 0.0
+            input_cost_details: dict[str, Any] = {}
+            priced_quantity = 0
+            total_quantity = 0
+
+            for m in materials:
+                if not isinstance(m, dict):
+                    continue
+                mat_type_id = _safe_int(m.get("typeID"))
+                base_qty = _safe_int(m.get("quantity"))
+                if not mat_type_id or not base_qty or base_qty <= 0:
+                    continue
+
+                adjusted_qty = _round_material_quantity(
+                    float(base_qty) * float(runs) * max(0.0, 1.0 - material_reduction),
+                    minimum_quantity=int(runs) if base_qty > 0 else 0,
+                )
+                total_quantity += adjusted_qty
+
+                unit_price = _get_or_fetch_market_price_on_date(
+                    type_id=mat_type_id,
+                    target_date=start_date,
+                    app_session=app_session,
+                    esi_service=esi_service,
+                    region_id=region_id,
+                )
+                if unit_price is None or unit_price <= 0:
+                    continue
+
+                line_cost = float(adjusted_qty) * float(unit_price)
+                total_materials_cost += line_cost
+                priced_quantity += adjusted_qty
+                input_cost_details[str(mat_type_id)] = {
+                    "unit_cost": float(unit_price),
+                    "quantity": int(adjusted_qty),
+                    "source": "historical_market_daily_average",
+                    "reference_date": start_date,
+                }
+
+            if not input_cost_details:
+                continue
+
+            coverage = float(priced_quantity) / float(total_quantity) if total_quantity > 0 else 0.0
+            job_cost = float(getattr(job, "cost", 0) or 0)
+            copy_cost = float(getattr(job, "copy_cost", 0) or 0)
+            invention_cost = float(getattr(job, "invention_cost", 0) or 0)
+            total_build_cost = total_materials_cost + job_cost + copy_cost + invention_cost
+
+            job.materials_cost = total_materials_cost
+            job.historical_materials_cost = total_materials_cost
+            job.historical_material_cost_source = "historical_market_daily_average"
+            job.historical_material_coverage_fraction = coverage
+            job.historical_input_costs = input_cost_details
+            job.total_build_cost = total_build_cost
+            job.unit_build_cost = total_build_cost / float(output_quantity)
+            job.build_cost_source = "historical_market_price_on_start_date"
+
+        except Exception as e:
+            logging.warning(
+                "backfill_historical_market_costs: skipping job_id=%s: %s",
+                getattr(job, "job_id", "?"),
+                e,
+            )
+            continue
+
+    try:
+        app_session.commit()
+    except Exception as e:
+        logging.warning("backfill_historical_market_costs: commit failed: %s", e)
+        app_session.rollback()
