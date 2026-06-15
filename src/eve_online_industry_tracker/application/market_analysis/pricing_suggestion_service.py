@@ -79,6 +79,14 @@ class PricingSuggestionService:
         # Profitability and velocity metrics
         avg_daily_vol = float(volume_data.get("avg_daily_volume", 0)) if volume_data.get("has_data") else 0.0
         break_even = self._calc_break_even(cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
+
+        # Clamp advised price to fee-aware break-even: the 5% margin floor in
+        # _calculate_breakdown() ignores fees, so the weighted price can still
+        # be a net loss after sales tax + broker fee.
+        if break_even and advised_price < break_even:
+            advised_price = break_even
+            breakdown["weighted_price"] = advised_price
+            breakdown["floored_to_break_even"] = True
         net_margin_advised = self._calc_net_margin(price=advised_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
         net_margin_current = self._calc_net_margin(price=current_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
         est_days_advised = self._estimate_sell_days(target_price=advised_price, quantity=quantity, orderbook_levels=orderbook_levels, avg_daily_volume=avg_daily_vol)
@@ -597,4 +605,6 @@ class PricingSuggestionService:
             parts.append("Market liquidity adjustment")
 
         reasoning = f"Based on: {', '.join(parts)}. Confidence: {confidence}."
+        if breakdown.get("floored_to_break_even"):
+            reasoning += " (Advised price raised to break-even — weighted average did not cover fees.)"
         return reasoning
