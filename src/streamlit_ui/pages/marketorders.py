@@ -233,6 +233,15 @@ def _render_pricing_analysis(selected_order: dict) -> None:
                 st.metric("ISK/day (Current)", format_isk_short(isk_day_cur),
                           delta=format_isk_short(delta) if delta is not None else None)
 
+    # --- Expiry urgency ---
+    expiry_detail = selected_order.get("expiry_urgency_detail")
+    if expiry_detail:
+        st.warning(
+            f"**Expiry urgency:** {expiry_detail.get('reason', '')}"
+            + (f"  \nOriginal advised: **{format_isk_short(expiry_detail.get('original_advised'))}** → "
+               f"urgency-adjusted: **{format_isk_short(expiry_detail.get('urgency_adjusted_price'))}**")
+        )
+
     # --- Hold signal ---
     hold_signal = selected_order.get("hold_signal")
     if hold_signal and hold_signal.get("suggested"):
@@ -284,6 +293,37 @@ def _render_pricing_analysis(selected_order: dict) -> None:
             st.caption(f"  {comp_data.get('label', '')}")
         elif comp_name == "buy_sell_spread" and comp_data.get("spread_pct") is not None:
             st.caption(f"  {comp_data.get('label', '')}")
+
+    # --- Fill-rate velocity ---
+    fill_rate = selected_order.get("fill_rate_velocity")
+    if fill_rate:
+        fr_conf = fill_rate.get("confidence", "low")
+        fr_raw = fill_rate.get("daily_velocity_raw", 0)
+        fr_adj = fill_rate.get("daily_velocity_adjusted", 0)
+        fr_median = fill_rate.get("median_historical_price", 0)
+        fr_txns = fill_rate.get("transaction_count", 0)
+        fr_days = fill_rate.get("day_span", 0)
+        elastic = fill_rate.get("elasticity_factor", 1.0)
+        st.write(f"**Historical Fill Rate** ({fr_conf} confidence — {fr_txns} sales over {fr_days}d):")
+        st.caption(
+            f"Raw velocity: {fr_raw:.2f} units/day  |  "
+            f"Adjusted (elasticity {elastic:.2f}×): {fr_adj:.2f} units/day  |  "
+            f"Median historical sale price: {format_isk_short(fr_median)}"
+        )
+
+    # --- Seller concentration ---
+    conc = selected_order.get("seller_concentration")
+    if conc and conc.get("risk_label"):
+        sniper = conc.get("sniper_risk", False)
+        icon = "🔴" if sniper else ("🟡" if conc.get("front_2_volume_pct", 0) > 60 else "🟢")
+        st.write(f"**Queue Concentration:** {icon} {conc.get('risk_label', '')}")
+        if conc.get("note"):
+            st.caption(
+                f"Top level: {conc.get('front_1_volume_pct', 0):.0f}% of visible volume  |  "
+                f"Top 2 levels: {conc.get('front_2_volume_pct', 0):.0f}%  |  "
+                f"{conc.get('num_price_levels', 0)} price levels  |  "
+                f"{conc.get('note', '')}"
+            )
 
     # --- Price band ---
     price_band = selected_order.get("price_band")
@@ -434,6 +474,55 @@ def render():
         )
     else:
         st.info("No market buy orders found.")
+
+    # Repricing priority queue — sell orders ranked by urgency
+    if sell_orders:
+        priority_orders = sorted(
+            [o for o in all_orders if not o.get("is_buy_order") and o.get("reprice_priority_score", 0) > 0],
+            key=lambda o: o.get("reprice_priority_score", 0),
+            reverse=True,
+        )
+        if priority_orders:
+            st.divider()
+            st.subheader("🔧 Repricing Priority Queue")
+            st.caption("Orders ranked by urgency — fix these first.")
+            for rank, o in enumerate(priority_orders[:10], start=1):
+                score = o.get("reprice_priority_score", 0)
+                name = o.get("type_name", "Unknown")
+                cur = float(o.get("price") or 0)
+                adv = float(o.get("advised_price") or cur)
+                margin_cur = o.get("net_margin_pct_current")
+                isk_adv = o.get("isk_per_day_advised")
+                isk_cur = o.get("isk_per_day_current")
+
+                flags = []
+                if (margin_cur or 0) < 0:
+                    flags.append("❌ below break-even")
+                if o.get("expiry_urgency"):
+                    detail = o.get("expiry_urgency_detail") or {}
+                    days_rem = detail.get("days_remaining")
+                    est_sell = detail.get("est_days_advised")
+                    flags.append(f"⏰ expires in {days_rem}d (est. {est_sell:.0f}d to sell)" if days_rem is not None and est_sell is not None else "⏰ expiry urgency")
+                if (o.get("relist_risk") or {}).get("at_risk"):
+                    flags.append("🔁 relist risk")
+                if adv < cur:
+                    diff_pct = (cur - adv) / cur * 100
+                    flags.append(f"📉 {diff_pct:.1f}% above advised")
+
+                isk_gain = ""
+                if isk_adv and isk_cur and isk_adv > isk_cur:
+                    isk_gain = f"  ·  +{format_isk_short(isk_adv - isk_cur)}/day if repriced"
+
+                flag_str = "  ·  ".join(flags) if flags else ""
+                st.write(
+                    f"**#{rank}** &nbsp; {name} &nbsp; "
+                    f"(score: {score:.0f}) &nbsp; "
+                    f"{format_isk_short(cur)} → **{format_isk_short(adv)}**"
+                    + (f"  ·  margin: {margin_cur:.1f}%" if margin_cur is not None else ""),
+                    unsafe_allow_html=True,
+                )
+                if flag_str or isk_gain:
+                    st.caption(f"{flag_str}{isk_gain}")
 
     # Details section for pricing analysis (sell orders)
     if sell_orders:
