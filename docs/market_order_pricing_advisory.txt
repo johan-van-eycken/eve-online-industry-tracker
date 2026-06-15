@@ -63,13 +63,22 @@ Component 1 — Your Recent Sales  (20% weight)
   Carries its own sub-confidence ("high", "medium", "low", "none") based on
   sample size, which feeds into the overall confidence score (see below).
 
-Component 2 — Current Market Hub Price  (35% weight)
-─────────────────────────────────────────────────────
+Component 2 — Current Market Hub Price  (up to 35% weight, volatility-dampened)
+─────────────────────────────────────────────────────────────────────────────────
   Source: market_pricing_service.get_type_price_map(side="sell", hub="jita") —
   the current lowest sell order(s) at Jita 4-4 (region 10000002).
 
-  Highest-weight component. If unavailable (pricing cache not populated), its
-  35% weight is redistributed proportionally across the other components.
+  [B] Volatility-dampened weight:
+    The raw 35% weight is reduced when the market has been volatile:
+
+        hub_weight = max(0.15, 0.35 / (1 + volatility_pct / 100))
+
+    Examples:
+      volatility = 0%   → hub_weight = 35%  (calm, trust the snapshot)
+      volatility = 50%  → hub_weight = 23%  (moderate dampening)
+      volatility = 100% → hub_weight = 17%  (high noise, minimum weight)
+
+    The released weight is redistributed proportionally to other components.
 
 Component 3 — Market Trend  (15% weight)
 ─────────────────────────────────────────
@@ -84,13 +93,35 @@ Component 3 — Market Trend  (15% weight)
   A rising market nudges the advised price up by half the observed trend rate;
   a falling market nudges it down.
 
-Component 4 — Liquidity Adjustment  (15% weight)
-──────────────────────────────────────────────────
-  Source: MarketHistoryService.get_volume_stats() — average daily traded volume.
+Component 4 — Supply/Demand Signal  (15% weight)           [replaces Liquidity]
+────────────────────────────────────────────────────────────────────────────────
+  [A] Source: orderbook queue depth + avg_daily_volume.
 
-      avg_daily_volume < 100     → current_price × 0.95  (thin market)
-      avg_daily_volume > 10,000  → current_price × 1.02  (high liquidity)
-      otherwise                  → current_price (neutral)
+      days_of_supply = total_sell_volume_in_orderbook / avg_daily_volume
+
+  Three buckets:
+    > 30 days supply → oversupplied  → signal_price = hub_price × 0.97
+    7–30 days supply → balanced      → signal_price = hub_price
+    < 7 days supply  → undersupplied → signal_price = hub_price × 1.03
+
+  This replaces the old three-bucket liquidity adjustment that used raw
+  daily volume thresholds (100/10,000). The new signal reflects how many
+  days' worth of competing sell orders currently exist, which is a more
+  direct measure of supply pressure.
+
+Component 5 — Buy-Sell Spread Signal  (10% weight)              [new component]
+────────────────────────────────────────────────────────────────────────────────
+  [C] Source: hub sell price (side="sell") vs hub buy price (side="buy").
+
+      spread_pct = (hub_sell_price - hub_buy_price) / hub_sell_price × 100
+
+  Three buckets:
+    < 5%  → tight spread  → demand strong → signal_price = hub_sell × 1.01
+    5–25% → normal spread → signal_price = hub_sell
+    > 25% → wide spread   → thin demand   → signal_price = midpoint(sell, buy)
+
+  A tight spread signals buy-side pressure pushing toward the ask; a wide
+  spread signals illiquid demand and warrants more conservative pricing.
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -151,10 +182,18 @@ to help decide whether to relist.
                            at 3%).
     Defaults if unavailable: 7.5% tax, 3% broker fee.
 
-  Break-even price
+  Break-even price (hard floor 1)
     The minimum list price to recover cost after fees:
         break_even = cost_basis / (1 - sales_tax_fraction - broker_fee_fraction)
     Items listed below this price result in a net loss.
+    The advised price is always clamped upward to this floor.
+
+  Minimum target margin price (hard floor 2)             [E — configurable]
+    A second, higher floor based on your configured profit target:
+        min_target_price = cost_basis / (1 - min_margin - sales_tax - broker_fee)
+    Default min_margin = 8 % (configurable in cfg_manager under
+    defaults.market_advisory.min_target_margin_pct).
+    The advised price is clamped to the higher of the two floors.
 
   Net margin %
         net_proceeds = price × (1 - sales_tax - broker_fee)
@@ -247,6 +286,36 @@ A warning banner is shown in the Pricing Analysis panel when at_risk = True.
 
 
 ────────────────────────────────────────────────────────────────────────────────
+  PRICE BAND — THREE-TIER LISTING STRATEGY                [F — new feature]
+────────────────────────────────────────────────────────────────────────────────
+
+Rather than a single advised price the system now returns three price tiers that
+answer different strategic questions.
+
+  Tier 1 — Aggressive (fastest sell)
+    Goal: clear inventory as quickly as possible.
+    Method: undercut the cheapest competing sell order by 0.01 ISK.
+    Floor: never below the minimum target margin price (or break-even if
+           no margin config). If our current price is already at or below
+           the queue front, we do not go lower — aggressive = target.
+
+  Tier 2 — Target (optimal ISK/day)
+    The advised price as computed by the weighted average, after both floor
+    clamps. This is the main recommended price — it maximises expected
+    ISK-per-day across the estimated sell window.
+
+  Tier 3 — Premium (trend hold)
+    Goal: maximise total ISK if the market is rising.
+    Method: project the 42-week trend forward 14 days.
+        daily_rate    = trend_pct / (42 × 7)
+        price_premium = hub_price × (1 + daily_rate × 14)
+    Capped at hub_price × 1.25 to avoid absurd suggestions.
+    If trend_pct ≤ 2 %, premium = target (market not trending up).
+
+  Each tier shows estimated sell days, ISK/day, and net margin % so you can
+  compare the strategy implications side by side.
+
+────────────────────────────────────────────────────────────────────────────────
   HUMAN-READABLE REASONING STRING
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -262,11 +331,20 @@ band. For example:
 ────────────────────────────────────────────────────────────────────────────────
 
 Sell Orders grid  (marketorders.py:_build_order_rows)
-  "Advised Price"       — advised_price in ISK
-  "Advice Confidence"   — "high", "medium", or "low"
-  "Est. Days (Adv.)"    — estimated_sell_days_advised, rounded to 1 decimal
-  "ISK/day (Adv.)"      — isk_per_day_advised in ISK
+  "Advised Price"         — advised_price in ISK
+  "Advice Confidence"     — "high", "medium", or "low"
+  "Est. Days (Adv.)"      — estimated_sell_days_advised, rounded to 1 decimal
+  "ISK/day (Adv.)"        — isk_per_day_advised in ISK
+  "Margin % (Current)"    — net margin at current list price (colour-coded)
+  "Margin % (Advised)"    — net margin at advised price (colour-coded)
 
+  Margin colour coding:
+    < 0 %     → red background (below break-even)
+    0–5 %     → amber (thin margin)
+    5–15 %    → neutral
+    ≥ 15 %    → green text (healthy margin)
+
+  A red error banner is shown if any order has Margin % (Current) < 0 %.
   These columns are only added when the API returns a non-null advised_price.
   Buy orders do not receive advised pricing.
 
@@ -275,9 +353,12 @@ Pricing Analysis panel  (marketorders.py:_render_pricing_analysis)
           Your Cost / Break-even Price
   Row 2: Net Margin % (advised vs current) | Est. Days (advised vs current) |
           ISK/day (advised vs current)
-  Hold signal banner (info)  — when trend favours holding
+  Hold signal banner (info)   — when trend favours holding
   Relist risk banner (warning) — when est. sell days > order duration
-  Pricing Components list    — one line per present component with weight
+  Pricing Components list     — one line per present component with weight and
+                                context (trend %, volatility dampening, spread %)
+  Price Band (F)              — three columns: Aggressive / Target / Premium,
+                                each showing price, est. days, ISK/day, margin
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -299,6 +380,29 @@ Phase 6).
 
 The two scores use different inputs, different scales, and serve different
 screens. They are not derived from each other.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  ALGORITHM IMPROVEMENT REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+
+  The following improvements (A/B/C/E/F) were implemented on branch
+  feature/market-order-pricing-advisory-improvements.
+
+  A — Days-of-supply signal (replaces liquidity bucket)
+      Three-bucket supply pressure using orderbook volume ÷ avg daily volume.
+
+  B — Volatility-dampened hub weight
+      Hub price weight reduced dynamically when price history shows high noise.
+
+  C — Buy-sell spread signal (new 10% component)
+      Spread between Jita best-sell and best-buy as demand-pressure indicator.
+
+  E — Configurable minimum margin floor
+      Second price floor after break-even; default 8%, configurable in cfg.
+
+  F — Price band (aggressive / target / premium)
+      Three-tier listing strategy shown in Pricing Analysis panel.
 
 
 ────────────────────────────────────────────────────────────────────────────────
