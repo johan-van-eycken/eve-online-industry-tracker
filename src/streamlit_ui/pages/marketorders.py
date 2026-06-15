@@ -215,7 +215,7 @@ def _render_buy_stats_box(df: pd.DataFrame) -> None:
 
 # ── Grid row builders ─────────────────────────────────────────────────────────
 
-def _build_order_rows(all_orders: list[dict]) -> tuple[list[dict], list[dict]]:
+def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = None) -> tuple[list[dict], list[dict]]:
     sell_orders: list[dict] = []
     buy_orders: list[dict] = []
     for order in all_orders:
@@ -253,6 +253,10 @@ def _build_order_rows(all_orders: list[dict]) -> tuple[list[dict], list[dict]]:
                 sell_order["Margin % (Current)"] = round(float(order["net_margin_pct_current"]), 1)
             if order.get("net_margin_pct_advised") is not None:
                 sell_order["Margin % (Advised)"] = round(float(order["net_margin_pct_advised"]), 1)
+            # Relist Priority column
+            if priority_map is not None:
+                key = (order.get("type_name", ""), float(order.get("price") or 0), order.get("station", ""))
+                sell_order["Relist Priority"] = priority_map.get(key, "")
             # Location always last
             sell_order.update(location)
             sell_orders.append(sell_order)
@@ -318,6 +322,20 @@ def _render_orders_grid(
             cellStyle=right,
             minWidth=90,
         )
+
+    if "Relist Priority" in df.columns:
+        priority_style = runtime.js_code(
+            """
+            function(params) {
+                var v = params.value;
+                if (v === 'High')   return {color: '#ef4444', fontWeight: '700', textAlign: 'center'};
+                if (v === 'Medium') return {color: '#f59e0b', fontWeight: '600', textAlign: 'center'};
+                if (v === 'Low')    return {color: '#9ca3af', textAlign: 'center'};
+                return {textAlign: 'center'};
+            }
+            """
+        )
+        gb.configure_column("Relist Priority", cellStyle=priority_style, minWidth=100, maxWidth=130)
 
     # Cap location columns so they don't dominate the layout
     for col, max_w in (("Station", 220), ("Region", 160), ("Range", 90)):
@@ -551,8 +569,18 @@ def render():
         st.error(f"Error fetching market orders: {str(e)}")
         return
 
+    # Build Relist Priority map: (type_name, price, station) → "High" / "Medium" / "Low" / ""
+    sell_raw_all = [o for o in all_orders if not o.get("is_buy_order")]
+    sell_raw_sorted = sorted(sell_raw_all, key=lambda o: o.get("reprice_priority_score", 0), reverse=True)
+    priority_map: dict = {}
+    for rank, o in enumerate(sell_raw_sorted, start=1):
+        score = o.get("reprice_priority_score", 0)
+        label = "" if score <= 0 else "High" if rank <= 3 else "Medium" if rank <= 10 else "Low"
+        key = (o.get("type_name", ""), float(o.get("price") or 0), o.get("station", ""))
+        priority_map[key] = label
+
     selected_owner = "All"
-    sell_orders, buy_orders = _build_order_rows(all_orders)
+    sell_orders, buy_orders = _build_order_rows(all_orders, priority_map=priority_map)
 
     if sell_orders:
         df = pd.DataFrame(sell_orders)
@@ -579,16 +607,6 @@ def render():
             st.write("")
 
         st.subheader("Selling")
-
-        # Negative-margin warning
-        if "Margin % (Current)" in df.columns:
-            loss_rows = df[df["Margin % (Current)"] < 0]
-            if not loss_rows.empty:
-                loss_names = ", ".join(loss_rows["Type"].tolist())
-                st.error(
-                    f"**{len(loss_rows)} order(s) are currently priced below break-even** (loss after fees): "
-                    f"{loss_names}. Consider relisting at or above the Advised Price."
-                )
 
         # Stats box — computed from the filtered raw enriched orders
         sell_raw_filtered = [
@@ -622,57 +640,6 @@ def render():
         _render_orders_grid(df_buy, runtime=runtime, img_renderer=img_renderer, isk_cols=["Price", "Total Price", "Price Difference", "Escrow Remaining"], min_volume=True, key="market_orders_buy")
     else:
         st.info("No market buy orders found.")
-
-    # Repricing priority queue
-    if sell_orders:
-        priority_orders = sorted(
-            [o for o in all_orders if not o.get("is_buy_order") and o.get("reprice_priority_score", 0) > 0],
-            key=lambda o: o.get("reprice_priority_score", 0),
-            reverse=True,
-        )
-        if priority_orders:
-            st.divider()
-            st.subheader("🔧 Repricing Priority Queue")
-            st.caption("Orders ranked by urgency — fix these first.")
-            for rank, o in enumerate(priority_orders[:10], start=1):
-                score = o.get("reprice_priority_score", 0)
-                name = o.get("type_name", "Unknown")
-                cur = float(o.get("price") or 0)
-                adv = float(o.get("advised_price") or cur)
-                margin_cur = o.get("net_margin_pct_current")
-                isk_adv = o.get("isk_per_day_advised")
-                isk_cur = o.get("isk_per_day_current")
-
-                flags = []
-                if (margin_cur or 0) < 0:
-                    flags.append("❌ below break-even")
-                if o.get("expiry_urgency"):
-                    detail = o.get("expiry_urgency_detail") or {}
-                    days_rem = detail.get("days_remaining")
-                    est_sell = detail.get("est_days_advised")
-                    flags.append(
-                        f"⏰ expires in {days_rem}d (est. {est_sell:.0f}d to sell)"
-                        if days_rem is not None and est_sell is not None else "⏰ expiry urgency"
-                    )
-                if (o.get("relist_risk") or {}).get("at_risk"):
-                    flags.append("🔁 relist risk")
-                if adv < cur:
-                    diff_pct = (cur - adv) / cur * 100
-                    flags.append(f"📉 {diff_pct:.1f}% above advised")
-
-                isk_gain = ""
-                if isk_adv and isk_cur and isk_adv > isk_cur:
-                    isk_gain = f"  ·  +{format_isk_short(isk_adv - isk_cur)}/day if repriced"
-
-                flag_str = "  ·  ".join(flags) if flags else ""
-                st.write(
-                    f"**#{rank}** &nbsp; {name} &nbsp; (score: {score:.0f}) &nbsp; "
-                    f"{format_isk_short(cur)} → **{format_isk_short(adv)}**"
-                    + (f"  ·  margin: {margin_cur:.1f}%" if margin_cur is not None else ""),
-                    unsafe_allow_html=True,
-                )
-                if flag_str or isk_gain:
-                    st.caption(f"{flag_str}{isk_gain}")
 
     # Pricing analysis panel
     if sell_orders:
