@@ -157,14 +157,19 @@ def _render_pricing_analysis(selected_order: dict) -> None:
             cost_source = selected_order.get("cost_basis_source", "asset")
 
             if cost_source == "market_order_fallback":
-                source_label = "Order Price (ESI Data Issue)"
+                source_label = "Order Price (no cost record found)"
+            elif cost_source == "asset_history":
+                base = "Built" if source == "manufactured" else "Bought" if source == "bought" else source.title()
+                source_label = f"{base} (from history)"
             else:
                 source_label = "Built" if source == "manufactured" else "Bought" if source == "bought" else source.title()
 
             st.metric("Your Cost", format_isk_short(cost_basis))
 
             if cost_source == "market_order_fallback":
-                st.warning("⚠️ Asset missing from inventory. Using order price as cost estimate.")
+                st.warning("No acquisition cost found — order price used as estimate. Margin figures are unreliable.")
+            elif cost_source == "asset_history":
+                st.caption(f"({source_label})")
             else:
                 st.caption(f"({source_label})")
 

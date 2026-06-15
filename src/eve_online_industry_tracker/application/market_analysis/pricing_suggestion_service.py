@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import and_
 from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
-from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel, CharacterModel
+from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel, CharacterAssetHistoryModel, CharacterModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
 
@@ -144,7 +144,13 @@ class PricingSuggestionService:
         """Get average acquisition cost and source for items in inventory.
 
         Returns: (cost_basis, acquisition_source, cost_source)
-        where cost_source is 'asset', 'market_order_fallback', or None
+
+        cost_source values:
+          'asset'                — weighted avg from current CharacterAssetsModel rows
+          'asset_history'        — most recent CharacterAssetHistoryModel record
+                                   (used when item is listed on market and absent
+                                   from the current assets snapshot)
+          'market_order_fallback' — neither assets nor history found; order price used
         """
         app_session = self._sessions.app_session()
         try:
@@ -155,42 +161,56 @@ class PricingSuggestionService:
                 )
             ).all()
 
-            if not assets:
-                logging.debug(f"Cost basis: no assets found (char_id={character_id}, type_id={type_id})")
-                if fallback_price and fallback_price > 0:
-                    logging.debug(f"Cost basis: using market order price as fallback ({fallback_price})")
-                    return fallback_price, "market_order_fallback", "market_order_fallback"
-                return None, None, None
+            if assets:
+                total_cost = 0.0
+                total_quantity = 0
+                sources = set()
 
-            total_cost = 0.0
-            total_quantity = 0
-            sources = set()
+                for asset in assets:
+                    cost = asset.acquisition_unit_cost
+                    qty = asset.quantity
+                    if cost and cost > 0 and qty and qty > 0:
+                        total_cost += cost * qty
+                        total_quantity += qty
+                    if asset.acquisition_source:
+                        sources.add(asset.acquisition_source)
 
-            for asset in assets:
-                cost = asset.acquisition_unit_cost
-                qty = asset.quantity
-                if cost and cost > 0 and qty and qty > 0:
-                    total_cost += cost * qty
-                    total_quantity += qty
-                if asset.acquisition_source:
-                    sources.add(asset.acquisition_source)
+                if total_quantity > 0:
+                    avg_cost = total_cost / total_quantity
+                    source = None
+                    if "manufactured" in sources:
+                        source = "manufactured"
+                    elif "bought" in sources or "market" in sources:
+                        source = "bought"
+                    elif sources:
+                        source = list(sources)[0]
 
-            if total_quantity > 0:
-                avg_cost = total_cost / total_quantity
-                source = None
-                if "manufactured" in sources:
-                    source = "manufactured"
-                elif "bought" in sources or "market" in sources:
-                    source = "bought"
-                elif sources:
-                    source = list(sources)[0]
+                    logging.debug(f"Cost basis found: {avg_cost} ({source}), char_id={character_id}, type_id={type_id}")
+                    return avg_cost, source, "asset"
 
-                logging.debug(f"Cost basis found: {avg_cost} ({source}), char_id={character_id}, type_id={type_id}")
-                return avg_cost, source, "asset"
+            # Item is likely listed on market — ESI removes active sell orders from
+            # the assets endpoint. Fall back to the most recent asset history record.
+            logging.debug(f"Cost basis: no current assets with cost (char_id={character_id}, type_id={type_id}), checking history")
+            history_row = (
+                app_session.query(CharacterAssetHistoryModel)
+                .filter(
+                    and_(
+                        CharacterAssetHistoryModel.character_id == character_id,
+                        CharacterAssetHistoryModel.type_id == type_id,
+                        CharacterAssetHistoryModel.acquisition_unit_cost.isnot(None),
+                    )
+                )
+                .order_by(CharacterAssetHistoryModel.observed_at.desc())
+                .first()
+            )
+            if history_row and history_row.acquisition_unit_cost and history_row.acquisition_unit_cost > 0:
+                source = history_row.acquisition_source or "unknown"
+                logging.debug(f"Cost basis from history: {history_row.acquisition_unit_cost} ({source})")
+                return float(history_row.acquisition_unit_cost), source, "asset_history"
 
-            logging.debug(f"Cost basis: found {len(assets)} asset(s) but none with costs, char_id={character_id}, type_id={type_id}")
+            # Last resort: use the order's own price as a rough proxy
             if fallback_price and fallback_price > 0:
-                logging.debug(f"Cost basis: using market order price as fallback for assetless item ({fallback_price})")
+                logging.debug(f"Cost basis: using market order price as fallback ({fallback_price})")
                 return fallback_price, "market_order_fallback", "market_order_fallback"
             return None, None, None
         finally:
