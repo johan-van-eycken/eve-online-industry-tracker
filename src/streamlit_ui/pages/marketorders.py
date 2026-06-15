@@ -1,7 +1,7 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 
-from streamlit_ui.components.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
+from streamlit_ui.components.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter, js_icon_cell_renderer, js_margin_pct_cell_style
 from streamlit_ui.components.assets_data import get_item_image_url as build_item_image_url
 from streamlit_ui.components.formatters import format_isk_short
 from streamlit_ui.api.market_orders import clear_market_orders_cache, fetch_market_orders, refresh_market_orders
@@ -69,6 +69,10 @@ def _build_order_rows(all_orders: list[dict]) -> tuple[list[dict], list[dict]]:
                 sell_order["Est. Days (Adv.)"] = round(float(order["estimated_sell_days_advised"]), 1)
             if order.get("isk_per_day_advised") is not None:
                 sell_order["ISK/day (Adv.)"] = order["isk_per_day_advised"]
+            if order.get("net_margin_pct_current") is not None:
+                sell_order["Margin % (Current)"] = round(float(order["net_margin_pct_current"]), 1)
+            if order.get("net_margin_pct_advised") is not None:
+                sell_order["Margin % (Advised)"] = round(float(order["net_margin_pct_advised"]), 1)
             sell_orders.append(sell_order)
     return sell_orders, buy_orders
 
@@ -108,6 +112,18 @@ def _render_orders_grid(
             cellStyle=right,
             minWidth=110,
         )
+
+    margin_style = js_margin_pct_cell_style(JsCode=runtime.js_code)
+    margin_fmt = js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1)
+    for col in ("Margin % (Current)", "Margin % (Advised)"):
+        if col in df.columns:
+            gb.configure_column(
+                col,
+                type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=margin_fmt,
+                cellStyle=margin_style,
+                minWidth=130,
+            )
 
     if min_volume and "Min. Volume" in df.columns:
         gb.configure_column(
@@ -313,6 +329,16 @@ def render():
             st.write("")
 
         st.subheader("Selling")
+
+        # Negative-margin warning — items where current price results in a loss after fees
+        if "Margin % (Current)" in df.columns:
+            loss_rows = df[df["Margin % (Current)"] < 0]
+            if not loss_rows.empty:
+                loss_names = ", ".join(loss_rows["Type"].tolist())
+                st.error(
+                    f"**{len(loss_rows)} order(s) are currently priced below break-even** (loss after fees): "
+                    f"{loss_names}. Consider relisting at or above the Advised Price."
+                )
 
         # Overview
         st.write(
