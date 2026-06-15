@@ -36,8 +36,39 @@ Two events create an acquisition cost record for an item:
 
          1. If unit_build_cost is already persisted on the job row
             (stored when the job was last synced), use it directly.
-         2. Otherwise, estimate from SDE blueprint materials × market prices,
+         2. Otherwise, look up owned material purchase records (wallet
+            transactions) and use their FIFO cost as the material basis,
             applying ME reduction and the actual ESI job fee.
+         3. If no purchase records exist (e.g. the app was offline when the
+            job started, or materials were bought before the wallet history
+            window), fall back to estimating from SDE blueprint materials ×
+            current ESI adjusted prices (build_cost_source =
+            "market_snapshot_estimate").
+
+     After all job snapshots are written, backfill_historical_market_costs()
+     runs a second pass over every job that landed on market_snapshot_estimate
+     with 0 % historical coverage and no per-material breakdown:
+
+         For each such job:
+           a. Determine the job's start_date (when materials were consumed).
+           b. For each blueprint material, look up the Jita daily average
+              price on or immediately before start_date from the
+              market_history table (ESI /markets/{region}/history/).
+              If the history is not yet cached, fetch it from ESI and store
+              it for future use (market history goes back several years).
+           c. Recalculate materials_cost, total_build_cost, and
+              unit_build_cost using those date-specific prices.
+           d. Write a per-material breakdown to historical_input_costs:
+                { "type_id": { "unit_cost", "quantity",
+                               "source": "historical_market_daily_average",
+                               "reference_date": "YYYY-MM-DD" } }
+           e. Set build_cost_source = "historical_market_price_on_start_date"
+              and historical_material_coverage_fraction to the fraction of
+              materials that could be priced from history (typically 1.0).
+
+     This makes retrospective job costs significantly more accurate than
+     using current ESI adjusted prices, which reflect today's market rather
+     than the market on the day materials were consumed.
 
      The resolved unit_build_cost is then written to CharacterAssetHistoryModel:
 
@@ -72,10 +103,16 @@ Steps:
 
   3. Query completed industry jobs whose product_type_id is in the type set.
      Jobs become "buy" lots at their unit_build_cost.
-     If unit_build_cost was not persisted on the job (e.g. the app was offline
-     when the job completed), the build cost is estimated from SDE materials ×
-     current market sell prices. This ensures manufactured sub-components always
-     carry a cost basis in the FIFO inventory, even without a stored snapshot.
+     The cost source priority for each job is:
+       a. historical_asset_acquisition_cost — actual material purchase records
+          were matched from wallet transactions (most accurate).
+       b. historical_market_price_on_start_date — no purchase records found,
+          but Jita daily average prices on the job's start_date were used
+          (see Phase 1B backfill). Accurate for jobs that ran before the
+          wallet history window, provided ESI market history covers that date.
+       c. market_snapshot_estimate — neither purchase records nor historical
+          market data were available; current ESI adjusted prices were used
+          (least accurate, may differ significantly from actual cost).
 
   4. Pass everything to build_fifo_remaining_lots_by_type():
 
@@ -263,13 +300,38 @@ Three signals are combined into an overall confidence rating (High / Medium / Lo
   COST SOURCE LABELS (visible in the material drilldown table)
 ────────────────────────────────────────────────────────────────────────────────
 
+  Job-level build_cost_source values (stored on industry job rows):
+
+  "historical_asset_acquisition_cost"         All materials matched from wallet
+                                              purchase records (FIFO). Most accurate.
+  "historical_market_price_on_start_date"     No purchase records; Jita daily avg
+                                              prices on job start_date used instead.
+                                              Per-material breakdown stored in
+                                              historical_input_costs.
+  "market_snapshot_estimate"                  No purchase records and no ESI history
+                                              available; current ESI adjusted prices
+                                              used. Least accurate.
+  "mixed_historical_and_market_estimate"      Partial purchase record coverage;
+                                              remainder estimated from market prices.
+
+  The above may be suffixed with "+actual_invention_job" or
+  "+expected_invention_material_cost" for T2 jobs.
+
+  Per-material source values (inside historical_input_costs JSON):
+
+  "historical_asset_acquisition_cost"         Actual purchase lot from wallet
+  "historical_market_daily_average"           Jita daily avg on job start_date
+                                              (set by the Phase 1B backfill)
+
+  Material-level cost source labels (visible in the drilldown table):
+
   "owned_asset_item_value"            FIFO-weighted average of what you paid
   "owned_asset_acquisition_cost"      Single acquisition_unit_cost from asset record
   "split_owned_and_market"            Blended: take_qty at FIFO avg + buy_qty at market
   "market_sell_price_<hub>"           Current best-N sell orders at hub
   "asset_average_price"               CCP market-wide average (type_average_price)
   "asset_adjusted_price"              CCP adjusted price (used for job fee EIV)
-  "market_snapshot_estimate"          Estimated from SDE + adjusted prices
+  "market_snapshot_estimate"          Estimated from SDE + current adjusted prices
 
   "Est. Cost?" column in the drilldown: ⚠ est.
   Means the material was taken from inventory but no purchase or build record
@@ -285,8 +347,16 @@ Three signals are combined into an overall confidence rating (High / Medium / Lo
      gap is mitigated by:
        - Back-filling unpriced units from acquisition_unit_cost on the asset
          record (Phase 2, step 5b).
-       - Estimating build costs for industry jobs without a persisted snapshot
-         using current market sell prices (Phase 2, step 3).
+       - For industry jobs: using the Phase 1B backfill to price materials
+         from Jita daily average prices on the job's start_date rather than
+         current ESI adjusted prices. ESI market history goes back several
+         years, so this works even for jobs that completed long before the
+         tracker was installed (build_cost_source =
+         "historical_market_price_on_start_date").
+       - For jobs where even market history is unavailable: estimating from
+         current ESI adjusted prices (build_cost_source =
+         "market_snapshot_estimate"). These estimates can be significantly
+         wrong if market prices have moved since the job ran.
      Units with none of the above still fall back to market sell price, then
      to CCP type_average_price as a last resort.
 
