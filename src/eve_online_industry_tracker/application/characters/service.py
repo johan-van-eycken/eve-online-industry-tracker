@@ -240,6 +240,8 @@ class CharactersService:
                     enriched_order["isk_per_day_current"] = advised_price_data.get("isk_per_day_current")
                     enriched_order["hold_signal"] = advised_price_data.get("hold_signal")
                     enriched_order["relist_risk"] = advised_price_data.get("relist_risk")
+                    enriched_order["price_band"] = advised_price_data.get("price_band")
+                    enriched_order["min_target_margin_pct"] = advised_price_data.get("min_target_margin_pct")
 
                 enriched_orders.append(enriched_order)
 

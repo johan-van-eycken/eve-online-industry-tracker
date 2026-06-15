@@ -278,6 +278,44 @@ def _render_pricing_analysis(selected_order: dict) -> None:
             st.caption(f"  Based on {comp_data['sample_size']} recent sales ({comp_data.get('confidence', 'N/A')} confidence)")
         elif comp_name == "market_trend" and comp_data.get("trend_pct"):
             st.caption(f"  42w avg: {format_isk_short(comp_data.get('avg_42w', 0))}, 7d avg: {format_isk_short(comp_data.get('avg_7d', 0))}, trend: {comp_data['trend_pct']:+.1f}%")
+        elif comp_name == "market_hub_price" and comp_data.get("volatility_dampened"):
+            st.caption(f"  Volatility-dampened (vol={comp_data.get('volatility_pct', 0):.1f}%) — hub weight reduced to {weight:.0f}%")
+        elif comp_name == "supply_demand" and comp_data.get("days_of_supply") is not None:
+            st.caption(f"  {comp_data.get('label', '')}")
+        elif comp_name == "buy_sell_spread" and comp_data.get("spread_pct") is not None:
+            st.caption(f"  {comp_data.get('label', '')}")
+
+    # --- Price band ---
+    price_band = selected_order.get("price_band")
+    min_margin_pct = selected_order.get("min_target_margin_pct")
+    if price_band:
+        st.write(f"**Price Band** (min target margin: {min_margin_pct or 8:.1f}%):")
+        pb_cols = st.columns(3)
+        tiers = [
+            ("aggressive", pb_cols[0]),
+            ("target", pb_cols[1]),
+            ("premium", pb_cols[2]),
+        ]
+        for tier_key, col in tiers:
+            tier = price_band.get(tier_key, {})
+            if not tier:
+                continue
+            with col:
+                tier_price = tier.get("price")
+                tier_label = tier.get("label", tier_key.title())
+                st.metric(tier_label, format_isk_short(tier_price) if tier_price else "—")
+                est_d = tier.get("estimated_sell_days")
+                isk_d = tier.get("isk_per_day")
+                margin = tier.get("net_margin_pct")
+                details = []
+                if est_d is not None:
+                    details.append(f"~{est_d:.1f}d to sell")
+                if isk_d is not None:
+                    details.append(f"{format_isk_short(isk_d)}/day")
+                if margin is not None:
+                    details.append(f"{margin:.1f}% margin")
+                if details:
+                    st.caption("  \n".join(details))
 
 
 # -- Main Render Function --
