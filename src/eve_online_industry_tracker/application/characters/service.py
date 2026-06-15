@@ -188,6 +188,8 @@ class CharactersService:
                             character_id=character_id,
                             type_id=type_id,
                             current_price=order_price,
+                            quantity=int(order.get("volume_remain") or 0),
+                            order_duration_days=duration_days_int or 90,
                         )
                     except Exception:
                         advised_price_data = None
@@ -227,6 +229,17 @@ class CharactersService:
                     enriched_order["cost_basis"] = advised_price_data.get("cost_basis")
                     enriched_order["acquisition_source"] = advised_price_data.get("acquisition_source")
                     enriched_order["cost_basis_source"] = advised_price_data.get("cost_basis_source")
+                    enriched_order["price_difference_pct"] = advised_price_data.get("price_difference_pct")
+                    # Profitability metrics
+                    enriched_order["break_even_price"] = advised_price_data.get("break_even_price")
+                    enriched_order["net_margin_pct_advised"] = advised_price_data.get("net_margin_pct_advised")
+                    enriched_order["net_margin_pct_current"] = advised_price_data.get("net_margin_pct_current")
+                    enriched_order["estimated_sell_days_advised"] = advised_price_data.get("estimated_sell_days_advised")
+                    enriched_order["estimated_sell_days_current"] = advised_price_data.get("estimated_sell_days_current")
+                    enriched_order["isk_per_day_advised"] = advised_price_data.get("isk_per_day_advised")
+                    enriched_order["isk_per_day_current"] = advised_price_data.get("isk_per_day_current")
+                    enriched_order["hold_signal"] = advised_price_data.get("hold_signal")
+                    enriched_order["relist_risk"] = advised_price_data.get("relist_risk")
 
                 enriched_orders.append(enriched_order)
 
