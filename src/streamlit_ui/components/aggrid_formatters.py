@@ -127,6 +127,41 @@ def js_icon_cell_renderer(*, JsCode: Any, size_px: int = 24) -> Any:
     )
 
 
+def js_margin_pct_cell_style(*, JsCode: Any) -> Any:
+    """Color-coded cell style for profit margin % columns.
+
+    negative  → red background  (loss)
+    0–5 %     → amber           (thin / below typical target)
+    5–15 %    → neutral
+    > 15 %    → green           (healthy margin)
+    """
+    if JsCode is None:
+        return None
+    return JsCode(
+        """
+        function(params) {
+            var style = {textAlign: 'right'};
+            var v = params.value;
+            if (v === null || v === undefined || v === '') return style;
+            var n = Number(v);
+            if (isNaN(n)) return style;
+            if (n < 0) {
+                style.backgroundColor = '#c0392b';
+                style.color = '#ffffff';
+                style.fontWeight = 'bold';
+            } else if (n < 5) {
+                style.backgroundColor = '#e67e22';
+                style.color = '#ffffff';
+            } else if (n >= 15) {
+                style.color = '#27ae60';
+                style.fontWeight = '600';
+            }
+            return style;
+        }
+        """
+    )
+
+
 def js_flag_text_style(
     *,
     JsCode: Any,
