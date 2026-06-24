@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import statistics
 from datetime import datetime
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from sqlalchemy import and_
 from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
+from eve_online_industry_tracker.application.market_pricing import MarketPricingService
 from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel, CharacterAssetHistoryModel, CharacterModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
@@ -21,6 +23,7 @@ class PricingSuggestionService:
         self._sessions = sessions or StateSessionProvider(state=state)
         self._sales_history = SalesHistoryService(state=state, sessions=sessions)
         self._market_history = MarketHistoryService(state=state, sessions=sessions)
+        self._market_pricing = MarketPricingService(state=state, sessions=self._sessions)
 
     def suggest_price(
         self,
@@ -88,6 +91,34 @@ class PricingSuggestionService:
             breakdown["floored_to_target_margin"] = True
             breakdown["min_target_margin_pct"] = round(min_target_margin * 100, 1)
 
+        # Snap to nearest valid EVE price tick (4 significant figures)
+        advised_price = self._snap_to_eve_tick(advised_price)
+        breakdown["weighted_price"] = advised_price
+
+        # Gap positioning: if being undercut, prefer the highest gap price over the
+        # weighted average — no reason to go lower than the nearest undercutter - 1 tick.
+        _gap_floor = min_target_price or break_even or advised_price
+        gap_price = self._find_gap_position(
+            current_price=current_price,
+            orderbook_levels=orderbook_levels,
+            floor_price=_gap_floor,
+        )
+        if gap_price is not None and gap_price > advised_price:
+            advised_price = gap_price
+            breakdown["weighted_price"] = advised_price
+            breakdown["gap_positioned"] = True
+            breakdown["gap_price"] = gap_price
+
+        # Front-of-queue guard: if already the cheapest seller, never advise going lower.
+        # Reducing price when front of queue only hurts margin — no one is buying from a
+        # cheaper competitor because there isn't one.
+        if orderbook_levels and current_price > 0:
+            front_price = orderbook_levels[0][0]
+            if current_price <= front_price and advised_price < current_price:
+                advised_price = self._snap_to_eve_tick(current_price)
+                breakdown["weighted_price"] = advised_price
+                breakdown["already_front_of_queue"] = True
+
         floor = min_target_price or break_even or advised_price
 
         net_margin_advised = self._calc_net_margin(price=advised_price, cost_basis=cost_basis, sales_tax=sales_tax, broker_fee=broker_fee)
@@ -125,7 +156,9 @@ class PricingSuggestionService:
                 urgency_ratio = max(0.0, 1.0 - (days_remaining / max(1.0, est_days_advised * 0.5)))
                 blend = min(0.5, urgency_ratio)  # cap at 50% blend toward aggressive
                 aggressive_price = (price_band or {}).get("aggressive", {}).get("price") or advised_price
-                urgency_price = max(floor, advised_price * (1.0 - blend) + aggressive_price * blend)
+                urgency_price = self._snap_to_eve_tick(
+                    max(floor, advised_price * (1.0 - blend) + aggressive_price * blend)
+                )
                 expiry_urgency_detail = {
                     "days_remaining": int(days_remaining),
                     "est_days_advised": round(est_days_advised, 1),
@@ -178,10 +211,7 @@ class PricingSuggestionService:
 
     def _get_hub_price(self, *, type_id: int, hub: str = "jita") -> float | None:
         try:
-            svc = getattr(self._state, "market_pricing_service", None)
-            if svc is None:
-                return None
-            price_map = svc.get_type_price_map(type_ids=[type_id], hub=hub, side="sell")
+            price_map = self._market_pricing.get_type_price_map(type_ids=[type_id], hub=hub, side="sell")
             if type_id in price_map:
                 return float(price_map[type_id].get("unit_price") or 0) or None
         except Exception as exc:
@@ -191,10 +221,7 @@ class PricingSuggestionService:
     def _get_hub_buy_price(self, *, type_id: int, hub: str = "jita") -> float | None:
         """Best Jita buy order price — used to compute the buy-sell spread."""
         try:
-            svc = getattr(self._state, "market_pricing_service", None)
-            if svc is None:
-                return None
-            price_map = svc.get_type_price_map(type_ids=[type_id], hub=hub, side="buy")
+            price_map = self._market_pricing.get_type_price_map(type_ids=[type_id], hub=hub, side="buy")
             if type_id in price_map:
                 return float(price_map[type_id].get("unit_price") or 0) or None
         except Exception as exc:
@@ -326,6 +353,71 @@ class PricingSuggestionService:
         upper_fence = q3 + 2.0 * iqr
         filtered = [lv for lv in levels if float(lv[0]) <= upper_fence]
         return filtered if len(filtered) >= 2 else levels[:2]
+
+    # ── EVE price tick helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _eve_price_tick(price: float) -> float:
+        """Minimum ISK increment for a price in EVE Online.
+
+        EVE allows only 4 significant figures when modifying an order price.
+        Digits below the 4th most-significant figure are zeroed out, so the
+        effective tick is 10^(floor(log10(price)) - 3), capped at 0.01 ISK.
+        Examples:
+          1,500,000 ISK → tick 1,000 ISK
+            150,000 ISK → tick   100 ISK
+             15,000 ISK → tick    10 ISK
+              1,500 ISK → tick     1 ISK
+                150 ISK → tick   0.1 ISK
+                 15 ISK → tick  0.01 ISK
+        """
+        if price <= 0:
+            return 0.01
+        magnitude = math.floor(math.log10(price))
+        return max(0.01, 10.0 ** (magnitude - 3))
+
+    @staticmethod
+    def _snap_to_eve_tick(price: float) -> float:
+        """Floor price DOWN to the nearest valid EVE market tick.
+
+        Snapping down (not rounding) ensures the output never exceeds the
+        intended price — important when the caller uses the result as an
+        undercut target or a margin floor.
+        """
+        if price <= 0:
+            return round(price, 2)
+        tick = PricingSuggestionService._eve_price_tick(price)
+        return round(math.floor(price / tick) * tick, 2)
+
+    def _find_gap_position(
+        self,
+        *,
+        current_price: float,
+        orderbook_levels: list[list[float]],
+        floor_price: float,
+    ) -> float | None:
+        """Find the highest valid price that still beats the nearest undercutting order.
+
+        When being undercut, the optimal strategy is not to chase the absolute
+        cheapest price but to position 1 EVE tick below the nearest competitor
+        that is cheaper than the current price — capturing the gap between
+        adjacent price clusters.
+
+        Example (Bustard):
+          Orderbook: ...170,000,000 | 171,000,000 | 171,100,000 (your order)
+          Nearest undercutter: 171,000,000
+          Tick at 171M: 100,000
+          Gap position: 170,900,000  (beats the 171M sellers by 1 tick, no need to go lower)
+        """
+        if not orderbook_levels or current_price <= 0:
+            return None
+        prices_below = [float(lv[0]) for lv in orderbook_levels if float(lv[0]) < current_price]
+        if not prices_below:
+            return None  # already front of queue — handled by front-of-queue guard
+        nearest_undercut = max(prices_below)
+        tick = self._eve_price_tick(nearest_undercut)
+        gap_top = self._snap_to_eve_tick(nearest_undercut) - tick
+        return gap_top if gap_top >= floor_price else None
 
     # ── Market microstructure signals ─────────────────────────────────────────
 
@@ -709,17 +801,22 @@ class PricingSuggestionService:
 
         if orderbook_levels:
             cheapest_competing = orderbook_levels[0][0]
+            # Undercut by exactly 1 EVE tick (the minimum price change EVE allows)
+            eve_tick = self._eve_price_tick(cheapest_competing)
+            undercut_price = self._snap_to_eve_tick(cheapest_competing) - eve_tick
             if current_price <= cheapest_competing:
-                price_aggressive = max(floor, current_price)
+                # Already front of queue — hold current price (snapped to valid tick)
+                price_aggressive = max(floor, self._snap_to_eve_tick(current_price))
             else:
-                price_aggressive = max(floor, cheapest_competing - 0.01)
+                price_aggressive = max(floor, undercut_price)
         else:
             price_aggressive = floor
 
         price_aggressive = min(price_aggressive, target_price)
         price_aggressive = max(price_aggressive, floor)
+        price_aggressive = self._snap_to_eve_tick(price_aggressive)
 
-        price_target = target_price
+        price_target = self._snap_to_eve_tick(target_price)
 
         trend_pct = float(market_data.get("trend_pct") or 0) if market_data.get("has_data") else 0.0
         if hub_price and hub_price > 0 and trend_pct > 2:
@@ -731,6 +828,7 @@ class PricingSuggestionService:
         else:
             price_premium = price_target
             premium_label = "Market not trending up — same as target"
+        price_premium = self._snap_to_eve_tick(price_premium)
 
         def _tier_metrics(price: float) -> dict[str, Any]:
             est_d = self._estimate_sell_days(
@@ -864,6 +962,11 @@ class PricingSuggestionService:
         if breakdown.get("floored_to_target_margin"):
             m = breakdown.get("min_target_margin_pct", 8)
             reasoning += f" (Price raised to meet {m}% target margin.)"
+        if breakdown.get("gap_positioned"):
+            gap = breakdown.get("gap_price", 0)
+            reasoning += f" (Gap positioning: raised to {gap:,.0f} ISK — 1 tick below nearest undercutting order.)"
+        if breakdown.get("already_front_of_queue"):
+            reasoning += " (Already cheapest at hub — held at current price, no undercut needed.)"
         if breakdown.get("urgency_adjusted"):
             blend_pct = round((breakdown.get("urgency_blend", 0)) * 100)
             reasoning += f" (Expiry urgency: price moved {blend_pct}% toward aggressive tier.)"

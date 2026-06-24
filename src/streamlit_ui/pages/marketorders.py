@@ -278,6 +278,8 @@ def _render_orders_grid(
     gb = runtime.grid_options_builder.from_dataframe(df)
     gb.configure_default_column(resizable=True, sortable=True, filter=True, minWidth=80)
     gb.configure_column("Icon", headerName="", width=46, cellRenderer=img_renderer, suppressSizeToFit=True, resizable=False, sortable=False, filter=False)
+    if "Type" in df.columns:
+        gb.configure_column("Type", minWidth=140)
 
     right = {"textAlign": "right"}
     for col in isk_cols:
@@ -287,7 +289,7 @@ def _render_orders_grid(
                 type=["numericColumn", "numberColumnFilter"],
                 valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
                 cellStyle=right,
-                minWidth=110,
+                minWidth=160,
             )
 
     if "Volume" in df.columns:
@@ -342,16 +344,20 @@ def _render_orders_grid(
         if col in df.columns:
             gb.configure_column(col, minWidth=80, maxWidth=max_w)
 
-    # Auto-size all columns to their content on first render
+    # Auto-size all columns to content. Deferred 150ms so cells have painted first.
+    # AG Grid >= 31 merged columnApi into api; fall back to columnApi for older builds.
     auto_size = runtime.js_code(
         """
         function(e) {
-            var api = e.columnApi || (e.api && e.api.columnModel ? e.api : null);
-            if (api && api.autoSizeAllColumns) {
-                api.autoSizeAllColumns(false);
-            } else if (e.api && e.api.autoSizeAllColumns) {
-                e.api.autoSizeAllColumns(false);
-            }
+            var gridApi = e.api;
+            var colApi  = e.columnApi;
+            setTimeout(function() {
+                if (gridApi && typeof gridApi.autoSizeAllColumns === 'function') {
+                    gridApi.autoSizeAllColumns(false);
+                } else if (colApi && typeof colApi.autoSizeAllColumns === 'function') {
+                    colApi.autoSizeAllColumns(false);
+                }
+            }, 150);
         }
         """
     )
