@@ -1072,7 +1072,7 @@ class Corporation:
                 f"/corporations/{self.corporation_id}/orders/",
                 paginate=True,
             )
-            if not order_list or not isinstance(order_list, list):
+            if not isinstance(order_list, list):
                 return
 
             # Cache location/region lookups to avoid repeated ESI calls.
@@ -1175,15 +1175,16 @@ class Corporation:
                     "updated_at": datetime.now(timezone.utc),
                 })
 
-            # Upsert: delete existing orders for this corp, insert fresh snapshot.
+            # Upsert: always delete existing orders for this corp, then insert
+            # the fresh snapshot (even if empty — all orders may have been cancelled).
+            self._db_app.session.query(CorporationMarketOrdersModel).filter_by(
+                corporation_id=self.corporation_id
+            ).delete()
             if orders:
-                self._db_app.session.query(CorporationMarketOrdersModel).filter_by(
-                    corporation_id=self.corporation_id
-                ).delete()
                 self._db_app.session.bulk_save_objects(
                     [CorporationMarketOrdersModel(**o) for o in orders]
                 )
-                self._db_app.session.commit()
+            self._db_app.session.commit()
 
             logging.debug(
                 f"Corporation market orders refreshed for {self.corporation_name}. "
