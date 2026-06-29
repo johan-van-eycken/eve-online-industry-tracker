@@ -18,6 +18,7 @@ from streamlit_ui.api.realized_profit import (
 )
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
 from streamlit_ui.components.webpage_ui import render_aggrid_table, require_aggrid
+from streamlit_ui.api.client import api_get
 
 
 _PREFERENCES_NAMESPACE = "realized_profit"
@@ -69,12 +70,27 @@ def _character_payloads() -> list[dict[str, Any]]:
     return characters if isinstance(characters, list) else []
 
 
+def _director_corporation_options() -> list[tuple[str, int, str]]:
+    try:
+        response = api_get("/corporations") or {}
+        corps = response.get("data") or []
+        return [
+            ("corporation", int(c["corporation_id"]), str(c.get("corporation_name") or f"Corp {c['corporation_id']}"))
+            for c in corps
+            if isinstance(c, dict) and c.get("has_director_access") and c.get("corporation_id")
+        ]
+    except Exception:
+        return []
+
+
 def _owner_selector_options() -> list[tuple[str, int, str]]:
     options: list[tuple[str, int, str]] = [
-        ("character", 0, "All"),
+        ("character", 0, "All Characters"),
     ]
     for owner_id, owner_name in sorted(_character_name_map().items(), key=lambda item: item[1].lower()):
         options.append(("character", int(owner_id), str(owner_name)))
+    for corp_option in _director_corporation_options():
+        options.append(corp_option)
     return options
 
 
@@ -285,6 +301,7 @@ def _trade_square_metrics(
     selected_owner_id: int,
     start_date: date | None,
     end_date: date | None,
+    owner_type: str = "character",
 ) -> dict[str, Any]:
     trade_like_rows = [row for row in filtered_rows if _primary_profit_bucket(row.get("source_mix")) == "Trade"]
     manufacturing_rows = [row for row in filtered_rows if _primary_profit_bucket(row.get("source_mix")) == "Manufacturing"]
@@ -298,15 +315,16 @@ def _trade_square_metrics(
     trade_purchases = 0.0
     buy_transactions = 0
     sell_transactions = 0
-    wallet_transactions = _filtered_character_wallet_transactions(
-        _character_payloads(),
-        selected_owner_id=int(selected_owner_id),
-        start_date=start_date,
-        end_date=end_date,
-    )
-    buy_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
-    sell_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is False)
-    trade_purchases = sum(float(tx.get("total_price") or 0.0) for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
+    if owner_type == "character":
+        wallet_transactions = _filtered_character_wallet_transactions(
+            _character_payloads(),
+            selected_owner_id=int(selected_owner_id),
+            start_date=start_date,
+            end_date=end_date,
+        )
+        buy_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
+        sell_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is False)
+        trade_purchases = sum(float(tx.get("total_price") or 0.0) for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
 
     rolling_trade_profit = float(trade_income) - float(trade_purchases) - float(sales_tax) - float(broker_fees)
     return {
@@ -638,11 +656,17 @@ def render() -> None:
             format_func=lambda option: str(option[2] if isinstance(option, tuple) and len(option) >= 3 else "-"),
         )
 
+    selected_owner_type = str(selected_owner_option[0]) if isinstance(selected_owner_option, tuple) and len(selected_owner_option) >= 1 else "character"
     selected_owner_id = int(selected_owner_option[1] if isinstance(selected_owner_option, tuple) and len(selected_owner_option) >= 2 else 0)
 
-    owner_name_by_id = character_name_by_id
-    owner_label = "Character"
-    owner_id_key = "character_id"
+    if selected_owner_type == "corporation":
+        owner_name_by_id = {corp_id: corp_name for _, corp_id, corp_name in _director_corporation_options()}
+        owner_label = "Corporation"
+        owner_id_key = "corporation_id"
+    else:
+        owner_name_by_id = character_name_by_id
+        owner_label = "Character"
+        owner_id_key = "character_id"
     with controls_range:
         persisted_range_preset = _load_range_preset()
         range_preset = st.segmented_control(
@@ -659,7 +683,7 @@ def render() -> None:
         if st.button("Refresh Ledger", type="primary", width="stretch"):
             with st.spinner("Rebuilding realized profit ledger..."):
                 refresh_realized_profit(
-                    owner_scope="character",
+                    owner_scope=selected_owner_type,
                     owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
                 )
             clear_realized_profit_cache()
@@ -671,7 +695,7 @@ def render() -> None:
             with st.popover("?", help="About this page"):
                 st.caption(
                     "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
-                    "Character scope supports wallet journal-backed fee capture when linked."
+                    "Corporation scope uses wallet journal-backed fee capture via context_id matching."
                 )
                 st.caption(
                     "Profit Type groups sales into Manufacturing or Trade for readability. "
@@ -699,7 +723,7 @@ def render() -> None:
                 st.caption("Coverage excludes rows with missing historical cost basis.")
 
     response = fetch_realized_profit(
-        owner_scope="character",
+        owner_scope=selected_owner_type,
         owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
     )
     if response.get("status") not in {None, "success"}:
@@ -721,7 +745,7 @@ def render() -> None:
 
     filtered_rows = _filter_rows(
         rows,
-        selected_character_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
+        selected_character_id=(None if selected_owner_type == "corporation" or int(selected_owner_id) == 0 else int(selected_owner_id)),
         start_date=start_date,
         end_date=end_date,
     )
@@ -738,6 +762,7 @@ def render() -> None:
         selected_owner_id=int(selected_owner_id),
         start_date=start_date,
         end_date=end_date,
+        owner_type=selected_owner_type,
     )
 
     groups_left, groups_right = st.columns([4, 6])
