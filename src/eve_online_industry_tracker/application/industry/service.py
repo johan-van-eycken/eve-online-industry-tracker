@@ -5768,12 +5768,9 @@ class IndustryService:
                     .all()
                 )
 
-            # Resolve hangar flag filter from parameter or admin setting
+            # Hangar flag filter is solely controlled by the caller via corporation_hangar_flags.
+            # None means no filter (return all assets); a non-empty list restricts to those flags.
             _hangar_flags: list[str] | None = corporation_hangar_flags
-            if _hangar_flags is None:
-                _admin_flag = self._adm("industry", "industry_hangar_flag", None)
-                if _admin_flag is not None:
-                    _hangar_flags = [str(_admin_flag)]
 
             def query_corporation_assets(ids: list[int]) -> list[CorporationAssetsModel]:
                 normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
@@ -6274,9 +6271,14 @@ class IndustryService:
             progress_callback(0.45, "Loading owned item inventory", {"stage": "inventory"})
         blueprint_copy_assets_by_type_id: dict[int, list] = {}
         blueprint_original_assets_by_type_id: dict[int, list] = {}
+        _admin_hangar_flag = self._adm("industry", "industry_hangar_flag", None)
+        _corporation_hangar_flags: list[str] | None = (
+            [str(_admin_hangar_flag)] if _admin_hangar_flag is not None else None
+        )
         available_owned_item_quantity_by_type_id_base, owned_item_unit_cost_by_type_id = self._get_owned_item_inventory(
             owned_blueprints_scope=owned_blueprints_scope,
             material_price_map=material_price_map,
+            corporation_hangar_flags=_corporation_hangar_flags,
         )
         (
             character_blueprint_assets, corporation_blueprint_assets,
