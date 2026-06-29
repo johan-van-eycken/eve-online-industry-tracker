@@ -16,6 +16,7 @@ from streamlit_ui.state.industry_builder_page import (
     start_overview_refresh_job,
 )
 from streamlit_ui.state.industry_builder_ui import filter_overview_rows
+from streamlit_ui.shopping_list import aggregate_shopping_list
 from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
     load_character_context,
@@ -485,6 +486,113 @@ def _render_page_about() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shopping List tab
+# ---------------------------------------------------------------------------
+
+def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
+    st.markdown("### Jita Shopping List")
+    st.caption(
+        "Select the items you plan to build. "
+        "Quantities reflect what the Industry Builder has already computed "
+        "(owned stock in the Industry hangar is already subtracted via the sourcing strategy)."
+    )
+
+    if not overview_rows:
+        st.info("No overview data loaded. Refresh from the Industry Builder first.")
+        return
+
+    # Build label → row mapping for multiselect
+    options: list[str] = []
+    label_to_row: dict[str, dict[str, Any]] = {}
+    for row in overview_rows:
+        type_name = str(row.get("type_name") or row.get("type_id") or "Unknown")
+        batches = max(1, int(row.get("max_batches_total") or 1))
+        label = f"{type_name} (×{batches})"
+        # Handle duplicates (shouldn't happen but be defensive)
+        unique_label = label
+        counter = 2
+        while unique_label in label_to_row:
+            unique_label = f"{label} [{counter}]"
+            counter += 1
+        options.append(unique_label)
+        label_to_row[unique_label] = row
+
+    selected_labels: list[str] = st.multiselect(
+        "Items to build",
+        options=options,
+        default=[],
+        key="shopping_list_selected_items",
+        help="Select one or more products. Quantities are scaled by the recommended batch count.",
+    )
+
+    if not selected_labels:
+        st.info("Select items above to generate a shopping list.")
+        return
+
+    selected_rows = [label_to_row[lbl] for lbl in selected_labels]
+    shopping_items = aggregate_shopping_list(selected_rows)
+
+    if not shopping_items:
+        st.info("No buy-sourced materials found for the selected items.")
+        return
+
+    # Build display DataFrame
+    def _fmt_isk(v: float | None) -> str:
+        if v is None:
+            return "—"
+        if v >= 1_000_000_000:
+            return f"{v / 1_000_000_000:.2f}B"
+        if v >= 1_000_000:
+            return f"{v / 1_000_000:.2f}M"
+        if v >= 1_000:
+            return f"{v / 1_000:.1f}K"
+        return f"{v:,.0f}"
+
+    table_rows = []
+    for item in shopping_items:
+        unit_price = item["unit_price"]
+        buy_qty = item["buy"]
+        total_isk = buy_qty * unit_price if unit_price is not None else None
+        table_rows.append({
+            "Item": item["type_name"],
+            "Need": f"{item['need']:,}",
+            "Have": f"{item['need'] - buy_qty:,}",
+            "Buy": f"{buy_qty:,}",
+            "Unit Price": _fmt_isk(unit_price),
+            "Total ISK": _fmt_isk(total_isk),
+        })
+
+    df = pd.DataFrame(table_rows)
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+    # Summary line
+    total_isk_sum = sum(
+        item["buy"] * item["unit_price"]
+        for item in shopping_items
+        if item["unit_price"] is not None and item["buy"] > 0
+    )
+    distinct_items = len(shopping_items)
+    fully_stocked = sum(1 for item in shopping_items if item["buy"] == 0)
+    st.markdown(
+        f"**Total ISK to buy:** {_fmt_isk(total_isk_sum)} · "
+        f"**Distinct items:** {distinct_items} · "
+        f"**Already fully stocked:** {fully_stocked}"
+    )
+
+    # Clipboard block
+    st.markdown("---")
+    st.markdown("**Copy to clipboard** (paste in-game or in a spreadsheet):")
+    lines = ["=== Jita Shopping List ==="]
+    for item in shopping_items:
+        buy_qty = item["buy"]
+        if buy_qty <= 0:
+            continue
+        lines.append(f"{item['type_name']} x {buy_qty:,}")
+    lines.append(f"Total: ~{_fmt_isk(total_isk_sum)} ISK")
+    st.code("\n".join(lines), language="text")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -524,5 +632,11 @@ def render() -> None:
     if overview_refresh_is_active():
         return
 
-    _render_recommendations_table(ranked[:15])
-    _render_excluded_section(disqualified)
+    tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
+
+    with tab_recommendations:
+        _render_recommendations_table(ranked[:15])
+        _render_excluded_section(disqualified)
+
+    with tab_shopping:
+        _render_shopping_list_tab(overview_rows)
