@@ -42,8 +42,12 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
                 buy_per_batch = int(mat["buy_quantity"])
             elif strategy == "take":
                 buy_per_batch = 0
+            elif strategy in ("split", "mixed"):
+                # "split" and "mixed" both represent partial inventory coverage —
+                # without an explicit buy_quantity we must buy everything.
+                buy_per_batch = quantity_per_batch
             else:
-                # "buy" or "split" without explicit buy_quantity: treat as full buy
+                # "buy" (and any unrecognised strategy): treat as full buy
                 buy_per_batch = quantity_per_batch
 
             need_total = quantity_per_batch * batches
