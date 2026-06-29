@@ -96,6 +96,17 @@ class CorporationsService:
     ) -> Any:
         return self._state.corp_manager.get_assets(corporation_id=corporation_id)
 
+    def get_market_orders(
+        self,
+        *,
+        refresh: bool = False,
+        corporation_id: int | None = None,
+    ) -> list[dict]:
+        return self._state.corp_manager.get_market_orders(
+            corporation_id=corporation_id,
+            refresh=refresh,
+        )
+
     def get_realized_profit_ledger(
         self,
         *,

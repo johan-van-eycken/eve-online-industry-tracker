@@ -204,6 +204,33 @@ class CharacterMarketOrdersModel(BaseApp):
     min_volume: Mapped[int] = mapped_column(Integer, nullable=True)
     range: Mapped[str] = mapped_column(String, nullable=True)
 
+class CorporationMarketOrdersModel(BaseApp):
+    __tablename__ = "corporation_market_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    corporation_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    order_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_group_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_category_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    type_category_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    location_id: Mapped[int] = mapped_column(BigInteger, nullable=True)
+    location_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    region_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    region_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    price: Mapped[float] = mapped_column(Float, nullable=True)
+    is_buy_order: Mapped[bool] = mapped_column(Boolean, nullable=True)
+    escrow: Mapped[float] = mapped_column(Float, nullable=True)
+    volume_total: Mapped[int] = mapped_column(Integer, nullable=True)
+    volume_remain: Mapped[int] = mapped_column(Integer, nullable=True)
+    duration: Mapped[int] = mapped_column(Integer, nullable=True)
+    issued: Mapped[str] = mapped_column(String, nullable=True)
+    min_volume: Mapped[int] = mapped_column(Integer, nullable=True)
+    range: Mapped[str] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
 class CharacterAssetsModel(BaseApp):
     __tablename__ = "character_assets"
 
