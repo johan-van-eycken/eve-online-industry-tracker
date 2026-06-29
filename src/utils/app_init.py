@@ -22,10 +22,28 @@ def _user_friendly_error(e: Exception) -> str | None:
 
     if "no such table" in msg.lower():
         table = msg.split("no such table: ")[-1].strip().split()[0] if "no such table: " in msg else "unknown"
+        sde_tables = {"types", "groups", "categories", "blueprints", "races", "factions",
+                      "mapregions", "mapconstellations", "mapsolarsystems", "npcstations"}
+        if any(t in table.lower() for t in sde_tables):
+            return (
+                f'SDE database is missing table "{table}".\n'
+                "  The EVE Static Data Export has not been imported yet.\n"
+                "  Fix: python3 scripts/import_sde.py --download --import --force"
+            )
         return (
-            f'SDE database is missing table "{table}".\n'
-            "  The EVE Static Data Export has not been imported yet.\n"
-            "  Fix: python3 scripts/import_sde.py --download --import --force"
+            f'App database is missing table "{table}".\n'
+            "  This can happen when moving to a new machine without copying the database files.\n"
+            "  Fix: delete database/eve_app.db and restart — the app will rebuild it automatically.\n"
+            "  Note: your OAuth tokens are stored separately in database/eve_oauth.db and are unaffected."
+        )
+
+    if "no such column" in msg.lower():
+        col = msg.split("no such column: ")[-1].strip().split()[0] if "no such column: " in msg else "unknown"
+        return (
+            f'Database column "{col}" is missing.\n'
+            "  The app database is from an older version and is missing a new column.\n"
+            "  Fix: delete database/eve_app.db and restart — the app will rebuild it automatically.\n"
+            "  Note: your OAuth tokens are stored separately in database/eve_oauth.db and are unaffected."
         )
 
     if "UNIQUE constraint failed" in msg:
