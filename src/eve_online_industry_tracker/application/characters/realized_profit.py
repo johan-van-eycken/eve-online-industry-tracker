@@ -254,8 +254,7 @@ def _corp_journal_fee_breakdown(
     """Match corp sell transaction to its brokers_fee and transaction_tax journal entries.
 
     brokers_fee is matched by date proximity within ±_CORP_FEE_MATCH_WINDOW_SECONDS.
-    transaction_tax is matched by exact context_id == sell_transaction_id when available,
-    falling back to date proximity.
+    transaction_tax is matched by exact context_id == sell_transaction_id when available.
     Each journal entry is consumed once (via used_journal_ids) to prevent double-matching.
     """
     notes: list[str] = []
@@ -268,7 +267,7 @@ def _corp_journal_fee_breakdown(
         division: int | None = None,
     ) -> Any | None:
         for entry in entries:
-            if entry.wallet_journal_id in used_journal_ids:
+            if getattr(entry, "wallet_journal_id", None) in used_journal_ids:
                 continue
             # Division filter: skip cross-division entries when both sides specify a division
             if division is not None and getattr(entry, "division", None) is not None:
@@ -282,7 +281,9 @@ def _corp_journal_fee_breakdown(
                 # Date-proximity match
                 entry_date = _parse_eve_date(entry.date)
                 if entry_date and sell_date:
-                    if abs((entry_date - sell_date).total_seconds()) <= _CORP_FEE_MATCH_WINDOW_SECONDS:
+                    sd = sell_date.replace(tzinfo=None)
+                    ed = entry_date.replace(tzinfo=None)
+                    if abs((ed - sd).total_seconds()) <= _CORP_FEE_MATCH_WINDOW_SECONDS:
                         return entry
         return None
 
