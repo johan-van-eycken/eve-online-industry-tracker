@@ -198,7 +198,7 @@ class Character:
     # -------------------
     def get_market_orders(self) -> Dict[str, Any]:
         """Return the character's market orders."""
-        return {"character_name": self.character_name, "character_id": self.character_id, "market_orders": self.market_orders if self.market_orders is not None else []}
+        return {"character_name": self.character_name, "character_id": self.character_id, "corporation_id": self.corporation_id, "market_orders": self.market_orders if self.market_orders is not None else []}
 
     # -------------------
     # Save Character
