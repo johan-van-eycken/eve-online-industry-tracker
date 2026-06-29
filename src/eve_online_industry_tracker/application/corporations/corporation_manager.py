@@ -212,6 +212,7 @@ class CorporationManager:
 
     def refresh_realized_profit_inputs(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
         self.refresh_wallet_transactions(corporation_name=corporation_name, corporation_id=corporation_id)
+        self.refresh_wallet_journal(corporation_name=corporation_name, corporation_id=corporation_id)
         self.refresh_industry_jobs(corporation_name=corporation_name, corporation_id=corporation_id)
 
     def get_market_orders(

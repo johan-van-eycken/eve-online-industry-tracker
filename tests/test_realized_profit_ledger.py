@@ -647,6 +647,8 @@ def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
             balance=9950.0,
             date="2026-03-01T10:00:03Z",
             ref_type="transaction_tax",
+            context_id=9100,
+            context_id_type="market_transaction_id",
         )
     )
     app_session.commit()
