@@ -18,6 +18,7 @@ sys.path.insert(0, str(src_path))
 
 from config.paths import app_config_path, app_secret_path
 from config.schemas import CONFIG_SCHEMA
+from eve_online_industry_tracker.application.characters.realized_profit import CorporationRealizedProfitLedgerService
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.infrastructure.models import (
@@ -283,6 +284,8 @@ def main():
     cfg = cfg_manager.all()
     db_app = DatabaseManager(cfg["app"]["database_app_uri"], cfg["app"]["language"])
     session = db_app.session
+    db_sde = DatabaseManager(cfg["app"]["database_sde_uri"], cfg["app"]["language"])
+    sde_session = db_sde.session
 
     print("Starting corp transfer cost backfill...")
     summary = backfill_corp_transfer_costs(session)
@@ -292,6 +295,27 @@ def main():
     print(f"  FIFO-matched (exact job):          {summary['fifo_matched']}")
     print(f"  Average-matched (weighted avg):    {summary['avg_matched']}")
     print(f"  Unmatched (no character job found):{summary['unmatched']}")
+
+    if summary["fifo_matched"] + summary["avg_matched"] > 0:
+        print("\nRebuilding realized profit ledger for affected corporations...")
+        corp_ids = [
+            row[0] for row in session.query(CorporationAssetHistoryModel.corporation_id)
+            .filter(CorporationAssetHistoryModel.acquisition_source.in_([
+                "industry_build_transferred",
+                "industry_build_transferred_avg",
+            ]))
+            .distinct()
+            .all()
+        ]
+        for corp_id in corp_ids:
+            service = CorporationRealizedProfitLedgerService(
+                app_session=session,
+                sde_session=sde_session,
+                market_prices=[],
+            )
+            service.rebuild(corporation_id=corp_id)
+            print(f"  Rebuilt realized profit ledger for corporation_id={corp_id}")
+
     print("\nBackfill complete!")
 
 
