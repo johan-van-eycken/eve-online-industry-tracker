@@ -227,57 +227,89 @@ def _gross_only_fee_breakdown(*, gross_revenue: float) -> tuple[float, float, fl
     ]
 
 
-# Maximum fraction by which the journal net amount may differ from gross revenue
-# before we reject the match.  Typical EVE market fees (broker + tax) are under 10 %,
-# so a 15 % window is generous enough to handle high-fee edge cases while avoiding
-# false positives from unrelated transactions of similar size.
-_CORP_JOURNAL_MATCH_TOLERANCE = 0.15
+_CORP_FEE_MATCH_WINDOW_SECONDS = 300
+
+
+def _parse_eve_date(date_str: Any) -> datetime | None:
+    if date_str is None:
+        return None
+    if isinstance(date_str, datetime):
+        return date_str
+    try:
+        return datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _corp_journal_fee_breakdown(
     *,
     gross_revenue: float,
-    journal_entries: list[Any],
+    sell_date: datetime | None,
+    brokers_fee_entries: list[Any],
+    transaction_tax_entries: list[Any],
     used_journal_ids: set[int],
 ) -> tuple[float, float, float, str, list[str]]:
-    """Match a corp sell transaction to its wallet-journal market_transaction entry.
+    """Match corp sell transaction to its brokers_fee and transaction_tax journal entries.
 
-    Because ``CorporationWalletTransactionsModel`` has no ``journal_ref_id`` column,
-    we cannot do a direct ID lookup.  Instead we scan through journal entries (already
-    filtered to ``ref_type = "market_transaction"`` and sorted by date) and pick the
-    first unused one whose ``amount`` is within ``_CORP_JOURNAL_MATCH_TOLERANCE`` of
-    ``gross_revenue``.
-
-    The matched entry is added to ``used_journal_ids`` so it is not claimed again by a
-    subsequent transaction.
+    Because CorporationWalletTransactionsModel has no journal_ref_id, matching uses
+    date proximity within ±_CORP_FEE_MATCH_WINDOW_SECONDS of the sell transaction date.
+    Each journal entry is consumed once (via used_journal_ids) to prevent double-matching.
     """
     notes: list[str] = []
     gross = float(gross_revenue)
 
-    for entry in journal_entries:
-        entry_id = _safe_int(getattr(entry, "wallet_journal_id", None))
-        if entry_id is None:
-            continue
-        if entry_id in used_journal_ids:
-            continue
-        amount = _safe_float(getattr(entry, "amount", None))
-        if amount is None or amount <= 0:
-            continue
-        # The journal net amount should be slightly below gross_revenue (fees deducted).
-        if amount > gross * (1.0 + _CORP_JOURNAL_MATCH_TOLERANCE):
-            continue
-        if amount < gross * (1.0 - _CORP_JOURNAL_MATCH_TOLERANCE):
-            continue
-        # Good match — claim it and compute the fee breakdown.
-        used_journal_ids.add(int(entry_id))
-        other_fees_amount, sales_tax_amount, net_revenue, mode, entry_notes = _journal_fee_breakdown(
-            gross_revenue=gross,
-            journal=entry,
-        )
-        return other_fees_amount, sales_tax_amount, net_revenue, mode, entry_notes
+    def _find_nearest(entries: list[Any]) -> Any | None:
+        if sell_date is None:
+            return None
+        best: Any = None
+        best_delta: float | None = None
+        for entry in entries:
+            entry_id = _safe_int(getattr(entry, "wallet_journal_id", None))
+            if entry_id is None or entry_id in used_journal_ids:
+                continue
+            entry_date = _parse_eve_date(getattr(entry, "date", None))
+            if entry_date is None:
+                continue
+            # Make both tz-naive for comparison
+            sd = sell_date.replace(tzinfo=None) if sell_date.tzinfo else sell_date
+            ed = entry_date.replace(tzinfo=None) if entry_date.tzinfo else entry_date
+            delta = abs((ed - sd).total_seconds())
+            if delta > _CORP_FEE_MATCH_WINDOW_SECONDS:
+                continue
+            if best_delta is None or delta < best_delta:
+                best = entry
+                best_delta = delta
+        return best
 
-    notes.append("No matching wallet journal entry found for this corp sale; fees are not captured.")
-    return 0.0, 0.0, gross, "gross_only", notes
+    broker_entry = _find_nearest(brokers_fee_entries)
+    tax_entry = _find_nearest(transaction_tax_entries)
+
+    broker_fee = 0.0
+    tax_fee = 0.0
+
+    if broker_entry is not None:
+        eid = _safe_int(getattr(broker_entry, "wallet_journal_id", None))
+        if eid is not None:
+            used_journal_ids.add(int(eid))
+        broker_fee = abs(float(_safe_float(getattr(broker_entry, "amount", None)) or 0.0))
+
+    if tax_entry is not None:
+        eid = _safe_int(getattr(tax_entry, "wallet_journal_id", None))
+        if eid is not None:
+            used_journal_ids.add(int(eid))
+        tax_fee = abs(float(_safe_float(getattr(tax_entry, "amount", None)) or 0.0))
+
+    if broker_entry is not None and tax_entry is not None:
+        mode = "journal_matched"
+    elif broker_entry is not None or tax_entry is not None:
+        mode = "journal_partial"
+        notes.append("Only one of broker fee or transaction tax was matched from the wallet journal.")
+    else:
+        notes.append("No matching wallet journal fee entries found for this corp sale; fees are not captured.")
+        return 0.0, 0.0, gross, "gross_only", notes
+
+    net_revenue = max(0.0, gross - broker_fee - tax_fee)
+    return broker_fee, tax_fee, net_revenue, mode, notes
 
 
 def _extract_market_fee_rates(raw_market_fees: Any) -> tuple[float | None, float | None]:
@@ -338,7 +370,7 @@ def _apply_estimated_market_fees(
 def _confidence(*, priced_quantity: int, unpriced_quantity: int, fee_capture_mode: str) -> str:
     if unpriced_quantity > 0:
         return "Low"
-    if fee_capture_mode == "journal_amount":
+    if fee_capture_mode in ("journal_amount", "journal_matched", "journal_partial"):
         return "High"
     return "Medium"
 
@@ -569,6 +601,7 @@ class _BaseRealizedProfitLedgerService:
                     )
                 journal_ref_id = _safe_int(getattr(tx, "journal_ref_id", None))
                 journal = journal_by_id.get(int(journal_ref_id)) if journal_ref_id is not None else None
+                owner_context["current_tx"] = tx
                 other_fees_amount, sales_tax_amount, net_revenue, fee_capture_mode, notes = self._fee_breakdown(
                     gross_revenue=float(gross_revenue),
                     journal=journal,
@@ -748,35 +781,37 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         return super().list_rows(owner_id=corporation_id)
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
-        """Load corp wallet journal entries for fee matching.
+        """Pre-load brokers_fee and transaction_tax journal entries for date-proximity matching.
 
-        ``CorporationWalletTransactionsModel`` has no ``journal_ref_id`` column, so we
-        cannot perform a direct ID lookup.  Instead we pre-load all
-        ``market_transaction`` journal entries for this corporation (sorted by date) and
-        carry them in ``owner_context`` alongside a mutable set of already-claimed IDs.
-        ``_fee_breakdown`` then picks the closest unused entry by amount.
+        CorporationWalletTransactionsModel has no journal_ref_id, so we match fee entries
+        to sell transactions by date proximity (within _CORP_FEE_MATCH_WINDOW_SECONDS).
         """
-        journal_entries: list[Any] = (
-            self._app_session.query(CorporationWalletJournalModel)
-            .filter(
-                CorporationWalletJournalModel.corporation_id == int(owner_id),
-                CorporationWalletJournalModel.ref_type == "market_transaction",
+        def _query_by_ref_type(ref_type: str) -> list[Any]:
+            return (
+                self._app_session.query(CorporationWalletJournalModel)
+                .filter(
+                    CorporationWalletJournalModel.corporation_id == int(owner_id),
+                    CorporationWalletJournalModel.ref_type == ref_type,
+                )
+                .order_by(CorporationWalletJournalModel.date)
+                .all()
             )
-            .order_by(CorporationWalletJournalModel.date)
-            .all()
-        )
+
         return {
-            "journal_entries": journal_entries,
+            "brokers_fee_entries": _query_by_ref_type("brokers_fee"),
+            "transaction_tax_entries": _query_by_ref_type("transaction_tax"),
             "used_journal_ids": set(),
         }
 
     def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:
-        journal_entries: list[Any] = owner_context.get("journal_entries") or []
-        used_journal_ids: set[int] = owner_context.get("used_journal_ids") or set()
+        tx = owner_context.get("current_tx")
+        sell_date = _parse_eve_date(getattr(tx, "date", None)) if tx is not None else None
         return _corp_journal_fee_breakdown(
             gross_revenue=float(gross_revenue),
-            journal_entries=journal_entries,
-            used_journal_ids=used_journal_ids,
+            sell_date=sell_date,
+            brokers_fee_entries=owner_context.get("brokers_fee_entries") or [],
+            transaction_tax_entries=owner_context.get("transaction_tax_entries") or [],
+            used_journal_ids=owner_context.get("used_journal_ids") or set(),
         )
 
 
