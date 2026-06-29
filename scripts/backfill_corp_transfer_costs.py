@@ -92,6 +92,7 @@ def build_character_buy_cost_map(session) -> dict[int, list[tuple[str, float, in
             CharacterWalletTransactionsModel.type_id.isnot(None),
             CharacterWalletTransactionsModel.unit_price.isnot(None),
             CharacterWalletTransactionsModel.quantity.isnot(None),
+            CharacterWalletTransactionsModel.date.isnot(None),
         )
         .order_by(CharacterWalletTransactionsModel.date)
         .all()
@@ -107,9 +108,6 @@ def build_character_buy_cost_map(session) -> dict[int, list[tuple[str, float, in
         if unit_price <= 0 or quantity <= 0:
             continue
         cost_map[type_id].append((date, unit_price, quantity, transaction_id))
-
-    for type_id in cost_map:
-        cost_map[type_id].sort(key=lambda t: t[0])
 
     return dict(cost_map)
 
@@ -262,7 +260,7 @@ def backfill_corp_transfer_costs(session) -> dict:
 
     fifo_matched = 0
     avg_matched = 0
-    unmatched = 0
+    unmatched = 0  # placeholder; computed after all passes
 
     for type_id, snapshots in rows_by_type.items():
         job_lots = cost_map.get(type_id)
@@ -345,12 +343,10 @@ def backfill_corp_transfer_costs(session) -> dict:
                 snapshot.acquisition_source = "character_market_buy_transferred"
                 snapshot.acquisition_unit_cost = unit_cost
                 snapshot.acquisition_total_cost = unit_cost * float(snapshot.quantity or 1)
-                snapshot.acquisition_reference_type = "wallet_transaction" if job_id is not None else None
+                snapshot.acquisition_reference_type = match["reference_type"] if job_id is not None else None
                 snapshot.acquisition_reference_id = job_id
                 snapshot.acquisition_date = completed_date
                 buy_matched += 1
-                # Adjust unmatched count since this snapshot is now matched
-                unmatched -= 1
                 print(
                     f"  BUY: type_id={type_id}, qty={snapshot.quantity}, "
                     f"unit_cost={unit_cost:.2f}, tx_id={job_id}"
@@ -360,6 +356,7 @@ def backfill_corp_transfer_costs(session) -> dict:
         session.commit()
 
     total_uncosted = len(uncosted_rows)
+    unmatched = total_uncosted - fifo_matched - avg_matched - buy_matched
     return {
         "total_uncosted": total_uncosted,
         "fifo_matched": fifo_matched,
