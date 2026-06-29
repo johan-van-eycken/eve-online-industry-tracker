@@ -605,7 +605,7 @@ def _render_character_orders_tab(runtime: object, img_renderer: object) -> None:
         return
 
     # Build Relist Priority map: (type_name, price, station) → "High" / "Medium" / "Low" / ""
-    sell_raw_all = [o for o in all_orders if not o.get("is_buy_order")]
+    sell_raw_all = [o for o in all_orders if not o.get("is_buy_order") and not o.get("is_corporation")]
     sell_raw_sorted = sorted(sell_raw_all, key=lambda o: o.get("reprice_priority_score", 0), reverse=True)
     priority_map: dict = {}
     for rank, o in enumerate(sell_raw_sorted, start=1):
