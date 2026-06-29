@@ -18,7 +18,9 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
     CharacterWalletJournalModel,
     CharacterWalletTransactionsModel,
     CorporationIndustryJobsModel,
+    CorporationModel,
     CorporationRealizedSalesLedgerModel,
+    CorporationWalletJournalModel,
     CorporationWalletTransactionsModel,
 )
 from eve_online_industry_tracker.application.characters.asset_provenance import build_market_price_map, resolve_industry_job_cost_snapshot  # noqa: E402
@@ -599,3 +601,98 @@ def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture() -> Non
 
     persisted = app_session.query(CorporationRealizedSalesLedgerModel).filter_by(corporation_id=10).all()
     assert len(persisted) == 1
+
+
+def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
+    """Corp ledger row uses journal_amount mode when a matching market_transaction entry exists."""
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=20, corporation_name="Test Corp"))
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=20,
+            division=1,
+            transaction_id=9100,
+            client_name="Buyer",
+            date="2026-03-01T10:00:00Z",
+            is_buy=False,
+            quantity=10,
+            type_id=300,
+            type_name="Sell Item",
+            type_group_name="Modules",
+            type_category_name="Module",
+            unit_price=100.0,
+            total_price=1000.0,
+        )
+    )
+    # Matching market_transaction journal entry: net amount after fees (broker 3% + tax 2% = ~950)
+    app_session.add(
+        CorporationWalletJournalModel(
+            corporation_id=20,
+            division=1,
+            wallet_journal_id=8000,
+            amount=950.0,
+            balance=10000.0,
+            date="2026-03-01T10:00:01Z",
+            ref_type="market_transaction",
+            tax=20.0,
+        )
+    )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=20)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["fee_capture_mode"] == "journal_amount"
+    assert row["total_fees_amount"] > 0
+    assert row["net_revenue"] == 950.0
+    assert row["sales_tax_amount"] == 20.0
+    assert row["other_fees_amount"] == 30.0
+
+
+def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match() -> None:
+    """Corp ledger row falls back to gross_only when no journal entries match."""
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=21, corporation_name="No Journal Corp"))
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=21,
+            division=1,
+            transaction_id=9200,
+            client_name="Buyer",
+            date="2026-03-02T10:00:00Z",
+            is_buy=False,
+            quantity=5,
+            type_id=301,
+            type_name="Unmatched Item",
+            type_group_name="Ammo",
+            type_category_name="Charge",
+            unit_price=50.0,
+            total_price=250.0,
+        )
+    )
+    # No journal entries at all for this corporation.
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=21)
+
+    assert len(rows) == 1
+    row = rows[0]
+    # Graceful fallback — no crash, fees default to zero.
+    assert row["fee_capture_mode"] == "gross_only"
+    assert row["total_fees_amount"] == 0.0
+    assert row["net_revenue"] == 250.0
