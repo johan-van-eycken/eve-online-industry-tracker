@@ -158,7 +158,15 @@ class Corporation:
     # -------------------
     def get_assets(self) -> Dict[str, Any]:
         """Return the corporation assets."""
-        return {"corporation_name": self.corporation_name, "corporation_id": self.corporation_id, "assets": self.assets if self.assets is not None else []}
+        assets = self.assets if self.assets is not None else []
+        return {
+            "corporation_name": self.corporation_name,
+            "corporation_id": self.corporation_id,
+            "assets": [
+                {col: getattr(a, col) for col in CorporationAssetsModel.__table__.columns.keys()}
+                for a in assets
+            ],
+        }
 
     # -------------------
     # Get Members
