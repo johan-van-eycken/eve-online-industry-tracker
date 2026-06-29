@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, desc
-from eve_online_industry_tracker.infrastructure.models import CharacterWalletTransactionsModel
+from eve_online_industry_tracker.infrastructure.models import CharacterWalletTransactionsModel, CorporationWalletTransactionsModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
 
@@ -20,13 +20,16 @@ class SalesHistoryService:
         character_id: int,
         type_id: int,
         days: int = 30,
+        corporation_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Get list of historical sales for a character and item type.
+        """Get list of historical sales for a character (or corporation) and item type.
 
         Args:
             character_id: The character's ID.
             type_id: The item type ID.
             days: Number of days to look back (default 30).
+            corporation_id: If provided, query corporation wallet transactions instead
+                of character wallet transactions.
 
         Returns:
             List of transactions sorted by date (newest first), each with:
@@ -40,14 +43,24 @@ class SalesHistoryService:
             cutoff_date = datetime.utcnow() - timedelta(days=days)
             cutoff_str = cutoff_date.isoformat()
 
-            transactions = app_session.query(CharacterWalletTransactionsModel).filter(
-                and_(
-                    CharacterWalletTransactionsModel.character_id == character_id,
-                    CharacterWalletTransactionsModel.type_id == type_id,
-                    CharacterWalletTransactionsModel.is_buy == False,
-                    CharacterWalletTransactionsModel.date >= cutoff_str,
-                )
-            ).order_by(desc(CharacterWalletTransactionsModel.date)).all()
+            if corporation_id is not None:
+                transactions = app_session.query(CorporationWalletTransactionsModel).filter(
+                    and_(
+                        CorporationWalletTransactionsModel.corporation_id == corporation_id,
+                        CorporationWalletTransactionsModel.type_id == type_id,
+                        CorporationWalletTransactionsModel.is_buy == False,
+                        CorporationWalletTransactionsModel.date >= cutoff_str,
+                    )
+                ).order_by(desc(CorporationWalletTransactionsModel.date)).all()
+            else:
+                transactions = app_session.query(CharacterWalletTransactionsModel).filter(
+                    and_(
+                        CharacterWalletTransactionsModel.character_id == character_id,
+                        CharacterWalletTransactionsModel.type_id == type_id,
+                        CharacterWalletTransactionsModel.is_buy == False,
+                        CharacterWalletTransactionsModel.date >= cutoff_str,
+                    )
+                ).order_by(desc(CharacterWalletTransactionsModel.date)).all()
 
             result = [
                 {

@@ -11,7 +11,7 @@ from sqlalchemy import and_
 from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing import MarketPricingService
-from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel, CharacterAssetHistoryModel, CharacterModel
+from eve_online_industry_tracker.infrastructure.models import CharacterAssetsModel, CharacterAssetHistoryModel, CharacterModel, CorporationAssetHistoryModel, CharacterIndustryJobsModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
 
@@ -36,13 +36,15 @@ class PricingSuggestionService:
         quantity: int = 0,
         order_duration_days: int = 90,
         days_remaining: int | None = None,
+        corporation_id: int | None = None,
     ) -> dict[str, Any]:
         """Suggest a sell price with detailed breakdown, three-tier price band, and urgency signals."""
         my_sales = self._sales_history.suggest_sell_price(character_id=character_id, type_id=type_id)
         market_data = self._market_history.get_price_stats(type_id=type_id, region_id=region_id)
         volume_data = self._market_history.get_volume_stats(type_id=type_id, region_id=region_id)
         cost_basis, acquisition_source, cost_source = self._get_cost_basis(
-            character_id=character_id, type_id=type_id, fallback_price=current_price
+            character_id=character_id, type_id=type_id, fallback_price=current_price,
+            corporation_id=corporation_id,
         )
         hub_price = self._get_hub_price(type_id=type_id, hub=hub)
         hub_buy_price = self._get_hub_buy_price(type_id=type_id, hub=hub)
@@ -54,6 +56,7 @@ class PricingSuggestionService:
         fill_rate = self._get_fill_rate_velocity(
             character_id=character_id, type_id=type_id,
             current_price=current_price, lookback_days=90,
+            corporation_id=corporation_id,
         )
         seller_concentration = self._get_seller_concentration(orderbook_levels=orderbook_levels)
 
@@ -229,10 +232,60 @@ class PricingSuggestionService:
         return None
 
     def _get_cost_basis(
-        self, *, character_id: int, type_id: int, fallback_price: float | None = None
+        self, *, character_id: int, type_id: int, fallback_price: float | None = None,
+        corporation_id: int | None = None,
     ) -> tuple[float | None, str | None, str | None]:
         app_session = self._sessions.app_session()
         try:
+            if corporation_id is not None:
+                # Corp order: skip character asset queries; use corp asset history first
+                corp_history_row = (
+                    app_session.query(CorporationAssetHistoryModel)
+                    .filter(
+                        and_(
+                            CorporationAssetHistoryModel.corporation_id == corporation_id,
+                            CorporationAssetHistoryModel.type_id == type_id,
+                            CorporationAssetHistoryModel.acquisition_unit_cost.isnot(None),
+                        )
+                    )
+                    .order_by(CorporationAssetHistoryModel.observed_at.desc())
+                    .first()
+                )
+                if corp_history_row and corp_history_row.acquisition_unit_cost and corp_history_row.acquisition_unit_cost > 0:
+                    return (
+                        float(corp_history_row.acquisition_unit_cost),
+                        corp_history_row.acquisition_source or "manufactured",
+                        "corp_asset_history",
+                    )
+
+                # Fallback: quantity-weighted average from character industry jobs
+                job_rows = (
+                    app_session.query(CharacterIndustryJobsModel)
+                    .filter(
+                        and_(
+                            CharacterIndustryJobsModel.product_type_id == type_id,
+                            CharacterIndustryJobsModel.unit_build_cost.isnot(None),
+                            CharacterIndustryJobsModel.status.in_(["delivered", "ready", "completed"]),
+                        )
+                    )
+                    .all()
+                )
+                if job_rows:
+                    total_cost = 0.0
+                    total_quantity = 0
+                    for job in job_rows:
+                        qty = int(job.output_quantity or 1)
+                        cost = float(job.unit_build_cost)
+                        total_cost += cost * qty
+                        total_quantity += qty
+                    if total_quantity > 0:
+                        avg_cost = total_cost / total_quantity
+                        return avg_cost, "manufactured", "char_industry_job"
+
+                if fallback_price and fallback_price > 0:
+                    return fallback_price, "market_order_fallback", "market_order_fallback"
+                return None, None, None
+
             assets = app_session.query(CharacterAssetsModel).filter(
                 and_(
                     CharacterAssetsModel.character_id == character_id,
@@ -473,6 +526,7 @@ class PricingSuggestionService:
         type_id: int,
         current_price: float,
         lookback_days: int = 90,
+        corporation_id: int | None = None,
     ) -> dict[str, Any] | None:
         """Estimate actual daily sell velocity from wallet transaction history.
 
@@ -482,7 +536,8 @@ class PricingSuggestionService:
         median historical sell price and the current target price.
         """
         history = self._sales_history.get_sold_history(
-            character_id=character_id, type_id=type_id, days=lookback_days
+            character_id=character_id, type_id=type_id, days=lookback_days,
+            corporation_id=corporation_id,
         )
         if len(history) < 2:
             return None

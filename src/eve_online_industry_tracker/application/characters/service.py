@@ -182,6 +182,7 @@ class CharactersService:
                 # Get pricing suggestion for sell orders
                 advised_price_data = None
                 character_id = order.get("character_id") or (character or {}).get("character_id")
+                corporation_id = int((character or {}).get("corporation_id")) if order.get("is_corporation") and (character or {}).get("corporation_id") else None
                 if not order.get("is_buy_order") and isinstance(type_id, int) and isinstance(character_id, int):
                     days_remaining_int: int | None = None
                     if expires_in_td.total_seconds() > 0:
@@ -194,6 +195,7 @@ class CharactersService:
                             quantity=int(order.get("volume_remain") or 0),
                             order_duration_days=duration_days_int or 90,
                             days_remaining=days_remaining_int,
+                            corporation_id=corporation_id,
                         )
                     except Exception:
                         advised_price_data = None
