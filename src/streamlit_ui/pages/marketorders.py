@@ -103,12 +103,15 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
     count = len(orders)
     total_listed = sum(float(o.get("total_price") or 0) for o in orders)
 
+    def _has_real_cost(o: dict) -> bool:
+        return o.get("cost_basis_source") not in (None, "market_order_fallback")
+
     # Est. profit at current price: total_price × net_margin% / 100
     # (net_margin = (net_proceeds - cost) / price × 100, so cost-profit = price × qty × margin/100 = total_price × margin/100)
     profit_cur_parts = [
         float(o.get("total_price") or 0) * float(o["net_margin_pct_current"]) / 100
         for o in orders
-        if o.get("net_margin_pct_current") is not None and o.get("total_price")
+        if o.get("net_margin_pct_current") is not None and o.get("total_price") and _has_real_cost(o)
     ]
     est_profit_current = sum(profit_cur_parts) if profit_cur_parts else None
 
@@ -119,31 +122,32 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
             o.get("advised_price") and
             o.get("net_margin_pct_advised") is not None and
             o.get("total_price") and
-            float(o.get("price") or 0) > 0
+            float(o.get("price") or 0) > 0 and
+            _has_real_cost(o)
         ):
             vol_remain = float(o["total_price"]) / float(o["price"])
             adv_total = float(o["advised_price"]) * vol_remain
             profit_adv_parts.append(adv_total * float(o["net_margin_pct_advised"]) / 100)
     est_profit_advised = sum(profit_adv_parts) if profit_adv_parts else None
 
-    # ISK/day totals
-    isk_day_cur = [float(o["isk_per_day_current"]) for o in orders if o.get("isk_per_day_current") is not None]
-    isk_day_adv = [float(o["isk_per_day_advised"]) for o in orders if o.get("isk_per_day_advised") is not None]
+    # ISK/day totals (only for orders with real cost basis)
+    isk_day_cur = [float(o["isk_per_day_current"]) for o in orders if o.get("isk_per_day_current") is not None and _has_real_cost(o)]
+    isk_day_adv = [float(o["isk_per_day_advised"]) for o in orders if o.get("isk_per_day_advised") is not None and _has_real_cost(o)]
     total_isk_day_current = sum(isk_day_cur) if isk_day_cur else None
     total_isk_day_advised = sum(isk_day_adv) if isk_day_adv else None
 
-    # Weighted-average margin at current price
+    # Weighted-average margin at current price (only orders with real cost basis)
     margin_w = [
         (float(o["net_margin_pct_current"]), float(o.get("total_price") or 0))
         for o in orders
-        if o.get("net_margin_pct_current") is not None and o.get("total_price")
+        if o.get("net_margin_pct_current") is not None and o.get("total_price") and _has_real_cost(o)
     ]
     avg_margin_current: float | None = None
     if margin_w:
         total_w = sum(w for _, w in margin_w)
         avg_margin_current = sum(m * w for m, w in margin_w) / total_w if total_w > 0 else None
 
-    below_breakeven = sum(1 for o in orders if (o.get("net_margin_pct_current") or 0) < 0)
+    below_breakeven = sum(1 for o in orders if (o.get("net_margin_pct_current") or 0) < 0 and _has_real_cost(o))
 
     return {
         "count": count,
@@ -256,9 +260,10 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
                 sell_order["Est. Days (Adv.)"] = round(float(order["estimated_sell_days_advised"]), 1)
             if order.get("isk_per_day_advised") is not None:
                 sell_order["ISK/day (Adv.)"] = order["isk_per_day_advised"]
-            if order.get("net_margin_pct_current") is not None:
+            has_real_cost = order.get("cost_basis_source") not in (None, "market_order_fallback")
+            if order.get("net_margin_pct_current") is not None and has_real_cost:
                 sell_order["Margin % (Current)"] = round(float(order["net_margin_pct_current"]), 1)
-            if order.get("net_margin_pct_advised") is not None:
+            if order.get("net_margin_pct_advised") is not None and has_real_cost:
                 sell_order["Margin % (Advised)"] = round(float(order["net_margin_pct_advised"]), 1)
             # Relist Priority column
             if priority_map is not None:
