@@ -5732,6 +5732,7 @@ class IndustryService:
         *,
         owned_blueprints_scope: str,
         material_price_map: dict[int, dict[str, Any]] | None = None,
+        corporation_hangar_flags: list[str] | None = None,
     ) -> tuple[dict[int, int], dict[int, float]]:
         session: Any = self._sessions.app_session()
         sde_session: Any = self._sessions.sde_session()
@@ -5767,15 +5768,24 @@ class IndustryService:
                     .all()
                 )
 
+            # Resolve hangar flag filter from parameter or admin setting
+            _hangar_flags: list[str] | None = corporation_hangar_flags
+            if _hangar_flags is None:
+                _admin_flag = self._adm("industry", "industry_hangar_flag", None)
+                if _admin_flag is not None:
+                    _hangar_flags = [str(_admin_flag)]
+
             def query_corporation_assets(ids: list[int]) -> list[CorporationAssetsModel]:
                 normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
                 if not normalized_ids:
                     return []
-                return (
+                q = (
                     session.query(CorporationAssetsModel)
                     .filter(CorporationAssetsModel.corporation_id.in_(normalized_ids))
-                    .all()
                 )
+                if _hangar_flags:
+                    q = q.filter(CorporationAssetsModel.location_flag.in_(_hangar_flags))
+                return q.all()
 
             character_assets: list[CharacterAssetsModel] = []
             corporation_assets: list[CorporationAssetsModel] = []
