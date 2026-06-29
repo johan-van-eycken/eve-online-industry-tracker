@@ -227,7 +227,7 @@ def _gross_only_fee_breakdown(*, gross_revenue: float) -> tuple[float, float, fl
     ]
 
 
-_CORP_FEE_MATCH_WINDOW_SECONDS = 300
+_CORP_FEE_MATCH_WINDOW_SECONDS = 3600
 
 
 def _parse_eve_date(date_str: Any) -> datetime | None:
@@ -245,44 +245,49 @@ def _corp_journal_fee_breakdown(
     *,
     gross_revenue: float,
     sell_date: datetime | None,
+    sell_transaction_id: int | None = None,
+    sell_division: int | None = None,
     brokers_fee_entries: list[Any],
     transaction_tax_entries: list[Any],
     used_journal_ids: set[int],
 ) -> tuple[float, float, float, str, list[str]]:
     """Match corp sell transaction to its brokers_fee and transaction_tax journal entries.
 
-    Because CorporationWalletTransactionsModel has no journal_ref_id, matching uses
-    date proximity within ±_CORP_FEE_MATCH_WINDOW_SECONDS of the sell transaction date.
+    brokers_fee is matched by date proximity within ±_CORP_FEE_MATCH_WINDOW_SECONDS.
+    transaction_tax is matched by exact context_id == sell_transaction_id when available,
+    falling back to date proximity.
     Each journal entry is consumed once (via used_journal_ids) to prevent double-matching.
     """
     notes: list[str] = []
     gross = float(gross_revenue)
 
-    def _find_nearest(entries: list[Any]) -> Any | None:
-        if sell_date is None:
-            return None
-        best: Any = None
-        best_delta: float | None = None
+    def _find_nearest(
+        entries: list[Any],
+        use_context_id: bool = False,
+        tid: int | None = None,
+        division: int | None = None,
+    ) -> Any | None:
         for entry in entries:
-            entry_id = _safe_int(getattr(entry, "wallet_journal_id", None))
-            if entry_id is None or entry_id in used_journal_ids:
+            if entry.wallet_journal_id in used_journal_ids:
                 continue
-            entry_date = _parse_eve_date(getattr(entry, "date", None))
-            if entry_date is None:
-                continue
-            # Make both tz-naive for comparison
-            sd = sell_date.replace(tzinfo=None) if sell_date.tzinfo else sell_date
-            ed = entry_date.replace(tzinfo=None) if entry_date.tzinfo else entry_date
-            delta = abs((ed - sd).total_seconds())
-            if delta > _CORP_FEE_MATCH_WINDOW_SECONDS:
-                continue
-            if best_delta is None or delta < best_delta:
-                best = entry
-                best_delta = delta
-        return best
+            # Division filter: skip cross-division entries when both sides specify a division
+            if division is not None and getattr(entry, "division", None) is not None:
+                if entry.division != division:
+                    continue
+            if use_context_id:
+                # Exact match via context_id — no date fallback
+                if tid is not None and getattr(entry, "context_id", None) == tid:
+                    return entry
+            else:
+                # Date-proximity match
+                entry_date = _parse_eve_date(entry.date)
+                if entry_date and sell_date:
+                    if abs((entry_date - sell_date).total_seconds()) <= _CORP_FEE_MATCH_WINDOW_SECONDS:
+                        return entry
+        return None
 
-    broker_entry = _find_nearest(brokers_fee_entries)
-    tax_entry = _find_nearest(transaction_tax_entries)
+    broker_entry = _find_nearest(brokers_fee_entries, division=sell_division)
+    tax_entry = _find_nearest(transaction_tax_entries, use_context_id=True, tid=sell_transaction_id, division=sell_division)
 
     broker_fee = 0.0
     tax_fee = 0.0
@@ -806,9 +811,13 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
     def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:
         tx = owner_context.get("current_tx")
         sell_date = _parse_eve_date(getattr(tx, "date", None)) if tx is not None else None
+        sell_transaction_id = getattr(tx, "transaction_id", None) if tx is not None else None
+        sell_division = getattr(tx, "division", None) if tx is not None else None
         return _corp_journal_fee_breakdown(
             gross_revenue=float(gross_revenue),
             sell_date=sell_date,
+            sell_transaction_id=sell_transaction_id,
+            sell_division=sell_division,
             brokers_fee_entries=owner_context.get("brokers_fee_entries") or [],
             transaction_tax_entries=owner_context.get("transaction_tax_entries") or [],
             used_journal_ids=owner_context.get("used_journal_ids") or set(),
