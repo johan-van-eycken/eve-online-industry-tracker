@@ -6,8 +6,9 @@ When characters transfer manufactured items to the corporation, the corp asset h
 has no cost basis (acquisition_unit_cost IS NULL, acquisition_source IS NULL or
 acquisition_source = 'untracked_inventory').
 This script:
-1. Matches those records to character industry jobs using FIFO chronological matching,
-   or falls back to a quantity-weighted average per type_id when FIFO cannot be resolved.
+1. Matches those records (acquisition_source IS NULL, "untracked_inventory", or "unknown")
+   to character industry jobs using FIFO chronological matching, or falls back to a
+   quantity-weighted average per type_id when FIFO cannot be resolved.
 2. For items with no matching industry job, attempts a second pass using character market
    buy transactions as the cost source.
 """
@@ -232,7 +233,7 @@ def backfill_corp_transfer_costs(session) -> dict:
     cost_map = build_character_job_cost_map(session)
 
     # Step 2: Query corp history rows with no cost basis (including previously stamped
-    # "untracked_inventory" rows that may now have a matchable source)
+    # "untracked_inventory" and "unknown" rows that may now have a matchable source)
     uncosted_rows = (
         session.query(CorporationAssetHistoryModel)
         .filter(
@@ -240,6 +241,7 @@ def backfill_corp_transfer_costs(session) -> dict:
             or_(
                 CorporationAssetHistoryModel.acquisition_source.is_(None),
                 CorporationAssetHistoryModel.acquisition_source == "untracked_inventory",
+                CorporationAssetHistoryModel.acquisition_source == "unknown",
             ),
         )
         .order_by(
