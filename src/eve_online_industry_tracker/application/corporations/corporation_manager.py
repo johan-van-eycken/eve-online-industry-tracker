@@ -213,3 +213,39 @@ class CorporationManager:
     def refresh_realized_profit_inputs(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
         self.refresh_wallet_transactions(corporation_name=corporation_name, corporation_id=corporation_id)
         self.refresh_industry_jobs(corporation_name=corporation_name, corporation_id=corporation_id)
+
+    def get_market_orders(
+        self,
+        corporation_name: Optional[str] = None,
+        corporation_id: Optional[int] = None,
+        *,
+        refresh: bool = False,
+    ) -> List[Dict]:
+        """Return market orders for one or all corporations."""
+        if corporation_id is not None:
+            corps = [self.get_corporation(corporation_id=corporation_id)]
+        elif corporation_name:
+            corps = [self.get_corporation(corporation_name=corporation_name)]
+        else:
+            corps = self._corporations
+
+        corps = [c for c in corps if c is not None]
+
+        if refresh:
+            self._refresh_batch("refresh_market_orders", corporation_name=corporation_name, corporation_id=corporation_id)
+
+        orders_list = []
+        for corp in corps:
+            try:
+                orders_list.append(corp.get_market_orders())
+            except Exception as e:
+                logging.error(f"Error retrieving market orders for corporation {corp.corporation_name}: {e}")
+        return orders_list
+
+    def refresh_market_orders(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
+        try:
+            self._refresh_batch("refresh_market_orders", corporation_name, corporation_id)
+        except Exception as e:
+            error_message = f"Failed to refresh corporation market orders: {str(e)}"
+            logging.error(error_message)
+            raise Exception(error_message)

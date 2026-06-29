@@ -4,7 +4,14 @@ import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingIm
 from streamlit_ui.components.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter, js_icon_cell_renderer, js_margin_pct_cell_style
 from streamlit_ui.components.assets_data import get_item_image_url as build_item_image_url
 from streamlit_ui.components.formatters import format_isk_short
-from streamlit_ui.api.market_orders import clear_market_orders_cache, fetch_market_orders, refresh_market_orders
+from streamlit_ui.api.market_orders import (
+    clear_market_orders_cache,
+    fetch_market_orders,
+    refresh_market_orders,
+    clear_corp_market_orders_cache,
+    fetch_corp_market_orders,
+    refresh_corp_market_orders,
+)
 from streamlit_ui.components.webpage_ui import AgGridRuntime, aggrid_height, require_aggrid
 
 
@@ -559,14 +566,35 @@ def _render_pricing_analysis(selected_order: dict) -> None:
                     st.caption("  \n".join(details))
 
 
-# ── Main render ───────────────────────────────────────────────────────────────
+# ── Corp order row builders ───────────────────────────────────────────────────
 
-def render():
-    st.header("Market Orders")
+def _build_corp_order_rows(corp_orders: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Build sell/buy row dicts from raw corp order dicts (no enrichment)."""
+    sell_orders: list[dict] = []
+    buy_orders: list[dict] = []
+    for order in corp_orders:
+        core = {
+            "Owner": order.get("corporation_name", "Corp"),
+            "Icon": get_item_image_url(order),
+            "Type": order.get("type_name", ""),
+            "Price": order.get("price", 0),
+            "Volume": str(order.get("volume_remain", 0)) + "/" + str(order.get("volume_total", 0)),
+            "Total Price": float(order.get("price") or 0) * float(order.get("volume_remain") or 0),
+        }
+        location = {
+            "Station": order.get("location_name") or f"Location {order.get('location_id', 'Unknown')}",
+            "Region": order.get("region_name") or (f"Region {order.get('region_id')}" if order.get("region_id") else "Unknown"),
+            "Range": order.get("range", ""),
+        }
+        if order.get("is_buy_order"):
+            buy_orders.append({**core, "Min. Volume": order.get("min_volume", 1), "Escrow Remaining": order.get("escrow", 0), **location})
+        else:
+            sell_orders.append({**core, **location})
+    return sell_orders, buy_orders
 
-    runtime = require_aggrid()
-    img_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
 
+def _render_character_orders_tab(runtime: object, img_renderer: object) -> None:
+    """Render existing character market orders content (unchanged logic)."""
     all_orders = []
     try:
         response = fetch_market_orders()
@@ -663,3 +691,98 @@ def render():
                 format_func=lambda i: order_options[i],
             )
             _render_pricing_analysis(full_sell_orders[selected_idx])
+
+
+def _render_corporation_orders_tab(runtime: object, img_renderer: object) -> None:
+    """Render corporation market orders tab."""
+    all_corp_data = []
+    try:
+        response = fetch_corp_market_orders()
+        all_corp_data = response.get("data", [])
+    except Exception as e:
+        st.error(f"Error fetching corporation market orders: {str(e)}")
+        return
+
+    # Flatten orders from all corporations, annotating each order with corp name.
+    all_orders: list[dict] = []
+    for corp_entry in all_corp_data:
+        corp_name = corp_entry.get("corporation_name", "Unknown Corp")
+        for order in corp_entry.get("market_orders", []):
+            all_orders.append({**order, "corporation_name": corp_name})
+
+    # Refresh button
+    refresh_col, filler = st.columns([2, 4])
+    with refresh_col:
+        if st.button("Refresh Corp Orders"):
+            with st.spinner("Refreshing corporation market orders..."):
+                try:
+                    refresh_corp_market_orders()
+                except Exception as e:
+                    st.error(f"Refresh failed: {str(e)}")
+            clear_corp_market_orders_cache()
+            _rerun()
+    with filler:
+        st.write("")
+
+    sell_orders, buy_orders = _build_corp_order_rows(all_orders)
+
+    if sell_orders:
+        st.subheader("Selling")
+        df = pd.DataFrame(sell_orders)
+        df = df.reset_index(drop=True).sort_values(by=["Type", "Price"], ascending=[True, True])
+
+        # Simple sell stats
+        total_listed = df["Total Price"].sum()
+        cards = [
+            ("Active Sell Orders", str(len(df))),
+            ("Total Listed ISK", format_isk_short(total_listed)),
+        ]
+        _render_stat_card_grid(cards)
+        st.write("")
+
+        _render_orders_grid(
+            df,
+            runtime=runtime,
+            img_renderer=img_renderer,
+            isk_cols=["Price", "Total Price"],
+            min_volume=False,
+            key="corp_market_orders_sell",
+        )
+    else:
+        st.info("No corporation sell orders found.")
+
+    if buy_orders:
+        st.subheader("Buying")
+        df_buy = pd.DataFrame(buy_orders)
+        df_buy = df_buy.reset_index(drop=True).sort_values(by=["Type", "Price"], ascending=[True, False])
+
+        _render_buy_stats_box(df_buy)
+        st.write("")
+
+        _render_orders_grid(
+            df_buy,
+            runtime=runtime,
+            img_renderer=img_renderer,
+            isk_cols=["Price", "Total Price", "Escrow Remaining"],
+            min_volume=True,
+            key="corp_market_orders_buy",
+        )
+    else:
+        st.info("No corporation buy orders found.")
+
+
+# ── Main render ───────────────────────────────────────────────────────────────
+
+def render():
+    st.header("Market Orders")
+
+    runtime = require_aggrid()
+    img_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
+
+    tab_char, tab_corp = st.tabs(["Character Orders", "Corporation Orders"])
+
+    with tab_char:
+        _render_character_orders_tab(runtime=runtime, img_renderer=img_renderer)
+
+    with tab_corp:
+        _render_corporation_orders_tab(runtime=runtime, img_renderer=img_renderer)

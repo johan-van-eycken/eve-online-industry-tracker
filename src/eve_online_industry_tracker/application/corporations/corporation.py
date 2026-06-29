@@ -10,6 +10,7 @@ from eve_online_industry_tracker.infrastructure.models import CorporationModel, 
     , CorporationMemberModel, CorporationAssetsModel
 from eve_online_industry_tracker.infrastructure.models import Types, Groups, Categories, Factions, Races, NpcCorporations
 from eve_online_industry_tracker.infrastructure.models import CorporationWalletJournalModel, CorporationWalletTransactionsModel, CorporationIndustryJobsModel
+from eve_online_industry_tracker.infrastructure.models import CorporationMarketOrdersModel
 from eve_online_industry_tracker.application.characters.character import Character
 from eve_online_industry_tracker.application.characters.character_manager import CharacterManager
 from eve_online_industry_tracker.application.characters.asset_provenance import (
@@ -294,15 +295,16 @@ class Corporation:
             # Phase 1: corporation info must run first
             self.refresh_corporation()
 
-            # Phase 2: wallet_journal, wallet_transactions, members, structures in parallel
+            # Phase 2: wallet_journal, wallet_transactions, members, structures, market_orders in parallel
             parallel_methods = [
                 self.refresh_wallet_journal,
                 self.refresh_wallet_transactions,
                 self.refresh_members,
                 self.refresh_structures,
                 self.refresh_assets,
+                self.refresh_market_orders,
             ]
-            with ThreadPoolExecutor(max_workers=5) as pool:
+            with ThreadPoolExecutor(max_workers=6) as pool:
                 futures = [pool.submit(m) for m in parallel_methods]
                 for f in as_completed(futures):
                     f.result()
@@ -1025,6 +1027,171 @@ class Corporation:
         except Exception as e:
             logging.warning(
                 "Skipping corporation industry jobs refresh for %s (%s): %s",
+                self.corporation_name,
+                self.corporation_id,
+                str(e),
+            )
+            return
+
+    # -------------------
+    # Get Market Orders
+    # -------------------
+    def get_market_orders(self) -> Dict[str, Any]:
+        """Return the corporation market orders."""
+        orders = (
+            self._db_app.session.query(CorporationMarketOrdersModel)
+            .filter_by(corporation_id=self.corporation_id)
+            .all()
+        )
+        orders_list = [
+            {col: getattr(o, col) for col in CorporationMarketOrdersModel.__table__.columns.keys()}
+            for o in orders
+        ]
+        return {
+            "corporation_name": self.corporation_name,
+            "corporation_id": self.corporation_id,
+            "market_orders": orders_list,
+        }
+
+    # -------------------
+    # Market Orders
+    # -------------------
+    def refresh_market_orders(self) -> None:
+        """Fetch and store corporation market orders from ESI.
+
+        ESI endpoint: GET /corporations/{corporation_id}/orders/
+        Required scope: esi-markets.read_corporation_orders.v1
+
+        Best-effort: logs a warning and returns gracefully if not authorised.
+        """
+        try:
+            if hasattr(self._default_esi_character, "ensure_esi"):
+                self._default_esi_character.ensure_esi()
+
+            order_list = self._default_esi_character._esi_client.esi_get(
+                f"/corporations/{self.corporation_id}/orders/",
+                paginate=True,
+            )
+            if not order_list or not isinstance(order_list, list):
+                return
+
+            # Cache location/region lookups to avoid repeated ESI calls.
+            location_region_cache: Dict[int, tuple] = {}
+            region_name_cache: Dict[int, Optional[str]] = {}
+
+            def resolve_region_name(region_id: int) -> Optional[str]:
+                if not region_id or not isinstance(region_id, int):
+                    return None
+                cached = region_name_cache.get(region_id)
+                if cached is not None:
+                    return cached
+                try:
+                    region_info = self._default_esi_character.esi_service.get_location_info(region_id)
+                    if isinstance(region_info, dict):
+                        name = region_info.get("name")
+                        if isinstance(name, str) and name:
+                            region_name_cache[region_id] = name
+                            return name
+                except Exception:
+                    pass
+                region_name_cache[region_id] = None
+                return None
+
+            def resolve_location_region(location_id: Optional[int]) -> tuple:
+                if not location_id or not isinstance(location_id, int):
+                    return None, 0, None
+                cached = location_region_cache.get(location_id)
+                if cached is not None:
+                    return cached
+                location_name: Optional[str] = None
+                region_id: int = 0
+                region_name: Optional[str] = None
+                try:
+                    location_info = self._default_esi_character.esi_service.get_location_info(location_id)
+                    if isinstance(location_info, dict):
+                        location_name = location_info.get("name")
+                        system_id = location_info.get("system_id") or location_info.get("solar_system_id")
+                        if system_id and isinstance(system_id, int):
+                            system_info = self._default_esi_character.esi_service.get_location_info(system_id)
+                            if isinstance(system_info, dict):
+                                constellation_id = system_info.get("constellation_id")
+                                if isinstance(constellation_id, int) and constellation_id:
+                                    constellation_info = self._default_esi_character.esi_service.get_location_info(constellation_id)
+                                    if isinstance(constellation_info, dict):
+                                        region_id_val = constellation_info.get("region_id")
+                                        if isinstance(region_id_val, int) and region_id_val:
+                                            region_id = region_id_val
+                    if region_id:
+                        region_name = resolve_region_name(region_id)
+                except Exception:
+                    pass
+                resolved = (location_name, region_id, region_name)
+                location_region_cache[location_id] = resolved
+                return resolved
+
+            # Bulk-load SDE type/group/category data for all orders in one pass.
+            type_ids = {o.get("type_id") for o in order_list if o.get("type_id")}
+            type_data_map = {t.id: t for t in self._db_sde.session.query(Types).filter(Types.id.in_(list(type_ids))).all()}
+            group_ids = {t.groupID for t in type_data_map.values()}
+            group_data_map = {g.id: g for g in self._db_sde.session.query(Groups).filter(Groups.id.in_(list(group_ids))).all()}
+            category_ids = {g.categoryID for g in group_data_map.values()}
+            category_data_map = {c.id: c for c in self._db_sde.session.query(Categories).filter(Categories.id.in_(list(category_ids))).all()}
+
+            orders = []
+            for order in order_list:
+                type_id = order.get("type_id")
+                type_data = type_data_map.get(type_id)
+                group_data = group_data_map.get(type_data.groupID) if type_data else None
+                category_data = category_data_map.get(group_data.categoryID) if group_data else None
+
+                location_id = order.get("location_id")
+                resolved_location_name, resolved_region_id, resolved_region_name = resolve_location_region(location_id)
+
+                final_region_id = order.get("region_id") or resolved_region_id
+                final_region_name = resolve_region_name(final_region_id) or resolved_region_name
+
+                orders.append({
+                    "corporation_id": self.corporation_id,
+                    "order_id": order.get("order_id"),
+                    "type_id": type_id,
+                    "type_name": type_data.name[self._db_sde.language] if type_data else None,
+                    "type_group_id": type_data.groupID if type_data else None,
+                    "type_group_name": group_data.name[self._db_sde.language] if group_data else None,
+                    "type_category_id": group_data.categoryID if group_data else None,
+                    "type_category_name": category_data.name[self._db_sde.language] if category_data else None,
+                    "location_id": location_id,
+                    "location_name": resolved_location_name,
+                    "region_id": final_region_id,
+                    "region_name": final_region_name,
+                    "price": order.get("price", 0.0),
+                    "is_buy_order": order.get("is_buy_order", False),
+                    "escrow": order.get("escrow", 0.0),
+                    "volume_total": order.get("volume_total", 0),
+                    "volume_remain": order.get("volume_remain", 0),
+                    "duration": order.get("duration", 0),
+                    "issued": order.get("issued"),
+                    "min_volume": order.get("min_volume", 1),
+                    "range": order.get("range"),
+                    "updated_at": datetime.now(timezone.utc),
+                })
+
+            # Upsert: delete existing orders for this corp, insert fresh snapshot.
+            if orders:
+                self._db_app.session.query(CorporationMarketOrdersModel).filter_by(
+                    corporation_id=self.corporation_id
+                ).delete()
+                self._db_app.session.bulk_save_objects(
+                    [CorporationMarketOrdersModel(**o) for o in orders]
+                )
+                self._db_app.session.commit()
+
+            logging.debug(
+                f"Corporation market orders refreshed for {self.corporation_name}. "
+                f"Total orders: {len(orders)}"
+            )
+        except Exception as e:
+            logging.warning(
+                "Skipping corporation market orders refresh for %s (%s): %s",
                 self.corporation_name,
                 self.corporation_id,
                 str(e),
