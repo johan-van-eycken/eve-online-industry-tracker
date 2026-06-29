@@ -37,12 +37,16 @@ def build_character_job_cost_map(session) -> dict[int, list[tuple[str, float, in
     """
     completed_statuses = {"delivered", "ready", "completed"}
 
+    # Filter status at the DB level to exclude jobs with a known non-completed status.
+    # Jobs with status=None are intentionally excluded here (isnot(None) filter) because
+    # a null status indicates the job completion state is unknown.
     rows = (
         session.query(CharacterIndustryJobsModel)
         .filter(
             CharacterIndustryJobsModel.product_type_id.isnot(None),
             CharacterIndustryJobsModel.unit_build_cost.isnot(None),
             CharacterIndustryJobsModel.output_quantity.isnot(None),
+            CharacterIndustryJobsModel.status.isnot(None),
         )
         .order_by(CharacterIndustryJobsModel.completed_date)
         .all()
@@ -51,7 +55,7 @@ def build_character_job_cost_map(session) -> dict[int, list[tuple[str, float, in
     cost_map: dict[int, list[tuple[str, float, int, int]]] = defaultdict(list)
     for job in rows:
         status = str(getattr(job, "status", "") or "").lower()
-        if status and status not in completed_statuses:
+        if status not in completed_statuses:
             continue
         type_id = int(job.product_type_id)
         completed_date = job.completed_date or ""
@@ -102,7 +106,9 @@ def fifo_match_corp_snapshots(
         qty_needed = int(snapshot.quantity or 1)
         snap_date = str(snapshot.observed_at or "")
 
-        matched = False
+        # Track all lot contributions for this snapshot (lot_date, unit_cost, units_taken, job_id)
+        contributions: list[tuple[str, float, int, int]] = []
+
         for lot in remaining_lots:
             lot_date, unit_cost, lot_qty, job_id = lot
             if lot_qty <= 0:
@@ -116,19 +122,38 @@ def fifo_match_corp_snapshots(
             take = min(qty_needed, lot_qty)
             lot[2] -= take
             qty_needed -= take
+            contributions.append((lot_date, unit_cost, take, job_id))
 
             if qty_needed <= 0:
-                results.append({
-                    "snapshot": snapshot,
-                    "unit_build_cost": unit_cost,
-                    "job_id": job_id,
-                    "completed_date": lot_date,
-                    "source": "industry_build_transferred",
-                })
-                matched = True
                 break
 
-        if not matched:
+        if qty_needed <= 0 and contributions:
+            # Successfully matched. When the snapshot's quantity spans more than one lot,
+            # compute a quantity-weighted average unit_build_cost across all contributing lots
+            # rather than attributing the entire snapshot to the last lot consumed. In that
+            # multi-lot case no single job_id applies, so acquisition_reference_id is set to
+            # None. For a single-lot match, the original job_id is preserved.
+            total_taken = sum(c[2] for c in contributions)
+            blended_cost = sum(c[1] * c[2] for c in contributions) / total_taken
+
+            if len(contributions) == 1:
+                _, _, _, matched_job_id = contributions[0]
+                matched_lot_date, _, _, _ = contributions[0]
+                result_job_id: int | None = matched_job_id
+                result_date = matched_lot_date
+            else:
+                # Multi-lot: no single job_id; use the date of the last contributing lot
+                result_job_id = None
+                result_date = contributions[-1][0]
+
+            results.append({
+                "snapshot": snapshot,
+                "unit_build_cost": blended_cost,
+                "job_id": result_job_id,
+                "completed_date": result_date,
+                "source": "industry_build_transferred",
+            })
+        else:
             results.append(None)
 
     return results
@@ -202,13 +227,15 @@ def backfill_corp_transfer_costs(session) -> dict:
         for match, snapshot in zip(match_results, snapshots):
             if match is not None:
                 unit_cost = match["unit_build_cost"]
-                job_id = match["job_id"]
+                job_id = match["job_id"]  # None when quantity spanned multiple lots
                 completed_date = match["completed_date"]
 
                 snapshot.acquisition_source = "industry_build_transferred"
                 snapshot.acquisition_unit_cost = unit_cost
                 snapshot.acquisition_total_cost = unit_cost * float(snapshot.quantity or 1)
-                snapshot.acquisition_reference_type = "industry_job"
+                # When job_id is None (multi-lot blend), reference_type is also None since
+                # no single industry_job record covers this snapshot.
+                snapshot.acquisition_reference_type = "industry_job" if job_id is not None else None
                 snapshot.acquisition_reference_id = job_id
                 snapshot.acquisition_date = completed_date
                 fifo_matched += 1

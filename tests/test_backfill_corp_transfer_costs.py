@@ -105,6 +105,38 @@ def test_fifo_match_returns_none_when_no_lot_precedes_snapshot() -> None:
     assert results[0] is None
 
 
+def test_fifo_match_blends_cost_when_snapshot_spans_multiple_lots() -> None:
+    """When a snapshot's quantity spans two lots, unit_build_cost is a weighted average
+    and job_id is None (since no single job covers the full snapshot quantity).
+
+    Lot 1: 3 units @ 10.0 ISK each
+    Lot 2: 7 units @ 20.0 ISK each
+    Snapshot: 8 units  (consumes all of lot 1 and 5 from lot 2)
+    Expected blended cost: (3*10 + 5*20) / 8 = (30 + 100) / 8 = 16.25
+    """
+
+    class FakeSnapshot:
+        def __init__(self, observed_at: str, quantity: int):
+            self.observed_at = observed_at
+            self.quantity = quantity
+
+    snapshots = [FakeSnapshot("2026-03-01T00:00:00Z", 8)]
+    job_lots = [
+        ("2026-01-01T00:00:00Z", 10.0, 3, 1001),
+        ("2026-02-01T00:00:00Z", 20.0, 7, 1002),
+    ]
+
+    results = fifo_match_corp_snapshots(snapshots, job_lots)
+
+    assert results[0] is not None
+    # job_id must be None — no single job covers the full snapshot
+    assert results[0]["job_id"] is None
+    # Weighted average: (3*10 + 5*20) / 8 == 16.25
+    expected = (3 * 10.0 + 5 * 20.0) / 8
+    assert abs(results[0]["unit_build_cost"] - expected) < 1e-9
+    assert results[0]["source"] == "industry_build_transferred"
+
+
 # ---------------------------------------------------------------------------
 # Integration-style tests using in-memory DB
 # ---------------------------------------------------------------------------
@@ -304,6 +336,127 @@ def test_backfill_skips_already_costed_rows() -> None:
     snapshot = session.query(CorporationAssetHistoryModel).filter_by(item_id=500001).first()
     assert snapshot.acquisition_source == "wallet_transaction"
     assert snapshot.acquisition_unit_cost == 88.0
+
+
+def test_backfill_multi_lot_snapshot_uses_blended_cost() -> None:
+    """A single corp snapshot whose quantity spans two job lots gets a blended unit cost.
+
+    Lot 1: 3 units @ 10.0  (job 9040)
+    Lot 2: 10 units @ 20.0 (job 9041)
+    Snapshot: 8 units (consumes all 3 from lot 1, then 5 from lot 2)
+    Expected blended unit_cost = (3*10 + 5*20) / 8 = 16.25
+    acquisition_reference_id must be None (multi-lot match).
+    """
+    session = _make_session()
+
+    session.add_all([
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=9040,
+            status="delivered",
+            product_type_id=700,
+            completed_date="2026-01-01T00:00:00Z",
+            output_quantity=3,
+            unit_build_cost=10.0,
+            total_build_cost=30.0,
+            build_cost_source="test",
+            raw={},
+        ),
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=9041,
+            status="delivered",
+            product_type_id=700,
+            completed_date="2026-02-01T00:00:00Z",
+            output_quantity=10,
+            unit_build_cost=20.0,
+            total_build_cost=200.0,
+            build_cost_source="test",
+            raw={},
+        ),
+    ])
+
+    session.add(
+        CorporationAssetHistoryModel(
+            corporation_id=98000001,
+            item_id=700001,
+            observed_at="2026-03-01T00:00:00Z",
+            snapshot_source="asset_refresh",
+            type_id=700,
+            type_name="BlendItem",
+            quantity=8,
+            acquisition_source=None,
+            acquisition_unit_cost=None,
+            acquisition_total_cost=None,
+        )
+    )
+    session.commit()
+
+    summary = backfill_corp_transfer_costs(session)
+
+    assert summary["fifo_matched"] == 1
+    assert summary["avg_matched"] == 0
+
+    snapshot = session.query(CorporationAssetHistoryModel).filter_by(item_id=700001).first()
+    assert snapshot is not None
+    assert snapshot.acquisition_source == "industry_build_transferred"
+    # Blended: (3*10 + 5*20) / 8 == 16.25
+    expected_cost = (3 * 10.0 + 5 * 20.0) / 8
+    assert abs(snapshot.acquisition_unit_cost - expected_cost) < 1e-9
+    assert abs(snapshot.acquisition_total_cost - expected_cost * 8) < 1e-6
+    # No single job covers this snapshot
+    assert snapshot.acquisition_reference_id is None
+    assert snapshot.acquisition_reference_type is None
+
+
+def test_backfill_excludes_null_status_jobs() -> None:
+    """Jobs with status=None are excluded from the cost map by the DB-level filter."""
+    session = _make_session()
+
+    # A job with status=None — should NOT be used for FIFO matching
+    session.add(
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=9050,
+            status=None,
+            product_type_id=800,
+            completed_date="2026-01-01T00:00:00Z",
+            output_quantity=10,
+            unit_build_cost=75.0,
+            total_build_cost=750.0,
+            build_cost_source="test",
+            raw={},
+        )
+    )
+
+    session.add(
+        CorporationAssetHistoryModel(
+            corporation_id=98000001,
+            item_id=800001,
+            observed_at="2026-02-01T00:00:00Z",
+            snapshot_source="asset_refresh",
+            type_id=800,
+            type_name="NullStatusItem",
+            quantity=5,
+            acquisition_source=None,
+            acquisition_unit_cost=None,
+            acquisition_total_cost=None,
+        )
+    )
+    session.commit()
+
+    cost_map = build_character_job_cost_map(session)
+    # type_id=800 must not appear — the only job has status=None
+    assert 800 not in cost_map
+
+    summary = backfill_corp_transfer_costs(session)
+    assert summary["unmatched"] == 1
+    assert summary["fifo_matched"] == 0
+    assert summary["avg_matched"] == 0
+
+    snapshot = session.query(CorporationAssetHistoryModel).filter_by(item_id=800001).first()
+    assert snapshot.acquisition_source is None
+    assert snapshot.acquisition_unit_cost is None
 
 
 def test_backfill_multiple_snapshots_for_same_type_fifo_order() -> None:
