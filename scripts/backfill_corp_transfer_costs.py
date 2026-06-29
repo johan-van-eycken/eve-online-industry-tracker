@@ -1,11 +1,15 @@
 #!/usr/bin/env python
-"""Backfill acquisition costs for corp asset history records from character industry jobs.
+"""Backfill acquisition costs for corp asset history records from character industry jobs
+and character market buy transactions.
 
 When characters transfer manufactured items to the corporation, the corp asset history
-has no cost basis (acquisition_unit_cost IS NULL, acquisition_source IS NULL).
-This script matches those records to character industry jobs using FIFO chronological
-matching, or falls back to a quantity-weighted average per type_id when FIFO cannot
-be resolved.
+has no cost basis (acquisition_unit_cost IS NULL, acquisition_source IS NULL or
+acquisition_source = 'untracked_inventory').
+This script:
+1. Matches those records to character industry jobs using FIFO chronological matching,
+   or falls back to a quantity-weighted average per type_id when FIFO cannot be resolved.
+2. For items with no matching industry job, attempts a second pass using character market
+   buy transactions as the cost source.
 """
 
 import sys
@@ -16,6 +20,8 @@ from pathlib import Path
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
+from sqlalchemy import or_
+
 from config.paths import app_config_path, app_secret_path
 from config.schemas import CONFIG_SCHEMA
 from eve_online_industry_tracker.application.characters.realized_profit import CorporationRealizedProfitLedgerService
@@ -23,6 +29,7 @@ from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.infrastructure.models import (
     CharacterIndustryJobsModel,
+    CharacterWalletTransactionsModel,
     CorporationAssetHistoryModel,
 )
 
@@ -74,6 +81,39 @@ def build_character_job_cost_map(session) -> dict[int, list[tuple[str, float, in
     return dict(cost_map)
 
 
+def build_character_buy_cost_map(session) -> dict[int, list[tuple[str, float, int, int]]]:
+    """Return {type_id: [(date, unit_price, quantity, transaction_id), ...]}
+    sorted oldest-first (FIFO) for all character market buy transactions.
+    """
+    rows = (
+        session.query(CharacterWalletTransactionsModel)
+        .filter(
+            CharacterWalletTransactionsModel.is_buy == True,  # noqa: E712
+            CharacterWalletTransactionsModel.type_id.isnot(None),
+            CharacterWalletTransactionsModel.unit_price.isnot(None),
+            CharacterWalletTransactionsModel.quantity.isnot(None),
+        )
+        .order_by(CharacterWalletTransactionsModel.date)
+        .all()
+    )
+
+    cost_map: dict[int, list[tuple[str, float, int, int]]] = defaultdict(list)
+    for tx in rows:
+        type_id = int(tx.type_id)
+        date = str(tx.date or "")
+        unit_price = float(tx.unit_price)
+        quantity = int(tx.quantity)
+        transaction_id = int(tx.transaction_id)
+        if unit_price <= 0 or quantity <= 0:
+            continue
+        cost_map[type_id].append((date, unit_price, quantity, transaction_id))
+
+    for type_id in cost_map:
+        cost_map[type_id].sort(key=lambda t: t[0])
+
+    return dict(cost_map)
+
+
 # ---------------------------------------------------------------------------
 # FIFO matching
 # ---------------------------------------------------------------------------
@@ -81,11 +121,16 @@ def build_character_job_cost_map(session) -> dict[int, list[tuple[str, float, in
 def fifo_match_corp_snapshots(
     snapshots: list,
     job_lots: list[tuple[str, float, int, int]],
-) -> list[dict]:
+    *,
+    source: str = "industry_build_transferred",
+    reference_type: str = "industry_job",
+) -> list[dict | None]:
     """Attempt to match corp history snapshots to job lots in chronological order (FIFO).
 
     snapshots: list of CorporationAssetHistoryModel rows, ordered by observed_at
     job_lots: list of (completed_date, unit_build_cost, output_quantity, job_id), sorted oldest-first
+    source: value to use for the "source" key in the result dict
+    reference_type: value to use for the "reference_type" key in the result dict
 
     Returns a list of match dicts, one per snapshot:
         {
@@ -93,7 +138,8 @@ def fifo_match_corp_snapshots(
             "unit_build_cost": float,
             "job_id": int,
             "completed_date": str,
-            "source": "industry_build_transferred",
+            "source": str,
+            "reference_type": str,
         }
 
     If a lot cannot be chronologically matched, returns None for that snapshot entry.
@@ -152,7 +198,8 @@ def fifo_match_corp_snapshots(
                 "unit_build_cost": blended_cost,
                 "job_id": result_job_id,
                 "completed_date": result_date,
-                "source": "industry_build_transferred",
+                "source": source,
+                "reference_type": reference_type,
             })
         else:
             results.append(None)
@@ -178,19 +225,24 @@ def weighted_average_unit_cost(job_lots: list[tuple[str, float, int, int]]) -> f
 # ---------------------------------------------------------------------------
 
 def backfill_corp_transfer_costs(session) -> dict:
-    """Backfill CorporationAssetHistoryModel rows from CharacterIndustryJobsModel.
+    """Backfill CorporationAssetHistoryModel rows from CharacterIndustryJobsModel
+    and CharacterWalletTransactionsModel.
 
     Returns a summary dict with counts.
     """
     # Step 1: Build cost map from all character industry jobs
     cost_map = build_character_job_cost_map(session)
 
-    # Step 2: Query corp history rows with no cost basis
+    # Step 2: Query corp history rows with no cost basis (including previously stamped
+    # "untracked_inventory" rows that may now have a matchable source)
     uncosted_rows = (
         session.query(CorporationAssetHistoryModel)
         .filter(
             CorporationAssetHistoryModel.acquisition_unit_cost.is_(None),
-            CorporationAssetHistoryModel.acquisition_source.is_(None),
+            or_(
+                CorporationAssetHistoryModel.acquisition_source.is_(None),
+                CorporationAssetHistoryModel.acquisition_source == "untracked_inventory",
+            ),
         )
         .order_by(
             CorporationAssetHistoryModel.type_id,
@@ -201,7 +253,7 @@ def backfill_corp_transfer_costs(session) -> dict:
 
     if not uncosted_rows:
         print("No corp asset history rows with missing cost basis found.")
-        return {"total_uncosted": 0, "fifo_matched": 0, "avg_matched": 0, "unmatched": 0}
+        return {"total_uncosted": 0, "fifo_matched": 0, "avg_matched": 0, "buy_matched": 0, "unmatched": 0}
 
     # Group by type_id
     rows_by_type: dict[int, list] = defaultdict(list)
@@ -216,7 +268,7 @@ def backfill_corp_transfer_costs(session) -> dict:
         job_lots = cost_map.get(type_id)
 
         if not job_lots:
-            # No character jobs for this type_id — leave as-is
+            # No character jobs for this type_id — leave as-is for now (buy pass below)
             unmatched += len(snapshots)
             continue
 
@@ -236,7 +288,7 @@ def backfill_corp_transfer_costs(session) -> dict:
                 snapshot.acquisition_total_cost = unit_cost * float(snapshot.quantity or 1)
                 # When job_id is None (multi-lot blend), reference_type is also None since
                 # no single industry_job record covers this snapshot.
-                snapshot.acquisition_reference_type = "industry_job" if job_id is not None else None
+                snapshot.acquisition_reference_type = match["reference_type"] if job_id is not None else None
                 snapshot.acquisition_reference_id = job_id
                 snapshot.acquisition_date = completed_date
                 fifo_matched += 1
@@ -258,7 +310,53 @@ def backfill_corp_transfer_costs(session) -> dict:
                     f"avg_unit_cost={avg_cost:.2f}"
                 )
 
-    if fifo_matched + avg_matched > 0:
+    # --- Pass 2: character market buy transactions ---
+    buy_cost_map = build_character_buy_cost_map(session)
+    buy_matched = 0
+
+    # Collect snapshots that were not matched by the industry-job pass
+    unmatched_by_type: dict[int, list] = defaultdict(list)
+    for type_id, snapshots in rows_by_type.items():
+        job_lots = cost_map.get(type_id)
+        if not job_lots:
+            # Entirely unmatched by industry jobs — all snapshots are candidates
+            for snapshot in snapshots:
+                unmatched_by_type[int(snapshot.type_id)].append(snapshot)
+        # Note: partially-matched types (some FIFO, some avg) are fully handled by pass 1
+
+    for type_id, snapshots in unmatched_by_type.items():
+        buy_lots = buy_cost_map.get(type_id)
+        if not buy_lots:
+            continue
+
+        match_results = fifo_match_corp_snapshots(
+            snapshots,
+            buy_lots,
+            source="character_market_buy_transferred",
+            reference_type="wallet_transaction",
+        )
+
+        for match, snapshot in zip(match_results, snapshots):
+            if match is not None:
+                unit_cost = match["unit_build_cost"]
+                job_id = match["job_id"]
+                completed_date = match["completed_date"]
+
+                snapshot.acquisition_source = "character_market_buy_transferred"
+                snapshot.acquisition_unit_cost = unit_cost
+                snapshot.acquisition_total_cost = unit_cost * float(snapshot.quantity or 1)
+                snapshot.acquisition_reference_type = "wallet_transaction" if job_id is not None else None
+                snapshot.acquisition_reference_id = job_id
+                snapshot.acquisition_date = completed_date
+                buy_matched += 1
+                # Adjust unmatched count since this snapshot is now matched
+                unmatched -= 1
+                print(
+                    f"  BUY: type_id={type_id}, qty={snapshot.quantity}, "
+                    f"unit_cost={unit_cost:.2f}, tx_id={job_id}"
+                )
+
+    if fifo_matched + avg_matched + buy_matched > 0:
         session.commit()
 
     total_uncosted = len(uncosted_rows)
@@ -266,6 +364,7 @@ def backfill_corp_transfer_costs(session) -> dict:
         "total_uncosted": total_uncosted,
         "fifo_matched": fifo_matched,
         "avg_matched": avg_matched,
+        "buy_matched": buy_matched,
         "unmatched": unmatched,
     }
 
@@ -294,15 +393,17 @@ def main():
     print(f"  Total uncosted corp history rows:  {summary['total_uncosted']}")
     print(f"  FIFO-matched (exact job):          {summary['fifo_matched']}")
     print(f"  Average-matched (weighted avg):    {summary['avg_matched']}")
-    print(f"  Unmatched (no character job found):{summary['unmatched']}")
+    print(f"  Buy-matched (character market buy):{summary['buy_matched']}")
+    print(f"  Unmatched (no source found):       {summary['unmatched']}")
 
-    if summary["fifo_matched"] + summary["avg_matched"] > 0:
+    if summary["fifo_matched"] + summary["avg_matched"] + summary["buy_matched"] > 0:
         print("\nRebuilding realized profit ledger for affected corporations...")
         corp_ids = [
             row[0] for row in session.query(CorporationAssetHistoryModel.corporation_id)
             .filter(CorporationAssetHistoryModel.acquisition_source.in_([
                 "industry_build_transferred",
                 "industry_build_transferred_avg",
+                "character_market_buy_transferred",
             ]))
             .distinct()
             .all()

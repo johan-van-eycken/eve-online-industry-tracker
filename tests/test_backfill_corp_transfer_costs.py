@@ -14,11 +14,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from eve_online_industry_tracker.infrastructure.models import (
     BaseApp,
     CharacterIndustryJobsModel,
+    CharacterWalletTransactionsModel,
     CorporationAssetHistoryModel,
 )
 
 from backfill_corp_transfer_costs import (
     backfill_corp_transfer_costs,
+    build_character_buy_cost_map,
     build_character_job_cost_map,
     fifo_match_corp_snapshots,
     weighted_average_unit_cost,
@@ -538,3 +540,149 @@ def test_backfill_multiple_snapshots_for_same_type_fifo_order() -> None:
     # Second snapshot gets second lot (job 9031) after first lot is exhausted
     assert snap2.acquisition_unit_cost == 60.0
     assert snap2.acquisition_reference_id == 9031
+
+
+# ---------------------------------------------------------------------------
+# New tests: Gap 1 (untracked_inventory) and Gap 2 (buy transactions)
+# ---------------------------------------------------------------------------
+
+def test_build_character_buy_cost_map_returns_fifo_sorted_by_date() -> None:
+    """build_character_buy_cost_map returns buy transactions sorted oldest-first per type."""
+    session = _make_session()
+
+    # Insert two buy transactions for the same type_id with different dates (newer first)
+    session.add_all([
+        CharacterWalletTransactionsModel(
+            character_id=1,
+            transaction_id=70002,
+            date="2026-03-01T00:00:00Z",
+            is_buy=True,
+            is_personal=True,
+            type_id=1234,
+            quantity=5,
+            unit_price=200.0,
+            total_price=1000.0,
+        ),
+        CharacterWalletTransactionsModel(
+            character_id=1,
+            transaction_id=70001,
+            date="2026-01-01T00:00:00Z",
+            is_buy=True,
+            is_personal=True,
+            type_id=1234,
+            quantity=10,
+            unit_price=100.0,
+            total_price=1000.0,
+        ),
+    ])
+    session.commit()
+
+    cost_map = build_character_buy_cost_map(session)
+
+    assert 1234 in cost_map
+    lots = cost_map[1234]
+    assert len(lots) == 2
+    # Oldest date must come first
+    assert lots[0][0] == "2026-01-01T00:00:00Z"
+    assert lots[1][0] == "2026-03-01T00:00:00Z"
+    # transaction_id preserved as the 4th tuple element
+    assert lots[0][3] == 70001
+    assert lots[1][3] == 70002
+
+
+def test_backfill_fills_untracked_inventory_items() -> None:
+    """Items previously stamped 'untracked_inventory' are re-processed by the backfill."""
+    session = _make_session()
+
+    session.add(
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=9060,
+            status="delivered",
+            product_type_id=1111,
+            completed_date="2026-01-05T00:00:00Z",
+            output_quantity=20,
+            unit_build_cost=75.0,
+            total_build_cost=1500.0,
+            build_cost_source="test",
+            raw={},
+        )
+    )
+
+    # Row previously stamped as untracked_inventory with no unit cost
+    session.add(
+        CorporationAssetHistoryModel(
+            corporation_id=98000001,
+            item_id=1111001,
+            observed_at="2026-01-10T00:00:00Z",
+            snapshot_source="asset_refresh",
+            type_id=1111,
+            type_name="UntrackedWidget",
+            quantity=5,
+            acquisition_source="untracked_inventory",
+            acquisition_unit_cost=None,
+            acquisition_total_cost=None,
+        )
+    )
+    session.commit()
+
+    summary = backfill_corp_transfer_costs(session)
+
+    assert summary["fifo_matched"] == 1
+
+    snapshot = session.query(CorporationAssetHistoryModel).filter_by(item_id=1111001).first()
+    assert snapshot is not None
+    assert snapshot.acquisition_unit_cost == 75.0
+    assert snapshot.acquisition_source == "industry_build_transferred"
+    assert snapshot.acquisition_reference_type == "industry_job"
+    assert snapshot.acquisition_reference_id == 9060
+
+
+def test_backfill_uses_character_buy_transactions_for_unmatched_items() -> None:
+    """Items with no industry job but a matching buy transaction get buy-matched."""
+    session = _make_session()
+
+    # No industry job for this type — only a buy transaction
+    session.add(
+        CharacterWalletTransactionsModel(
+            character_id=1,
+            transaction_id=80001,
+            date="2026-02-01T00:00:00Z",
+            is_buy=True,
+            is_personal=True,
+            type_id=2222,
+            quantity=10,
+            unit_price=55.0,
+            total_price=550.0,
+        )
+    )
+
+    session.add(
+        CorporationAssetHistoryModel(
+            corporation_id=98000001,
+            item_id=2222001,
+            observed_at="2026-02-15T00:00:00Z",
+            snapshot_source="asset_refresh",
+            type_id=2222,
+            type_name="BoughtItem",
+            quantity=3,
+            acquisition_source=None,
+            acquisition_unit_cost=None,
+            acquisition_total_cost=None,
+        )
+    )
+    session.commit()
+
+    summary = backfill_corp_transfer_costs(session)
+
+    assert summary["buy_matched"] == 1
+    assert summary["fifo_matched"] == 0
+    assert summary["avg_matched"] == 0
+
+    snapshot = session.query(CorporationAssetHistoryModel).filter_by(item_id=2222001).first()
+    assert snapshot is not None
+    assert snapshot.acquisition_source == "character_market_buy_transferred"
+    assert snapshot.acquisition_unit_cost == 55.0
+    assert abs(snapshot.acquisition_total_cost - 55.0 * 3) < 1e-9
+    assert snapshot.acquisition_reference_type == "wallet_transaction"
+    assert snapshot.acquisition_reference_id == 80001
