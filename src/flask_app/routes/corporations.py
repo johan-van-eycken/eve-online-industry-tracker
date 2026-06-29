@@ -28,6 +28,16 @@ def corporations_assets():
     return ok(data=svc.list_assets(corporation_id=corporation_id))
 
 
+@corporations_bp.get("/corporations/<int:corporation_id>/market_orders")
+def corporations_get_market_orders(corporation_id: int):
+    require_ready(get_state())
+    svc = CorporationsService(state=get_state())
+    refresh_raw = (request.args.get("refresh") or "0").strip().lower()
+    refresh = refresh_raw in {"1", "true", "yes", "y", "on"}
+
+    return ok(data=svc.get_market_orders(refresh=refresh, corporation_id=corporation_id))
+
+
 @corporations_bp.get("/corporations/realized_profit")
 def corporations_realized_profit():
     require_ready(get_state())

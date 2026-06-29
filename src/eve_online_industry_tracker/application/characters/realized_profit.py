@@ -20,6 +20,7 @@ from eve_online_industry_tracker.db_models import (
     CorporationIndustryJobsModel,
     CorporationModel,
     CorporationRealizedSalesLedgerModel,
+    CorporationWalletJournalModel,
     CorporationWalletTransactionsModel,
 )
 
@@ -226,6 +227,97 @@ def _gross_only_fee_breakdown(*, gross_revenue: float) -> tuple[float, float, fl
     ]
 
 
+_CORP_FEE_MATCH_WINDOW_SECONDS = 3600
+
+
+def _parse_eve_date(date_str: Any) -> datetime | None:
+    if date_str is None:
+        return None
+    if isinstance(date_str, datetime):
+        return date_str
+    try:
+        return datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _corp_journal_fee_breakdown(
+    *,
+    gross_revenue: float,
+    sell_date: datetime | None,
+    sell_transaction_id: int | None = None,
+    sell_division: int | None = None,
+    brokers_fee_entries: list[Any],
+    transaction_tax_entries: list[Any],
+    used_journal_ids: set[int],
+) -> tuple[float, float, float, str, list[str]]:
+    """Match corp sell transaction to its brokers_fee and transaction_tax journal entries.
+
+    brokers_fee is matched by date proximity within ±_CORP_FEE_MATCH_WINDOW_SECONDS.
+    transaction_tax is matched by exact context_id == sell_transaction_id when available.
+    Each journal entry is consumed once (via used_journal_ids) to prevent double-matching.
+    """
+    notes: list[str] = []
+    gross = float(gross_revenue)
+
+    def _find_nearest(
+        entries: list[Any],
+        use_context_id: bool = False,
+        tid: int | None = None,
+        division: int | None = None,
+    ) -> Any | None:
+        for entry in entries:
+            if getattr(entry, "wallet_journal_id", None) in used_journal_ids:
+                continue
+            # Division filter: skip cross-division entries when both sides specify a division
+            if division is not None and getattr(entry, "division", None) is not None:
+                if entry.division != division:
+                    continue
+            if use_context_id:
+                # Exact match via context_id — no date fallback
+                if tid is not None and getattr(entry, "context_id", None) == tid:
+                    return entry
+            else:
+                # Date-proximity match
+                entry_date = _parse_eve_date(entry.date)
+                if entry_date and sell_date:
+                    sd = sell_date.replace(tzinfo=None)
+                    ed = entry_date.replace(tzinfo=None)
+                    if abs((ed - sd).total_seconds()) <= _CORP_FEE_MATCH_WINDOW_SECONDS:
+                        return entry
+        return None
+
+    broker_entry = _find_nearest(brokers_fee_entries, division=sell_division)
+    tax_entry = _find_nearest(transaction_tax_entries, use_context_id=True, tid=sell_transaction_id, division=sell_division)
+
+    broker_fee = 0.0
+    tax_fee = 0.0
+
+    if broker_entry is not None:
+        eid = _safe_int(getattr(broker_entry, "wallet_journal_id", None))
+        if eid is not None:
+            used_journal_ids.add(int(eid))
+        broker_fee = abs(float(_safe_float(getattr(broker_entry, "amount", None)) or 0.0))
+
+    if tax_entry is not None:
+        eid = _safe_int(getattr(tax_entry, "wallet_journal_id", None))
+        if eid is not None:
+            used_journal_ids.add(int(eid))
+        tax_fee = abs(float(_safe_float(getattr(tax_entry, "amount", None)) or 0.0))
+
+    if broker_entry is not None and tax_entry is not None:
+        mode = "journal_matched"
+    elif broker_entry is not None or tax_entry is not None:
+        mode = "journal_partial"
+        notes.append("Only one of broker fee or transaction tax was matched from the wallet journal.")
+    else:
+        notes.append("No matching wallet journal fee entries found for this corp sale; fees are not captured.")
+        return 0.0, 0.0, gross, "gross_only", notes
+
+    net_revenue = max(0.0, gross - broker_fee - tax_fee)
+    return broker_fee, tax_fee, net_revenue, mode, notes
+
+
 def _extract_market_fee_rates(raw_market_fees: Any) -> tuple[float | None, float | None]:
     payload = raw_market_fees
     if isinstance(payload, str):
@@ -284,7 +376,7 @@ def _apply_estimated_market_fees(
 def _confidence(*, priced_quantity: int, unpriced_quantity: int, fee_capture_mode: str) -> str:
     if unpriced_quantity > 0:
         return "Low"
-    if fee_capture_mode == "journal_amount":
+    if fee_capture_mode in ("journal_amount", "journal_matched", "journal_partial"):
         return "High"
     return "Medium"
 
@@ -515,6 +607,7 @@ class _BaseRealizedProfitLedgerService:
                     )
                 journal_ref_id = _safe_int(getattr(tx, "journal_ref_id", None))
                 journal = journal_by_id.get(int(journal_ref_id)) if journal_ref_id is not None else None
+                owner_context["current_tx"] = tx
                 other_fees_amount, sales_tax_amount, net_revenue, fee_capture_mode, notes = self._fee_breakdown(
                     gross_revenue=float(gross_revenue),
                     journal=journal,
@@ -692,6 +785,44 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
+
+    def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
+        """Pre-load brokers_fee and transaction_tax journal entries for date-proximity matching.
+
+        CorporationWalletTransactionsModel has no journal_ref_id, so we match fee entries
+        to sell transactions by date proximity (within _CORP_FEE_MATCH_WINDOW_SECONDS).
+        """
+        def _query_by_ref_type(ref_type: str) -> list[Any]:
+            return (
+                self._app_session.query(CorporationWalletJournalModel)
+                .filter(
+                    CorporationWalletJournalModel.corporation_id == int(owner_id),
+                    CorporationWalletJournalModel.ref_type == ref_type,
+                )
+                .order_by(CorporationWalletJournalModel.date)
+                .all()
+            )
+
+        return {
+            "brokers_fee_entries": _query_by_ref_type("brokers_fee"),
+            "transaction_tax_entries": _query_by_ref_type("transaction_tax"),
+            "used_journal_ids": set(),
+        }
+
+    def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:
+        tx = owner_context.get("current_tx")
+        sell_date = _parse_eve_date(getattr(tx, "date", None)) if tx is not None else None
+        sell_transaction_id = getattr(tx, "transaction_id", None) if tx is not None else None
+        sell_division = getattr(tx, "division", None) if tx is not None else None
+        return _corp_journal_fee_breakdown(
+            gross_revenue=float(gross_revenue),
+            sell_date=sell_date,
+            sell_transaction_id=sell_transaction_id,
+            sell_division=sell_division,
+            brokers_fee_entries=owner_context.get("brokers_fee_entries") or [],
+            transaction_tax_entries=owner_context.get("transaction_tax_entries") or [],
+            used_journal_ids=owner_context.get("used_journal_ids") or set(),
+        )
 
 
 def summarize_realized_profit_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:

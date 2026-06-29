@@ -5732,6 +5732,7 @@ class IndustryService:
         *,
         owned_blueprints_scope: str,
         material_price_map: dict[int, dict[str, Any]] | None = None,
+        corporation_hangar_flags: list[str] | None = None,
     ) -> tuple[dict[int, int], dict[int, float]]:
         session: Any = self._sessions.app_session()
         sde_session: Any = self._sessions.sde_session()
@@ -5767,15 +5768,21 @@ class IndustryService:
                     .all()
                 )
 
+            # Hangar flag filter is solely controlled by the caller via corporation_hangar_flags.
+            # None means no filter (return all assets); a non-empty list restricts to those flags.
+            _hangar_flags: list[str] | None = corporation_hangar_flags
+
             def query_corporation_assets(ids: list[int]) -> list[CorporationAssetsModel]:
                 normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
                 if not normalized_ids:
                     return []
-                return (
+                q = (
                     session.query(CorporationAssetsModel)
                     .filter(CorporationAssetsModel.corporation_id.in_(normalized_ids))
-                    .all()
                 )
+                if _hangar_flags:
+                    q = q.filter(CorporationAssetsModel.location_flag.in_(_hangar_flags))
+                return q.all()
 
             character_assets: list[CharacterAssetsModel] = []
             corporation_assets: list[CorporationAssetsModel] = []
@@ -6264,9 +6271,14 @@ class IndustryService:
             progress_callback(0.45, "Loading owned item inventory", {"stage": "inventory"})
         blueprint_copy_assets_by_type_id: dict[int, list] = {}
         blueprint_original_assets_by_type_id: dict[int, list] = {}
+        _admin_hangar_flag = self._adm("industry", "industry_hangar_flag", None)
+        _corporation_hangar_flags: list[str] | None = (
+            [str(_admin_hangar_flag)] if _admin_hangar_flag is not None else None
+        )
         available_owned_item_quantity_by_type_id_base, owned_item_unit_cost_by_type_id = self._get_owned_item_inventory(
             owned_blueprints_scope=owned_blueprints_scope,
             material_price_map=material_price_map,
+            corporation_hangar_flags=_corporation_hangar_flags,
         )
         (
             character_blueprint_assets, corporation_blueprint_assets,

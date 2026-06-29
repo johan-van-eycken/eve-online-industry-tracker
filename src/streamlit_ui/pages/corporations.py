@@ -324,7 +324,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
 
         st.markdown(division_label)
         if not direct_items.empty:
-            st.markdown("Direct items in division:")
+            _render_asset_summary(direct_items)
             _render_asset_table(
                 render_table,
                 direct_items,

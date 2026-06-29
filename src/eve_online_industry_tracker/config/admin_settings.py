@@ -332,6 +332,25 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Portfolio order count threshold",
                 "help": "Minimum number of hub orders for a product to score 'healthy liquidity'.",
             },
+            "industry_hangar_flag": {
+                "type": "select",
+                "default": None,
+                "options": [
+                    {"value": None, "label": "All corp hangar divisions (no filter)"},
+                    {"value": "CorpDeliveries", "label": "Corp Deliveries"},
+                    {"value": "CorpSAG1", "label": "Division 1 (CorpSAG1)"},
+                    {"value": "CorpSAG2", "label": "Division 2 (CorpSAG2)"},
+                    {"value": "CorpSAG3", "label": "Division 3 (CorpSAG3)"},
+                    {"value": "CorpSAG4", "label": "Division 4 (CorpSAG4)"},
+                    {"value": "CorpSAG5", "label": "Division 5 (CorpSAG5)"},
+                    {"value": "CorpSAG6", "label": "Division 6 (CorpSAG6)"},
+                    {"value": "CorpSAG7", "label": "Division 7 (CorpSAG7)"},
+                ],
+                "label": "Industry hangar division",
+                "help": "Corp office hangar division used as the material sourcing pool. "
+                        "Only assets in this division are counted as available inputs. "
+                        "Set to 'All' to use all corp assets (legacy behaviour).",
+            },
         },
     },
     "esi_resilience": {
@@ -474,6 +493,12 @@ class AdminSettingsManager:
             return bool(value)
         if typ == "str":
             return str(value)
+        if typ == "select":
+            # Treat empty string and the string "null" / "None" as None (no filter)
+            if value is None or value == "" or str(value).lower() in ("null", "none"):
+                return None
+            allowed = {opt["value"] for opt in spec.get("options", []) if opt["value"] is not None}
+            return str(value) if str(value) in allowed else None
         return value
 
     def _load(self) -> None:
