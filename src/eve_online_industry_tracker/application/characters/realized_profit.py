@@ -20,6 +20,7 @@ from eve_online_industry_tracker.db_models import (
     CorporationIndustryJobsModel,
     CorporationModel,
     CorporationRealizedSalesLedgerModel,
+    CorporationWalletJournalModel,
     CorporationWalletTransactionsModel,
 )
 
@@ -224,6 +225,59 @@ def _gross_only_fee_breakdown(*, gross_revenue: float) -> tuple[float, float, fl
     return 0.0, 0.0, float(gross_revenue), "gross_only", [
         "Corporation realized profit currently does not have wallet journal-backed fee capture.",
     ]
+
+
+# Maximum fraction by which the journal net amount may differ from gross revenue
+# before we reject the match.  Typical EVE market fees (broker + tax) are under 10 %,
+# so a 15 % window is generous enough to handle high-fee edge cases while avoiding
+# false positives from unrelated transactions of similar size.
+_CORP_JOURNAL_MATCH_TOLERANCE = 0.15
+
+
+def _corp_journal_fee_breakdown(
+    *,
+    gross_revenue: float,
+    journal_entries: list[Any],
+    used_journal_ids: set[int],
+) -> tuple[float, float, float, str, list[str]]:
+    """Match a corp sell transaction to its wallet-journal market_transaction entry.
+
+    Because ``CorporationWalletTransactionsModel`` has no ``journal_ref_id`` column,
+    we cannot do a direct ID lookup.  Instead we scan through journal entries (already
+    filtered to ``ref_type = "market_transaction"`` and sorted by date) and pick the
+    first unused one whose ``amount`` is within ``_CORP_JOURNAL_MATCH_TOLERANCE`` of
+    ``gross_revenue``.
+
+    The matched entry is added to ``used_journal_ids`` so it is not claimed again by a
+    subsequent transaction.
+    """
+    notes: list[str] = []
+    gross = float(gross_revenue)
+
+    for entry in journal_entries:
+        entry_id = _safe_int(getattr(entry, "wallet_journal_id", None))
+        if entry_id is None:
+            continue
+        if entry_id in used_journal_ids:
+            continue
+        amount = _safe_float(getattr(entry, "amount", None))
+        if amount is None or amount <= 0:
+            continue
+        # The journal net amount should be slightly below gross_revenue (fees deducted).
+        if amount > gross * (1.0 + _CORP_JOURNAL_MATCH_TOLERANCE):
+            continue
+        if amount < gross * (1.0 - _CORP_JOURNAL_MATCH_TOLERANCE):
+            continue
+        # Good match — claim it and compute the fee breakdown.
+        used_journal_ids.add(int(entry_id))
+        other_fees_amount, sales_tax_amount, net_revenue, mode, entry_notes = _journal_fee_breakdown(
+            gross_revenue=gross,
+            journal=entry,
+        )
+        return other_fees_amount, sales_tax_amount, net_revenue, mode, entry_notes
+
+    notes.append("No matching wallet journal entry found for this corp sale; fees are not captured.")
+    return 0.0, 0.0, gross, "gross_only", notes
 
 
 def _extract_market_fee_rates(raw_market_fees: Any) -> tuple[float | None, float | None]:
@@ -692,6 +746,38 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
+
+    def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
+        """Load corp wallet journal entries for fee matching.
+
+        ``CorporationWalletTransactionsModel`` has no ``journal_ref_id`` column, so we
+        cannot perform a direct ID lookup.  Instead we pre-load all
+        ``market_transaction`` journal entries for this corporation (sorted by date) and
+        carry them in ``owner_context`` alongside a mutable set of already-claimed IDs.
+        ``_fee_breakdown`` then picks the closest unused entry by amount.
+        """
+        journal_entries: list[Any] = (
+            self._app_session.query(CorporationWalletJournalModel)
+            .filter(
+                CorporationWalletJournalModel.corporation_id == int(owner_id),
+                CorporationWalletJournalModel.ref_type == "market_transaction",
+            )
+            .order_by(CorporationWalletJournalModel.date)
+            .all()
+        )
+        return {
+            "journal_entries": journal_entries,
+            "used_journal_ids": set(),
+        }
+
+    def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:
+        journal_entries: list[Any] = owner_context.get("journal_entries") or []
+        used_journal_ids: set[int] = owner_context.get("used_journal_ids") or set()
+        return _corp_journal_fee_breakdown(
+            gross_revenue=float(gross_revenue),
+            journal_entries=journal_entries,
+            used_journal_ids=used_journal_ids,
+        )
 
 
 def summarize_realized_profit_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
