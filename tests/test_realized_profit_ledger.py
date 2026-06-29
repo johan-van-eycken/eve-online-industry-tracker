@@ -604,7 +604,7 @@ def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture() -> Non
 
 
 def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
-    """Corp ledger row uses journal_amount mode when a matching market_transaction entry exists."""
+    """Corp ledger row uses journal_matched mode when brokers_fee and transaction_tax entries exist within the time window."""
     app_session, sde_session = _make_sessions()
 
     app_session.add(CorporationModel(corporation_id=20, corporation_name="Test Corp"))
@@ -625,17 +625,28 @@ def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
             total_price=1000.0,
         )
     )
-    # Matching market_transaction journal entry: net amount after fees (broker 3% + tax 2% = ~950)
+    # brokers_fee debit (negative amount in EVE) — within 5 minutes of the sell
     app_session.add(
         CorporationWalletJournalModel(
             corporation_id=20,
             division=1,
-            wallet_journal_id=8000,
-            amount=950.0,
-            balance=10000.0,
-            date="2026-03-01T10:00:01Z",
-            ref_type="market_transaction",
-            tax=20.0,
+            wallet_journal_id=8001,
+            amount=-30.0,
+            balance=9970.0,
+            date="2026-03-01T10:00:02Z",
+            ref_type="brokers_fee",
+        )
+    )
+    # transaction_tax debit (negative amount in EVE) — within 5 minutes of the sell
+    app_session.add(
+        CorporationWalletJournalModel(
+            corporation_id=20,
+            division=1,
+            wallet_journal_id=8002,
+            amount=-20.0,
+            balance=9950.0,
+            date="2026-03-01T10:00:03Z",
+            ref_type="transaction_tax",
         )
     )
     app_session.commit()
@@ -650,11 +661,11 @@ def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["fee_capture_mode"] == "journal_amount"
-    assert row["total_fees_amount"] > 0
+    assert row["fee_capture_mode"] == "journal_matched"
+    assert row["total_fees_amount"] == 50.0
     assert row["net_revenue"] == 950.0
-    assert row["sales_tax_amount"] == 20.0
     assert row["other_fees_amount"] == 30.0
+    assert row["sales_tax_amount"] == 20.0
 
 
 def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match() -> None:
