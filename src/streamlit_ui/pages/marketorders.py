@@ -12,6 +12,7 @@ from streamlit_ui.api.market_orders import (
     fetch_corp_market_orders,
     refresh_corp_market_orders,
 )
+from streamlit_ui.api.client import api_get
 from streamlit_ui.components.webpage_ui import AgGridRuntime, aggrid_height, require_aggrid
 
 
@@ -693,14 +694,43 @@ def _render_character_orders_tab(runtime: object, img_renderer: object) -> None:
             _render_pricing_analysis(full_sell_orders[selected_idx])
 
 
+def _get_director_corp_ids() -> list[int]:
+    """Return corporation IDs for all director-managed corporations."""
+    try:
+        corps_response = api_get("/corporations", timeout_seconds=30) or {}
+        corps = corps_response.get("data", []) if isinstance(corps_response, dict) else []
+        return [
+            int(c["corporation_id"])
+            for c in corps
+            if isinstance(c, dict) and c.get("has_director_access") and c.get("corporation_id")
+        ]
+    except Exception:
+        return []
+
+
 def _render_corporation_orders_tab(runtime: object, img_renderer: object) -> None:
     """Render corporation market orders tab."""
-    all_corp_data = []
-    try:
-        response = fetch_corp_market_orders()
-        all_corp_data = response.get("data", [])
-    except Exception as e:
-        st.error(f"Error fetching corporation market orders: {str(e)}")
+    corp_ids = _get_director_corp_ids()
+
+    # Collect orders from each director-access corporation.
+    all_corp_data: list[dict] = []
+    fetch_errors: list[str] = []
+    for corp_id in corp_ids:
+        try:
+            response = fetch_corp_market_orders(corp_id)
+            entry = response.get("data")
+            if isinstance(entry, list):
+                all_corp_data.extend(entry)
+            elif isinstance(entry, dict):
+                all_corp_data.append(entry)
+        except Exception as e:
+            fetch_errors.append(f"Corp {corp_id}: {e}")
+
+    for err in fetch_errors:
+        st.error(f"Error fetching corporation market orders: {err}")
+
+    if not corp_ids and not all_corp_data:
+        st.info("No director-access corporations found.")
         return
 
     # Flatten orders from all corporations, annotating each order with corp name.
@@ -715,10 +745,11 @@ def _render_corporation_orders_tab(runtime: object, img_renderer: object) -> Non
     with refresh_col:
         if st.button("Refresh Corp Orders"):
             with st.spinner("Refreshing corporation market orders..."):
-                try:
-                    refresh_corp_market_orders()
-                except Exception as e:
-                    st.error(f"Refresh failed: {str(e)}")
+                for corp_id in corp_ids:
+                    try:
+                        refresh_corp_market_orders(corp_id)
+                    except Exception as e:
+                        st.error(f"Refresh failed for corp {corp_id}: {str(e)}")
             clear_corp_market_orders_cache()
             _rerun()
     with filler:

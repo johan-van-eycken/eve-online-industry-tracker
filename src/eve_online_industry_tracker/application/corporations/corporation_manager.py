@@ -232,7 +232,7 @@ class CorporationManager:
         corps = [c for c in corps if c is not None]
 
         if refresh:
-            self._refresh_batch("refresh_market_orders", corporation_name=corporation_name, corporation_id=corporation_id)
+            self._refresh_batch("refresh_market_orders", corporation_name, corporation_id)
 
         orders_list = []
         for corp in corps:
