@@ -17,6 +17,7 @@ from eve_online_industry_tracker.db_models import (
     CharacterRealizedSalesLedgerModel,
     CharacterWalletJournalModel,
     CharacterWalletTransactionsModel,
+    CorporationAssetHistoryModel,
     CorporationIndustryJobsModel,
     CorporationModel,
     CorporationRealizedSalesLedgerModel,
@@ -458,6 +459,7 @@ class _BaseRealizedProfitLedgerService:
 
         wallet_transactions = self._load_wallet_transactions(owner_id=int(owner_id))
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
+        asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
         journal_by_id = self._load_journal_map(owner_id=int(owner_id))
         owner_context = self._load_owner_context(owner_id=int(owner_id))
 
@@ -529,6 +531,17 @@ class _BaseRealizedProfitLedgerService:
                 }
             )
 
+        for ah_type_id, ah_lots in asset_history_lots.items():
+            for lot in ah_lots:
+                events_by_type.setdefault(int(ah_type_id), []).append(
+                    {
+                        "kind": "asset_history",
+                        "dt": _parse_date(lot.acquisition_date),
+                        "sort_id": 0,
+                        "lot": lot,
+                    }
+                )
+
         persisted_rows: list[Any] = []
         for type_id, events in events_by_type.items():
             events.sort(key=lambda item: (item.get("dt") or datetime.min, int(item.get("sort_id") or 0)))
@@ -576,6 +589,12 @@ class _BaseRealizedProfitLedgerService:
                             source=ASSET_SOURCE_INDUSTRY_BUILD,
                         ),
                     )
+                    continue
+
+                if kind == "asset_history":
+                    lot = event.get("lot")
+                    if lot is not None:
+                        _append_lot(lots_by_type, type_id=int(type_id), lot=lot)
                     continue
 
                 if kind != "sell":
@@ -673,6 +692,10 @@ class _BaseRealizedProfitLedgerService:
         return self._app_session.query(self.industry_job_model).filter(getattr(self.industry_job_model, self.owner_id_field) == int(owner_id)).all()
 
     def _load_journal_map(self, *, owner_id: int) -> dict[int, Any]:
+        return {}
+
+    def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
+        """Return FifoLots sourced from asset history, keyed by type_id. Subclasses may override."""
         return {}
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
@@ -785,6 +808,45 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
+
+    def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
+        """Load FifoLots from CorporationAssetHistoryModel rows that have a stamped acquisition_unit_cost.
+
+        These represent finished goods transferred from characters who built them, backfilled
+        by scripts/backfill_corp_transfer_costs.py with acquisition_source values such as
+        'industry_build_transferred', 'industry_build_transferred_avg', and
+        'character_market_buy_transferred'.
+        """
+        rows = (
+            self._app_session.query(CorporationAssetHistoryModel)
+            .filter(
+                CorporationAssetHistoryModel.corporation_id == int(owner_id),
+                CorporationAssetHistoryModel.acquisition_unit_cost.isnot(None),
+            )
+            .all()
+        )
+        lots_by_type: dict[int, list[FifoLot]] = {}
+        for row in rows:
+            type_id = _safe_int(getattr(row, "type_id", None))
+            unit_cost = _safe_float(getattr(row, "acquisition_unit_cost", None))
+            quantity = _safe_int(getattr(row, "quantity", None))
+            if type_id is None or type_id <= 0 or unit_cost is None or unit_cost <= 0 or not quantity or quantity <= 0:
+                continue
+            acquisition_date = getattr(row, "acquisition_date", None) or getattr(row, "observed_at", None)
+            source = str(getattr(row, "acquisition_source", None) or "asset_history")
+            reference_id = _safe_int(getattr(row, "acquisition_reference_id", None))
+            reference_type = str(getattr(row, "acquisition_reference_type", None) or "asset_history")
+            lots_by_type.setdefault(int(type_id), []).append(
+                FifoLot(
+                    quantity=int(quantity),
+                    unit_price=float(unit_cost),
+                    acquisition_date=acquisition_date,
+                    reference_id=reference_id,
+                    reference_type=reference_type,
+                    source=source,
+                )
+            )
+        return lots_by_type
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         """Pre-load brokers_fee and transaction_tax journal entries for date-proximity matching.
