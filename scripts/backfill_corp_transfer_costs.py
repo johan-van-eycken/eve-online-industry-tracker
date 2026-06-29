@@ -307,12 +307,12 @@ def main():
             .distinct()
             .all()
         ]
+        service = CorporationRealizedProfitLedgerService(
+            app_session=session,
+            sde_session=sde_session,
+            market_prices=[],
+        )
         for corp_id in corp_ids:
-            service = CorporationRealizedProfitLedgerService(
-                app_session=session,
-                sde_session=sde_session,
-                market_prices=[],
-            )
             service.rebuild(corporation_id=corp_id)
             print(f"  Rebuilt realized profit ledger for corporation_id={corp_id}")
 
