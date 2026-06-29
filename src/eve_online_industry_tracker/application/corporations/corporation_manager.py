@@ -210,10 +210,19 @@ class CorporationManager:
             logging.error(error_message)
             raise Exception(error_message)
 
+    def refresh_assets(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
+        try:
+            self._refresh_batch("refresh_assets", corporation_name, corporation_id)
+        except Exception as e:
+            error_message = f"Failed to refresh corporation assets: {str(e)}"
+            logging.error(error_message)
+            raise Exception(error_message)
+
     def refresh_realized_profit_inputs(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
         self.refresh_wallet_transactions(corporation_name=corporation_name, corporation_id=corporation_id)
         self.refresh_wallet_journal(corporation_name=corporation_name, corporation_id=corporation_id)
         self.refresh_industry_jobs(corporation_name=corporation_name, corporation_id=corporation_id)
+        self.refresh_assets(corporation_name=corporation_name, corporation_id=corporation_id)
 
     def get_market_orders(
         self,

@@ -460,6 +460,34 @@ class _BaseRealizedProfitLedgerService:
         wallet_transactions = self._load_wallet_transactions(owner_id=int(owner_id))
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
+
+        # Determine which type_ids are already covered by corp jobs, corp buys, or asset history
+        # so the supplemental fallback only fills genuine gaps.
+        _covered_from_corp_jobs: set[int] = set()
+        for job in industry_jobs:
+            status = str(getattr(job, "status", "") or "").strip().lower()
+            completed_statuses = {"delivered", "ready", "completed"}
+            if status and status not in completed_statuses:
+                continue
+            pid = _safe_int(getattr(job, "product_type_id", None))
+            if pid:
+                _covered_from_corp_jobs.add(int(pid))
+        _covered_from_corp_buys: set[int] = set()
+        for tx in wallet_transactions:
+            if not getattr(tx, "is_buy", False):
+                continue
+            tid = _safe_int(getattr(tx, "type_id", None))
+            if tid:
+                _covered_from_corp_buys.add(int(tid))
+        covered_type_ids: set[int] = (
+            _covered_from_corp_jobs | _covered_from_corp_buys | set(asset_history_lots.keys())
+        )
+        supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id), covered_type_ids=covered_type_ids)
+
+        # Merge supplemental lots into asset_history_lots (they cover disjoint type_ids by construction)
+        for supp_type_id, supp_lots in supplemental_lots.items():
+            asset_history_lots.setdefault(int(supp_type_id), []).extend(supp_lots)
+
         journal_by_id = self._load_journal_map(owner_id=int(owner_id))
         owner_context = self._load_owner_context(owner_id=int(owner_id))
 
@@ -698,6 +726,10 @@ class _BaseRealizedProfitLedgerService:
         """Return FifoLots sourced from asset history, keyed by type_id. Subclasses may override."""
         return {}
 
+    def _load_supplemental_lots(self, *, owner_id: int, covered_type_ids: set[int]) -> dict[int, list[FifoLot]]:
+        """Return additional FifoLots for type_ids not yet covered. Subclasses may override."""
+        return {}
+
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         return {}
 
@@ -809,6 +841,82 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
 
+    def _load_character_source_lots(self, corporation_id: int, covered_type_ids: set[int]) -> dict[int, list[FifoLot]]:
+        """Return FifoLots from character industry jobs and character market buys for type_ids
+        not already covered by corp jobs, corp buys, or asset history.
+
+        These represent items manufactured or purchased by characters, then transferred to the
+        corporation before a corp asset sync ran (so no CorporationAssetHistoryModel row exists).
+        """
+        lots_by_type: dict[int, list[FifoLot]] = {}
+        completed_statuses = {"delivered", "ready", "completed"}
+
+        char_jobs = (
+            self._app_session.query(CharacterIndustryJobsModel)
+            .filter(
+                CharacterIndustryJobsModel.unit_build_cost.isnot(None),
+                CharacterIndustryJobsModel.output_quantity.isnot(None),
+            )
+            .all()
+        )
+        for job in char_jobs:
+            product_type_id = _safe_int(getattr(job, "product_type_id", None))
+            if product_type_id is None or int(product_type_id) in covered_type_ids:
+                continue
+            status = str(getattr(job, "status", "") or "").strip().lower()
+            if status and status not in completed_statuses:
+                continue
+            unit_build_cost = _safe_float(getattr(job, "unit_build_cost", None))
+            output_quantity = _safe_int(getattr(job, "output_quantity", None))
+            if unit_build_cost is None or unit_build_cost <= 0 or not output_quantity or output_quantity <= 0:
+                continue
+            completed_date = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
+            lots_by_type.setdefault(int(product_type_id), []).append(
+                FifoLot(
+                    quantity=int(output_quantity),
+                    unit_price=float(unit_build_cost),
+                    acquisition_date=completed_date,
+                    reference_id=_safe_int(getattr(job, "job_id", None)),
+                    reference_type="industry_job",
+                    source="industry_build_transferred",
+                )
+            )
+
+        char_buys = (
+            self._app_session.query(CharacterWalletTransactionsModel)
+            .filter(
+                CharacterWalletTransactionsModel.is_buy.is_(True),
+                CharacterWalletTransactionsModel.unit_price.isnot(None),
+            )
+            .all()
+        )
+        for tx in char_buys:
+            type_id = _safe_int(getattr(tx, "type_id", None))
+            if type_id is None or int(type_id) in covered_type_ids:
+                continue
+            unit_price = _safe_float(getattr(tx, "unit_price", None))
+            quantity = _safe_int(getattr(tx, "quantity", None))
+            if unit_price is None or unit_price <= 0 or not quantity or quantity <= 0:
+                continue
+            lots_by_type.setdefault(int(type_id), []).append(
+                FifoLot(
+                    quantity=int(quantity),
+                    unit_price=float(unit_price),
+                    acquisition_date=getattr(tx, "date", None),
+                    reference_id=_safe_int(getattr(tx, "transaction_id", None)),
+                    reference_type="wallet_transaction",
+                    source="character_market_buy_transferred",
+                )
+            )
+
+        # Sort each type's lots oldest-first
+        for type_id_key in lots_by_type:
+            lots_by_type[type_id_key].sort(
+                key=lambda lot: (_parse_date(lot.acquisition_date) or datetime.min)
+            )
+
+        return lots_by_type
+
     def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Load FifoLots from CorporationAssetHistoryModel rows that have a stamped acquisition_unit_cost.
 
@@ -847,6 +955,10 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 )
             )
         return lots_by_type
+
+    def _load_supplemental_lots(self, *, owner_id: int, covered_type_ids: set[int]) -> dict[int, list[FifoLot]]:
+        """Delegate to _load_character_source_lots for the corp service."""
+        return self._load_character_source_lots(corporation_id=int(owner_id), covered_type_ids=covered_type_ids)
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         """Pre-load brokers_fee and transaction_tax journal entries for date-proximity matching.
