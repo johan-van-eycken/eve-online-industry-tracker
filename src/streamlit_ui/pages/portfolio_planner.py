@@ -556,7 +556,7 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
         table_rows.append({
             "Item": item["type_name"],
             "Need": f"{item['need']:,}",
-            "Have": f"{item['need'] - buy_qty:,}",
+            "Owned (est.)": f"{item['need'] - buy_qty:,}",
             "Buy": f"{buy_qty:,}",
             "Unit Price": _fmt_isk(unit_price),
             "Total ISK": _fmt_isk(total_isk),
@@ -564,6 +564,10 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
 
     df = pd.DataFrame(table_rows)
     st.dataframe(df, hide_index=True, use_container_width=True)
+    st.caption(
+        "* Owned quantities are estimated from the Industry Builder's material sourcing calculations. "
+        "Run a corp asset sync to update."
+    )
 
     # Summary line
     total_isk_sum = sum(
