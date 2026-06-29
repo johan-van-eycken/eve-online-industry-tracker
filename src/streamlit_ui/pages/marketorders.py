@@ -615,7 +615,9 @@ def _render_character_orders_tab(runtime: object, img_renderer: object) -> None:
         priority_map[key] = label
 
     selected_owner = "All"
-    sell_orders, buy_orders = _build_order_rows(all_orders, priority_map=priority_map)
+    # Exclude corporation orders — those belong to the Corporation Orders tab
+    char_orders_only = [o for o in all_orders if not o.get("is_corporation")]
+    sell_orders, buy_orders = _build_order_rows(char_orders_only, priority_map=priority_map)
 
     if sell_orders:
         df = pd.DataFrame(sell_orders)
@@ -643,10 +645,10 @@ def _render_character_orders_tab(runtime: object, img_renderer: object) -> None:
 
         st.subheader("Selling")
 
-        # Stats box — computed from the filtered raw enriched orders
+        # Stats box — computed from the filtered raw enriched orders (character orders only)
         sell_raw_filtered = [
             o for o in all_orders
-            if not o.get("is_buy_order") and (selected_owner == "All" or o.get("owner") == selected_owner)
+            if not o.get("is_buy_order") and not o.get("is_corporation") and (selected_owner == "All" or o.get("owner") == selected_owner)
         ]
         stats = _compute_sell_stats(sell_raw_filtered)
         _render_sell_stats_box(stats)

@@ -84,6 +84,8 @@ def _source_mix_label(source_mix: Any) -> str:
 
     source_labels = {
         "industry_build": "Industry Build",
+        "industry_build_transferred": "Industry Build (transferred)",
+        "industry_build_transferred_avg": "Industry Build (transferred, avg)",
         "market_buy": "Market Trade",
         "opening_inventory": "Opening Inventory",
         "untracked_inventory": "Untracked Inventory",
@@ -216,11 +218,18 @@ def _summary(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_MANUFACTURING_SOURCES = frozenset({
+    "industry_build",
+    "industry_build_transferred",
+    "industry_build_transferred_avg",
+})
+
+
 def _primary_profit_bucket(source_mix: Any) -> str:
     if not isinstance(source_mix, dict) or not source_mix:
         return "Trade"
     sources = {str(key) for key in source_mix.keys()}
-    if "industry_build" in sources:
+    if sources & _MANUFACTURING_SOURCES:
         return "Manufacturing"
     return "Trade"
 
