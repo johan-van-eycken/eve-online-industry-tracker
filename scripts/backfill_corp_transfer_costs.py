@@ -310,9 +310,10 @@ def backfill_corp_transfer_costs(session) -> dict:
                     f"avg_unit_cost={avg_cost:.2f}"
                 )
 
-    # --- Pass 2: character market buy transactions ---
+    # --- Pass 2: character market buy transactions (FIFO, then weighted-avg fallback) ---
     buy_cost_map = build_character_buy_cost_map(session)
     buy_matched = 0
+    buy_avg_matched = 0
 
     # Collect snapshots that were not matched by the industry-job pass
     unmatched_by_type: dict[int, list] = defaultdict(list)
@@ -336,6 +337,9 @@ def backfill_corp_transfer_costs(session) -> dict:
             reference_type="wallet_transaction",
         )
 
+        # Weighted average across all buy lots for this type (used as fallback)
+        avg_buy_cost = weighted_average_unit_cost(buy_lots)
+
         for match, snapshot in zip(match_results, snapshots):
             if match is not None:
                 unit_cost = match["unit_build_cost"]
@@ -353,17 +357,31 @@ def backfill_corp_transfer_costs(session) -> dict:
                     f"  BUY: type_id={type_id}, qty={snapshot.quantity}, "
                     f"unit_cost={unit_cost:.2f}, tx_id={job_id}"
                 )
+            else:
+                # FIFO failed (corp qty exceeds tracked buy lots) — use weighted average
+                snapshot.acquisition_source = "character_market_buy_transferred_avg"
+                snapshot.acquisition_unit_cost = avg_buy_cost
+                snapshot.acquisition_total_cost = avg_buy_cost * float(snapshot.quantity or 1)
+                snapshot.acquisition_reference_type = None
+                snapshot.acquisition_reference_id = None
+                snapshot.acquisition_date = None
+                buy_avg_matched += 1
+                print(
+                    f"  BUY-AVG: type_id={type_id}, qty={snapshot.quantity}, "
+                    f"avg_unit_cost={avg_buy_cost:.2f}"
+                )
 
-    if fifo_matched + avg_matched + buy_matched > 0:
+    if fifo_matched + avg_matched + buy_matched + buy_avg_matched > 0:
         session.commit()
 
     total_uncosted = len(uncosted_rows)
-    unmatched = total_uncosted - fifo_matched - avg_matched - buy_matched
+    unmatched = total_uncosted - fifo_matched - avg_matched - buy_matched - buy_avg_matched
     return {
         "total_uncosted": total_uncosted,
         "fifo_matched": fifo_matched,
         "avg_matched": avg_matched,
         "buy_matched": buy_matched,
+        "buy_avg_matched": buy_avg_matched,
         "unmatched": unmatched,
     }
 
@@ -393,9 +411,11 @@ def main():
     print(f"  FIFO-matched (exact job):          {summary['fifo_matched']}")
     print(f"  Average-matched (weighted avg):    {summary['avg_matched']}")
     print(f"  Buy-matched (character market buy):{summary['buy_matched']}")
+    print(f"  Buy-avg-matched (buy weighted avg):{summary['buy_avg_matched']}")
     print(f"  Unmatched (no source found):       {summary['unmatched']}")
 
-    if summary["fifo_matched"] + summary["avg_matched"] + summary["buy_matched"] > 0:
+    any_matched = sum(summary[k] for k in ["fifo_matched", "avg_matched", "buy_matched", "buy_avg_matched"])
+    if any_matched > 0:
         print("\nRebuilding realized profit ledger for affected corporations...")
         corp_ids = [
             row[0] for row in session.query(CorporationAssetHistoryModel.corporation_id)
@@ -403,6 +423,7 @@ def main():
                 "industry_build_transferred",
                 "industry_build_transferred_avg",
                 "character_market_buy_transferred",
+                "character_market_buy_transferred_avg",
             ]))
             .distinct()
             .all()
