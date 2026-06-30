@@ -564,3 +564,19 @@ def industry_active_jobs():
     character_id = int(character_id_raw) if character_id_raw.isdigit() else None
     svc = IndustryService(state=get_state())
     return ok(data=svc.industry_active_jobs(character_id=character_id))
+
+
+@industry_bp.get("/industry/blueprint_skill_qualification")
+def industry_blueprint_skill_qualification():
+    require_ready(get_state())
+    raw = (request.args.get("blueprint_type_ids") or "").strip()
+    if not raw:
+        return ok(data={})
+    try:
+        type_ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        return ok(data={})
+    svc = IndustryService(state=get_state())
+    result = svc.get_blueprint_skill_qualification(blueprint_type_ids=type_ids)
+    # JSON keys must be strings
+    return ok(data={str(k): {str(cid): v for cid, v in char_map.items()} for k, char_map in result.items()})

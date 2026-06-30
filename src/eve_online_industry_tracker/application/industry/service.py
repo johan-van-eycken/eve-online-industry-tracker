@@ -7716,3 +7716,69 @@ class IndustryService:
 
         rows.sort(key=lambda r: r.get("end_date") or "")
         return {"jobs": rows, "slot_capacities": slot_capacities}
+
+    def get_blueprint_skill_qualification(
+        self,
+        *,
+        blueprint_type_ids: list[int],
+    ) -> dict[int, dict[int, bool]]:
+        """
+        For each blueprint_type_id, return whether each configured character
+        meets the manufacturing skill requirements.
+
+        Returns: {blueprint_type_id: {character_id: bool}}
+        """
+        if not blueprint_type_ids:
+            return {}
+
+        characters = self._state.char_manager.get_characters()
+        character_ids: list[int] = [int(c["character_id"]) for c in characters if c.get("character_id")]
+
+        # Fetch trained skill levels for each character
+        char_skill_levels: dict[int, dict[int, int]] = {}
+        for character_id in character_ids:
+            try:
+                char_skill_levels[character_id] = self._get_character_trained_skill_levels(
+                    character_id=character_id
+                )
+            except Exception:
+                char_skill_levels[character_id] = {}
+
+        # Query blueprints from SDE
+        sde_session: Any = self._sessions.sde_session()
+        blueprint_rows = (
+            sde_session.query(Blueprints)
+            .filter(Blueprints.blueprintTypeID.in_(blueprint_type_ids))
+            .all()
+        )
+        blueprint_skills_by_type_id: dict[int, list[dict[str, int]]] = {}
+        for bp in blueprint_rows:
+            activities = bp.activities or {}
+            if not isinstance(activities, dict):
+                activities = {}
+            mfg_skills = activities.get("1", {}).get("skills", [])
+            if not isinstance(mfg_skills, list):
+                mfg_skills = []
+            blueprint_skills_by_type_id[int(bp.blueprintTypeID)] = [
+                s for s in mfg_skills if isinstance(s, dict)
+            ]
+
+        result: dict[int, dict[int, bool]] = {}
+        for bp_type_id in blueprint_type_ids:
+            required_skills = blueprint_skills_by_type_id.get(bp_type_id)
+            if required_skills is None:
+                # Blueprint not found in SDE — no requirements, all qualify
+                result[bp_type_id] = {cid: True for cid in character_ids}
+                continue
+
+            char_qual: dict[int, bool] = {}
+            for character_id in character_ids:
+                trained = char_skill_levels.get(character_id) or {}
+                qualifies = all(
+                    trained.get(int(req.get("typeID") or 0), 0) >= int(req.get("level") or 0)
+                    for req in required_skills
+                )
+                char_qual[character_id] = qualifies
+            result[bp_type_id] = char_qual
+
+        return result

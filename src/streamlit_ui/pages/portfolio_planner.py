@@ -8,6 +8,7 @@ import streamlit as st
 
 from streamlit_ui.api.industry_builder import (
     clear_industry_builder_caches,
+    fetch_blueprint_skill_qualification,
     start_product_overview_refresh,
 )
 from streamlit_ui.api.industry_jobs import fetch_active_industry_jobs
@@ -520,7 +521,106 @@ def _bpc_label(row: dict) -> str:
     return "?"
 
 
-def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None) -> None:
+def _compute_character_assignment(
+    candidates: list[dict],
+    skill_qual: dict[str, dict[str, bool]],
+    jobs_data: dict,
+) -> dict[str, str]:
+    """
+    Returns {overview_row_id: character_name} assignment for each candidate.
+
+    Algorithm:
+    1. For each candidate, look up blueprint_type_id in skill_qual.
+    2. Qualified characters = those with skill_qual[bp_type_id][char_id] == True.
+    3. If no one qualifies -> "?" (unassignable).
+    4. Among qualified: pick the one with most free manufacturing slots.
+    5. Tiebreak: more active jobs of same manufacturing_group category.
+    6. Tiebreak: lowest character_id (deterministic).
+    """
+    jobs: list[dict[str, Any]] = jobs_data.get("jobs") or []
+    slot_capacities: dict[str, Any] = jobs_data.get("slot_capacities") or {}
+
+    # Compute free manufacturing slots per character
+    char_used_mfg: dict[str, int] = {c: 0 for c in slot_capacities}
+    for job in jobs:
+        cid_key = str(job.get("character_id") or "")
+        if cid_key in slot_capacities and job.get("activity_id") == 1:
+            char_used_mfg[cid_key] += 1
+
+    def free_mfg_slots(cid_str: str) -> int:
+        caps = slot_capacities.get(cid_str) or {}
+        mfg_max = int(caps.get("manufacturing_max") or 0)
+        used = char_used_mfg.get(cid_str, 0)
+        return max(0, mfg_max - used)
+
+    # Compute active mfg jobs per character per manufacturing_group
+    char_group_active: dict[str, dict[str, int]] = {}
+    for job in jobs:
+        if job.get("activity_id") != 1:
+            continue
+        cid_key = str(job.get("character_id") or "")
+        # We don't have manufacturing_group on jobs; we just count all active mfg jobs per char
+        char_group_active.setdefault(cid_key, {})
+        group = str(job.get("manufacturing_group") or "_all")
+        char_group_active[cid_key][group] = char_group_active[cid_key].get(group, 0) + 1
+
+    # Resolve character names from jobs
+    char_name_map: dict[str, str] = {}
+    for job in jobs:
+        cid_key = str(job.get("character_id") or "")
+        if cid_key and cid_key not in char_name_map:
+            char_name_map[cid_key] = str(job.get("character_name") or cid_key)
+
+    assignment: dict[str, str] = {}
+    for candidate in candidates:
+        overview_row_id = str(candidate.get("overview_row_id") or "")
+        if not overview_row_id:
+            continue
+
+        # Determine blueprint_type_id from the row
+        bp_type_id: int = 0
+        try:
+            bp_type_id = int(
+                candidate.get("blueprint_type_id")
+                or ((candidate.get("manufacturing_job") or {}).get("blueprint_sde") or {}).get("blueprint_type_id")
+                or 0
+            )
+        except (TypeError, ValueError):
+            bp_type_id = 0
+
+        bp_type_id_str = str(bp_type_id)
+        char_quals = skill_qual.get(bp_type_id_str) or {}
+
+        qualified_char_ids = [
+            cid_str
+            for cid_str, qualifies in char_quals.items()
+            if qualifies
+        ]
+
+        if not qualified_char_ids:
+            assignment[overview_row_id] = "?"
+            continue
+
+        mfg_group = str(candidate.get("manufacturing_group") or "_all")
+
+        def sort_key(cid_str: str) -> tuple:
+            free = free_mfg_slots(cid_str)
+            group_jobs = (char_group_active.get(cid_str) or {}).get(mfg_group, 0)
+            try:
+                cid_int = int(cid_str)
+            except (TypeError, ValueError):
+                cid_int = 0
+            # More free slots is better (desc), more same-group jobs is better (desc),
+            # lower char_id is tiebreaker (asc)
+            return (-free, -group_jobs, cid_int)
+
+        best_char_id = min(qualified_char_ids, key=sort_key)
+        assignment[overview_row_id] = char_name_map.get(best_char_id) or best_char_id
+
+    return assignment
+
+
+def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None) -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
         return
@@ -550,10 +650,15 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
                     pass
         active_flag = "⚠️ Building" if is_active else ""
 
+        # Resolve assignment for this row
+        overview_row_id = str(row.get("overview_row_id") or "")
+        assigned_char = (assignment or {}).get(overview_row_id, "") if overview_row_id else ""
+
         table_rows.append({
             "#": rank,
             "Product": str(row.get("type_name") or row.get("type_id") or "Unknown"),
             "Score": score,
+            "Assign to": assigned_char,
             "Profit (M)": round(sf(row.get("profit_amount")) / 1_000_000, 1),
             "ISK/Hr (M)": round(sf(row.get("isk_per_hour")) / 1_000_000, 1),
             "Margin %": round(sf(row.get("profit_margin_fraction")) * 100, 1),
@@ -806,10 +911,35 @@ def render() -> None:
     _render_slot_summary_header(jobs_data)
     active_type_ids = _build_active_type_ids(jobs_data)
 
+    # Compute character assignment for recommendations
+    top_candidates = [row for row, _ in ranked[:15]]
+    blueprint_type_ids_for_qual: tuple[int, ...] = tuple(
+        sorted({
+            int(
+                row.get("blueprint_type_id")
+                or ((row.get("manufacturing_job") or {}).get("blueprint_sde") or {}).get("blueprint_type_id")
+                or 0
+            )
+            for row in top_candidates
+            if int(
+                row.get("blueprint_type_id")
+                or ((row.get("manufacturing_job") or {}).get("blueprint_sde") or {}).get("blueprint_type_id")
+                or 0
+            ) > 0
+        })
+    )
+    skill_qual: dict[str, dict[str, bool]] = {}
+    if blueprint_type_ids_for_qual:
+        try:
+            skill_qual = fetch_blueprint_skill_qualification(blueprint_type_ids_for_qual)
+        except Exception:
+            skill_qual = {}
+    assignment = _compute_character_assignment(top_candidates, skill_qual, jobs_data)
+
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
-        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids)
+        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment)
         _render_excluded_section(disqualified)
 
     with tab_shopping:
