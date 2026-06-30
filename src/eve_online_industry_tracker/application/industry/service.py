@@ -7525,17 +7525,34 @@ class IndustryService:
         return capacities
 
     def industry_active_jobs(self, *, character_id: int | None = None) -> dict[str, Any]:
-        """Return active industry jobs and slot capacities, optionally filtered by character."""
+        """Return active industry jobs and slot capacities, optionally filtered by character.
+
+        Includes both character-scope jobs (CharacterIndustryJobsModel) and
+        corporation-scope jobs (CorporationIndustryJobsModel).  Corp jobs are
+        attributed to the character who installed them via installer_id so that
+        per-character slot counting works correctly.
+        """
         from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
         session: Any = self._sessions.app_session()
-        query = session.query(CharacterIndustryJobsModel).filter(
+
+        # --- Character-scope jobs ---
+        char_query = session.query(CharacterIndustryJobsModel).filter(
             CharacterIndustryJobsModel.status == "active"
         )
         if character_id is not None:
-            query = query.filter(CharacterIndustryJobsModel.character_id == int(character_id))
+            char_query = char_query.filter(CharacterIndustryJobsModel.character_id == int(character_id))
+        char_jobs = char_query.all()
 
-        jobs = query.all()
+        # --- Corporation-scope jobs ---
+        # Fetch for all corporations known to the system; filter by installer_id
+        # when character_id is given.
+        corp_query = session.query(CorporationIndustryJobsModel).filter(
+            CorporationIndustryJobsModel.status == "active"
+        )
+        if character_id is not None:
+            corp_query = corp_query.filter(CorporationIndustryJobsModel.installer_id == int(character_id))
+        corp_jobs = corp_query.all()
 
         # Slot capacities (always include even with no active jobs)
         all_capacities = self._character_slot_capacities()
@@ -7544,12 +7561,12 @@ class IndustryService:
         else:
             slot_capacities = {str(k): v for k, v in all_capacities.items()}
 
-        if not jobs:
+        if not char_jobs and not corp_jobs:
             return {"jobs": [], "slot_capacities": slot_capacities}
 
-        # Collect type IDs for name resolution
+        # Collect type IDs for name resolution across both job lists
         type_ids: set[int] = set()
-        for job in jobs:
+        for job in list(char_jobs) + list(corp_jobs):
             bp_type_id = getattr(job, "blueprint_type_id", None)
             prod_type_id = getattr(job, "product_type_id", None)
             if bp_type_id:
@@ -7563,8 +7580,17 @@ class IndustryService:
         if type_ids:
             type_data_map = get_type_data(sde_session, language, sorted(type_ids))
 
-        # Resolve character names
-        char_ids: set[int] = {int(getattr(j, "character_id", 0)) for j in jobs if getattr(j, "character_id", None)}
+        # Resolve character names from both job sets
+        char_ids: set[int] = set()
+        for j in char_jobs:
+            cid = getattr(j, "character_id", None)
+            if cid:
+                char_ids.add(int(cid))
+        for j in corp_jobs:
+            iid = getattr(j, "installer_id", None)
+            if iid:
+                char_ids.add(int(iid))
+
         char_name_map: dict[int, str] = {}
         if char_ids:
             char_manager = getattr(self._state, "char_manager", None)
@@ -7579,7 +7605,9 @@ class IndustryService:
                     pass
 
         rows: list[dict[str, Any]] = []
-        for job in jobs:
+
+        # Build rows for character-scope jobs
+        for job in char_jobs:
             raw = getattr(job, "raw", None) or {}
             activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
             activity_name = self._ACTIVITY_ID_TO_NAME.get(activity_id, f"Unknown ({activity_id})")
@@ -7612,6 +7640,45 @@ class IndustryService:
                 "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
                 "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
+                "is_corp_job": False,
+            })
+
+        # Build rows for corporation-scope jobs — attribute to installer_id
+        for job in corp_jobs:
+            raw = getattr(job, "raw", None) or {}
+            activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
+            activity_name = self._ACTIVITY_ID_TO_NAME.get(activity_id, f"Unknown ({activity_id})")
+
+            bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
+            prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
+
+            bp_name = (type_data_map.get(bp_type_id) or {}).get("type_name", str(bp_type_id)) if bp_type_id else ""
+            prod_name = (type_data_map.get(prod_type_id) or {}).get("type_name", str(prod_type_id)) if prod_type_id else ""
+
+            # Use installer_id as character_id so slot counting attributes correctly
+            installer_id = int(getattr(job, "installer_id", 0) or 0)
+
+            rows.append({
+                "job_id": int(getattr(job, "job_id", 0) or 0),
+                "character_id": installer_id,
+                "character_name": char_name_map.get(installer_id, str(installer_id)),
+                "activity_id": activity_id,
+                "activity_name": activity_name,
+                "blueprint_type_id": bp_type_id,
+                "blueprint_name": bp_name,
+                "product_type_id": prod_type_id,
+                "product_name": prod_name,
+                "runs": int(getattr(job, "runs", 0) or 0),
+                "output_quantity": int(getattr(job, "output_quantity", 0) or 0),
+                "cost": float(getattr(job, "cost", 0) or 0),
+                "start_date": getattr(job, "start_date", None),
+                "end_date": getattr(job, "end_date", None),
+                "facility_id": int(getattr(job, "facility_id", 0) or 0),
+                "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
+                "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
+                "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
+                "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
+                "is_corp_job": True,
             })
 
         rows.sort(key=lambda r: r.get("end_date") or "")

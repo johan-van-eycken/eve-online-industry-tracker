@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone, timedelta
 from typing import Any, cast
 
 import pandas as pd
@@ -9,6 +10,7 @@ from streamlit_ui.api.industry_builder import (
     clear_industry_builder_caches,
     start_product_overview_refresh,
 )
+from streamlit_ui.api.industry_jobs import fetch_active_industry_jobs
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
     fetch_industry_profiles_cached,
@@ -373,7 +375,127 @@ def _render_header_banner(
             st.rerun()
 
 
-def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]]) -> None:
+_LAB_ACTIVITY_IDS: frozenset[int] = frozenset({3, 4, 5, 8})
+
+
+def _fetch_jobs_data() -> dict[str, Any]:
+    """Fetch active industry jobs; returns empty structure on error."""
+    try:
+        return fetch_active_industry_jobs()
+    except Exception:
+        return {"jobs": [], "slot_capacities": {}}
+
+
+def _parse_end_date(end_date: Any) -> datetime | None:
+    """Parse an ISO-formatted end_date string into a UTC datetime, or None."""
+    if not end_date:
+        return None
+    try:
+        s = str(end_date).rstrip("Z")
+        if "." in s:
+            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f")
+        else:
+            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _render_slot_summary_header(jobs_data: dict[str, Any]) -> None:
+    """Render a compact per-character slot summary at the top of the page."""
+    jobs: list[dict[str, Any]] = jobs_data.get("jobs") or []
+    slot_capacities: dict[str, Any] = jobs_data.get("slot_capacities") or {}
+
+    if not slot_capacities:
+        return
+
+    now_utc = datetime.now(tz=timezone.utc)
+    soon_cutoff = now_utc + timedelta(hours=24)
+
+    # Collect all character IDs present in capacities
+    char_ids = list(slot_capacities.keys())
+
+    # Build per-character job counts and upcoming job data
+    char_used_mfg: dict[str, int] = {c: 0 for c in char_ids}
+    char_used_lab: dict[str, int] = {c: 0 for c in char_ids}
+    char_upcoming: dict[str, list[datetime]] = {c: [] for c in char_ids}
+
+    for job in jobs:
+        cid_key = str(job.get("character_id") or "")
+        if cid_key not in slot_capacities:
+            continue
+        activity_id = job.get("activity_id")
+        if activity_id == 1:
+            char_used_mfg[cid_key] = char_used_mfg.get(cid_key, 0) + 1
+        elif activity_id in _LAB_ACTIVITY_IDS:
+            char_used_lab[cid_key] = char_used_lab.get(cid_key, 0) + 1
+
+        end_dt = _parse_end_date(job.get("end_date"))
+        if end_dt is not None and now_utc <= end_dt <= soon_cutoff:
+            char_upcoming.setdefault(cid_key, []).append(end_dt)
+
+    # Resolve character names from the jobs list (best-effort)
+    char_name_map: dict[str, str] = {}
+    for job in jobs:
+        cid_key = str(job.get("character_id") or "")
+        if cid_key and cid_key not in char_name_map:
+            name = job.get("character_name") or cid_key
+            char_name_map[cid_key] = str(name)
+
+    st.markdown("#### Industry Slots")
+    cols = st.columns(max(len(char_ids), 1))
+    for idx, cid_key in enumerate(char_ids):
+        caps = slot_capacities.get(cid_key) or {}
+        mfg_max = int(caps.get("manufacturing_max") or 0)
+        lab_max = int(caps.get("research_max") or 0)
+        used_mfg = char_used_mfg.get(cid_key, 0)
+        used_lab = char_used_lab.get(cid_key, 0)
+        free_mfg = max(mfg_max - used_mfg, 0)
+        free_lab = max(lab_max - used_lab, 0)
+
+        name = char_name_map.get(cid_key) or cid_key
+
+        with cols[idx]:
+            st.markdown(f"**{name}**")
+
+            # Manufacturing slots
+            st.caption(f"Manufacturing: {used_mfg}/{mfg_max} used, {free_mfg} free")
+            if mfg_max > 0:
+                st.progress(min(used_mfg / mfg_max, 1.0))
+
+            # Lab slots
+            st.caption(f"Lab: {used_lab}/{lab_max} used, {free_lab} free")
+            if lab_max > 0:
+                st.progress(min(used_lab / lab_max, 1.0))
+
+            # Upcoming completions within 24h
+            upcoming = sorted(char_upcoming.get(cid_key, []))
+            if upcoming:
+                soonest = upcoming[0]
+                delta = soonest - now_utc
+                total_mins = max(int(delta.total_seconds() / 60), 0)
+                hours_left = total_mins // 60
+                mins_left = total_mins % 60
+                st.caption(f"⏰ +{len(upcoming)} in {hours_left}h {mins_left}m")
+
+    st.markdown("---")
+
+
+def _build_active_type_ids(jobs_data: dict[str, Any]) -> set[int]:
+    """Return the set of product_type_ids currently being built."""
+    jobs: list[dict[str, Any]] = jobs_data.get("jobs") or []
+    result: set[int] = set()
+    for job in jobs:
+        pid = job.get("product_type_id")
+        if pid:
+            try:
+                result.add(int(pid))
+            except (TypeError, ValueError):
+                pass
+    return result
+
+
+def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None) -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
         return
@@ -391,6 +513,18 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]]) ->
         warns = _warnings(row)
         warning_str = "; ".join(f"⚠ {w}" for w in warns) if warns else ""
         dos = row.get("days_of_supply")
+
+        # Check if this product is currently being built
+        is_active = False
+        if active_type_ids:
+            prod_type_id = row.get("product_type_id") or row.get("type_id")
+            if prod_type_id:
+                try:
+                    is_active = int(prod_type_id) in active_type_ids
+                except (TypeError, ValueError):
+                    pass
+        active_flag = "⚠️ Building" if is_active else ""
+
         table_rows.append({
             "#": rank,
             "Product": str(row.get("type_name") or row.get("type_id") or "Unknown"),
@@ -401,6 +535,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]]) ->
             "ROC %": round(sf(row.get("return_on_capital")) * 100, 0),
             "Liquidity": str(row.get("liquidity_indicator") or "Unknown"),
             "DOS": round(dos, 1) if dos is not None else None,
+            "Active?": active_flag,
             "Warnings": warning_str,
         })
 
@@ -636,10 +771,15 @@ def render() -> None:
     if overview_refresh_is_active():
         return
 
+    # Fetch active jobs once for the slot summary header and the "Active?" column
+    jobs_data = _fetch_jobs_data()
+    _render_slot_summary_header(jobs_data)
+    active_type_ids = _build_active_type_ids(jobs_data)
+
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
-        _render_recommendations_table(ranked[:15])
+        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids)
         _render_excluded_section(disqualified)
 
     with tab_shopping:
