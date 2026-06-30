@@ -7644,6 +7644,9 @@ class IndustryService:
             })
 
         # Build rows for corporation-scope jobs — attribute to installer_id
+        # Deduplicate: the character endpoint returns corp-structure jobs too,
+        # so skip any corp job whose job_id is already in the character rows.
+        char_job_ids = {r["job_id"] for r in rows}
         for job in corp_jobs:
             raw = getattr(job, "raw", None) or {}
             activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
@@ -7658,8 +7661,12 @@ class IndustryService:
             # Use installer_id as character_id so slot counting attributes correctly
             installer_id = int(getattr(job, "installer_id", 0) or 0)
 
+            corp_job_id = int(getattr(job, "job_id", 0) or 0)
+            if corp_job_id in char_job_ids:
+                continue
+
             rows.append({
-                "job_id": int(getattr(job, "job_id", 0) or 0),
+                "job_id": corp_job_id,
                 "character_id": installer_id,
                 "character_name": char_name_map.get(installer_id, str(installer_id)),
                 "activity_id": activity_id,

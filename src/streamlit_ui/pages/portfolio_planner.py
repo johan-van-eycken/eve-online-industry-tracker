@@ -376,6 +376,7 @@ def _render_header_banner(
 
 
 _LAB_ACTIVITY_IDS: frozenset[int] = frozenset({3, 4, 5, 8})
+_REACTION_ACTIVITY_IDS: frozenset[int] = frozenset({9})
 
 
 def _fetch_jobs_data() -> dict[str, Any]:
@@ -418,6 +419,7 @@ def _render_slot_summary_header(jobs_data: dict[str, Any]) -> None:
     # Build per-character job counts and upcoming job data
     char_used_mfg: dict[str, int] = {c: 0 for c in char_ids}
     char_used_lab: dict[str, int] = {c: 0 for c in char_ids}
+    char_used_reaction: dict[str, int] = {c: 0 for c in char_ids}
     char_upcoming: dict[str, list[datetime]] = {c: [] for c in char_ids}
 
     for job in jobs:
@@ -429,6 +431,8 @@ def _render_slot_summary_header(jobs_data: dict[str, Any]) -> None:
             char_used_mfg[cid_key] = char_used_mfg.get(cid_key, 0) + 1
         elif activity_id in _LAB_ACTIVITY_IDS:
             char_used_lab[cid_key] = char_used_lab.get(cid_key, 0) + 1
+        elif activity_id in _REACTION_ACTIVITY_IDS:
+            char_used_reaction[cid_key] = char_used_reaction.get(cid_key, 0) + 1
 
         end_dt = _parse_end_date(job.get("end_date"))
         if end_dt is not None and now_utc <= end_dt <= soon_cutoff:
@@ -467,6 +471,14 @@ def _render_slot_summary_header(jobs_data: dict[str, Any]) -> None:
             st.caption(f"Lab: {used_lab}/{lab_max} used, {free_lab} free")
             if lab_max > 0:
                 st.progress(min(used_lab / lab_max, 1.0))
+
+            # Reaction slots (only shown when character has reaction capacity)
+            react_max = int(caps.get("reaction_max") or 0)
+            if react_max > 0:
+                used_react = char_used_reaction.get(cid_key, 0)
+                free_react = max(react_max - used_react, 0)
+                st.caption(f"Reactions: {used_react}/{react_max} used, {free_react} free")
+                st.progress(min(used_react / react_max, 1.0))
 
             # Upcoming completions within 24h
             upcoming = sorted(char_upcoming.get(cid_key, []))
