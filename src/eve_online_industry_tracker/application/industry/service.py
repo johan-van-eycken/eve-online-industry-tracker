@@ -7805,6 +7805,19 @@ class IndustryService:
         corps = self._state.corp_manager.get_corporations()
         corp_ids = [int(c["corporation_id"]) for c in corps if c.get("corporation_id")]
 
+        # If no corporations are configured, return no_data for all type_ids
+        if not corp_ids:
+            return {
+                tid: {
+                    "reorder_date": None,
+                    "days_until_reorder": None,
+                    "urgency": "no_data",
+                    "stock_qty": 0,
+                    "velocity_per_day": None,
+                }
+                for tid in type_ids
+            }
+
         # Parse today
         today = date.fromisoformat(today_iso)
         cutoff_str = (today - timedelta(days=lookback_days)).isoformat()
@@ -7815,6 +7828,7 @@ class IndustryService:
         asset_rows = (
             app_session.query(CorporationAssetsModel)
             .filter(
+                CorporationAssetsModel.corporation_id.in_(corp_ids),
                 CorporationAssetsModel.type_id.in_(type_ids),
                 CorporationAssetsModel.is_blueprint_copy == False,  # noqa: E712
                 CorporationAssetsModel.is_singleton == False,  # noqa: E712
@@ -7830,6 +7844,7 @@ class IndustryService:
         job_rows = (
             app_session.query(CorporationIndustryJobsModel)
             .filter(
+                CorporationIndustryJobsModel.corporation_id.in_(corp_ids),
                 CorporationIndustryJobsModel.status == "active",
                 CorporationIndustryJobsModel.product_type_id.in_(type_ids),
             )
@@ -7844,6 +7859,7 @@ class IndustryService:
         tx_rows = (
             app_session.query(CorporationWalletTransactionsModel)
             .filter(
+                CorporationWalletTransactionsModel.corporation_id.in_(corp_ids),
                 CorporationWalletTransactionsModel.type_id.in_(type_ids),
                 CorporationWalletTransactionsModel.is_buy == False,  # noqa: E712
                 CorporationWalletTransactionsModel.date >= cutoff_str,

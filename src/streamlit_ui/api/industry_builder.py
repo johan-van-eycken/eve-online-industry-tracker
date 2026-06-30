@@ -276,7 +276,7 @@ def fetch_blueprint_skill_qualification(blueprint_type_ids: tuple[int, ...]) -> 
     return (response.get("data") or {}) if isinstance(response, dict) else {}
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_reorder_alerts(type_ids: tuple[int, ...]) -> dict[str, dict]:
     from streamlit_ui.api.client import api_get
     if not type_ids:
