@@ -2468,6 +2468,26 @@ class IndustryService:
             else None
         )
         owned_input_coverage_fraction = cls._owned_input_coverage_fraction(procurement_materials)
+
+        meta_group = str(row.get("meta_group_name") or "").strip().lower()
+        is_t2 = meta_group == "tech ii"
+        threshold = 5 if is_t2 else 3
+        bpc_count = int(row.get("bpc_count") or 0)
+        has_bpo = bool(row.get("has_bpo"))
+
+        if has_bpo and bpc_count == 0:
+            bpc_status = "needed"          # Have BPO, need to run copy jobs
+        elif has_bpo and bpc_count < threshold:
+            bpc_status = "low_with_bpo"    # Have BPO + some copies, but below threshold
+        elif has_bpo:
+            bpc_status = "bpo"             # BPO owned; copies above threshold → treated as well-stocked
+        elif bpc_count == 0:
+            bpc_status = "invent"          # No BPO, no BPCs → need to invent (T2) or source externally
+        elif bpc_count < threshold:
+            bpc_status = "low"             # Some BPCs but below threshold
+        else:
+            bpc_status = "stocked"         # Enough BPCs
+
         is_portfolio_candidate = bool(
             profit_amount is not None
             and profit_amount > 0
@@ -2534,6 +2554,10 @@ class IndustryService:
             "effective_profit_per_batch": effective_profit_per_batch,
             "effective_isk_per_hour": effective_isk_per_hour,
             "is_portfolio_candidate": is_portfolio_candidate,
+            "bpc_count": bpc_count,
+            "has_bpo": has_bpo,
+            "bpc_status": bpc_status,
+            "bpc_threshold": threshold,
         }
 
     @classmethod
@@ -6944,6 +6968,8 @@ class IndustryService:
             "market_price_fetched_at": product_market_pricing.get("fetched_at"),
             "market_price_sample_size": product_market_pricing.get("sample_size"),
             "market_volume_total": product_market_pricing.get("volume_total"),
+            "bpc_count": len(ctx.blueprint_copy_assets_by_type_id.get(blueprint_type_id, [])),
+            "has_bpo": bool(ctx.blueprint_original_assets_by_type_id.get(blueprint_type_id)),
         }
 
     # ----------------------------------------------------------------

@@ -508,6 +508,18 @@ def _build_active_type_ids(jobs_data: dict[str, Any]) -> set[int]:
     return result
 
 
+def _bpc_label(row: dict) -> str:
+    status = row.get("bpc_status")
+    count = int(row.get("bpc_count") or 0)
+    if status == "bpo":        return "— BPO"
+    if status == "stocked":    return f"✅ {count}"
+    if status == "low_with_bpo": return f"⚠️ {count}"
+    if status == "low":        return f"⚠️ {count}"
+    if status == "needed":     return "🔴 Copy"
+    if status == "invent":     return "🔴 Invent"
+    return "?"
+
+
 def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None) -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
@@ -548,6 +560,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
             "ROC %": round(sf(row.get("return_on_capital")) * 100, 0),
             "Liquidity": str(row.get("liquidity_indicator") or "Unknown"),
             "DOS": round(dos, 1) if dos is not None else None,
+            "BPC": _bpc_label(row),
             "Active?": active_flag,
             "Warnings": warning_str,
         })
