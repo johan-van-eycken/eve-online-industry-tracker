@@ -16,6 +16,7 @@ from eve_online_industry_tracker.db_models import (  # noqa: E402
     Blueprints,
     CharacterAssetHistoryModel,
     CharacterAssetsModel,
+    CharacterIndustryJobsModel,
 )
 
 
@@ -92,6 +93,14 @@ def test_get_owned_blueprint_assets_falls_back_to_historical_rows() -> None:
             blueprint_material_efficiency=10,
             acquisition_source="wallet_transaction",
             acquisition_total_cost=88.0,
+        )
+    )
+    app_session.add(
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=1,
+            status="active",
+            blueprint_item_id=9001,
         )
     )
     app_session.commit()
