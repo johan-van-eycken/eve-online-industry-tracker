@@ -53,6 +53,11 @@ _CONFIDENCE_SCORES: dict[str, float] = {
 }
 
 
+def _row_blueprint_type_id(row: dict) -> int:
+    """Extract blueprint_type_id from an overview/candidate row via the manufacturing_job.blueprint_sde path."""
+    return int(((row.get("manufacturing_job") or {}).get("blueprint_sde") or {}).get("blueprint_type_id") or 0)
+
+
 # ---------------------------------------------------------------------------
 # Data acquisition
 # ---------------------------------------------------------------------------
@@ -554,16 +559,13 @@ def _compute_character_assignment(
         used = char_used_mfg.get(cid_str, 0)
         return max(0, mfg_max - used)
 
-    # Compute active mfg jobs per character per manufacturing_group
-    char_group_active: dict[str, dict[str, int]] = {}
+    # Compute active mfg jobs per character (activity_id == 1 only)
+    char_active_mfg: dict[str, int] = {}
     for job in jobs:
         if job.get("activity_id") != 1:
             continue
         cid_key = str(job.get("character_id") or "")
-        # We don't have manufacturing_group on jobs; we just count all active mfg jobs per char
-        char_group_active.setdefault(cid_key, {})
-        group = str(job.get("manufacturing_group") or "_all")
-        char_group_active[cid_key][group] = char_group_active[cid_key].get(group, 0) + 1
+        char_active_mfg[cid_key] = char_active_mfg.get(cid_key, 0) + 1
 
     # Resolve character names from jobs
     char_name_map: dict[str, str] = {}
@@ -581,11 +583,7 @@ def _compute_character_assignment(
         # Determine blueprint_type_id from the row
         bp_type_id: int = 0
         try:
-            bp_type_id = int(
-                candidate.get("blueprint_type_id")
-                or ((candidate.get("manufacturing_job") or {}).get("blueprint_sde") or {}).get("blueprint_type_id")
-                or 0
-            )
+            bp_type_id = _row_blueprint_type_id(candidate)
         except (TypeError, ValueError):
             bp_type_id = 0
 
@@ -602,18 +600,16 @@ def _compute_character_assignment(
             assignment[overview_row_id] = "?"
             continue
 
-        mfg_group = str(candidate.get("manufacturing_group") or "_all")
-
         def sort_key(cid_str: str) -> tuple:
             free = free_mfg_slots(cid_str)
-            group_jobs = (char_group_active.get(cid_str) or {}).get(mfg_group, 0)
+            active_mfg = char_active_mfg.get(cid_str, 0)
             try:
                 cid_int = int(cid_str)
             except (TypeError, ValueError):
                 cid_int = 0
-            # More free slots is better (desc), more same-group jobs is better (desc),
+            # More free slots is better (desc), more active mfg jobs is better (desc),
             # lower char_id is tiebreaker (asc)
-            return (-free, -group_jobs, cid_int)
+            return (-free, -active_mfg, cid_int)
 
         best_char_id = min(qualified_char_ids, key=sort_key)
         assignment[overview_row_id] = char_name_map.get(best_char_id) or best_char_id
@@ -927,17 +923,9 @@ def render() -> None:
     top_candidates = [row for row, _ in ranked[:15]]
     blueprint_type_ids_for_qual: tuple[int, ...] = tuple(
         sorted({
-            int(
-                row.get("blueprint_type_id")
-                or ((row.get("manufacturing_job") or {}).get("blueprint_sde") or {}).get("blueprint_type_id")
-                or 0
-            )
+            _row_blueprint_type_id(row)
             for row in top_candidates
-            if int(
-                row.get("blueprint_type_id")
-                or ((row.get("manufacturing_job") or {}).get("blueprint_sde") or {}).get("blueprint_type_id")
-                or 0
-            ) > 0
+            if _row_blueprint_type_id(row) > 0
         })
     )
     skill_qual: dict[str, dict[str, bool]] = {}
