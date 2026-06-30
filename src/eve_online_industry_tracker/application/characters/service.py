@@ -201,6 +201,7 @@ class CharactersService:
                         advised_price_data = None
 
                 enriched_order = {
+                    "order_id": order.get("order_id"),
                     "owner": order.get("owner"),
                     "type_id": type_id,
                     "type_name": order.get("type_name"),
@@ -219,6 +220,8 @@ class CharactersService:
                     "region": region_name
                     or (f"Region {order.get('region_id')}" if order.get("region_id") else "Unknown"),
                     "is_buy_order": order.get("is_buy_order"),
+                    "is_corporation": order.get("is_corporation", False),
+                    "corporation_id": corporation_id,
                     "type_group_id": order.get("type_group_id", -1),
                     "type_group_name": order.get("type_group_name", "Unknown"),
                     "type_category_id": order.get("type_category_id", -1),

@@ -23,6 +23,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
     load_character_context,
 )
+from streamlit_ui.eve_constants import ACTIVITY_LAB_IDS, ACTIVITY_REACTION_IDS
 
 _ALL_META_GROUPS = {"Tech I", "Tech II", "Tech III", "Faction", "Storyline", "Other"}
 _DEFAULT_META_GROUPS_ON = {"Tech I", "Tech II", "Faction", "Storyline", "Other"}
@@ -375,8 +376,8 @@ def _render_header_banner(
             st.rerun()
 
 
-_LAB_ACTIVITY_IDS: frozenset[int] = frozenset({3, 4, 5, 8})
-_REACTION_ACTIVITY_IDS: frozenset[int] = frozenset({9})
+_LAB_ACTIVITY_IDS = ACTIVITY_LAB_IDS
+_REACTION_ACTIVITY_IDS = ACTIVITY_REACTION_IDS
 
 
 def _fetch_jobs_data() -> dict[str, Any]:
@@ -428,15 +429,15 @@ def _render_slot_summary_header(jobs_data: dict[str, Any]) -> None:
             continue
         activity_id = job.get("activity_id")
         if activity_id == 1:
-            char_used_mfg[cid_key] = char_used_mfg.get(cid_key, 0) + 1
+            char_used_mfg[cid_key] += 1
         elif activity_id in _LAB_ACTIVITY_IDS:
-            char_used_lab[cid_key] = char_used_lab.get(cid_key, 0) + 1
+            char_used_lab[cid_key] += 1
         elif activity_id in _REACTION_ACTIVITY_IDS:
-            char_used_reaction[cid_key] = char_used_reaction.get(cid_key, 0) + 1
+            char_used_reaction[cid_key] += 1
 
         end_dt = _parse_end_date(job.get("end_date"))
         if end_dt is not None and now_utc <= end_dt <= soon_cutoff:
-            char_upcoming.setdefault(cid_key, []).append(end_dt)
+            char_upcoming[cid_key].append(end_dt)
 
     # Resolve character names from the jobs list (best-effort)
     char_name_map: dict[str, str] = {}
@@ -724,11 +725,15 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
     )
     distinct_items = len(shopping_items)
     fully_stocked = sum(1 for item in shopping_items if item["buy"] == 0)
-    st.markdown(
+    no_price_count = sum(1 for item in shopping_items if item["unit_price"] is None and item["buy"] > 0)
+    summary = (
         f"**Total ISK to buy:** {_fmt_isk(total_isk_sum)} · "
         f"**Distinct items:** {distinct_items} · "
         f"**Already fully stocked:** {fully_stocked}"
     )
+    if no_price_count:
+        summary += f" · ⚠️ {no_price_count} item(s) have no price — excluded from total"
+    st.markdown(summary)
 
     # Clipboard block
     st.markdown("---")

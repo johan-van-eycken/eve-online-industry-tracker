@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -27,10 +28,14 @@ from backfill_corp_transfer_costs import (
 )
 
 
-def _make_session() -> Session:
+@pytest.fixture
+def db_session() -> Session:
     engine = create_engine("sqlite:///:memory:")
     BaseApp.metadata.create_all(bind=engine)
-    return sessionmaker(bind=engine)()
+    session = sessionmaker(bind=engine)()
+    yield session
+    session.close()
+    engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +148,9 @@ def test_fifo_match_blends_cost_when_snapshot_spans_multiple_lots() -> None:
 # Integration-style tests using in-memory DB
 # ---------------------------------------------------------------------------
 
-def test_backfill_sets_cost_from_single_character_job_fifo() -> None:
+def test_backfill_sets_cost_from_single_character_job_fifo(db_session: Session) -> None:
     """A corp history snapshot with no cost gets FIFO-matched to the correct job."""
-    session = _make_session()
+    session = db_session
 
     # Add a completed character industry job for type_id=100
     session.add(
@@ -196,9 +201,9 @@ def test_backfill_sets_cost_from_single_character_job_fifo() -> None:
     assert snapshot.acquisition_date == "2026-01-10T00:00:00Z"
 
 
-def test_backfill_uses_weighted_average_when_no_fifo_match_possible() -> None:
+def test_backfill_uses_weighted_average_when_no_fifo_match_possible(db_session: Session) -> None:
     """When the snapshot predates all job completions, fallback to weighted avg."""
-    session = _make_session()
+    session = db_session
 
     # Two jobs for type_id=200, both completed AFTER the snapshot
     session.add_all([
@@ -261,9 +266,9 @@ def test_backfill_uses_weighted_average_when_no_fifo_match_possible() -> None:
     assert snapshot.acquisition_reference_id is None
 
 
-def test_backfill_leaves_unmatched_when_no_character_job_exists() -> None:
+def test_backfill_leaves_unmatched_when_no_character_job_exists(db_session: Session) -> None:
     """Corp history rows for type_ids with no character jobs remain unchanged."""
-    session = _make_session()
+    session = db_session
 
     # No character jobs at all
     session.add(
@@ -294,9 +299,9 @@ def test_backfill_leaves_unmatched_when_no_character_job_exists() -> None:
     assert snapshot.acquisition_unit_cost is None
 
 
-def test_backfill_skips_already_costed_rows() -> None:
+def test_backfill_skips_already_costed_rows(db_session: Session) -> None:
     """Corp history rows that already have an acquisition_source are not touched."""
-    session = _make_session()
+    session = db_session
 
     session.add(
         CharacterIndustryJobsModel(
@@ -340,7 +345,7 @@ def test_backfill_skips_already_costed_rows() -> None:
     assert snapshot.acquisition_unit_cost == 88.0
 
 
-def test_backfill_multi_lot_snapshot_uses_blended_cost() -> None:
+def test_backfill_multi_lot_snapshot_uses_blended_cost(db_session: Session) -> None:
     """A single corp snapshot whose quantity spans two job lots gets a blended unit cost.
 
     Lot 1: 3 units @ 10.0  (job 9040)
@@ -349,7 +354,7 @@ def test_backfill_multi_lot_snapshot_uses_blended_cost() -> None:
     Expected blended unit_cost = (3*10 + 5*20) / 8 = 16.25
     acquisition_reference_id must be None (multi-lot match).
     """
-    session = _make_session()
+    session = db_session
 
     session.add_all([
         CharacterIndustryJobsModel(
@@ -411,9 +416,9 @@ def test_backfill_multi_lot_snapshot_uses_blended_cost() -> None:
     assert snapshot.acquisition_reference_type is None
 
 
-def test_backfill_excludes_null_status_jobs() -> None:
+def test_backfill_excludes_null_status_jobs(db_session: Session) -> None:
     """Jobs with status=None are excluded from the cost map by the DB-level filter."""
-    session = _make_session()
+    session = db_session
 
     # A job with status=None — should NOT be used for FIFO matching
     session.add(
@@ -461,13 +466,13 @@ def test_backfill_excludes_null_status_jobs() -> None:
     assert snapshot.acquisition_unit_cost is None
 
 
-def test_backfill_multiple_snapshots_for_same_type_fifo_order() -> None:
+def test_backfill_multiple_snapshots_for_same_type_fifo_order(db_session: Session) -> None:
     """Multiple corp history rows for the same type_id are assigned via FIFO.
 
     Job 1 has exactly 5 output units, snapshot 1 consumes it entirely.
     Snapshot 2 then draws from job 2.
     """
-    session = _make_session()
+    session = db_session
 
     # Job 1: exactly 5 units (will be fully consumed by snapshot 1)
     # Job 2: 10 units (will supply snapshot 2)
@@ -546,9 +551,9 @@ def test_backfill_multiple_snapshots_for_same_type_fifo_order() -> None:
 # New tests: Gap 1 (untracked_inventory) and Gap 2 (buy transactions)
 # ---------------------------------------------------------------------------
 
-def test_build_character_buy_cost_map_returns_fifo_sorted_by_date() -> None:
+def test_build_character_buy_cost_map_returns_fifo_sorted_by_date(db_session: Session) -> None:
     """build_character_buy_cost_map returns buy transactions sorted oldest-first per type."""
-    session = _make_session()
+    session = db_session
 
     # Insert two buy transactions for the same type_id with different dates (newer first)
     session.add_all([
@@ -590,9 +595,9 @@ def test_build_character_buy_cost_map_returns_fifo_sorted_by_date() -> None:
     assert lots[1][3] == 70002
 
 
-def test_backfill_fills_untracked_inventory_items() -> None:
+def test_backfill_fills_untracked_inventory_items(db_session: Session) -> None:
     """Items previously stamped 'untracked_inventory' are re-processed by the backfill."""
-    session = _make_session()
+    session = db_session
 
     session.add(
         CharacterIndustryJobsModel(
@@ -638,9 +643,9 @@ def test_backfill_fills_untracked_inventory_items() -> None:
     assert snapshot.acquisition_reference_id == 9060
 
 
-def test_backfill_uses_character_buy_transactions_for_unmatched_items() -> None:
+def test_backfill_uses_character_buy_transactions_for_unmatched_items(db_session: Session) -> None:
     """Items with no industry job but a matching buy transaction get buy-matched."""
-    session = _make_session()
+    session = db_session
 
     # No industry job for this type — only a buy transaction
     session.add(

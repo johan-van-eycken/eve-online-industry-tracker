@@ -10,6 +10,7 @@ from streamlit_ui.api.market_orders import (
     refresh_market_orders,
     clear_corp_market_orders_cache,
     refresh_corp_market_orders,
+    fetch_corp_market_orders_enriched,
 )
 from streamlit_ui.api.client import api_get
 from streamlit_ui.components.webpage_ui import AgGridRuntime, aggrid_height, require_aggrid
@@ -97,14 +98,15 @@ def _colored(value: str, *, color: str) -> str:
     return f"<span style='color:{color}'>{value}</span>"
 
 
+def _has_real_cost(o: dict) -> bool:
+    return o.get("cost_basis_source") not in (None, "market_order_fallback")
+
+
 # ── Summary stats computation ─────────────────────────────────────────────────
 
 def _compute_sell_stats(orders: list[dict]) -> dict:
     count = len(orders)
     total_listed = sum(float(o.get("total_price") or 0) for o in orders)
-
-    def _has_real_cost(o: dict) -> bool:
-        return o.get("cost_basis_source") not in (None, "market_order_fallback")
 
     # Est. profit at current price: total_price × net_margin% / 100
     # (net_margin = (net_proceeds - cost) / price × 100, so cost-profit = price × qty × margin/100 = total_price × margin/100)
@@ -260,10 +262,9 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
                 sell_order["Est. Days (Adv.)"] = round(float(order["estimated_sell_days_advised"]), 1)
             if order.get("isk_per_day_advised") is not None:
                 sell_order["ISK/day (Adv.)"] = order["isk_per_day_advised"]
-            has_real_cost = order.get("cost_basis_source") not in (None, "market_order_fallback")
-            if order.get("net_margin_pct_current") is not None and has_real_cost:
+            if order.get("net_margin_pct_current") is not None and _has_real_cost(order):
                 sell_order["Margin % (Current)"] = round(float(order["net_margin_pct_current"]), 1)
-            if order.get("net_margin_pct_advised") is not None and has_real_cost:
+            if order.get("net_margin_pct_advised") is not None and _has_real_cost(order):
                 sell_order["Margin % (Advised)"] = round(float(order["net_margin_pct_advised"]), 1)
             # Relist Priority column
             if priority_map is not None:
@@ -577,10 +578,23 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
     all_orders = []
     try:
         response = fetch_market_orders()
-        all_orders = response.get("data", [])
+        all_orders = list(response.get("data", []))
     except Exception as e:
         st.error(f"Error fetching market orders: {str(e)}")
         return
+
+    # Merge corp orders from the ESI corporation endpoint (adds orders placed by other characters)
+    char_order_ids: set[int] = {int(o["order_id"]) for o in all_orders if o.get("order_id") is not None}
+    for corp_id in _get_director_corp_ids():
+        try:
+            corp_orders = fetch_corp_market_orders_enriched(corp_id)
+            for o in corp_orders:
+                oid = o.get("order_id")
+                if oid is not None and int(oid) not in char_order_ids:
+                    all_orders.append(o)
+                    char_order_ids.add(int(oid))
+        except Exception:
+            pass
 
     # Build Relist Priority map: (type_name, price, station) → "High" / "Medium" / "Low" / ""
     sell_raw_all = [o for o in all_orders if not o.get("is_buy_order")]
@@ -678,17 +692,8 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
 
 
 def _get_director_corp_ids() -> list[int]:
-    """Return corporation IDs for all director-managed corporations."""
-    try:
-        corps_response = api_get("/corporations", timeout_seconds=30) or {}
-        corps = corps_response.get("data", []) if isinstance(corps_response, dict) else []
-        return [
-            int(c["corporation_id"])
-            for c in corps
-            if isinstance(c, dict) and c.get("has_director_access") and c.get("corporation_id")
-        ]
-    except Exception:
-        return []
+    from streamlit_ui.api.corporations import fetch_director_corporations
+    return [int(c["corporation_id"]) for c in fetch_director_corporations()]
 
 
 

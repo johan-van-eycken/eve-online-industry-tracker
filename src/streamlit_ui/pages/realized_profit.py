@@ -71,16 +71,11 @@ def _character_payloads() -> list[dict[str, Any]]:
 
 
 def _director_corporation_options() -> list[tuple[str, int, str]]:
-    try:
-        response = api_get("/corporations") or {}
-        corps = response.get("data") or []
-        return [
-            ("corporation", int(c["corporation_id"]), str(c.get("corporation_name") or f"Corp {c['corporation_id']}"))
-            for c in corps
-            if isinstance(c, dict) and c.get("has_director_access") and c.get("corporation_id")
-        ]
-    except Exception:
-        return []
+    from streamlit_ui.api.corporations import fetch_director_corporations
+    return [
+        ("corporation", int(c["corporation_id"]), str(c.get("corporation_name") or f"Corp {c['corporation_id']}"))
+        for c in fetch_director_corporations()
+    ]
 
 
 def _owner_selector_options() -> list[tuple[str, int, str]]:
@@ -660,7 +655,7 @@ def render() -> None:
     selected_owner_id = int(selected_owner_option[1] if isinstance(selected_owner_option, tuple) and len(selected_owner_option) >= 2 else 0)
 
     if selected_owner_type == "corporation":
-        owner_name_by_id = {corp_id: corp_name for _, corp_id, corp_name in _director_corporation_options()}
+        owner_name_by_id = {corp_id: corp_name for otype, corp_id, corp_name in owner_selector_options if otype == "corporation"}
         owner_label = "Corporation"
         owner_id_key = "corporation_id"
     else:

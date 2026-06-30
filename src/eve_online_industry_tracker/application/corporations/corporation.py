@@ -30,6 +30,25 @@ from eve_online_industry_tracker.application.characters.asset_history import (
     sync_asset_history,
 )
 
+
+def _serialize_rows(rows: list) -> list[dict]:
+    """Serialize a list of SQLAlchemy model instances to plain dicts."""
+    if not rows:
+        return []
+    cols = rows[0].__table__.columns.keys()
+    return [{col: getattr(row, col) for col in cols} for row in rows]
+
+
+def _in_query(session, model_class, ids: set, chunk_size: int = 900) -> list:
+    """Query model_class for all IDs, batched to stay under SQLite's 999-variable limit."""
+    ids_list = list(ids)
+    result = []
+    for i in range(0, len(ids_list), chunk_size):
+        chunk = ids_list[i:i + chunk_size]
+        result.extend(session.query(model_class).filter(model_class.id.in_(chunk)).all())
+    return result
+
+
 class Corporation:
     """Ingame entity of a corporation."""
 
@@ -158,14 +177,10 @@ class Corporation:
     # -------------------
     def get_assets(self) -> Dict[str, Any]:
         """Return the corporation assets."""
-        assets = self.assets if self.assets is not None else []
         return {
             "corporation_name": self.corporation_name,
             "corporation_id": self.corporation_id,
-            "assets": [
-                {col: getattr(a, col) for col in CorporationAssetsModel.__table__.columns.keys()}
-                for a in assets
-            ],
+            "assets": _serialize_rows(self.assets if self.assets is not None else []),
         }
 
     # -------------------
@@ -1051,14 +1066,10 @@ class Corporation:
             .filter_by(corporation_id=self.corporation_id)
             .all()
         )
-        orders_list = [
-            {col: getattr(o, col) for col in CorporationMarketOrdersModel.__table__.columns.keys()}
-            for o in orders
-        ]
         return {
             "corporation_name": self.corporation_name,
             "corporation_id": self.corporation_id,
-            "market_orders": orders_list,
+            "market_orders": _serialize_rows(orders),
         }
 
     # -------------------
@@ -1139,11 +1150,11 @@ class Corporation:
 
             # Bulk-load SDE type/group/category data for all orders in one pass.
             type_ids = {o.get("type_id") for o in order_list if o.get("type_id")}
-            type_data_map = {t.id: t for t in self._db_sde.session.query(Types).filter(Types.id.in_(list(type_ids))).all()}
+            type_data_map = {t.id: t for t in _in_query(self._db_sde.session, Types, type_ids)}
             group_ids = {t.groupID for t in type_data_map.values()}
-            group_data_map = {g.id: g for g in self._db_sde.session.query(Groups).filter(Groups.id.in_(list(group_ids))).all()}
+            group_data_map = {g.id: g for g in _in_query(self._db_sde.session, Groups, group_ids)}
             category_ids = {g.categoryID for g in group_data_map.values()}
-            category_data_map = {c.id: c for c in self._db_sde.session.query(Categories).filter(Categories.id.in_(list(category_ids))).all()}
+            category_data_map = {c.id: c for c in _in_query(self._db_sde.session, Categories, category_ids)}
 
             orders = []
             for order in order_list:

@@ -770,18 +770,14 @@ def render() -> None:
     owned_blueprint_scope_labels = page_context.owned_blueprint_scope_labels
 
     # Set smart session defaults on fresh session (do not override user's prior selections)
-    _PREFERRED_CORP_SCOPE = "corporation:98745576"
-    _PREFERRED_CHARACTER_ID = 2121433846
     if "industry_builder_owned_blueprints_scope" not in st.session_state:
-        if _PREFERRED_CORP_SCOPE in owned_blueprint_scope_options:
-            st.session_state["industry_builder_owned_blueprints_scope"] = _PREFERRED_CORP_SCOPE
+        preferred_corp_scope = page_context.main_character_corporation_scope
+        if preferred_corp_scope and preferred_corp_scope in owned_blueprint_scope_options:
+            st.session_state["industry_builder_owned_blueprints_scope"] = preferred_corp_scope
         else:
             st.session_state["industry_builder_owned_blueprints_scope"] = page_context.default_owned_blueprint_scope
     if "industry_builder_character_id" not in st.session_state:
-        if _PREFERRED_CHARACTER_ID in character_options:
-            st.session_state["industry_builder_character_id"] = _PREFERRED_CHARACTER_ID
-        else:
-            st.session_state["industry_builder_character_id"] = page_context.default_character_id_value
+        st.session_state["industry_builder_character_id"] = page_context.default_character_id_value
 
     selected_character_id = int(st.session_state.get("industry_builder_character_id", page_context.default_character_id_value))
 

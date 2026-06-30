@@ -29,6 +29,15 @@ def fetch_corp_market_orders(corporation_id: int) -> dict[str, Any]:
     return response if isinstance(response, dict) else {}
 
 
+@st.cache_data(ttl=3600)
+def fetch_corp_market_orders_enriched(corporation_id: int) -> list[Any]:
+    response = api_get(f"/corporations/{corporation_id}/market_orders/enriched?refresh=0", timeout_seconds=120) or {}
+    if not isinstance(response, dict):
+        return []
+    data = response.get("data") or []
+    return data if isinstance(data, list) else []
+
+
 def refresh_corp_market_orders(corporation_id: int) -> None:
     response = api_get(f"/corporations/{corporation_id}/market_orders?refresh=1", timeout_seconds=120) or {}
     if isinstance(response, dict) and response.get("status") not in {None, "success"}:
@@ -37,3 +46,4 @@ def refresh_corp_market_orders(corporation_id: int) -> None:
 
 def clear_corp_market_orders_cache() -> None:
     fetch_corp_market_orders.clear()
+    fetch_corp_market_orders_enriched.clear()

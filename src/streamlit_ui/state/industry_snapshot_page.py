@@ -45,6 +45,7 @@ class SharedIndustrySnapshotContext:
     default_character_id_value: int
     default_industry_profile_id: int
     default_owned_blueprint_scope: str
+    main_character_corporation_scope: str | None
     reactions_allowed_for_profile: bool
     overview_rows: list[dict[str, Any]]
     overview_meta: dict[str, Any]
@@ -764,10 +765,24 @@ def prepare_shared_industry_snapshot_page(
             )
             st.caption("Refresh job is running in the background. The current snapshot stays visible until the backend job completes.")
 
+    main_character_corporation_scope: str | None = None
+    for _char in _characters:
+        if bool(_char.get("is_main")):
+            try:
+                _corp_id = int(_char.get("corporation_id") or 0)
+            except Exception:
+                _corp_id = 0
+            if _corp_id > 0:
+                _candidate = f"corporation:{_corp_id}"
+                if _candidate in owned_blueprint_scope_options:
+                    main_character_corporation_scope = _candidate
+            break
+
     return SharedIndustrySnapshotContext(
         default_character_id_value=default_character_id_value,
         default_industry_profile_id=default_industry_profile_id,
         default_owned_blueprint_scope=default_owned_blueprint_scope,
+        main_character_corporation_scope=main_character_corporation_scope,
         reactions_allowed_for_profile=reactions_allowed_for_profile,
         overview_rows=overview_rows,
         overview_meta=overview_meta,
