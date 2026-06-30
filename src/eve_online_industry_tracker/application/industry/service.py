@@ -2499,6 +2499,25 @@ class IndustryService:
             and max_batches_total > 0
         )
 
+        # Capital Cycle ISK/day — total profit over planning horizon ÷ one capital cycle
+        _build_days = float(total_time_seconds or 0) / 86400.0
+        _effective_daily_volume = (
+            float(region_daily_volume_7d_avg)
+            if region_daily_volume_7d_avg is not None and float(region_daily_volume_7d_avg) > 0
+            else float(region_daily_volume)
+        )
+        _sell_days = (
+            (float(max_batches_total) * float(quantity_per_batch)) / _effective_daily_volume
+            if _effective_daily_volume > 0 and quantity_per_batch > 0 and max_batches_total > 0
+            else None
+        )
+        _cycle_days = (_build_days + _sell_days) if _sell_days is not None and _build_days > 0 else None
+        isk_per_cycle_day: float | None = (
+            (float(profit_amount) * float(max_batches_total)) / _cycle_days
+            if _cycle_days is not None and _cycle_days > 0 and profit_amount is not None and max_batches_total > 0
+            else None
+        )
+
         return {
             "overview_row_id": row.get("overview_row_id"),
             "type_id": int(row.get("type_id") or 0),
@@ -2558,6 +2577,7 @@ class IndustryService:
             "has_bpo": has_bpo,
             "bpc_status": bpc_status,
             "bpc_threshold": threshold,
+            "isk_per_cycle_day": isk_per_cycle_day,
         }
 
     @classmethod

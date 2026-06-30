@@ -185,9 +185,34 @@ def _score_row(row: dict[str, Any], ctx: dict[str, float]) -> float:
     return round(composite * 100.0, 1)
 
 
-def _rank_candidates(rows: list[dict[str, Any]]) -> list[tuple[dict[str, Any], float]]:
+SCORING_OBJECTIVES = ["Balanced", "Max ISK/hr", "Capital Turnover"]
+
+
+def _rank_candidates(
+    rows: list[dict[str, Any]],
+    objective: str = "Balanced",
+) -> list[tuple[dict[str, Any], float]]:
     if not rows:
         return []
+    if objective == "Max ISK/hr":
+        def _isk_key(row: dict) -> float:
+            try:
+                return float(row.get("isk_per_hour") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        scored = [(row, round(_isk_key(row) / 1_000_000, 1)) for row in rows]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored
+    if objective == "Capital Turnover":
+        def _ct_key(row: dict) -> float:
+            try:
+                return float(row.get("isk_per_cycle_day") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        scored = [(row, round(_ct_key(row) / 1_000_000, 1)) for row in rows]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored
+    # Default: Balanced composite
     ctx = _compute_normalization_context(rows)
     scored = [(row, _score_row(row, ctx)) for row in rows]
     scored.sort(key=lambda pair: pair[1], reverse=True)
@@ -627,12 +652,19 @@ def _reorder_tag(row: dict, reorder_alerts: dict) -> str:
     return ""   # no_data or missing → don't show
 
 
-def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None) -> None:
+_SCORE_COLUMN_LABELS: dict[str, str] = {
+    "Balanced": "Score",
+    "Max ISK/hr": "ISK/Hr (M)",
+    "Capital Turnover": "Cycle ISK/d (M)",
+}
+
+
+def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None, objective: str = "Balanced") -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
         return
 
-    st.markdown("### Top 15 Manufacturing Recommendations")
+    st.markdown(f"### Top 15 Manufacturing Recommendations — sorted by {objective}")
 
     def sf(v: Any) -> float:
         try:
@@ -640,6 +672,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
         except (TypeError, ValueError):
             return 0.0
 
+    score_col_label = _SCORE_COLUMN_LABELS.get(objective, "Score")
     table_rows = []
     for rank, (row, score) in enumerate(ranked, start=1):
         warns = _warnings(row)
@@ -664,7 +697,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
         table_rows.append({
             "#": rank,
             "Product": str(row.get("type_name") or row.get("type_id") or "Unknown"),
-            "Score": score,
+            score_col_label: score,
             "Assign to": assigned_char,
             "Profit (M)": round(sf(row.get("profit_amount")) / 1_000_000, 1),
             "ISK/Hr (M)": round(sf(row.get("isk_per_hour")) / 1_000_000, 1),
@@ -907,7 +940,14 @@ def render() -> None:
     )
 
     eligible_rows, disqualified = _apply_hard_disqualifiers(filtered_rows)
-    ranked = _rank_candidates(eligible_rows)
+
+    scoring_objective = st.selectbox(
+        "Sort by",
+        SCORING_OBJECTIVES,
+        key="portfolio_scoring_objective",
+    )
+
+    ranked = _rank_candidates(eligible_rows, objective=scoring_objective)
 
     _render_header_banner(overview_rows, filtered_rows, eligible_rows, overview_meta)
 
@@ -951,7 +991,7 @@ def render() -> None:
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
-        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts)
+        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts, objective=scoring_objective)
         _render_excluded_section(disqualified)
 
     with tab_shopping:
