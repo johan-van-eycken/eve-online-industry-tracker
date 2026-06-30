@@ -597,3 +597,20 @@ def industry_reorder_alerts():
     svc = IndustryService(state=get_state())
     result = svc.get_industry_reorder_alerts(type_ids=type_ids, today_iso=today_iso)
     return ok(data={str(k): v for k, v in result.items()})
+
+
+@industry_bp.get("/industry/track_record")
+def industry_track_record():
+    require_ready(get_state())
+    raw = (request.args.get("type_ids") or "").strip()
+    if not raw:
+        return ok(data={})
+    try:
+        type_ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        return ok(data={})
+    from datetime import date
+    today_iso = date.today().isoformat()
+    svc = IndustryService(state=get_state())
+    result = svc.get_type_track_record(type_ids=type_ids, today_iso=today_iso)
+    return ok(data={str(k): v for k, v in result.items()})

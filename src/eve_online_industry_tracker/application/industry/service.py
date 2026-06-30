@@ -22,6 +22,7 @@ from eve_online_industry_tracker.db_models import (
     CorporationAssetHistoryModel,
     CorporationAssetsModel,
     CorporationIndustryJobsModel,
+    CorporationRealizedSalesLedgerModel,
     CorporationWalletTransactionsModel,
     NpcCorporations,
     NpcStations,
@@ -7925,5 +7926,89 @@ class IndustryService:
                 "stock_qty": stock_qty,
                 "velocity_per_day": velocity_per_day,
             }
+
+        return output
+
+    def get_type_track_record(
+        self,
+        *,
+        type_ids: list[int],
+        lookback_days: int = 90,
+        today_iso: str,
+    ) -> dict[int, dict]:
+        """
+        Returns {type_id: {"status": "proven"|"unprofitable"|"marginal"|"untested",
+                            "avg_margin_fraction": float|None,
+                            "sale_count": int}}
+
+        Status rules (based on last `lookback_days` days of CorporationRealizedSalesLedgerModel):
+        - No rows for type_id in period -> "untested", avg_margin_fraction=None, sale_count=0
+        - Has rows and avg realized_margin_fraction >= 0.10 -> "proven"
+        - Has rows and avg realized_margin_fraction < 0.0 -> "unprofitable"
+        - Has rows and 0.0 <= avg realized_margin_fraction < 0.10 -> "marginal"
+        """
+        from datetime import datetime, timedelta
+
+        if not type_ids:
+            return {}
+
+        corps = self._state.corp_manager.get_corporations()
+        corp_ids = [int(c["corporation_id"]) for c in corps if c.get("corporation_id")]
+
+        if not corp_ids:
+            return {
+                tid: {
+                    "status": "untested",
+                    "avg_margin_fraction": None,
+                    "sale_count": 0,
+                }
+                for tid in type_ids
+            }
+
+        cutoff_str = (datetime.fromisoformat(today_iso) - timedelta(days=lookback_days)).isoformat()[:10]
+
+        session: Any = self._sessions.app_session()
+
+        rows = (
+            session.query(CorporationRealizedSalesLedgerModel)
+            .filter(
+                CorporationRealizedSalesLedgerModel.corporation_id.in_(corp_ids),
+                CorporationRealizedSalesLedgerModel.type_id.in_(type_ids),
+                CorporationRealizedSalesLedgerModel.date >= cutoff_str,
+                CorporationRealizedSalesLedgerModel.realized_margin_fraction.isnot(None),
+            )
+            .all()
+        )
+
+        # Group by type_id
+        margin_totals: dict[int, float] = {}
+        sale_counts: dict[int, int] = {}
+        for row in rows:
+            tid = int(row.type_id)
+            margin_totals[tid] = margin_totals.get(tid, 0.0) + float(row.realized_margin_fraction)
+            sale_counts[tid] = sale_counts.get(tid, 0) + 1
+
+        output: dict[int, dict] = {}
+        for tid in type_ids:
+            count = sale_counts.get(tid, 0)
+            if count == 0:
+                output[tid] = {
+                    "status": "untested",
+                    "avg_margin_fraction": None,
+                    "sale_count": 0,
+                }
+            else:
+                avg = margin_totals[tid] / count
+                if avg >= 0.10:
+                    status = "proven"
+                elif avg < 0.0:
+                    status = "unprofitable"
+                else:
+                    status = "marginal"
+                output[tid] = {
+                    "status": status,
+                    "avg_margin_fraction": avg,
+                    "sale_count": count,
+                }
 
         return output

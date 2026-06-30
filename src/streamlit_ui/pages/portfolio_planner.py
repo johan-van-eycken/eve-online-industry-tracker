@@ -10,6 +10,7 @@ from streamlit_ui.api.industry_builder import (
     clear_industry_builder_caches,
     fetch_blueprint_skill_qualification,
     fetch_reorder_alerts,
+    fetch_type_track_record,
     start_product_overview_refresh,
 )
 from streamlit_ui.api.industry_jobs import fetch_active_industry_jobs
@@ -652,6 +653,27 @@ def _reorder_tag(row: dict, reorder_alerts: dict) -> str:
     return ""   # no_data or missing → don't show
 
 
+def _apply_track_record_multiplier(score: float, row: dict, track_record: dict) -> float:
+    type_id_str = str(int(row.get("type_id") or 0))
+    rec = track_record.get(type_id_str) or {}
+    status = rec.get("status")
+    if status == "proven":
+        return round(score * 1.15, 1)
+    if status == "untested":
+        return round(score * 0.90, 1)
+    return score
+
+
+def _track_record_label(row: dict, track_record: dict) -> str:
+    type_id_str = str(int(row.get("type_id") or 0))
+    rec = track_record.get(type_id_str) or {}
+    status = rec.get("status")
+    if status == "proven":      return "✅ Proven"
+    if status == "unprofitable": return "⚠️ Unprofitable"
+    if status == "marginal":    return "〰 Marginal"
+    return ""   # untested or missing → don't clutter
+
+
 _SCORE_COLUMN_LABELS: dict[str, str] = {
     "Balanced": "Score",
     "Max ISK/hr": "ISK/Hr (M)",
@@ -659,7 +681,7 @@ _SCORE_COLUMN_LABELS: dict[str, str] = {
 }
 
 
-def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None, objective: str = "Balanced") -> None:
+def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None, objective: str = "Balanced", track_record: dict | None = None) -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
         return
@@ -708,6 +730,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
             "BPC": _bpc_label(row),
             "Active?": active_flag,
             "Reorder": _reorder_tag(row, reorder_alerts or {}),
+            "Track": _track_record_label(row, track_record or {}),
             "Warnings": warning_str,
         })
 
@@ -949,6 +972,26 @@ def render() -> None:
 
     ranked = _rank_candidates(eligible_rows, objective=scoring_objective)
 
+    # Apply track record multipliers after ranking
+    # (track_record is fetched below after top_candidates are determined,
+    # but we need to apply it before final re-sort — so we fetch it on top_15 type_ids)
+    _pre_type_ids = tuple(sorted({
+        int(r.get("type_id") or 0)
+        for r, _ in ranked[:15]
+        if int(r.get("type_id") or 0) > 0
+    }))
+    _track_record_pre: dict[str, dict] = {}
+    if _pre_type_ids:
+        try:
+            _track_record_pre = fetch_type_track_record(_pre_type_ids)
+        except Exception:
+            _track_record_pre = {}
+    ranked = [
+        (row, _apply_track_record_multiplier(score, row, _track_record_pre))
+        for row, score in ranked
+    ]
+    ranked.sort(key=lambda pair: pair[1], reverse=True)
+
     _render_header_banner(overview_rows, filtered_rows, eligible_rows, overview_meta)
 
     if overview_refresh_is_active():
@@ -988,10 +1031,17 @@ def render() -> None:
         except Exception:
             reorder_alerts = {}
 
+    track_record: dict[str, dict] = {}
+    if candidate_type_ids:
+        try:
+            track_record = fetch_type_track_record(candidate_type_ids)
+        except Exception:
+            track_record = {}
+
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
-        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts, objective=scoring_objective)
+        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts, objective=scoring_objective, track_record=track_record)
         _render_excluded_section(disqualified)
 
     with tab_shopping:
