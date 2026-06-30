@@ -7782,3 +7782,112 @@ class IndustryService:
             result[bp_type_id] = char_qual
 
         return result
+
+    def get_industry_reorder_alerts(
+        self,
+        *,
+        type_ids: list[int],
+        lookback_days: int = 30,
+        today_iso: str,
+    ) -> dict[int, dict]:
+        """
+        For each type_id, compute reorder urgency based on current stock and sell velocity.
+
+        Returns: {type_id: {"reorder_date": str|None, "days_until_reorder": float|None,
+                             "urgency": "urgent"|"soon"|"ok"|"no_data",
+                             "stock_qty": int, "velocity_per_day": float|None}}
+        """
+        from datetime import date, timedelta
+
+        if not type_ids:
+            return {}
+
+        corps = self._state.corp_manager.get_corporations()
+        corp_ids = [int(c["corporation_id"]) for c in corps if c.get("corporation_id")]
+
+        # Parse today
+        today = date.fromisoformat(today_iso)
+        cutoff_str = (today - timedelta(days=lookback_days)).isoformat()
+
+        app_session: Any = self._sessions.app_session()
+
+        # --- Hangar stock from corporation assets ---
+        asset_rows = (
+            app_session.query(CorporationAssetsModel)
+            .filter(
+                CorporationAssetsModel.type_id.in_(type_ids),
+                CorporationAssetsModel.is_blueprint_copy == False,  # noqa: E712
+                CorporationAssetsModel.is_singleton == False,  # noqa: E712
+            )
+            .all()
+        )
+        hangar_qty: dict[int, int] = {}
+        for row in asset_rows:
+            tid = int(row.type_id)
+            hangar_qty[tid] = hangar_qty.get(tid, 0) + int(row.quantity or 0)
+
+        # --- In-progress quantity from active manufacturing jobs ---
+        job_rows = (
+            app_session.query(CorporationIndustryJobsModel)
+            .filter(
+                CorporationIndustryJobsModel.status == "active",
+                CorporationIndustryJobsModel.product_type_id.in_(type_ids),
+            )
+            .all()
+        )
+        job_qty: dict[int, int] = {}
+        for row in job_rows:
+            tid = int(row.product_type_id)
+            job_qty[tid] = job_qty.get(tid, 0) + int(row.output_quantity or 0)
+
+        # --- Sell velocity from wallet transactions ---
+        tx_rows = (
+            app_session.query(CorporationWalletTransactionsModel)
+            .filter(
+                CorporationWalletTransactionsModel.type_id.in_(type_ids),
+                CorporationWalletTransactionsModel.is_buy == False,  # noqa: E712
+                CorporationWalletTransactionsModel.date >= cutoff_str,
+            )
+            .all()
+        )
+        sold_qty: dict[int, int] = {}
+        for row in tx_rows:
+            tid = int(row.type_id)
+            sold_qty[tid] = sold_qty.get(tid, 0) + int(row.quantity or 0)
+
+        # --- Compute urgency for each type_id ---
+        output: dict[int, dict] = {}
+        for tid in type_ids:
+            stock_qty = hangar_qty.get(tid, 0) + job_qty.get(tid, 0)
+            total_sold = sold_qty.get(tid, 0)
+
+            if total_sold == 0:
+                output[tid] = {
+                    "reorder_date": None,
+                    "days_until_reorder": None,
+                    "urgency": "no_data",
+                    "stock_qty": stock_qty,
+                    "velocity_per_day": None,
+                }
+                continue
+
+            velocity_per_day = total_sold / lookback_days
+            days_of_stock = stock_qty / velocity_per_day
+            reorder_date = (today + timedelta(days=days_of_stock)).isoformat()
+
+            if days_of_stock < 3:
+                urgency = "urgent"
+            elif days_of_stock < 7:
+                urgency = "soon"
+            else:
+                urgency = "ok"
+
+            output[tid] = {
+                "reorder_date": reorder_date,
+                "days_until_reorder": days_of_stock,
+                "urgency": urgency,
+                "stock_qty": stock_qty,
+                "velocity_per_day": velocity_per_day,
+            }
+
+        return output

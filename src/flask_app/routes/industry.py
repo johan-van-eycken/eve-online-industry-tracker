@@ -580,3 +580,20 @@ def industry_blueprint_skill_qualification():
     result = svc.get_blueprint_skill_qualification(blueprint_type_ids=type_ids)
     # JSON keys must be strings
     return ok(data={str(k): {str(cid): v for cid, v in char_map.items()} for k, char_map in result.items()})
+
+
+@industry_bp.get("/industry/reorder_alerts")
+def industry_reorder_alerts():
+    require_ready(get_state())
+    raw = (request.args.get("type_ids") or "").strip()
+    if not raw:
+        return ok(data={})
+    try:
+        type_ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        return ok(data={})
+    from datetime import date
+    today_iso = date.today().isoformat()
+    svc = IndustryService(state=get_state())
+    result = svc.get_industry_reorder_alerts(type_ids=type_ids, today_iso=today_iso)
+    return ok(data={str(k): v for k, v in result.items()})

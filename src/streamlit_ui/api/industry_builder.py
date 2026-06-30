@@ -276,8 +276,19 @@ def fetch_blueprint_skill_qualification(blueprint_type_ids: tuple[int, ...]) -> 
     return (response.get("data") or {}) if isinstance(response, dict) else {}
 
 
+@st.cache_data(ttl=120)
+def fetch_reorder_alerts(type_ids: tuple[int, ...]) -> dict[str, dict]:
+    from streamlit_ui.api.client import api_get
+    if not type_ids:
+        return {}
+    ids_str = ",".join(str(i) for i in type_ids)
+    response = api_get(f"/industry/reorder_alerts?type_ids={ids_str}") or {}
+    return (response.get("data") or {}) if isinstance(response, dict) else {}
+
+
 def clear_industry_builder_caches() -> None:
     fetch_product_overview.clear()
     fetch_portfolio_candidates.clear()
     fetch_portfolio_plan.clear()
     fetch_blueprint_skill_qualification.clear()
+    fetch_reorder_alerts.clear()

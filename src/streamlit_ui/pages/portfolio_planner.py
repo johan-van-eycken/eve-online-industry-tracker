@@ -9,6 +9,7 @@ import streamlit as st
 from streamlit_ui.api.industry_builder import (
     clear_industry_builder_caches,
     fetch_blueprint_skill_qualification,
+    fetch_reorder_alerts,
     start_product_overview_refresh,
 )
 from streamlit_ui.api.industry_jobs import fetch_active_industry_jobs
@@ -620,7 +621,17 @@ def _compute_character_assignment(
     return assignment
 
 
-def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None) -> None:
+def _reorder_tag(row: dict, reorder_alerts: dict) -> str:
+    type_id = str(int(row.get("type_id") or 0))
+    alert = reorder_alerts.get(type_id) or {}
+    urgency = alert.get("urgency")
+    if urgency == "urgent":  return "🔴 Restock now"
+    if urgency == "soon":    return "🟡 Restock soon"
+    if urgency == "ok":      return "🟢 OK"
+    return ""   # no_data or missing → don't show
+
+
+def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None) -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
         return
@@ -667,6 +678,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
             "DOS": round(dos, 1) if dos is not None else None,
             "BPC": _bpc_label(row),
             "Active?": active_flag,
+            "Reorder": _reorder_tag(row, reorder_alerts or {}),
             "Warnings": warning_str,
         })
 
@@ -936,10 +948,22 @@ def render() -> None:
             skill_qual = {}
     assignment = _compute_character_assignment(top_candidates, skill_qual, jobs_data)
 
+    candidate_type_ids = tuple(sorted({
+        int(c.get("type_id") or 0)
+        for c in top_candidates
+        if int(c.get("type_id") or 0) > 0
+    }))
+    reorder_alerts: dict[str, dict] = {}
+    if candidate_type_ids:
+        try:
+            reorder_alerts = fetch_reorder_alerts(candidate_type_ids)
+        except Exception:
+            reorder_alerts = {}
+
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
-        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment)
+        _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts)
         _render_excluded_section(disqualified)
 
     with tab_shopping:
