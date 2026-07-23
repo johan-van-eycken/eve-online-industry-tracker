@@ -707,4 +707,90 @@ def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match
     # Graceful fallback — no crash, fees default to zero.
     assert row["fee_capture_mode"] == "gross_only"
     assert row["total_fees_amount"] == 0.0
+
+
+def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_corp_also_bought_same_type() -> None:
+    """Corp sell order for a type that a character manufactured should show as Manufacturing
+    even when the corporation also has market buy transactions for that same type.
+
+    Previously, any corp buy for type X placed X into covered_type_ids, which silently
+    dropped the supplemental character industry-job lots. The sell then matched only
+    the corp market-buy lot and was classified as Trade.
+    """
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=30, corporation_name="Mixed Source Corp"))
+
+    # Character industry job that produced the items char1 transferred to the corp.
+    # Completed before the corp's own market buy to ensure FIFO consumes this lot first.
+    app_session.add(
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=8001,
+            status="delivered",
+            end_date="2026-01-10T00:00:00Z",
+            completed_date="2026-01-10T00:00:00Z",
+            blueprint_type_id=7000,
+            product_type_id=200,
+            successful_runs=1,
+            runs=1,
+            output_quantity=5,
+            unit_build_cost=20.0,
+        )
+    )
+
+    # Corp also bought units of the same type — this was wrongly blocking the char job lot.
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=30,
+            division=1,
+            transaction_id=9301,
+            client_name="Seller",
+            date="2026-01-20T00:00:00Z",
+            is_buy=True,
+            quantity=5,
+            type_id=200,
+            type_name="Mixed Item",
+            type_group_name="Ammo",
+            type_category_name="Charge",
+            unit_price=25.0,
+            total_price=125.0,
+        )
+    )
+
+    # Corp sell — only 5 units, which FIFO should consume from the char job lot (oldest).
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=30,
+            division=1,
+            transaction_id=9302,
+            client_name="Buyer",
+            date="2026-02-01T00:00:00Z",
+            is_buy=False,
+            quantity=5,
+            type_id=200,
+            type_name="Mixed Item",
+            type_group_name="Ammo",
+            type_category_name="Charge",
+            unit_price=50.0,
+            total_price=250.0,
+        )
+    )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=30)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["priced_quantity"] == 5
+    assert row["unpriced_quantity"] == 0
+    # Char job lot (industry_build_transferred) consumed first by FIFO — must be Manufacturing.
+    assert "industry_build_transferred" in row["source_mix"]
+    assert row["source_mix"]["industry_build_transferred"]["quantity"] == 5
     assert row["net_revenue"] == 250.0

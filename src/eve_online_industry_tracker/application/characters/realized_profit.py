@@ -461,8 +461,10 @@ class _BaseRealizedProfitLedgerService:
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
-        # Determine which type_ids are already covered by corp jobs, corp buys, or asset history
-        # so the supplemental fallback only fills genuine gaps.
+        # Determine which type_ids are already covered by corp jobs or backfilled asset history
+        # so the supplemental character-job fallback only fills genuine gaps.
+        # Corp market buys are intentionally excluded: a corp buy and a char-manufactured lot
+        # of the same type are different acquisition paths that should coexist in the FIFO queue.
         _covered_from_corp_jobs: set[int] = set()
         for job in industry_jobs:
             status = str(getattr(job, "status", "") or "").strip().lower()
@@ -472,16 +474,7 @@ class _BaseRealizedProfitLedgerService:
             pid = _safe_int(getattr(job, "product_type_id", None))
             if pid:
                 _covered_from_corp_jobs.add(int(pid))
-        _covered_from_corp_buys: set[int] = set()
-        for tx in wallet_transactions:
-            if not getattr(tx, "is_buy", False):
-                continue
-            tid = _safe_int(getattr(tx, "type_id", None))
-            if tid:
-                _covered_from_corp_buys.add(int(tid))
-        covered_type_ids: set[int] = (
-            _covered_from_corp_jobs | _covered_from_corp_buys | set(asset_history_lots.keys())
-        )
+        covered_type_ids: set[int] = _covered_from_corp_jobs | set(asset_history_lots.keys())
         supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id), covered_type_ids=covered_type_ids)
 
         # Merge supplemental lots into asset_history_lots (they cover disjoint type_ids by construction)
