@@ -878,3 +878,86 @@ def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufactur
     assert row["source_mix"]["industry_build_transferred"]["quantity"] == 4
     # Allocated cost: 6*30 + 4*32 = 180 + 128 = 308
     assert abs(row["allocated_cost"] - 308.0) < 0.01
+
+
+def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells() -> None:
+    """A corp market order's lump-sum broker_fee is split equally across all units that sell.
+
+    Before this fix three bugs caused the -7.5M Deluge profit to be wrong:
+    1. `or set()` made used_journal_ids a fresh empty set every call → same fee matched N times.
+    2. transaction_tax with NULL context_id was never matched (context_id required).
+    3. The full order broker_fee was assigned to one unit instead of being divided by order size.
+
+    After the fix: 3 sells at 1000 ISK each, broker_fee = 90 ISK (covers all 3 units at 3%),
+    transaction_tax = 30 ISK per unit (NULL context_id, date-proximity fallback).
+    Expected per-unit net_revenue = 1000 − 30 (broker) − 30 (tax) = 940 ISK each.
+    """
+    app_session, sde_session = _make_sessions()
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Multi-Unit Corp"))
+
+    # Three individual sell transactions for the same type at the same price,
+    # clustered within minutes of each other (same market order).
+    for tx_id, minutes_offset in [(5001, 30), (5002, 35), (5003, 45)]:
+        app_session.add(
+            CorporationWalletTransactionsModel(
+                corporation_id=50,
+                division=1,
+                transaction_id=tx_id,
+                client_name="Buyer",
+                date=f"2026-04-01T10:{minutes_offset:02d}:00Z",
+                is_buy=False,
+                quantity=1,
+                type_id=400,
+                type_name="Widget",
+                type_group_name="Frigate",
+                type_category_name="Ship",
+                unit_price=1000.0,
+                total_price=1000.0,
+            )
+        )
+
+    # One broker_fee journal entry covering the entire 3-unit order (paid before any sell),
+    # 3 units × 1000 ISK × 3% = 90 ISK. NULL context_id — typical for corp journal.
+    app_session.add(
+        CorporationWalletJournalModel(
+            corporation_id=50,
+            division=1,
+            wallet_journal_id=6001,
+            amount=-90.0,
+            balance=9910.0,
+            date="2026-04-01T10:00:00Z",
+            ref_type="brokers_fee",
+        )
+    )
+    # Three separate transaction_tax entries — one per sell, at the exact sell timestamp,
+    # NULL context_id (common for corp wallet journal entries).
+    for jid, minutes_offset in [(6002, 30), (6003, 35), (6004, 45)]:
+        app_session.add(
+            CorporationWalletJournalModel(
+                corporation_id=50,
+                division=1,
+                wallet_journal_id=jid,
+                amount=-30.0,
+                balance=0.0,
+                date=f"2026-04-01T10:{minutes_offset:02d}:00Z",
+                ref_type="transaction_tax",
+            )
+        )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+    rows = service.rebuild(corporation_id=50)
+
+    assert len(rows) == 3
+    for row in rows:
+        # Per-unit broker fee: 90 / 3 = 30 ISK
+        assert abs(row["other_fees_amount"] - 30.0) < 0.01, f"Expected 30.0, got {row['other_fees_amount']}"
+        # Per-unit transaction tax: 30 ISK (from date-proximity fallback)
+        assert abs(row["sales_tax_amount"] - 30.0) < 0.01, f"Expected 30.0, got {row['sales_tax_amount']}"
+        # Net revenue: 1000 − 30 − 30 = 940 ISK
+        assert abs(row["net_revenue"] - 940.0) < 0.01, f"Expected 940.0, got {row['net_revenue']}"
+        assert row["fee_capture_mode"] == "journal_matched"

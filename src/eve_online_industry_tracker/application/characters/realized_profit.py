@@ -238,6 +238,13 @@ def _gross_only_fee_breakdown(*, gross_revenue: float) -> tuple[float, float, fl
 
 
 _CORP_FEE_MATCH_WINDOW_SECONDS = 3600
+# Tight window for transaction_tax date-proximity fallback (fires when context_id is NULL):
+# tax entries appear at nearly the same second as their sell transaction.
+_CORP_TAX_DATE_FALLBACK_WINDOW_SECONDS = 120
+# How far after a broker_fee entry to search for its sell transactions:
+_CORP_BROKER_ATTRIBUTION_WINDOW_SECONDS = 4 * 3600
+# Max time gap between consecutive fills of the SAME order (larger gap → new order):
+_CORP_BROKER_CLUSTER_GAP_SECONDS = 90 * 60
 
 
 def _parse_eve_date(date_str: Any) -> datetime | None:
@@ -260,64 +267,85 @@ def _corp_journal_fee_breakdown(
     brokers_fee_entries: list[Any],
     transaction_tax_entries: list[Any],
     used_journal_ids: set[int],
+    pre_computed_broker_fee: float | None = None,
 ) -> tuple[float, float, float, str, list[str]]:
     """Match corp sell transaction to its brokers_fee and transaction_tax journal entries.
 
-    brokers_fee is matched by date proximity within ±_CORP_FEE_MATCH_WINDOW_SECONDS.
-    transaction_tax is matched by exact context_id == sell_transaction_id when available.
+    pre_computed_broker_fee: when set, this per-unit broker fee was already determined by
+    proportionally splitting a multi-unit order's lump-sum broker_fee journal entry across
+    all units in that order. It is used directly instead of date-proximity matching.
+
+    For brokers_fee without pre_computed_broker_fee: date-proximity within
+    ±_CORP_FEE_MATCH_WINDOW_SECONDS.
+    For transaction_tax: context_id exact match first; falls back to date proximity within
+    ±_CORP_TAX_DATE_FALLBACK_WINDOW_SECONDS when context_id is NULL.
     Each journal entry is consumed once (via used_journal_ids) to prevent double-matching.
     """
     notes: list[str] = []
     gross = float(gross_revenue)
 
-    def _find_nearest(
-        entries: list[Any],
-        use_context_id: bool = False,
-        tid: int | None = None,
-        division: int | None = None,
-    ) -> Any | None:
+    def _find_by_date(entries: list[Any], window: int, division: int | None) -> Any | None:
         for entry in entries:
             if getattr(entry, "wallet_journal_id", None) in used_journal_ids:
                 continue
-            # Division filter: skip cross-division entries when both sides specify a division
             if division is not None and getattr(entry, "division", None) is not None:
                 if entry.division != division:
                     continue
-            if use_context_id:
-                # Exact match via context_id — no date fallback
-                if tid is not None and getattr(entry, "context_id", None) == tid:
+            entry_date = _parse_eve_date(entry.date)
+            if entry_date and sell_date:
+                sd = sell_date.replace(tzinfo=None)
+                ed = entry_date.replace(tzinfo=None)
+                if abs((ed - sd).total_seconds()) <= window:
                     return entry
-            else:
-                # Date-proximity match
-                entry_date = _parse_eve_date(entry.date)
-                if entry_date and sell_date:
-                    sd = sell_date.replace(tzinfo=None)
-                    ed = entry_date.replace(tzinfo=None)
-                    if abs((ed - sd).total_seconds()) <= _CORP_FEE_MATCH_WINDOW_SECONDS:
-                        return entry
         return None
 
-    broker_entry = _find_nearest(brokers_fee_entries, division=sell_division)
-    tax_entry = _find_nearest(transaction_tax_entries, use_context_id=True, tid=sell_transaction_id, division=sell_division)
+    def _find_tax_entry(division: int | None) -> Any | None:
+        # Try exact context_id match first
+        if sell_transaction_id is not None:
+            for entry in transaction_tax_entries:
+                if getattr(entry, "wallet_journal_id", None) in used_journal_ids:
+                    continue
+                if division is not None and getattr(entry, "division", None) is not None:
+                    if entry.division != division:
+                        continue
+                ctx = getattr(entry, "context_id", None)
+                if ctx == sell_transaction_id:
+                    return entry
+                # Entry has a non-null context_id that doesn't match — skip for date fallback
+                if ctx is not None:
+                    continue
+                # context_id is NULL — eligible for date-proximity fallback (handled below)
+        # Date-proximity fallback: covers entries where context_id is NULL
+        return _find_by_date(transaction_tax_entries, _CORP_TAX_DATE_FALLBACK_WINDOW_SECONDS, division)
 
     broker_fee = 0.0
+    has_broker = False
+
+    if pre_computed_broker_fee is not None:
+        broker_fee = float(pre_computed_broker_fee)
+        has_broker = True
+    else:
+        broker_entry = _find_by_date(brokers_fee_entries, _CORP_FEE_MATCH_WINDOW_SECONDS, sell_division)
+        if broker_entry is not None:
+            eid = _safe_int(getattr(broker_entry, "wallet_journal_id", None))
+            if eid is not None:
+                used_journal_ids.add(int(eid))
+            broker_fee = abs(float(_safe_float(getattr(broker_entry, "amount", None)) or 0.0))
+            has_broker = True
+
+    tax_entry = _find_tax_entry(sell_division)
     tax_fee = 0.0
-
-    if broker_entry is not None:
-        eid = _safe_int(getattr(broker_entry, "wallet_journal_id", None))
-        if eid is not None:
-            used_journal_ids.add(int(eid))
-        broker_fee = abs(float(_safe_float(getattr(broker_entry, "amount", None)) or 0.0))
-
+    has_tax = False
     if tax_entry is not None:
         eid = _safe_int(getattr(tax_entry, "wallet_journal_id", None))
         if eid is not None:
             used_journal_ids.add(int(eid))
         tax_fee = abs(float(_safe_float(getattr(tax_entry, "amount", None)) or 0.0))
+        has_tax = True
 
-    if broker_entry is not None and tax_entry is not None:
+    if has_broker and has_tax:
         mode = "journal_matched"
-    elif broker_entry is not None or tax_entry is not None:
+    elif has_broker or has_tax:
         mode = "journal_partial"
         notes.append("Only one of broker fee or transaction tax was matched from the wallet journal.")
     else:
@@ -959,10 +987,20 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         return self._load_character_source_lots(corporation_id=int(owner_id), covered_type_ids=covered_type_ids)
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
-        """Pre-load brokers_fee and transaction_tax journal entries for date-proximity matching.
+        """Pre-load journal entries and pre-compute per-unit broker fees for corp sells.
 
-        CorporationWalletTransactionsModel has no journal_ref_id, so we match fee entries
-        to sell transactions by date proximity (within _CORP_FEE_MATCH_WINDOW_SECONDS).
+        CorporationWalletTransactionsModel has no journal_ref_id, so broker fees and
+        transaction taxes cannot be matched by reference ID.
+
+        Broker fees: a corp market order's broker_fee journal entry covers ALL units in
+        that order as a single lump sum paid at order creation time. We pre-compute a
+        per-unit allocation by grouping sell transactions of the same type_id and price
+        that cluster chronologically after the fee entry, then splitting the fee equally
+        across the cluster. This prevents the lump sum from being attributed entirely to
+        the first unit that sells.
+
+        Transaction tax: matched by context_id when available, with a narrow date-proximity
+        fallback for entries where context_id is NULL (common for corp journal entries).
         """
         def _query_by_ref_type(ref_type: str) -> list[Any]:
             return (
@@ -975,17 +1013,166 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 .all()
             )
 
+        brokers_fee_entries = _query_by_ref_type("brokers_fee")
+        transaction_tax_entries = _query_by_ref_type("transaction_tax")
+
+        sell_transactions = (
+            self._app_session.query(CorporationWalletTransactionsModel)
+            .filter(
+                CorporationWalletTransactionsModel.corporation_id == int(owner_id),
+                CorporationWalletTransactionsModel.is_buy.is_(False),
+            )
+            .all()
+        )
+
+        per_unit_broker_fees, pre_consumed_journal_ids = self._precompute_per_unit_broker_fees(
+            sell_transactions=sell_transactions,
+            brokers_fee_entries=brokers_fee_entries,
+        )
+
         return {
-            "brokers_fee_entries": _query_by_ref_type("brokers_fee"),
-            "transaction_tax_entries": _query_by_ref_type("transaction_tax"),
-            "used_journal_ids": set(),
+            "brokers_fee_entries": brokers_fee_entries,
+            "transaction_tax_entries": transaction_tax_entries,
+            "per_unit_broker_fees": per_unit_broker_fees,
+            # Initialise used_journal_ids with entries already consumed by pre-computation
+            # so the date-proximity fallback cannot re-match them for other sells.
+            "used_journal_ids": set(pre_consumed_journal_ids),
         }
+
+    @staticmethod
+    def _precompute_per_unit_broker_fees(
+        sell_transactions: list[Any],
+        brokers_fee_entries: list[Any],
+    ) -> tuple[dict[int, float], set[int]]:
+        """Proportionally split corp market order broker fees across individual sell transactions.
+
+        Returns (per_unit_broker_fee_by_tx_id, consumed_journal_ids).
+
+        For each broker_fee journal entry (processed oldest-first):
+        1. Find unmatched sell transactions that occurred AFTER the fee within
+           _CORP_BROKER_ATTRIBUTION_WINDOW_SECONDS.
+        2. Group those sells by (type_id, unit_price).
+        3. Within each group, take the first cluster of consecutive sells separated by
+           at most _CORP_BROKER_CLUSTER_GAP_SECONDS (longer gaps indicate a new order).
+        4. If fee_amount / (cluster_size × unit_price) falls in a plausible broker-rate
+           range (0.3%–25%), assign fee_amount / cluster_size to each sell in the cluster.
+        5. Try groups in order of earliest first sell (the order that started filling
+           soonest after the fee was paid is the most likely match).
+        """
+        if not brokers_fee_entries or not sell_transactions:
+            return {}, set()
+
+        _MIN_RATE = 0.003
+        _MAX_RATE = 0.25
+
+        # Index sell transactions
+        sell_data: list[tuple[datetime, int, int, float]] = []
+        for tx in sell_transactions:
+            if getattr(tx, "is_buy", None):
+                continue
+            tx_id = _safe_int(getattr(tx, "transaction_id", None))
+            type_id = _safe_int(getattr(tx, "type_id", None))
+            unit_price = _safe_float(getattr(tx, "unit_price", None))
+            date = _parse_date(getattr(tx, "date", None))
+            if tx_id is None or type_id is None or not unit_price or unit_price <= 0 or date is None:
+                continue
+            sell_data.append((date, int(tx_id), int(type_id), float(unit_price)))
+        sell_data.sort(key=lambda s: s[0])
+
+        matched_tx_ids: set[int] = set()
+        consumed_journal_ids: set[int] = set()
+        per_unit_broker_fee: dict[int, float] = {}
+
+        fee_entries_sorted = sorted(
+            brokers_fee_entries,
+            key=lambda e: (_parse_date(getattr(e, "date", None)) or datetime.min),
+        )
+
+        for fee_entry in fee_entries_sorted:
+            fee_amount = abs(float(_safe_float(getattr(fee_entry, "amount", None)) or 0.0))
+            journal_id = _safe_int(getattr(fee_entry, "wallet_journal_id", None))
+            if fee_amount <= 0:
+                continue
+            fee_date = _parse_date(getattr(fee_entry, "date", None))
+            if fee_date is None:
+                continue
+            fee_date_naive = fee_date.replace(tzinfo=None)
+
+            # Unmatched sells that occurred after this fee within the attribution window
+            candidates: list[tuple[datetime, int, int, float]] = [
+                s for s in sell_data
+                if s[1] not in matched_tx_ids
+                and 0 < (s[0].replace(tzinfo=None) - fee_date_naive).total_seconds()
+                <= _CORP_BROKER_ATTRIBUTION_WINDOW_SECONDS
+            ]
+            if not candidates:
+                continue
+
+            # Group by (type_id, rounded unit_price) — round to nearest 10 ISK for float safety
+            from collections import defaultdict as _dd
+            groups: dict[tuple[int, int], list[tuple[datetime, int, int, float]]] = _dd(list)
+            for s in candidates:
+                key = (s[2], int(round(s[3] / 10) * 10))
+                groups[key].append(s)
+
+            # Iterate groups ordered by earliest first sell (most temporally proximate to fee)
+            group_items = sorted(
+                groups.items(),
+                key=lambda kv: min(s[0] for s in kv[1]),
+            )
+
+            best_cluster: list[tuple] | None = None
+            best_per_unit: float | None = None
+
+            for (_type_id, _rounded_price), group in group_items:
+                sorted_group = sorted(group, key=lambda s: s[0])
+                # Build first cluster of consecutive fills separated by ≤ cluster gap
+                cluster: list[tuple] = [sorted_group[0]]
+                for i in range(1, len(sorted_group)):
+                    gap = (
+                        sorted_group[i][0].replace(tzinfo=None)
+                        - sorted_group[i - 1][0].replace(tzinfo=None)
+                    ).total_seconds()
+                    if gap <= _CORP_BROKER_CLUSTER_GAP_SECONDS:
+                        cluster.append(sorted_group[i])
+                    else:
+                        break
+
+                n = len(cluster)
+                price = cluster[0][3]
+                if price <= 0:
+                    continue
+                implied_rate = fee_amount / (n * price)
+                if _MIN_RATE <= implied_rate <= _MAX_RATE:
+                    best_cluster = cluster
+                    best_per_unit = fee_amount / n
+                    break  # Take first valid group (earliest sells after the fee)
+
+            if best_cluster is not None and best_per_unit is not None:
+                for s in best_cluster:
+                    per_unit_broker_fee[s[1]] = best_per_unit
+                    matched_tx_ids.add(s[1])
+                if journal_id is not None:
+                    consumed_journal_ids.add(int(journal_id))
+
+        return per_unit_broker_fee, consumed_journal_ids
 
     def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:
         tx = owner_context.get("current_tx")
         sell_date = _parse_eve_date(getattr(tx, "date", None)) if tx is not None else None
-        sell_transaction_id = getattr(tx, "transaction_id", None) if tx is not None else None
+        sell_transaction_id = _safe_int(getattr(tx, "transaction_id", None)) if tx is not None else None
         sell_division = getattr(tx, "division", None) if tx is not None else None
+
+        # Retrieve the shared used_journal_ids set — must NOT use `or set()` since an
+        # empty set is falsy, which would create a new local set and break cross-call dedup.
+        used_journal_ids = owner_context.get("used_journal_ids")
+        if not isinstance(used_journal_ids, set):
+            used_journal_ids = set()
+            owner_context["used_journal_ids"] = used_journal_ids
+
+        per_unit_broker_fees: dict[int, float] = owner_context.get("per_unit_broker_fees") or {}
+        pre_computed_broker_fee = per_unit_broker_fees.get(int(sell_transaction_id)) if sell_transaction_id is not None else None
+
         return _corp_journal_fee_breakdown(
             gross_revenue=float(gross_revenue),
             sell_date=sell_date,
@@ -993,7 +1180,8 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             sell_division=sell_division,
             brokers_fee_entries=owner_context.get("brokers_fee_entries") or [],
             transaction_tax_entries=owner_context.get("transaction_tax_entries") or [],
-            used_journal_ids=owner_context.get("used_journal_ids") or set(),
+            used_journal_ids=used_journal_ids,
+            pre_computed_broker_fee=pre_computed_broker_fee,
         )
 
 
