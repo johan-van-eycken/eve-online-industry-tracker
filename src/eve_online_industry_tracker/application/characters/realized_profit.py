@@ -791,7 +791,10 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
     def _load_wallet_transactions(self, *, owner_id: int) -> list[Any]:
         return (
             self._app_session.query(self.transaction_model)
-            .filter(self.transaction_model.character_id == int(owner_id))
+            .filter(
+                self.transaction_model.character_id == int(owner_id),
+                self.transaction_model.is_personal.is_not(False),
+            )
             .all()
         )
 

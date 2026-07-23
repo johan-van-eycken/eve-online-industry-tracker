@@ -435,7 +435,10 @@ def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_c
     assert second_row["source_mix"]["industry_build"]["quantity"] == 5
 
 
-def test_character_realized_profit_includes_non_personal_sales() -> None:
+def test_character_realized_profit_excludes_non_personal_sales() -> None:
+    # Corp sell orders (is_personal=False) appear in CharacterWalletTransactionsModel
+    # but belong to the corporation ledger, not the character ledger. They must be
+    # excluded to prevent double-counting and Trade misclassification.
     app_session, sde_session = _make_sessions()
 
     app_session.add(
@@ -473,13 +476,9 @@ def test_character_realized_profit_includes_non_personal_sales() -> None:
 
     rows = service.rebuild(character_id=1)
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["transaction_id"] == 301
-    assert row["priced_quantity"] == 0
-    assert row["unpriced_quantity"] == 5
+    assert len(rows) == 0
     persisted = app_session.query(CharacterRealizedSalesLedgerModel).filter_by(character_id=1).all()
-    assert len(persisted) == 1
+    assert len(persisted) == 0
 
 
 def test_character_realized_profit_estimates_market_fees_without_journal() -> None:
