@@ -70,11 +70,19 @@ def _character_payloads() -> list[dict[str, Any]]:
     return characters if isinstance(characters, list) else []
 
 
-def _director_corporation_options() -> list[tuple[str, int, str]]:
+def _corporation_payloads() -> list[dict[str, Any]]:
     from streamlit_ui.api.corporations import fetch_director_corporations
+    try:
+        corps = fetch_director_corporations()
+    except Exception:
+        return []
+    return corps if isinstance(corps, list) else []
+
+
+def _director_corporation_options() -> list[tuple[str, int, str]]:
     return [
         ("corporation", int(c["corporation_id"]), str(c.get("corporation_name") or f"Corp {c['corporation_id']}"))
-        for c in fetch_director_corporations()
+        for c in _corporation_payloads()
     ]
 
 
@@ -290,6 +298,33 @@ def _filtered_character_wallet_transactions(
     return filtered
 
 
+def _filtered_corp_wallet_transactions(
+    corporation_payloads: list[dict[str, Any]],
+    *,
+    selected_owner_id: int,
+    start_date: date | None,
+    end_date: date | None,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for corp in corporation_payloads:
+        if not isinstance(corp, dict):
+            continue
+        corporation_id = int(corp.get("corporation_id") or 0)
+        if selected_owner_id > 0 and corporation_id != int(selected_owner_id):
+            continue
+        for tx in corp.get("wallet_transactions") or []:
+            if not isinstance(tx, dict):
+                continue
+            tx_dt = _parse_iso_date(tx.get("date"))
+            tx_date = tx_dt.date() if tx_dt is not None else None
+            if start_date is not None and tx_date is not None and tx_date < start_date:
+                continue
+            if end_date is not None and tx_date is not None and tx_date > end_date:
+                continue
+            filtered.append(tx)
+    return filtered
+
+
 def _trade_square_metrics(
     filtered_rows: list[dict[str, Any]],
     *,
@@ -313,6 +348,16 @@ def _trade_square_metrics(
     if owner_type == "character":
         wallet_transactions = _filtered_character_wallet_transactions(
             _character_payloads(),
+            selected_owner_id=int(selected_owner_id),
+            start_date=start_date,
+            end_date=end_date,
+        )
+        buy_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
+        sell_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is False)
+        trade_purchases = sum(float(tx.get("total_price") or 0.0) for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
+    elif owner_type == "corporation":
+        wallet_transactions = _filtered_corp_wallet_transactions(
+            _corporation_payloads(),
             selected_owner_id=int(selected_owner_id),
             start_date=start_date,
             end_date=end_date,
