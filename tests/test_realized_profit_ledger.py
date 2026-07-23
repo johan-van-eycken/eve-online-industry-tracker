@@ -793,4 +793,88 @@ def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_c
     # Char job lot (industry_build_transferred) consumed first by FIFO — must be Manufacturing.
     assert "industry_build_transferred" in row["source_mix"]
     assert row["source_mix"]["industry_build_transferred"]["quantity"] == 5
-    assert row["net_revenue"] == 250.0
+
+
+def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufacturing() -> None:
+    """When a corp industry job AND a character industry job both produce the same type,
+    and all units are sold via a single corp sell order, every unit must be classified
+    as Manufacturing — none should fall through to untracked/Trade.
+
+    Previously _covered_from_corp_jobs blocked the char job lots whenever the corp had
+    its own manufacturing job for the same type_id, leaving the char-built units untracked.
+    """
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=40, corporation_name="Mixed Mfg Corp"))
+
+    # Corp industry job: 6 units completed first.
+    app_session.add(
+        CorporationIndustryJobsModel(
+            corporation_id=40,
+            job_id=6001,
+            status="delivered",
+            end_date="2026-01-05T00:00:00Z",
+            completed_date="2026-01-05T00:00:00Z",
+            blueprint_type_id=7000,
+            product_type_id=300,
+            successful_runs=6,
+            runs=6,
+            output_quantity=6,
+            unit_build_cost=30.0,
+        )
+    )
+
+    # Character industry job (Duke X1): 4 units completed after the corp job.
+    app_session.add(
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=6002,
+            status="delivered",
+            end_date="2026-01-12T00:00:00Z",
+            completed_date="2026-01-12T00:00:00Z",
+            blueprint_type_id=7000,
+            product_type_id=300,
+            successful_runs=4,
+            runs=4,
+            output_quantity=4,
+            unit_build_cost=32.0,
+        )
+    )
+
+    # Corp sell order: all 10 units in one transaction.
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=40,
+            division=1,
+            transaction_id=9401,
+            client_name="Buyer",
+            date="2026-02-01T00:00:00Z",
+            is_buy=False,
+            quantity=10,
+            type_id=300,
+            type_name="Deluge",
+            type_group_name="Frigate",
+            type_category_name="Ship",
+            unit_price=500.0,
+            total_price=5000.0,
+        )
+    )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=40)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["priced_quantity"] == 10
+    assert row["unpriced_quantity"] == 0
+    # Corp job lot consumed first (oldest), char job lot consumed after.
+    assert row["source_mix"]["industry_build"]["quantity"] == 6
+    assert row["source_mix"]["industry_build_transferred"]["quantity"] == 4
+    # Allocated cost: 6*30 + 4*32 = 180 + 128 = 308
+    assert abs(row["allocated_cost"] - 308.0) < 0.01

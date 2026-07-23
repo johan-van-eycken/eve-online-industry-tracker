@@ -177,6 +177,15 @@ def _opening_inventory_lot(events: list[dict[str, Any]]) -> FifoLot | None:
                 job = event.get("job")
                 first_known_date = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
             running_balance += int(quantity)
+        elif kind == "asset_history":
+            lot = event.get("lot")
+            if lot is not None:
+                lot_qty = _safe_int(getattr(lot, "quantity", None)) or 0
+                lot_price = _safe_float(getattr(lot, "unit_price", None))
+                if first_known_unit_cost is None and lot_price is not None and lot_price > 0 and lot_qty > 0:
+                    first_known_unit_cost = float(lot_price)
+                    first_known_date = getattr(lot, "acquisition_date", None)
+                running_balance += int(lot_qty)
         elif kind == "sell":
             tx = event.get("tx")
             quantity = _safe_int(getattr(tx, "quantity", None)) or 0
@@ -461,20 +470,14 @@ class _BaseRealizedProfitLedgerService:
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
-        # Determine which type_ids are already covered by corp jobs or backfilled asset history
-        # so the supplemental character-job fallback only fills genuine gaps.
-        # Corp market buys are intentionally excluded: a corp buy and a char-manufactured lot
-        # of the same type are different acquisition paths that should coexist in the FIFO queue.
-        _covered_from_corp_jobs: set[int] = set()
-        for job in industry_jobs:
-            status = str(getattr(job, "status", "") or "").strip().lower()
-            completed_statuses = {"delivered", "ready", "completed"}
-            if status and status not in completed_statuses:
-                continue
-            pid = _safe_int(getattr(job, "product_type_id", None))
-            if pid:
-                _covered_from_corp_jobs.add(int(pid))
-        covered_type_ids: set[int] = _covered_from_corp_jobs | set(asset_history_lots.keys())
+        # Only suppress supplemental character-job lots when backfilled asset history already
+        # encodes those char-built items (acquisition_unit_cost IS NOT NULL). In that case
+        # the asset history lot carries the correct industry_build_transferred source and
+        # adding the raw char job lot again would double-count.
+        # Corp jobs and corp buys for the same type_id are NOT a reason to exclude char lots:
+        # they represent different manufacturing runs producing distinct physical items and
+        # must coexist in the FIFO queue alongside the char-built lots.
+        covered_type_ids: set[int] = set(asset_history_lots.keys())
         supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id), covered_type_ids=covered_type_ids)
 
         # Merge supplemental lots into asset_history_lots (they cover disjoint type_ids by construction)
