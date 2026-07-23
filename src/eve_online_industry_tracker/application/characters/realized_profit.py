@@ -470,17 +470,16 @@ class _BaseRealizedProfitLedgerService:
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
-        # Only suppress supplemental character-job lots when backfilled asset history already
-        # encodes those char-built items (acquisition_unit_cost IS NOT NULL). In that case
-        # the asset history lot carries the correct industry_build_transferred source and
-        # adding the raw char job lot again would double-count.
-        # Corp jobs and corp buys for the same type_id are NOT a reason to exclude char lots:
-        # they represent different manufacturing runs producing distinct physical items and
-        # must coexist in the FIFO queue alongside the char-built lots.
-        covered_type_ids: set[int] = set(asset_history_lots.keys())
-        supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id), covered_type_ids=covered_type_ids)
+        # Always load char-job and char-buy lots regardless of whether an asset history lot
+        # exists for the same type_id. FIFO attribution only charges costs to actually-sold
+        # units; extra lots that aren't consumed simply remain unused in the queue, so there
+        # is no double-counting risk. This allows char-built items sold before the corp job
+        # was captured in asset history to be correctly attributed as Manufacturing instead
+        # of falling through to opening_inventory (Trade).
+        supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id), covered_type_ids=set())
 
-        # Merge supplemental lots into asset_history_lots (they cover disjoint type_ids by construction)
+        # Merge supplemental lots into asset_history_lots (may overlap on type_id when both
+        # a corp asset history row and char-job lots exist for the same product type)
         for supp_type_id, supp_lots in supplemental_lots.items():
             asset_history_lots.setdefault(int(supp_type_id), []).extend(supp_lots)
 
@@ -841,11 +840,11 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         return super().list_rows(owner_id=corporation_id)
 
     def _load_character_source_lots(self, corporation_id: int, covered_type_ids: set[int]) -> dict[int, list[FifoLot]]:
-        """Return FifoLots from character industry jobs and character market buys for type_ids
-        not already covered by corp jobs, corp buys, or asset history.
+        """Return FifoLots from character industry jobs and character market buys.
 
         These represent items manufactured or purchased by characters, then transferred to the
-        corporation before a corp asset sync ran (so no CorporationAssetHistoryModel row exists).
+        corporation. covered_type_ids can be used to skip type_ids already fully represented
+        by asset history lots; callers may pass an empty set to load all lots unconditionally.
         """
         lots_by_type: dict[int, list[FifoLot]] = {}
         completed_statuses = {"delivered", "ready", "completed"}
