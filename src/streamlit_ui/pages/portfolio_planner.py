@@ -375,7 +375,7 @@ def _render_header_banner(
             "Refresh Snapshot",
             key="portfolio_planner_refresh_snapshot",
             disabled=overview_refresh_is_active(),
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 (
@@ -735,7 +735,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
         })
 
     df = pd.DataFrame(table_rows)
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width="stretch")
 
     st.markdown("---")
     st.markdown("**Details per recommendation**")
@@ -787,7 +787,7 @@ def _render_excluded_section(disqualified: list[tuple[dict[str, Any], str]]) -> 
             }
             for row, reason in disqualified
         ]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def _render_page_about() -> None:
@@ -893,7 +893,7 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
         })
 
     df = pd.DataFrame(table_rows)
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width="stretch")
     st.caption(
         "* Owned quantities are estimated from the Industry Builder's material sourcing calculations. "
         "Run a corp asset sync to update."
