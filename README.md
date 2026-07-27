@@ -41,7 +41,7 @@ Set the callback URL to: `http://localhost:8765/callback`
 ### macOS / Linux
 
 ```bash
-git clone https://github.com/johan-van-eycken/eve-online-industry-tracker.git
+git clone --recurse-submodules https://github.com/johan-van-eycken/eve-online-industry-tracker.git
 cd eve-online-industry-tracker
 
 python3 -m venv .venv
@@ -60,7 +60,7 @@ python3 -m eve_online_industry_tracker
 ### Windows
 
 ```powershell
-git clone https://github.com/johan-van-eycken/eve-online-industry-tracker.git
+git clone --recurse-submodules https://github.com/johan-van-eycken/eve-online-industry-tracker.git
 cd eve-online-industry-tracker
 
 py -3.12 -m venv .venv
@@ -82,13 +82,12 @@ Once running, open **http://localhost:8501** in your browser.
 
 ## Configuration
 
-### `config/secret.json`
+### `config/private/secret.json`
 
-Create this file before first launch (it is gitignored):
+Stored in a private git submodule (`eve-online-industry-tracker-config`). Clone with `--recurse-submodules` to pull it automatically. If setting up manually, create the file at `config/private/secret.json`:
 
 ```json
 {
-    "client_id": "your_eve_app_client_id",
     "client_secret": "your_eve_app_client_secret",
     "characters": [
         {
@@ -118,7 +117,7 @@ Controls which SDE tables are imported and where the SQLite file is stored.
 | Variable | Default | Description |
 |---|---|---|
 | `APP_CONFIG_PATH` | `config/config.json` | Path to main config |
-| `APP_SECRET_PATH` | `config/secret.json` | Path to secrets file |
+| `APP_SECRET_PATH` | `config/private/secret.json` | Path to secrets file |
 | `LOG_LEVEL` | `DEBUG` | Logging verbosity |
 | `FLASK_HOST` | `localhost` | Flask bind host |
 | `FLASK_PORT` | `5000` | Flask bind port |
@@ -180,8 +179,9 @@ python scripts/import_sde.py --download --import --force
 │   └── utils/
 ├── config/
 │   ├── config.json
-│   ├── secret.json                    # gitignored — create locally
-│   └── import_sde.json
+│   ├── import_sde.json
+│   └── private/                       # private submodule — cloned via --recurse-submodules
+│       └── secret.json
 ├── database/                          # local SQLite databases (gitignored)
 ├── scripts/
 │   └── import_sde.py
