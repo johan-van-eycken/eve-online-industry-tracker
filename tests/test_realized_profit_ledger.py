@@ -18,7 +18,9 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
     CharacterWalletJournalModel,
     CharacterWalletTransactionsModel,
     CorporationIndustryJobsModel,
+    CorporationModel,
     CorporationRealizedSalesLedgerModel,
+    CorporationWalletJournalModel,
     CorporationWalletTransactionsModel,
 )
 from eve_online_industry_tracker.application.characters.asset_provenance import build_market_price_map, resolve_industry_job_cost_snapshot  # noqa: E402
@@ -433,7 +435,10 @@ def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_c
     assert second_row["source_mix"]["industry_build"]["quantity"] == 5
 
 
-def test_character_realized_profit_includes_non_personal_sales() -> None:
+def test_character_realized_profit_excludes_non_personal_sales() -> None:
+    # Corp sell orders (is_personal=False) appear in CharacterWalletTransactionsModel
+    # but belong to the corporation ledger, not the character ledger. They must be
+    # excluded to prevent double-counting and Trade misclassification.
     app_session, sde_session = _make_sessions()
 
     app_session.add(
@@ -471,13 +476,9 @@ def test_character_realized_profit_includes_non_personal_sales() -> None:
 
     rows = service.rebuild(character_id=1)
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["transaction_id"] == 301
-    assert row["priced_quantity"] == 0
-    assert row["unpriced_quantity"] == 5
+    assert len(rows) == 0
     persisted = app_session.query(CharacterRealizedSalesLedgerModel).filter_by(character_id=1).all()
-    assert len(persisted) == 1
+    assert len(persisted) == 0
 
 
 def test_character_realized_profit_estimates_market_fees_without_journal() -> None:
@@ -599,3 +600,364 @@ def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture() -> Non
 
     persisted = app_session.query(CorporationRealizedSalesLedgerModel).filter_by(corporation_id=10).all()
     assert len(persisted) == 1
+
+
+def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
+    """Corp ledger row uses journal_matched mode when brokers_fee and transaction_tax entries exist within the time window."""
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=20, corporation_name="Test Corp"))
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=20,
+            division=1,
+            transaction_id=9100,
+            client_name="Buyer",
+            date="2026-03-01T10:00:00Z",
+            is_buy=False,
+            quantity=10,
+            type_id=300,
+            type_name="Sell Item",
+            type_group_name="Modules",
+            type_category_name="Module",
+            unit_price=100.0,
+            total_price=1000.0,
+        )
+    )
+    # brokers_fee debit (negative amount in EVE) — within 5 minutes of the sell
+    app_session.add(
+        CorporationWalletJournalModel(
+            corporation_id=20,
+            division=1,
+            wallet_journal_id=8001,
+            amount=-30.0,
+            balance=9970.0,
+            date="2026-03-01T10:00:02Z",
+            ref_type="brokers_fee",
+        )
+    )
+    # transaction_tax debit (negative amount in EVE) — within 5 minutes of the sell
+    app_session.add(
+        CorporationWalletJournalModel(
+            corporation_id=20,
+            division=1,
+            wallet_journal_id=8002,
+            amount=-20.0,
+            balance=9950.0,
+            date="2026-03-01T10:00:03Z",
+            ref_type="transaction_tax",
+            context_id=9100,
+            context_id_type="market_transaction_id",
+        )
+    )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=20)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["fee_capture_mode"] == "journal_matched"
+    assert row["total_fees_amount"] == 50.0
+    assert row["net_revenue"] == 950.0
+    assert row["other_fees_amount"] == 30.0
+    assert row["sales_tax_amount"] == 20.0
+
+
+def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match() -> None:
+    """Corp ledger row falls back to gross_only when no journal entries match."""
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=21, corporation_name="No Journal Corp"))
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=21,
+            division=1,
+            transaction_id=9200,
+            client_name="Buyer",
+            date="2026-03-02T10:00:00Z",
+            is_buy=False,
+            quantity=5,
+            type_id=301,
+            type_name="Unmatched Item",
+            type_group_name="Ammo",
+            type_category_name="Charge",
+            unit_price=50.0,
+            total_price=250.0,
+        )
+    )
+    # No journal entries at all for this corporation.
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=21)
+
+    assert len(rows) == 1
+    row = rows[0]
+    # Graceful fallback — no crash, fees default to zero.
+    assert row["fee_capture_mode"] == "gross_only"
+    assert row["total_fees_amount"] == 0.0
+
+
+def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_corp_also_bought_same_type() -> None:
+    """Corp sell order for a type that a character manufactured should show as Manufacturing
+    even when the corporation also has market buy transactions for that same type.
+
+    Previously, any corp buy for type X placed X into covered_type_ids, which silently
+    dropped the supplemental character industry-job lots. The sell then matched only
+    the corp market-buy lot and was classified as Trade.
+    """
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=30, corporation_name="Mixed Source Corp"))
+
+    # Character industry job that produced the items char1 transferred to the corp.
+    # Completed before the corp's own market buy to ensure FIFO consumes this lot first.
+    app_session.add(
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=8001,
+            status="delivered",
+            end_date="2026-01-10T00:00:00Z",
+            completed_date="2026-01-10T00:00:00Z",
+            blueprint_type_id=7000,
+            product_type_id=200,
+            successful_runs=1,
+            runs=1,
+            output_quantity=5,
+            unit_build_cost=20.0,
+        )
+    )
+
+    # Corp also bought units of the same type — this was wrongly blocking the char job lot.
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=30,
+            division=1,
+            transaction_id=9301,
+            client_name="Seller",
+            date="2026-01-20T00:00:00Z",
+            is_buy=True,
+            quantity=5,
+            type_id=200,
+            type_name="Mixed Item",
+            type_group_name="Ammo",
+            type_category_name="Charge",
+            unit_price=25.0,
+            total_price=125.0,
+        )
+    )
+
+    # Corp sell — only 5 units, which FIFO should consume from the char job lot (oldest).
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=30,
+            division=1,
+            transaction_id=9302,
+            client_name="Buyer",
+            date="2026-02-01T00:00:00Z",
+            is_buy=False,
+            quantity=5,
+            type_id=200,
+            type_name="Mixed Item",
+            type_group_name="Ammo",
+            type_category_name="Charge",
+            unit_price=50.0,
+            total_price=250.0,
+        )
+    )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=30)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["priced_quantity"] == 5
+    assert row["unpriced_quantity"] == 0
+    # Char job lot (industry_build_transferred) consumed first by FIFO — must be Manufacturing.
+    assert "industry_build_transferred" in row["source_mix"]
+    assert row["source_mix"]["industry_build_transferred"]["quantity"] == 5
+
+
+def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufacturing() -> None:
+    """When a corp industry job AND a character industry job both produce the same type,
+    and all units are sold via a single corp sell order, every unit must be classified
+    as Manufacturing — none should fall through to untracked/Trade.
+
+    Previously _covered_from_corp_jobs blocked the char job lots whenever the corp had
+    its own manufacturing job for the same type_id, leaving the char-built units untracked.
+    """
+    app_session, sde_session = _make_sessions()
+
+    app_session.add(CorporationModel(corporation_id=40, corporation_name="Mixed Mfg Corp"))
+
+    # Corp industry job: 6 units completed first.
+    app_session.add(
+        CorporationIndustryJobsModel(
+            corporation_id=40,
+            job_id=6001,
+            status="delivered",
+            end_date="2026-01-05T00:00:00Z",
+            completed_date="2026-01-05T00:00:00Z",
+            blueprint_type_id=7000,
+            product_type_id=300,
+            successful_runs=6,
+            runs=6,
+            output_quantity=6,
+            unit_build_cost=30.0,
+        )
+    )
+
+    # Character industry job (Duke X1): 4 units completed after the corp job.
+    app_session.add(
+        CharacterIndustryJobsModel(
+            character_id=1,
+            job_id=6002,
+            status="delivered",
+            end_date="2026-01-12T00:00:00Z",
+            completed_date="2026-01-12T00:00:00Z",
+            blueprint_type_id=7000,
+            product_type_id=300,
+            successful_runs=4,
+            runs=4,
+            output_quantity=4,
+            unit_build_cost=32.0,
+        )
+    )
+
+    # Corp sell order: all 10 units in one transaction.
+    app_session.add(
+        CorporationWalletTransactionsModel(
+            corporation_id=40,
+            division=1,
+            transaction_id=9401,
+            client_name="Buyer",
+            date="2026-02-01T00:00:00Z",
+            is_buy=False,
+            quantity=10,
+            type_id=300,
+            type_name="Deluge",
+            type_group_name="Frigate",
+            type_category_name="Ship",
+            unit_price=500.0,
+            total_price=5000.0,
+        )
+    )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+
+    rows = service.rebuild(corporation_id=40)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["priced_quantity"] == 10
+    assert row["unpriced_quantity"] == 0
+    # Corp job lot consumed first (oldest), char job lot consumed after.
+    assert row["source_mix"]["industry_build"]["quantity"] == 6
+    assert row["source_mix"]["industry_build_transferred"]["quantity"] == 4
+    # Allocated cost: 6*30 + 4*32 = 180 + 128 = 308
+    assert abs(row["allocated_cost"] - 308.0) < 0.01
+
+
+def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells() -> None:
+    """A corp market order's lump-sum broker_fee is split equally across all units that sell.
+
+    Before this fix three bugs caused the -7.5M Deluge profit to be wrong:
+    1. `or set()` made used_journal_ids a fresh empty set every call → same fee matched N times.
+    2. transaction_tax with NULL context_id was never matched (context_id required).
+    3. The full order broker_fee was assigned to one unit instead of being divided by order size.
+
+    After the fix: 3 sells at 1000 ISK each, broker_fee = 90 ISK (covers all 3 units at 3%),
+    transaction_tax = 30 ISK per unit (NULL context_id, date-proximity fallback).
+    Expected per-unit net_revenue = 1000 − 30 (broker) − 30 (tax) = 940 ISK each.
+    """
+    app_session, sde_session = _make_sessions()
+    app_session.add(CorporationModel(corporation_id=50, corporation_name="Multi-Unit Corp"))
+
+    # Three individual sell transactions for the same type at the same price,
+    # clustered within minutes of each other (same market order).
+    for tx_id, minutes_offset in [(5001, 30), (5002, 35), (5003, 45)]:
+        app_session.add(
+            CorporationWalletTransactionsModel(
+                corporation_id=50,
+                division=1,
+                transaction_id=tx_id,
+                client_name="Buyer",
+                date=f"2026-04-01T10:{minutes_offset:02d}:00Z",
+                is_buy=False,
+                quantity=1,
+                type_id=400,
+                type_name="Widget",
+                type_group_name="Frigate",
+                type_category_name="Ship",
+                unit_price=1000.0,
+                total_price=1000.0,
+            )
+        )
+
+    # One broker_fee journal entry covering the entire 3-unit order (paid before any sell),
+    # 3 units × 1000 ISK × 3% = 90 ISK. NULL context_id — typical for corp journal.
+    app_session.add(
+        CorporationWalletJournalModel(
+            corporation_id=50,
+            division=1,
+            wallet_journal_id=6001,
+            amount=-90.0,
+            balance=9910.0,
+            date="2026-04-01T10:00:00Z",
+            ref_type="brokers_fee",
+        )
+    )
+    # Three separate transaction_tax entries — one per sell, at the exact sell timestamp,
+    # NULL context_id (common for corp wallet journal entries).
+    for jid, minutes_offset in [(6002, 30), (6003, 35), (6004, 45)]:
+        app_session.add(
+            CorporationWalletJournalModel(
+                corporation_id=50,
+                division=1,
+                wallet_journal_id=jid,
+                amount=-30.0,
+                balance=0.0,
+                date=f"2026-04-01T10:{minutes_offset:02d}:00Z",
+                ref_type="transaction_tax",
+            )
+        )
+    app_session.commit()
+
+    service = CorporationRealizedProfitLedgerService(
+        app_session=app_session,
+        sde_session=sde_session,
+        market_prices=[],
+    )
+    rows = service.rebuild(corporation_id=50)
+
+    assert len(rows) == 3
+    for row in rows:
+        # Per-unit broker fee: 90 / 3 = 30 ISK
+        assert abs(row["other_fees_amount"] - 30.0) < 0.01, f"Expected 30.0, got {row['other_fees_amount']}"
+        # Per-unit transaction tax: 30 ISK (from date-proximity fallback)
+        assert abs(row["sales_tax_amount"] - 30.0) < 0.01, f"Expected 30.0, got {row['sales_tax_amount']}"
+        # Net revenue: 1000 − 30 − 30 = 940 ISK
+        assert abs(row["net_revenue"] - 940.0) < 0.01, f"Expected 940.0, got {row['net_revenue']}"
+        assert row["fee_capture_mode"] == "journal_matched"

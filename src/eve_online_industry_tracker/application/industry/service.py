@@ -22,6 +22,7 @@ from eve_online_industry_tracker.db_models import (
     CorporationAssetHistoryModel,
     CorporationAssetsModel,
     CorporationIndustryJobsModel,
+    CorporationRealizedSalesLedgerModel,
     CorporationWalletTransactionsModel,
     NpcCorporations,
     NpcStations,
@@ -2468,6 +2469,26 @@ class IndustryService:
             else None
         )
         owned_input_coverage_fraction = cls._owned_input_coverage_fraction(procurement_materials)
+
+        meta_group = str(row.get("meta_group_name") or "").strip().lower()
+        is_t2 = meta_group == "tech ii"
+        threshold = 5 if is_t2 else 3
+        bpc_count = int(row.get("bpc_count") or 0)
+        has_bpo = bool(row.get("has_bpo"))
+
+        if has_bpo and bpc_count == 0:
+            bpc_status = "needed"          # Have BPO, need to run copy jobs
+        elif has_bpo and bpc_count < threshold:
+            bpc_status = "low_with_bpo"    # Have BPO + some copies, but below threshold
+        elif has_bpo:
+            bpc_status = "bpo"             # BPO owned; copies above threshold → treated as well-stocked
+        elif bpc_count == 0:
+            bpc_status = "invent"          # No BPO, no BPCs → need to invent (T2) or source externally
+        elif bpc_count < threshold:
+            bpc_status = "low"             # Some BPCs but below threshold
+        else:
+            bpc_status = "stocked"         # Enough BPCs
+
         is_portfolio_candidate = bool(
             profit_amount is not None
             and profit_amount > 0
@@ -2477,6 +2498,25 @@ class IndustryService:
             and slot_hours_per_batch is not None
             and slot_hours_per_batch > 0
             and max_batches_total > 0
+        )
+
+        # Capital Cycle ISK/day — total profit over planning horizon ÷ one capital cycle
+        _build_days = float(total_time_seconds or 0) / 86400.0
+        _effective_daily_volume = (
+            float(region_daily_volume_7d_avg)
+            if region_daily_volume_7d_avg is not None and float(region_daily_volume_7d_avg) > 0
+            else float(region_daily_volume)
+        )
+        _sell_days = (
+            (float(max_batches_total) * float(quantity_per_batch)) / _effective_daily_volume
+            if _effective_daily_volume > 0 and quantity_per_batch > 0 and max_batches_total > 0
+            else None
+        )
+        _cycle_days = (_build_days + _sell_days) if _sell_days is not None and _build_days > 0 else None
+        isk_per_cycle_day: float | None = (
+            (float(profit_amount) * float(max_batches_total)) / _cycle_days
+            if _cycle_days is not None and _cycle_days > 0 and profit_amount is not None and max_batches_total > 0
+            else None
         )
 
         return {
@@ -2534,6 +2574,11 @@ class IndustryService:
             "effective_profit_per_batch": effective_profit_per_batch,
             "effective_isk_per_hour": effective_isk_per_hour,
             "is_portfolio_candidate": is_portfolio_candidate,
+            "bpc_count": bpc_count,
+            "has_bpo": has_bpo,
+            "bpc_status": bpc_status,
+            "bpc_threshold": threshold,
+            "isk_per_cycle_day": isk_per_cycle_day,
         }
 
     @classmethod
@@ -5732,6 +5777,7 @@ class IndustryService:
         *,
         owned_blueprints_scope: str,
         material_price_map: dict[int, dict[str, Any]] | None = None,
+        corporation_hangar_flags: list[str] | None = None,
     ) -> tuple[dict[int, int], dict[int, float]]:
         session: Any = self._sessions.app_session()
         sde_session: Any = self._sessions.sde_session()
@@ -5767,15 +5813,21 @@ class IndustryService:
                     .all()
                 )
 
+            # Hangar flag filter is solely controlled by the caller via corporation_hangar_flags.
+            # None means no filter (return all assets); a non-empty list restricts to those flags.
+            _hangar_flags: list[str] | None = corporation_hangar_flags
+
             def query_corporation_assets(ids: list[int]) -> list[CorporationAssetsModel]:
                 normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
                 if not normalized_ids:
                     return []
-                return (
+                q = (
                     session.query(CorporationAssetsModel)
                     .filter(CorporationAssetsModel.corporation_id.in_(normalized_ids))
-                    .all()
                 )
+                if _hangar_flags:
+                    q = q.filter(CorporationAssetsModel.location_flag.in_(_hangar_flags))
+                return q.all()
 
             character_assets: list[CharacterAssetsModel] = []
             corporation_assets: list[CorporationAssetsModel] = []
@@ -6264,9 +6316,14 @@ class IndustryService:
             progress_callback(0.45, "Loading owned item inventory", {"stage": "inventory"})
         blueprint_copy_assets_by_type_id: dict[int, list] = {}
         blueprint_original_assets_by_type_id: dict[int, list] = {}
+        _admin_hangar_flag = self._adm("industry", "industry_hangar_flag", None)
+        _corporation_hangar_flags: list[str] | None = (
+            [str(_admin_hangar_flag)] if _admin_hangar_flag is not None else None
+        )
         available_owned_item_quantity_by_type_id_base, owned_item_unit_cost_by_type_id = self._get_owned_item_inventory(
             owned_blueprints_scope=owned_blueprints_scope,
             material_price_map=material_price_map,
+            corporation_hangar_flags=_corporation_hangar_flags,
         )
         (
             character_blueprint_assets, corporation_blueprint_assets,
@@ -6932,6 +6989,8 @@ class IndustryService:
             "market_price_fetched_at": product_market_pricing.get("fetched_at"),
             "market_price_sample_size": product_market_pricing.get("sample_size"),
             "market_volume_total": product_market_pricing.get("volume_total"),
+            "bpc_count": len(ctx.blueprint_copy_assets_by_type_id.get(blueprint_type_id, [])),
+            "has_bpo": bool(ctx.blueprint_original_assets_by_type_id.get(blueprint_type_id)),
         }
 
     # ----------------------------------------------------------------
@@ -7513,17 +7572,34 @@ class IndustryService:
         return capacities
 
     def industry_active_jobs(self, *, character_id: int | None = None) -> dict[str, Any]:
-        """Return active industry jobs and slot capacities, optionally filtered by character."""
+        """Return active industry jobs and slot capacities, optionally filtered by character.
+
+        Includes both character-scope jobs (CharacterIndustryJobsModel) and
+        corporation-scope jobs (CorporationIndustryJobsModel).  Corp jobs are
+        attributed to the character who installed them via installer_id so that
+        per-character slot counting works correctly.
+        """
         from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
         session: Any = self._sessions.app_session()
-        query = session.query(CharacterIndustryJobsModel).filter(
+
+        # --- Character-scope jobs ---
+        char_query = session.query(CharacterIndustryJobsModel).filter(
             CharacterIndustryJobsModel.status == "active"
         )
         if character_id is not None:
-            query = query.filter(CharacterIndustryJobsModel.character_id == int(character_id))
+            char_query = char_query.filter(CharacterIndustryJobsModel.character_id == int(character_id))
+        char_jobs = char_query.all()
 
-        jobs = query.all()
+        # --- Corporation-scope jobs ---
+        # Fetch for all corporations known to the system; filter by installer_id
+        # when character_id is given.
+        corp_query = session.query(CorporationIndustryJobsModel).filter(
+            CorporationIndustryJobsModel.status == "active"
+        )
+        if character_id is not None:
+            corp_query = corp_query.filter(CorporationIndustryJobsModel.installer_id == int(character_id))
+        corp_jobs = corp_query.all()
 
         # Slot capacities (always include even with no active jobs)
         all_capacities = self._character_slot_capacities()
@@ -7532,12 +7608,12 @@ class IndustryService:
         else:
             slot_capacities = {str(k): v for k, v in all_capacities.items()}
 
-        if not jobs:
+        if not char_jobs and not corp_jobs:
             return {"jobs": [], "slot_capacities": slot_capacities}
 
-        # Collect type IDs for name resolution
+        # Collect type IDs for name resolution across both job lists
         type_ids: set[int] = set()
-        for job in jobs:
+        for job in list(char_jobs) + list(corp_jobs):
             bp_type_id = getattr(job, "blueprint_type_id", None)
             prod_type_id = getattr(job, "product_type_id", None)
             if bp_type_id:
@@ -7551,8 +7627,17 @@ class IndustryService:
         if type_ids:
             type_data_map = get_type_data(sde_session, language, sorted(type_ids))
 
-        # Resolve character names
-        char_ids: set[int] = {int(getattr(j, "character_id", 0)) for j in jobs if getattr(j, "character_id", None)}
+        # Resolve character names from both job sets
+        char_ids: set[int] = set()
+        for j in char_jobs:
+            cid = getattr(j, "character_id", None)
+            if cid:
+                char_ids.add(int(cid))
+        for j in corp_jobs:
+            iid = getattr(j, "installer_id", None)
+            if iid:
+                char_ids.add(int(iid))
+
         char_name_map: dict[int, str] = {}
         if char_ids:
             char_manager = getattr(self._state, "char_manager", None)
@@ -7567,7 +7652,9 @@ class IndustryService:
                     pass
 
         rows: list[dict[str, Any]] = []
-        for job in jobs:
+
+        # Build rows for character-scope jobs
+        for job in char_jobs:
             raw = getattr(job, "raw", None) or {}
             activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
             activity_name = self._ACTIVITY_ID_TO_NAME.get(activity_id, f"Unknown ({activity_id})")
@@ -7600,7 +7687,328 @@ class IndustryService:
                 "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
                 "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
+                "is_corp_job": False,
+            })
+
+        # Build rows for corporation-scope jobs — attribute to installer_id
+        # Deduplicate: the character endpoint returns corp-structure jobs too,
+        # so skip any corp job whose job_id is already in the character rows.
+        char_job_ids = {r["job_id"] for r in rows}
+        for job in corp_jobs:
+            raw = getattr(job, "raw", None) or {}
+            activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
+            activity_name = self._ACTIVITY_ID_TO_NAME.get(activity_id, f"Unknown ({activity_id})")
+
+            bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
+            prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
+
+            bp_name = (type_data_map.get(bp_type_id) or {}).get("type_name", str(bp_type_id)) if bp_type_id else ""
+            prod_name = (type_data_map.get(prod_type_id) or {}).get("type_name", str(prod_type_id)) if prod_type_id else ""
+
+            # Use installer_id as character_id so slot counting attributes correctly
+            installer_id = int(getattr(job, "installer_id", 0) or 0)
+
+            corp_job_id = int(getattr(job, "job_id", 0) or 0)
+            if corp_job_id in char_job_ids:
+                continue
+
+            rows.append({
+                "job_id": corp_job_id,
+                "character_id": installer_id,
+                "character_name": char_name_map.get(installer_id, str(installer_id)),
+                "activity_id": activity_id,
+                "activity_name": activity_name,
+                "blueprint_type_id": bp_type_id,
+                "blueprint_name": bp_name,
+                "product_type_id": prod_type_id,
+                "product_name": prod_name,
+                "runs": int(getattr(job, "runs", 0) or 0),
+                "output_quantity": int(getattr(job, "output_quantity", 0) or 0),
+                "cost": float(getattr(job, "cost", 0) or 0),
+                "start_date": getattr(job, "start_date", None),
+                "end_date": getattr(job, "end_date", None),
+                "facility_id": int(getattr(job, "facility_id", 0) or 0),
+                "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
+                "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
+                "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
+                "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
+                "is_corp_job": True,
             })
 
         rows.sort(key=lambda r: r.get("end_date") or "")
         return {"jobs": rows, "slot_capacities": slot_capacities}
+
+    def get_blueprint_skill_qualification(
+        self,
+        *,
+        blueprint_type_ids: list[int],
+    ) -> dict[int, dict[int, bool]]:
+        """
+        For each blueprint_type_id, return whether each configured character
+        meets the manufacturing skill requirements.
+
+        Returns: {blueprint_type_id: {character_id: bool}}
+        """
+        if not blueprint_type_ids:
+            return {}
+
+        characters = self._state.char_manager.get_characters()
+        character_ids: list[int] = [int(c["character_id"]) for c in characters if c.get("character_id")]
+
+        # Fetch trained skill levels for each character
+        char_skill_levels: dict[int, dict[int, int]] = {}
+        for character_id in character_ids:
+            try:
+                char_skill_levels[character_id] = self._get_character_trained_skill_levels(
+                    character_id=character_id
+                )
+            except Exception:
+                char_skill_levels[character_id] = {}
+
+        # Query blueprints from SDE
+        sde_session: Any = self._sessions.sde_session()
+        blueprint_rows = (
+            sde_session.query(Blueprints)
+            .filter(Blueprints.blueprintTypeID.in_(blueprint_type_ids))
+            .all()
+        )
+        blueprint_skills_by_type_id: dict[int, list[dict[str, int]]] = {}
+        for bp in blueprint_rows:
+            activities = bp.activities or {}
+            if not isinstance(activities, dict):
+                activities = {}
+            mfg_skills = activities.get("1", {}).get("skills", [])
+            if not isinstance(mfg_skills, list):
+                mfg_skills = []
+            blueprint_skills_by_type_id[int(bp.blueprintTypeID)] = [
+                s for s in mfg_skills if isinstance(s, dict)
+            ]
+
+        result: dict[int, dict[int, bool]] = {}
+        for bp_type_id in blueprint_type_ids:
+            required_skills = blueprint_skills_by_type_id.get(bp_type_id)
+            if required_skills is None:
+                # Blueprint not found in SDE — no requirements, all qualify
+                result[bp_type_id] = {cid: True for cid in character_ids}
+                continue
+
+            char_qual: dict[int, bool] = {}
+            for character_id in character_ids:
+                trained = char_skill_levels.get(character_id) or {}
+                qualifies = all(
+                    trained.get(int(req.get("typeID") or 0), 0) >= int(req.get("level") or 0)
+                    for req in required_skills
+                )
+                char_qual[character_id] = qualifies
+            result[bp_type_id] = char_qual
+
+        return result
+
+    def get_industry_reorder_alerts(
+        self,
+        *,
+        type_ids: list[int],
+        lookback_days: int = 30,
+        today_iso: str,
+    ) -> dict[int, dict]:
+        """
+        For each type_id, compute reorder urgency based on current stock and sell velocity.
+
+        Returns: {type_id: {"reorder_date": str|None, "days_until_reorder": float|None,
+                             "urgency": "urgent"|"soon"|"ok"|"no_data",
+                             "stock_qty": int, "velocity_per_day": float|None}}
+        """
+        from datetime import date, timedelta
+
+        if not type_ids:
+            return {}
+
+        corps = self._state.corp_manager.get_corporations()
+        corp_ids = [int(c["corporation_id"]) for c in corps if c.get("corporation_id")]
+
+        # If no corporations are configured, return no_data for all type_ids
+        if not corp_ids:
+            return {
+                tid: {
+                    "reorder_date": None,
+                    "days_until_reorder": None,
+                    "urgency": "no_data",
+                    "stock_qty": 0,
+                    "velocity_per_day": None,
+                }
+                for tid in type_ids
+            }
+
+        # Parse today
+        today = date.fromisoformat(today_iso)
+        cutoff_str = (today - timedelta(days=lookback_days)).isoformat()
+
+        app_session: Any = self._sessions.app_session()
+
+        # --- Hangar stock from corporation assets ---
+        asset_rows = (
+            app_session.query(CorporationAssetsModel)
+            .filter(
+                CorporationAssetsModel.corporation_id.in_(corp_ids),
+                CorporationAssetsModel.type_id.in_(type_ids),
+                CorporationAssetsModel.is_blueprint_copy == False,  # noqa: E712
+                CorporationAssetsModel.is_singleton == False,  # noqa: E712
+            )
+            .all()
+        )
+        hangar_qty: dict[int, int] = {}
+        for row in asset_rows:
+            tid = int(row.type_id)
+            hangar_qty[tid] = hangar_qty.get(tid, 0) + int(row.quantity or 0)
+
+        # --- In-progress quantity from active manufacturing jobs ---
+        job_rows = (
+            app_session.query(CorporationIndustryJobsModel)
+            .filter(
+                CorporationIndustryJobsModel.corporation_id.in_(corp_ids),
+                CorporationIndustryJobsModel.status == "active",
+                CorporationIndustryJobsModel.product_type_id.in_(type_ids),
+            )
+            .all()
+        )
+        job_qty: dict[int, int] = {}
+        for row in job_rows:
+            tid = int(row.product_type_id)
+            job_qty[tid] = job_qty.get(tid, 0) + int(row.output_quantity or 0)
+
+        # --- Sell velocity from wallet transactions ---
+        tx_rows = (
+            app_session.query(CorporationWalletTransactionsModel)
+            .filter(
+                CorporationWalletTransactionsModel.corporation_id.in_(corp_ids),
+                CorporationWalletTransactionsModel.type_id.in_(type_ids),
+                CorporationWalletTransactionsModel.is_buy == False,  # noqa: E712
+                CorporationWalletTransactionsModel.date >= cutoff_str,
+            )
+            .all()
+        )
+        sold_qty: dict[int, int] = {}
+        for row in tx_rows:
+            tid = int(row.type_id)
+            sold_qty[tid] = sold_qty.get(tid, 0) + int(row.quantity or 0)
+
+        # --- Compute urgency for each type_id ---
+        output: dict[int, dict] = {}
+        for tid in type_ids:
+            stock_qty = hangar_qty.get(tid, 0) + job_qty.get(tid, 0)
+            total_sold = sold_qty.get(tid, 0)
+
+            if total_sold == 0:
+                output[tid] = {
+                    "reorder_date": None,
+                    "days_until_reorder": None,
+                    "urgency": "no_data",
+                    "stock_qty": stock_qty,
+                    "velocity_per_day": None,
+                }
+                continue
+
+            velocity_per_day = total_sold / lookback_days
+            days_of_stock = stock_qty / velocity_per_day
+            reorder_date = (today + timedelta(days=days_of_stock)).isoformat()
+
+            if days_of_stock < 3:
+                urgency = "urgent"
+            elif days_of_stock < 7:
+                urgency = "soon"
+            else:
+                urgency = "ok"
+
+            output[tid] = {
+                "reorder_date": reorder_date,
+                "days_until_reorder": days_of_stock,
+                "urgency": urgency,
+                "stock_qty": stock_qty,
+                "velocity_per_day": velocity_per_day,
+            }
+
+        return output
+
+    def get_type_track_record(
+        self,
+        *,
+        type_ids: list[int],
+        lookback_days: int = 90,
+        today_iso: str,
+    ) -> dict[int, dict]:
+        """
+        Returns {type_id: {"status": "proven"|"unprofitable"|"marginal"|"untested",
+                            "avg_margin_fraction": float|None,
+                            "sale_count": int}}
+
+        Status rules (based on last `lookback_days` days of CorporationRealizedSalesLedgerModel):
+        - No rows for type_id in period -> "untested", avg_margin_fraction=None, sale_count=0
+        - Has rows and avg realized_margin_fraction >= 0.10 -> "proven"
+        - Has rows and avg realized_margin_fraction < 0.0 -> "unprofitable"
+        - Has rows and 0.0 <= avg realized_margin_fraction < 0.10 -> "marginal"
+        """
+        from datetime import datetime, timedelta
+
+        if not type_ids:
+            return {}
+
+        corps = self._state.corp_manager.get_corporations()
+        corp_ids = [int(c["corporation_id"]) for c in corps if c.get("corporation_id")]
+
+        if not corp_ids:
+            return {
+                tid: {
+                    "status": "untested",
+                    "avg_margin_fraction": None,
+                    "sale_count": 0,
+                }
+                for tid in type_ids
+            }
+
+        cutoff_str = (datetime.fromisoformat(today_iso) - timedelta(days=lookback_days)).isoformat()[:10]
+
+        session: Any = self._sessions.app_session()
+
+        rows = (
+            session.query(CorporationRealizedSalesLedgerModel)
+            .filter(
+                CorporationRealizedSalesLedgerModel.corporation_id.in_(corp_ids),
+                CorporationRealizedSalesLedgerModel.type_id.in_(type_ids),
+                CorporationRealizedSalesLedgerModel.date >= cutoff_str,
+                CorporationRealizedSalesLedgerModel.realized_margin_fraction.isnot(None),
+            )
+            .all()
+        )
+
+        # Group by type_id
+        margin_totals: dict[int, float] = {}
+        sale_counts: dict[int, int] = {}
+        for row in rows:
+            tid = int(row.type_id)
+            margin_totals[tid] = margin_totals.get(tid, 0.0) + float(row.realized_margin_fraction)
+            sale_counts[tid] = sale_counts.get(tid, 0) + 1
+
+        output: dict[int, dict] = {}
+        for tid in type_ids:
+            count = sale_counts.get(tid, 0)
+            if count == 0:
+                output[tid] = {
+                    "status": "untested",
+                    "avg_margin_fraction": None,
+                    "sale_count": 0,
+                }
+            else:
+                avg = margin_totals[tid] / count
+                if avg >= 0.10:
+                    status = "proven"
+                elif avg < 0.0:
+                    status = "unprofitable"
+                else:
+                    status = "marginal"
+                output[tid] = {
+                    "status": status,
+                    "avg_margin_fraction": avg,
+                    "sale_count": count,
+                }
+
+        return output

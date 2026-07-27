@@ -4,7 +4,15 @@ import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingIm
 from streamlit_ui.components.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter, js_icon_cell_renderer, js_margin_pct_cell_style
 from streamlit_ui.components.assets_data import get_item_image_url as build_item_image_url
 from streamlit_ui.components.formatters import format_isk_short
-from streamlit_ui.api.market_orders import clear_market_orders_cache, fetch_market_orders, refresh_market_orders
+from streamlit_ui.api.market_orders import (
+    clear_market_orders_cache,
+    fetch_market_orders,
+    refresh_market_orders,
+    clear_corp_market_orders_cache,
+    refresh_corp_market_orders,
+    fetch_corp_market_orders_enriched,
+)
+from streamlit_ui.api.client import api_get
 from streamlit_ui.components.webpage_ui import AgGridRuntime, aggrid_height, require_aggrid
 
 
@@ -90,6 +98,10 @@ def _colored(value: str, *, color: str) -> str:
     return f"<span style='color:{color}'>{value}</span>"
 
 
+def _has_real_cost(o: dict) -> bool:
+    return o.get("cost_basis_source") not in (None, "market_order_fallback")
+
+
 # ── Summary stats computation ─────────────────────────────────────────────────
 
 def _compute_sell_stats(orders: list[dict]) -> dict:
@@ -101,7 +113,7 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
     profit_cur_parts = [
         float(o.get("total_price") or 0) * float(o["net_margin_pct_current"]) / 100
         for o in orders
-        if o.get("net_margin_pct_current") is not None and o.get("total_price")
+        if o.get("net_margin_pct_current") is not None and o.get("total_price") and _has_real_cost(o)
     ]
     est_profit_current = sum(profit_cur_parts) if profit_cur_parts else None
 
@@ -112,31 +124,32 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
             o.get("advised_price") and
             o.get("net_margin_pct_advised") is not None and
             o.get("total_price") and
-            float(o.get("price") or 0) > 0
+            float(o.get("price") or 0) > 0 and
+            _has_real_cost(o)
         ):
             vol_remain = float(o["total_price"]) / float(o["price"])
             adv_total = float(o["advised_price"]) * vol_remain
             profit_adv_parts.append(adv_total * float(o["net_margin_pct_advised"]) / 100)
     est_profit_advised = sum(profit_adv_parts) if profit_adv_parts else None
 
-    # ISK/day totals
-    isk_day_cur = [float(o["isk_per_day_current"]) for o in orders if o.get("isk_per_day_current") is not None]
-    isk_day_adv = [float(o["isk_per_day_advised"]) for o in orders if o.get("isk_per_day_advised") is not None]
+    # ISK/day totals (only for orders with real cost basis)
+    isk_day_cur = [float(o["isk_per_day_current"]) for o in orders if o.get("isk_per_day_current") is not None and _has_real_cost(o)]
+    isk_day_adv = [float(o["isk_per_day_advised"]) for o in orders if o.get("isk_per_day_advised") is not None and _has_real_cost(o)]
     total_isk_day_current = sum(isk_day_cur) if isk_day_cur else None
     total_isk_day_advised = sum(isk_day_adv) if isk_day_adv else None
 
-    # Weighted-average margin at current price
+    # Weighted-average margin at current price (only orders with real cost basis)
     margin_w = [
         (float(o["net_margin_pct_current"]), float(o.get("total_price") or 0))
         for o in orders
-        if o.get("net_margin_pct_current") is not None and o.get("total_price")
+        if o.get("net_margin_pct_current") is not None and o.get("total_price") and _has_real_cost(o)
     ]
     avg_margin_current: float | None = None
     if margin_w:
         total_w = sum(w for _, w in margin_w)
         avg_margin_current = sum(m * w for m, w in margin_w) / total_w if total_w > 0 else None
 
-    below_breakeven = sum(1 for o in orders if (o.get("net_margin_pct_current") or 0) < 0)
+    below_breakeven = sum(1 for o in orders if (o.get("net_margin_pct_current") or 0) < 0 and _has_real_cost(o))
 
     return {
         "count": count,
@@ -249,9 +262,9 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
                 sell_order["Est. Days (Adv.)"] = round(float(order["estimated_sell_days_advised"]), 1)
             if order.get("isk_per_day_advised") is not None:
                 sell_order["ISK/day (Adv.)"] = order["isk_per_day_advised"]
-            if order.get("net_margin_pct_current") is not None:
+            if order.get("net_margin_pct_current") is not None and _has_real_cost(order):
                 sell_order["Margin % (Current)"] = round(float(order["net_margin_pct_current"]), 1)
-            if order.get("net_margin_pct_advised") is not None:
+            if order.get("net_margin_pct_advised") is not None and _has_real_cost(order):
                 sell_order["Margin % (Advised)"] = round(float(order["net_margin_pct_advised"]), 1)
             # Relist Priority column
             if priority_map is not None:
@@ -559,21 +572,29 @@ def _render_pricing_analysis(selected_order: dict) -> None:
                     st.caption("  \n".join(details))
 
 
-# ── Main render ───────────────────────────────────────────────────────────────
+# ── Corp order row builders ───────────────────────────────────────────────────
 
-def render():
-    st.header("Market Orders")
-
-    runtime = require_aggrid()
-    img_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
-
+def _render_market_orders(runtime: object, img_renderer: object) -> None:
     all_orders = []
     try:
         response = fetch_market_orders()
-        all_orders = response.get("data", [])
+        all_orders = list(response.get("data", []))
     except Exception as e:
         st.error(f"Error fetching market orders: {str(e)}")
         return
+
+    # Merge corp orders from the ESI corporation endpoint (adds orders placed by other characters)
+    char_order_ids: set[int] = {int(o["order_id"]) for o in all_orders if o.get("order_id") is not None}
+    for corp_id in _get_director_corp_ids():
+        try:
+            corp_orders = fetch_corp_market_orders_enriched(corp_id)
+            for o in corp_orders:
+                oid = o.get("order_id")
+                if oid is not None and int(oid) not in char_order_ids:
+                    all_orders.append(o)
+                    char_order_ids.add(int(oid))
+        except Exception:
+            pass
 
     # Build Relist Priority map: (type_name, price, station) → "High" / "Medium" / "Low" / ""
     sell_raw_all = [o for o in all_orders if not o.get("is_buy_order")]
@@ -607,14 +628,19 @@ def render():
                         refresh_market_orders()
                     except Exception as e:
                         st.error(f"Refresh failed: {str(e)}")
+                    for corp_id in _get_director_corp_ids():
+                        try:
+                            refresh_corp_market_orders(corp_id)
+                        except Exception as e:
+                            st.error(f"Corp refresh failed: {str(e)}")
                 clear_market_orders_cache()
+                clear_corp_market_orders_cache()
                 _rerun()
         with filler:
             st.write("")
 
         st.subheader("Selling")
 
-        # Stats box — computed from the filtered raw enriched orders
         sell_raw_filtered = [
             o for o in all_orders
             if not o.get("is_buy_order") and (selected_owner == "All" or o.get("owner") == selected_owner)
@@ -663,3 +689,20 @@ def render():
                 format_func=lambda i: order_options[i],
             )
             _render_pricing_analysis(full_sell_orders[selected_idx])
+
+
+def _get_director_corp_ids() -> list[int]:
+    from streamlit_ui.api.corporations import fetch_director_corporations
+    return [int(c["corporation_id"]) for c in fetch_director_corporations()]
+
+
+
+# ── Main render ───────────────────────────────────────────────────────────────
+
+def render():
+    st.header("Market Orders")
+
+    runtime = require_aggrid()
+    img_renderer = js_icon_cell_renderer(JsCode=runtime.js_code, size_px=24)
+
+    _render_market_orders(runtime=runtime, img_renderer=img_renderer)

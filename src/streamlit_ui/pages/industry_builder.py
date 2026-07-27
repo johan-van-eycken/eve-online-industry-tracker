@@ -766,9 +766,20 @@ def render() -> None:
 
     # Get selector data for form
     character_options = page_context.character_options
-    selected_character_id = int(st.session_state.get("industry_builder_character_id", page_context.default_character_id_value))
     owned_blueprint_scope_options = page_context.owned_blueprint_scope_options
     owned_blueprint_scope_labels = page_context.owned_blueprint_scope_labels
+
+    # Set smart session defaults on fresh session (do not override user's prior selections)
+    if "industry_builder_owned_blueprints_scope" not in st.session_state:
+        preferred_corp_scope = page_context.main_character_corporation_scope
+        if preferred_corp_scope and preferred_corp_scope in owned_blueprint_scope_options:
+            st.session_state["industry_builder_owned_blueprints_scope"] = preferred_corp_scope
+        else:
+            st.session_state["industry_builder_owned_blueprints_scope"] = page_context.default_owned_blueprint_scope
+    if "industry_builder_character_id" not in st.session_state:
+        st.session_state["industry_builder_character_id"] = page_context.default_character_id_value
+
+    selected_character_id = int(st.session_state.get("industry_builder_character_id", page_context.default_character_id_value))
 
     industry_profiles = fetch_industry_profiles_cached(character_id=int(selected_character_id))
     industry_profile_options, industry_profile_labels, default_industry_profile_id = build_industry_profile_options(
@@ -989,7 +1000,7 @@ def render() -> None:
             )
 
         # Form submit button
-        submitted = st.form_submit_button("Refresh Overview", use_container_width=True)
+        submitted = st.form_submit_button("Refresh Overview", width="stretch")
 
     # Apply selectors and filters when form is submitted
     if submitted:

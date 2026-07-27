@@ -43,7 +43,7 @@ def _build_service(
         service,
     )
     service._get_owned_item_inventory = MethodType(  # type: ignore[attr-defined]
-        lambda self, *, owned_blueprints_scope: owned_item_inventory or ({}, {}),
+        lambda self, *, owned_blueprints_scope, **kwargs: owned_item_inventory or ({}, {}),
         service,
     )
     service._get_adjusted_market_price_map = MethodType(  # type: ignore[attr-defined]
@@ -56,6 +56,18 @@ def _build_service(
     )
     service._enrich_product_rows_with_material_prices = MethodType(  # type: ignore[attr-defined]
         lambda self, product_rows, progress_callback=None, **kwargs: product_rows,
+        service,
+    )
+    service._enrich_product_rows_with_market_activity = MethodType(  # type: ignore[attr-defined]
+        lambda self, product_rows, **kwargs: product_rows,
+        service,
+    )
+    service._enrich_product_rows_with_price_anomaly = MethodType(  # type: ignore[attr-defined]
+        lambda self, product_rows, **kwargs: product_rows,
+        service,
+    )
+    service._enrich_product_rows_with_pricing_confidence = MethodType(  # type: ignore[attr-defined]
+        lambda self, product_rows, **kwargs: product_rows,
         service,
     )
     service._enrich_product_rows_with_sale_proceeds = MethodType(  # type: ignore[attr-defined]

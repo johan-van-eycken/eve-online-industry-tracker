@@ -3,6 +3,20 @@ from __future__ import annotations
 from typing import Any
 
 
+def fetch_director_corporations() -> list[dict[str, Any]]:
+    """Return all corporations for which the app has director-level ESI access."""
+    from streamlit_ui.api.client import api_get
+    try:
+        response = api_get("/corporations") or {}
+        corps = (response.get("data") or []) if isinstance(response, dict) else []
+        return [
+            c for c in corps
+            if isinstance(c, dict) and c.get("has_director_access") and c.get("corporation_id")
+        ]
+    except Exception:
+        return []
+
+
 def build_owned_blueprint_corporation_scope_options(
     characters: list[dict[str, Any]],
 ) -> tuple[list[str], dict[str, str]]:

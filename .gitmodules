@@ -1,0 +1,3 @@
+[submodule "config/private"]
+	path = config/private
+	url = git@github-johan:johan-van-eycken/eve-online-industry-tracker-config.git

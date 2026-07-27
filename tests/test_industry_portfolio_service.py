@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from types import MethodType
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -15,6 +16,10 @@ from eve_online_industry_tracker.application.industry.service import IndustrySer
 
 def test_portfolio_candidate_payload_derives_candidate_metrics() -> None:
     service = object.__new__(IndustryService)
+    service._resolve_industry_profile_context = MethodType(  # type: ignore[attr-defined]
+        lambda self, *, character_id, industry_profile_id: None,
+        service,
+    )
     service.industry_manufacturing_product_overview_payload = lambda **kwargs: {  # type: ignore[attr-defined]
         "rows": [
             {

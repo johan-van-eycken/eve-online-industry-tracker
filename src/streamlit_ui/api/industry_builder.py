@@ -266,7 +266,40 @@ def fetch_solar_system_security_map() -> dict[int, float]:
     return out
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_blueprint_skill_qualification(blueprint_type_ids: tuple[int, ...]) -> dict[str, dict[str, bool]]:
+    from streamlit_ui.api.client import api_get
+    if not blueprint_type_ids:
+        return {}
+    ids_str = ",".join(str(i) for i in blueprint_type_ids)
+    response = api_get(f"/industry/blueprint_skill_qualification?blueprint_type_ids={ids_str}") or {}
+    return (response.get("data") or {}) if isinstance(response, dict) else {}
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_reorder_alerts(type_ids: tuple[int, ...]) -> dict[str, dict]:
+    from streamlit_ui.api.client import api_get
+    if not type_ids:
+        return {}
+    ids_str = ",".join(str(i) for i in type_ids)
+    response = api_get(f"/industry/reorder_alerts?type_ids={ids_str}") or {}
+    return (response.get("data") or {}) if isinstance(response, dict) else {}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_type_track_record(type_ids: tuple[int, ...]) -> dict[str, dict]:
+    from streamlit_ui.api.client import api_get
+    if not type_ids:
+        return {}
+    ids_str = ",".join(str(i) for i in type_ids)
+    response = api_get(f"/industry/track_record?type_ids={ids_str}") or {}
+    return (response.get("data") or {}) if isinstance(response, dict) else {}
+
+
 def clear_industry_builder_caches() -> None:
     fetch_product_overview.clear()
     fetch_portfolio_candidates.clear()
     fetch_portfolio_plan.clear()
+    fetch_blueprint_skill_qualification.clear()
+    fetch_reorder_alerts.clear()
+    fetch_type_track_record.clear()

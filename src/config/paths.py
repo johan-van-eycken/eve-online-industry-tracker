@@ -23,7 +23,7 @@ def app_secret_path() -> str:
     Controlled by APP_SECRET_PATH.
     """
 
-    return _env("APP_SECRET_PATH", "config/secret.json")
+    return _env("APP_SECRET_PATH", "config/private/secret.json")
 
 
 def streamlit_preferences_path() -> str:

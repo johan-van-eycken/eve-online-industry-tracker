@@ -76,6 +76,23 @@ def render() -> None:
                         help=help_text,
                         key=widget_key,
                     )
+                elif typ == "select":
+                    options = spec.get("options", [])
+                    option_values = [opt["value"] for opt in options]
+                    option_labels = [opt["label"] for opt in options]
+                    try:
+                        current_index = option_values.index(current)
+                    except ValueError:
+                        current_index = 0
+                    selected_label = st.selectbox(
+                        label,
+                        options=option_labels,
+                        index=current_index,
+                        help=help_text,
+                        key=widget_key,
+                    )
+                    # Map selected label back to its value
+                    new_val = option_values[option_labels.index(selected_label)]
                 else:
                     new_val = st.text_input(
                         label,
