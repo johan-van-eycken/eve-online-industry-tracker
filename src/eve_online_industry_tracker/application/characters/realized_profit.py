@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
 import json
 from typing import Any
@@ -319,8 +320,11 @@ def _corp_journal_fee_breakdown(
                 if ctx is not None:
                     continue
                 # context_id is NULL — eligible for date-proximity fallback (handled below)
-        # Date-proximity fallback: covers entries where context_id is NULL
-        return _find_by_date(transaction_tax_entries, _CORP_TAX_DATE_FALLBACK_WINDOW_SECONDS, division)
+        # Date-proximity fallback: only entries where context_id IS NULL are eligible —
+        # entries with a non-null context_id that didn't match the exact-match pass above
+        # belong to a different transaction and must not be attributed here.
+        null_ctx_entries = [e for e in transaction_tax_entries if getattr(e, "context_id", None) is None]
+        return _find_by_date(null_ctx_entries, _CORP_TAX_DATE_FALLBACK_WINDOW_SECONDS, division)
 
     broker_fee = 0.0
     has_broker = False
@@ -508,7 +512,7 @@ class _BaseRealizedProfitLedgerService:
         # is no double-counting risk. This allows char-built items sold before the corp job
         # was captured in asset history to be correctly attributed as Manufacturing instead
         # of falling through to opening_inventory (Trade).
-        supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id), covered_type_ids=set())
+        supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id))
 
         # Merge supplemental lots into asset_history_lots (may overlap on type_id when both
         # a corp asset history row and char-job lots exist for the same product type)
@@ -753,8 +757,8 @@ class _BaseRealizedProfitLedgerService:
         """Return FifoLots sourced from asset history, keyed by type_id. Subclasses may override."""
         return {}
 
-    def _load_supplemental_lots(self, *, owner_id: int, covered_type_ids: set[int]) -> dict[int, list[FifoLot]]:
-        """Return additional FifoLots for type_ids not yet covered. Subclasses may override."""
+    def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
+        """Return additional FifoLots to merge into the FIFO queue. Subclasses may override."""
         return {}
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
@@ -871,12 +875,12 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
     def list_rows(self, *, corporation_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=corporation_id)
 
-    def _load_character_source_lots(self, corporation_id: int, covered_type_ids: set[int]) -> dict[int, list[FifoLot]]:
+    def _load_character_source_lots(self, corporation_id: int) -> dict[int, list[FifoLot]]:
         """Return FifoLots from character industry jobs and character market buys.
 
         These represent items manufactured or purchased by characters, then transferred to the
-        corporation. covered_type_ids can be used to skip type_ids already fully represented
-        by asset history lots; callers may pass an empty set to load all lots unconditionally.
+        corporation. All lots are loaded unconditionally; FIFO only charges costs to actually-sold
+        units, so surplus lots simply remain unused in the queue with no double-counting risk.
         """
         lots_by_type: dict[int, list[FifoLot]] = {}
         completed_statuses = {"delivered", "ready", "completed"}
@@ -891,7 +895,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         )
         for job in char_jobs:
             product_type_id = _safe_int(getattr(job, "product_type_id", None))
-            if product_type_id is None or int(product_type_id) in covered_type_ids:
+            if product_type_id is None:
                 continue
             status = str(getattr(job, "status", "") or "").strip().lower()
             if status and status not in completed_statuses:
@@ -922,7 +926,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         )
         for tx in char_buys:
             type_id = _safe_int(getattr(tx, "type_id", None))
-            if type_id is None or int(type_id) in covered_type_ids:
+            if type_id is None:
                 continue
             unit_price = _safe_float(getattr(tx, "unit_price", None))
             quantity = _safe_int(getattr(tx, "quantity", None))
@@ -986,9 +990,9 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             )
         return lots_by_type
 
-    def _load_supplemental_lots(self, *, owner_id: int, covered_type_ids: set[int]) -> dict[int, list[FifoLot]]:
+    def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Delegate to _load_character_source_lots for the corp service."""
-        return self._load_character_source_lots(corporation_id=int(owner_id), covered_type_ids=covered_type_ids)
+        return self._load_character_source_lots(corporation_id=int(owner_id))
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         """Pre-load journal entries and pre-compute per-unit broker fees for corp sells.
@@ -1113,8 +1117,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 continue
 
             # Group by (type_id, rounded unit_price) — round to nearest 10 ISK for float safety
-            from collections import defaultdict as _dd
-            groups: dict[tuple[int, int], list[tuple[datetime, int, int, float]]] = _dd(list)
+            groups: dict[tuple[int, int], list[tuple[datetime, int, int, float]]] = defaultdict(list)
             for s in candidates:
                 key = (s[2], int(round(s[3] / 10) * 10))
                 groups[key].append(s)
