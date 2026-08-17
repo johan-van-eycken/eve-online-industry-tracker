@@ -6,6 +6,9 @@ config/secret.json
 # markdown files (README.md is already tracked and unaffected)
 *.md
 
+# macOS metadata
+.DS_Store
+
 # database files
 database/*.db
 database/*.db-shm
