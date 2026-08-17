@@ -697,30 +697,8 @@ class Character:
                     if pid:
                         party_ids.add(pid)
 
-            # Step 2: Lookup names for each unique ID
-            party_names = {}
-            for pid in party_ids:
-                name = None
-                id_type = self._esi_client.get_id_type(pid)
-                if id_type == "character":
-                    data = self._esi_client.esi_get(f"/characters/{pid}/")
-                    if data and "name" in data:
-                        name = data["name"]
-                elif id_type == "alliance":
-                    data = self._esi_client.esi_get(f"/alliances/{pid}/")
-                    if data and "name" in data:
-                        name = data["name"]
-                elif id_type == "corporation":
-                    data = self._esi_client.esi_get(f"/corporations/{pid}/")
-                    if data and "name" in data:
-                        name = data["name"]
-                elif id_type == "npc_corporation":
-                    npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=pid).first()
-                    name = npc_corp.name[self._db_sde.language] if npc_corp else None
-                else:
-                    continue  # Unknown type, skip
-
-                party_names[pid] = name
+            # Step 2: Resolve names via batch endpoint (handles all ID ranges)
+            party_names = self._resolve_client_names(party_ids)
 
             # Step 3: Assign names to journal entries
             new_entries = []
@@ -755,6 +733,7 @@ class Character:
                 new_entries.append(new_entry)
 
             self.save_wallet_journal(new_entries)
+            self._backfill_wallet_journal_party_names()
 
             # Assign loaded entries to self.wallet_journal for runtime access
             character_wallet_journal = (self._db_app.session.query(CharacterWalletJournalModel).filter_by(character_id=self.character_id).all())
@@ -799,30 +778,8 @@ class Character:
                 if cid:
                     client_ids.add(cid)
 
-            # Step 2: Lookup names for each unique ID
-            client_names = {}
-            for cid in client_ids:
-                name = None
-                id_type = self._esi_client.get_id_type(cid)
-                if id_type == "character":
-                    data = self._esi_client.esi_get(f"/characters/{cid}/")
-                    if data and "name" in data:
-                        name = data["name"]
-                elif id_type == "alliance":
-                    data = self._esi_client.esi_get(f"/alliances/{cid}/")
-                    if data and "name" in data:
-                        name = data["name"]
-                elif id_type == "corporation":
-                    data = self._esi_client.esi_get(f"/corporations/{cid}/")
-                    if data and "name" in data:
-                        name = data["name"]
-                elif id_type == "npc_corporation":
-                    npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
-                    name = npc_corp.name[self._db_sde.language] if npc_corp else None
-                else:
-                    continue  # Unknown type, skip
-
-                client_names[cid] = name
+            # Step 2: Resolve names via batch endpoint (handles all ID ranges)
+            client_names = self._resolve_client_names(client_ids)
 
             # Step 3: Assign names to transaction entries
             new_entries = []
@@ -863,6 +820,7 @@ class Character:
                 new_entries.append(new_entry)
 
             self.save_wallet_transactions(new_entries)
+            self._backfill_wallet_transaction_client_names()
 
             # Assign loaded entries to self.wallet_transactions for runtime access
             character_wallet_transactions = (self._db_app.session.query(CharacterWalletTransactionsModel).filter_by(character_id=self.character_id).all())
@@ -872,11 +830,92 @@ class Character:
             ]
 
             logging.debug(f"Wallet transactions successfully refreshed for {self.character_name}. New entries: {len(new_entries)}")
-        
+
         except Exception as e:
             error_message = f"Failed to refresh wallet transactions for {self.character_name}. Error: {str(e)}"
             logging.error(error_message)
             raise Exception(error_message)
+
+    def _resolve_client_names(self, client_ids: set) -> dict:
+        ids = [int(cid) for cid in client_ids if cid is not None]
+        resolved = self.esi_service.resolve_universe_names(ids)
+        # Fallback to SDE for NPC corporations not returned by /universe/names/
+        for cid in ids:
+            if cid not in resolved and 1000000 <= cid <= 1999999:
+                try:
+                    npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
+                    if npc_corp:
+                        resolved[cid] = npc_corp.name[self._db_sde.language]
+                except Exception:
+                    pass
+        return resolved
+
+    def _backfill_wallet_transaction_client_names(self) -> None:
+        unresolved = (
+            self._db_app.session.query(CharacterWalletTransactionsModel)
+            .filter(
+                CharacterWalletTransactionsModel.character_id == self.character_id,
+                CharacterWalletTransactionsModel.client_id.isnot(None),
+                CharacterWalletTransactionsModel.client_name.is_(None),
+            )
+            .all()
+        )
+        if not unresolved:
+            return
+        unique_ids = {int(row.client_id) for row in unresolved}
+        resolved = self._resolve_client_names(unique_ids)
+        updated = 0
+        for row in unresolved:
+            name = resolved.get(int(row.client_id))
+            if name is not None:
+                row.client_name = name
+                updated += 1
+        if updated:
+            self._db_app.session.commit()
+            logging.debug(f"Backfilled {updated} client names for {self.character_name}")
+
+    def _backfill_wallet_journal_party_names(self) -> None:
+        _PARTY_PAIRS = [
+            ("first_party_id", "first_party_name"),
+            ("second_party_id", "second_party_name"),
+            ("tax_receiver_id", "tax_receiver_name"),
+        ]
+        filters = []
+        for id_col, name_col in _PARTY_PAIRS:
+            id_attr = getattr(CharacterWalletJournalModel, id_col)
+            name_attr = getattr(CharacterWalletJournalModel, name_col)
+            filters.append((id_attr.isnot(None)) & (name_attr.is_(None)))
+        from sqlalchemy import or_
+        unresolved = (
+            self._db_app.session.query(CharacterWalletJournalModel)
+            .filter(
+                CharacterWalletJournalModel.character_id == self.character_id,
+                or_(*filters),
+            )
+            .all()
+        )
+        if not unresolved:
+            return
+        unique_ids: set = set()
+        for row in unresolved:
+            for id_col, name_col in _PARTY_PAIRS:
+                pid = getattr(row, id_col, None)
+                name = getattr(row, name_col, None)
+                if pid is not None and name is None:
+                    unique_ids.add(int(pid))
+        resolved = self._resolve_client_names(unique_ids)
+        updated = 0
+        for row in unresolved:
+            for id_col, name_col in _PARTY_PAIRS:
+                pid = getattr(row, id_col, None)
+                if pid is not None and getattr(row, name_col, None) is None:
+                    name = resolved.get(int(pid))
+                    if name is not None:
+                        setattr(row, name_col, name)
+                        updated += 1
+        if updated:
+            self._db_app.session.commit()
+            logging.debug(f"Backfilled {updated} journal party names for {self.character_name}")
 
     # -------------------
     # Industry Jobs

@@ -564,34 +564,7 @@ class Corporation:
                     elif isinstance(pid, str) and pid.isdigit():
                         party_ids.add(int(pid))
 
-            party_names: Dict[int, Optional[str]] = {}
-            for pid in party_ids:
-                name = None
-                try:
-                    id_type = self._default_esi_character._esi_client.get_id_type(pid)
-                except Exception:
-                    id_type = None
-
-                try:
-                    if id_type == "character":
-                        data = self._default_esi_character._esi_client.esi_get(f"/characters/{pid}/")
-                        if data and "name" in data:
-                            name = data["name"]
-                    elif id_type == "alliance":
-                        data = self._default_esi_character._esi_client.esi_get(f"/alliances/{pid}/")
-                        if data and "name" in data:
-                            name = data["name"]
-                    elif id_type == "corporation":
-                        data = self._default_esi_character._esi_client.esi_get(f"/corporations/{pid}/")
-                        if data and "name" in data:
-                            name = data["name"]
-                    elif id_type == "npc_corporation":
-                        npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=pid).first()
-                        name = npc_corp.name[self._db_sde.language] if npc_corp else None
-                except Exception:
-                    name = None
-
-                party_names[pid] = name
+            party_names = self._resolve_client_names(party_ids)
 
             rows: List[Dict[str, Any]] = []
             for entry in new_entries:
@@ -634,6 +607,8 @@ class Corporation:
             if rows:
                 self._db_app.session.bulk_save_objects([CorporationWalletJournalModel(**row) for row in rows])
                 self._db_app.session.commit()
+
+            self._backfill_wallet_journal_party_names()
 
             corporation_wallet_journal = (
                 self._db_app.session.query(CorporationWalletJournalModel)
@@ -727,34 +702,7 @@ class Corporation:
                 elif isinstance(cid, str) and cid.isdigit():
                     client_ids.add(int(cid))
 
-            client_names: Dict[int, Optional[str]] = {}
-            for cid in client_ids:
-                name = None
-                try:
-                    id_type = self._default_esi_character._esi_client.get_id_type(cid)
-                except Exception:
-                    id_type = None
-
-                try:
-                    if id_type == "character":
-                        data = self._default_esi_character._esi_client.esi_get(f"/characters/{cid}/")
-                        if data and "name" in data:
-                            name = data["name"]
-                    elif id_type == "alliance":
-                        data = self._default_esi_character._esi_client.esi_get(f"/alliances/{cid}/")
-                        if data and "name" in data:
-                            name = data["name"]
-                    elif id_type == "corporation":
-                        data = self._default_esi_character._esi_client.esi_get(f"/corporations/{cid}/")
-                        if data and "name" in data:
-                            name = data["name"]
-                    elif id_type == "npc_corporation":
-                        npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
-                        name = npc_corp.name[self._db_sde.language] if npc_corp else None
-                except Exception:
-                    name = None
-
-                client_names[cid] = name
+            client_names = self._resolve_client_names(client_ids)
 
             rows: List[Dict[str, Any]] = []
             for entry in new_entries:
@@ -804,6 +752,8 @@ class Corporation:
                 self._db_app.session.bulk_save_objects([CorporationWalletTransactionsModel(**r) for r in rows])
                 self._db_app.session.commit()
 
+            self._backfill_wallet_transaction_client_names()
+
             corporation_wallet_transactions = (
                 self._db_app.session.query(CorporationWalletTransactionsModel)
                 .filter_by(corporation_id=self.corporation_id)
@@ -821,6 +771,105 @@ class Corporation:
                 str(e),
             )
             return
+
+    def _resolve_client_names(self, client_ids: set) -> dict:
+        ids = [int(cid) for cid in client_ids if cid is not None]
+        resolved = self._default_esi_character.esi_service.resolve_universe_names(ids)
+        for cid in ids:
+            if cid not in resolved and 1000000 <= cid <= 1999999:
+                try:
+                    npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
+                    if npc_corp:
+                        resolved[cid] = npc_corp.name[self._db_sde.language]
+                except Exception:
+                    pass
+        return resolved
+
+    def _backfill_wallet_transaction_client_names(self) -> None:
+        unresolved = (
+            self._db_app.session.query(CorporationWalletTransactionsModel)
+            .filter(
+                CorporationWalletTransactionsModel.corporation_id == self.corporation_id,
+                CorporationWalletTransactionsModel.client_id.isnot(None),
+                CorporationWalletTransactionsModel.client_name.is_(None),
+            )
+            .all()
+        )
+        if not unresolved:
+            return
+        unique_ids: set[int] = set()
+        for row in unresolved:
+            cid = row.client_id
+            if isinstance(cid, int):
+                unique_ids.add(cid)
+            elif isinstance(cid, str) and cid.isdigit():
+                unique_ids.add(int(cid))
+        resolved = self._resolve_client_names(unique_ids)
+        updated = 0
+        for row in unresolved:
+            cid = int(row.client_id) if isinstance(row.client_id, (int, str)) and str(row.client_id).isdigit() else None
+            if cid is None:
+                continue
+            name = resolved.get(cid)
+            if name is not None:
+                row.client_name = name
+                updated += 1
+        if updated:
+            self._db_app.session.commit()
+            logging.debug(
+                "Backfilled %d client names for corporation %s (%s)",
+                updated,
+                self.corporation_name,
+                self.corporation_id,
+            )
+
+    def _backfill_wallet_journal_party_names(self) -> None:
+        _PARTY_PAIRS = [
+            ("first_party_id", "first_party_name"),
+            ("second_party_id", "second_party_name"),
+            ("tax_receiver_id", "tax_receiver_name"),
+        ]
+        filters = []
+        for id_col, name_col in _PARTY_PAIRS:
+            id_attr = getattr(CorporationWalletJournalModel, id_col)
+            name_attr = getattr(CorporationWalletJournalModel, name_col)
+            filters.append((id_attr.isnot(None)) & (name_attr.is_(None)))
+        from sqlalchemy import or_
+        unresolved = (
+            self._db_app.session.query(CorporationWalletJournalModel)
+            .filter(
+                CorporationWalletJournalModel.corporation_id == self.corporation_id,
+                or_(*filters),
+            )
+            .all()
+        )
+        if not unresolved:
+            return
+        unique_ids: set[int] = set()
+        for row in unresolved:
+            for id_col, name_col in _PARTY_PAIRS:
+                pid = getattr(row, id_col, None)
+                name = getattr(row, name_col, None)
+                if pid is not None and name is None:
+                    unique_ids.add(int(pid))
+        resolved = self._resolve_client_names(unique_ids)
+        updated = 0
+        for row in unresolved:
+            for id_col, name_col in _PARTY_PAIRS:
+                pid = getattr(row, id_col, None)
+                if pid is not None and getattr(row, name_col, None) is None:
+                    name = resolved.get(int(pid))
+                    if name is not None:
+                        setattr(row, name_col, name)
+                        updated += 1
+        if updated:
+            self._db_app.session.commit()
+            logging.debug(
+                "Backfilled %d journal party names for corporation %s (%s)",
+                updated,
+                self.corporation_name,
+                self.corporation_id,
+            )
 
     # -------------------
     # Industry Jobs
