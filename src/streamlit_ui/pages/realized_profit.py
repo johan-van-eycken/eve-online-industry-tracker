@@ -88,6 +88,7 @@ def _director_corporation_options() -> list[tuple[str, int, str]]:
 
 def _owner_selector_options() -> list[tuple[str, int, str]]:
     options: list[tuple[str, int, str]] = [
+        ("all", 0, "All"),
         ("character", 0, "All Characters"),
     ]
     for owner_id, owner_name in sorted(_character_name_map().items(), key=lambda item: item[1].lower()):
@@ -345,26 +346,26 @@ def _trade_square_metrics(
     trade_purchases = 0.0
     buy_transactions = 0
     sell_transactions = 0
-    if owner_type == "character":
-        wallet_transactions = _filtered_character_wallet_transactions(
+    if owner_type in {"character", "all"}:
+        char_wallet = _filtered_character_wallet_transactions(
             _character_payloads(),
             selected_owner_id=int(selected_owner_id),
             start_date=start_date,
             end_date=end_date,
         )
-        buy_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
-        sell_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is False)
-        trade_purchases = sum(float(tx.get("total_price") or 0.0) for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
-    elif owner_type == "corporation":
-        wallet_transactions = _filtered_corp_wallet_transactions(
+        buy_transactions += sum(1 for tx in char_wallet if bool(tx.get("is_buy")) is True)
+        sell_transactions += sum(1 for tx in char_wallet if bool(tx.get("is_buy")) is False)
+        trade_purchases += sum(float(tx.get("total_price") or 0.0) for tx in char_wallet if bool(tx.get("is_buy")) is True)
+    if owner_type in {"corporation", "all"}:
+        corp_wallet = _filtered_corp_wallet_transactions(
             _corporation_payloads(),
-            selected_owner_id=int(selected_owner_id),
+            selected_owner_id=(0 if owner_type == "all" else int(selected_owner_id)),
             start_date=start_date,
             end_date=end_date,
         )
-        buy_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
-        sell_transactions = sum(1 for tx in wallet_transactions if bool(tx.get("is_buy")) is False)
-        trade_purchases = sum(float(tx.get("total_price") or 0.0) for tx in wallet_transactions if bool(tx.get("is_buy")) is True)
+        buy_transactions += sum(1 for tx in corp_wallet if bool(tx.get("is_buy")) is True)
+        sell_transactions += sum(1 for tx in corp_wallet if bool(tx.get("is_buy")) is False)
+        trade_purchases += sum(float(tx.get("total_price") or 0.0) for tx in corp_wallet if bool(tx.get("is_buy")) is True)
 
     rolling_trade_profit = float(trade_income) - float(trade_purchases) - float(sales_tax) - float(broker_fees)
     return {
@@ -703,6 +704,11 @@ def render() -> None:
         owner_name_by_id = {corp_id: corp_name for otype, corp_id, corp_name in owner_selector_options if otype == "corporation"}
         owner_label = "Corporation"
         owner_id_key = "corporation_id"
+    elif selected_owner_type == "all":
+        corp_name_by_id = {corp_id: corp_name for otype, corp_id, corp_name in owner_selector_options if otype == "corporation"}
+        owner_name_by_id = {**character_name_by_id, **corp_name_by_id}
+        owner_label = "Owner"
+        owner_id_key = "owner_id"
     else:
         owner_name_by_id = character_name_by_id
         owner_label = "Character"
@@ -722,10 +728,14 @@ def render() -> None:
         st.write("")
         if st.button("Refresh Ledger", type="primary", width="stretch"):
             with st.spinner("Rebuilding realized profit ledger..."):
-                refresh_realized_profit(
-                    owner_scope=selected_owner_type,
-                    owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
-                )
+                if selected_owner_type == "all":
+                    refresh_realized_profit(owner_scope="character", owner_id=None)
+                    refresh_realized_profit(owner_scope="corporation", owner_id=None)
+                else:
+                    refresh_realized_profit(
+                        owner_scope=selected_owner_type,
+                        owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
+                    )
             clear_realized_profit_cache()
             st.rerun()
     with controls_about:
@@ -762,19 +772,28 @@ def render() -> None:
                 )
                 st.caption("Coverage excludes rows with missing historical cost basis.")
 
-    response = fetch_realized_profit(
-        owner_scope=selected_owner_type,
-        owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
-    )
-    if response.get("status") not in {None, "success"}:
-        st.error(response.get("message") or "Failed to load realized profit data")
-        return
-
-    payload = response.get("data") or {}
-    rows = payload.get("rows") or []
-    if not isinstance(rows, list) or not rows:
-        st.info("No realized sales have been recorded yet for the selected scope.")
-        return
+    if selected_owner_type == "all":
+        char_response = fetch_realized_profit(owner_scope="character", owner_id=None)
+        corp_response = fetch_realized_profit(owner_scope="corporation", owner_id=None)
+        char_rows = [{**row, "owner_id": row.get("character_id")} for row in ((char_response.get("data") or {}).get("rows") or [])]
+        corp_rows = [{**row, "owner_id": row.get("corporation_id")} for row in ((corp_response.get("data") or {}).get("rows") or [])]
+        rows = char_rows + corp_rows
+        if not rows:
+            st.info("No realized sales have been recorded yet for the selected scope.")
+            return
+    else:
+        response = fetch_realized_profit(
+            owner_scope=selected_owner_type,
+            owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
+        )
+        if response.get("status") not in {None, "success"}:
+            st.error(response.get("message") or "Failed to load realized profit data")
+            return
+        payload = response.get("data") or {}
+        rows = payload.get("rows") or []
+        if not isinstance(rows, list) or not rows:
+            st.info("No realized sales have been recorded yet for the selected scope.")
+            return
 
     min_available_date, max_available_date = _available_date_span(rows)
     start_date, end_date = _resolve_range_preset(
@@ -785,7 +804,7 @@ def render() -> None:
 
     filtered_rows = _filter_rows(
         rows,
-        selected_character_id=(None if selected_owner_type == "corporation" or int(selected_owner_id) == 0 else int(selected_owner_id)),
+        selected_character_id=(None if selected_owner_type in {"corporation", "all"} or int(selected_owner_id) == 0 else int(selected_owner_id)),
         start_date=start_date,
         end_date=end_date,
     )
