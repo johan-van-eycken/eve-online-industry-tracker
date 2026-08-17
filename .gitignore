@@ -3,6 +3,9 @@
 # very important, contains sensitive information
 config/secret.json
 
+# markdown files (README.md is already tracked and unaffected)
+*.md
+
 # database files
 database/*.db
 database/*.db-shm
