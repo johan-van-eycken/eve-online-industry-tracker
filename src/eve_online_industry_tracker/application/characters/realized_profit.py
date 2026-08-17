@@ -285,6 +285,8 @@ def _corp_journal_fee_breakdown(
     gross = float(gross_revenue)
 
     def _find_by_date(entries: list[Any], window: int, division: int | None) -> Any | None:
+        best_entry = None
+        best_delta: float | None = None
         for entry in entries:
             if getattr(entry, "wallet_journal_id", None) in used_journal_ids:
                 continue
@@ -295,9 +297,11 @@ def _corp_journal_fee_breakdown(
             if entry_date and sell_date:
                 sd = sell_date.replace(tzinfo=None)
                 ed = entry_date.replace(tzinfo=None)
-                if abs((ed - sd).total_seconds()) <= window:
-                    return entry
-        return None
+                delta = abs((ed - sd).total_seconds())
+                if delta <= window and (best_delta is None or delta < best_delta):
+                    best_entry = entry
+                    best_delta = delta
+        return best_entry
 
     def _find_tax_entry(division: int | None) -> Any | None:
         # Try exact context_id match first
