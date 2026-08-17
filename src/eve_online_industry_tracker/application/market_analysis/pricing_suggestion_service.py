@@ -183,6 +183,7 @@ class PricingSuggestionService:
             "advised_price": advised_price,
             "confidence": confidence,
             "current_price": current_price,
+            "hub_price": float(hub_price) if hub_price else None,
             "price_difference": advised_price - current_price,
             "price_difference_pct": ((advised_price - current_price) / current_price * 100) if current_price > 0 else 0,
             "cost_basis": cost_basis,

@@ -151,6 +151,18 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
 
     below_breakeven = sum(1 for o in orders if (o.get("net_margin_pct_current") or 0) < 0 and _has_real_cost(o))
 
+    below_cost_count = sum(
+        1 for o in orders
+        if _has_real_cost(o) and o.get("hub_price") and o.get("cost_basis")
+        and float(o["hub_price"]) < float(o["cost_basis"])
+    )
+    below_cost_isk = sum(
+        float(o.get("price", 0)) * float(o.get("volume_remain", 0))
+        for o in orders
+        if _has_real_cost(o) and o.get("hub_price") and o.get("cost_basis")
+        and float(o["hub_price"]) < float(o["cost_basis"])
+    )
+
     return {
         "count": count,
         "total_listed": total_listed,
@@ -160,6 +172,8 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
         "total_isk_day_advised": total_isk_day_advised,
         "avg_margin_current": avg_margin_current,
         "below_breakeven": below_breakeven,
+        "below_cost_count": below_cost_count,
+        "below_cost_isk": below_cost_isk,
     }
 
 
@@ -173,6 +187,7 @@ def _render_sell_stats_box(stats: dict) -> None:
         else "#f4f4f5"
     )
     risk_color = "#c0392b" if stats["below_breakeven"] > 0 else "#27ae60"
+    below_cost_color = "#c0392b" if stats["below_cost_count"] > 0 else "#27ae60"
 
     left_cards = [
         ("Active Orders", str(stats["count"])),
@@ -185,6 +200,13 @@ def _render_sell_stats_box(stats: dict) -> None:
         (
             "Orders at Risk",
             _colored(str(stats["below_breakeven"]), color=risk_color),
+        ),
+        (
+            "Below Market Cost",
+            _colored(
+                f"{stats['below_cost_count']} ({format_isk_short(stats['below_cost_isk'])})",
+                color=below_cost_color,
+            ) if stats["below_cost_count"] > 0 else _colored("0", color="#27ae60"),
         ),
     ]
     right_cards = [
@@ -266,6 +288,17 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
                 sell_order["Margin % (Current)"] = round(float(order["net_margin_pct_current"]), 1)
             if order.get("net_margin_pct_advised") is not None and _has_real_cost(order):
                 sell_order["Margin % (Advised)"] = round(float(order["net_margin_pct_advised"]), 1)
+            # Cost Status: market price vs build cost
+            hub_price = order.get("hub_price")
+            cost_basis = order.get("cost_basis")
+            break_even = order.get("break_even_price")
+            if _has_real_cost(order) and hub_price and cost_basis and float(cost_basis) > 0:
+                if float(hub_price) < float(cost_basis):
+                    sell_order["Cost Status"] = "Below Cost"
+                elif break_even and float(hub_price) < float(break_even):
+                    sell_order["Cost Status"] = "Squeeze"
+                else:
+                    sell_order["Cost Status"] = "OK"
             # Relist Priority column
             if priority_map is not None:
                 key = (order.get("type_name", ""), float(order.get("price") or 0), order.get("station", ""))
@@ -337,6 +370,19 @@ def _render_orders_grid(
             cellStyle=right,
             minWidth=90,
         )
+
+    if "Cost Status" in df.columns:
+        cost_status_style = runtime.js_code(
+            """
+            function(params) {
+                var v = params.value;
+                if (v === 'Below Cost') return {color: '#ef4444', fontWeight: '700', textAlign: 'center'};
+                if (v === 'Squeeze')    return {color: '#f59e0b', fontWeight: '600', textAlign: 'center'};
+                return {color: '#6b7280', textAlign: 'center'};
+            }
+            """
+        )
+        gb.configure_column("Cost Status", cellStyle=cost_status_style, minWidth=100, maxWidth=130)
 
     if "Relist Priority" in df.columns:
         priority_style = runtime.js_code(
@@ -431,6 +477,13 @@ def _render_pricing_analysis(selected_order: dict) -> None:
             break_even = selected_order.get("break_even_price")
             if break_even:
                 st.metric("Break-even Price", format_isk_short(break_even))
+
+            hub_price = selected_order.get("hub_price")
+            if hub_price and cost_basis and selected_order.get("cost_basis_source") != "market_order_fallback":
+                if float(hub_price) < float(cost_basis):
+                    st.error(f"Market ({format_isk_short(hub_price)}) is **below your build cost** — manufacturing this item is currently unprofitable.")
+                elif break_even and float(hub_price) < float(break_even):
+                    st.warning(f"Market ({format_isk_short(hub_price)}) is below break-even — margin is squeezed by fees.")
         else:
             st.caption("No cost data available")
 

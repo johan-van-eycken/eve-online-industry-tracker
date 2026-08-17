@@ -266,6 +266,7 @@ class CorporationsService:
                     enriched_order["acquisition_source"] = advised_price_data.get("acquisition_source")
                     enriched_order["cost_basis_source"] = advised_price_data.get("cost_basis_source")
                     enriched_order["price_difference_pct"] = advised_price_data.get("price_difference_pct")
+                    enriched_order["hub_price"] = advised_price_data.get("hub_price")
                     enriched_order["break_even_price"] = advised_price_data.get("break_even_price")
                     enriched_order["net_margin_pct_advised"] = advised_price_data.get("net_margin_pct_advised")
                     enriched_order["net_margin_pct_current"] = advised_price_data.get("net_margin_pct_current")
