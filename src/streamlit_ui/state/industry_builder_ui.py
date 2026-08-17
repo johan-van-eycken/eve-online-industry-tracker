@@ -278,6 +278,27 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         blueprint_sde_fallback = node.get("blueprint_sde_fallback")
         material_contention = node.get("material_contention")
         manufacturing_cost_index = node.get("manufacturing_cost_index")
+        # Tier 1/2/3 — new fields (top-level product rows only)
+        price_trend_pct = None
+        price_avg_7d = None
+        price_avg_42w = None
+        price_volatility_pct = None
+        margin_buffer_pct = None
+        projected_price_at_delivery = None
+        projected_margin_pct = None
+        material_cost_trend_pct = None
+        isk_per_hour_effective = None
+        production_to_demand_ratio = None
+        selling_time_days = None
+        pipeline_units_in_jobs = None
+        pipeline_units_on_market = None
+        pipeline_total_units = None
+        pipeline_days_supply = None
+        historical_realized_margin_pct = None
+        historical_vs_projected_delta_pct = None
+        relist_cost_per_unit = None
+        effective_profit_with_relist = None
+        effective_margin_with_relist_pct = None
         bpc_source = ""
         bpo_source = ""
         meta_group = str(node.get("meta_group_name") or "")
@@ -346,6 +367,29 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             blueprint_sde_fallback = source_row.get("blueprint_sde_fallback")
             material_contention = source_row.get("material_contention")
             manufacturing_cost_index = source_row.get("manufacturing_cost_index")
+            # Tier 1 — Market trends
+            price_trend_pct = source_row.get("price_trend_pct")
+            price_avg_7d = source_row.get("price_avg_7d")
+            price_avg_42w = source_row.get("price_avg_42w")
+            price_volatility_pct = source_row.get("price_volatility_pct")
+            margin_buffer_pct = source_row.get("margin_buffer_pct")
+            projected_price_at_delivery = source_row.get("projected_price_at_delivery")
+            projected_margin_pct = source_row.get("projected_margin_pct")
+            material_cost_trend_pct = source_row.get("material_cost_trend_pct")
+            isk_per_hour_effective = source_row.get("isk_per_hour_effective")
+            production_to_demand_ratio = source_row.get("production_to_demand_ratio")
+            selling_time_days = source_row.get("selling_time_days")
+            # Tier 2 — Pipeline
+            pipeline_units_in_jobs = source_row.get("pipeline_units_in_jobs")
+            pipeline_units_on_market = source_row.get("pipeline_units_on_market")
+            pipeline_total_units = source_row.get("pipeline_total_units")
+            pipeline_days_supply = source_row.get("pipeline_days_supply")
+            # Tier 3 — Historical & relist
+            historical_realized_margin_pct = source_row.get("historical_realized_margin_pct")
+            historical_vs_projected_delta_pct = source_row.get("historical_vs_projected_delta_pct")
+            relist_cost_per_unit = source_row.get("relist_cost_per_unit")
+            effective_profit_with_relist = source_row.get("effective_profit_with_relist")
+            effective_margin_with_relist_pct = source_row.get("effective_margin_with_relist_pct")
             blueprint_copy = manufacturing_job.get("blueprint_copy") or {}
             blueprint_original = manufacturing_job.get("blueprint_original") or {}
             if isinstance(blueprint_copy, dict):
@@ -462,6 +506,29 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "BPO Source": bpo_source,
                 "Meta Group": meta_group,
                 "Category": category,
+                # Tier 1 — Market trends (top-level product rows only)
+                "Price Trend %": price_trend_pct,
+                "7d Avg Price": price_avg_7d,
+                "42w Avg Price": price_avg_42w,
+                "Price Volatility %": price_volatility_pct,
+                "Margin Buffer %": margin_buffer_pct,
+                "Projected Price": projected_price_at_delivery,
+                "Projected Margin %": projected_margin_pct,
+                "Material Trend %": material_cost_trend_pct,
+                "ISK/Hour (Effective)": isk_per_hour_effective,
+                "Prod/Demand Ratio (Days)": production_to_demand_ratio,
+                "Selling Time (Days)": selling_time_days,
+                # Tier 2 — Pipeline
+                "Pipeline: Jobs": pipeline_units_in_jobs,
+                "Pipeline: Market": pipeline_units_on_market,
+                "Pipeline: Total": pipeline_total_units,
+                "Pipeline: Days Supply": pipeline_days_supply,
+                # Tier 3 — Historical & relist
+                "Historical Margin %": historical_realized_margin_pct,
+                "Builder Accuracy (Δ%)": historical_vs_projected_delta_pct,
+                "Relist Cost/Unit": relist_cost_per_unit,
+                "Profit (After Relist)": effective_profit_with_relist,
+                "Margin (After Relist) %": effective_margin_with_relist_pct,
             }
         )
 

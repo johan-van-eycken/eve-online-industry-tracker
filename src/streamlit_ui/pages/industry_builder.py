@@ -1,7 +1,7 @@
 import streamlit as st
 from typing import Any, cast
 
-from streamlit_ui.components.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_icon_cell_renderer
+from streamlit_ui.components.aggrid_formatters import js_eu_isk_formatter, js_eu_number_formatter, js_eu_pct_formatter, js_icon_cell_renderer, js_margin_pct_cell_style
 from streamlit_ui.components.formatters import format_duration
 from streamlit_ui.state.industry_builder_ui import (
     build_overview_grid_frame,
@@ -207,6 +207,26 @@ def _render_overview_grid(
         ("Hub Sell Orders", 135),
         ("Pricing Confidence", 140),
         ("Profit Margin %", 130),
+        ("Price Trend %", 120),
+        ("7d Avg Price", 130),
+        ("42w Avg Price", 130),
+        ("Price Volatility %", 130),
+        ("Margin Buffer %", 130),
+        ("Projected Price", 130),
+        ("Projected Margin %", 130),
+        ("Material Trend %", 130),
+        ("ISK/Hour (Effective)", 150),
+        ("Prod/Demand Ratio (Days)", 160),
+        ("Selling Time (Days)", 140),
+        ("Pipeline: Jobs", 120),
+        ("Pipeline: Market", 130),
+        ("Pipeline: Total", 120),
+        ("Pipeline: Days Supply", 150),
+        ("Historical Margin %", 150),
+        ("Builder Accuracy (Δ%)", 160),
+        ("Relist Cost/Unit", 130),
+        ("Profit (After Relist)", 150),
+        ("Margin (After Relist) %", 170),
     ]:
         if col in df.columns:
             gb.configure_column(
@@ -277,6 +297,8 @@ def _render_overview_grid(
                 autoHeaderHeight=False,
             )
 
+    margin_style = js_margin_pct_cell_style(JsCode=runtime.js_code)
+
     for col in ["Profit Margin %"]:
         if col in df.columns:
             gb.configure_column(
@@ -287,6 +309,111 @@ def _render_overview_grid(
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
             )
+
+    # Trend columns: green = rising, red = falling
+    trend_style = runtime.js_code("""
+function(params) {
+    var v = params.value;
+    if (v == null) return {textAlign: 'right'};
+    if (v > 5)  return {color: '#22c55e', textAlign: 'right'};
+    if (v > 0)  return {color: '#86efac', textAlign: 'right'};
+    if (v > -5) return {color: '#fbbf24', textAlign: 'right'};
+    return {color: '#ef4444', textAlign: 'right'};
+}
+""")
+    for col in ("Price Trend %", "Projected Margin %", "Historical Margin %"):
+        if col in df.columns:
+            gb.configure_column(col, type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+                cellStyle=trend_style, minWidth=120)
+
+    # Material trend: inverted (positive = bad, materials getting expensive)
+    mat_trend_style = runtime.js_code("""
+function(params) {
+    var v = params.value;
+    if (v == null) return {textAlign: 'right'};
+    if (v > 5)  return {color: '#ef4444', textAlign: 'right'};
+    if (v > 0)  return {color: '#fbbf24', textAlign: 'right'};
+    if (v > -5) return {color: '#86efac', textAlign: 'right'};
+    return {color: '#22c55e', textAlign: 'right'};
+}
+""")
+    if "Material Trend %" in df.columns:
+        gb.configure_column("Material Trend %", type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+            cellStyle=mat_trend_style, minWidth=130)
+
+    # Margin buffer: red < 5, amber 5-15, green > 15
+    buf_style = runtime.js_code("""
+function(params) {
+    var v = params.value;
+    if (v == null) return {textAlign: 'right'};
+    if (v > 15) return {color: '#22c55e', textAlign: 'right'};
+    if (v > 5)  return {color: '#fbbf24', textAlign: 'right'};
+    return {color: '#ef4444', textAlign: 'right'};
+}
+""")
+    if "Margin Buffer %" in df.columns:
+        gb.configure_column("Margin Buffer %", type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+            cellStyle=buf_style, minWidth=130)
+
+    # Production/demand & pipeline days: red > 14, amber 7-14, green < 7
+    days_style = runtime.js_code("""
+function(params) {
+    var v = params.value;
+    if (v == null) return {textAlign: 'right'};
+    if (v < 7)  return {color: '#22c55e', textAlign: 'right'};
+    if (v < 14) return {color: '#fbbf24', textAlign: 'right'};
+    return {color: '#ef4444', textAlign: 'right'};
+}
+""")
+    for col in ("Prod/Demand Ratio (Days)", "Selling Time (Days)", "Pipeline: Days Supply"):
+        if col in df.columns:
+            gb.configure_column(col, type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+                cellStyle=days_style, minWidth=130)
+
+    # Builder accuracy: negative = overestimates (bad), positive = conservative (ok)
+    accuracy_style = runtime.js_code("""
+function(params) {
+    var v = params.value;
+    if (v == null) return {textAlign: 'right'};
+    if (v >= 0) return {color: '#22c55e', textAlign: 'right'};
+    if (v >= -5) return {color: '#fbbf24', textAlign: 'right'};
+    return {color: '#ef4444', textAlign: 'right'};
+}
+""")
+    if "Builder Accuracy (Δ%)" in df.columns:
+        gb.configure_column("Builder Accuracy (Δ%)", type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+            cellStyle=accuracy_style, minWidth=160)
+
+    # ISK columns for new profit fields
+    for col in ("ISK/Hour (Effective)", "7d Avg Price", "42w Avg Price", "Projected Price",
+                "Relist Cost/Unit", "Profit (After Relist)"):
+        if col in df.columns:
+            gb.configure_column(col, type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                cellStyle={"textAlign": "right"}, minWidth=130)
+
+    # Pipeline unit counts (integers)
+    for col in ("Pipeline: Jobs", "Pipeline: Market", "Pipeline: Total"):
+        if col in df.columns:
+            gb.configure_column(col, type=["numericColumn", "numberColumnFilter"],
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
+                cellStyle={"textAlign": "right"}, minWidth=110)
+
+    # Price Volatility % — plain numeric
+    if "Price Volatility %" in df.columns:
+        gb.configure_column("Price Volatility %", type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+            cellStyle={"textAlign": "right"}, minWidth=130)
+
+    if "Margin (After Relist) %" in df.columns:
+        gb.configure_column("Margin (After Relist) %", type=["numericColumn", "numberColumnFilter"],
+            valueFormatter=js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),
+            cellStyle=margin_style, minWidth=160)
 
     for col in ["Days of Supply", "Sell-Through Rate %", "Liquidity Score"]:
         if col in df.columns:
