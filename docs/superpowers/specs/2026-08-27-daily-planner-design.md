@@ -30,7 +30,7 @@ The user's daily workflow: open the page → deliver finished jobs → start new
 - Automatic in-game job submission (read-only ESI; user executes actions manually)
 - T2/Faction/Deadspace BPO recommendations (these BPOs do not exist)
 - Multi-corporation support (single corp assumed)
-- Reaction job planning beyond slot tracking (may be added later)
+- Starting new reaction jobs (may be added later); existing reaction jobs ARE included in DELIVER actions and their slots ARE counted against research slot availability
 
 ---
 
@@ -42,7 +42,7 @@ The user's daily workflow: open the page → deliver finished jobs → start new
 |---|---|
 | `IndustryService` | Full profitability overview rows per blueprint (ISK/hour, margin, material cost, market intelligence, pipeline, days-of-supply) |
 | `CorporationIndustryJobsModel` | Active jobs per character: activity type, completion time, delivery status |
-| `CorporationAssetsModel` | All corp stock: raw materials, BPOs, BPCs in hangars |
+| `CorporationAssetsModel` | All corp stock: raw materials, BPOs, BPCs across all hangar divisions (1–7) |
 | `CorporationMarketOrdersModel` | Open sell orders, pipeline units on market |
 | `CorporationWalletModel` | Corp main account balance (capital budget) |
 | `PricingSuggestionService` | Relist/reprice signals for open sell orders |
@@ -78,7 +78,7 @@ Streamlit page
 
 ## Data Model
 
-Three new tables added to `eve_app.db` via `schema_migrations.py`.
+Five new tables added to `eve_app.db` via `schema_migrations.py`.
 
 ### `build_plan`
 
@@ -115,10 +115,9 @@ One row per evaluated product per plan.
 | `days_of_supply_current` | REAL | Market + in-flight jobs at plan time |
 | `pipeline_stage` | TEXT | `'manufacturing'` \| `'invention'` \| `'copying'` \| `'watching'` |
 | `bpo_investment_recommended` | BOOLEAN | Only set for meta group 1 items |
-| `bpo_market_price` | REAL | Lowest sell price for BPO type at hub |
+| `bpo_market_price` | REAL | Lowest sell price for BPO type at hub (market orders only; contract-only BPOs will show NULL) |
 | `break_even_days` | REAL | |
 | `projected_annual_savings` | REAL | Material savings × planned annual runs |
-| `manual_override` | TEXT | `NULL` \| `'force_include'` \| `'force_exclude'` |
 
 ### `daily_action_log`
 
@@ -131,7 +130,8 @@ Append-only. One row per recommended action per computation. Marking `status='do
 | `generated_at` | DATETIME | |
 | `character_id` | INTEGER | |
 | `character_name` | TEXT | |
-| `action_type` | TEXT | `'deliver'` \| `'manufacture'` \| `'invent'` \| `'copy'` \| `'me_research'` \| `'te_research'` \| `'buy_materials'` \| `'buy_bpo'` \| `'relist_order'` |
+| `action_type` | TEXT | `'deliver'` \| `'manufacture'` \| `'sub_manufacture'` \| `'invent'` \| `'copy'` \| `'me_research'` \| `'te_research'` \| `'buy_materials'` \| `'buy_bpo'` \| `'relist_order'` |
+| `shopping_category` | TEXT | For `buy_materials` rows: `'current_job'` \| `'future_stock'` \| `'invention_input'` |
 | `type_id` | INTEGER | |
 | `type_name` | TEXT | |
 | `quantity` | INTEGER | |
@@ -144,7 +144,7 @@ Append-only. One row per recommended action per computation. Marking `status='do
 
 ### `plan_item_outcome`
 
-Written when a manufacturing batch completes and sells. Populated by comparing `daily_action_log` records (planned) with corp wallet transactions (realized).
+Written when a manufacturing batch completes and sells. Actuals are sourced from `CorporationRealizedSalesLedgerModel` (existing realized profit tracking via FIFO cost + wallet transactions), matched to `daily_action_log` records by `type_id` and completion timeframe.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -214,7 +214,8 @@ adjusted_score = isk_per_hour
   × accuracy_ema            # self-learning: penalises chronic mispredicts
   × velocity_multiplier     # self-learning: rewards fast sellers
   × market_timing_factor    # 1.0 if trend >= -5%; scales down to 0.5 at -15%
-  × pipeline_saturation     # 1.0 if days_of_supply < 3d; 0.0 at 14d+
+  × pipeline_saturation     # 1.0 if days_of_supply < 3d; linear decay to 0.0 at 14d+
+                            # formula: max(0, 1 - (days_of_supply - 3) / 11)
   × confidence_tier_bonus   # 1.0 / 1.05 / 1.15 for low / medium / high
 ```
 
@@ -227,7 +228,7 @@ adjusted_score = isk_per_hour
 | `pause` | Currently building but 7d price trend < -8% — finish in-flight, don't restart |
 | `skip` | Margin below threshold, high anomaly risk, or insufficient liquidity |
 
-Manual overrides (`force_include` / `force_exclude`) bypass this logic.
+The goal is for the planner to be self-optimising through its feedback loop. Session-only UI overrides (force include / force exclude) are available in Tab 3 for the current view only and are never persisted — they reset on the next recomputation.
 
 ### Phase 5 — Full Production Chain Planning
 
@@ -261,10 +262,31 @@ else:
     if BPO for T1 base item in corp assets:
         plan copy jobs → plan invention jobs
         # Forward look: start invention now if BPC stock < production_lead_time_days
-        add datacores + decryptors to shopping list
+        add datacores + decryptors to shopping list (category: 'invention_input')
     else:
         add T1 BPC or base item to shopping list
         flag T1 BPO for BPO investment analysis
+
+# Sub-manufacture decision (applied to every required input material)
+for each required_material of a planned manufacturing job:
+    if BPO owned for required_material (meta_group_id == 1):
+        sub_manufacture_cost = compute manufacturing cost from BPO
+                               (materials + job cost using existing IndustryService)
+        market_buy_cost      = hub_sell_price × quantity_needed
+        if sub_manufacture_cost < market_buy_cost:
+            # Time-awareness: sub-manufacture job must complete before parent job starts.
+            # If sub-manufacture duration > time until parent job would start,
+            # fall back to market buy for this cycle and flag for next plan cycle.
+            if sub_manufacture_duration <= time_until_parent_job_start:
+                plan sub_manufacture job (action_type = 'sub_manufacture')
+                add sub-material inputs to shopping list (category: 'current_job')
+            else:
+                add to shopping list (category: 'current_job') with note:
+                    "sub-manufacture too slow for this cycle — buying from market"
+        else:
+            add to shopping list (category: 'current_job')
+    else:
+        add to shopping list (category: 'current_job')
 ```
 
 **BPO Investment Analysis:**
@@ -283,10 +305,7 @@ Only items with `meta_group_id == 1` reach this analysis. T2, Faction, Deadspace
 
 ### Phase 6 — Skill-Aware Character Assignment
 
-Available slots per character (derived from existing skill data):
-- Manufacturing: `5 + Mass Production + Advanced Mass Production` (skill rank 1 per level)
-- Research/Invention: `1 + Laboratory Operation + Advanced Laboratory Operation`
-- Running jobs reduce available slots
+Available slots per character are derived from character skills using the existing slot capacity calculation already implemented in the Industry Slots page. Running jobs (including active reaction jobs) reduce available slots.
 
 Assignment priority:
 1. Manufacturing jobs → character with most free manufacturing slots; ties broken by fewest total active jobs
@@ -298,29 +317,42 @@ ME/TE research, copy, and invention jobs all compete for the same research slot 
 
 ### Phase 7 — Material Shopping List
 
-```
-to_buy = Σ required_materials(all planned jobs)
-       − corp_assets_available
-       − materials_reserved_for_in_flight_jobs
+Materials are aggregated across all planned jobs and categorised so the user understands what each purchase is for.
 
-for each item in to_buy:
-    if meta_group_id == 1 and BPO owned for this material:
-        flag as 'sub-manufacture' candidate (cheaper to build than buy)
-    else:
-        flag as 'buy from market'
-        estimated_cost = hub_sell_price × quantity
 ```
+for each required_material across all planned jobs:
+    net_required = quantity_needed − corp_assets_available
+                                   − reserved_for_in_flight_jobs
+    if net_required <= 0: skip (already covered by stock)
+
+    determine shopping_category:
+        'current_job'     — material needed immediately for a job starting today
+        'future_stock'    — material needed for jobs planned beyond today
+                            (pre-buy to avoid restocking delays)
+        'invention_input' — datacores, decryptors, T1 BPCs for invention jobs
+
+    sub-manufacture decisions are resolved in Phase 5.
+    Items where sub-manufacture was chosen appear as 'sub_manufacture' actions
+    in the daily action log, not in the shopping list.
+    Items where market buy was chosen (cheaper or sub-manufacture too slow)
+    appear in the shopping list with their category and a note if applicable.
+
+    estimated_cost = hub_sell_price × net_required
+```
+
+The shopping list in the UI groups rows by `shopping_category` with subtotals per category and a grand total ISK figure vs corp wallet balance.
 
 ### Phase 8 — Daily Action List
 
 Per character, ordered:
 
-1. **DELIVER** — corp jobs with `end_date < now`
+1. **DELIVER** — corp jobs with `end_date < now` (manufacturing, copy, invention, reaction, research)
 2. **START INVENTION** — highest priority items needing BPCs, research slots free
 3. **START COPY** — BPO copy jobs feeding invention pipeline
 4. **START ME/TE RESEARCH** — BPOs with research below target, research slots free
-5. **START MANUFACTURING** — highest priority items with BPCs ready, manufacturing slots free
-6. **RELIST** — market orders flagged by `PricingSuggestionService`
+5. **START SUB-MANUFACTURE** — component jobs that must complete before parent manufacturing starts
+6. **START MANUFACTURING** — highest priority items with BPCs ready, manufacturing slots free
+7. **RELIST** — market orders flagged by `PricingSuggestionService`
 
 Each action includes: item name, quantity/runs, estimated cost, estimated completion time, and a plain-language note explaining the reasoning.
 
@@ -330,7 +362,7 @@ Each action includes: item name, quantity/runs, estimated cost, estimated comple
 - Insert new `build_plan` record
 - Insert `build_plan_item` rows per product decision
 - Insert `daily_action_log` rows per character action
-- Compute `market_snapshot_hash` from current prices of all `build` items
+- Compute `market_snapshot_hash`: SHA-256 of hub sell prices for all `build` items' products plus their primary input materials (Tritanium, Pyerite, Mexallon, Isogen, Nocxium, Zydrine, Megacyte, Morphite and all T2 component inputs present in planned jobs)
 
 ---
 
@@ -342,9 +374,9 @@ On page load, the planner re-hashes current prices of all items in the active pl
 
 ## Self-Learning Feedback Loop
 
-After each plan cycle, the system checks `daily_action_log` for actions marked `done` where the corresponding manufacturing batch has since completed and sold (matched via corp wallet transactions). For each matched batch:
+After each plan cycle, the system checks `daily_action_log` for `manufacture` actions marked `done` where the corresponding type_id appears in `CorporationRealizedSalesLedgerModel` with a completion timestamp after the action's `generated_at`. For each matched batch:
 
-1. Compute `actual_isk_per_hour`, `actual_sell_days`, `actual_material_cost` from wallet + FIFO data
+1. Read `actual_isk_per_hour`, `actual_sell_days`, `actual_material_cost` from `CorporationRealizedSalesLedgerModel` (which already tracks realized profit via FIFO cost + wallet transactions)
 2. Write a `plan_item_outcome` record
 3. Update `plan_learning_weights` for the item using EMA (α = 0.2):
    ```
@@ -400,12 +432,29 @@ Example layout:
 
 Two AG-Grid sections:
 
-**Materials to Buy** — aggregated, net of corp stock:
+**Materials to Buy** — aggregated, net of corp stock, grouped by category with subtotals:
 
-| Item | Quantity | Est. Unit Price | Est. Total | Source |
-|---|---|---|---|---|
-| Tritanium | 4,200,000 | 5.1 ISK | 21.4M ISK | Jita sell |
-| Fullerite-C320 | 800 | 48,200 ISK | 38.6M ISK | Jita sell |
+*Current Job Materials* — needed for jobs starting today:
+
+| Item | Quantity | Est. Unit Price | Est. Total | Source | Note |
+|---|---|---|---|---|---|
+| Tritanium | 4,200,000 | 5.1 ISK | 21.4M ISK | Jita sell | |
+| Fullerite-C320 | 800 | 48,200 ISK | 38.6M ISK | Jita sell | |
+
+*Future Build Stock* — needed for jobs planned in coming days:
+
+| Item | Quantity | Est. Unit Price | Est. Total | Source | Note |
+|---|---|---|---|---|---|
+| Morphite | 6,200 | 890 ISK | 5.5M ISK | Jita sell | for Cerberus batch in 2d |
+
+*Invention Inputs* — datacores, decryptors, T1 BPCs for invention jobs:
+
+| Item | Quantity | Est. Unit Price | Est. Total | Source | Note |
+|---|---|---|---|---|---|
+| Caldari Encryption Methods | 20 | 12,400 ISK | 248K ISK | Jita sell | |
+| Occult Process Decryptor | 5 | 4,100 ISK | 20.5K ISK | Jita sell | |
+
+**Total to spend: X ISK** — Corp wallet: Y ISK — Remaining after purchase: Z ISK
 
 **BPO Investment Opportunities** — T1 only, sorted by break-even speed:
 
@@ -420,7 +469,7 @@ T2 items never appear in this section.
 
 AG-Grid of all evaluated items. Filterable by decision type. Shows: item name, decision, priority score, ISK/hour, margin %, days of supply, confidence tier, sample count, decision reason.
 
-Manual override column: force include / force exclude / reset — matches existing Portfolio Planner pattern and writes `manual_override` to `build_plan_item`.
+Session-only override buttons (force include / force exclude / reset) affect the current view only and are never written to the database. They reset when the plan is recomputed. The goal is for the self-learning feedback loop to make manual overrides unnecessary over time.
 
 ### Tab 4 — Plan Analytics
 
