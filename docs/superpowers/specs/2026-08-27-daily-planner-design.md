@@ -114,7 +114,7 @@ One row per evaluated product per plan.
 | `margin_pct` | REAL | |
 | `days_of_supply_current` | REAL | Market + in-flight jobs at plan time |
 | `pipeline_stage` | TEXT | `'manufacturing'` \| `'invention'` \| `'copying'` \| `'researching'` \| `'watching'` |
-| `bpo_investment_recommended` | BOOLEAN | Only set for meta group 1 items |
+| `bpo_investment_recommended` | BOOLEAN | NULL for T2+/Faction/Deadspace items (analysis never ran). TRUE/FALSE only for meta group 1 items. |
 | `bpo_market_price` | REAL | Lowest sell price for BPO type at hub (market orders only; contract-only BPOs will show NULL) |
 | `break_even_days` | REAL | |
 | `projected_annual_savings` | REAL | Material savings × planned annual runs |
@@ -140,6 +140,7 @@ Append-only. One row per recommended action per computation. Marking `status='do
 | `estimated_profit_isk` | REAL | |
 | `estimated_completion` | DATETIME | |
 | `status` | TEXT | `'pending'` \| `'done'` \| `'skipped'` |
+| `processed_for_feedback` | BOOLEAN | Default FALSE. Set TRUE once this row's outcome has been written to `plan_item_outcome` and EMA weights updated. Prevents re-processing on subsequent recomputations. |
 | `notes` | TEXT | Plain-language context, e.g. "BPC stock covers 1.8 days — start now" |
 
 ### `plan_item_outcome`
@@ -154,7 +155,7 @@ Written when a manufacturing batch completes and sells. Actuals are sourced from
 | `completed_at` | DATETIME | |
 | `predicted_isk_per_hour` | REAL | |
 | `actual_isk_per_hour` | REAL | `actual_profit / (manufacturing_duration_hours + actual_sell_days × 24)`. NULL for slow_mover outcomes (no realized sale). |
-| `accuracy_ratio` | REAL | actual / predicted |
+| `accuracy_ratio` | REAL | `actual_isk_per_hour / predicted_isk_per_hour`. NULL for slow_mover outcomes (no realized sale, so actual_isk_per_hour is NULL). |
 | `predicted_sell_days` | REAL | |
 | `actual_sell_days` | REAL | From wallet transaction timestamps; capped at slow-mover timeout |
 | `slow_mover` | BOOLEAN | True if outcome was written due to timeout, not an actual sale |
@@ -191,7 +192,7 @@ Fetches in parallel from existing services:
 - Corp assets (materials, BPOs, BPCs) across all hangar divisions
 - Corp market orders (open sell orders)
 - `plan_learning_weights` per type_id
-- Sell velocity per type_id from `SalesHistoryService` (used as `sell_velocity_per_day` in Phase 2). The feedback check from `plan_item_outcome` also runs here — outcomes for batches completed and sold since the last plan are written before new scoring begins, so the updated learning weights inform the current computation.
+- Sell velocity per type_id from `SalesHistoryService` (used as `sell_velocity_per_day` in Phase 2). The feedback check also runs here — `daily_action_log` rows with `status='done'` and `processed_for_feedback=false` are matched against `CorporationRealizedSalesLedgerModel`, new `plan_item_outcome` records are written, and `plan_learning_weights` are updated before new scoring begins. Each processed row is then marked `processed_for_feedback=true` to prevent re-processing.
 
 ### Phase 2 — Pipeline State per Item
 
@@ -217,12 +218,14 @@ copy_in_flight      = active copy jobs feeding this item's invention
 
 ```
 adjusted_score = isk_per_hour
-  × accuracy_ema            # self-learning: penalises chronic mispredicts
+  × accuracy_ema            # self-learning: penalises chronic mispredicts vs actual profit
   × velocity_multiplier     # self-learning: rewards fast sellers
+  × cost_multiplier         # self-learning: adjusts for systematic material cost misprediction
   × market_timing_factor    # 1.0 if 7d trend >= -5%; linear decay to 0.5 at -15%; floored at 0.5
                             # formula: max(0.5, 1.0 - (abs(trend) - 5) / 20) when trend < -5%
-  × pipeline_saturation     # 1.0 if days_of_supply < 3d; linear decay to 0.0 at 14d+
+  × pipeline_saturation     # > 1.0 if days_of_supply < 3d (urgency boost); 1.0 at 3d; linear decay to 0.0 at 14d+
                             # formula: max(0, 1 - (days_of_supply - 3) / 11)
+                            # e.g. 0 days → 1.27 (urgent), 3 days → 1.0, 14 days → 0.0
   × confidence_tier_bonus   # 1.0 / 1.05 / 1.15 for low / medium / high
 ```
 
@@ -289,16 +292,23 @@ for each required_material of a planned manufacturing job:
         market_buy_cost      = hub_sell_price × quantity_needed
 
         if sub_manufacture_cost < market_buy_cost:
-            # time_until_parent_job_start:
-            #   0 if the assigned character has a free manufacturing slot now;
-            #   otherwise end_date of the earliest-completing job for that character.
-            if sub_manufacture_duration <= time_until_parent_job_start:
+            # Two cases for time-awareness:
+            if character_has_free_manufacturing_slot_now:
+                # Slot is free: start sub-manufacture immediately.
+                # Parent job is scheduled to start after sub-manufacture completes.
                 plan sub_manufacture job (action_type = 'sub_manufacture')
                 # sub_manufacture jobs follow same character assignment rules as manufacturing
                 add sub-material inputs to shopping list (category: 'current_job')
             else:
-                add to shopping list (category: 'current_job') with note:
-                    "sub-manufacture too slow for this cycle — buying from market"
+                # Slot is busy: earliest_free_slot = end_date of earliest-completing job
+                if sub_manufacture_duration <= time_until_earliest_free_slot:
+                    # Sub-manufacture finishes by the time the slot frees — start now
+                    plan sub_manufacture job (action_type = 'sub_manufacture')
+                    add sub-material inputs to shopping list (category: 'current_job')
+                else:
+                    # Sub-manufacture would still be running when the parent needs to start
+                    add to shopping list (category: 'current_job') with note:
+                        "sub-manufacture too slow for this cycle — buying from market"
         else:
             add to shopping list (category: 'current_job')
     else:
@@ -321,7 +331,7 @@ Only items with `meta_group_id == 1` reach this analysis. T2, Faction, Deadspace
 
 ### Phase 6 — Skill-Aware Character Assignment
 
-Available slots per character are derived from character skills using the existing slot capacity calculation already implemented in the Industry Slots page. Running jobs (including active reaction jobs) reduce available slots.
+Available slots per character are derived from character skills using the existing slot capacity calculation already implemented in the Industry Slots page. Active manufacturing and research jobs reduce their respective slot pools. Reaction jobs occupy a separate reaction slot pool (controlled by `Mass Reactions` + `Advanced Mass Reactions`) and do not affect manufacturing or research slot availability.
 
 Assignment priority:
 1. Manufacturing and sub-manufacture jobs → character with most free manufacturing slots; ties broken by fewest total active jobs. Sub-manufacture jobs follow the same assignment rules as regular manufacturing jobs and consume the same slot type.
@@ -360,9 +370,11 @@ for each required_material across all planned jobs:
     Items where market buy was chosen (cheaper or sub-manufacture too slow)
     appear in the shopping list with their category and a note if applicable.
 
-    estimated_cost = hub_sell_price × net_required × cost_multiplier
-    # cost_multiplier from plan_learning_weights adjusts for historical drift
-    # between predicted and actual purchase prices for this material
+    estimated_cost = hub_sell_price × net_required
+    # cost_multiplier from plan_learning_weights is a per-product diagnostic signal
+    # (how well we predicted a product's total material cost), not a per-material
+    # price signal. It is used in Phase 3 scoring to improve profitability predictions
+    # for manufactured items, not applied to individual shopping line items.
 ```
 
 The shopping list in the UI groups rows by `shopping_category` with subtotals per category and a grand total ISK figure vs corp wallet balance.
@@ -457,9 +469,9 @@ Plan recomputation is always manual — triggered by the "Recompute Plan" button
 
 Per-character accordion sections. Within each character, actions are grouped and ordered by type: Deliver → Invent → Copy → ME/TE Research → Sub-Manufacture → Manufacture → Relist.
 
-Each action row has a checkbox. Checking it calls `POST /planner/action/done` and writes `status='done'` to `daily_action_log` in real-time. "Mark All Delivered Done" convenience button per character marks only that character's DELIVER actions as done (not all action types).
+Each action row has a checkbox. Checking it calls `POST /planner/action/done` and writes `status='done'` to `daily_action_log` in real-time. "Mark All Delivered Done" convenience button per character marks only that character's DELIVER actions as done (not all action types). Sections only render when at least one action of that type exists for the character — a character with no copy jobs will show no COPY section.
 
-Example layout:
+Example layout (not all sections will always appear):
 ```
 ▼ Aldara Voss   [3 mfg slots free]  [2 research slots free]
 
@@ -517,7 +529,7 @@ Two AG-Grid sections:
 | Medium Shield Extender | 420M ISK | 22 days | 6.8B ISK | ★ Strong Buy |
 | Caracal | 320M ISK | 67 days | 2.1B ISK | Consider |
 
-T2 items never appear in this section.
+T2 item BPOs never appear (they don't exist). T1 BPOs may appear either as direct product investments or as invention enablers for T2 items (e.g. a Caracal BPO appearing because it enables Cerberus invention).
 
 ### Tab 3 — Build Plan
 
@@ -570,4 +582,5 @@ New blueprint: `flask_app/routes/daily_planner.py`
 - Minimum ISK/hour threshold for `build` decision = 5M ISK/hr (configurable via admin settings)
 - `freshness_score` warning level = 0.9 (configurable via admin settings)
 - Tab 4 accuracy window N = 20 batches (configurable via admin settings)
-- Pipeline gap prevention look-ahead: start invention/copy if current BPC stock covers less than `job_duration_days + 1` of planned manufacturing
+- Pipeline gap prevention look-ahead: start invention/copy if current BPC stock covers less than `job_duration_days + 1` of planned manufacturing (+1 day safety buffer for job setup overhead)
+- `GET /planner/plan` computes live `freshness_score` on each call and writes the updated value back to `build_plan`, so the DB always holds the most recent staleness assessment
