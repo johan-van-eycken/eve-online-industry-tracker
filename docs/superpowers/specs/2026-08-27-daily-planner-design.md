@@ -44,11 +44,26 @@ The user's daily workflow: open the page → deliver finished jobs → start new
 | `CorporationIndustryJobsModel` | Active jobs per character: activity type, completion time, delivery status |
 | `CorporationAssetsModel` | All corp stock: raw materials, BPOs, BPCs across all hangar divisions (1–7) |
 | `CorporationMarketOrdersModel` | Open sell orders, pipeline units on market |
-| `CorporationWalletModel` | Corp main account balance (capital budget) |
+| `CorporationModel.wallets` | Corp main account balance — stored as a JSON column (`wallets`) on `CorporationModel`, one entry per division. Division 1 is labeled "Master Wallet". Balance is stored as a string; parse as float. No separate `CorporationWalletModel` table exists. |
 | `PricingSuggestionService` | Relist/reprice signals for open sell orders |
 | `CharacterModel` (skills) | Per-character slot capacities and skill levels |
 
 Character-level assets and wallets are **not** used for materials or capital; only character skills and slot data are read at character level.
+
+### Verified data availability (pre-implementation checks)
+
+| Concern | Verdict | Notes |
+|---|---|---|
+| FIFO cost basis — corp vs character scope | **Handled** | `_get_owned_item_inventory` correctly switches between `CharacterAssetHistoryModel` and `CorporationAssetHistoryModel` based on `owned_blueprints_scope` |
+| Corp + character job slot tracking | **Handled** | `industry_active_jobs` queries both `CorporationIndustryJobsModel` and `CharacterIndustryJobsModel`; `installer_id` attributes corp jobs to the installing character |
+| Sub-manufacture cost calculation | **Handled** | `_build_manufacture_job_plan` is recursive (depth ≤ 8), applies all ME/rig/skill bonuses at every level; `ShoppingListBuilder` must call this existing method rather than reimplement it |
+| Blueprint physical location | **Handled** | `top_location_name` is resolved via `resolve_top_location_name_map` (ESI `/universe/structures/` + `/universe/stations/`) and included in every blueprint payload |
+| `CorporationWalletModel` | **No such model** | Balance is in `CorporationModel.wallets` JSON column, division 1 = "Master Wallet", stored as string — parse as float |
+| `optimal_ME_from_IndustryService` | **Does not exist** | Needs a new function — see Phase 5 |
+| Market hub configurability | **Partial** | Hub is a per-request parameter defaulting to Jita; `get_material_sell_price_map` is hardcoded Jita — must NOT be used by the planner |
+| Structure/location in action list | **Available** | `industry_profile.location_name` and `profile_name` are included in every overview row; planner must surface them in action list |
+| Datacore/decryptor stock check | **Handled, with caveat** | `_plan_take_or_buy_material_nodes` deducts owned datacores/decryptors; BUT the `industry_hangar_flag` admin setting can restrict which hangar division is visible — items in other divisions are invisible |
+| Batch-to-sale attribution in feedback loop | **Approximate** | `CorporationRealizedProfitLedgerService` uses temporal FIFO (not exact batch matching); noise is smoothed by EMA over many samples |
 
 ### New components
 
@@ -249,10 +264,18 @@ For every `build` item:
 ```
 if meta_group_id == 1:  # T1 items — BPO path available
     if BPO owned in corp assets:
-        # Use IndustryService computed optimal ME/TE per blueprint
-        # (point of diminishing returns, not always ME10/TE20)
-        schedule ME research jobs if current_ME < optimal_ME_from_IndustryService
-        schedule TE research jobs if current_TE < optimal_TE_from_IndustryService
+        # compute_optimal_me(blueprint) must be implemented as a new function
+        # (does not currently exist in the codebase). Algorithm:
+        #   For each material in the blueprint:
+        #     find the smallest ME level where
+        #     ceil(base_qty × (1 - 0.01 × (ME+1))) == ceil(base_qty × (1 - 0.01 × ME))
+        #     i.e. no further unit reduction from one more ME level
+        #   optimal_ME = max across all materials (all must reach diminishing returns)
+        #   optimal_TE = TE level where time savings per level fall below a configurable
+        #                threshold (default: < 1% time saved per level)
+        # This function belongs in blueprints.py or IndustryService as a static utility.
+        schedule ME research jobs if current_ME < compute_optimal_me(blueprint)
+        schedule TE research jobs if current_TE < compute_optimal_te(blueprint)
         plan manufacturing jobs from BPO
 
     elif BPC available in corp assets:
@@ -370,6 +393,14 @@ for each required_material across all planned jobs:
     Items where market buy was chosen (cheaper or sub-manufacture too slow)
     appear in the shopping list with their category and a note if applicable.
 
+    # Hangar visibility caveat: corp asset queries are filtered by the
+    # `industry_hangar_flag` admin setting. Datacores, decryptors, and other
+    # invention inputs stored in a different hangar division than the configured
+    # flag will NOT be counted in corp_assets_available and will appear in the
+    # shopping list even if the corp physically has them.
+    # Mitigation: if datacores appear unexpectedly in the shopping list,
+    # check the industry_hangar_flag setting covers all relevant divisions.
+
     estimated_cost = hub_sell_price × net_required
     # cost_multiplier from plan_learning_weights is a per-product diagnostic signal
     # (how well we predicted a product's total material cost), not a per-material
@@ -391,7 +422,7 @@ Per character, ordered:
 6. **START MANUFACTURING** — highest priority items with BPCs ready, manufacturing slots free
 7. **RELIST** — market orders flagged by `PricingSuggestionService`
 
-Each action includes: item name, quantity/runs, estimated cost, estimated completion time, and a plain-language note explaining the reasoning.
+Each action includes: item name, quantity/runs, estimated cost, estimated completion time, **structure name** (`industry_profile.location_name`) and **profile name** (`industry_profile.profile_name`) for all job actions (manufacture, invent, copy, me_research, te_research, sub_manufacture), and a plain-language note explaining the reasoning. Structure context is sourced from the `industry_profile` embedded in every `IndustryService` overview row — no additional lookup required.
 
 ### Phase 9 — Persistence
 
@@ -418,7 +449,7 @@ If `freshness_score` drops below 0.9 (i.e., more than 10% of tracked items have 
 
 ## Self-Learning Feedback Loop
 
-After each plan cycle, the system checks `daily_action_log` for `manufacture` actions marked `done` where the corresponding type_id appears in `CorporationRealizedSalesLedgerModel` with a completion timestamp after the action's `generated_at`. For each matched batch:
+After each plan cycle, the system checks `daily_action_log` for `manufacture` actions marked `done` and `processed_for_feedback=false`. Actuals are read from `CorporationRealizedProfitLedgerService` (which exists and handles corp scope). **Attribution method:** temporal FIFO — sales are matched to batches by `type_id` chronologically, not by an exact batch-to-sale link (EVE's API provides no such link). For frequently manufactured items this introduces some noise; EMA smoothing (α=0.2) averages it out over many samples. For low-volume items (capitals, rare T2), the noise may be more pronounced and confidence tier will remain `low` longer. For each matched batch:
 
 1. Read `actual_sell_days`, `actual_material_cost`, and realized profit from `CorporationRealizedSalesLedgerModel`
 2. Write a `plan_item_outcome` record
@@ -571,6 +602,7 @@ New blueprint: `flask_app/routes/daily_planner.py`
 
 ## Implementation Notes
 
+- **Primary market hub** for shopping list and BPO price lookups: configurable via admin settings (default: `jita`). The planner must pass this hub explicitly to all `MarketPricingService` calls. `get_material_sell_price_map()` is hardcoded to Jita and must NOT be used by the planner — use `get_type_price_map(hub=configured_hub)` instead.
 - Background computation follows the same pattern as `IndustryService` refresh (background thread, progress callbacks, polled by frontend)
 - Plan recomputation is always manual — no scheduled auto-recompute
 - Schema migrations added to `schema_migrations.py` for all five new tables
