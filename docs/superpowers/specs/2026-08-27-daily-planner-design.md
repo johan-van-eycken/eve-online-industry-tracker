@@ -144,7 +144,7 @@ Append-only. One row per recommended action per computation. Marking `status='do
 
 ### `plan_item_outcome`
 
-Written when a manufacturing batch completes and sells. Actuals are sourced from `CorporationRealizedSalesLedgerModel` (existing realized profit tracking via FIFO cost + wallet transactions), matched to `daily_action_log` records by `type_id` and completion timeframe.
+Written when a manufacturing batch completes and sells. Actuals are sourced from `CorporationRealizedSalesLedgerModel` (existing realized profit tracking via FIFO cost + wallet transactions), matched to `daily_action_log` records by `type_id` and completion timeframe. If no matching sale appears within the configurable slow-mover timeout (default 60 days), an outcome row is written with `actual_sell_days` set to the timeout value and `slow_mover = true`, so the velocity score for that item is penalised rather than left unresolved indefinitely.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -153,12 +153,13 @@ Written when a manufacturing batch completes and sells. Actuals are sourced from
 | `type_id` | INTEGER | |
 | `completed_at` | DATETIME | |
 | `predicted_isk_per_hour` | REAL | |
-| `actual_isk_per_hour` | REAL | From wallet transactions + FIFO cost |
+| `actual_isk_per_hour` | REAL | From `CorporationRealizedSalesLedgerModel` |
 | `accuracy_ratio` | REAL | actual / predicted |
 | `predicted_sell_days` | REAL | |
-| `actual_sell_days` | REAL | From wallet transaction timestamps |
+| `actual_sell_days` | REAL | From wallet transaction timestamps; capped at slow-mover timeout |
+| `slow_mover` | BOOLEAN | True if outcome was written due to timeout, not an actual sale |
 | `predicted_material_cost` | REAL | |
-| `actual_material_cost` | REAL | From corp wallet transactions |
+| `actual_material_cost` | REAL | From `CorporationRealizedSalesLedgerModel` FIFO cost |
 
 ### `plan_learning_weights`
 
@@ -185,11 +186,12 @@ Triggered via `POST /planner/compute`. Runs in a background thread. Eight sequen
 
 Fetches in parallel from existing services:
 - Corp wallet balance
-- All `IndustryService` overview rows
+- All `IndustryService` overview rows — if overview data is older than 12 hours, the planner warns the user and offers to trigger an Industry Builder refresh before proceeding
 - Active corp industry jobs per character (completion times, activity type, slot usage)
-- Corp assets (materials, BPOs, BPCs)
+- Corp assets (materials, BPOs, BPCs) across all hangar divisions
 - Corp market orders (open sell orders)
 - `plan_learning_weights` per type_id
+- Sell velocity per type_id from `SalesHistoryService` (used as `sell_velocity_per_day` in Phase 2)
 
 ### Phase 2 — Pipeline State per Item
 
@@ -213,7 +215,8 @@ copy_in_flight      = active copy jobs feeding this item's invention
 adjusted_score = isk_per_hour
   × accuracy_ema            # self-learning: penalises chronic mispredicts
   × velocity_multiplier     # self-learning: rewards fast sellers
-  × market_timing_factor    # 1.0 if trend >= -5%; scales down to 0.5 at -15%
+  × market_timing_factor    # 1.0 if 7d trend >= -5%; linear decay to 0.5 at -15%; floored at 0.5
+                            # formula: max(0.5, 1.0 - (abs(trend) - 5) / 20) when trend < -5%
   × pipeline_saturation     # 1.0 if days_of_supply < 3d; linear decay to 0.0 at 14d+
                             # formula: max(0, 1 - (days_of_supply - 3) / 11)
   × confidence_tier_bonus   # 1.0 / 1.05 / 1.15 for low / medium / high
@@ -235,50 +238,52 @@ The goal is for the planner to be self-optimising through its feedback loop. Ses
 For every `build` item:
 
 ```
-# T1 items (meta_group_id == 1)
-if BPO owned in corp assets:
-    schedule ME research jobs if current_ME < target_ME (typically 10)
-    schedule TE research jobs if current_TE < target_TE (typically 20)
-    plan manufacturing jobs from BPO
+if meta_group_id == 1:  # T1 items — BPO path available
+    if BPO owned in corp assets:
+        schedule ME research jobs if current_ME < target_ME (typically 10)
+        schedule TE research jobs if current_TE < target_TE (typically 20)
+        plan manufacturing jobs from BPO
 
-elif BPC available in corp assets:
-    plan manufacturing jobs from BPC
-    run BPO investment analysis (T1 only)
+    elif BPC available in corp assets:
+        plan manufacturing jobs from BPC
+        run BPO investment analysis
 
-elif BPO purchasable on market (meta_group_id == 1):
-    run BPO investment analysis
-    if break_even_days < 30: recommend BPO purchase (★ Strong Buy)
-    if 30 <= break_even_days <= 90: flag as investment opportunity
-    if break_even_days > 90: add BPC/items to shopping list
+    elif BPO purchasable on market:
+        run BPO investment analysis
+        if break_even_days < 30:       recommend BPO purchase (★ Strong Buy)
+        elif break_even_days <= 90:    flag as investment opportunity
+        else:                          add BPC/items to shopping list
 
-else:
-    add BPC or finished items to shopping list
-
-# T2 items (meta_group_id != 1) — no BPO path
-if BPC available in corp assets:
-    plan manufacturing jobs from BPC
-
-else:
-    if BPO for T1 base item in corp assets:
-        plan copy jobs → plan invention jobs
-        # Forward look: start invention now if BPC stock < production_lead_time_days
-        add datacores + decryptors to shopping list (category: 'invention_input')
     else:
-        add T1 BPC or base item to shopping list
-        flag T1 BPO for BPO investment analysis
+        add BPC or finished items to shopping list
 
-# Sub-manufacture decision (applied to every required input material)
+else:  # T2+ items — invention chain only, no BPO path
+    if BPC available in corp assets:
+        plan manufacturing jobs from BPC
+
+    else:
+        if BPO for T1 base item in corp assets:
+            plan copy jobs → plan invention jobs
+            # Forward look: start invention now if BPC stock < production_lead_time_days
+            add datacores + decryptors to shopping list (category: 'invention_input')
+        else:
+            add T1 BPC or base item to shopping list
+            flag T1 BPO for BPO investment analysis
+
+# Sub-manufacture decision (applied to every required input material regardless of T1/T2)
 for each required_material of a planned manufacturing job:
     if BPO owned for required_material (meta_group_id == 1):
         sub_manufacture_cost = compute manufacturing cost from BPO
                                (materials + job cost using existing IndustryService)
         market_buy_cost      = hub_sell_price × quantity_needed
+
         if sub_manufacture_cost < market_buy_cost:
-            # Time-awareness: sub-manufacture job must complete before parent job starts.
-            # If sub-manufacture duration > time until parent job would start,
-            # fall back to market buy for this cycle and flag for next plan cycle.
+            # time_until_parent_job_start:
+            #   0 if the assigned character has a free manufacturing slot now;
+            #   otherwise end_date of the earliest-completing job for that character.
             if sub_manufacture_duration <= time_until_parent_job_start:
                 plan sub_manufacture job (action_type = 'sub_manufacture')
+                # sub_manufacture jobs follow same character assignment rules as manufacturing
                 add sub-material inputs to shopping list (category: 'current_job')
             else:
                 add to shopping list (category: 'current_job') with note:
@@ -308,7 +313,7 @@ Only items with `meta_group_id == 1` reach this analysis. T2, Faction, Deadspace
 Available slots per character are derived from character skills using the existing slot capacity calculation already implemented in the Industry Slots page. Running jobs (including active reaction jobs) reduce available slots.
 
 Assignment priority:
-1. Manufacturing jobs → character with most free manufacturing slots; ties broken by fewest total active jobs
+1. Manufacturing and sub-manufacture jobs → character with most free manufacturing slots; ties broken by fewest total active jobs. Sub-manufacture jobs follow the same assignment rules as regular manufacturing jobs and consume the same slot type.
 2. Invention jobs → character with highest relevant Science + Metallurgy skill sum and free research slot
 3. Copy jobs → character with most free research slots; ties broken by highest Research skill
 4. ME/TE research → character with most free research slots
@@ -326,9 +331,10 @@ for each required_material across all planned jobs:
     if net_required <= 0: skip (already covered by stock)
 
     determine shopping_category:
-        'current_job'     — material needed immediately for a job starting today
-        'future_stock'    — material needed for jobs planned beyond today
-                            (pre-buy to avoid restocking delays)
+        'current_job'     — material needed for a job in today's action list
+        'future_stock'    — material needed for jobs in the current plan that are
+                            not starting today (pre-buy across the full planning window
+                            to avoid restocking delays on subsequent days)
         'invention_input' — datacores, decryptors, T1 BPCs for invention jobs
 
     sub-manufacture decisions are resolved in Phase 5.
@@ -403,22 +409,32 @@ New items start at weight 1.0. After 5+ batches the system has signal; after 20+
 [ Recompute Plan ]   ⚠ "Tritanium shifted 7.2% — consider recomputing"
 ```
 
+**Capital Reserved** = sum of `estimated_cost_isk` for all pending `buy_materials` and `buy_bpo` actions + sum of estimated job install costs for all planned manufacturing and sub-manufacture jobs. Represents the ISK that will be committed if the user follows the full day's plan.
+
+**Projected ISK Return (7d)** = sum of `estimated_profit_isk` for all in-flight and planned manufacturing jobs whose estimated completion date + velocity-adjusted sell time falls within the next 7 days. Sell time per item uses `sell_velocity_per_day × velocity_multiplier` from learning weights.
+
+Plan recomputation is always manual — triggered by the "Recompute Plan" button. There is no automatic scheduled recomputation.
+
 ### Tab 1 — Today's Actions *(primary view)*
 
-Per-character accordion sections. Within each character, actions are grouped and ordered by type: Deliver → Invent → Copy → ME/TE Research → Manufacture → Relist.
+Per-character accordion sections. Within each character, actions are grouped and ordered by type: Deliver → Invent → Copy → ME/TE Research → Sub-Manufacture → Manufacture → Relist.
 
-Each action row has a checkbox. Checking it calls `POST /planner/action/done` and writes `status='done'` to `daily_action_log` in real-time. "Mark All Delivered Done" convenience button per character.
+Each action row has a checkbox. Checking it calls `POST /planner/action/done` and writes `status='done'` to `daily_action_log` in real-time. "Mark All Delivered Done" convenience button per character marks only that character's DELIVER actions as done (not all action types).
 
 Example layout:
 ```
 ▼ Aldara Voss   [3 mfg slots free]  [2 research slots free]
 
-  🔴 DELIVER
+  🔴 DELIVER   [ Mark All Delivered Done ]
      ☐  Tengu ×5 runs — move to corp hangar
 
   🟡 INVENT
      ☐  Tengu BPC ×10 attempts — ~1.2M ISK — est. 18h
         "BPC stock covers 1.8 days — start now to avoid slot gap"
+
+  🔧 SUB-MANUFACTURE
+     ☐  Crystalline Carbonide Armor Plate ×200 — ~3.1M ISK — est. 6h
+        "cheaper to build than buy (market: 4.2M ISK) — must complete before Cerberus job"
 
   🟢 MANUFACTURE
      ☐  Cerberus ×3 runs — ~42M ISK — est. 4d 6h
@@ -506,8 +522,11 @@ New blueprint: `flask_app/routes/daily_planner.py`
 ## Implementation Notes
 
 - Background computation follows the same pattern as `IndustryService` refresh (background thread, progress callbacks, polled by frontend)
+- Plan recomputation is always manual — no scheduled auto-recompute
 - Schema migrations added to `schema_migrations.py` for all five new tables
 - EMA weight α = 0.2 (configurable via admin settings)
 - Staleness price drift threshold = 5% (configurable via admin settings)
+- IndustryService overview freshness threshold = 12 hours (configurable via admin settings)
 - BPO break-even thresholds (Strong Buy: 30d, Consider: 90d) configurable via admin settings
+- Slow-mover timeout = 60 days (global, configurable via admin settings); applies uniformly to all item categories
 - Pipeline gap prevention look-ahead: start invention/copy if current BPC stock covers less than `job_duration_days + 1` of planned manufacturing
