@@ -30,7 +30,7 @@ The user's daily workflow: open the page → deliver finished jobs → start new
 - Automatic in-game job submission (read-only ESI; user executes actions manually)
 - T2/Faction/Deadspace BPO recommendations (these BPOs do not exist)
 - Multi-corporation support (single corp assumed)
-- Starting new reaction jobs (may be added later); existing reaction jobs ARE included in DELIVER actions and their slots ARE counted against research slot availability
+- Starting new reaction jobs (may be added later); existing reaction jobs ARE included in DELIVER actions and their reaction slots ARE counted against reaction slot availability (controlled by `Mass Reactions` + `Advanced Mass Reactions` skills — a separate pool from manufacturing and research/invention slots)
 
 ---
 
@@ -108,12 +108,12 @@ One row per evaluated product per plan.
 | `meta_group_id` | INTEGER | From SDE; gates BPO analysis (only meta group 1 eligible) |
 | `decision` | TEXT | `'build'` \| `'watch'` \| `'pause'` \| `'skip'` |
 | `decision_reason` | TEXT | Plain-language explanation shown in UI |
-| `target_batches` | INTEGER | Batches to maintain in pipeline |
+| `target_batches` | INTEGER | Batches to maintain in pipeline. Formula: `ceil(effective_velocity × production_lead_time_days / runs_per_batch)` where `production_lead_time_days` = manufacturing job duration in days |
 | `priority_score` | REAL | Composite adjusted score |
 | `isk_per_hour` | REAL | At plan creation time |
 | `margin_pct` | REAL | |
 | `days_of_supply_current` | REAL | Market + in-flight jobs at plan time |
-| `pipeline_stage` | TEXT | `'manufacturing'` \| `'invention'` \| `'copying'` \| `'watching'` |
+| `pipeline_stage` | TEXT | `'manufacturing'` \| `'invention'` \| `'copying'` \| `'researching'` \| `'watching'` |
 | `bpo_investment_recommended` | BOOLEAN | Only set for meta group 1 items |
 | `bpo_market_price` | REAL | Lowest sell price for BPO type at hub (market orders only; contract-only BPOs will show NULL) |
 | `break_even_days` | REAL | |
@@ -128,8 +128,8 @@ Append-only. One row per recommended action per computation. Marking `status='do
 | `id` | INTEGER PK | |
 | `plan_id` | INTEGER FK → `build_plan` | |
 | `generated_at` | DATETIME | |
-| `character_id` | INTEGER | |
-| `character_name` | TEXT | |
+| `character_id` | INTEGER | Nullable for `buy_materials` and `buy_bpo` actions (corp-level, not character-specific; any character with market access can execute) |
+| `character_name` | TEXT | Nullable for the same corp-level action types |
 | `action_type` | TEXT | `'deliver'` \| `'manufacture'` \| `'sub_manufacture'` \| `'invent'` \| `'copy'` \| `'me_research'` \| `'te_research'` \| `'buy_materials'` \| `'buy_bpo'` \| `'relist_order'` |
 | `shopping_category` | TEXT | For `buy_materials` rows: `'current_job'` \| `'future_stock'` \| `'invention_input'` |
 | `type_id` | INTEGER | |
@@ -153,7 +153,7 @@ Written when a manufacturing batch completes and sells. Actuals are sourced from
 | `type_id` | INTEGER | |
 | `completed_at` | DATETIME | |
 | `predicted_isk_per_hour` | REAL | |
-| `actual_isk_per_hour` | REAL | From `CorporationRealizedSalesLedgerModel` |
+| `actual_isk_per_hour` | REAL | `actual_profit / (manufacturing_duration_hours + actual_sell_days × 24)`. NULL for slow_mover outcomes (no realized sale). |
 | `accuracy_ratio` | REAL | actual / predicted |
 | `predicted_sell_days` | REAL | |
 | `actual_sell_days` | REAL | From wallet transaction timestamps; capped at slow-mover timeout |
@@ -191,18 +191,22 @@ Fetches in parallel from existing services:
 - Corp assets (materials, BPOs, BPCs) across all hangar divisions
 - Corp market orders (open sell orders)
 - `plan_learning_weights` per type_id
-- Sell velocity per type_id from `SalesHistoryService` (used as `sell_velocity_per_day` in Phase 2)
+- Sell velocity per type_id from `SalesHistoryService` (used as `sell_velocity_per_day` in Phase 2). The feedback check from `plan_item_outcome` also runs here — outcomes for batches completed and sold since the last plan are written before new scoring begins, so the updated learning weights inform the current computation.
 
 ### Phase 2 — Pipeline State per Item
 
 For every manufacturable item:
 
 ```
+# sell_velocity_per_day fallback: if SalesHistoryService returns 0 (item never sold),
+# use (1 / days_of_supply) from IndustryService row, floored at a minimum of 0.01 units/day
+effective_velocity = max(0.01, sell_velocity_per_day × velocity_multiplier)
+
 total_pipeline_days = (
     corp_stock_units
     + units_in_active_manufacturing_jobs
     + units_on_market
-) / (sell_velocity_per_day × velocity_multiplier)
+) / effective_velocity
 
 bpc_runs_available  = sum(BPC.runs for BPC in corp_assets where product = item)
 invention_in_flight = active invention jobs for this item
@@ -226,10 +230,12 @@ adjusted_score = isk_per_hour
 
 | Decision | Condition |
 |---|---|
-| `build` | Profitable, pipeline < 3 days of supply, market timing OK |
+| `build` | `adjusted_score` > minimum ISK/hour threshold (default 5M ISK/hr, configurable) AND pipeline < 3 days of supply |
 | `watch` | Profitable but pipeline ≥ 3 days of supply (already saturated) |
 | `pause` | Currently building but 7d price trend < -8% — finish in-flight, don't restart |
-| `skip` | Margin below threshold, high anomaly risk, or insufficient liquidity |
+| `skip` | `adjusted_score` ≤ minimum threshold, high anomaly risk, or insufficient liquidity |
+
+**Note on overlapping price thresholds:** `market_timing_factor` (applied in Phase 3) continuously penalises the score as trend falls below -5%, reaching its floor of 0.5 at -15%. This is a soft signal. `pause` (decided in Phase 4) is a hard override that triggers at -8% regardless of score — it forces an item from `build` to `pause` even if its adjusted score remains above the minimum threshold. These two mechanisms serve different roles: one modulates scoring, the other overrides the decision.
 
 The goal is for the planner to be self-optimising through its feedback loop. Session-only UI overrides (force include / force exclude) are available in Tab 3 for the current view only and are never persisted — they reset on the next recomputation.
 
@@ -240,8 +246,10 @@ For every `build` item:
 ```
 if meta_group_id == 1:  # T1 items — BPO path available
     if BPO owned in corp assets:
-        schedule ME research jobs if current_ME < target_ME (typically 10)
-        schedule TE research jobs if current_TE < target_TE (typically 20)
+        # Use IndustryService computed optimal ME/TE per blueprint
+        # (point of diminishing returns, not always ME10/TE20)
+        schedule ME research jobs if current_ME < optimal_ME_from_IndustryService
+        schedule TE research jobs if current_TE < optimal_TE_from_IndustryService
         plan manufacturing jobs from BPO
 
     elif BPC available in corp assets:
@@ -268,7 +276,10 @@ else:  # T2+ items — invention chain only, no BPO path
             add datacores + decryptors to shopping list (category: 'invention_input')
         else:
             add T1 BPC or base item to shopping list
-            flag T1 BPO for BPO investment analysis
+            # Flag the T1 base item BPO for BPO investment analysis.
+            # Context: this analysis is for the T1 BPO as an invention enabler
+            # (not as a product to manufacture and sell), so the break-even
+            # calculation uses invention-driven run counts, not direct sales velocity.
 
 # Sub-manufacture decision (applied to every required input material regardless of T1/T2)
 for each required_material of a planned manufacturing job:
@@ -320,14 +331,20 @@ Assignment priority:
 
 ME/TE research, copy, and invention jobs all compete for the same research slot pool — the assigner never double-books a character's research capacity.
 
+If no character has a free slot for a planned job, that job is deferred to the next plan cycle: it remains visible in Tab 3 (Build Plan) with a note explaining why it was not scheduled, but does not appear in Tab 1 (Today's Actions).
+
 ### Phase 7 — Material Shopping List
 
 Materials are aggregated across all planned jobs and categorised so the user understands what each purchase is for.
 
 ```
+# Note: in EVE, materials are consumed from the corp hangar at job start,
+# so CorporationAssetsModel already excludes materials tied to active jobs.
+# 'already_allocated' below prevents double-booking the same corp stock
+# across two planned jobs that would both start today.
 for each required_material across all planned jobs:
     net_required = quantity_needed − corp_assets_available
-                                   − reserved_for_in_flight_jobs
+                                   − already_allocated_to_other_planned_jobs_today
     if net_required <= 0: skip (already covered by stock)
 
     determine shopping_category:
@@ -343,7 +360,9 @@ for each required_material across all planned jobs:
     Items where market buy was chosen (cheaper or sub-manufacture too slow)
     appear in the shopping list with their category and a note if applicable.
 
-    estimated_cost = hub_sell_price × net_required
+    estimated_cost = hub_sell_price × net_required × cost_multiplier
+    # cost_multiplier from plan_learning_weights adjusts for historical drift
+    # between predicted and actual purchase prices for this material
 ```
 
 The shopping list in the UI groups rows by `shopping_category` with subtotals per category and a grand total ISK figure vs corp wallet balance.
@@ -374,7 +393,14 @@ Each action includes: item name, quantity/runs, estimated cost, estimated comple
 
 ## Staleness Detection
 
-On page load, the planner re-hashes current prices of all items in the active plan. If any key item price has drifted >5% from `market_snapshot_hash`, `freshness_score` is reduced. The UI warns the user to recompute. Threshold is configurable via admin settings.
+On page load, the planner re-hashes current prices of all items in the active plan and compares to `market_snapshot_hash`.
+
+```
+drifted_count  = count of items where abs(current_price - snapshot_price) / snapshot_price > drift_threshold
+freshness_score = 1 - (drifted_count / total_tracked_items)
+```
+
+If `freshness_score` drops below 0.9 (i.e., more than 10% of tracked items have drifted), the UI shows a warning and prompts recomputation. Both the drift threshold (default 5%) and the freshness warning level (default 0.9) are configurable via admin settings.
 
 ---
 
@@ -382,13 +408,25 @@ On page load, the planner re-hashes current prices of all items in the active pl
 
 After each plan cycle, the system checks `daily_action_log` for `manufacture` actions marked `done` where the corresponding type_id appears in `CorporationRealizedSalesLedgerModel` with a completion timestamp after the action's `generated_at`. For each matched batch:
 
-1. Read `actual_isk_per_hour`, `actual_sell_days`, `actual_material_cost` from `CorporationRealizedSalesLedgerModel` (which already tracks realized profit via FIFO cost + wallet transactions)
+1. Read `actual_sell_days`, `actual_material_cost`, and realized profit from `CorporationRealizedSalesLedgerModel`
 2. Write a `plan_item_outcome` record
-3. Update `plan_learning_weights` for the item using EMA (α = 0.2):
+3. Update `plan_learning_weights` using EMA (α = 0.2):
+
+   **For normal outcomes** (`slow_mover = false`):
    ```
-   accuracy_ema = 0.8 × old_accuracy_ema + 0.2 × (actual / predicted)
+   accuracy_ema        = 0.8 × old_accuracy_ema + 0.2 × (actual_isk_per_hour / predicted_isk_per_hour)
    velocity_multiplier = 0.8 × old_velocity + 0.2 × (predicted_days / actual_days)
-   cost_multiplier = 0.8 × old_cost + 0.2 × (actual_cost / predicted_cost)
+   cost_multiplier     = 0.8 × old_cost + 0.2 × (actual_material_cost / predicted_material_cost)
+   ```
+
+   **For slow mover outcomes** (`slow_mover = true`, no realized sale):
+   ```
+   # accuracy_ema and cost_multiplier are NOT updated (no realized data)
+   velocity_multiplier = 0.8 × old_velocity + 0.2 × (predicted_days / slow_mover_timeout_days)
+   # This penalises the velocity score proportionally to how far actual exceeded predicted
+   ```
+
+   ```
    confidence_tier = 'low' if sample_count < 5 else 'medium' if < 20 else 'high'
    ```
 
@@ -489,9 +527,9 @@ Session-only override buttons (force include / force exclude / reset) affect the
 
 ### Tab 4 — Plan Analytics
 
-- **Accuracy** — per-item predicted vs actual ISK/hour over last N batches
-- **Velocity** — predicted vs actual sell days per item
-- **Plan History** — timeline of recomputations, changes per cycle, net ISK earned vs projected
+- **Accuracy** — per-item predicted vs actual ISK/hour over last N batches (default N = 20, configurable via admin settings)
+- **Velocity** — predicted vs actual sell days per item; slow_mover outcomes shown distinctly
+- **Plan History** — timeline of recomputations; per-cycle changes tracked as decision shifts per item (e.g. `build → watch`, `skip → build`), net ISK earned vs projected
 
 ---
 
@@ -529,4 +567,7 @@ New blueprint: `flask_app/routes/daily_planner.py`
 - IndustryService overview freshness threshold = 12 hours (configurable via admin settings)
 - BPO break-even thresholds (Strong Buy: 30d, Consider: 90d) configurable via admin settings
 - Slow-mover timeout = 60 days (global, configurable via admin settings); applies uniformly to all item categories
+- Minimum ISK/hour threshold for `build` decision = 5M ISK/hr (configurable via admin settings)
+- `freshness_score` warning level = 0.9 (configurable via admin settings)
+- Tab 4 accuracy window N = 20 batches (configurable via admin settings)
 - Pipeline gap prevention look-ahead: start invention/copy if current BPC stock covers less than `job_duration_days + 1` of planned manufacturing
