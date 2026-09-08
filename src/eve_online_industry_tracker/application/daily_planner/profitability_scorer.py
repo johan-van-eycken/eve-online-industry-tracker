@@ -19,9 +19,10 @@ class ProfitabilityScorer:
         self,
         pipeline: PipelineState,
         overview_row: dict[str, Any],
-        weights: Any | None,           # PlanLearningWeightsModel | None
+        weights: Any | None,            # PlanLearningWeightsModel | None
         market_depth: Any | None,       # MarketDepthCacheModel | None (for absolute_profit)
         margin_correlation: Any | None, # MarginCorrelationCacheModel | None
+        trit_trend_7d: float | None = None,  # Tritanium 7d price trend %
     ) -> ScoredItem:
         """Apply Phase 3 multipliers and return a ScoredItem."""
         type_id = pipeline.type_id
@@ -76,15 +77,13 @@ class ProfitabilityScorer:
             competition_factor = 0.60
 
         # ── Mineral squeeze penalty ───────────────────────────────────────────
-        # Phase A: always 1.0 (no correlation data)
+        # Only applies when: item is squeeze-sensitive AND Tritanium's 7d trend > +5%.
+        # Without confirmed rising Tritanium prices the penalty must not fire.
         mineral_squeeze_penalty = 1.0
         if margin_correlation is not None:
             is_sensitive = getattr(margin_correlation, "is_squeeze_sensitive", False) or False
-            if is_sensitive:
-                # Only apply penalty if Tritanium is currently rising (trend > +5%)
-                # Tritanium is type_id=34; we use price_trend_7d from the correlation entry
-                # or fall back to the admin setting planner_mineral_squeeze_factor
-                mineral_squeeze_penalty = 0.85  # configurable, but use default here
+            if is_sensitive and trit_trend_7d is not None and trit_trend_7d > 5.0:
+                mineral_squeeze_penalty = 0.85
 
         # ── Adjusted score ────────────────────────────────────────────────────
         adjusted_score = (

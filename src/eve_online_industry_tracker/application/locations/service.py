@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from eve_online_industry_tracker.infrastructure.models import StructureNameCacheModel
+from eve_online_industry_tracker.infrastructure.esi_versions import ESI_UNIVERSE_STRUCTURE
 
 
 def _is_structure_id(location_id: int) -> bool:
@@ -90,7 +91,7 @@ class LocationsService:
                 if char.esi_client is main_esi_client:
                     continue
                 data = char.esi_client.esi_get(
-                    f"/universe/structures/{structure_id}/",
+                    ESI_UNIVERSE_STRUCTURE.format(structure_id=structure_id),
                     suppress_forbidden_log=True,
                     suppress_not_found_log=True,
                 )

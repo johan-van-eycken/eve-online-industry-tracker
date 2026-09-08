@@ -27,7 +27,7 @@ CONFIG_SCHEMA = {
         "headers": {
             "Accept": "application/json",  # Required
             "Accept-Language": "en",  # Default language
-            "X-Compatibity-Date": "2025-08-26",  # Required compatibility date
+            "X-Compatibility-Date": "2025-08-26",  # Required compatibility date
             "X-Tenant": "tranquility",  # Tenant identifier
         },
     },

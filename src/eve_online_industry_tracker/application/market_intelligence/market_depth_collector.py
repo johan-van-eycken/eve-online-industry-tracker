@@ -103,10 +103,12 @@ class MarketDepthCollector:
             if len(rows) < 3:
                 return None
 
-            total_vol = sum(r.volume for r in rows if r.volume)
+            # Only include rows where both close price and volume are present
+            valid_rows = [r for r in rows if r.volume and r.close]
+            total_vol = sum(r.volume for r in valid_rows)
             if total_vol <= 0:
                 return None
-            return sum(r.close * r.volume for r in rows if r.volume and r.close) / total_vol
+            return sum(r.close * r.volume for r in valid_rows) / total_vol
         finally:
             try:
                 app_session.close()
@@ -235,10 +237,11 @@ class MarketDepthCollector:
                 orders = sell_orders.get(type_id) or []
                 avg_30d, std_30d = self._get_avg_30d_stats(type_id, region_id)
 
-                # Outlier filter
+                # Outlier filter — two-sided: removes both high-price and low-price anomalies
                 if avg_30d is not None and std_30d is not None:
-                    threshold = avg_30d + sigma * std_30d
-                    filtered = [o for o in orders if float(o.get("price", 0)) <= threshold]
+                    upper = avg_30d + sigma * std_30d
+                    lower = max(1.0, avg_30d - sigma * std_30d)
+                    filtered = [o for o in orders if lower <= float(o.get("price", 0)) <= upper]
                     if len(filtered) < len(orders) * 0.5:
                         logging.warning(
                             "MarketDepthCollector: >50%% outliers for type_id=%s, skipping filter",

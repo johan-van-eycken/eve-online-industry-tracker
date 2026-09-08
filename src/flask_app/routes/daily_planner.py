@@ -44,12 +44,30 @@ def mark_done():
 @daily_planner_bp.patch("/planner/action/<int:action_id>")
 def set_action_status(action_id: int):
     # Body: {"status": "pending" | "skipped"}
-    # Returns 409 if feedback already processed (service raises ValueError)
+    # Allowed transitions: done→pending, pending→skipped, skipped→pending.
+    # Returns 409 if feedback already processed (repo raises ValueError).
     require_ready(get_state())
     payload = request.get_json(silent=True) or {}
     new_status = payload.get("status")
     if new_status not in ("pending", "skipped"):
         return error(message="status must be 'pending' or 'skipped'", status_code=400)
+
+    # Validate the state-machine transition before writing
+    current = get_state().daily_planner_service.get_action(action_id)
+    if current is None:
+        return error(message="Action not found", status_code=404)
+    current_status = str(current.get("status") or "")
+    allowed = {
+        "pending": {"skipped"},
+        "skipped": {"pending"},
+        "done": {"pending"},
+    }
+    if new_status not in allowed.get(current_status, set()):
+        return error(
+            message=f"Transition {current_status!r} → {new_status!r} is not allowed",
+            status_code=422,
+        )
+
     try:
         get_state().daily_planner_service.set_action_status(action_id, new_status)
     except ValueError as e:

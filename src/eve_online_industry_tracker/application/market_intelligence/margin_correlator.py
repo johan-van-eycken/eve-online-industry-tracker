@@ -142,29 +142,32 @@ class MarginCorrelator:
             except Exception:
                 pass
 
+        if not active_type_ids:
+            logging.info("MarginCorrelator: no active type_ids, skipping")
+            return
+
         now_iso = datetime.utcnow().isoformat()
 
-        # Compute Pearson per type_id
-        for type_id in active_type_ids:
-            try:
-                margin_by_date = margins_by_type.get(type_id, {})
-                # Find common dates between Tritanium and this item
-                common_dates = sorted(set(trit_by_date.keys()) & set(margin_by_date.keys()))
-                if len(common_dates) < min_days:
-                    continue
-
-                trit_series = [trit_by_date[d] for d in common_dates]
-                margin_series = [
-                    sum(margin_by_date[d]) / len(margin_by_date[d])
-                    for d in common_dates
-                ]
-
-                pearson_r, _ = pearsonr(trit_series, margin_series)
-                is_squeeze = bool(pearson_r < threshold)
-
-                app_session4 = sessions.app_session()
+        # Compute Pearson per type_id — batch all writes in a single session
+        write_session = sessions.app_session()
+        try:
+            for type_id in active_type_ids:
                 try:
-                    app_session4.execute(text(
+                    margin_by_date = margins_by_type.get(type_id, {})
+                    common_dates = sorted(set(trit_by_date.keys()) & set(margin_by_date.keys()))
+                    if len(common_dates) < min_days:
+                        continue
+
+                    trit_series = [trit_by_date[d] for d in common_dates]
+                    margin_series = [
+                        sum(margin_by_date[d]) / len(margin_by_date[d])
+                        for d in common_dates
+                    ]
+
+                    pearson_r, _ = pearsonr(trit_series, margin_series)
+                    is_squeeze = bool(pearson_r < threshold)
+
+                    write_session.execute(text(
                         "INSERT OR REPLACE INTO margin_correlation_cache "
                         "(type_id, pearson_correlation, is_squeeze_sensitive, data_points, computed_at) "
                         "VALUES (:type_id, :pearson_correlation, :is_squeeze_sensitive, :data_points, :computed_at)"
@@ -175,28 +178,24 @@ class MarginCorrelator:
                         "data_points": len(common_dates),
                         "computed_at": now_iso,
                     })
-                    app_session4.commit()
-                finally:
-                    try:
-                        app_session4.close()
-                    except Exception:
-                        pass
-            except Exception as e:
-                logging.warning("MarginCorrelator: failed for type_id=%s: %s", type_id, e)
+                except Exception as e:
+                    logging.warning("MarginCorrelator: failed for type_id=%s: %s", type_id, e)
 
-        # Cleanup: delete rows for type_ids not in active plan
-        app_session5 = sessions.app_session()
-        try:
-            app_session5.execute(text(
-                "DELETE FROM margin_correlation_cache WHERE type_id NOT IN "
-                f"({','.join(str(t) for t in active_type_ids) or '0'})"
-            ))
-            app_session5.commit()
+            # Cleanup: delete stale rows using a parameterized IN clause
+            active_list = list(active_type_ids)
+            placeholders = ",".join(f":tid{i}" for i in range(len(active_list)))
+            params = {f"tid{i}": tid for i, tid in enumerate(active_list)}
+            write_session.execute(
+                text(f"DELETE FROM margin_correlation_cache WHERE type_id NOT IN ({placeholders})"),
+                params,
+            )
+            write_session.commit()
         except Exception as e:
-            logging.warning("MarginCorrelator: stale cleanup failed: %s", e)
+            logging.warning("MarginCorrelator: write/cleanup failed: %s", e)
+            write_session.rollback()
         finally:
             try:
-                app_session5.close()
+                write_session.close()
             except Exception:
                 pass
 

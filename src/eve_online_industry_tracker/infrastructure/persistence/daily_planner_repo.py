@@ -143,16 +143,39 @@ class DailyPlannerRepository:
         finally:
             session.close()
 
+    def get_action(self, action_id: int) -> DailyActionLogModel | None:
+        session = self._session_provider.app_session()
+        try:
+            return session.query(DailyActionLogModel).filter(
+                DailyActionLogModel.id == action_id
+            ).first()
+        finally:
+            session.close()
+
     def mark_action_done(self, action_id: int) -> None:
         self.set_action_status(action_id, "done")
 
     def set_action_status(self, action_id: int, status: str) -> None:
         session = self._session_provider.app_session()
         try:
-            session.query(DailyActionLogModel).filter(
-                DailyActionLogModel.id == action_id
+            # Atomic guard: only update if not yet processed for feedback
+            rowcount = session.query(DailyActionLogModel).filter(
+                DailyActionLogModel.id == action_id,
+                DailyActionLogModel.processed_for_feedback == False,  # noqa: E712
             ).update({"status": status}, synchronize_session="fetch")
             session.commit()
+            if rowcount == 0:
+                # Row may exist but already processed — surface that as ValueError
+                row = session.query(DailyActionLogModel).filter(
+                    DailyActionLogModel.id == action_id
+                ).first()
+                if row is not None and row.processed_for_feedback:
+                    raise ValueError(
+                        f"Action {action_id} has already been processed for feedback "
+                        "and cannot be modified"
+                    )
+        except ValueError:
+            raise
         except Exception:
             session.rollback()
             raise

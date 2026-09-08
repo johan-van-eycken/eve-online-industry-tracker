@@ -278,7 +278,12 @@ class ESIClient:
         self.token_expiry: Optional[int] = None
 
         # ESI Config
-        self.esi_base_uri = self.cfg.get("esi")["base"]
+        # Strip any trailing version segment left over from pre-refactor configs
+        # (old default was "https://esi.evetech.net/latest"; new is "https://esi.evetech.net")
+        _raw_base = self.cfg.get("esi")["base"].rstrip("/")
+        if _raw_base.endswith("/latest"):
+            _raw_base = _raw_base[: -len("/latest")]
+        self.esi_base_uri = _raw_base
         self.redirect_uri = self.cfg.get("app")["redirect_uri"]
         self.token_url = self.cfg.get("esi")["token_url"]
         self.verify_url = self.cfg.get("esi")["verify_url"]

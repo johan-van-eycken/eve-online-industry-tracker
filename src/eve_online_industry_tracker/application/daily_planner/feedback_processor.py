@@ -118,7 +118,7 @@ class FeedbackProcessor:
         type_id = int(action.type_id)
 
         # Try to find matching realized sale via the service (temporal FIFO)
-        realized = self._find_realized_sale(type_id)
+        realized = self._find_realized_sale(type_id, action=action)
 
         # Retrieve the plan_item for this action (needed for plan_item_id FK)
         plan_items = self._repo.get_plan_items(action.plan_id)
@@ -126,11 +126,12 @@ class FeedbackProcessor:
         plan_item_id = int(matching_item.id) if matching_item is not None else 0
 
         predicted_isk_per_hour: float | None = None
-        predicted_sell_days: float | None = None
         predicted_material_cost: float | None = None
         if matching_item is not None:
             predicted_isk_per_hour = matching_item.isk_per_hour
-            predicted_material_cost = None  # not stored on plan_item; approximated below
+        # Use the manufacture action's estimated_cost_isk as the predicted material cost
+        if action.estimated_cost_isk and float(action.estimated_cost_isk) > 0:
+            predicted_material_cost = float(action.estimated_cost_isk)
 
         # Retrieve existing weights (or defaults)
         weights_map = self._repo.get_weights([type_id])
@@ -157,8 +158,7 @@ class FeedbackProcessor:
                 float(actual_isk_per_hour or 0.0) / safe_predicted_isk_per_hr
             )
             # velocity: predicted_days / actual_days  (higher = sold faster than predicted → bonus)
-            # We use the action's estimated completion vs now as a proxy for predicted_sell_days
-            predicted_days = _estimate_predicted_sell_days(action)
+            predicted_days = _estimate_predicted_sell_days(matching_item)
             new_velocity = (1.0 - alpha) * old_velocity + alpha * (
                 float(predicted_days) / safe_actual_days
             )
@@ -196,7 +196,7 @@ class FeedbackProcessor:
                 return False
 
             # Slow-mover outcome — write timeout record, only update velocity
-            predicted_days = _estimate_predicted_sell_days(action)
+            predicted_days = _estimate_predicted_sell_days(matching_item)
             # velocity penalty: predicted / slow_mover_timeout (worse than predicted)
             new_velocity = (1.0 - alpha) * old_velocity + alpha * (
                 float(predicted_days) / slow_mover_timeout
@@ -235,7 +235,7 @@ class FeedbackProcessor:
         self._repo.upsert_weights(updated_weights)
         return True
 
-    def _find_realized_sale(self, type_id: int) -> dict[str, Any] | None:
+    def _find_realized_sale(self, type_id: int, *, action: Any = None) -> dict[str, Any] | None:
         """Query corporation_realized_sales_ledger for the most recent sale of this type_id.
 
         When session_provider is available, queries the DB directly.
@@ -261,9 +261,23 @@ class FeedbackProcessor:
                     row = rows[0]
                     realized_profit = float(row.realized_profit or 0.0)
                     material_cost = float(row.allocated_cost or 0.0)
-                    # sell_days: approximate — we don't have the exact job-completion→sale window
-                    # Use 1.0 as a conservative floor; EMA smoothing handles the approximation error
+                    # Compute sell_days as time from action generation to sale date
                     sell_days = 1.0
+                    try:
+                        generated_at = getattr(action, "generated_at", None)
+                        sale_date = row.date
+                        if generated_at is not None and sale_date is not None:
+                            import datetime as _dt
+                            if hasattr(sale_date, "date"):
+                                sale_date = sale_date.date()
+                            if isinstance(generated_at, _dt.datetime):
+                                gen_date = generated_at.date()
+                            else:
+                                gen_date = generated_at
+                            diff = (sale_date - gen_date).days
+                            sell_days = max(0.1, float(diff)) if diff > 0 else 1.0
+                    except Exception:
+                        pass
                     isk_per_hour = realized_profit / max(0.01, sell_days * 24.0)
                     return {
                         "isk_per_hour": isk_per_hour,
@@ -297,15 +311,21 @@ class FeedbackProcessor:
             return None
 
 
-def _estimate_predicted_sell_days(action: Any) -> float:
-    """Estimate predicted sell days from the action record.
+def _estimate_predicted_sell_days(plan_item: Any) -> float:
+    """Estimate predicted sell days from the plan_item's effective_velocity.
 
-    Uses 1/effective_velocity approximation: if we can't recover the original
-    prediction, default to 7 days (a conservative assumption).
+    Returns 1 / effective_velocity (days per unit) clamped to [0.1, 30].
+    Falls back to 7 days when velocity is unavailable or zero.
     """
-    # estimated_completion is the job completion time, not the sell-time.
-    # We use a fixed fallback of 7 days as the predicted sell time
-    # since the plan_item doesn't store predicted_sell_days directly.
+    if plan_item is not None:
+        vel = getattr(plan_item, "effective_velocity", None)
+        if vel is not None:
+            try:
+                v = float(vel)
+                if v > 0:
+                    return max(0.1, min(30.0, 1.0 / v))
+            except (TypeError, ValueError):
+                pass
     return 7.0
 
 

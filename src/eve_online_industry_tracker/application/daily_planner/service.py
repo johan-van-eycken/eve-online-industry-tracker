@@ -138,6 +138,10 @@ class DailyPlannerService:
     def mark_action_done(self, action_id: int) -> None:
         self._repo.mark_action_done(action_id)
 
+    def get_action(self, action_id: int) -> dict[str, Any] | None:
+        row = self._repo.get_action(action_id)
+        return _model_to_dict(row) if row is not None else None
+
     def set_action_status(self, action_id: int, status: str) -> None:
         self._repo.set_action_status(action_id, status)
 
@@ -289,7 +293,7 @@ class DailyPlannerService:
             shopping_items = self._phase_7_shopping(assigned_actions, phase1_data)
 
             # Phase 8 — Action list
-            action_log_rows = self._phase_8_actions(assigned_actions, shopping_items, phase1_data)
+            action_log_rows = self._phase_8_actions(assigned_actions, shopping_items, phase1_data, chain_plan)
 
             # Phase 9 — Persistence
             self._phase_9_persist(
@@ -350,6 +354,9 @@ class DailyPlannerService:
         min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
         invention_rates = self._repo.get_invention_success_rates(type_ids, min_attempts) if type_ids else {}
 
+        # Tritanium 7d price trend (for squeeze penalty gate)
+        trit_trend_7d = self._get_trit_trend_7d()
+
         # Pricing suggestions (for RELIST actions)
         pricing_suggestions = self._get_pricing_suggestions()
 
@@ -370,6 +377,7 @@ class DailyPlannerService:
             "market_depth_cache": market_depth,
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
+            "trit_trend_7d": trit_trend_7d,
             "pricing_suggestions": pricing_suggestions,
             "blueprint_data": blueprint_data,
             "bpo_assets_by_type_id": bpo_assets_by_type_id,
@@ -395,6 +403,7 @@ class DailyPlannerService:
     ) -> list[Any]:
         logger.info("DailyPlannerService: Phase 3 — profitability scoring")
         overview_by_type = {int(r["type_id"]): r for r in phase1["overview_rows"] if r.get("type_id")}
+        trit_trend_7d: float | None = phase1.get("trit_trend_7d")
         scored = []
         for ps in pipeline_states:
             row = overview_by_type.get(ps.type_id, {})
@@ -408,6 +417,7 @@ class DailyPlannerService:
                     weights=weights,
                     market_depth=market_depth,
                     margin_correlation=margin_corr,
+                    trit_trend_7d=trit_trend_7d,
                 )
                 scored.append(scored_item)
             except Exception:
@@ -484,8 +494,10 @@ class DailyPlannerService:
         assigned_actions: list[Any],
         shopping_items: list[Any],
         phase1: dict[str, Any],
+        chain_plan: Any = None,
     ) -> list[Any]:
         logger.info("DailyPlannerService: Phase 8 — action list")
+        bpo_opportunities = getattr(chain_plan, "bpo_opportunities", None) if chain_plan is not None else None
         # plan_id is set in Phase 9 (not known yet); use 0 as placeholder
         return self._action_plan_builder.build(
             plan_id=0,
@@ -494,6 +506,7 @@ class DailyPlannerService:
             pricing_suggestions=phase1["pricing_suggestions"],
             industry_jobs=phase1["industry_jobs"],
             admin_settings=self._admin,
+            bpo_opportunities=bpo_opportunities,
         )
 
     def _phase_9_persist(
@@ -687,6 +700,32 @@ class DailyPlannerService:
                 session.close()
         except Exception:
             return {}
+
+    def _get_trit_trend_7d(self) -> float | None:
+        """Compute Tritanium 7-day price trend % from market history (type_id=34, Jita region)."""
+        from datetime import timedelta
+        try:
+            from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
+            session = self._session_provider.app_session()
+            try:
+                cutoff = (datetime.utcnow() - timedelta(days=14)).date().isoformat()
+                rows = session.query(MarketHistoryModel).filter(
+                    MarketHistoryModel.type_id == 34,
+                    MarketHistoryModel.region_id == 10000002,
+                    MarketHistoryModel.date >= cutoff,
+                ).order_by(MarketHistoryModel.date.desc()).limit(14).all()
+            finally:
+                session.close()
+            prices = [float(r.close) for r in rows if r.close and float(r.close) > 0]
+            if len(prices) < 8:
+                return None
+            recent_avg = sum(prices[:7]) / 7.0
+            older_avg = sum(prices[7:]) / len(prices[7:])
+            if older_avg <= 0:
+                return None
+            return (recent_avg - older_avg) / older_avg * 100.0
+        except Exception:
+            return None
 
     def _get_pricing_suggestions(self) -> list[Any]:
         """Get relist suggestions from PricingSuggestionService."""

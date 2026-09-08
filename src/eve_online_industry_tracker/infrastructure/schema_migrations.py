@@ -654,3 +654,15 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "ON market_history(type_id, region_id, date DESC)"
         ),
     )
+
+    # Daily planner column migrations (for installations that predate some columns)
+    _ensure_column(db_app, table="build_plan", column="freshness_score", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan", column="market_snapshot_hash", ddl_type="TEXT")
+    _ensure_column(db_app, table="build_plan", column="plan_summary_json", ddl_type="TEXT")
+    _ensure_column(db_app, table="build_plan_item", column="effective_velocity", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="bpo_investment_recommended", ddl_type="INTEGER")
+    _ensure_column(db_app, table="build_plan_item", column="bpo_market_price", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="break_even_days", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="projected_annual_savings", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
+    _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")

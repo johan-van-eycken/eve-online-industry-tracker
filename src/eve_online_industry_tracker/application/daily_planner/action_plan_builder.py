@@ -48,6 +48,7 @@ class ActionPlanBuilder:
         pricing_suggestions: list[Any],   # from PricingSuggestionService
         industry_jobs: list[Any],         # for DELIVER actions
         admin_settings: Any,
+        bpo_opportunities: list[Any] | None = None,  # from ChainPlan.bpo_opportunities
     ) -> list[DailyActionLogModel]:
         """Return ordered list of DailyActionLogModel rows ready for persistence."""
         now = _now()
@@ -69,9 +70,15 @@ class ActionPlanBuilder:
         buy_rows = self._build_buy_material_actions(plan_id, shopping_items, now)
         rows.extend(buy_rows)
 
-        # Sort within character groups by action_order
+        # ── BUY_BPO rows (Tab 2 — corp-level) ────────────────────────────────
+        if bpo_opportunities:
+            bpo_rows = self._build_buy_bpo_actions(plan_id, bpo_opportunities, now)
+            rows.extend(bpo_rows)
+
+        # Sort: corp-level rows (character_id=None) after all character rows
         rows.sort(key=lambda r: (
-            r.character_id or 999999,
+            r.character_id is None,
+            r.character_id or 0,
             _ACTION_ORDER.get(r.action_type, 99),
         ))
 
@@ -248,6 +255,55 @@ class ActionPlanBuilder:
                 status="pending",
                 processed_for_feedback=False,
                 notes=item.notes,
+            ))
+        return rows
+
+
+    def _build_buy_bpo_actions(
+        self,
+        plan_id: int,
+        bpo_opportunities: list[Any],
+        now: datetime,
+    ) -> list[DailyActionLogModel]:
+        """Generate buy_bpo rows from ChainPlan.bpo_opportunities (Tab 2 only)."""
+        rows: list[DailyActionLogModel] = []
+        for opp in bpo_opportunities:
+            if isinstance(opp, dict):
+                type_id = int(opp.get("type_id") or 0)
+                type_name = str(opp.get("type_name") or "")
+                market_price = opp.get("bpo_market_price") or opp.get("market_price")
+                break_even = opp.get("break_even_days")
+                savings = opp.get("projected_annual_savings")
+            else:
+                type_id = int(getattr(opp, "type_id", 0))
+                type_name = str(getattr(opp, "type_name", ""))
+                market_price = getattr(opp, "bpo_market_price", None) or getattr(opp, "market_price", None)
+                break_even = getattr(opp, "break_even_days", None)
+                savings = getattr(opp, "projected_annual_savings", None)
+            if type_id <= 0:
+                continue
+            notes_parts = []
+            if break_even is not None:
+                notes_parts.append(f"break-even {float(break_even):.0f}d")
+            if savings is not None:
+                notes_parts.append(f"saves {float(savings)/1e6:.1f}M ISK/yr")
+            rows.append(DailyActionLogModel(
+                plan_id=plan_id,
+                generated_at=now,
+                character_id=None,
+                character_name=None,
+                action_type="buy_bpo",
+                shopping_category="bpo_investment",
+                type_id=type_id,
+                type_name=type_name,
+                quantity=1,
+                runs=None,
+                estimated_cost_isk=float(market_price) if market_price is not None else None,
+                estimated_profit_isk=float(savings) if savings is not None else None,
+                estimated_completion=None,
+                status="pending",
+                processed_for_feedback=False,
+                notes="; ".join(notes_parts) or "BPO investment opportunity",
             ))
         return rows
 
