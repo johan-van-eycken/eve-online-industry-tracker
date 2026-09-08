@@ -176,6 +176,12 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
             session_provider=_session_provider,
         )
 
+        # Start MarketIntelligenceJob daemon thread
+        from eve_online_industry_tracker.application.market_intelligence.job import MarketIntelligenceJob
+        _mij = MarketIntelligenceJob(state=state)
+        _mij.start()
+        state._market_intelligence_job = _mij
+
         chars_initialized = len(state.char_manager._character_list)
         corps_initialized = len(state.corp_manager._corporation_ids)
         logging.info("All done. Characters: %s, Corporations: %s", chars_initialized, corps_initialized)

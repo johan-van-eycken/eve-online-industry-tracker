@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, request
+from flask import Blueprint, jsonify, request
 
 from flask_app.bootstrap import require_ready
 from flask_app.deps import get_state
@@ -61,3 +61,12 @@ def set_action_status(action_id: int):
 def analytics():
     require_ready(get_state())
     return ok(data=get_state().daily_planner_service.get_analytics())
+
+
+@daily_planner_bp.route("/planner/market_intel/status", methods=["GET"])
+def market_intel_status():
+    state = get_state()
+    mij = getattr(state, "_market_intelligence_job", None)
+    if mij is None:
+        return jsonify({"status": "not_started", "last_completed_at": None, "last_error": None})
+    return jsonify(mij.get_status())
