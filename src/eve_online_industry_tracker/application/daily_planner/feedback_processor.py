@@ -43,10 +43,12 @@ class FeedbackProcessor:
         realized_profit_service: Any,
         repo: Any,
         admin_settings: Any,
+        session_provider: Any = None,
     ) -> None:
         self._realized = realized_profit_service
         self._repo = repo
         self._admin = admin_settings
+        self._session_provider = session_provider
 
     def _adm(self, key: str, fallback: Any) -> Any:
         try:
@@ -234,11 +236,50 @@ class FeedbackProcessor:
         return True
 
     def _find_realized_sale(self, type_id: int) -> dict[str, Any] | None:
-        """Look up a realized sale for type_id using CorporationRealizedProfitLedgerService.
+        """Query corporation_realized_sales_ledger for the most recent sale of this type_id.
 
-        Returns a dict with keys: isk_per_hour, material_cost, sell_days.
-        Returns None if no matching sale found.
+        When session_provider is available, queries the DB directly.
+        Falls back to realized_profit_service.get_realized_profit_for_type() when not.
         """
+        if self._session_provider is not None:
+            try:
+                from eve_online_industry_tracker.infrastructure.models import CorporationRealizedSalesLedgerModel
+                session = self._session_provider.app_session()
+                try:
+                    rows = (
+                        session.query(CorporationRealizedSalesLedgerModel)
+                        .filter(
+                            CorporationRealizedSalesLedgerModel.type_id == type_id,
+                            CorporationRealizedSalesLedgerModel.realized_profit.isnot(None),
+                        )
+                        .order_by(CorporationRealizedSalesLedgerModel.date.desc())
+                        .limit(5)
+                        .all()
+                    )
+                    if not rows:
+                        return None
+                    row = rows[0]
+                    realized_profit = float(row.realized_profit or 0.0)
+                    material_cost = float(row.allocated_cost or 0.0)
+                    # sell_days: approximate — we don't have the exact job-completion→sale window
+                    # Use 1.0 as a conservative floor; EMA smoothing handles the approximation error
+                    sell_days = 1.0
+                    isk_per_hour = realized_profit / max(0.01, sell_days * 24.0)
+                    return {
+                        "isk_per_hour": isk_per_hour,
+                        "material_cost": material_cost,
+                        "sell_days": sell_days,
+                    }
+                finally:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+            except Exception:
+                logger.debug("FeedbackProcessor: realized sale lookup failed for type_id=%s", type_id, exc_info=True)
+                return None
+
+        # Fallback: delegate to realized_profit_service (used when session_provider is not wired)
         try:
             result = self._realized.get_realized_profit_for_type(type_id=type_id)
             if result is None:
@@ -249,7 +290,7 @@ class FeedbackProcessor:
                 "sell_days": float(result.get("sell_days", 1.0)),
             }
         except AttributeError:
-            # Service may not have this method — fall back to None
+            # Service does not implement this method — no realized sale data available
             return None
         except Exception:
             logger.debug("FeedbackProcessor: realized profit lookup failed for type_id=%s", type_id)

@@ -76,6 +76,7 @@ class DailyPlannerService:
             realized_profit_service=realized_profit_service,
             repo=repo,
             admin_settings=admin_settings,
+            session_provider=session_provider,
         )
         self._pipeline_analyzer = PipelineAnalyzer()
         self._profitability_scorer = ProfitabilityScorer()
