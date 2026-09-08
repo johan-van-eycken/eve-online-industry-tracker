@@ -7,6 +7,7 @@ from eve_online_industry_tracker.application.characters.realized_profit import (
     CorporationRealizedProfitLedgerService,
     summarize_realized_profit_rows,
 )
+from eve_online_industry_tracker.infrastructure.esi_versions import ESI_CORP_PUBLIC
 
 
 class CorporationsService:
@@ -50,7 +51,7 @@ class CorporationsService:
             corp_info: dict[str, Any] = {}
             try:
                 corp_info = self._state.esi_service._public_esi_get(
-                    f"/corporations/{corp_id}/"
+                    ESI_CORP_PUBLIC.format(corporation_id=corp_id)
                 ) or {}
                 if not isinstance(corp_info, dict):
                     corp_info = {}

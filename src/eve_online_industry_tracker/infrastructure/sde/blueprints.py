@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 from typing import Iterable
 
@@ -318,3 +319,94 @@ def get_blueprint_manufacturing_data(
         }
 
     return result
+
+
+def compute_optimal_me(blueprint_type_id: int, session) -> int:
+    """Return the ME level where no material quantity further decreases.
+
+    For each material in the blueprint's manufacturing activity, find the last
+    ME level (1–10) that still reduces the required quantity. The optimal ME
+    is the maximum of these per-material values. If no material ever benefits
+    from ME research (e.g. qty=1 for all materials), returns 0.
+
+    Algorithm:
+        For ME in 1..10, compute ceil(qty * (1 - 0.01 * ME)) and compare to the
+        previous level. The last ME that yields a reduction is the material's
+        optimal ME. optimal_ME = max across all materials.
+    """
+    blueprint = session.query(Blueprints).filter(
+        Blueprints.blueprintTypeID == int(blueprint_type_id)
+    ).first()
+    if blueprint is None:
+        return 0
+
+    activities = blueprint.activities if isinstance(blueprint.activities, dict) else {}
+    manufacturing = activities.get("manufacturing", {}) if isinstance(activities.get("manufacturing"), dict) else {}
+    materials = manufacturing.get("materials", []) or []
+
+    if not materials:
+        return 0
+
+    per_material_optimal: list[int] = []
+    for mat in materials:
+        try:
+            qty = int(mat.get("quantity", 0))
+        except (TypeError, ValueError):
+            continue
+        if qty <= 0:
+            continue
+
+        last_useful_me = 0
+        prev_qty = qty  # ME0: ceil(qty * 1.0) = qty
+        for me in range(1, 11):
+            curr_qty = math.ceil(qty * (1.0 - 0.01 * me))
+            if curr_qty < prev_qty:
+                last_useful_me = me
+            prev_qty = curr_qty
+        per_material_optimal.append(last_useful_me)
+
+    return max(per_material_optimal) if per_material_optimal else 0
+
+
+def compute_optimal_te(
+    blueprint_type_id: int,
+    session,
+    time_savings_threshold_pct: float = 1.0,
+) -> int:
+    """Return the TE level where per-level time savings fall below threshold_pct%.
+
+    Iterates TE levels 1..10. When the time saved by going from TE-1 to TE
+    falls below ``time_savings_threshold_pct``% of the base manufacturing time,
+    returns TE-1 (the last level still worth researching). Returns 10 if the
+    threshold is never reached within 1..10.
+
+    time(TE) = ceil(base_time * (1 - 0.01 * TE))
+    saved_pct(TE) = (time(TE-1) - time(TE)) / base_time * 100
+    """
+    blueprint = session.query(Blueprints).filter(
+        Blueprints.blueprintTypeID == int(blueprint_type_id)
+    ).first()
+    if blueprint is None:
+        return 0
+
+    activities = blueprint.activities if isinstance(blueprint.activities, dict) else {}
+    manufacturing = activities.get("manufacturing", {}) if isinstance(activities.get("manufacturing"), dict) else {}
+    base_time = manufacturing.get("time", 0)
+
+    try:
+        base_time = int(base_time)
+    except (TypeError, ValueError):
+        return 0
+
+    if base_time <= 0:
+        return 0
+
+    prev_time = base_time  # TE=0: ceil(base_time * 1.0) = base_time
+    for te in range(1, 11):
+        curr_time = math.ceil(base_time * (1.0 - 0.01 * te))
+        saved_pct = (prev_time - curr_time) / base_time * 100.0
+        if saved_pct < time_savings_threshold_pct:
+            return te - 1  # last level worth researching is the previous one
+        prev_time = curr_time
+
+    return 10  # threshold never reached within TE 1–10

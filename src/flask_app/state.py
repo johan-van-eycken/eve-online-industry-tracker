@@ -20,6 +20,7 @@ class RuntimeState:
     esi_service: Any = None
     industry_job_manager: Any = None
     admin_settings: Any = None
+    daily_planner_service: Any = None
 
 
 @dataclass
@@ -75,10 +76,28 @@ class IndustryPortfolioCandidatesJobState:
 
 
 @dataclass
+class DailyPlannerJobState:
+    status: str = "idle"        # "idle" | "running" | "done" | "failed"
+    error: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+@dataclass
+class MarketIntelligenceJobState:
+    status: str = "idle"
+    error: str | None = None
+    last_completed_at: datetime | None = None
+    next_scheduled_at: datetime | None = None
+
+
+@dataclass
 class JobsState:
     public_structures: PublicStructuresJobState = field(default_factory=PublicStructuresJobState)
     industry_overview_refresh: IndustryOverviewRefreshJobState = field(default_factory=IndustryOverviewRefreshJobState)
     industry_portfolio_candidates: IndustryPortfolioCandidatesJobState = field(default_factory=IndustryPortfolioCandidatesJobState)
+    daily_planner: DailyPlannerJobState = field(default_factory=DailyPlannerJobState)
+    market_intelligence: MarketIntelligenceJobState = field(default_factory=MarketIntelligenceJobState)
 
 
 @dataclass
@@ -172,6 +191,14 @@ class AppState:
     @admin_settings.setter
     def admin_settings(self, v: Any) -> None:
         self.runtime.admin_settings = v
+
+    @property
+    def daily_planner_service(self) -> Any:
+        return self.runtime.daily_planner_service
+
+    @daily_planner_service.setter
+    def daily_planner_service(self, v: Any) -> None:
+        self.runtime.daily_planner_service = v
 
     @property
     def materials_cache(self) -> Any:

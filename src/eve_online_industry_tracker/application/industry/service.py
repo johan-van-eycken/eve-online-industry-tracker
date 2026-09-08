@@ -1938,7 +1938,8 @@ class IndustryService:
             stats = price_stats_map.get(tid, {})
 
             # Price trend signals
-            row["price_trend_pct"] = stats.get("trend_pct")
+            row["price_trend_7d_pct"] = stats.get("trend_pct")
+            row["price_trend_30d_pct"] = stats.get("trend_30d_pct")
             row["price_avg_7d"] = stats.get("avg_7d")
             row["price_avg_42w"] = stats.get("avg_42w")
             row["price_volatility_pct"] = stats.get("volatility_pct")

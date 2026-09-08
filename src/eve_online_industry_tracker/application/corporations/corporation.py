@@ -29,6 +29,28 @@ from eve_online_industry_tracker.application.characters.asset_history import (
     record_historical_acquisition,
     sync_asset_history,
 )
+from eve_online_industry_tracker.infrastructure.esi_versions import (
+    ESI_CHAR_PUBLIC,
+    ESI_CORP_PUBLIC,
+    ESI_CORP_DIVISIONS,
+    ESI_CORP_WALLETS,
+    ESI_CORP_WALLETS_JOURNAL,
+    ESI_CORP_WALLETS_TRANSACTIONS,
+    ESI_CORP_STANDINGS,
+    ESI_CORP_STRUCTURES,
+    ESI_CORP_MEMBERS,
+    ESI_CORP_MEMBERS_TITLES,
+    ESI_CORP_TITLES,
+    ESI_CORP_ORDERS,
+    ESI_CORP_ASSETS,
+    ESI_CORP_ASSETS_NAMES,
+    ESI_CORP_BLUEPRINTS,
+    ESI_CORP_INDUSTRY_JOBS,
+    ESI_MARKETS_PRICES,
+    ESI_UNIVERSE_SYSTEMS,
+    ESI_UNIVERSE_CONSTELLATIONS,
+    ESI_UNIVERSE_REGIONS,
+)
 
 
 def _serialize_rows(rows: list) -> list[dict]:
@@ -347,11 +369,11 @@ class Corporation:
     def refresh_corporation(self) -> None:
         """Refresh the runtime data of the corporation."""
         try:
-            corp_data = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/")
-            corp_divisions = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/divisions/")
-            corp_wallets = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/wallets/")
-            corp_standings = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/standings/")
-            ceo_character = self._default_esi_character._esi_client.esi_get(f"/characters/{corp_data.get('ceo_id')}/")
+            corp_data = self._default_esi_character._esi_client.esi_get(ESI_CORP_PUBLIC.format(corporation_id=self.corporation_id))
+            corp_divisions = self._default_esi_character._esi_client.esi_get(ESI_CORP_DIVISIONS.format(corporation_id=self.corporation_id))
+            corp_wallets = self._default_esi_character._esi_client.esi_get(ESI_CORP_WALLETS.format(corporation_id=self.corporation_id))
+            corp_standings = self._default_esi_character._esi_client.esi_get(ESI_CORP_STANDINGS.format(corporation_id=self.corporation_id))
+            ceo_character = self._default_esi_character._esi_client.esi_get(ESI_CHAR_PUBLIC.format(character_id=corp_data.get('ceo_id')))
             if isinstance(corp_wallets, str):
                 corp_wallets = json.loads(corp_wallets)
             if isinstance(corp_divisions, str):
@@ -422,12 +444,12 @@ class Corporation:
     def refresh_structures(self) -> None:
         """Refresh the structures of the corporation from ESI."""
         try:
-            structures_data = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/structures/")
+            structures_data = self._default_esi_character._esi_client.esi_get(ESI_CORP_STRUCTURES.format(corporation_id=self.corporation_id))
             self.structures = []
             for structure in structures_data:
-                system_data = self._default_esi_character._esi_client.esi_get(f"/universe/systems/{structure.get('system_id')}/")
-                constellation_data = self._default_esi_character._esi_client.esi_get(f"/universe/constellations/{system_data.get('constellation_id')}/")
-                region_data = self._default_esi_character._esi_client.esi_get(f"/universe/regions/{constellation_data.get('region_id')}/")
+                system_data = self._default_esi_character._esi_client.esi_get(ESI_UNIVERSE_SYSTEMS.format(system_id=structure.get('system_id')))
+                constellation_data = self._default_esi_character._esi_client.esi_get(ESI_UNIVERSE_CONSTELLATIONS.format(constellation_id=system_data.get('constellation_id')))
+                region_data = self._default_esi_character._esi_client.esi_get(ESI_UNIVERSE_REGIONS.format(region_id=constellation_data.get('region_id')))
                 type_data = self._db_sde.session.query(Types).filter_by(id=structure.get("type_id")).first()
                 group_data = self._db_sde.session.query(Groups).filter_by(id=type_data.groupID).first()
                 category_data = self._db_sde.session.query(Categories).filter_by(id=group_data.categoryID).first()
@@ -474,9 +496,9 @@ class Corporation:
     def refresh_members(self) -> None:
         """Refresh the member list of the corporation from ESI."""
         try:
-            members = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/members/")
-            member_roles = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/members/titles/")
-            corporation_titles = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/titles/")
+            members = self._default_esi_character._esi_client.esi_get(ESI_CORP_MEMBERS.format(corporation_id=self.corporation_id))
+            member_roles = self._default_esi_character._esi_client.esi_get(ESI_CORP_MEMBERS_TITLES.format(corporation_id=self.corporation_id))
+            corporation_titles = self._default_esi_character._esi_client.esi_get(ESI_CORP_TITLES.format(corporation_id=self.corporation_id))
             self.members = []
             for character_id in members:
                 character = self._char_manager.get_character_by_id(character_id)
@@ -516,7 +538,7 @@ class Corporation:
                 self._default_esi_character.ensure_esi()
 
             corp_wallets = self._default_esi_character._esi_client.esi_get(
-                f"/corporations/{self.corporation_id}/wallets/"
+                ESI_CORP_WALLETS.format(corporation_id=self.corporation_id)
             )
             if isinstance(corp_wallets, str):
                 corp_wallets = json.loads(corp_wallets)
@@ -532,7 +554,7 @@ class Corporation:
                     continue
 
                 journal_entries = self._default_esi_character._esi_client.esi_get(
-                    f"/corporations/{self.corporation_id}/wallets/{division}/journal/"
+                    ESI_CORP_WALLETS_JOURNAL.format(corporation_id=self.corporation_id, division=division)
                 )
                 if isinstance(journal_entries, str):
                     journal_entries = json.loads(journal_entries)
@@ -643,7 +665,7 @@ class Corporation:
                 self._default_esi_character.ensure_esi()
 
             corp_wallets = self._default_esi_character._esi_client.esi_get(
-                f"/corporations/{self.corporation_id}/wallets/"
+                ESI_CORP_WALLETS.format(corporation_id=self.corporation_id)
             )
             if isinstance(corp_wallets, str):
                 corp_wallets = json.loads(corp_wallets)
@@ -659,7 +681,7 @@ class Corporation:
                     continue
 
                 transactions = self._default_esi_character._esi_client.esi_get(
-                    f"/corporations/{self.corporation_id}/wallets/{division}/transactions/"
+                    ESI_CORP_WALLETS_TRANSACTIONS.format(corporation_id=self.corporation_id, division=division)
                 )
                 if isinstance(transactions, str):
                     transactions = json.loads(transactions)
@@ -886,14 +908,14 @@ class Corporation:
                 self._default_esi_character.ensure_esi()
 
             jobs = self._default_esi_character._esi_client.esi_get(
-                f"/corporations/{self.corporation_id}/industry/jobs/",
+                ESI_CORP_INDUSTRY_JOBS.format(corporation_id=self.corporation_id),
                 params={"include_completed": True},
                 paginate=True,
             )
             if not jobs or not isinstance(jobs, list):
                 return
 
-            market_prices = self._default_esi_character._esi_client.esi_get("/markets/prices/")
+            market_prices = self._default_esi_character._esi_client.esi_get(ESI_MARKETS_PRICES)
             market_price_map = build_market_price_map(market_prices)
             invention_cost_by_blueprint_type = build_invention_cost_per_run_by_blueprint_type(
                 jobs=jobs,
@@ -1137,7 +1159,7 @@ class Corporation:
                 self._default_esi_character.ensure_esi()
 
             order_list = self._default_esi_character._esi_client.esi_get(
-                f"/corporations/{self.corporation_id}/orders/",
+                ESI_CORP_ORDERS.format(corporation_id=self.corporation_id),
                 paginate=True,
             )
             if not isinstance(order_list, list):
@@ -1274,15 +1296,15 @@ class Corporation:
         """Refresh the asset list of the corporation from ESI and enrich with SDE and container custom names."""
         try:
             assets = self._default_esi_character._esi_client.esi_get(
-                f"/corporations/{self.corporation_id}/assets/",
+                ESI_CORP_ASSETS.format(corporation_id=self.corporation_id),
                 paginate=True,
             )
             if isinstance(assets, str):
                 assets = json.loads(assets)
             if not assets or not isinstance(assets, list):
                 return
-            blueprints = self._default_esi_character._esi_client.esi_get(f"/corporations/{self.corporation_id}/blueprints/", paginate=True)
-            market_prices = self._default_esi_character._esi_client.esi_get(f"/markets/prices/")
+            blueprints = self._default_esi_character._esi_client.esi_get(ESI_CORP_BLUEPRINTS.format(corporation_id=self.corporation_id), paginate=True)
+            market_prices = self._default_esi_character._esi_client.esi_get(ESI_MARKETS_PRICES)
 
             type_ids_for_cost: List[int] = []
             qty_by_type: Dict[int, int] = {}
@@ -1418,7 +1440,7 @@ class Corporation:
             container_names = {}
             if container_ids:
                 names_response = self._default_esi_character._esi_client.esi_post(
-                    f"/corporations/{self.corporation_id}/assets/names",
+                    ESI_CORP_ASSETS_NAMES.format(corporation_id=self.corporation_id),
                     json=container_ids
                 )
                 if names_response and isinstance(names_response, list):
@@ -1433,7 +1455,7 @@ class Corporation:
             ship_names = {}
             if ship_ids:
                 names_response = self._default_esi_character._esi_client.esi_post(
-                    f"/corporations/{self.corporation_id}/assets/names",
+                    ESI_CORP_ASSETS_NAMES.format(corporation_id=self.corporation_id),
                     json=ship_ids
                 )
                 if names_response and isinstance(names_response, list):

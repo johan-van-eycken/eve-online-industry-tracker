@@ -19,6 +19,7 @@ from flask_app.routes.locations import locations_bp
 from flask_app.routes.static_data import static_data_bp
 from flask_app.routes.industry import industry_bp
 from flask_app.routes.settings import settings_bp
+from flask_app.routes.daily_planner import daily_planner_bp
 
 
 def create_app() -> Flask:
@@ -70,5 +71,6 @@ def create_app() -> Flask:
     app.register_blueprint(locations_bp)
     app.register_blueprint(industry_bp)
     app.register_blueprint(settings_bp)
+    app.register_blueprint(daily_planner_bp)
 
     return app

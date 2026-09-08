@@ -100,10 +100,12 @@ class MarketHistoryService:
                     "has_data": False,
                     "avg_42w": None,
                     "avg_7d": None,
+                    "avg_30d": None,
                     "avg_1d": None,
                     "volatility": None,
                     "price_range": None,
                     "trend": None,
+                    "trend_30d_pct": None,
                 }
 
             prices = [float(r.close) for r in records if r.close and r.close > 0]
@@ -112,10 +114,12 @@ class MarketHistoryService:
                     "has_data": False,
                     "avg_42w": None,
                     "avg_7d": None,
+                    "avg_30d": None,
                     "avg_1d": None,
                     "volatility": None,
                     "price_range": None,
                     "trend": None,
+                    "trend_30d_pct": None,
                 }
 
             # 42-week average
@@ -124,6 +128,9 @@ class MarketHistoryService:
             # 7-day average (last 7 records)
             prices_7d = prices[-7:] if len(prices) >= 7 else prices
             avg_7d = float(statistics.mean(prices_7d))
+
+            # 30-day average (last 30 records)
+            avg_30d = float(statistics.mean(prices[-30:])) if len(prices) >= 30 else None
 
             # 1-day (last price)
             avg_1d = prices[-1] if prices else None
@@ -134,10 +141,14 @@ class MarketHistoryService:
             # Price trend (7d vs 42w)
             trend_pct = ((avg_7d - avg_42w) / avg_42w * 100) if avg_42w > 0 else 0
 
+            # Price trend (7d vs 30d)
+            trend_30d_pct = ((avg_7d - avg_30d) / avg_30d * 100) if (avg_30d is not None and avg_30d > 0) else None
+
             return {
                 "has_data": True,
                 "avg_42w": avg_42w,
                 "avg_7d": avg_7d,
+                "avg_30d": avg_30d,
                 "avg_1d": avg_1d,
                 "volatility": volatility,
                 "volatility_pct": (volatility / avg_42w * 100) if avg_42w > 0 else 0,
@@ -146,6 +157,7 @@ class MarketHistoryService:
                     "max": float(max(prices)),
                 },
                 "trend_pct": trend_pct,  # positive = trending up
+                "trend_30d_pct": trend_30d_pct,
                 "record_count": len(records),
             }
         finally:

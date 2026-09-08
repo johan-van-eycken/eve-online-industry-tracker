@@ -20,7 +20,7 @@ CONFIG_SCHEMA = {
         "language": "en",
     },
     "esi": {
-        "base": "https://esi.evetech.net/latest",
+        "base": "https://esi.evetech.net",
         "auth_url": "https://login.eveonline.com/v2/oauth/authorize/",
         "token_url": "https://login.eveonline.com/v2/oauth/token",
         "verify_url": "https://login.eveonline.com/oauth/verify",

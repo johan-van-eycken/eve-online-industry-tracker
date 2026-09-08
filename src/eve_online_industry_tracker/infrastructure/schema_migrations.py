@@ -443,3 +443,214 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "ON corporation_realized_sales_ledger(corporation_id, date)"
         ),
     )
+
+    # ── Daily Planner tables ───────────────────────────────────────────────
+
+    _ensure_table(
+        db_app,
+        table="build_plan",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS build_plan ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "created_at DATETIME NOT NULL,"
+            "updated_at DATETIME NOT NULL,"
+            "status TEXT NOT NULL,"
+            "corp_wallet_snapshot REAL NULL,"
+            "market_snapshot_hash TEXT NULL,"
+            "freshness_score REAL NULL,"
+            "plan_summary_json TEXT NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="build_plan_item",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS build_plan_item ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "plan_id INTEGER NOT NULL REFERENCES build_plan(id),"
+            "type_id INTEGER NOT NULL,"
+            "type_name TEXT NULL,"
+            "meta_group_id INTEGER NULL,"
+            "decision TEXT NOT NULL,"
+            "decision_reason TEXT NULL,"
+            "target_batches INTEGER NULL,"
+            "priority_score REAL NULL,"
+            "isk_per_hour REAL NULL,"
+            "margin_pct REAL NULL,"
+            "days_of_supply_current REAL NULL,"
+            "pipeline_stage TEXT NULL,"
+            "bpo_investment_recommended INTEGER NULL,"
+            "bpo_market_price REAL NULL,"
+            "break_even_days REAL NULL,"
+            "projected_annual_savings REAL NULL,"
+            "effective_velocity REAL NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="daily_action_log",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS daily_action_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "plan_id INTEGER NOT NULL REFERENCES build_plan(id),"
+            "generated_at DATETIME NOT NULL,"
+            "character_id INTEGER NULL,"
+            "character_name TEXT NULL,"
+            "action_type TEXT NOT NULL,"
+            "shopping_category TEXT NULL,"
+            "type_id INTEGER NOT NULL,"
+            "type_name TEXT NULL,"
+            "quantity INTEGER NULL,"
+            "runs INTEGER NULL,"
+            "estimated_cost_isk REAL NULL,"
+            "estimated_profit_isk REAL NULL,"
+            "estimated_completion DATETIME NULL,"
+            "status TEXT NOT NULL DEFAULT 'pending',"
+            "processed_for_feedback INTEGER NOT NULL DEFAULT 0,"
+            "notes TEXT NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="plan_item_outcome",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS plan_item_outcome ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "plan_item_id INTEGER NOT NULL REFERENCES build_plan_item(id),"
+            "type_id INTEGER NOT NULL,"
+            "completed_at DATETIME NOT NULL,"
+            "predicted_isk_per_hour REAL NULL,"
+            "actual_isk_per_hour REAL NULL,"
+            "accuracy_ratio REAL NULL,"
+            "predicted_sell_days REAL NULL,"
+            "actual_sell_days REAL NULL,"
+            "slow_mover INTEGER NOT NULL DEFAULT 0,"
+            "predicted_material_cost REAL NULL,"
+            "actual_material_cost REAL NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="plan_learning_weights",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS plan_learning_weights ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL UNIQUE,"
+            "accuracy_ema REAL NOT NULL DEFAULT 1.0,"
+            "velocity_multiplier REAL NOT NULL DEFAULT 1.0,"
+            "cost_multiplier REAL NOT NULL DEFAULT 1.0,"
+            "sample_count INTEGER NOT NULL DEFAULT 0,"
+            "last_updated DATETIME NOT NULL,"
+            "confidence_tier TEXT NOT NULL DEFAULT 'low'"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="market_depth_cache",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS market_depth_cache ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL,"
+            "hub TEXT NOT NULL,"
+            "competitor_units INTEGER NULL,"
+            "vwap_5d REAL NULL,"
+            "spot_sell_price REAL NULL,"
+            "competition_index REAL NULL,"
+            "snapshot_at DATETIME NOT NULL,"
+            "UNIQUE(type_id, hub)"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="invention_outcome_log",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS invention_outcome_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL,"
+            "blueprint_type_id INTEGER NOT NULL,"
+            "decryptor_type_id INTEGER NULL,"
+            "theoretical_success_pct REAL NULL,"
+            "was_success INTEGER NOT NULL,"
+            "character_id INTEGER NOT NULL,"
+            "completed_at DATETIME NOT NULL,"
+            "UNIQUE(type_id, character_id, completed_at)"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="margin_correlation_cache",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS margin_correlation_cache ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL UNIQUE,"
+            "pearson_correlation REAL NULL,"
+            "is_squeeze_sensitive INTEGER NULL,"
+            "data_points INTEGER NULL,"
+            "computed_at DATETIME NOT NULL"
+            ")"
+        ),
+    )
+
+    # Daily Planner indexes
+    _ensure_index(
+        db_app,
+        name="idx_build_plan_item_plan_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_build_plan_item_plan_id "
+            "ON build_plan_item(plan_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_daily_action_log_plan_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_daily_action_log_plan_id "
+            "ON daily_action_log(plan_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_daily_action_log_type_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_daily_action_log_type_id "
+            "ON daily_action_log(type_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_plan_item_outcome_plan_item_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_plan_item_outcome_plan_item_id "
+            "ON plan_item_outcome(plan_item_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_plan_learning_weights_type_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_plan_learning_weights_type_id "
+            "ON plan_learning_weights(type_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_market_history_type_region_date",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_market_history_type_region_date "
+            "ON market_history(type_id, region_id, date DESC)"
+        ),
+    )

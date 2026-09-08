@@ -279,7 +279,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         material_contention = node.get("material_contention")
         manufacturing_cost_index = node.get("manufacturing_cost_index")
         # Tier 1/2/3 — new fields (top-level product rows only)
-        price_trend_pct = None
+        price_trend_7d_pct = None
         price_avg_7d = None
         price_avg_42w = None
         price_volatility_pct = None
@@ -368,7 +368,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             material_contention = source_row.get("material_contention")
             manufacturing_cost_index = source_row.get("manufacturing_cost_index")
             # Tier 1 — Market trends
-            price_trend_pct = source_row.get("price_trend_pct")
+            price_trend_7d_pct = source_row.get("price_trend_7d_pct")
             price_avg_7d = source_row.get("price_avg_7d")
             price_avg_42w = source_row.get("price_avg_42w")
             price_volatility_pct = source_row.get("price_volatility_pct")
@@ -507,7 +507,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Meta Group": meta_group,
                 "Category": category,
                 # Tier 1 — Market trends (top-level product rows only)
-                "Price Trend %": price_trend_pct,
+                "Price Trend %": price_trend_7d_pct,
                 "7d Avg Price": price_avg_7d,
                 "42w Avg Price": price_avg_42w,
                 "Price Volatility %": price_volatility_pct,
