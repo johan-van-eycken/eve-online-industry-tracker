@@ -274,6 +274,19 @@ class DailyPlannerService:
             # Phase 1 — Data collection + feedback processing
             phase1_data = self._phase_1_collect()
 
+            if not phase1_data["overview_rows"]:
+                logger.error(
+                    "DailyPlannerService: aborting — no product overview rows available. "
+                    "Open the Industry Builder and refresh the overview first, then recompute."
+                )
+                with self._lock:
+                    self._status = "failed"
+                    self._error = (
+                        "No product overview available. Open Industry Builder → refresh the "
+                        "product overview, then recompute the daily plan."
+                    )
+                return
+
             # Phase 2 — Pipeline state per item
             pipeline_states = self._phase_2_pipeline(phase1_data)
 
@@ -564,7 +577,7 @@ class DailyPlannerService:
     def _get_corp_wallet(self) -> float:
         """Read corp master wallet balance (Division 1)."""
         try:
-            corps = self._corporations.get_corporations()
+            corps = self._corporations.list_corporations()
             if not corps:
                 return 0.0
             corp = corps[0] if isinstance(corps, list) else corps
@@ -590,22 +603,20 @@ class DailyPlannerService:
             return 0.0
 
     def _get_overview_rows(self) -> list[dict[str, Any]]:
-        """Get IndustryService overview rows."""
+        """Get IndustryService overview rows from cache.
+
+        Returns an empty list when no cached overview is available — callers
+        must treat this as a soft abort and surface a user-visible message.
+        """
         try:
             result = self._industry.get_cached_overview_rows()
             if isinstance(result, list):
                 return result
-            return []
-        except AttributeError:
-            pass
-        try:
-            store = self._industry._get_industry_overview_refresh_store()
-            jobs = store.jobs if hasattr(store, "jobs") else {}
-            if not jobs:
-                return []
-            latest = max(jobs.values(), key=lambda j: j.get("updated_at", ""), default=None)
-            if latest and latest.get("result"):
-                return list(latest["result"])
+            # None → not yet computed
+            logger.warning(
+                "DailyPlannerService: no cached product overview available — "
+                "open the Industry Builder and refresh the product overview first"
+            )
             return []
         except Exception:
             logger.exception("DailyPlannerService: failed to get overview rows")
@@ -678,7 +689,7 @@ class DailyPlannerService:
     def _get_corp_id(self) -> int:
         """Get corp ID from corporations service."""
         try:
-            corps = self._corporations.get_corporations()
+            corps = self._corporations.list_corporations()
             corp = corps[0] if isinstance(corps, list) else corps
             return int(getattr(corp, "corporation_id", 0) or corp.get("corporation_id", 0) if isinstance(corp, dict) else 0)
         except Exception:

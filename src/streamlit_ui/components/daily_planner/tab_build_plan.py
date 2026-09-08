@@ -296,13 +296,13 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
             st.dataframe(
                 df.drop(columns=["_decision_raw"]),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
     else:
         st.dataframe(
             df.drop(columns=["_decision_raw"]),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
     st.caption(

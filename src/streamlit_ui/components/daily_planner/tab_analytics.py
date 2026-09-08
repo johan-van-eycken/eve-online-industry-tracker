@@ -47,7 +47,7 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                     "Cost ×": f"{float(i.get('cost_multiplier') or 1.0):.3f}",
                     "Decision": str(i.get("decision") or ""),
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------
     # Section 2: Competition Monitor
@@ -78,7 +78,7 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                     "Competitor Units": int(i.get("competitor_units") or 0),
                     "Market Last Updated": str(i.get("market_snapshot_at") or "—"),
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------
     # Section 3: Margin–Mineral Correlation
@@ -105,7 +105,7 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                     "Squeeze Sensitive": squeeze_display,
                     "Data Points": int(i.get("correlation_data_points") or 0),
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------
     # Section 4: Invention Success Rates
@@ -132,7 +132,7 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                     "Attempts": attempts,
                     "Status": status,
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------
     # Section 5: Plan History
@@ -149,4 +149,4 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                 }
                 for p in plan_history
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)

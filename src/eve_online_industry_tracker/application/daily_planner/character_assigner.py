@@ -222,7 +222,7 @@ class CharacterAssigner:
     def _get_characters(self, characters_service: Any) -> list[dict[str, Any]]:
         """Fetch characters list from service."""
         try:
-            chars = characters_service.get_characters()
+            chars = characters_service.list_characters()
             if isinstance(chars, list):
                 return [c if isinstance(c, dict) else c.__dict__ for c in chars]
             return []
@@ -237,13 +237,32 @@ class CharacterAssigner:
         now: datetime,
     ) -> dict[int, dict[str, Any]]:
         """Compute free slot counts per character, treating end_date < now as already delivered."""
+        # ESI skill IDs → flat skill name used by slot math below
+        _SKILL_ID_MAP: dict[int, str] = {
+            3387: "mass_production",
+            24625: "advanced_mass_production",
+            3406: "laboratory_operation",
+            24624: "advanced_laboratory_operation",
+        }
+
         slot_map: dict[int, dict[str, Any]] = {}
         for char in characters:
             char_id = int(char.get("character_id") or char.get("id") or 0)
             if char_id <= 0:
                 continue
-            skills = char.get("skills") or {}
-            # Maximum manufacturing slots = 1 + Mass Production + Advanced Mass Production
+
+            # ESI returns skills as {"skills": [{skill_id, active_skill_level, ...}], "total_sp": ...}
+            # Flatten to {skill_name: level} for the relevant industry skills only.
+            skills_raw = char.get("skills") or {}
+            if isinstance(skills_raw, dict) and "skills" in skills_raw:
+                skills: dict[str, int] = {}
+                for entry in (skills_raw.get("skills") or []):
+                    sid = int(entry.get("skill_id") or 0)
+                    if sid in _SKILL_ID_MAP:
+                        skills[_SKILL_ID_MAP[sid]] = int(entry.get("active_skill_level") or 0)
+            else:
+                skills = {k: int(v) for k, v in skills_raw.items()} if isinstance(skills_raw, dict) else {}
+
             max_mfg = 1 + int(skills.get("mass_production", 0)) + int(skills.get("advanced_mass_production", 0))
             max_research = 1 + int(skills.get("laboratory_operation", 0)) + int(skills.get("advanced_laboratory_operation", 0))
             slot_map[char_id] = {
@@ -283,7 +302,14 @@ class CharacterAssigner:
                 except Exception:
                     pass
 
+            # activity_id is a top-level attribute on character job ORM models but stored
+            # only in the `raw` JSON column on corporation_industry_jobs — check both.
             activity_id = int(_job_attr(job, "activity_id") or 0)
+            if activity_id == 0:
+                raw = _job_attr(job, "raw")
+                if isinstance(raw, dict):
+                    activity_id = int(raw.get("activity_id") or 0)
+
             if activity_id == ACTIVITY_MANUFACTURING:
                 slot_map[char_id]["free_mfg"] = max(0, slot_map[char_id]["free_mfg"] - 1)
             elif activity_id in (ACTIVITY_RESEARCHING_TE, ACTIVITY_RESEARCHING_ME, ACTIVITY_COPYING, ACTIVITY_INVENTION):

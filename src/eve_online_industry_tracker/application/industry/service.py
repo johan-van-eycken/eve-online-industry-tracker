@@ -5654,8 +5654,15 @@ class IndustryService:
         # Only include historical blueprints that are currently locked inside an
         # active industry job.  A blueprint absent from both current assets and
         # any active job has been consumed (1-run BPC) or sold — not available.
+        #
+        # Track char-job and corp-job item IDs separately.  A blueprint installed
+        # in a CORP job can appear in both character_asset_history (previous state)
+        # and corporation_asset_history (state while at the corp structure).  Using a
+        # single shared set would cause it to be emitted from both history sources,
+        # producing a duplicate row in the product overview.
         _active_statuses = {"active", "paused", "ready"}
-        in_active_job_item_ids: set[int] = set()
+        in_active_char_job_item_ids: set[int] = set()
+        in_active_corp_job_item_ids: set[int] = set()
 
         if normalized_character_ids:
             for (bp_item_id,) in (
@@ -5665,7 +5672,7 @@ class IndustryService:
                 .filter(CharacterIndustryJobsModel.blueprint_item_id.isnot(None))
                 .all()
             ):
-                in_active_job_item_ids.add(int(bp_item_id))
+                in_active_char_job_item_ids.add(int(bp_item_id))
 
         if normalized_corporation_ids:
             for (bp_item_id,) in (
@@ -5675,7 +5682,11 @@ class IndustryService:
                 .filter(CorporationIndustryJobsModel.blueprint_item_id.isnot(None))
                 .all()
             ):
-                in_active_job_item_ids.add(int(bp_item_id))
+                in_active_corp_job_item_ids.add(int(bp_item_id))
+
+        # A blueprint locked in a corp job must NOT also appear as a historical char
+        # asset — it would produce a duplicate product row.
+        char_eligible_item_ids = in_active_char_job_item_ids - in_active_corp_job_item_ids
 
         historical_character_assets: list[CharacterAssetsModel] = []
         for row in latest_character_rows:
@@ -5683,7 +5694,7 @@ class IndustryService:
             type_id = int(getattr(row, "type_id", 0) or 0)
             if item_id <= 0 or type_id not in blueprint_type_ids or item_id in current_item_ids:
                 continue
-            if item_id not in in_active_job_item_ids:
+            if item_id not in char_eligible_item_ids:
                 continue
             asset = self._materialize_historical_blueprint_asset(row, owner_kind="character")
             if isinstance(asset, CharacterAssetsModel):
@@ -5695,7 +5706,7 @@ class IndustryService:
             type_id = int(getattr(row, "type_id", 0) or 0)
             if item_id <= 0 or type_id not in blueprint_type_ids or item_id in current_item_ids:
                 continue
-            if item_id not in in_active_job_item_ids:
+            if item_id not in in_active_corp_job_item_ids:
                 continue
             asset = self._materialize_historical_blueprint_asset(row, owner_kind="corporation")
             if isinstance(asset, CorporationAssetsModel):
@@ -7382,6 +7393,14 @@ class IndustryService:
         self._state._overview_result_cache = {"hash": overview_input_hash, "rows": product_rows}
         return product_rows
 
+    def get_cached_overview_rows(self) -> list[dict] | None:
+        """Return the most recent product overview rows from in-memory cache, or None if not yet computed."""
+        cached = getattr(self._state, "_overview_result_cache", None)
+        if isinstance(cached, dict):
+            rows = cached.get("rows")
+            if isinstance(rows, list):
+                return [dict(r) for r in rows]
+        return None
 
     def _enrich_product_rows_with_material_prices(
         self,

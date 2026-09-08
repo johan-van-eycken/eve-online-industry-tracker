@@ -164,9 +164,9 @@ def _render_materials_section(
                 allow_unsafe_jscode=False,
             )
         except Exception:
-            st.dataframe(df, hide_index=True, use_container_width=True)
+            st.dataframe(df, hide_index=True, width="stretch")
     else:
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df, hide_index=True, width="stretch")
 
     return subtotal
 
@@ -279,4 +279,4 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
             }
             for r in bpo_rows
         ])
-        st.dataframe(bpo_display, hide_index=True, use_container_width=True)
+        st.dataframe(bpo_display, hide_index=True, width="stretch")
