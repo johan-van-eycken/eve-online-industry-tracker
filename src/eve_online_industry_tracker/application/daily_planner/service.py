@@ -144,18 +144,68 @@ class DailyPlannerService:
         """Fetch self-learning accuracy stats for all tracked type_ids."""
         plan = self._repo.get_active_plan()
         if plan is None:
-            return {"items": []}
+            return {"items": [], "plan_history": []}
 
         items = self._repo.get_plan_items(int(plan.id))
         type_ids = [int(i.type_id) for i in items]
         weights = self._repo.get_weights(type_ids)
         invention_rates = self._repo.get_invention_success_rates(type_ids)
 
+        # Competition data
+        try:
+            hub = str(_adm(self._admin, "planner_market_hub", "jita"))
+            market_depth = self._repo.get_market_depth(type_ids, hub)
+        except Exception:
+            market_depth = {}
+
+        # Margin correlation data
+        try:
+            from eve_online_industry_tracker.infrastructure.models import MarginCorrelationCacheModel  # noqa: PLC0415
+            mc_session = self._session_provider.app_session()
+            try:
+                margin_rows = mc_session.query(MarginCorrelationCacheModel).filter(
+                    MarginCorrelationCacheModel.type_id.in_(type_ids)
+                ).all()
+                margin_by_type = {int(r.type_id): r for r in margin_rows}
+            finally:
+                mc_session.close()
+        except Exception:
+            margin_by_type: dict[int, Any] = {}
+
+        # Invention details from raw SQL
+        try:
+            from sqlalchemy import text  # noqa: PLC0415
+            inv_session = self._session_provider.app_session()
+            try:
+                inv_placeholders = ",".join(str(t) for t in type_ids) or "0"
+                inv_rows = inv_session.execute(text(
+                    f"SELECT type_id, "
+                    f"CAST(SUM(CASE WHEN was_success THEN 1 ELSE 0 END) AS REAL) / COUNT(*) AS actual_rate, "
+                    f"COUNT(*) AS attempts, "
+                    f"AVG(theoretical_success_pct) AS theoretical_rate "
+                    f"FROM invention_outcome_log "
+                    f"WHERE type_id IN ({inv_placeholders}) GROUP BY type_id"
+                )).fetchall()
+            finally:
+                inv_session.close()
+            inv_details = {
+                int(r[0]): {
+                    "actual_rate": float(r[1]),
+                    "attempts": int(r[2]),
+                    "theoretical_rate": float(r[3] or 0.0),
+                }
+                for r in inv_rows
+            }
+        except Exception:
+            inv_details: dict[int, Any] = {}
+
         result = []
         for item in items:
             tid = int(item.type_id)
             w = weights.get(tid)
             outcomes = self._repo.get_outcomes(tid, limit=20)
+            md = market_depth.get(tid)
+            mc = margin_by_type.get(tid)
             result.append({
                 "type_id": tid,
                 "type_name": item.type_name,
@@ -167,9 +217,46 @@ class DailyPlannerService:
                 "confidence_tier": str(getattr(w, "confidence_tier", "low")) if w else "low",
                 "invention_success_rate": invention_rates.get(tid),
                 "recent_outcomes": [_model_to_dict(o) for o in outcomes],
+                # Competition data
+                "competition_index": float(getattr(md, "competition_index", None) or 0.0) if md else None,
+                "competitor_units": int(getattr(md, "competitor_units", 0) or 0) if md else None,
+                "market_snapshot_at": str(getattr(md, "snapshot_at", None) or "") if md else None,
+                # Margin correlation data
+                "pearson_correlation": (
+                    float(getattr(mc, "pearson_correlation", None))
+                    if (mc and mc.pearson_correlation is not None)
+                    else None
+                ),
+                "is_squeeze_sensitive": bool(getattr(mc, "is_squeeze_sensitive", False)) if mc else False,
+                "correlation_data_points": int(getattr(mc, "data_points", 0) or 0) if mc else 0,
+                # Invention details
+                "invention_details": inv_details.get(tid),
             })
 
-        return {"items": result}
+        # Plan history (last 90 days)
+        try:
+            from datetime import timedelta  # noqa: PLC0415
+            cutoff = (datetime.utcnow() - timedelta(days=90)).isoformat()
+            ph_session = self._session_provider.app_session()
+            try:
+                plan_history_rows = ph_session.query(BuildPlanModel).filter(
+                    BuildPlanModel.created_at >= cutoff
+                ).order_by(BuildPlanModel.created_at.desc()).limit(90).all()
+            finally:
+                ph_session.close()
+            plan_history = [
+                {
+                    "id": int(p.id),
+                    "created_at": str(p.created_at),
+                    "status": str(p.status),
+                    "freshness_score": float(p.freshness_score or 1.0),
+                }
+                for p in plan_history_rows
+            ]
+        except Exception:
+            plan_history = []
+
+        return {"items": result, "plan_history": plan_history}
 
     # ──────────────────────────────────────────────────────────────────────────
     # Private: computation phases

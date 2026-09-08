@@ -74,6 +74,15 @@ def set_action_status(action_id: int, status: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_market_intel_status() -> dict[str, Any]:
+    """GET /planner/market_intel/status — market intelligence job status."""
+    response = api_get("/planner/market_intel/status") or {}
+    if response.get("status") != "success":
+        return {}
+    return response.get("data") or {}
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_analytics() -> dict[str, Any]:
     """GET /planner/analytics — self-learning accuracy stats (rarely changes; cached 5 min)."""

@@ -6,11 +6,14 @@ from typing import Any
 
 import streamlit as st
 
-from streamlit_ui.api.daily_planner import compute_plan, get_plan, get_status
+from streamlit_ui.api.daily_planner import compute_plan, get_market_intel_status, get_plan, get_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 
 # Default from spec: plan expires after 36 hours
 PLANNER_MAX_PLAN_AGE_HOURS: float = 36.0
+
+# Market intel refresh interval: green if fresher than this
+PLANNER_MARKET_REFRESH_INTERVAL_HOURS: float = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +221,7 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
 
     # Metrics row
     if plan_meta:
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
 
         freshness_pct = int(freshness_score * 100)
         if freshness_score >= 0.90:
@@ -247,6 +250,26 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
                 )
             )
             st.metric("Capital Reserved", _fmt_isk(capital_reserved) if capital_reserved else "—")
+        with c5:
+            try:
+                market_status = get_market_intel_status() or {}
+            except Exception:
+                market_status = {}
+            last_completed = market_status.get("last_completed_at")
+            market_dt = _parse_dt(last_completed)
+            if market_dt is None:
+                market_label = "—"
+            else:
+                now_utc = datetime.now(tz=timezone.utc)
+                market_age_hours = (now_utc - market_dt).total_seconds() / 3600
+                age_text = _fmt_age(market_age_hours)
+                if market_age_hours < PLANNER_MARKET_REFRESH_INTERVAL_HOURS:
+                    market_label = f"{age_text} ✓"
+                elif market_age_hours < 6.0:
+                    market_label = f"{age_text} ⚠"
+                else:
+                    market_label = f"{age_text} 🔴"
+            st.metric("Market Data", market_label)
 
     # Freshness warning
     if page_state.plan and freshness_score < 0.75:
