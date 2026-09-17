@@ -1703,23 +1703,48 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ### Task 9: CharacterAssigner — skills, slots and invention choice (findings 1, 9 + discovered)
 
-Three defects in one file, all about slot accounting:
+Three defects in one file, all about slot accounting. The root cause of two of them is that
+`CharacterAssigner` hand-rolled a four-entry skill id map instead of using the SDE-backed skill
+mapper the project already has.
 
-1. **Finding 1** — skills read from `active_skill_level`; the character dicts use
-   `trained_skill_level`, so `max_mfg` and `max_research` are always `1 + 0 + 0 = 1`.
+**The existing mapper.** `application/characters/character.py:1234-1293` joins the ESI skill list
+against every published skill in SDE category 16 and stores the result on the character as
+`skills["skills"]` — a list of one entry per skill in the game, each carrying `skill_id`,
+`skill_name`, `group_name` and `trained_skill_level`. Verified against
+`database/eve_app.db`: 511 entries per character, and the industry skills resolve by name —
+`Mass Production` 3387, `Advanced Mass Production` 24625, `Laboratory Operation` 3406,
+`Advanced Laboratory Operation` 24624, `Science` 3402, `Research` 3403, `Metallurgy` 3409,
+`Advanced Industry` 3388. `industry/service.py:157` already holds the canonical name list as
+`_INDUSTRY_CHARACTER_MODIFIER_SKILL_NAMES`, and `industry/service.py:3011` has the same
+name-keyed reduction as `_skill_levels_by_name`.
+
+So `_SKILL_ID_MAP` is deleted, not extended. Skills are looked up by name.
+
+The three defects:
+
+1. **Finding 1, worse than reported** — the assigner reads `active_skill_level`, and that key is
+   **absent from the stored payload entirely** (confirmed against the live DB). So
+   `entry.get("active_skill_level") or 0` is 0 for every skill of every character, always, and
+   `max_mfg`/`max_research` are `1 + 0 + 0 = 1`. On the real character measured, every relevant
+   skill is at level 5 — true capacity is 11 manufacturing and 11 research slots. The planner was
+   using one of each.
 2. **Finding 9** — slot counters decrement per *decision*, after all its actions are built, so ME
    and TE research on one item both take the same single free slot.
-3. **Discovered while planning** — `_best_invention_char` sums skills matching `"science"` or
-   `"metallurgy"`, but `skills` only ever holds the four slot skills from `_SKILL_ID_MAP`. The sum
-   is always 0, so invention assignment degenerates to "first character with a free slot".
+3. **Discovered while planning** — `_best_invention_char` sums skills whose name contains
+   `"science"` or `"metallurgy"`, but the hand-rolled map only ever populated the four slot
+   skills, so the sum is always 0 and invention assignment degenerates to "first character with a
+   free slot". Reading through the mapper fixes this for free, because `Science`, `Metallurgy`,
+   `Research` and `Advanced Industry` are all present by name.
 
 **Files:**
 - Modify: `src/eve_online_industry_tracker/application/daily_planner/character_assigner.py:66-74,233-275,346-362`
 - Test: `tests/test_daily_planner_assignment.py` (new file)
 
 **Interfaces:**
-- Produces: `_SKILL_ID_MAP` extended with the invention science skills; slot decrement moves into
-  `_assign_decision` via a `_take_slot(char_slots, char_id, kind)` helper.
+- Consumes: character dicts whose `skills["skills"]` is the enriched list from
+  `characters/character.py` (`skill_name` + `trained_skill_level` per entry).
+- Produces: `skill_levels_by_name(char) -> dict[str, int]` (module-level, so it is testable and
+  reusable); `CharacterAssigner._take_slot(char_slots, char_id, action_type)`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1740,8 +1765,14 @@ def _char(char_id, name, skills):
             "skills": {"skills": skills, "total_sp": 0}}
 
 
-def _skill(skill_id, level):
-    return {"skill_id": skill_id, "trained_skill_level": level, "active_skill_level": level}
+def _skill(skill_name, level, skill_id=0):
+    """One entry in the enriched skill list produced by characters/character.py.
+
+    Note there is deliberately no active_skill_level key — the real stored
+    payload does not have one.
+    """
+    return {"skill_id": skill_id, "skill_name": skill_name,
+            "group_name": "Production", "trained_skill_level": level}
 
 
 class _Chars:
@@ -1764,21 +1795,59 @@ def _decision(**overrides):
     return ItemDecision(**base)
 
 
+def test_skill_levels_are_read_by_name_from_the_enriched_list():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        skill_levels_by_name,
+    )
+
+    char = _char(1, "Pilot", [_skill("Mass Production", 5), _skill("Science", 4)])
+    assert skill_levels_by_name(char) == {"Mass Production": 5, "Science": 4}
+
+
+def test_skill_levels_of_a_character_without_skills_is_empty():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        skill_levels_by_name,
+    )
+
+    assert skill_levels_by_name({"character_id": 1}) == {}
+    assert skill_levels_by_name({"character_id": 1, "skills": {}}) == {}
+
+
 def test_slot_capacity_uses_trained_skill_levels():
     # Mass Production 5 + Advanced Mass Production 4 => 1 + 5 + 4 = 10 mfg slots
-    chars = [_char(1, "Pilot", [_skill(3387, 5), _skill(24625, 4)])]
+    chars = [_char(1, "Pilot", [_skill("Mass Production", 5),
+                                _skill("Advanced Mass Production", 4)])]
     slots = CharacterAssigner()._compute_available_slots(chars, [], _now())
     assert slots[1]["free_mfg"] == 10
 
 
+def test_a_fully_skilled_pilot_has_eleven_slots_of_each_kind():
+    # The real measured character: every industry skill at 5.
+    chars = [_char(1, "Pilot", [
+        _skill("Mass Production", 5), _skill("Advanced Mass Production", 5),
+        _skill("Laboratory Operation", 5), _skill("Advanced Laboratory Operation", 5),
+    ])]
+    slots = CharacterAssigner()._compute_available_slots(chars, [], _now())
+    assert slots[1]["free_mfg"] == 11
+    assert slots[1]["free_research"] == 11
+
+
 def test_research_slot_capacity_uses_trained_skill_levels():
-    chars = [_char(1, "Pilot", [_skill(3406, 5), _skill(24624, 3)])]
+    chars = [_char(1, "Pilot", [_skill("Laboratory Operation", 5),
+                                _skill("Advanced Laboratory Operation", 3)])]
     slots = CharacterAssigner()._compute_available_slots(chars, [], _now())
     assert slots[1]["free_research"] == 9
 
 
+def test_an_unskilled_pilot_still_has_one_slot_of_each_kind():
+    chars = [_char(1, "Pilot", [])]
+    slots = CharacterAssigner()._compute_available_slots(chars, [], _now())
+    assert slots[1]["free_mfg"] == 1
+    assert slots[1]["free_research"] == 1
+
+
 def test_me_and_te_research_take_two_separate_slots():
-    chars = [_char(1, "Pilot", [_skill(3406, 1)])]  # 1 + 1 = 2 research slots
+    chars = [_char(1, "Pilot", [_skill("Laboratory Operation", 1)])]  # 1 + 1 = 2 slots
     plan = ChainPlan(decisions=[_decision(
         overview_row={"type_id": 12345, "needs_me_research": True,
                       "needs_te_research": True, "blueprint_type_id": 999},
@@ -1789,7 +1858,7 @@ def test_me_and_te_research_take_two_separate_slots():
 
 
 def test_a_single_research_slot_yields_only_one_research_action():
-    chars = [_char(1, "Pilot", [])]  # 1 + 0 = 1 research slot
+    chars = [_char(1, "Pilot", [])]  # 1 + 0 = 1 research slot only
     plan = ChainPlan(decisions=[_decision(
         overview_row={"type_id": 12345, "needs_me_research": True,
                       "needs_te_research": True, "blueprint_type_id": 999},
@@ -1800,9 +1869,8 @@ def test_a_single_research_slot_yields_only_one_research_action():
 
 
 def test_invention_prefers_the_higher_science_skilled_pilot():
-    # 11444 = Advanced Industry is not a science skill; 11433/11443 are.
-    low = _char(1, "Low", [_skill(3406, 5), _skill(11433, 1)])
-    high = _char(2, "High", [_skill(3406, 5), _skill(11433, 5)])
+    low = _char(1, "Low", [_skill("Laboratory Operation", 5), _skill("Science", 1)])
+    high = _char(2, "High", [_skill("Laboratory Operation", 5), _skill("Science", 5)])
     plan = ChainPlan(decisions=[_decision(
         overview_row={"type_id": 12345, "needs_invention": True},
     )])
@@ -1827,22 +1895,9 @@ class _AdminStub:
         return default
 ```
 
-The science skill ids used above must match the ones added to `_SKILL_ID_MAP` in Step 3. Confirm
-them against the SDE before writing the test:
-
-```bash
-python3 -c "
-import sqlite3, json
-c = sqlite3.connect('file:database/eve_sde.db?mode=ro&immutable=1', uri=True)
-for row in c.execute('''select id, name from types
-                        where json_extract(name, '\$.en') in
-                        ('Science','Laboratory Operation','Advanced Laboratory Operation',
-                         'Mass Production','Advanced Mass Production')'''):
-    print(row[0], json.loads(row[1])['en'])
-"
-```
-
-Use the real ids the query prints, in both the test and `_SKILL_ID_MAP`.
+No skill-id lookup is needed: the tests and the implementation both address skills by name, which
+is what the mapper in `characters/character.py` provides. The names used here are exactly those in
+`industry/service.py:157`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -1852,30 +1907,66 @@ invention test picking pilot 1.
 
 - [ ] **Step 3: Fix all three**
 
-In `_compute_available_slots`, extend the skill map and read the right key:
+Delete `_SKILL_ID_MAP` entirely and read through the project's own skill mapper instead. Add at
+module level:
 
 ```python
-        # ESI skill ids → the flat names the slot and invention maths below use.
-        _SKILL_ID_MAP: dict[int, str] = {
-            3387: "mass_production",
-            24625: "advanced_mass_production",
-            3406: "laboratory_operation",
-            24624: "advanced_laboratory_operation",
-            # Science skills — used to pick the best invention pilot.
-            <SCIENCE_ID>: "science",
-            <ADV_SCIENCE_ID>: "advanced_science",
-        }
+# Slot capacity skills. Base one slot, plus one per level of each.
+MFG_SLOT_SKILLS = ("Mass Production", "Advanced Mass Production")
+RESEARCH_SLOT_SKILLS = ("Laboratory Operation", "Advanced Laboratory Operation")
+# Skills that make a pilot a better inventor, used only to rank candidates.
+SCIENCE_SKILLS = ("Science", "Advanced Industry", "Metallurgy", "Research")
+
+
+def skill_levels_by_name(char: dict[str, Any]) -> dict[str, int]:
+    """{skill_name: trained_skill_level} for one character.
+
+    Reads the enriched skill list built in characters/character.py, which joins
+    ESI's skill list against every published SDE skill and carries skill_name
+    alongside trained_skill_level. Note the stored payload has no
+    `active_skill_level` key at all — reading one yields 0 for every skill.
+    """
+    raw = char.get("skills") or {}
+    entries = raw.get("skills") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        return {}
+
+    levels: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("skill_name") or "").strip()
+        if not name:
+            continue
+        try:
+            level = int(entry.get("trained_skill_level") or 0)
+        except (TypeError, ValueError):
+            continue
+        levels[name] = max(level, levels.get(name, 0))
+    return levels
+
+
+def _slot_capacity(levels: dict[str, int], skill_names: tuple[str, ...]) -> int:
+    """One base slot plus one per trained level of each contributing skill."""
+    return 1 + sum(int(levels.get(name, 0)) for name in skill_names)
 ```
 
-and replace line 262:
+Then replace the skill-flattening block in `_compute_available_slots` (lines 254-267) with:
 
 ```python
-                        skills[_SKILL_ID_MAP[sid]] = int(entry.get("trained_skill_level") or 0)
+            levels = skill_levels_by_name(char)
+            max_mfg = _slot_capacity(levels, MFG_SLOT_SKILLS)
+            max_research = _slot_capacity(levels, RESEARCH_SLOT_SKILLS)
 ```
 
-`trained_skill_level` is what ESI's `/characters/{id}/skills/` returns and what
-`industry/service.py:1231` already uses. `active_skill_level` differs only while a skill is
-unplugged by an inactive clone — not the number slot capacity depends on.
+and store `"skills": levels` in the slot map so `_best_invention_char` sees full, name-keyed
+levels rather than four hardcoded entries. Drop the `_SKILL_ID_MAP` dict and the
+`if isinstance(skills_raw, dict) and "skills" in skills_raw` branch — `skill_levels_by_name`
+handles both the populated and the empty shape.
+
+`trained_skill_level` is the key ESI actually returns, the key
+`characters/character.py:1274` stores, and the key `industry/service.py:1231` and `:3023` already
+read. `active_skill_level` appears nowhere in the stored payload.
 
 Add a slot-taking helper on the class:
 
@@ -1907,11 +1998,9 @@ after each `actions.append(...)` — for `me_research`, `te_research`, `invent`,
 
 `_assign_decision` needs `char_slots` passed through, which it already receives.
 
-Finally, make invention scoring use the real science skills:
+Finally, make invention scoring use the real science skills, now that they are actually present:
 
 ```python
-    _SCIENCE_SKILL_NAMES = ("science", "advanced_science")
-
     def _best_invention_char(
         self, char_slots: dict[int, dict], characters: list[dict]
     ) -> tuple[int | None, str | None]:
@@ -1923,10 +2012,8 @@ Finally, make invention scoring use the real science skills:
         for slot in char_slots.values():
             if slot.get("free_research", 0) <= 0:
                 continue
-            skills = slot.get("skills") or {}
-            science_sum = sum(
-                int(skills.get(name, 0) or 0) for name in self._SCIENCE_SKILL_NAMES
-            )
+            levels = slot.get("skills") or {}
+            science_sum = sum(int(levels.get(name, 0) or 0) for name in SCIENCE_SKILLS)
             candidates.append(
                 (-science_sum, slot.get("total_active_jobs", 0),
                  slot["character_id"], slot["character_name"])
@@ -1943,7 +2030,7 @@ read a slot dict by a key that could be `0`.
 - [ ] **Step 4: Run the tests**
 
 Run: `python -m pytest tests/test_daily_planner_assignment.py -v`
-Expected: PASS (5 passed).
+Expected: PASS (10 passed).
 
 - [ ] **Step 5: Run the whole planner suite**
 
@@ -1955,13 +2042,15 @@ Expected: no new failures.
 ```bash
 git add src/eve_online_industry_tracker/application/daily_planner/character_assigner.py \
         tests/test_daily_planner_assignment.py
-git commit -m "fix: correct slot capacity, slot accounting and invention pilot choice
+git commit -m "fix: read character skills through the SDE skill mapper
 
-Skills came from active_skill_level (ESI sends trained_skill_level), so every
-pilot had exactly one slot of each kind. Slots were also decremented per
-decision rather than per action, letting ME and TE research share one slot. And
-the invention science sum read skill names that were never populated, so pilot
-choice was arbitrary.
+CharacterAssigner hand-rolled a four-entry skill id map and read
+active_skill_level, a key the stored payload does not have — so every pilot had
+exactly one slot of each kind instead of up to eleven, and the invention science
+sum was always zero. It now reads skill_name/trained_skill_level from the
+enriched list that characters/character.py already builds. Slots are also
+consumed per action rather than per decision, so ME and TE research can no
+longer share one slot.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -2154,8 +2243,13 @@ Three bugs that compound into a shopping list that is both far too small and dou
 1. **Finding 7** — per-run material quantities are never multiplied by `action.runs`.
 2. **Finding 8** — `already_allocated` is updated *after* the stock-covered `continue`, so stock is
    re-offered to the next job.
-3. **Discovered** — `_build_corp_stock_map` excludes assets by the phantom `is_blueprint`, so
-   blueprints count as material stock.
+3. **Discovered, cosmetic** — `_build_corp_stock_map` excludes assets by the phantom
+   `is_blueprint`, so blueprints land in the material stock map. **No measurable impact today:**
+   the map is keyed by `type_id` and only ever read with a *material* `type_id`, and blueprint
+   type_ids never collide with material type_ids (different SDE categories, disjoint id ranges).
+   The blueprint entries are simply never looked up. Fix it anyway — one line, and it makes the
+   map mean what its name says — but do not expect any change in output, and do not let it hold
+   up the task if the resolver plumbing proves awkward.
 
 **Files:**
 - Modify: `src/eve_online_industry_tracker/application/daily_planner/shopping_list_builder.py:37-100,129-140,160-174`
@@ -3758,12 +3852,17 @@ def test_scoring_subtracts_material_cost_from_a_real_row(input_rows):
 
 
 def test_a_skilled_pilot_gets_more_than_one_slot():
+    """Mirrors the real stored payload: skill_name + trained_skill_level, no
+    active_skill_level key."""
     chars = [{
         "character_id": 1, "character_name": "Pilot",
         "skills": {"skills": [
-            {"skill_id": 3387, "trained_skill_level": 5},
-            {"skill_id": 24625, "trained_skill_level": 4},
-            {"skill_id": 3406, "trained_skill_level": 5},
+            {"skill_id": 3387, "skill_name": "Mass Production",
+             "trained_skill_level": 5},
+            {"skill_id": 24625, "skill_name": "Advanced Mass Production",
+             "trained_skill_level": 4},
+            {"skill_id": 3406, "skill_name": "Laboratory Operation",
+             "trained_skill_level": 5},
         ]},
     }]
     from datetime import datetime, timezone
@@ -3850,12 +3949,19 @@ All 15 review findings are covered. Four defects discovered while planning are a
 were **not** in the spec — flag these to the user:
 
 1. `_best_invention_char` sums skill names that are never populated, so invention pilot choice is
-   arbitrary (Task 9).
+   arbitrary (Task 9). Root cause shared with finding 1: the assigner hand-rolled a four-entry
+   skill id map instead of using the SDE-backed mapper in `characters/character.py`. Task 9 now
+   deletes that map and reads skills by name.
 2. `_get_industry_jobs` applies no status filter, so delivered jobs count as active (Task 13).
-3. `_build_corp_stock_map` excludes stock by the phantom `is_blueprint`, so blueprints count as
-   material stock (Task 11).
+3. `_build_corp_stock_map` excludes stock by the phantom `is_blueprint`, so blueprints land in the
+   material stock map (Task 11). Cosmetic only — blueprint type_ids are never looked up there.
 4. The invention branch of the shopping list is a `pass`, so invention inputs never appear
    (Task 17). This is build-out and belongs to cluster D.
+
+**Correction to the spec:** the spec's Cluster A row for finding 1 says the fix is
+`trained_skill_level`. That is necessary but not sufficient — `active_skill_level` is absent from
+the stored payload entirely, and the deeper problem is the hand-rolled id map. Task 9 supersedes
+that row.
 
 **Type consistency:** `PlannerInputRow` field names are used identically in Tasks 6-11 and 19.
 `meta_resolver` is the parameter name for the `TypeMetadataResolver` in every consumer
