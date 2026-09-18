@@ -113,6 +113,13 @@ def get_pipeline_days_supply(row: dict[str, Any]) -> float | None:
 
 
 def get_price_trend_7d_pct(row: dict[str, Any]) -> float:
+    """7-day price trend percentage.
+
+    Absent is deliberately read as `0.0` (flat), not `None`: this mirrors
+    `PipelineState.price_trend_7d_pct`, which is declared as a required
+    `float`, unlike `price_trend_30d_pct` (`float | None`, `None` meaning "not
+    enough history"). Do not change this to return `None` on absence.
+    """
     return _as_float(row.get("price_trend_7d_pct"))
 
 

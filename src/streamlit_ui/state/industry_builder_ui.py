@@ -9,6 +9,7 @@ import streamlit as st
 from eve_online_industry_tracker.application.industry.overview_row import (  # noqa: F401
     get_effective_runs,
     get_manufacturing_job,
+    get_meta_group_name,
     get_product_quantity,
     skill_requirements_met,
 )
@@ -36,22 +37,6 @@ def get_node_primary_activity_child(node: dict[str, Any]) -> dict[str, Any]:
         if child_node_type == "activity" and child_activity in {"manufacturing", "reaction"}:
             return child
     return {}
-
-
-def get_meta_group_name(row: dict[str, Any]) -> str:
-    raw_name = str(row.get("meta_group_name") or "").strip()
-    normalized = raw_name.lower()
-    if normalized in {"tech i", "structure tech i", "abyssal"}:
-        return "Tech I"
-    if normalized in {"tech ii", "structure tech ii"}:
-        return "Tech II"
-    if normalized in {"tech iii", "structure tech iii"}:
-        return "Tech III"
-    if normalized in {"faction", "structure faction"}:
-        return "Faction"
-    if normalized in {"storyline", "limited time"}:
-        return "Storyline"
-    return raw_name
 
 
 def meta_group_label(meta_group_name: str) -> str:
