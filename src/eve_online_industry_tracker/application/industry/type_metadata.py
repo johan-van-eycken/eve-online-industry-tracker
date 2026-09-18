@@ -10,17 +10,22 @@ Note on `meta_group_id`: `types.metaGroupID` is stored as REAL in the SDE, so
 is load-bearing -- callers expect a plain `int`, not a float. A `None` meta
 group id is normal data (every blueprint type has one) and is cached as a
 found-but-empty result, never treated as a failed lookup.
+
+Note on `is_blueprint`: it keys on `category_id`, not `category_name`. The
+name is localized (`get_type_data` runs it through `parse_localized(...,
+language)`), so if the configured app language is ever anything other than
+"en", `category_name` would read as e.g. "Blaupause" and a name-based check
+would silently return False for every blueprint -- exactly the defect this
+class exists to fix. `category_id` is a plain, language-independent integer,
+so `is_blueprint` is keyed on that instead.
 """
 from __future__ import annotations
 
-import logging
 from typing import Any, Callable, Iterable
 
 from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
-logger = logging.getLogger(__name__)
-
-BLUEPRINT_CATEGORY_NAME = "blueprint"
+BLUEPRINT_CATEGORY_ID = 9
 
 
 class TypeMetadataResolver:
@@ -38,7 +43,17 @@ class TypeMetadataResolver:
         self._missing: set[int] = set()
 
     def prefetch(self, type_ids: Iterable[int]) -> None:
-        """Load metadata for many types in one SDE query."""
+        """Load metadata for many types in one SDE query.
+
+        If the loader call itself raises, the exception propagates unchanged and
+        `wanted` is NOT added to `_missing`. Recording a failed lookup as "these
+        types do not exist" would silently and permanently poison every later
+        meta_group_id()/category_id()/is_blueprint() call for these ids -- a
+        transient failure (or a real bug) must not present as "no blueprints,
+        no meta groups" for the rest of this instance's life. A missing id in an
+        otherwise-successful load is a different, legitimate case and is still
+        cached in `_missing` below.
+        """
         wanted = {
             int(tid)
             for tid in type_ids
@@ -60,9 +75,6 @@ class TypeMetadataResolver:
         session = self._sde_session_provider()
         try:
             loaded = self._loader(session, self._language, sorted(wanted))
-        except (KeyError, TypeError, ValueError):
-            logger.exception("TypeMetadataResolver: SDE lookup failed for %d types", len(wanted))
-            loaded = {}
         finally:
             close = getattr(session, "close", None)
             if callable(close):
@@ -95,5 +107,14 @@ class TypeMetadataResolver:
     def category_name(self, type_id: int) -> str:
         return str(self._entry(type_id).get("category_name") or "")
 
+    def category_id(self, type_id: int) -> int | None:
+        raw = self._entry(type_id).get("category_id")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
     def is_blueprint(self, type_id: int) -> bool:
-        return self.category_name(type_id).strip().lower() == BLUEPRINT_CATEGORY_NAME
+        return self.category_id(type_id) == BLUEPRINT_CATEGORY_ID
