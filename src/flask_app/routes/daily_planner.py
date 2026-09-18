@@ -88,3 +88,32 @@ def market_intel_status():
     if mij is None:
         return jsonify({"status": "not_started", "last_completed_at": None, "last_error": None})
     return jsonify(mij.get_status())
+
+
+@daily_planner_bp.get("/planner/debug/overview-fixture")
+def debug_overview_fixture():
+    """Dump a sanitised sample of the live overview cache for test fixtures.
+
+    Disabled unless EVE_ENABLE_DEBUG_FIXTURE=1. Rows are sanitised inside this
+    process, so raw corporation data never crosses the response boundary.
+    """
+    import os
+
+    from eve_online_industry_tracker.application.daily_planner.fixture_export import (
+        sanitise_overview_rows,
+    )
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    if os.environ.get("EVE_ENABLE_DEBUG_FIXTURE") != "1":
+        return error(message="debug fixture export disabled", status_code=404)
+
+    require_ready(get_state())
+    rows = IndustryService(state=get_state()).get_cached_overview_rows()
+    if not rows:
+        return error(
+            message="no cached overview — refresh the product overview first",
+            status_code=409,
+        )
+
+    limit = int(request.args.get("limit", 20))
+    return ok(data=sanitise_overview_rows(rows[:limit]))
