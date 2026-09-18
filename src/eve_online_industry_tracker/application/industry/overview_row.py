@@ -144,7 +144,23 @@ def get_profit_margin_fraction(row: dict[str, Any]) -> float:
 
 
 def get_blueprint_type_id(row: dict[str, Any]) -> int | None:
-    value = _as_int(row.get("blueprint_type_id"))
+    """Blueprint type id used to build this product.
+
+    The producer writes this nested, under
+    `manufacturing_job.blueprint_sde.blueprint_type_id`
+    (industry/service.py:6921 sets it on `blueprint_sde_payload`; :7251 nests
+    that payload under `manufacturing_job["blueprint_sde"]`). There is no
+    top-level `blueprint_type_id` key on a real overview row, but one is
+    checked as a fallback in case some other producer path writes it there
+    directly. None when absent from both places, or not a positive int.
+    """
+    manufacturing_job = get_manufacturing_job(row)
+    blueprint_sde = manufacturing_job.get("blueprint_sde")
+    if isinstance(blueprint_sde, dict) and "blueprint_type_id" in blueprint_sde:
+        raw = blueprint_sde.get("blueprint_type_id")
+    else:
+        raw = row.get("blueprint_type_id")
+    value = _as_int(raw)
     return value if value > 0 else None
 
 

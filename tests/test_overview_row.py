@@ -79,6 +79,18 @@ def test_scalar_accessors():
     assert orow.get_meta_group_name(ROW) == "Tech II"
 
 
+def test_blueprint_type_id_prefers_the_nested_blueprint_sde_path():
+    row = {
+        "blueprint_type_id": 999,
+        "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 777}},
+    }
+    assert orow.get_blueprint_type_id(row) == 777
+
+
+def test_blueprint_type_id_falls_back_to_a_top_level_key():
+    assert orow.get_blueprint_type_id({"blueprint_type_id": 999}) == 999
+
+
 def test_skill_requirements_met_reads_the_precomputed_boolean():
     # The producer sets a single precomputed boolean under
     # manufacturing_job.skills.skill_requirements_met; the accessor just reads it.
