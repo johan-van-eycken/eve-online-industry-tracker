@@ -14,8 +14,6 @@ from eve_online_industry_tracker.infrastructure.persistence.daily_planner_repo i
     DailyPlannerRepository,
 )
 
-FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
-
 
 @pytest.fixture()
 def app_engine():
@@ -37,24 +35,26 @@ def app_session(app_engine) -> Session:
         session.close()
 
 
-class _StaticSessionProvider:
-    """Session provider that always hands back the same test session.
+class _EngineSessionProvider:
+    """Session provider that mirrors production's StateSessionProvider.
 
-    close() is a no-op so repository code that closes its session does not
-    invalidate the fixture for the rest of the test.
+    Each app_session() call returns a fresh Session bound to the shared
+    in-memory engine, and close() is real. sqlite:// in-memory engines use
+    SingletonThreadPool, so every session shares the one underlying
+    connection and sees the same schema and committed data -- there is no
+    need to keep a single Session alive across calls to get that.
     """
 
-    def __init__(self, session: Session) -> None:
-        self._session = session
+    def __init__(self, engine) -> None:
+        self._factory = sessionmaker(bind=engine, future=True)
 
     def app_session(self) -> Session:
-        self._session.close = lambda: None  # type: ignore[method-assign]
-        return self._session
+        return self._factory()
 
 
 @pytest.fixture()
-def session_provider(app_session) -> _StaticSessionProvider:
-    return _StaticSessionProvider(app_session)
+def session_provider(app_engine) -> _EngineSessionProvider:
+    return _EngineSessionProvider(app_engine)
 
 
 @pytest.fixture()
