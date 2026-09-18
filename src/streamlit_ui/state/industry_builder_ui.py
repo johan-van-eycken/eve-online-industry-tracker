@@ -6,13 +6,14 @@ from typing import Any, cast
 import pandas as pd
 import streamlit as st
 
+from eve_online_industry_tracker.application.industry.overview_row import (  # noqa: F401
+    get_effective_runs,
+    get_manufacturing_job,
+    get_product_quantity,
+    skill_requirements_met,
+)
 from streamlit_ui.components.assets_data import get_item_image_url
 from streamlit_ui.components.formatters import format_duration
-
-
-def get_manufacturing_job(row: dict[str, Any]) -> dict[str, Any]:
-    value = row.get("manufacturing_job") or {}
-    return value if isinstance(value, dict) else {}
 
 
 def get_node_blueprint_sources(node: dict[str, Any]) -> tuple[str, str]:
@@ -35,31 +36,6 @@ def get_node_primary_activity_child(node: dict[str, Any]) -> dict[str, Any]:
         if child_node_type == "activity" and child_activity in {"manufacturing", "reaction"}:
             return child
     return {}
-
-
-def get_product_quantity(row: dict[str, Any]) -> int:
-    try:
-        return int(row.get("quantity") or 0)
-    except Exception:
-        return 0
-
-
-def get_effective_runs(row: dict[str, Any]) -> int:
-    manufacturing_job = get_manufacturing_job(row)
-    try:
-        runs = int(manufacturing_job.get("runs") or 0)
-    except Exception:
-        runs = 0
-    if runs > 0:
-        return runs
-    return get_product_quantity(row)
-
-
-def skill_requirements_met(row: dict[str, Any]) -> bool:
-    skills = get_manufacturing_job(row).get("skills") or {}
-    if not isinstance(skills, dict):
-        return False
-    return bool(skills.get("skill_requirements_met", False))
 
 
 def get_meta_group_name(row: dict[str, Any]) -> str:
