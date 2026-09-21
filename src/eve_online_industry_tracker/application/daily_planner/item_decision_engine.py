@@ -55,7 +55,7 @@ class ItemDecisionEngine:
                 days_of_supply_current=pipeline.days_of_supply_current,
                 effective_velocity=pipeline.effective_velocity,
                 meta_group_id=meta_group_id,
-                pipeline_stage="watching",
+                pipeline_stage="unscoreable",
                 overview_row=overview_row,
             )
 

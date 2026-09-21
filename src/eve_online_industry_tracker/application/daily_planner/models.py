@@ -60,7 +60,7 @@ class ItemDecision:
     days_of_supply_current: float
     effective_velocity: float
     meta_group_id: int | None
-    pipeline_stage: str      # 'manufacturing' | 'invention' | 'copying' | 'researching' | 'watching'
+    pipeline_stage: str      # 'manufacturing' | 'invention' | 'copying' | 'researching' | 'watching' | 'unscoreable'
     # BPO analysis fields (populated in Phase 5)
     bpo_investment_recommended: bool | None = None
     bpo_market_price: float | None = None

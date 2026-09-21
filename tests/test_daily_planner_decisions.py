@@ -251,3 +251,7 @@ class TestItemDecisionEngine:
         decision = self.engine.decide(scored, pipeline, row, admin)
         assert decision.decision == "skip"
         assert decision.decision_reason == "no isk/hour (missing cost basis or job time)"
+        # 'unscoreable' is a distinct pipeline_stage from the ordinary 'watching'
+        # skip -- this item was never priced, not deliberately deferred after
+        # being priced -- so persisted build_plan_item rows can tell the two apart.
+        assert decision.pipeline_stage == "unscoreable"
