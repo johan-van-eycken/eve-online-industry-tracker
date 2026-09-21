@@ -233,6 +233,29 @@ class TestPipelineAnalyzer:
         # (40 + 60) / 10.0
         assert states[0].total_pipeline_days == 10.0
 
+    def test_pipeline_days_fallback_does_not_double_count_units_in_manufacturing(self):
+        """pipeline_units_in_jobs (industry/service.py:1872-1889) is already
+        SUM(output_quantity) over active/ready manufacturing jobs -- it IS the units
+        in manufacturing. The fallback numerator must be exactly
+        pipeline_units_in_jobs + pipeline_units_on_market, with no separate term
+        derived from `industry_jobs`, or those units get counted twice."""
+        row = _input_row(pipeline_days_supply=None, pipeline_units_in_jobs=40,
+                          pipeline_units_on_market=60)
+        job = MagicMock()
+        job.activity_id = 1
+        job.product_type_id = row.type_id
+        job.status = "active"
+        job.runs = 5
+        job.output_quantity = 25  # would double-count if summed in again
+
+        states = PipelineAnalyzer().analyze(
+            input_rows=[row], industry_jobs=[job], corp_assets=[],
+            market_depth_cache={}, weights={}, sell_velocities={row.type_id: 10.0},
+            meta_resolver=_NoBlueprints(),
+        )
+        # (40 + 60) / 10.0 == 10.0, unaffected by the job's output_quantity
+        assert states[0].total_pipeline_days == 10.0
+
     def test_bpc_runs_are_read_from_blueprint_runs_on_copy_assets(self):
         row = _input_row(blueprint_type_id=999)
         asset = SimpleNamespace(type_id=999, is_blueprint_copy=True, blueprint_runs=17, quantity=1)
@@ -244,8 +267,12 @@ class TestPipelineAnalyzer:
         assert states[0].bpc_runs_available == 17
 
     def test_a_bpo_is_not_counted_as_bpc_runs(self):
+        """A positive blueprint_runs alone must not count as BPC stock -- the
+        is_blueprint_copy gate (finding 4's actual fix) has to be what excludes a
+        BPO, not the `runs <= 0` check. blueprint_runs=17 (not None/0) here so the
+        assertion would fail if is_blueprint_copy were ever ignored."""
         row = _input_row(blueprint_type_id=999)
-        bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False, blueprint_runs=None, quantity=1)
+        bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False, blueprint_runs=17, quantity=1)
         states = PipelineAnalyzer().analyze(
             input_rows=[row], industry_jobs=[], corp_assets=[bpo],
             market_depth_cache={}, weights={}, sell_velocities={},

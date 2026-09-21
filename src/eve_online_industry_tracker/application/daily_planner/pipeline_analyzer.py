@@ -151,16 +151,19 @@ class PipelineAnalyzer:
             effective_velocity = max(0.01, fallback)
 
         # ── Pipeline days ─────────────────────────────────────────────────────
-        # The producer already computes this (industry/service.py:2013). Only
-        # fall back when it could not — 7-day volume of zero yields None there.
+        # The producer already computes this (industry/service.py:2004-2012) as
+        # (pipeline_units_in_jobs + pipeline_units_on_market) / vol_7d, returning
+        # None only when vol_7d == 0. pipeline_units_in_jobs is itself
+        # SUM(output_quantity) over jobs with status in ("active", "ready")
+        # (industry/service.py:1872-1889) -- i.e. it already IS the units
+        # sitting in manufacturing. The fallback below must reuse that same
+        # numerator verbatim and differ only in the denominator (effective_velocity
+        # standing in for the unavailable vol_7d); adding a second, independently
+        # computed "units in manufacturing" term here would double-count them.
         if row.pipeline_days_supply is not None:
             total_pipeline_days = float(row.pipeline_days_supply)
         else:
-            units_in_pipeline = (
-                float(row.pipeline_units_in_jobs)
-                + float(row.pipeline_units_on_market)
-                + _units_in_manufacturing(mfg_jobs_by_type.get(type_id, []))
-            )
+            units_in_pipeline = float(row.pipeline_units_in_jobs) + float(row.pipeline_units_on_market)
             total_pipeline_days = units_in_pipeline / effective_velocity
 
         # ── Competition (from pre-computed cache, Phase A = None) ─────────────
@@ -232,17 +235,3 @@ def _get_attr(obj: Any, attr: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(attr)
     return getattr(obj, attr, None)
-
-
-def _units_in_manufacturing(jobs: list[Any]) -> float:
-    """Sum up output quantities from in-progress manufacturing jobs."""
-    total = 0.0
-    for job in jobs:
-        # Count only active (non-delivered) jobs
-        status = str(_job_attr(job, "status") or "").lower()
-        if status == "delivered":
-            continue
-        runs = int(_job_attr(job, "runs") or 1)
-        output_qty = int(_job_attr(job, "output_quantity") or _job_attr(job, "product_quantity") or runs)
-        total += output_qty
-    return total
