@@ -33,6 +33,32 @@ class ItemDecisionEngine:
         type_name = str(overview_row.get("type_name") or "")
         meta_group_id = overview_row.get("meta_group_id") or overview_row.get("type_meta_group_id")
 
+        # ── UNSCOREABLE check (must precede every threshold comparison and
+        # every /1e6 arithmetic below) ─────────────────────────────────────────
+        # ProfitabilityScorer sets this when it had no cost basis and/or no
+        # isk/hour to work with. Its numeric fields are then placeholder
+        # 0.0s, not genuine measurements -- comparing them against the
+        # thresholds below (or formatting them) would read as "confirmed
+        # unprofitable", a false and more specific claim than "we could not
+        # price this item at all". Skip immediately instead, carrying the
+        # scorer's reason through unchanged.
+        if scored.unscoreable_reason is not None:
+            return ItemDecision(
+                type_id=type_id,
+                type_name=type_name,
+                decision="skip",
+                decision_reason=scored.unscoreable_reason,
+                adjusted_score=scored.adjusted_score,
+                absolute_profit_per_batch=scored.absolute_profit_per_batch,
+                isk_per_hour=scored.isk_per_hour,
+                margin_pct=scored.margin_pct,
+                days_of_supply_current=pipeline.days_of_supply_current,
+                effective_velocity=pipeline.effective_velocity,
+                meta_group_id=meta_group_id,
+                pipeline_stage="watching",
+                overview_row=overview_row,
+            )
+
         min_isk_per_hour = float(_adm(admin_settings, "planner_min_isk_per_hour", 5_000_000))
         min_profit_per_batch = float(_adm(admin_settings, "planner_min_profit_per_batch", 20_000_000))
         competition_gate = float(_adm(admin_settings, "planner_competition_index_gate", 4.0))

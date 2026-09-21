@@ -56,6 +56,7 @@ def _make_scored(
     type_id: int = 1,
     adjusted_score: float = 10_000_000,
     absolute_profit: float = 50_000_000,
+    unscoreable_reason: str | None = None,
 ) -> ScoredItem:
     return ScoredItem(
         type_id=type_id,
@@ -71,6 +72,7 @@ def _make_scored(
         confidence_tier_bonus=1.0,
         isk_per_hour=10_000_000,
         margin_pct=0.15,
+        unscoreable_reason=unscoreable_reason,
     )
 
 
@@ -229,3 +231,23 @@ class TestItemDecisionEngine:
 
         decision = self.engine.decide(scored, pipeline, row, admin)
         assert decision.decision == "build"
+
+    def test_unscoreable_item_skips_with_reason_before_any_threshold_check(self):
+        """An unscoreable ScoredItem must skip on that reason, not on the score/profit gate.
+
+        Pipeline/admin values here would normally satisfy the 'build' path outright
+        (high score, high profit, no saturation) -- proving the unscoreable check runs
+        first, before any threshold comparison or /1e6 formatting.
+        """
+        pipeline = _make_pipeline(total_pipeline_days=1.0, competition_index=None, price_trend_7d=0.0)
+        scored = _make_scored(
+            adjusted_score=10_000_000,
+            absolute_profit=50_000_000,
+            unscoreable_reason="no isk/hour (missing cost basis or job time)",
+        )
+        admin = _make_admin(min_isk=5_000_000, min_profit=20_000_000)
+        row = _make_overview_row()
+
+        decision = self.engine.decide(scored, pipeline, row, admin)
+        assert decision.decision == "skip"
+        assert decision.decision_reason == "no isk/hour (missing cost basis or job time)"

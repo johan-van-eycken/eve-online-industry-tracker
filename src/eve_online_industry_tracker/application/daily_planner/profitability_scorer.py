@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState, ScoredItem
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ class ProfitabilityScorer:
     def score(
         self,
         pipeline: PipelineState,
-        overview_row: dict[str, Any],
+        row: PlannerInputRow,
         weights: Any | None,            # PlanLearningWeightsModel | None
         market_depth: Any | None,       # MarketDepthCacheModel | None (for absolute_profit)
         margin_correlation: Any | None, # MarginCorrelationCacheModel | None
@@ -28,13 +29,22 @@ class ProfitabilityScorer:
         type_id = pipeline.type_id
 
         # ── Base values ───────────────────────────────────────────────────────
-        isk_per_hour = float(overview_row.get("isk_per_hour") or 0.0)
-        margin_pct = float(overview_row.get("profit_margin_fraction") or overview_row.get("margin_pct") or 0.0) * 100.0
-        # Some rows store margin as a fraction (e.g. 0.15), others as a percentage (e.g. 15.0)
-        # Normalise: if margin_pct > 1.0 we assume it's already in %, if <= 1.0 we multiply by 100
-        if abs(margin_pct) <= 1.0 and margin_pct != 0.0:
-            # Still a fraction — leave it; most rows use fraction
-            pass  # margin_pct already reasonable
+        # isk_per_hour and profit_margin_fraction can legitimately be None
+        # (PlannerInputRow docs: missing net_proceeds/total_cost/time_seconds
+        # upstream). margin_pct is informational only, so a missing fraction
+        # becomes 0.0 without affecting scoreability. isk_per_hour instead
+        # feeds directly into adjusted_score below, so its absence is one of
+        # the two conditions that make an item unscoreable -- see reasons.
+        unscoreable_reasons: list[str] = []
+
+        if row.isk_per_hour is None:
+            isk_per_hour = 0.0
+            unscoreable_reasons.append("no isk/hour (missing cost basis or job time)")
+        else:
+            isk_per_hour = row.isk_per_hour
+
+        margin_fraction = row.profit_margin_fraction if row.profit_margin_fraction is not None else 0.0
+        margin_pct = margin_fraction * 100.0
 
         # ── Self-learning multipliers ─────────────────────────────────────────
         accuracy_ema = float(getattr(weights, "accuracy_ema", 1.0)) if weights else 1.0
@@ -86,6 +96,8 @@ class ProfitabilityScorer:
                 mineral_squeeze_penalty = 0.85
 
         # ── Adjusted score ────────────────────────────────────────────────────
+        # isk_per_hour is already 0.0 above when unscoreable, which naturally
+        # zeroes adjusted_score without any special-casing here.
         adjusted_score = (
             isk_per_hour
             * accuracy_ema
@@ -99,7 +111,9 @@ class ProfitabilityScorer:
         )
 
         # ── Absolute profit per batch ─────────────────────────────────────────
-        absolute_profit_per_batch = _compute_absolute_profit(overview_row, market_depth)
+        absolute_profit_per_batch, cost_basis_reason = _compute_absolute_profit(row, market_depth)
+        if cost_basis_reason is not None:
+            unscoreable_reasons.append(cost_basis_reason)
 
         return ScoredItem(
             type_id=type_id,
@@ -115,34 +129,45 @@ class ProfitabilityScorer:
             confidence_tier_bonus=confidence_tier_bonus,
             isk_per_hour=isk_per_hour,
             margin_pct=margin_pct,
+            unscoreable_reason="; ".join(unscoreable_reasons) or None,
         )
 
 
-def _compute_absolute_profit(row: dict[str, Any], market_depth: Any | None) -> float:
-    """Compute absolute_profit_per_batch = (sell_price - material_cost_per_unit) × runs × output_qty.
+def _compute_absolute_profit(
+    row: PlannerInputRow, market_depth: Any | None
+) -> tuple[float, str | None]:
+    """(sell price − material cost per unit) × runs × units per batch.
 
-    Uses vwap_5d from market_depth_cache as the sell price (fallback: spot_sell_price or
-    profit_amount from overview_row).
+    Falls back to the producer's own profit_amount when no market depth is
+    available, or when material_cost_per_unit is itself unknown (it is
+    legitimately None whenever IndustryService could not price materials
+    yet -- see PlannerInputRow's docstring). Only when profit_amount is ALSO
+    None is there truly no cost basis to score from; that is reported as an
+    unscoreable reason rather than silently returning 0.0 as if the item
+    were unprofitable.
     """
-    # Prefer VWAP from market depth cache
-    vwap_5d: float | None = None
-    spot_sell_price: float | None = None
-    if market_depth is not None:
-        vwap_raw = getattr(market_depth, "vwap_5d", None) if not isinstance(market_depth, dict) else market_depth.get("vwap_5d")
-        spot_raw = getattr(market_depth, "spot_sell_price", None) if not isinstance(market_depth, dict) else market_depth.get("spot_sell_price")
-        vwap_5d = float(vwap_raw) if vwap_raw is not None else None
-        spot_sell_price = float(spot_raw) if spot_raw is not None else None
+    sell_price = _sell_price(market_depth)
+    if sell_price is not None and row.material_cost_per_unit is not None:
+        return (sell_price - row.material_cost_per_unit) * row.runs * row.quantity, None
+    if row.profit_amount is not None:
+        return row.profit_amount, None
+    return 0.0, "no cost basis (material cost and profit unavailable)"
 
-    sell_price = vwap_5d or spot_sell_price
 
-    if sell_price is not None:
-        # Use VWAP-based calculation
-        material_cost_per_unit = float(row.get("estimated_material_cost_per_unit") or
-                                       row.get("material_cost_per_unit") or 0.0)
-        runs = int(row.get("runs_per_batch") or row.get("runs") or 1)
-        output_qty = int(row.get("output_quantity") or row.get("product_quantity") or runs)
-        return (sell_price - material_cost_per_unit) * runs * output_qty
-    else:
-        # Fallback: use profit_amount from overview row directly
-        profit_amount = float(row.get("profit_amount") or 0.0)
-        return profit_amount
+def _sell_price(market_depth: Any | None) -> float | None:
+    if market_depth is None:
+        return None
+    get = market_depth.get if isinstance(market_depth, dict) else (
+        lambda key, default=None: getattr(market_depth, key, default)
+    )
+    for key in ("vwap_5d", "spot_sell_price"):
+        raw = get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None

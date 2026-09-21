@@ -38,6 +38,12 @@ class ScoredItem:
     confidence_tier_bonus: float
     isk_per_hour: float                # base isk/hour before multipliers
     margin_pct: float
+    # None when scoreable. Otherwise names the missing input(s) that forced
+    # adjusted_score / absolute_profit_per_batch to a placeholder 0.0 -- e.g.
+    # "no cost basis (material cost and profit unavailable)" or "no isk/hour
+    # (missing cost basis or job time)". Additive field with a safe default
+    # so existing construction sites keep working.
+    unscoreable_reason: str | None = None
 
 
 @dataclass
