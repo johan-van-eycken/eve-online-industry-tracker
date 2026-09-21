@@ -342,8 +342,13 @@ class CharacterAssigner:
                 except Exception:
                     pass
 
-            # activity_id is a top-level attribute on character job ORM models but stored
-            # only in the `raw` JSON column on corporation_industry_jobs — check both.
+            # activity_id is now a real column on both job ORM models (Task 13),
+            # backfilled from `raw` for pre-existing rows and set directly on new
+            # syncs. The `raw` fallback below stays anyway: a database that has
+            # not yet run that migration still has activity_id NULL/0 on every
+            # row, and without this fallback slot deduction would silently stop
+            # working there. Do not remove it until every deployed database is
+            # confirmed migrated.
             activity_id = int(_job_attr(job, "activity_id") or 0)
             if activity_id == 0:
                 raw = _job_attr(job, "raw")

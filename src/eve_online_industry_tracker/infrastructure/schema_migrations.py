@@ -95,6 +95,14 @@ def _backfill_activity_id_sql(db: DatabaseManager, *, table: str) -> None:
     Additive and idempotent: only touches rows where activity_id is still
     NULL, so re-running ensure_app_schema on an already-backfilled database
     is a no-op.
+
+    Deliberately non-fatal: a deployed SQLite build without the JSON1
+    extension (or any other driver quirk) must not crash app boot over a
+    best-effort backfill. But a silent failure here reproduces finding 2 --
+    every pre-existing row stays activity_id IS NULL forever, so historical
+    jobs remain unindexed and has_active_manufacturing_jobs stays False for
+    them -- so both a raised exception and a no-op/partial UPDATE are logged
+    at ERROR, loud enough to be seen, rather than WARNING.
     """
     try:
         db.execute(
@@ -105,7 +113,52 @@ def _backfill_activity_id_sql(db: DatabaseManager, *, table: str) -> None:
         )
         logging.info("Backfilled %s.activity_id from raw", table)
     except Exception as e:
-        logging.warning("Failed backfilling %s.activity_id: %s", table, str(e))
+        logging.error(
+            "Failed backfilling %s.activity_id: %s -- historical jobs will "
+            "remain unindexed; the daily planner cannot detect active "
+            "manufacturing for them",
+            table,
+            str(e),
+        )
+        return
+
+    _verify_activity_id_backfill(db, table=table)
+
+
+def _verify_activity_id_backfill(db: DatabaseManager, *, table: str) -> None:
+    """Confirm the backfill actually populated every row it should have.
+
+    Catches a partial or no-op backfill that did not raise -- e.g. a JSON1
+    build present but behaving unexpectedly -- not just an exception from the
+    UPDATE itself. This is the check that matters: the UPDATE above can
+    "succeed" (no exception) while still leaving rows unindexed.
+    """
+    try:
+        rows = db.query(
+            f"SELECT COUNT(*) FROM {table} "
+            "WHERE activity_id IS NULL AND raw IS NOT NULL "
+            "AND json_extract(raw, '$.activity_id') IS NOT NULL"
+        )
+        remaining = int(rows[0][0]) if rows else 0
+    except Exception as e:
+        logging.error(
+            "Failed verifying %s.activity_id backfill: %s -- historical jobs "
+            "may remain unindexed; the daily planner cannot detect active "
+            "manufacturing for them",
+            table,
+            str(e),
+        )
+        return
+
+    if remaining:
+        logging.error(
+            "%s.activity_id backfill left %s row(s) unindexed despite a "
+            "matching raw.activity_id -- historical jobs will remain "
+            "unindexed; the daily planner cannot detect active manufacturing "
+            "for them",
+            table,
+            remaining,
+        )
 
 
 def backfill_job_activity_ids(session: Any) -> int:

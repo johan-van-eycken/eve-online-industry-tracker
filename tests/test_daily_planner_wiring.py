@@ -18,6 +18,7 @@ from eve_online_industry_tracker.application.daily_planner.input_row import (
 from eve_online_industry_tracker.application.daily_planner.service import (
     DailyPlannerService,
 )
+from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
 
 GOOD_ROW = {
     "type_id": 12345,
@@ -174,3 +175,29 @@ def test_phase_7_passes_the_resolver(session_provider):
     })
 
     assert captured["meta_resolver"] is svc._meta_resolver
+
+
+def test_get_industry_jobs_excludes_only_terminal_statuses(session_provider):
+    """_get_industry_jobs must run its status filter for real, not just build a
+    query object -- a delivered job wrongly counting as active is what made the
+    pause decision unreachable (finding 2). paused is pinned deliberately: it is
+    the case the deny-list (vs. the producer's active/ready allow-list) exists
+    for -- a paused job still holds a manufacturing slot and must stay active."""
+    session = session_provider.app_session()
+    try:
+        session.add_all([
+            CorporationIndustryJobsModel(corporation_id=1, job_id=101, status="active"),
+            CorporationIndustryJobsModel(corporation_id=1, job_id=102, status="paused"),
+            CorporationIndustryJobsModel(corporation_id=1, job_id=103, status="delivered"),
+            CorporationIndustryJobsModel(corporation_id=1, job_id=104, status="cancelled"),
+            CorporationIndustryJobsModel(corporation_id=1, job_id=105, status="reverted"),
+        ])
+        session.commit()
+    finally:
+        session.close()
+
+    svc = _service(session_provider, [])
+    jobs = svc._get_industry_jobs()
+
+    job_ids = {job.job_id for job in jobs}
+    assert job_ids == {101, 102}
