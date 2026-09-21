@@ -20,6 +20,7 @@ from eve_online_industry_tracker.application.daily_planner.item_decision_engine 
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
 from eve_online_industry_tracker.application.daily_planner.profitability_scorer import ProfitabilityScorer
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
 from eve_online_industry_tracker.infrastructure.models import (
     BuildPlanItemModel,
     BuildPlanModel,
@@ -37,6 +38,17 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
         return admin_settings.get("daily_planner", key)
     except Exception:
         return fallback
+
+
+def _no_sde_session() -> None:
+    """Fallback sde_session provider for a session_provider that has no sde_session().
+
+    Used only so DailyPlannerService.__init__ never raises AttributeError while
+    building its TypeMetadataResolver — stub collaborators in tests may not
+    implement sde_session(). It intentionally returns None rather than a lambda,
+    matching TypeMetadataResolver's own SessionProvider protocol.
+    """
+    return None
 
 
 class DailyPlannerService:
@@ -89,6 +101,19 @@ class DailyPlannerService:
         self._character_assigner = CharacterAssigner()
         self._shopping_list_builder = ShoppingListBuilder()
         self._action_plan_builder = ActionPlanBuilder()
+
+        # Blueprint-ness comes from the SDE category (see type_metadata.py), so
+        # indexing corp assets into BPOs/BPCs needs an SDE-backed resolver. Some
+        # tests construct this service with stub collaborators whose session
+        # providers don't implement sde_session() — guard against that so
+        # construction never raises; a missing sde_session() just means the
+        # resolver has no SDE data to look up.
+        sde_session_provider = getattr(session_provider, "sde_session", None)
+        if not callable(sde_session_provider):
+            sde_session_provider = _no_sde_session
+        self._meta_resolver = TypeMetadataResolver(
+            sde_session_provider=sde_session_provider,
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -575,32 +600,18 @@ class DailyPlannerService:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _get_corp_wallet(self) -> float:
-        """Read corp master wallet balance (Division 1)."""
+        """Master wallet (division 1) balance, or 0.0 when unavailable."""
         try:
             corps = self._corporations.list_corporations()
-            if not corps:
-                return 0.0
-            corp = corps[0] if isinstance(corps, list) else corps
-            wallets_raw = getattr(corp, "wallets", None) or {}
-            if isinstance(wallets_raw, str):
-                import json as _json
-                wallets = _json.loads(wallets_raw)
-            else:
-                wallets = wallets_raw
+        except (KeyError, TypeError, ValueError):
+            logger.exception("DailyPlannerService: failed to list corporations")
+            return 0.0
 
-            if isinstance(wallets, list):
-                # List of wallet entries — find division 1
-                for w in wallets:
-                    if isinstance(w, dict) and int(w.get("division", 0)) == 1:
-                        return float(str(w.get("balance", "0")).replace(",", ""))
-            elif isinstance(wallets, dict):
-                balance = wallets.get("1") or wallets.get(1)
-                if balance is not None:
-                    return float(str(balance).replace(",", ""))
+        if not corps:
             return 0.0
-        except Exception:
-            logger.exception("DailyPlannerService: failed to read corp wallet")
-            return 0.0
+        corp = corps[0] if isinstance(corps, list) else corps
+        wallets = corp.get("wallets") if isinstance(corp, dict) else getattr(corp, "wallets", None)
+        return _select_division_one_balance(wallets)
 
     def _get_overview_rows(self) -> list[dict[str, Any]]:
         """Get IndustryService overview rows from cache.
@@ -768,30 +779,9 @@ class DailyPlannerService:
 
     def _index_blueprint_assets(
         self, corp_assets: list[Any]
-    ) -> tuple[dict[int, list], dict[int, list]]:
+    ) -> tuple[dict[int, list[Any]], dict[int, list[Any]]]:
         """Separate corp assets into BPO and BPC indexes."""
-        bpo_by_type: dict[int, list] = {}
-        bpc_by_type: dict[int, list] = {}
-
-        for asset in corp_assets:
-            if not _asset_attr_bool(asset, "is_blueprint"):
-                continue
-            type_id = int(_asset_attr(asset, "type_id") or 0)
-            if type_id <= 0:
-                continue
-            runs = _asset_attr(asset, "runs")
-            try:
-                runs_int = int(runs or 0)
-            except (TypeError, ValueError):
-                runs_int = 0
-
-            if runs_int < 0 or runs_int == 0:
-                # BPO: runs = -1 (unlimited) or 0 in some representations
-                bpo_by_type.setdefault(type_id, []).append(asset)
-            else:
-                bpc_by_type.setdefault(type_id, []).append(asset)
-
-        return bpo_by_type, bpc_by_type
+        return index_blueprint_assets(corp_assets, self._meta_resolver)
 
     def _build_plan_items(
         self, plan_id: int, decisions: list[Any]
@@ -912,3 +902,51 @@ def _get_attr(obj: Any, attr: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(attr)
     return getattr(obj, attr, None)
+
+
+def index_blueprint_assets(
+    corp_assets: list[Any], meta_resolver: Any
+) -> tuple[dict[int, list[Any]], dict[int, list[Any]]]:
+    """Split blueprint assets into (BPOs, BPCs), both keyed by blueprint type_id.
+
+    Blueprint-ness comes from the SDE category — no asset column says it. A BPC
+    is a blueprint with is_blueprint_copy=True; anything else blueprint-shaped is
+    a BPO.
+    """
+    bpos: dict[int, list[Any]] = {}
+    bpcs: dict[int, list[Any]] = {}
+    for asset in corp_assets:
+        type_id = int(_asset_attr(asset, "type_id") or 0)
+        if type_id <= 0 or not meta_resolver.is_blueprint(type_id):
+            continue
+        target = bpcs if _asset_attr_bool(asset, "is_blueprint_copy") else bpos
+        target.setdefault(type_id, []).append(asset)
+    return bpos, bpcs
+
+
+def _select_division_one_balance(wallets: Any) -> float:
+    """Master wallet (division 1) balance from either ESI shape."""
+    if isinstance(wallets, str):
+        import json as _json
+
+        try:
+            wallets = _json.loads(wallets)
+        except ValueError:
+            return 0.0
+
+    if isinstance(wallets, list):
+        for entry in wallets:
+            if isinstance(entry, dict) and int(entry.get("division") or 0) == 1:
+                return _parse_isk(entry.get("balance"))
+    elif isinstance(wallets, dict):
+        raw = wallets.get("1", wallets.get(1))
+        if raw is not None:
+            return _parse_isk(raw)
+    return 0.0
+
+
+def _parse_isk(raw: Any) -> float:
+    try:
+        return float(str(raw).replace(",", ""))
+    except (TypeError, ValueError):
+        return 0.0
