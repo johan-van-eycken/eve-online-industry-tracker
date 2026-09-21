@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
+from eve_online_industry_tracker.application.industry import overview_row as orow
 
 logger = logging.getLogger(__name__)
 
@@ -25,19 +26,20 @@ class ShoppingListBuilder:
         market_depth_cache: dict[int, Any],
         admin_settings: Any,
         blueprint_data: dict[int, dict[str, Any]],
+        meta_resolver: Any,
     ) -> list[ShoppingItem]:
         """Return shopping list of net required materials.
 
         assigned_actions: from Phase 6 (includes manufacture, sub_manufacture, invent, copy, me_research, te_research)
         corp_assets: all corp asset objects
         market_depth_cache: keyed by type_id → MarketDepthCacheModel or dict
-        admin_settings: for future_stock_days and other config
+        admin_settings: for future config (currently unused)
         blueprint_data: type_id → blueprint manufacturing data (for material lookups)
+        meta_resolver: TypeMetadataResolver, used to tell blueprints apart from
+            material stock in corp_assets
         """
-        future_stock_days = float(_adm(admin_settings, "planner_shopping_future_stock_days", 7))
-
         # Build corp stock map: type_id → available quantity
-        corp_stock: dict[int, int] = self._build_corp_stock_map(corp_assets)
+        corp_stock: dict[int, int] = self._build_corp_stock_map(corp_assets, meta_resolver)
 
         # Track allocated quantities to prevent double-buying
         already_allocated: dict[int, int] = {}
@@ -54,13 +56,17 @@ class ShoppingListBuilder:
             bp_type_id = action.type_id  # for mfg/sub_mfg, type_id is the product type_id
             # Look up materials from blueprint_data by matching product type_id → blueprint type_id
             mats = self._get_materials_for_action(action, blueprint_data)
+            runs = max(1, int(action.runs or 1))
             for mat in mats:
                 mat_type_id = int(mat.get("type_id") or 0)
                 if mat_type_id <= 0:
                     continue
-                qty_needed = int(mat.get("quantity") or 0)
-                if qty_needed <= 0:
+                per_run_qty = int(mat.get("quantity") or 0)
+                if per_run_qty <= 0:
                     continue
+
+                # Blueprint material quantities are per run.
+                qty_needed = per_run_qty * runs
 
                 mat_name = str(mat.get("type_name") or f"type_{mat_type_id}")
                 net_required = self._compute_net_required(
@@ -69,11 +75,15 @@ class ShoppingListBuilder:
                     corp_stock=corp_stock,
                     already_allocated=already_allocated,
                 )
+
+                # Claim the stock this job consumes before any early exit, or the
+                # next job is told the same units are still free.
+                already_allocated[mat_type_id] = (
+                    already_allocated.get(mat_type_id, 0) + qty_needed
+                )
+
                 if net_required <= 0:
                     continue
-
-                # Mark as allocated
-                already_allocated[mat_type_id] = already_allocated.get(mat_type_id, 0) + qty_needed
 
                 estimated_unit_price, is_vwap = self._get_price(mat_type_id, market_depth_cache)
                 if estimated_unit_price is None or estimated_unit_price <= 0:
@@ -108,10 +118,12 @@ class ShoppingListBuilder:
 
         Looks up blueprint_data by the action's type_id (product type_id).
         """
-        # blueprint_data is keyed by blueprint_type_id; we need product_type_id → blueprint_type_id mapping
-        # Check if the overview_row on the action has blueprint_type_id
+        # blueprint_data is keyed by blueprint_type_id; we need product_type_id → blueprint_type_id mapping.
+        # Read the nested overview-row path (with top-level fallback) through the
+        # shared accessor, since no producer writes blueprint_type_id at the row's
+        # top level.
         overview = getattr(action, "overview_row", {}) or {}
-        bp_type_id = int(overview.get("blueprint_type_id") or 0)
+        bp_type_id = orow.get_blueprint_type_id(overview) or 0
 
         if bp_type_id and bp_type_id in blueprint_data:
             mfg = blueprint_data[bp_type_id].get("manufacturing", {})
@@ -157,28 +169,35 @@ class ShoppingListBuilder:
 
         return None, False
 
-    def _build_corp_stock_map(self, corp_assets: list[Any]) -> dict[int, int]:
-        """Build {type_id: quantity} map from corp assets."""
+    def _build_corp_stock_map(
+        self, corp_assets: list[Any], meta_resolver: Any
+    ) -> dict[int, int]:
+        """{type_id: quantity} of material stock, excluding blueprints.
+
+        Pre-warms meta_resolver's cache with every distinct asset type_id in one
+        batched SDE query. Without this, TypeMetadataResolver._entry() self-heals
+        a cache miss by calling prefetch() for a single id, so is_blueprint()
+        inside the per-asset loop below would otherwise open one SDE session
+        (with its metaGroups table reflection) per distinct type_id. prefetch()
+        is idempotent (skips ids already cached or already marked missing), so
+        this is safe even if a caller already warmed it. Same shape as
+        index_blueprint_assets in daily_planner/service.py.
+        """
+        type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
+        meta_resolver.prefetch({t for t in type_ids if t > 0})
+
         stock: dict[int, int] = {}
         for asset in corp_assets:
-            # Skip blueprints — they're not material stock
-            if _asset_attr_bool(asset, "is_blueprint"):
-                continue
             type_id = int(_asset_attr(asset, "type_id") or 0)
             if type_id <= 0:
                 continue
+            if meta_resolver.is_blueprint(type_id):
+                continue  # blueprints are not material stock
             qty = int(_asset_attr(asset, "quantity") or 0)
             if qty <= 0:
                 continue
             stock[type_id] = stock.get(type_id, 0) + qty
         return stock
-
-
-def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
-    try:
-        return admin_settings.get("daily_planner", key)
-    except Exception:
-        return fallback
 
 
 def _get_attr(obj: Any, attr: str) -> Any:
@@ -191,8 +210,3 @@ def _asset_attr(asset: Any, attr: str) -> Any:
     if isinstance(asset, dict):
         return asset.get(attr)
     return getattr(asset, attr, None)
-
-
-def _asset_attr_bool(asset: Any, attr: str) -> bool:
-    v = _asset_attr(asset, attr)
-    return bool(v) if v is not None else False

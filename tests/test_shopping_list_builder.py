@@ -1,0 +1,122 @@
+# tests/test_shopping_list_builder.py
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
+    ShoppingListBuilder,
+)
+
+
+class _NoBlueprints:
+    def is_blueprint(self, type_id):
+        return False
+
+    def prefetch(self, type_ids):
+        return None
+
+
+class _BlueprintsAre:
+    def __init__(self, *ids):
+        self._ids = set(ids)
+
+    def is_blueprint(self, type_id):
+        return int(type_id) in self._ids
+
+    def prefetch(self, type_ids):
+        return None
+
+
+class _Admin:
+    def get(self, section, key, default=None):
+        return default
+
+
+def _action(runs, type_id=12345, blueprint_type_id=999):
+    return AssignedAction(
+        type_id=type_id, type_name="Widget", action_type="manufacture",
+        character_id=1, character_name="Pilot", quantity=None, runs=runs,
+        estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None,
+    )
+
+
+# Two distinct products (12345, 22222), both built from the same blueprint and
+# sharing material 34 -- needed so the two-job ordering tests below actually
+# exercise a shared material rather than silently resolving no materials for
+# the second job.
+BLUEPRINTS = {
+    999: {"manufacturing": {
+        "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 100}],
+        "products": [{"type_id": 12345, "quantity": 1}, {"type_id": 22222, "quantity": 1}],
+    }}
+}
+DEPTH = {34: {"vwap_5d": 5.0}}
+
+
+def _build(actions, assets, blueprints=BLUEPRINTS, resolver=None):
+    return ShoppingListBuilder().build(
+        assigned_actions=actions, corp_assets=assets, market_depth_cache=DEPTH,
+        admin_settings=_Admin(), blueprint_data=blueprints,
+        meta_resolver=resolver or _NoBlueprints(),
+    )
+
+
+def test_material_quantity_scales_with_runs():
+    items = _build([_action(runs=20)], [])
+    assert len(items) == 1
+    assert items[0].quantity == 2000  # 100 per run x 20 runs
+
+
+def test_runs_of_none_is_treated_as_one_run():
+    items = _build([_action(runs=None)], [])
+    assert items[0].quantity == 100
+
+
+def test_corp_stock_reduces_the_purchase():
+    stock = SimpleNamespace(type_id=34, quantity=500, is_blueprint_copy=False)
+    items = _build([_action(runs=20)], [stock])
+    assert items[0].quantity == 1500
+
+
+def test_stock_consumed_by_the_first_job_is_not_offered_to_the_second():
+    # 1000 in stock; two jobs each needing 1000 => buy 0 then 1000.
+    stock = SimpleNamespace(type_id=34, quantity=1000, is_blueprint_copy=False)
+    items = _build([_action(runs=10), _action(runs=10, type_id=22222)], [stock])
+    assert sum(i.quantity for i in items) == 1000
+
+
+def test_stock_partially_covering_first_job_is_not_reoffered_to_second():
+    # 600 in stock; two jobs each need 1000 (100/run x 10 runs). A correct
+    # implementation allocates 600 to job 1 (net 400) and 0 to job 2 (net
+    # 1000), for a total of 1400. An implementation that updates
+    # already_allocated AFTER the stock-covered continue -- or that never
+    # hits an early continue at all here since neither job is fully covered
+    # -- would still update already_allocated using the full qty_needed, but
+    # the bug in Finding 8 specifically re-offers stock consumed by job 1 to
+    # job 2 by allocating in the wrong order/place. To make a wrong ordering
+    # visibly wrong (not coincidentally right), use two jobs sharing one
+    # material where stock partially covers only the first: if the second
+    # job's net_required is computed before the first job's consumption is
+    # recorded, both jobs would see the full 600 available and the total
+    # would be too low (2000 - 600 - 600 = 800 instead of the correct 1400).
+    stock = SimpleNamespace(type_id=34, quantity=600, is_blueprint_copy=False)
+    items = _build([_action(runs=10), _action(runs=10, type_id=22222)], [stock])
+    assert sum(i.quantity for i in items) == 1400
+
+
+def test_fully_stocked_material_is_not_listed_at_all():
+    stock = SimpleNamespace(type_id=34, quantity=10_000, is_blueprint_copy=False)
+    assert _build([_action(runs=20)], [stock]) == []
+
+
+def test_blueprints_do_not_count_as_material_stock():
+    blueprint = SimpleNamespace(type_id=34, quantity=10_000, is_blueprint_copy=False)
+    items = _build([_action(runs=20)], [blueprint], resolver=_BlueprintsAre(34))
+    assert items[0].quantity == 2000
+
+
+def test_estimated_total_matches_quantity_times_unit_price():
+    items = _build([_action(runs=20)], [])
+    assert items[0].estimated_total == items[0].quantity * items[0].estimated_unit_price
