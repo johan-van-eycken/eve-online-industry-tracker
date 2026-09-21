@@ -8,6 +8,7 @@ already_allocated tracking prevents double-buying when two jobs share a material
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
@@ -53,10 +54,9 @@ class ShoppingListBuilder:
         # buy_materials and buy_bpo are generated here, not from Phase 6
 
         for action in current_job_actions:
-            bp_type_id = action.type_id  # for mfg/sub_mfg, type_id is the product type_id
             # Look up materials from blueprint_data by matching product type_id → blueprint type_id
-            mats = self._get_materials_for_action(action, blueprint_data)
-            runs = max(1, int(action.runs or 1))
+            mats, per_run_output = self._get_materials_and_output_for_action(action, blueprint_data)
+            runs = self._effective_runs(action, per_run_output)
             for mat in mats:
                 mat_type_id = int(mat.get("type_id") or 0)
                 if mat_type_id <= 0:
@@ -109,14 +109,21 @@ class ShoppingListBuilder:
 
         return shopping
 
-    def _get_materials_for_action(
+    def _get_materials_and_output_for_action(
         self,
         action: AssignedAction,
         blueprint_data: dict[int, dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Get required materials for a manufacture/sub_manufacture action.
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Materials and per-run product output for a manufacture/sub_manufacture action.
 
-        Looks up blueprint_data by the action's type_id (product type_id).
+        Looks up blueprint_data by the action's type_id (product type_id) and
+        returns (materials, per_run_output) from the same matched blueprint, so
+        callers needing both (e.g. to convert a target quantity into a run
+        count) do not look the blueprint up twice.
+
+        per_run_output is the quantity of action.type_id produced by one run of
+        the matched blueprint, or 0 when no matching product entry is found
+        (materials may still be non-empty via the bp_type_id path even then).
         """
         # blueprint_data is keyed by blueprint_type_id; we need product_type_id → blueprint_type_id mapping.
         # Read the nested overview-row path (with top-level fallback) through the
@@ -125,18 +132,57 @@ class ShoppingListBuilder:
         overview = getattr(action, "overview_row", {}) or {}
         bp_type_id = orow.get_blueprint_type_id(overview) or 0
 
+        mfg: dict[str, Any] | None = None
         if bp_type_id and bp_type_id in blueprint_data:
             mfg = blueprint_data[bp_type_id].get("manufacturing", {})
-            return mfg.get("materials", []) or []
+        else:
+            # Fallback: search blueprint_data for a blueprint whose product matches action.type_id
+            for bpd in blueprint_data.values():
+                products = bpd.get("manufacturing", {}).get("products", []) or []
+                if any(int(p.get("type_id") or 0) == action.type_id for p in products):
+                    mfg = bpd.get("manufacturing", {})
+                    break
 
-        # Fallback: search blueprint_data for a blueprint whose product matches action.type_id
-        for bpd in blueprint_data.values():
-            products = bpd.get("manufacturing", {}).get("products", []) or []
-            for prod in products:
-                if int(prod.get("type_id") or 0) == action.type_id:
-                    return bpd.get("manufacturing", {}).get("materials", []) or []
+        if mfg is None:
+            return [], 0
 
-        return []
+        materials = mfg.get("materials", []) or []
+        per_run_output = 0
+        for prod in mfg.get("products", []) or []:
+            if int(prod.get("type_id") or 0) == action.type_id:
+                per_run_output = int(prod.get("quantity") or 0)
+                break
+
+        return materials, per_run_output
+
+    def _effective_runs(self, action: AssignedAction, per_run_output: int) -> int:
+        """Runs to buy materials for.
+
+        `manufacture` actions carry a real run count in `action.runs`; use it
+        directly when positive. `sub_manufacture` actions instead carry the
+        target component quantity in `action.quantity` with `action.runs` left
+        None (character_assigner.py), so derive runs as
+        ceil(quantity / per_run_output). Guards the division: a missing, zero,
+        or non-numeric per_run_output falls back to 1 run (never divides by
+        zero), logged at debug since it means the blueprint data is
+        incomplete rather than that only 1 unit was actually needed.
+        """
+        runs = _positive_int(action.runs)
+        if runs is not None:
+            return runs
+
+        quantity = _positive_int(action.quantity)
+        if quantity is not None:
+            if per_run_output > 0:
+                return math.ceil(quantity / per_run_output)
+            logger.debug(
+                "ShoppingListBuilder: type_id=%s has quantity=%s but no usable "
+                "per-run output (blueprint data incomplete) — falling back to 1 run",
+                action.type_id, quantity,
+            )
+            return 1
+
+        return 1
 
     def _compute_net_required(
         self,
@@ -198,6 +244,17 @@ class ShoppingListBuilder:
                 continue
             stock[type_id] = stock.get(type_id, 0) + qty
         return stock
+
+
+def _positive_int(value: Any) -> int | None:
+    """int(value) if it converts to a positive integer, else None."""
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
 
 
 def _get_attr(obj: Any, attr: str) -> Any:

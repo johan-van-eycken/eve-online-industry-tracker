@@ -42,6 +42,19 @@ def _action(runs, type_id=12345, blueprint_type_id=999):
     )
 
 
+def _sub_manufacture_action(quantity, type_id=12345):
+    # character_assigner.py:229-237 builds sub_manufacture actions with the
+    # target component count in `quantity` and `runs` left None -- the
+    # builder must derive an effective run count from `quantity`, not read
+    # `action.runs` directly.
+    return AssignedAction(
+        type_id=type_id, type_name="Widget", action_type="sub_manufacture",
+        character_id=1, character_name="Pilot", quantity=quantity, runs=None,
+        estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None,
+    )
+
+
 # Two distinct products (12345, 22222), both built from the same blueprint and
 # sharing material 34 -- needed so the two-job ordering tests below actually
 # exercise a shared material rather than silently resolving no materials for
@@ -120,3 +133,58 @@ def test_blueprints_do_not_count_as_material_stock():
 def test_estimated_total_matches_quantity_times_unit_price():
     items = _build([_action(runs=20)], [])
     assert items[0].estimated_total == items[0].quantity * items[0].estimated_unit_price
+
+
+# --- sub_manufacture: runs=None, quantity carries the target component count.
+# character_assigner.py:229-237 never sets `runs` for these -- a builder that
+# reads action.runs directly (the pre-fix behaviour) sees `None`, floors it to
+# 1, and buys materials for a single run no matter how many units are needed.
+
+
+def test_sub_manufacture_buys_materials_for_computed_runs_one_unit_per_run():
+    # Blueprint produces 1 unit/run (BLUEPRINTS' default), needs 100 material/run.
+    # quantity=50 => 50 runs needed => 5000 material.
+    # A wrong implementation that reads action.runs (None) directly floors to
+    # 1 run and would buy only 100 -- visibly different from 5000.
+    items = _build([_sub_manufacture_action(quantity=50)], [])
+    assert len(items) == 1
+    assert items[0].quantity == 5000
+
+
+SUB_MFG_BLUEPRINTS_10_PER_RUN = {
+    999: {"manufacturing": {
+        "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 100}],
+        "products": [{"type_id": 12345, "quantity": 10}],
+    }}
+}
+
+
+def test_sub_manufacture_buys_materials_for_computed_runs_ten_units_per_run():
+    # Blueprint produces 10 units/run, needs 100 material/run.
+    # quantity=50 => ceil(50/10) = 5 runs => 500 material, not 50 (runs=1) and
+    # not 5000 (mistaking quantity itself for run count).
+    items = _build(
+        [_sub_manufacture_action(quantity=50)], [],
+        blueprints=SUB_MFG_BLUEPRINTS_10_PER_RUN,
+    )
+    assert len(items) == 1
+    assert items[0].quantity == 500
+
+
+SUB_MFG_BLUEPRINTS_ZERO_OUTPUT = {
+    999: {"manufacturing": {
+        "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 100}],
+        "products": [{"type_id": 12345, "quantity": 0}],
+    }}
+}
+
+
+def test_sub_manufacture_with_no_usable_per_run_output_falls_back_to_one_run():
+    # per_run_output is 0 (incomplete blueprint data) -- must not divide by
+    # zero or raise, and must fall back to 1 run (100 material), not crash.
+    items = _build(
+        [_sub_manufacture_action(quantity=50)], [],
+        blueprints=SUB_MFG_BLUEPRINTS_ZERO_OUTPUT,
+    )
+    assert len(items) == 1
+    assert items[0].quantity == 100
