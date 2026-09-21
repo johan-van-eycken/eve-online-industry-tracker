@@ -23,13 +23,55 @@ ACTIVITY_RESEARCHING_ME = 4
 ACTIVITY_COPYING = 5
 ACTIVITY_INVENTION = 8
 
+# Slot capacity skills. Base one slot, plus one per level of each.
+MFG_SLOT_SKILLS = ("Mass Production", "Advanced Mass Production")
+RESEARCH_SLOT_SKILLS = ("Laboratory Operation", "Advanced Laboratory Operation")
+# Skills that make a pilot a better inventor, used only to rank candidates.
+SCIENCE_SKILLS = ("Science", "Advanced Industry", "Metallurgy", "Research")
+
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
+def skill_levels_by_name(char: dict[str, Any]) -> dict[str, int]:
+    """{skill_name: trained_skill_level} for one character.
+
+    Reads the enriched skill list built in characters/character.py, which joins
+    ESI's skill list against every published SDE skill and carries skill_name
+    alongside trained_skill_level. Note the stored payload has no
+    `active_skill_level` key at all — reading one yields 0 for every skill.
+    """
+    raw = char.get("skills") or {}
+    entries = raw.get("skills") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        return {}
+
+    levels: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("skill_name") or "").strip()
+        if not name:
+            continue
+        try:
+            level = int(entry.get("trained_skill_level") or 0)
+        except (TypeError, ValueError):
+            continue
+        levels[name] = max(level, levels.get(name, 0))
+    return levels
+
+
+def _slot_capacity(levels: dict[str, int], skill_names: tuple[str, ...]) -> int:
+    """One base slot plus one per trained level of each contributing skill."""
+    return 1 + sum(int(levels.get(name, 0)) for name in skill_names)
+
+
 class CharacterAssigner:
     """Phase 6: skill-aware job-to-character assignment."""
+
+    _MFG_ACTIONS = ("manufacture", "sub_manufacture")
+    _RESEARCH_ACTIONS = ("invent", "copy", "me_research", "te_research")
 
     def assign(
         self,
@@ -63,17 +105,21 @@ class CharacterAssigner:
                 characters=characters,
                 now=now,
             )
-            for action in actions:
-                if action.character_id is not None:
-                    # Mark the slot as used
-                    char_id = action.character_id
-                    if action.action_type in ("manufacture", "sub_manufacture"):
-                        char_slots[char_id]["free_mfg"] = max(0, char_slots[char_id].get("free_mfg", 0) - 1)
-                    elif action.action_type in ("invent", "copy", "me_research", "te_research"):
-                        char_slots[char_id]["free_research"] = max(0, char_slots[char_id].get("free_research", 0) - 1)
+            # Slots are consumed inside _assign_decision, as each action is
+            # created — two research actions on one item must not share a slot.
             assigned_actions.extend(actions)
 
         return assigned_actions
+
+    def _take_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
+        """Consume one slot immediately, so sibling actions cannot reuse it."""
+        slot = char_slots.get(char_id)
+        if slot is None:
+            return
+        if action_type in self._MFG_ACTIONS:
+            slot["free_mfg"] = max(0, slot.get("free_mfg", 0) - 1)
+        elif action_type in self._RESEARCH_ACTIONS:
+            slot["free_research"] = max(0, slot.get("free_research", 0) - 1)
 
     def _assign_decision(
         self,
@@ -116,6 +162,7 @@ class CharacterAssigner:
                     estimated_completion=None,
                     notes=f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
                 ))
+                self._take_slot(char_slots, char_id, "me_research")
             else:
                 logger.debug("CharacterAssigner: no free research slot for ME research on type_id=%s", type_id)
 
@@ -135,6 +182,7 @@ class CharacterAssigner:
                     estimated_completion=None,
                     notes=f"TE research: {row.get('te_current', '?')} → {row.get('te_research_target', '?')}",
                 ))
+                self._take_slot(char_slots, char_id, "te_research")
 
         # Invention
         if row.get("needs_invention"):
@@ -153,6 +201,7 @@ class CharacterAssigner:
                     estimated_completion=None,
                     notes="Invention: BPC stock below pipeline threshold",
                 ))
+                self._take_slot(char_slots, char_id, "invent")
 
         # Copy (T1 BPO copy for invention feed)
         if row.get("needs_invention") and row.get("has_t1_bpo"):
@@ -171,6 +220,7 @@ class CharacterAssigner:
                     estimated_completion=None,
                     notes="Copy T1 BPO to feed invention pipeline",
                 ))
+                self._take_slot(char_slots, char_id, "copy")
 
         # Sub-manufacture
         if decision.is_sub_component:
@@ -193,6 +243,7 @@ class CharacterAssigner:
                         f"(market: {(row.get('market_buy_cost') or 0)/1e6:.1f}M ISK)"
                     ),
                 ))
+                self._take_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action
 
         # Manufacturing
@@ -214,21 +265,29 @@ class CharacterAssigner:
                 estimated_completion=None,
                 notes=f"Build: {decision.decision_reason}",
             ))
+            self._take_slot(char_slots, char_id, "manufacture")
         else:
             logger.debug("CharacterAssigner: no free mfg slot for type_id=%s", type_id)
 
         return actions
 
     def _get_characters(self, characters_service: Any) -> list[dict[str, Any]]:
-        """Fetch characters list from service."""
+        """Fetch characters list from service.
+
+        CharacterManager.get_characters() raises ValueError when it has no
+        cached characters yet — that is the only condition meaning "no
+        characters to assign". Any other exception is a real failure deeper
+        in the stack and must propagate, not be logged away as an empty
+        roster (that used to hide genuine bugs behind a "no characters"
+        warning).
+        """
         try:
             chars = characters_service.list_characters()
-            if isinstance(chars, list):
-                return [c if isinstance(c, dict) else c.__dict__ for c in chars]
+        except ValueError:
             return []
-        except Exception:
-            logger.exception("CharacterAssigner: failed to get characters")
-            return []
+        if isinstance(chars, list):
+            return [c if isinstance(c, dict) else c.__dict__ for c in chars]
+        return []
 
     def _compute_available_slots(
         self,
@@ -237,41 +296,22 @@ class CharacterAssigner:
         now: datetime,
     ) -> dict[int, dict[str, Any]]:
         """Compute free slot counts per character, treating end_date < now as already delivered."""
-        # ESI skill IDs → flat skill name used by slot math below
-        _SKILL_ID_MAP: dict[int, str] = {
-            3387: "mass_production",
-            24625: "advanced_mass_production",
-            3406: "laboratory_operation",
-            24624: "advanced_laboratory_operation",
-        }
-
         slot_map: dict[int, dict[str, Any]] = {}
         for char in characters:
             char_id = int(char.get("character_id") or char.get("id") or 0)
             if char_id <= 0:
                 continue
 
-            # ESI returns skills as {"skills": [{skill_id, active_skill_level, ...}], "total_sp": ...}
-            # Flatten to {skill_name: level} for the relevant industry skills only.
-            skills_raw = char.get("skills") or {}
-            if isinstance(skills_raw, dict) and "skills" in skills_raw:
-                skills: dict[str, int] = {}
-                for entry in (skills_raw.get("skills") or []):
-                    sid = int(entry.get("skill_id") or 0)
-                    if sid in _SKILL_ID_MAP:
-                        skills[_SKILL_ID_MAP[sid]] = int(entry.get("active_skill_level") or 0)
-            else:
-                skills = {k: int(v) for k, v in skills_raw.items()} if isinstance(skills_raw, dict) else {}
-
-            max_mfg = 1 + int(skills.get("mass_production", 0)) + int(skills.get("advanced_mass_production", 0))
-            max_research = 1 + int(skills.get("laboratory_operation", 0)) + int(skills.get("advanced_laboratory_operation", 0))
+            levels = skill_levels_by_name(char)
+            max_mfg = _slot_capacity(levels, MFG_SLOT_SKILLS)
+            max_research = _slot_capacity(levels, RESEARCH_SLOT_SKILLS)
             slot_map[char_id] = {
                 "character_id": char_id,
                 "character_name": str(char.get("character_name") or char.get("name") or ""),
                 "free_mfg": max_mfg,
                 "free_research": max_research,
                 "total_active_jobs": 0,
-                "skills": skills,
+                "skills": levels,
             }
 
         # Deduct active jobs (treat end_date < now as already delivered — slots free)
@@ -346,20 +386,24 @@ class CharacterAssigner:
     def _best_invention_char(
         self, char_slots: dict[int, dict], characters: list[dict]
     ) -> tuple[int | None, str | None]:
-        """Character with highest science skill sum + free research slot."""
-        best_score = -1
-        best_id: int | None = None
-        best_name: str | None = None
+        """Highest science skill sum among characters with a free research slot.
+
+        Ties break toward the character with the fewest active jobs.
+        """
+        candidates = []
         for slot in char_slots.values():
-            if slot["free_research"] <= 0:
+            if slot.get("free_research", 0) <= 0:
                 continue
-            skills = slot.get("skills") or {}
-            science_sum = sum(int(v) for k, v in skills.items() if "science" in k.lower() or "metallurgy" in k.lower())
-            if science_sum > best_score or (science_sum == best_score and slot["total_active_jobs"] < (char_slots.get(best_id or 0, {}).get("total_active_jobs", 999))):
-                best_score = science_sum
-                best_id = slot["character_id"]
-                best_name = slot["character_name"]
-        return best_id, best_name
+            levels = slot.get("skills") or {}
+            science_sum = sum(int(levels.get(name, 0) or 0) for name in SCIENCE_SKILLS)
+            candidates.append(
+                (-science_sum, slot.get("total_active_jobs", 0),
+                 slot["character_id"], slot["character_name"])
+            )
+        if not candidates:
+            return None, None
+        candidates.sort()
+        return candidates[0][2], candidates[0][3]
 
 
 def _job_attr(job: Any, attr: str) -> Any:
