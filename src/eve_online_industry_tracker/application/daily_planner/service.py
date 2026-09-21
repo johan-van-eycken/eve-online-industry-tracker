@@ -16,6 +16,10 @@ from eve_online_industry_tracker.application.daily_planner.action_plan_builder i
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
+from eve_online_industry_tracker.application.daily_planner.input_row import (
+    PlannerInputError,
+    PlannerInputRow,
+)
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
 from eve_online_industry_tracker.application.daily_planner.profitability_scorer import ProfitabilityScorer
@@ -344,6 +348,21 @@ class DailyPlannerService:
                 self._status = "done"
             logger.info("DailyPlannerService: plan computation complete")
 
+        except PlannerInputError as exc:
+            # A contract violation must abort the whole computation, not be
+            # swallowed into a generic failure message: naming the offending
+            # field and type_id here is what lets someone fix the producer
+            # (or the contract) instead of guessing which row broke.
+            logger.exception(
+                "DailyPlannerService: plan computation failed — input contract violation "
+                "(type_id=%s, field=%s)", exc.type_id, exc.field,
+            )
+            with self._lock:
+                self._status = "failed"
+                self._error = (
+                    f"Overview row type_id={exc.type_id} violates the planner input "
+                    f"contract: {exc.field} {exc.detail}."
+                )
         except Exception as exc:
             logger.exception("DailyPlannerService: plan computation failed")
             with self._lock:
@@ -407,6 +426,7 @@ class DailyPlannerService:
         return {
             "corp_wallet": corp_wallet,
             "overview_rows": overview_rows,
+            "input_rows": self._build_input_rows(overview_rows),
             "industry_jobs": industry_jobs,
             "corp_assets": corp_assets,
             "corp_orders": corp_orders,
@@ -423,15 +443,31 @@ class DailyPlannerService:
             "hub": hub,
         }
 
+    def _build_input_rows(self, overview_rows: list[dict[str, Any]]) -> list[PlannerInputRow]:
+        """Validate every overview row against the planner's input contract.
+
+        Prefetches type metadata in one SDE query, then converts. A contract
+        violation propagates: a plan built from the rows that happened to parse
+        would silently omit whatever failed, which is the exact failure mode
+        this contract exists to end.
+        """
+        type_ids = [int(r.get("type_id") or 0) for r in overview_rows if isinstance(r, dict)]
+        self._meta_resolver.prefetch([tid for tid in type_ids if tid > 0])
+        return [
+            PlannerInputRow.from_overview(row, meta_groups=self._meta_resolver)
+            for row in overview_rows
+        ]
+
     def _phase_2_pipeline(self, phase1: dict[str, Any]) -> list[Any]:
         logger.info("DailyPlannerService: Phase 2 — pipeline analysis")
         return self._pipeline_analyzer.analyze(
-            overview_rows=phase1["overview_rows"],
+            input_rows=phase1["input_rows"],
             industry_jobs=phase1["industry_jobs"],
             corp_assets=phase1["corp_assets"],
             market_depth_cache=phase1["market_depth_cache"],
             weights=phase1["weights"],
             sell_velocities=phase1["sell_velocities"],
+            meta_resolver=self._meta_resolver,
         )
 
     def _phase_3_score(
@@ -440,18 +476,20 @@ class DailyPlannerService:
         phase1: dict[str, Any],
     ) -> list[Any]:
         logger.info("DailyPlannerService: Phase 3 — profitability scoring")
-        overview_by_type = {int(r["type_id"]): r for r in phase1["overview_rows"] if r.get("type_id")}
+        input_by_type = {r.type_id: r for r in phase1["input_rows"]}
         trit_trend_7d: float | None = phase1.get("trit_trend_7d")
         scored = []
         for ps in pipeline_states:
-            row = overview_by_type.get(ps.type_id, {})
+            row = input_by_type.get(ps.type_id)
+            if row is None:
+                continue
             weights = phase1["weights"].get(ps.type_id)
             market_depth = phase1["market_depth_cache"].get(ps.type_id)
             margin_corr = phase1["margin_correlations"].get(ps.type_id)
             try:
                 scored_item = self._profitability_scorer.score(
                     pipeline=ps,
-                    overview_row=row,
+                    row=row,
                     weights=weights,
                     market_depth=market_depth,
                     margin_correlation=margin_corr,
@@ -525,6 +563,7 @@ class DailyPlannerService:
             market_depth_cache=phase1["market_depth_cache"],
             admin_settings=self._admin,
             blueprint_data=phase1["blueprint_data"],
+            meta_resolver=self._meta_resolver,
         )
 
     def _phase_8_actions(
