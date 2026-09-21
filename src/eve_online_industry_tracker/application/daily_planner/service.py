@@ -915,6 +915,17 @@ def index_blueprint_assets(
     """
     bpos: dict[int, list[Any]] = {}
     bpcs: dict[int, list[Any]] = {}
+
+    # Pre-warm the resolver's cache with every distinct asset type_id in one batched
+    # SDE query. Without this, TypeMetadataResolver._entry() self-heals a cache miss by
+    # calling prefetch() for a single id, so is_blueprint() inside the per-asset loop
+    # below would otherwise open one SDE session (with its metaGroups table reflection)
+    # per distinct type_id -- 881 sessions for a live corp_assets table of 4263 rows in
+    # this app's own database. prefetch() is idempotent (skips ids already cached or
+    # already marked missing), so this is safe even if a caller already warmed it.
+    type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
+    meta_resolver.prefetch({t for t in type_ids if t > 0})
+
     for asset in corp_assets:
         type_id = int(_asset_attr(asset, "type_id") or 0)
         if type_id <= 0 or not meta_resolver.is_blueprint(type_id):
