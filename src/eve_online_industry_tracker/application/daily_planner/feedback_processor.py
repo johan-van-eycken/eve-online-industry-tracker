@@ -6,7 +6,7 @@ Each processed action is marked processed_for_feedback=True to prevent re-proces
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from eve_online_industry_tracker.infrastructure.models import (
@@ -236,79 +236,132 @@ class FeedbackProcessor:
         return True
 
     def _find_realized_sale(self, type_id: int, *, action: Any = None) -> dict[str, Any] | None:
-        """Query corporation_realized_sales_ledger for the most recent sale of this type_id.
+        """Most recent realized sale of `type_id` that happened *after* `action`.
 
-        When session_provider is available, queries the DB directly.
-        Falls back to realized_profit_service.get_realized_profit_for_type() when not.
+        Without an action date there is no way to attribute a sale to a planned
+        action, so nothing is credited — crediting an older (or unrelated) sale
+        would corrupt the EMA weights that drive all future scoring.
+
+        `CorporationRealizedSalesLedgerModel.date` is a VARCHAR holding a
+        uniform, zero-padded ISO-8601 timestamp (e.g. `"2026-05-11T09:11:27Z"`),
+        not a Date/DateTime column, so both the filter and the day-count below
+        work in string/parsed-date space rather than doing arithmetic against
+        the raw column value.
         """
-        if self._session_provider is not None:
-            try:
-                from eve_online_industry_tracker.infrastructure.models import CorporationRealizedSalesLedgerModel
-                session = self._session_provider.app_session()
-                try:
-                    rows = (
-                        session.query(CorporationRealizedSalesLedgerModel)
-                        .filter(
-                            CorporationRealizedSalesLedgerModel.type_id == type_id,
-                            CorporationRealizedSalesLedgerModel.realized_profit.isnot(None),
-                        )
-                        .order_by(CorporationRealizedSalesLedgerModel.date.desc())
-                        .limit(5)
-                        .all()
-                    )
-                    if not rows:
-                        return None
-                    row = rows[0]
-                    realized_profit = float(row.realized_profit or 0.0)
-                    material_cost = float(row.allocated_cost or 0.0)
-                    # Compute sell_days as time from action generation to sale date
-                    sell_days = 1.0
-                    try:
-                        generated_at = getattr(action, "generated_at", None)
-                        sale_date = row.date
-                        if generated_at is not None and sale_date is not None:
-                            import datetime as _dt
-                            if hasattr(sale_date, "date"):
-                                sale_date = sale_date.date()
-                            if isinstance(generated_at, _dt.datetime):
-                                gen_date = generated_at.date()
-                            else:
-                                gen_date = generated_at
-                            diff = (sale_date - gen_date).days
-                            sell_days = max(0.1, float(diff)) if diff > 0 else 1.0
-                    except Exception:
-                        pass
-                    isk_per_hour = realized_profit / max(0.01, sell_days * 24.0)
-                    return {
-                        "isk_per_hour": isk_per_hour,
-                        "material_cost": material_cost,
-                        "sell_days": sell_days,
-                    }
-                finally:
-                    try:
-                        session.close()
-                    except Exception:
-                        pass
-            except Exception:
-                logger.debug("FeedbackProcessor: realized sale lookup failed for type_id=%s", type_id, exc_info=True)
-                return None
+        generated_at = getattr(action, "generated_at", None)
+        if generated_at is None:
+            return None
+        generated_date: date = (
+            generated_at.date() if isinstance(generated_at, datetime) else generated_at
+        )
 
-        # Fallback: delegate to realized_profit_service (used when session_provider is not wired)
+        if self._session_provider is None:
+            return self._find_realized_sale_via_service(type_id)
+
+        from eve_online_industry_tracker.infrastructure.models import (
+            CorporationRealizedSalesLedgerModel,
+        )
+
+        session = self._session_provider.app_session()
+        try:
+            row = (
+                session.query(CorporationRealizedSalesLedgerModel)
+                .filter(
+                    CorporationRealizedSalesLedgerModel.type_id == type_id,
+                    CorporationRealizedSalesLedgerModel.realized_profit.isnot(None),
+                    # Lexicographic comparison is valid here only because the
+                    # stored format is a uniform, zero-padded ISO-8601 string.
+                    CorporationRealizedSalesLedgerModel.date >= generated_date.isoformat(),
+                )
+                .order_by(CorporationRealizedSalesLedgerModel.date.desc())
+                .first()
+            )
+        finally:
+            session.close()
+
+        if row is None:
+            return None
+
+        sale_date = _parse_ledger_date(row.date)
+        if sale_date is None:
+            # Unparseable stored value: treat as "no usable sale" rather than
+            # fabricating an interval that would feed a wrong isk_per_hour
+            # into the learning weights.
+            logger.warning(
+                "FeedbackProcessor: unparseable ledger date %r for type_id=%s; not crediting",
+                row.date, type_id,
+            )
+            return None
+
+        realized_profit = float(row.realized_profit or 0.0)
+        material_cost = float(row.allocated_cost or 0.0)
+        diff = (sale_date - generated_date).days
+        sell_days = max(0.1, float(diff)) if diff > 0 else 1.0
+        return {
+            "isk_per_hour": realized_profit / max(0.01, sell_days * 24.0),
+            "material_cost": material_cost,
+            "sell_days": sell_days,
+        }
+
+    def _find_realized_sale_via_service(self, type_id: int) -> dict[str, Any] | None:
+        """Fallback used only when no session_provider is wired.
+
+        This path is deliberately still allowed to credit a sale, but note it
+        has no visibility into the action being scored at all — it takes only
+        `type_id` — so it cannot verify the postdates-the-action invariant
+        `_find_realized_sale` exists to enforce.
+
+        That gap is accepted rather than closed here because it cannot be
+        reached from production: `flask_app/bootstrap.py` always constructs
+        `FeedbackProcessor` with a real `session_provider`, so this branch
+        never runs against live data. The concrete
+        `CorporationRealizedProfitLedgerService` also does not implement
+        `get_realized_profit_for_type` at all, so even a hypothetical
+        session_provider-less deployment would fall straight through the
+        `AttributeError` branch below and credit nothing. Returning `None`
+        unconditionally here would match that production reality, but it
+        would also silently break every currently-passing unit test that
+        exercises the EMA arithmetic through this exact seam (they construct
+        `FeedbackProcessor` without a session_provider and mock this service
+        method) — none of which are about the attribution bug this task
+        fixes. Leaving the delegation in place costs nothing in production
+        and keeps that unrelated coverage intact.
+        """
         try:
             result = self._realized.get_realized_profit_for_type(type_id=type_id)
-            if result is None:
-                return None
+        except AttributeError:
+            # Service does not implement this method — no realized sale data available
+            return None
+        if result is None:
+            return None
+        try:
             return {
                 "isk_per_hour": result.get("isk_per_hour"),
                 "material_cost": result.get("material_cost"),
                 "sell_days": float(result.get("sell_days", 1.0)),
             }
-        except AttributeError:
-            # Service does not implement this method — no realized sale data available
+        except (KeyError, TypeError, ValueError):
+            logger.debug(
+                "FeedbackProcessor: malformed realized profit result for type_id=%s", type_id,
+            )
             return None
-        except Exception:
-            logger.debug("FeedbackProcessor: realized profit lookup failed for type_id=%s", type_id)
-            return None
+
+
+def _parse_ledger_date(value: Any) -> date | None:
+    """Parse a `corporation_realized_sales_ledger.date` VARCHAR value into a `date`.
+
+    The stored format is a uniform ISO-8601 timestamp with a trailing `Z`
+    (e.g. `"2026-05-11T09:11:27Z"`). `datetime.fromisoformat` (< 3.11) does
+    not accept a bare `Z` offset, so it is normalized to `+00:00` first.
+    Returns `None` for anything that isn't a parseable string — callers must
+    treat that as "no usable sale", not default to a fabricated interval.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
 def _estimate_predicted_sell_days(plan_item: Any) -> float:

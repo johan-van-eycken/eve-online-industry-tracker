@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -13,6 +14,41 @@ from eve_online_industry_tracker.infrastructure.models import (
     PlanLearningWeightsModel,
     PlanItemOutcomeModel,
 )
+
+
+class _StaticSessionProvider:
+    """Session provider that always hands back one already-open session.
+
+    conftest.py only defines `_EngineSessionProvider`, which wraps an engine
+    -- not an existing `Session` -- so it can't be handed the `app_session`
+    fixture directly. This wraps that fixture's session as-is: data seeded
+    on it before construction is visible to the query `_find_realized_sale`
+    runs through this provider, on the same connection/transaction.
+    """
+
+    def __init__(self, session) -> None:
+        self._session = session
+
+    def app_session(self):
+        return self._session
+
+
+def _processor(session, repo) -> FeedbackProcessor:
+    """Build a FeedbackProcessor wired to `session` for direct-DB lookups.
+
+    `realized_profit_service` is an unused MagicMock here: these tests only
+    exercise `_find_realized_sale`'s direct-session-provider path, which
+    never calls it. `repo` is the real `planner_repo` fixture (per
+    conftest.py's caution: it was previously constructed but never
+    exercised) even though `_find_realized_sale` does not call into it
+    either -- it matches FeedbackProcessor's real production wiring shape.
+    """
+    return FeedbackProcessor(
+        realized_profit_service=MagicMock(),
+        repo=repo,
+        admin_settings=_make_admin(),
+        session_provider=_StaticSessionProvider(session),
+    )
 
 
 def _make_admin(alpha: float = 0.2, slow_mover_timeout: float = 60.0) -> MagicMock:
@@ -321,3 +357,81 @@ class TestFeedbackProcessor:
 
         weights_arg = self.repo.upsert_weights.call_args[0][0]
         assert weights_arg.confidence_tier == "high", f"Got {weights_arg.confidence_tier}"
+
+
+class TestFindRealizedSaleAttribution:
+    """Finding 14: a realized sale must be attributable to the action it is credited to.
+
+    `_find_realized_sale` must not credit a sale that happened before the
+    action it is scoring -- that would corrupt the EMA learning weights.
+    These use realistic stored values: full ISO-8601 timestamps with a
+    trailing `Z`, matching every row in the live
+    `corporation_realized_sales_ledger` table, because `date` is a VARCHAR
+    column, not a Date/DateTime one. Seeding with bare `date(...)` objects
+    (as an earlier draft of this test suite did) would pass against a
+    lexicographic-comparison implementation for the wrong reason -- SQLite
+    would coerce them to a comparable form -- without ever exercising the
+    string-vs-string comparison this fix depends on.
+    """
+
+    def test_a_sale_predating_the_action_is_not_credited_to_it(self, planner_repo, app_session):
+        from eve_online_industry_tracker.infrastructure.models import (
+            CorporationRealizedSalesLedgerModel,
+        )
+
+        app_session.add(CorporationRealizedSalesLedgerModel(
+            corporation_id=1, transaction_id=1, quantity=1,
+            type_id=12345, realized_profit=500.0, allocated_cost=100.0,
+            date="2026-09-01T09:11:27Z",
+        ))
+        app_session.commit()
+
+        processor = _processor(app_session, planner_repo)
+        action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
+        assert processor._find_realized_sale(12345, action=action) is None
+
+    def test_a_sale_after_the_action_is_credited(self, planner_repo, app_session):
+        from eve_online_industry_tracker.infrastructure.models import (
+            CorporationRealizedSalesLedgerModel,
+        )
+
+        app_session.add(CorporationRealizedSalesLedgerModel(
+            corporation_id=1, transaction_id=2, quantity=1,
+            type_id=12345, realized_profit=500.0, allocated_cost=100.0,
+            date="2026-09-12T09:11:27Z",
+        ))
+        app_session.commit()
+
+        processor = _processor(app_session, planner_repo)
+        action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
+        found = processor._find_realized_sale(12345, action=action)
+        assert found is not None
+        assert found["material_cost"] == 100.0
+        assert found["sell_days"] == 2.0
+
+    def test_a_sale_on_the_same_day_as_the_action_is_credited(self, planner_repo, app_session):
+        """Same calendar day as the action: still credited (date-granularity
+        comparison), using the pre-existing zero/negative-diff fallback of a
+        flat 1.0-day interval -- unchanged by this fix, which only governs
+        whether a sale is attributable at all, not this same-day edge case."""
+        from eve_online_industry_tracker.infrastructure.models import (
+            CorporationRealizedSalesLedgerModel,
+        )
+
+        app_session.add(CorporationRealizedSalesLedgerModel(
+            corporation_id=1, transaction_id=3, quantity=1,
+            type_id=12345, realized_profit=240.0, allocated_cost=40.0,
+            date="2026-09-10T23:59:00Z",
+        ))
+        app_session.commit()
+
+        processor = _processor(app_session, planner_repo)
+        action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10, 1, 0, 0))
+        found = processor._find_realized_sale(12345, action=action)
+        assert found is not None
+        assert found["sell_days"] == 1.0
+        assert found["material_cost"] == 40.0
+
+    def test_without_an_action_date_no_sale_is_credited(self, planner_repo, app_session):
+        processor = _processor(app_session, planner_repo)
+        assert processor._find_realized_sale(12345, action=None) is None
