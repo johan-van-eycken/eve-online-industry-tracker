@@ -4,7 +4,7 @@ import os
 import sys
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import Column, Integer, JSON, MetaData, String, Table, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -48,9 +48,32 @@ def sde_engine():
     prefetch's queries succeed and simply find nothing, which the contract
     already treats as legitimate optional data (meta_group_id/category_id ->
     None, is_blueprint() -> False).
+
+    `metaGroups` is deliberately NOT part of BaseSde.metadata: get_type_data
+    (infrastructure/sde/types.py) reaches it via raw reflection --
+    `Table("metaGroups", MetaData(), autoload_with=bind)` -- not an ORM model,
+    so `BaseSde.metadata.create_all()` never creates it. That is harmless only
+    while `Types` is empty: `get_type_data` guards the reflection behind
+    `if meta_group_ids:`, so no query ever touches `metaGroups` with zero
+    `Types` rows. The first caller that inserts a real `Types` row with a
+    non-null `metaGroupID` (a legitimate use of this same fixture -- see
+    test_type_metadata.py's real-schema test) hits the reflection and would
+    get `NoSuchTableError: metaGroups` with no swallowing try/except to hide
+    it. Create the table explicitly, with exactly the columns get_type_data
+    selects (id, color, name, iconID), so that path works too.
     """
     engine = create_engine("sqlite://", future=True)
     BaseSde.metadata.create_all(engine)
+    meta = MetaData()
+    Table(
+        "metaGroups",
+        meta,
+        Column("id", Integer, primary_key=True),
+        Column("color", String, nullable=True),
+        Column("name", JSON, nullable=True),
+        Column("iconID", Integer, nullable=True),
+    )
+    meta.create_all(engine)
     try:
         yield engine
     finally:

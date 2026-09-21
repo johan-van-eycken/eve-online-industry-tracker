@@ -118,6 +118,48 @@ def test_phase_2_passes_input_rows_and_the_resolver(session_provider):
     assert all(isinstance(r, PlannerInputRow) for r in captured["input_rows"])
 
 
+def test_phase_3_passes_row_not_overview_row_plus_every_other_argument(session_provider):
+    """Guards the exact kwargs ProfitabilityScorer.score now requires.
+
+    Phase 3 is the call site this task changed the most: overview_row= became
+    row=, and the row itself now comes from an input_by_type lookup instead of
+    an overview_by_type one. Without this test a future edit could silently
+    drop e.g. trit_trend_7d (disabling the mineral-squeeze penalty) with the
+    suite still green, the same failure mode phase 2's and phase 7's kwargs
+    tests already guard against.
+    """
+    captured = {}
+
+    svc = _service(session_provider, [GOOD_ROW])
+    svc._profitability_scorer = SimpleNamespace(
+        score=lambda **kwargs: captured.update(kwargs) or SimpleNamespace(type_id=12345)
+    )
+    input_rows = svc._build_input_rows([GOOD_ROW])
+    pipeline_state = SimpleNamespace(type_id=12345)
+
+    scored = svc._phase_3_score(
+        [pipeline_state],
+        {
+            "input_rows": input_rows,
+            "weights": {12345: "weights-marker"},
+            "market_depth_cache": {12345: "market-depth-marker"},
+            "margin_correlations": {12345: "margin-corr-marker"},
+            "trit_trend_7d": 3.5,
+        },
+    )
+
+    assert len(scored) == 1, "the stub score() call must not be swallowed"
+    assert "row" in captured, "score() must receive row="
+    assert "overview_row" not in captured, "the old kwarg must be gone"
+    assert isinstance(captured["row"], PlannerInputRow)
+    assert captured["row"].type_id == 12345
+    assert captured["pipeline"] is pipeline_state
+    assert captured["weights"] == "weights-marker"
+    assert captured["market_depth"] == "market-depth-marker"
+    assert captured["margin_correlation"] == "margin-corr-marker"
+    assert captured["trit_trend_7d"] == 3.5
+
+
 def test_phase_7_passes_the_resolver(session_provider):
     captured = {}
 

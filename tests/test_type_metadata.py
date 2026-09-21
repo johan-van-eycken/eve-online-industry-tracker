@@ -238,3 +238,38 @@ def test_loader_exception_during_prefetch_does_not_poison_other_ids():
 
     assert r.meta_group_id(12345) == 2
     assert r.is_blueprint(999) is True
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (task 11b) — the shared sde_engine fixture must support the
+# real get_type_data loader, not just _FakeLoader.
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_against_the_real_sde_schema_and_default_loader(session_provider):
+    """Exercises the real get_type_data loader (the resolver's default, not
+    _FakeLoader) against tests/conftest.py's shared sde_engine fixture.
+
+    get_type_data reaches `metaGroups` via raw reflection
+    (Table("metaGroups", MetaData(), autoload_with=bind)), not an ORM model,
+    so BaseSde.metadata.create_all() alone never creates it -- that table only
+    got created because conftest.py's sde_engine fixture now creates it
+    explicitly. Before that fix, inserting a Types row with a non-null
+    metaGroupID (exactly what this test does) made the reflection line raise
+    NoSuchTableError, uncaught (Task 5 removed prefetch's swallowing
+    try/except). This also locks in the float-to-int cast documented on
+    meta_group_id(): metaGroupID is a REAL column in the real SDE.
+    """
+    from eve_online_industry_tracker.db_models import Types
+
+    session = session_provider.sde_session()
+    try:
+        session.add(Types(id=2488, metaGroupID=2.0, name={"en": "Warrior II"}))
+        session.commit()
+    finally:
+        session.close()
+
+    resolver = TypeMetadataResolver(sde_session_provider=session_provider.sde_session)
+    result = resolver.meta_group_id(2488)
+    assert result == 2
+    assert isinstance(result, int)
