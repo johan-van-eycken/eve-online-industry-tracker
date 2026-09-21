@@ -236,17 +236,37 @@ class FeedbackProcessor:
         return True
 
     def _find_realized_sale(self, type_id: int, *, action: Any = None) -> dict[str, Any] | None:
-        """Most recent realized sale of `type_id` that happened *after* `action`.
+        """Earliest realized sale of `type_id` at or after `action`'s timestamp.
 
-        Without an action date there is no way to attribute a sale to a planned
-        action, so nothing is credited — crediting an older (or unrelated) sale
+        Without an action timestamp there is no way to attribute a sale to a
+        planned action, so nothing is credited — crediting an unrelated sale
         would corrupt the EMA weights that drive all future scoring.
+
+        Ordering picks the *earliest* qualifying sale, not the latest: for a
+        type manufactured repeatedly (the normal case), the most-recent sale
+        is shared by every earlier action's lookup, crediting one sale to an
+        unbounded number of actions and inflating `sell_days` arbitrarily for
+        the older ones — finding 14's own defect reappearing inside its fix.
+        Earliest-after is bounded to the action's own window and cannot be
+        shared that way.
+
+        This still does not give true per-unit attribution: for a fungible
+        commodity with no lot tracking, the earliest sale after this action
+        may equally be pre-existing inventory sold off, or output from a
+        different (earlier) manufacture run of the same type, rather than
+        this action's own output. A precise fix would bound each action's
+        attribution window by the next action for the same type_id, which is
+        real design work and out of scope here.
 
         `CorporationRealizedSalesLedgerModel.date` is a VARCHAR holding a
         uniform, zero-padded ISO-8601 timestamp (e.g. `"2026-05-11T09:11:27Z"`),
-        not a Date/DateTime column, so both the filter and the day-count below
-        work in string/parsed-date space rather than doing arithmetic against
-        the raw column value.
+        not a Date/DateTime column. The filter compares against the action's
+        full timestamp (not just its calendar date) so that a same-day sale
+        which happened *before* the action is correctly excluded — a
+        date-only filter would let same-day-earlier sales through, which is
+        exactly the pre-dating-sale defect this method exists to prevent, at
+        intraday granularity. The day-count below still truncates to dates
+        (kept as pre-existing behavior for the `sell_days` estimate).
         """
         generated_at = getattr(action, "generated_at", None)
         if generated_at is None:
@@ -254,6 +274,10 @@ class FeedbackProcessor:
         generated_date: date = (
             generated_at.date() if isinstance(generated_at, datetime) else generated_at
         )
+        # Both `date` and `datetime` support strftime (a bare date fills the
+        # time fields with zero), so this works whether generated_at carries
+        # a time component or not.
+        generated_ts = generated_at.strftime("%Y-%m-%dT%H:%M:%S")
 
         if self._session_provider is None:
             return self._find_realized_sale_via_service(type_id)
@@ -270,10 +294,11 @@ class FeedbackProcessor:
                     CorporationRealizedSalesLedgerModel.type_id == type_id,
                     CorporationRealizedSalesLedgerModel.realized_profit.isnot(None),
                     # Lexicographic comparison is valid here only because the
-                    # stored format is a uniform, zero-padded ISO-8601 string.
-                    CorporationRealizedSalesLedgerModel.date >= generated_date.isoformat(),
+                    # stored format is a uniform, zero-padded ISO-8601 string,
+                    # and generated_ts is formatted to match its precision.
+                    CorporationRealizedSalesLedgerModel.date >= generated_ts,
                 )
-                .order_by(CorporationRealizedSalesLedgerModel.date.desc())
+                .order_by(CorporationRealizedSalesLedgerModel.date.asc())
                 .first()
             )
         finally:

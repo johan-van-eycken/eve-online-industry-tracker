@@ -409,11 +409,13 @@ class TestFindRealizedSaleAttribution:
         assert found["material_cost"] == 100.0
         assert found["sell_days"] == 2.0
 
-    def test_a_sale_on_the_same_day_as_the_action_is_credited(self, planner_repo, app_session):
-        """Same calendar day as the action: still credited (date-granularity
-        comparison), using the pre-existing zero/negative-diff fallback of a
-        flat 1.0-day interval -- unchanged by this fix, which only governs
-        whether a sale is attributable at all, not this same-day edge case."""
+    def test_a_sale_on_the_same_day_after_the_action_is_credited(self, planner_repo, app_session):
+        """Same calendar day, later time-of-day: credited. The filter compares
+        full timestamps (not just the calendar date), but 23:59 is still at
+        or after the action's 01:00, so this sale qualifies. `sell_days` uses
+        the pre-existing zero/negative-diff fallback of a flat 1.0-day
+        interval -- unchanged by this fix, which only governs whether a sale
+        is attributable at all, not this same-day edge case."""
         from eve_online_industry_tracker.infrastructure.models import (
             CorporationRealizedSalesLedgerModel,
         )
@@ -431,6 +433,65 @@ class TestFindRealizedSaleAttribution:
         assert found is not None
         assert found["sell_days"] == 1.0
         assert found["material_cost"] == 40.0
+
+    def test_a_sale_on_the_same_day_before_the_action_is_not_credited(self, planner_repo, app_session):
+        """Same calendar date, earlier time-of-day: must NOT be credited.
+
+        A date-only filter (comparing calendar dates instead of full
+        timestamps) would let this sale through, since it shares the
+        action's date -- but 01:00 is strictly before the action's 09:00, so
+        it is exactly a pre-dating sale, the defect this method exists to
+        prevent, just at intraday granularity. This is the discriminating
+        test for the full-timestamp filter: it fails (wrongly credits) if
+        the filter is ever loosened back to comparing calendar dates.
+        """
+        from eve_online_industry_tracker.infrastructure.models import (
+            CorporationRealizedSalesLedgerModel,
+        )
+
+        app_session.add(CorporationRealizedSalesLedgerModel(
+            corporation_id=1, transaction_id=4, quantity=1,
+            type_id=12345, realized_profit=240.0, allocated_cost=40.0,
+            date="2026-05-11T01:00:00Z",
+        ))
+        app_session.commit()
+
+        processor = _processor(app_session, planner_repo)
+        action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 5, 11, 9, 0, 0))
+        assert processor._find_realized_sale(12345, action=action) is None
+
+    def test_earliest_qualifying_sale_is_credited_not_the_latest(self, planner_repo, app_session):
+        """When several sales postdate the action, the EARLIEST is credited.
+
+        Ordering by most-recent would take the globally latest sale of this
+        type_id regardless of which action asked -- so every earlier
+        action's lookup for a repeatedly-manufactured type would collide on
+        the same row, crediting one sale to many outcomes and inflating
+        sell_days arbitrarily for the older ones. Earliest-after is bounded
+        to this action's own window and cannot be shared that way.
+        """
+        from eve_online_industry_tracker.infrastructure.models import (
+            CorporationRealizedSalesLedgerModel,
+        )
+
+        app_session.add(CorporationRealizedSalesLedgerModel(
+            corporation_id=1, transaction_id=5, quantity=1,
+            type_id=12345, realized_profit=100.0, allocated_cost=10.0,
+            date="2026-09-11T00:00:00Z",  # earliest qualifying sale
+        ))
+        app_session.add(CorporationRealizedSalesLedgerModel(
+            corporation_id=1, transaction_id=6, quantity=1,
+            type_id=12345, realized_profit=999.0, allocated_cost=999.0,
+            date="2026-09-20T00:00:00Z",  # latest -- must NOT be picked
+        ))
+        app_session.commit()
+
+        processor = _processor(app_session, planner_repo)
+        action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
+        found = processor._find_realized_sale(12345, action=action)
+        assert found is not None
+        assert found["material_cost"] == 10.0
+        assert found["sell_days"] == 1.0
 
     def test_without_an_action_date_no_sale_is_credited(self, planner_repo, app_session):
         processor = _processor(app_session, planner_repo)
