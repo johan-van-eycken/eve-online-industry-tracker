@@ -27,11 +27,18 @@ class ItemDecisionEngine:
         pipeline: PipelineState,
         overview_row: dict[str, Any],
         admin_settings: Any,
+        meta_group_id: int | None = None,
     ) -> ItemDecision:
-        """Apply Phase 4 decision rules and return an ItemDecision."""
+        """Apply Phase 4 decision rules and return an ItemDecision.
+
+        `meta_group_id` is the numeric id resolved from the SDE (see
+        `PlannerInputRow.meta_group_id` / `TypeMetadataResolver.meta_group_id`),
+        passed in explicitly by the caller. The overview row itself never
+        carries a numeric meta group id -- only `meta_group_name` -- so this
+        engine must not try to read one off it.
+        """
         type_id = scored.type_id
         type_name = str(overview_row.get("type_name") or "")
-        meta_group_id = overview_row.get("meta_group_id") or overview_row.get("type_meta_group_id")
 
         # ── UNSCOREABLE check (must precede every threshold comparison and
         # every /1e6 arithmetic below) ─────────────────────────────────────────

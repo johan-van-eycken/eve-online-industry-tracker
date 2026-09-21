@@ -21,6 +21,59 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
     InventionOutcomeLogModel,
     PlanLearningWeightsModel,
 )
+from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService  # noqa: E402
+from eve_online_industry_tracker.application.daily_planner.models import ItemDecision  # noqa: E402
+
+
+def _service(session_provider, admin_settings=None) -> DailyPlannerService:
+    """Build a DailyPlannerService against the real repo/session_provider fixtures.
+
+    Only `repo` and `session_provider` are exercised by get_active_plan(),
+    get_analytics() and _persist_plan_items() -- the other collaborators are
+    only touched by the compute-pipeline phases, which these tests don't run,
+    so plain `None` stubs are enough to satisfy __init__ without raising.
+    """
+    repo = DailyPlannerRepository(session_provider=session_provider)
+    return DailyPlannerService(
+        industry_service=None,
+        corporations_service=None,
+        characters_service=None,
+        sales_history_service=None,
+        pricing_suggestion_service=None,
+        market_pricing_service=None,
+        realized_profit_service=None,
+        repo=repo,
+        admin_settings=admin_settings,
+        session_provider=session_provider,
+    )
+
+
+class _AdminSettings:
+    """Minimal admin_settings stub matching `_adm`'s `.get(section, key)` shape."""
+
+    def __init__(self, **values):
+        self._values = values
+
+    def get(self, section, key):
+        return self._values.get(key)
+
+
+def _decision(meta_group_id: int | None = None) -> ItemDecision:
+    """A minimal ItemDecision, standing in for Phase 4 output."""
+    return ItemDecision(
+        type_id=590,
+        type_name="Rifter",
+        decision="build",
+        decision_reason="test",
+        adjusted_score=10_000_000.0,
+        absolute_profit_per_batch=50_000_000.0,
+        isk_per_hour=10_000_000.0,
+        margin_pct=0.15,
+        days_of_supply_current=1.0,
+        effective_velocity=10.0,
+        meta_group_id=meta_group_id,
+        pipeline_stage="manufacturing",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -448,3 +501,57 @@ def test_upsert_weights_and_get() -> None:
     result2 = repo.get_weights([590])
     assert result2[590].accuracy_ema == 0.90
     assert result2[590].sample_count == 12
+
+
+# ---------------------------------------------------------------------------
+# DailyPlannerService.get_analytics() -- plan_history (finding 13)
+# ---------------------------------------------------------------------------
+
+def test_plan_history_returns_recent_plans(app_session, session_provider):
+    from datetime import datetime, timedelta
+
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanModel
+
+    now = datetime.utcnow()
+    app_session.add(BuildPlanModel(
+        created_at=now, updated_at=now, status="active", freshness_score=1.0,
+    ))
+    # 45 days ago: inside the *old* code's hardcoded 90-day cutoff (which
+    # ignored planner_history_days entirely), but outside the 30-day window
+    # configured below -- a boundary the old code gets wrong two ways at
+    # once: it never consulted planner_history_days, and it compared
+    # `created_at >= cutoff.isoformat()` (a string) against a DateTime
+    # column instead of a real datetime.
+    app_session.add(BuildPlanModel(
+        created_at=now - timedelta(days=45), updated_at=now, status="superseded",
+        freshness_score=0.8,
+    ))
+    app_session.add(BuildPlanModel(
+        created_at=now - timedelta(days=200), updated_at=now, status="superseded",
+        freshness_score=0.5,
+    ))
+    app_session.commit()
+
+    service = _service(session_provider, admin_settings=_AdminSettings(planner_history_days=30))
+    history = service.get_analytics()["plan_history"]
+
+    # Only the "now" plan is inside the configured 30-day window. Asserting
+    # the exact boundary (not merely "non-empty") is what actually catches
+    # finding 13: the old code's hardcoded 90-day cutoff would let the
+    # 45-day-old plan back in, producing 2 rows instead of 1.
+    assert len(history) == 1
+    assert history[0]["status"] == "active"
+
+
+# ---------------------------------------------------------------------------
+# DailyPlannerService._persist_plan_items() -- meta_group_id persistence (D6)
+# ---------------------------------------------------------------------------
+
+def test_plan_items_persist_the_resolved_meta_group_id(app_session, session_provider):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    service = _service(session_provider)
+    service._persist_plan_items(plan_id=1, decisions=[_decision(meta_group_id=2)])
+
+    item = app_session.query(BuildPlanItemModel).one()
+    assert item.meta_group_id == 2

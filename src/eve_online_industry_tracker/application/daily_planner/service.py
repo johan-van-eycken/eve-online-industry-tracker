@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
@@ -277,28 +277,33 @@ class DailyPlannerService:
                 "invention_details": inv_details.get(tid),
             })
 
-        # Plan history (last 90 days)
+        # Plan history (last N days, default 90) -- cutoff must be a datetime,
+        # not an ISO string: BuildPlanModel.created_at is a DateTime column,
+        # and SQLite silently rejects (rather than coerces) a string compared
+        # against it, so a bare `except` around this used to hide a permanently
+        # empty plan_history. Let a genuinely broken query raise instead.
+        history_days = int(_adm(self._admin, "planner_history_days", 90))
+        cutoff = datetime.utcnow() - timedelta(days=history_days)
+        ph_session = self._session_provider.app_session()
         try:
-            from datetime import timedelta  # noqa: PLC0415
-            cutoff = (datetime.utcnow() - timedelta(days=90)).isoformat()
-            ph_session = self._session_provider.app_session()
-            try:
-                plan_history_rows = ph_session.query(BuildPlanModel).filter(
-                    BuildPlanModel.created_at >= cutoff
-                ).order_by(BuildPlanModel.created_at.desc()).limit(90).all()
-            finally:
-                ph_session.close()
-            plan_history = [
-                {
-                    "id": int(p.id),
-                    "created_at": str(p.created_at),
-                    "status": str(p.status),
-                    "freshness_score": float(p.freshness_score or 1.0),
-                }
-                for p in plan_history_rows
-            ]
-        except Exception:
-            plan_history = []
+            plan_history_rows = (
+                ph_session.query(BuildPlanModel)
+                .filter(BuildPlanModel.created_at >= cutoff)
+                .order_by(BuildPlanModel.created_at.desc())
+                .limit(90)
+                .all()
+            )
+        finally:
+            ph_session.close()
+        plan_history = [
+            {
+                "id": int(p.id),
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "status": str(p.status),
+                "freshness_score": float(p.freshness_score or 1.0),
+            }
+            for p in plan_history_rows
+        ]
 
         return {"items": result, "plan_history": plan_history}
 
@@ -519,18 +524,24 @@ class DailyPlannerService:
         logger.info("DailyPlannerService: Phase 4 — item decisions (Pass 1)")
         pipeline_by_type = {ps.type_id: ps for ps in pipeline_states}
         overview_by_type = {int(r["type_id"]): r for r in phase1["overview_rows"] if r.get("type_id")}
+        input_by_type = {r.type_id: r for r in phase1["input_rows"]}
         decisions = []
         for scored in scored_items:
             ps = pipeline_by_type.get(scored.type_id)
             if ps is None:
                 continue
             row = overview_by_type.get(scored.type_id, {})
+            input_row = input_by_type.get(scored.type_id)
             try:
                 decision = self._decision_engine.decide(
                     scored=scored,
                     pipeline=ps,
                     overview_row=row,
                     admin_settings=self._admin,
+                    # The overview row never carries a numeric meta group id
+                    # (only meta_group_name); the resolved SDE value lives on
+                    # the validated input row instead.
+                    meta_group_id=input_row.meta_group_id if input_row is not None else None,
                 )
                 decisions.append(decision)
             except Exception:
@@ -627,10 +638,8 @@ class DailyPlannerService:
         )
         plan_id = self._repo.insert_plan(plan)
 
-        # Build plan items
-        plan_items = self._build_plan_items(plan_id, chain_plan.decisions)
-        if plan_items:
-            self._repo.insert_plan_items(plan_items)
+        # Build + persist plan items
+        self._persist_plan_items(plan_id, chain_plan.decisions)
 
         # Fix plan_id on action rows (was 0 in Phase 8)
         for row in action_log_rows:
@@ -782,7 +791,6 @@ class DailyPlannerService:
 
     def _get_trit_trend_7d(self) -> float | None:
         """Compute Tritanium 7-day price trend % from market history (type_id=34, Jita region)."""
-        from datetime import timedelta
         try:
             from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
             session = self._session_provider.app_session()
@@ -866,6 +874,17 @@ class DailyPlannerService:
                 effective_velocity=d.effective_velocity,
             ))
         return items
+
+    def _persist_plan_items(self, plan_id: int, decisions: list[Any]) -> None:
+        """Build BuildPlanItemModel rows from decisions and write them via the repo.
+
+        Split out from Phase 9 so the plan-item write (including the resolved
+        meta_group_id -- see ItemDecisionEngine.decide()) is independently
+        testable without running the whole compute pipeline.
+        """
+        plan_items = self._build_plan_items(plan_id, decisions)
+        if plan_items:
+            self._repo.insert_plan_items(plan_items)
 
     def _compute_freshness_score(self, plan: Any) -> float:
         """Compare current spot prices to snapshot; return freshness (0.0–1.0)."""
