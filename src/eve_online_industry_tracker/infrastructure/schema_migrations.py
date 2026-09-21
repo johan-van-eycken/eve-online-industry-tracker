@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 
@@ -86,6 +87,57 @@ def _ensure_column(db: DatabaseManager, *, table: str, column: str, ddl_type: st
     except Exception as e:
         # SQLite only supports limited ALTER TABLE; this should be safe for ADD COLUMN.
         logging.warning("Failed adding column %s.%s: %s", table, column, str(e))
+
+
+def _backfill_activity_id_sql(db: DatabaseManager, *, table: str) -> None:
+    """Populate activity_id from the stored raw ESI payload, once.
+
+    Additive and idempotent: only touches rows where activity_id is still
+    NULL, so re-running ensure_app_schema on an already-backfilled database
+    is a no-op.
+    """
+    try:
+        db.execute(
+            f"UPDATE {table} "
+            "SET activity_id = json_extract(raw, '$.activity_id') "
+            "WHERE activity_id IS NULL AND raw IS NOT NULL "
+            "AND json_extract(raw, '$.activity_id') IS NOT NULL"
+        )
+        logging.info("Backfilled %s.activity_id from raw", table)
+    except Exception as e:
+        logging.warning("Failed backfilling %s.activity_id: %s", table, str(e))
+
+
+def backfill_job_activity_ids(session: Any) -> int:
+    """ORM-level backfill used by tests and by a one-off repair.
+
+    Returns the number of rows updated.
+    """
+    from eve_online_industry_tracker.infrastructure.models import (
+        CorporationIndustryJobsModel,
+    )
+
+    rows = (
+        session.query(CorporationIndustryJobsModel)
+        .filter(CorporationIndustryJobsModel.activity_id.is_(None))
+        .all()
+    )
+    updated = 0
+    for row in rows:
+        raw = row.raw if isinstance(row.raw, dict) else None
+        if not raw:
+            continue
+        value = raw.get("activity_id")
+        if value is None:
+            continue
+        try:
+            row.activity_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        updated += 1
+    if updated:
+        session.commit()
+    return updated
 
 
 def ensure_app_schema(db_app: DatabaseManager) -> None:
@@ -318,6 +370,26 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         _ensure_column(db_app, table=table, column="total_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="unit_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="build_cost_source", ddl_type="TEXT")
+        _ensure_column(db_app, table=table, column="activity_id", ddl_type="INTEGER")
+
+    _ensure_index(
+        db_app,
+        name="ix_corporation_industry_jobs_activity_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS ix_corporation_industry_jobs_activity_id "
+            "ON corporation_industry_jobs (activity_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="ix_character_industry_jobs_activity_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS ix_character_industry_jobs_activity_id "
+            "ON character_industry_jobs (activity_id)"
+        ),
+    )
+    for table in ("character_industry_jobs", "corporation_industry_jobs"):
+        _backfill_activity_id_sql(db_app, table=table)
 
     # Market orderbook view cache (persistent hub pricing aggregates)
     _ensure_table(

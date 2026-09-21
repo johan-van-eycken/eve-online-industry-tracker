@@ -462,6 +462,7 @@ class CharacterIndustryJobsModel(BaseApp):
     end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     completed_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    activity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     blueprint_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -508,6 +509,7 @@ class CorporationIndustryJobsModel(BaseApp):
     end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     completed_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    activity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     blueprint_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

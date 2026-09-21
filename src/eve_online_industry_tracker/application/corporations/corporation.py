@@ -1052,6 +1052,7 @@ class Corporation:
                         "start_date": j.get("start_date"),
                         "end_date": j.get("end_date"),
                         "completed_date": j.get("completed_date"),
+                        "activity_id": int(j.get("activity_id") or 0) or None,
                         "blueprint_type_id": j.get("blueprint_type_id"),
                         "product_type_id": j.get("product_type_id"),
                         "runs": j.get("runs"),

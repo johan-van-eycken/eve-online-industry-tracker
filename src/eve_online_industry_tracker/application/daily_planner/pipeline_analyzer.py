@@ -29,6 +29,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+    ACTIVITY_MANUFACTURING,
+)
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState
 
@@ -67,18 +70,19 @@ class PipelineAnalyzer:
         now = _now()
         result: list[PipelineState] = []
 
-        # Index active manufacturing jobs by product type_id for quick lookup
+        # Index active manufacturing jobs by product type_id for quick lookup.
+        # activity_id is now a real column (backfilled from the raw ESI payload by
+        # schema_migrations.backfill_job_activity_ids for pre-existing rows, and set
+        # directly on new syncs by corporation.py) -- no more raw-JSON fallback needed
+        # here.
         mfg_jobs_by_type: dict[int, list[Any]] = {}
         for job in industry_jobs:
-            activity_id = _job_attr(job, "activity_id") or _job_attr(job, "activityID")
-            # activity_id 1 = manufacturing
-            if int(activity_id or 0) != 1:
+            if int(_job_attr(job, "activity_id") or 0) != ACTIVITY_MANUFACTURING:
                 continue
-            product_type_id = _job_attr(job, "product_type_id") or _job_attr(job, "productTypeID")
+            product_type_id = _job_attr(job, "product_type_id")
             if product_type_id is None:
                 continue
-            tid = int(product_type_id)
-            mfg_jobs_by_type.setdefault(tid, []).append(job)
+            mfg_jobs_by_type.setdefault(int(product_type_id), []).append(job)
 
         # Index BPC runs by blueprint type_id.
         # A blueprint *copy* is is_blueprint_copy=True with blueprint_runs > 0;

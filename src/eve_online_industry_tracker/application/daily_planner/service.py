@@ -44,6 +44,16 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
         return fallback
 
 
+#: Job statuses ESI reports for a *finished* job -- excluded from "active" job
+#: queries so delivered/cancelled/reverted jobs stop being counted as in-progress.
+#: A deny-list (rather than mirroring industry/service.py's allow-list of
+#: ("active", "ready")) because ESI's job status enum is closed and small
+#: (active, cancelled, delivered, paused, ready, reverted); enumerating the three
+#: terminal ones and excluding them also keeps "paused" jobs -- which still hold a
+#: manufacturing slot -- counted as active, unlike an allow-list of ("active", "ready").
+_TERMINAL_JOB_STATUSES = ("delivered", "cancelled", "reverted")
+
+
 def _no_sde_session() -> None:
     """Fallback sde_session provider for a session_provider that has no sde_session().
 
@@ -673,15 +683,23 @@ class DailyPlannerService:
             return []
 
     def _get_industry_jobs(self) -> list[Any]:
-        """Get active corp industry jobs."""
+        """Active corp industry jobs -- delivered/cancelled/reverted jobs are not active."""
         try:
             session = self._session_provider.app_session()
             try:
                 from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
-                return session.query(CorporationIndustryJobsModel).all()
+
+                return (
+                    session.query(CorporationIndustryJobsModel)
+                    .filter(
+                        CorporationIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
+                        | CorporationIndustryJobsModel.status.is_(None)
+                    )
+                    .all()
+                )
             finally:
                 session.close()
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             logger.exception("DailyPlannerService: failed to get industry jobs")
             return []
 
