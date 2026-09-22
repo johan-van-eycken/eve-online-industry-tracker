@@ -49,13 +49,17 @@ class ActionPlanBuilder:
         industry_jobs: list[Any],         # for DELIVER actions
         admin_settings: Any,
         bpo_opportunities: list[Any] | None = None,  # from ChainPlan.bpo_opportunities
+        character_name_map: dict[int, str] | None = None,  # installer/character_id -> name
+        meta_resolver: Any | None = None,  # TypeMetadataResolver, for DELIVER item names
     ) -> list[DailyActionLogModel]:
         """Return ordered list of DailyActionLogModel rows ready for persistence."""
         now = _now()
         rows: list[DailyActionLogModel] = []
 
         # ── DELIVER rows (from industry_jobs with end_date < now) ─────────────
-        deliver_rows = self._build_deliver_actions(plan_id, industry_jobs, now)
+        deliver_rows = self._build_deliver_actions(
+            plan_id, industry_jobs, now, character_name_map, meta_resolver
+        )
         rows.extend(deliver_rows)
 
         # ── RELIST rows (from PricingSuggestionService) ───────────────────────
@@ -89,9 +93,26 @@ class ActionPlanBuilder:
         plan_id: int,
         industry_jobs: list[Any],
         now: datetime,
+        character_name_map: dict[int, str] | None = None,
+        meta_resolver: Any | None = None,
     ) -> list[DailyActionLogModel]:
         """Generate DELIVER actions for jobs whose end_date < now."""
         rows: list[DailyActionLogModel] = []
+        character_name_map = character_name_map or {}
+
+        # Prefetch every distinct product_type_id in one batched SDE query, up
+        # front -- mirrors service.py's index_blueprint_assets prewarm (and the
+        # ruling this same remediation batch re-applies to pipeline_analyzer).
+        # Without this, meta_resolver.type_name() self-heals a per-id cache
+        # miss inside the loop below, opening one SDE session (with its
+        # metaGroups table reflection) per distinct product_type_id instead of
+        # one query total.
+        if meta_resolver is not None:
+            product_type_ids = {
+                int(_job_attr(job, "product_type_id") or 0) for job in industry_jobs
+            }
+            meta_resolver.prefetch({t for t in product_type_ids if t > 0})
+
         for job in industry_jobs:
             status = str(_job_attr(job, "status") or "").lower()
             if status == "delivered":
@@ -113,10 +134,28 @@ class ActionPlanBuilder:
             if end_date > now:
                 continue  # not ready yet
 
+            # character_name and installer_name are not columns on either job
+            # ORM model -- neither CorporationIndustryJobsModel nor
+            # CharacterIndustryJobsModel carries a denormalized pilot name.
+            # installer_id *is* real on both, so resolve the name the same
+            # way Phase 6 does: via characters_service.list_characters().
             character_id = _job_attr(job, "character_id") or _job_attr(job, "installer_id")
-            character_name = _job_attr(job, "character_name") or _job_attr(job, "installer_name")
+            character_name = (
+                character_name_map.get(int(character_id)) if character_id is not None else None
+            )
+
+            # product_type_name and type_name are likewise not real columns --
+            # product_type_id is. Resolve the item name from the SDE via the
+            # shared TypeMetadataResolver rather than leaving it blank.
             type_id = int(_job_attr(job, "product_type_id") or _job_attr(job, "type_id") or 0)
-            type_name = str(_job_attr(job, "product_type_name") or _job_attr(job, "type_name") or "")
+            type_name = ""
+            if meta_resolver is not None and type_id > 0:
+                type_name = meta_resolver.type_name(type_id)
+            if not type_name:
+                # A name that can't be resolved must stay identifiable -- an
+                # empty string in a UI row is indistinguishable from a
+                # rendering bug.
+                type_name = f"type_{type_id}"
             runs = int(_job_attr(job, "runs") or 1)
             output_qty = int(_job_attr(job, "output_quantity") or _job_attr(job, "product_quantity") or runs)
 

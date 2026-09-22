@@ -271,6 +271,25 @@ class CharacterAssigner:
 
         return actions
 
+    def get_character_name_map(self, characters_service: Any) -> dict[int, str]:
+        """{character_id: character_name}, resolved via list_characters().
+
+        ActionPlanBuilder needs the pilot name for each in-flight job's
+        deliver row (installer_id -> name) but must not reach for
+        characters_service itself -- that is a service it does not own.
+        This reuses the same characters_service.list_characters() call
+        _compute_available_slots already resolves names from, so Phase 8
+        does not have to invent its own name-resolution path.
+        """
+        characters = self._get_characters(characters_service)
+        result: dict[int, str] = {}
+        for char in characters:
+            char_id = int(char.get("character_id") or char.get("id") or 0)
+            if char_id <= 0:
+                continue
+            result[char_id] = str(char.get("character_name") or char.get("name") or "")
+        return result
+
     def _get_characters(self, characters_service: Any) -> list[dict[str, Any]]:
         """Fetch characters list from service.
 

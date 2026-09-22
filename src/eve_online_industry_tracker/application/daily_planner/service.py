@@ -691,6 +691,12 @@ class DailyPlannerService:
     ) -> list[Any]:
         logger.info("DailyPlannerService: Phase 8 — action list")
         bpo_opportunities = getattr(chain_plan, "bpo_opportunities", None) if chain_plan is not None else None
+        # DELIVER rows need the pilot name for installer_id and the item name
+        # for product_type_id -- neither is a real column on either job ORM
+        # model. Resolve both here rather than have ActionPlanBuilder reach
+        # for characters_service itself: the name map mirrors what Phase 6's
+        # CharacterAssigner already resolves for char_slots.
+        character_name_map = self._character_assigner.get_character_name_map(self._characters)
         # plan_id is set in Phase 9 (not known yet); use 0 as placeholder
         return self._action_plan_builder.build(
             plan_id=0,
@@ -700,6 +706,8 @@ class DailyPlannerService:
             industry_jobs=phase1["industry_jobs"],
             admin_settings=self._admin,
             bpo_opportunities=bpo_opportunities,
+            character_name_map=character_name_map,
+            meta_resolver=self._meta_resolver,
         )
 
     def _phase_9_persist(

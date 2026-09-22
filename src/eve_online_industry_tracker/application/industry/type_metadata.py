@@ -107,6 +107,9 @@ class TypeMetadataResolver:
     def category_name(self, type_id: int) -> str:
         return str(self._entry(type_id).get("category_name") or "")
 
+    def type_name(self, type_id: int) -> str:
+        return str(self._entry(type_id).get("type_name") or "")
+
     def category_id(self, type_id: int) -> int | None:
         raw = self._entry(type_id).get("category_id")
         if raw is None:

@@ -1,0 +1,187 @@
+# tests/test_action_plan_builder.py
+"""Regression tests for Defect 1 (task-18a remediation batch):
+
+ActionPlanBuilder._build_deliver_actions read `character_name`,
+`installer_name`, `product_type_name` and `type_name` off industry job rows
+via `_job_attr` -- none of those four are real columns on either job ORM
+model (CorporationIndustryJobsModel / CharacterIndustryJobsModel), so every
+DELIVER row silently got character_name=None and type_name="". Fix: resolve
+the pilot name from a character_id/installer_id -> name map (built the same
+way CharacterAssigner builds it for slot accounting), and the item name from
+TypeMetadataResolver.type_name(product_type_id), added for this fix.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+from eve_online_industry_tracker.application.daily_planner.action_plan_builder import (
+    ActionPlanBuilder,
+)
+from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
+
+
+def _past(hours: int = 1) -> datetime:
+    return (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).replace(tzinfo=None)
+
+
+class _RecordingLoader:
+    """Mirrors tests/test_type_metadata.py's _FakeLoader: records every batch
+    of type_ids it was asked to load, so a test can assert it was invoked
+    exactly once (batched), not once per deliver row."""
+
+    def __init__(self, data):
+        self._data = data
+        self.calls: list[list[int]] = []
+
+    def __call__(self, session, language, type_ids):
+        self.calls.append(sorted(type_ids))
+        return {tid: self._data[tid] for tid in type_ids if tid in self._data}
+
+
+def _job(**kwargs):
+    """A minimal stand-in for a CorporationIndustryJobsModel/
+    CharacterIndustryJobsModel row -- a plain object with only real columns
+    plus whatever the test wants to set. No `character_name`,
+    `installer_name`, `product_type_name` or `type_name` attribute exists,
+    matching the real ORM models exactly (getattr(..., None) is what
+    `_job_attr` falls back to for those)."""
+    defaults = dict(
+        status="ready",
+        end_date=_past(),
+        character_id=None,
+        installer_id=None,
+        product_type_id=None,
+        type_id=None,
+        runs=1,
+        output_quantity=None,
+        product_quantity=None,
+        activity_id=1,
+    )
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
+def test_deliver_action_resolves_pilot_name_via_installer_id_not_a_phantom_field():
+    """installer_name/character_name are not real columns -- the pilot name
+    must come from the character_name_map (installer_id -> name), the way
+    CharacterAssigner already resolves it for slot accounting."""
+    job = _job(installer_id=42, product_type_id=999)
+    resolver = TypeMetadataResolver(
+        sde_session_provider=lambda: None,
+        loader=_RecordingLoader({999: {"type_id": 999, "type_name": "Warrior II"}}),
+    )
+
+    rows = ActionPlanBuilder().build(
+        plan_id=1,
+        assigned_actions=[],
+        shopping_items=[],
+        pricing_suggestions=[],
+        industry_jobs=[job],
+        admin_settings=SimpleNamespace(),
+        character_name_map={42: "Test Pilot"},
+        meta_resolver=resolver,
+    )
+
+    deliver_rows = [r for r in rows if r.action_type == "deliver"]
+    assert len(deliver_rows) == 1
+    assert deliver_rows[0].character_id == 42
+    assert deliver_rows[0].character_name == "Test Pilot"
+
+
+def test_deliver_action_resolves_item_name_via_meta_resolver_not_a_phantom_field():
+    """product_type_name/type_name are not real columns -- the item name must
+    come from TypeMetadataResolver.type_name(product_type_id), not be blank.
+    A wrong implementation (still reading the phantom fields) produces
+    type_name="" here -- indistinguishable from a rendering bug in Tab 1."""
+    job = _job(installer_id=42, product_type_id=999)
+    resolver = TypeMetadataResolver(
+        sde_session_provider=lambda: None,
+        loader=_RecordingLoader({999: {"type_id": 999, "type_name": "Warrior II"}}),
+    )
+
+    rows = ActionPlanBuilder().build(
+        plan_id=1,
+        assigned_actions=[],
+        shopping_items=[],
+        pricing_suggestions=[],
+        industry_jobs=[job],
+        admin_settings=SimpleNamespace(),
+        character_name_map={42: "Test Pilot"},
+        meta_resolver=resolver,
+    )
+
+    deliver_rows = [r for r in rows if r.action_type == "deliver"]
+    assert deliver_rows[0].type_name == "Warrior II"
+    assert deliver_rows[0].type_name != ""
+
+
+def test_unresolvable_item_name_falls_back_to_an_identifiable_placeholder_not_blank():
+    """When the SDE has nothing for this type_id, the fallback must stay
+    identifiable (f"type_{type_id}"), never an empty string."""
+    job = _job(installer_id=42, product_type_id=424242)
+    resolver = TypeMetadataResolver(sde_session_provider=lambda: None, loader=_RecordingLoader({}))
+
+    rows = ActionPlanBuilder().build(
+        plan_id=1,
+        assigned_actions=[],
+        shopping_items=[],
+        pricing_suggestions=[],
+        industry_jobs=[job],
+        admin_settings=SimpleNamespace(),
+        character_name_map={},
+        meta_resolver=resolver,
+    )
+
+    deliver_rows = [r for r in rows if r.action_type == "deliver"]
+    assert deliver_rows[0].type_name == "type_424242"
+
+
+def test_deliver_item_names_are_prefetched_in_one_batch_not_per_job():
+    """Mirrors index_blueprint_assets' prewarm test (test_daily_planner_service_helpers.py):
+    without an up-front batched prefetch, meta_resolver.type_name() self-heals
+    a per-id cache miss inside the deliver loop, opening one SDE session per
+    distinct product_type_id instead of one query total."""
+    jobs = [
+        _job(installer_id=1, product_type_id=100),
+        _job(installer_id=1, product_type_id=200),
+        _job(installer_id=1, product_type_id=100),
+    ]
+    loader = _RecordingLoader({
+        100: {"type_id": 100, "type_name": "Tritanium"},
+        200: {"type_id": 200, "type_name": "Pyerite"},
+    })
+    resolver = TypeMetadataResolver(sde_session_provider=lambda: None, loader=loader)
+
+    ActionPlanBuilder().build(
+        plan_id=1,
+        assigned_actions=[],
+        shopping_items=[],
+        pricing_suggestions=[],
+        industry_jobs=jobs,
+        admin_settings=SimpleNamespace(),
+        character_name_map={1: "Test Pilot"},
+        meta_resolver=resolver,
+    )
+
+    assert loader.calls == [[100, 200]]
+
+
+def test_no_character_name_map_or_resolver_still_uses_honest_fallbacks():
+    """Backward-compat: when Phase 8 is called without the new kwargs (e.g. an
+    older caller or a stub in another test), the deliver row must not raise
+    and must still avoid an empty type_name."""
+    job = _job(installer_id=42, product_type_id=999)
+
+    rows = ActionPlanBuilder().build(
+        plan_id=1,
+        assigned_actions=[],
+        shopping_items=[],
+        pricing_suggestions=[],
+        industry_jobs=[job],
+        admin_settings=SimpleNamespace(),
+    )
+
+    deliver_rows = [r for r in rows if r.action_type == "deliver"]
+    assert deliver_rows[0].character_name is None
+    assert deliver_rows[0].type_name == "type_999"
