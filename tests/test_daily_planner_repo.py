@@ -542,6 +542,31 @@ def test_plan_history_returns_recent_plans(app_session, session_provider):
     assert len(history) == 1
     assert history[0]["status"] == "active"
 
+    # Second boundary: a row cap, not a day cutoff. Configure a window well
+    # above 90 days and put more than 90 plans inside it -- the exact same
+    # class of bug as the cutoff above (a hardcoded limit silently
+    # truncating the configured retention window), this time by row count.
+    # The 3 plans already committed above land inside this 180-day window
+    # too, except the 200-day-old one, so the running total below accounts
+    # for those.
+    for days_ago in range(1, 96):
+        app_session.add(BuildPlanModel(
+            created_at=now - timedelta(days=days_ago), updated_at=now,
+            status="superseded", freshness_score=0.9,
+        ))
+    app_session.commit()
+
+    service_180 = _service(session_provider, admin_settings=_AdminSettings(planner_history_days=180))
+    history_180 = service_180.get_analytics()["plan_history"]
+
+    # Inside the 180-day window: the "now" plan, the "-45 days" plan from
+    # above, and the 95 new ones just added (1..95 days ago) = 97 rows.
+    # The 200-day-old plan stays excluded. A reinstated `.limit(90)` would
+    # clamp this to 90 -- asserting the exact count (not "> 90") pins the
+    # behaviour rather than merely gesturing at it.
+    assert len(history_180) == 97
+    assert history_180[0]["status"] == "active"
+
 
 # ---------------------------------------------------------------------------
 # DailyPlannerService._persist_plan_items() -- meta_group_id persistence (D6)

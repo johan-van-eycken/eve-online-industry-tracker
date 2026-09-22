@@ -290,7 +290,7 @@ class DailyPlannerService:
                 ph_session.query(BuildPlanModel)
                 .filter(BuildPlanModel.created_at >= cutoff)
                 .order_by(BuildPlanModel.created_at.desc())
-                .limit(90)
+                .limit(history_days)
                 .all()
             )
         finally:
