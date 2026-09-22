@@ -82,11 +82,32 @@ def _make_action(
     return action
 
 
-def _make_plan_item(type_id: int = 100, isk_per_hour: float = 10_000_000.0) -> MagicMock:
+def _make_plan_item(
+    type_id: int = 100,
+    isk_per_hour: float = 10_000_000.0,
+    effective_velocity: float | None = 1.0,
+) -> MagicMock:
+    """Build a plan_item mock.
+
+    `effective_velocity` defaults to `1.0` (a 1.0-day predicted sell time)
+    to match the value every caller of this helper got *by accident* before
+    this parameter existed: a bare `MagicMock()` numeric attribute silently
+    satisfies `float(...)` as `1.0` instead of raising -- e.g.
+    `float(MagicMock().effective_velocity) == 1.0` -- so
+    `_estimate_predicted_sell_days` was returning 1.0 for every plan_item
+    built here, not its documented 7.0-day fallback. That silent trap is
+    exactly what hid the EMA-velocity test bugs for so long: they assumed
+    the 7.0 fallback in their `expected_velocity` math while the code under
+    test was actually consuming 1.0.
+
+    Pass `effective_velocity=None` explicitly to deliberately exercise the
+    7.0-day fallback instead (as the velocity/slow-mover tests below do).
+    """
     item = MagicMock()
     item.id = 1
     item.type_id = type_id
     item.isk_per_hour = isk_per_hour
+    item.effective_velocity = effective_velocity
     return item
 
 
@@ -187,9 +208,13 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {
             300: _make_weights(velocity_multiplier=old_velocity)
         }
-        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=300)]
+        # effective_velocity=None deliberately exercises the 7.0-day
+        # fallback in _estimate_predicted_sell_days (see _make_plan_item's
+        # docstring for why this must be explicit rather than left to a
+        # bare MagicMock attribute).
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=300, effective_velocity=None)]
 
-        # Actual sell_days = 5.0; predicted = 7.0 (fixed default)
+        # Actual sell_days = 5.0; predicted = 7.0 (velocity fallback)
         actual_days = 5.0
         self.realized.get_realized_profit_for_type.return_value = {
             "isk_per_hour": 10_000_000.0,
@@ -200,7 +225,8 @@ class TestFeedbackProcessor:
         self.processor.process_pending_feedback()
 
         weights_arg = self.repo.upsert_weights.call_args[0][0]
-        # predicted_days = 7.0 (fixed default from _estimate_predicted_sell_days)
+        # predicted_days = 7.0 (fallback from _estimate_predicted_sell_days
+        # when effective_velocity is None)
         # velocity = 0.8 * 1.0 + 0.2 * (7.0 / 5.0) = 0.8 + 0.28 = 1.08
         expected_velocity = 0.8 * old_velocity + 0.2 * (7.0 / actual_days)
         assert abs(weights_arg.velocity_multiplier - expected_velocity) < 0.001, (
@@ -224,7 +250,9 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {
             400: _make_weights(accuracy_ema=old_accuracy, cost_multiplier=old_cost, velocity_multiplier=old_velocity)
         }
-        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=400)]
+        # effective_velocity=None deliberately exercises the 7.0-day
+        # fallback (see _make_plan_item's docstring).
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=400, effective_velocity=None)]
 
         # No realized sale (slow mover)
         self.realized.get_realized_profit_for_type.return_value = None
@@ -357,6 +385,33 @@ class TestFeedbackProcessor:
 
         weights_arg = self.repo.upsert_weights.call_args[0][0]
         assert weights_arg.confidence_tier == "high", f"Got {weights_arg.confidence_tier}"
+
+
+class TestEstimatePredictedSellDaysFallback:
+    """Direct coverage for `_estimate_predicted_sell_days`'s 7.0-day fallback.
+
+    `test_normal_outcome_ema_velocity_update` and
+    `test_slow_mover_skips_accuracy_and_cost` above now also exercise this
+    path (via `effective_velocity=None`), but nothing tested the fallback
+    in isolation before -- and it is exactly this function's fallback that
+    the `float(MagicMock())` trap (see `_make_plan_item`'s docstring) hid
+    for so long, by making it look like it always returned 1.0 instead.
+    """
+
+    def test_falls_back_to_seven_days_when_velocity_is_none(self):
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+            _estimate_predicted_sell_days,
+        )
+
+        item = _make_plan_item(effective_velocity=None)
+        assert _estimate_predicted_sell_days(item) == 7.0
+
+    def test_falls_back_to_seven_days_when_plan_item_is_none(self):
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+            _estimate_predicted_sell_days,
+        )
+
+        assert _estimate_predicted_sell_days(None) == 7.0
 
 
 class TestFindRealizedSaleAttribution:
