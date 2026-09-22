@@ -236,9 +236,9 @@ class Corporation:
                     value = getattr(self, column)
                     setattr(corporation_record, column, value)
             if hasattr(self, "wallets"):
-                corporation_record.wallets = json.dumps(self.wallets)
+                corporation_record.wallets = self.wallets
             if hasattr(self, "standings"):
-                corporation_record.standings = json.dumps(self.standings)
+                corporation_record.standings = self.standings
             corporation_record.updated_at = datetime.now(timezone.utc)
             self._db_app.session.commit()
             logging.debug(f"Corporation '{self.corporation_name}' saved to database.")

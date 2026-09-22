@@ -346,8 +346,8 @@ class CorporationModel(BaseApp):
     tax_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     war_eligible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    wallets: Mapped[Optional[str]] = mapped_column(JSON, nullable=True)
-    standings: Mapped[Optional[str]] = mapped_column(JSON, nullable=True)
+    wallets: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
+    standings: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
     date_founded: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
