@@ -179,6 +179,18 @@ SUB_MFG_BLUEPRINTS_ZERO_OUTPUT = {
 }
 
 
+def test_material_with_no_market_price_is_skipped_not_priced_at_zero():
+    """A material absent from market_depth_cache (no vwap_5d, no spot price)
+    must be skipped from the shopping list entirely -- not appended with a
+    price of 0.0, which would silently make it look free."""
+    items = ShoppingListBuilder().build(
+        assigned_actions=[_action(runs=20)], corp_assets=[], market_depth_cache={},
+        admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
+        meta_resolver=_NoBlueprints(),
+    )
+    assert items == []
+
+
 def test_sub_manufacture_with_no_usable_per_run_output_falls_back_to_one_run():
     # per_run_output is 0 (incomplete blueprint data) -- must not divide by
     # zero or raise, and must fall back to 1 run (100 material), not crash.

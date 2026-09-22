@@ -164,6 +164,40 @@ def test_phase_3_passes_row_not_overview_row_plus_every_other_argument(session_p
     assert captured["trit_trend_7d"] == 3.5
 
 
+def test_phase_4_forwards_row_admin_settings_and_meta_group_id_to_decide(session_provider):
+    """Guards the exact kwargs ItemDecisionEngine.decide now requires.
+
+    The write path from decide()'s return value onward is already covered by
+    test_daily_planner_end_to_end.py's read-back test, but nothing directly
+    proved _phase_4_decide forwards scored/pipeline/overview_row/
+    admin_settings/meta_group_id to decide() by name -- the same kwargs-drift
+    failure mode phase 2's and phase 3's wiring tests above already guard
+    against for their own phases.
+    """
+    captured = {}
+
+    svc = _service(session_provider, [GOOD_ROW])
+    svc._decision_engine = SimpleNamespace(
+        decide=lambda **kwargs: captured.update(kwargs) or SimpleNamespace(type_id=12345)
+    )
+    input_rows = svc._build_input_rows([GOOD_ROW])
+    pipeline_state = SimpleNamespace(type_id=12345)
+    scored_item = SimpleNamespace(type_id=12345)
+
+    decisions = svc._phase_4_decide(
+        [scored_item],
+        [pipeline_state],
+        {"overview_rows": [GOOD_ROW], "input_rows": input_rows},
+    )
+
+    assert len(decisions) == 1, "the stub decide() call must not be swallowed"
+    assert captured["scored"] is scored_item
+    assert captured["pipeline"] is pipeline_state
+    assert captured["overview_row"] == GOOD_ROW
+    assert captured["admin_settings"] is svc._admin
+    assert captured["meta_group_id"] == input_rows[0].meta_group_id
+
+
 def test_phase_7_passes_the_resolver(session_provider):
     captured = {}
 
