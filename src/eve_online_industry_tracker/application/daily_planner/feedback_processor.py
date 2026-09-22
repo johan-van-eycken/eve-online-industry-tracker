@@ -33,19 +33,16 @@ class FeedbackProcessor:
     """Match done manufacture actions to realized sales; update EMA weights.
 
     Constructor parameters:
-        realized_profit_service: CorporationRealizedProfitLedgerService instance.
         repo: DailyPlannerRepository instance.
         admin_settings: AdminSettingsManager instance (reads planner_ema_alpha etc.).
     """
 
     def __init__(
         self,
-        realized_profit_service: Any,
         repo: Any,
         admin_settings: Any,
         session_provider: Any = None,
     ) -> None:
-        self._realized = realized_profit_service
         self._repo = repo
         self._admin = admin_settings
         self._session_provider = session_provider
@@ -117,7 +114,7 @@ class FeedbackProcessor:
         """Process one done manufacture action. Returns True if processed, False if deferred."""
         type_id = int(action.type_id)
 
-        # Try to find matching realized sale via the service (temporal FIFO)
+        # Try to find matching realized sale via the session provider (temporal FIFO)
         realized = self._find_realized_sale(type_id, action=action)
 
         # Retrieve the plan_item for this action (needed for plan_item_id FK)
@@ -280,7 +277,7 @@ class FeedbackProcessor:
         generated_ts = generated_at.strftime("%Y-%m-%dT%H:%M:%S")
 
         if self._session_provider is None:
-            return self._find_realized_sale_via_service(type_id)
+            return None
 
         from eve_online_industry_tracker.infrastructure.models import (
             CorporationRealizedSalesLedgerModel,
@@ -327,49 +324,6 @@ class FeedbackProcessor:
             "material_cost": material_cost,
             "sell_days": sell_days,
         }
-
-    def _find_realized_sale_via_service(self, type_id: int) -> dict[str, Any] | None:
-        """Fallback used only when no session_provider is wired.
-
-        This path is deliberately still allowed to credit a sale, but note it
-        has no visibility into the action being scored at all — it takes only
-        `type_id` — so it cannot verify the postdates-the-action invariant
-        `_find_realized_sale` exists to enforce.
-
-        That gap is accepted rather than closed here because it cannot be
-        reached from production: `flask_app/bootstrap.py` always constructs
-        `FeedbackProcessor` with a real `session_provider`, so this branch
-        never runs against live data. The concrete
-        `CorporationRealizedProfitLedgerService` also does not implement
-        `get_realized_profit_for_type` at all, so even a hypothetical
-        session_provider-less deployment would fall straight through the
-        `AttributeError` branch below and credit nothing. Returning `None`
-        unconditionally here would match that production reality, but it
-        would also silently break every currently-passing unit test that
-        exercises the EMA arithmetic through this exact seam (they construct
-        `FeedbackProcessor` without a session_provider and mock this service
-        method) — none of which are about the attribution bug this task
-        fixes. Leaving the delegation in place costs nothing in production
-        and keeps that unrelated coverage intact.
-        """
-        try:
-            result = self._realized.get_realized_profit_for_type(type_id=type_id)
-        except AttributeError:
-            # Service does not implement this method — no realized sale data available
-            return None
-        if result is None:
-            return None
-        try:
-            return {
-                "isk_per_hour": result.get("isk_per_hour"),
-                "material_cost": result.get("material_cost"),
-                "sell_days": float(result.get("sell_days", 1.0)),
-            }
-        except (KeyError, TypeError, ValueError):
-            logger.debug(
-                "FeedbackProcessor: malformed realized profit result for type_id=%s", type_id,
-            )
-            return None
 
 
 def _parse_ledger_date(value: Any) -> date | None:

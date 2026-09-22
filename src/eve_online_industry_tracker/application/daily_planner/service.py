@@ -167,13 +167,19 @@ class DailyPlannerService:
         admin_settings: Any,
         session_provider: Any,
     ) -> None:
+        # `realized_profit_service` is accepted but intentionally not stored
+        # or forwarded: FeedbackProcessor no longer takes it (its one use
+        # site, `get_realized_profit_for_type`, does not exist anywhere in
+        # `src/` and was dead code), and nothing else on this service used
+        # it either. The parameter itself stays in the signature because
+        # dropping it would ripple into `flask_app/bootstrap.py` and several
+        # test constructions that pass it positionally/by keyword.
         self._industry = industry_service
         self._corporations = corporations_service
         self._characters = characters_service
         self._sales_history = sales_history_service
         self._pricing_suggestions = pricing_suggestion_service
         self._market_pricing = market_pricing_service
-        self._realized_profit = realized_profit_service
         self._repo = repo
         self._admin = admin_settings
         self._session_provider = session_provider
@@ -185,7 +191,6 @@ class DailyPlannerService:
 
         # Sub-components
         self._feedback_processor = FeedbackProcessor(
-            realized_profit_service=realized_profit_service,
             repo=repo,
             admin_settings=admin_settings,
             session_provider=session_provider,

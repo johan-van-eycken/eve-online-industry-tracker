@@ -36,15 +36,12 @@ class _StaticSessionProvider:
 def _processor(session, repo) -> FeedbackProcessor:
     """Build a FeedbackProcessor wired to `session` for direct-DB lookups.
 
-    `realized_profit_service` is an unused MagicMock here: these tests only
-    exercise `_find_realized_sale`'s direct-session-provider path, which
-    never calls it. `repo` is the real `planner_repo` fixture (per
-    conftest.py's caution: it was previously constructed but never
-    exercised) even though `_find_realized_sale` does not call into it
-    either -- it matches FeedbackProcessor's real production wiring shape.
+    `repo` is the real `planner_repo` fixture (per conftest.py's caution: it
+    was previously constructed but never exercised) even though
+    `_find_realized_sale` does not call into it either -- it matches
+    FeedbackProcessor's real production wiring shape.
     """
     return FeedbackProcessor(
-        realized_profit_service=MagicMock(),
         repo=repo,
         admin_settings=_make_admin(),
         session_provider=_StaticSessionProvider(session),
@@ -128,10 +125,14 @@ def _make_weights(
 
 class TestFeedbackProcessor:
     def setup_method(self):
-        self.realized = MagicMock()
         self.repo = MagicMock()
         self.admin = _make_admin(alpha=0.2, slow_mover_timeout=60.0)
-        self.processor = FeedbackProcessor(self.realized, self.repo, self.admin)
+        self.processor = FeedbackProcessor(self.repo, self.admin)
+        # `_find_realized_sale` is the real method that looks up a sale for
+        # an action; these tests are about EMA arithmetic, not sale lookup
+        # (that is covered separately by TestFindRealizedSaleAttribution's
+        # temporal tests), so it is stubbed directly per test below.
+        self.processor._find_realized_sale = MagicMock()
 
     def test_no_done_actions_returns_0(self):
         """No unprocessed done actions → process_pending_feedback returns 0."""
@@ -149,7 +150,7 @@ class TestFeedbackProcessor:
         }
 
         # Realized sale: actual ISK/hour = 8M
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 8_000_000.0,
             "material_cost": 5_000_000.0,
             "sell_days": 10.0,
@@ -183,7 +184,7 @@ class TestFeedbackProcessor:
         # Predicted cost = 1.0 (no plan_item material cost), actual = 6M
         # cost_multiplier = 0.8 * 1.0 + 0.2 * (max(0.01, 1.0) / max(0.01, 6M))
         actual_cost = 6_000_000.0
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 8_000_000.0,
             "material_cost": actual_cost,
             "sell_days": 5.0,
@@ -216,7 +217,7 @@ class TestFeedbackProcessor:
 
         # Actual sell_days = 5.0; predicted = 7.0 (velocity fallback)
         actual_days = 5.0
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
             "material_cost": 5_000_000.0,
             "sell_days": actual_days,
@@ -255,7 +256,7 @@ class TestFeedbackProcessor:
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=400, effective_velocity=None)]
 
         # No realized sale (slow mover)
-        self.realized.get_realized_profit_for_type.return_value = None
+        self.processor._find_realized_sale.return_value = None
 
         self.processor.process_pending_feedback()
 
@@ -283,7 +284,7 @@ class TestFeedbackProcessor:
         self.repo.get_unprocessed_done_actions.return_value = [action]
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=500)]
         self.repo.get_weights.return_value = {500: _make_weights()}
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
             "material_cost": 5_000_000.0,
             "sell_days": 7.0,
@@ -300,7 +301,7 @@ class TestFeedbackProcessor:
         self.repo.get_unprocessed_done_actions.return_value = [deliver, manufacture]
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=601)]
         self.repo.get_weights.return_value = {601: _make_weights()}
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
             "material_cost": 5_000_000.0,
             "sell_days": 7.0,
@@ -323,7 +324,7 @@ class TestFeedbackProcessor:
         self.repo.get_unprocessed_done_actions.return_value = [recent_action]
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=700)]
         self.repo.get_weights.return_value = {700: _make_weights()}
-        self.realized.get_realized_profit_for_type.return_value = None  # no sale yet
+        self.processor._find_realized_sale.return_value = None  # no sale yet
 
         result = self.processor.process_pending_feedback()
 
@@ -341,7 +342,7 @@ class TestFeedbackProcessor:
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=800)]
         old_count = 4
         self.repo.get_weights.return_value = {800: _make_weights(sample_count=old_count)}
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
             "material_cost": 5_000_000.0,
             "sell_days": 7.0,
@@ -358,7 +359,7 @@ class TestFeedbackProcessor:
         self.repo.get_unprocessed_done_actions.return_value = [action]
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=900)]
         self.repo.get_weights.return_value = {900: _make_weights(sample_count=4)}  # 4 → 5 after increment
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
             "material_cost": 5_000_000.0,
             "sell_days": 7.0,
@@ -375,7 +376,7 @@ class TestFeedbackProcessor:
         self.repo.get_unprocessed_done_actions.return_value = [action]
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=901)]
         self.repo.get_weights.return_value = {901: _make_weights(sample_count=19)}  # 19 → 20
-        self.realized.get_realized_profit_for_type.return_value = {
+        self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
             "material_cost": 5_000_000.0,
             "sell_days": 7.0,
