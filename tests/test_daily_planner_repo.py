@@ -580,3 +580,60 @@ def test_plan_items_persist_the_resolved_meta_group_id(app_session, session_prov
 
     item = app_session.query(BuildPlanItemModel).one()
     assert item.meta_group_id == 2
+
+
+# ---------------------------------------------------------------------------
+# DailyPlannerService._build_plan_items() / _persist_plan_items() --
+# snapshot_sell_price write (finding 15 fix round 1)
+#
+# This pins the one line that *is* the finding-15 fix:
+# `snapshot_sell_price=_spot_sell_price(market_depth_cache.get(d.type_id))`.
+# Without a test on it, a future refactor could drop the market_depth_cache
+# argument (or read the wrong entry) and every plan item would persist
+# snapshot_sell_price=None -- freshness would then silently freeze at a
+# confident-looking 1.0 forever, with the rest of the suite green. The price
+# below is distinctive (not 0 or 1) so a wrong source or a dropped argument
+# shows up as a mismatch rather than a coincidental match.
+# ---------------------------------------------------------------------------
+
+def test_persisted_plan_item_snapshot_price_matches_the_market_depth_entry(
+    app_session, session_provider
+):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    service = _service(session_provider)
+    # _decision() defaults to type_id=590 (Rifter) -- see _decision() above.
+    market_depth_cache = {590: {"spot_sell_price": 123456.78}}
+
+    built = service._build_plan_items(
+        plan_id=1, decisions=[_decision()], market_depth_cache=market_depth_cache
+    )
+    assert built[0].snapshot_sell_price == 123456.78
+
+    service._persist_plan_items(
+        plan_id=1, decisions=[_decision()], market_depth_cache=market_depth_cache
+    )
+
+    # Round trip through a separate session -- confirms the value was
+    # actually written to the DB, not just present on the in-memory object.
+    item = app_session.query(BuildPlanItemModel).one()
+    assert item.snapshot_sell_price == 123456.78
+
+
+def test_persisted_plan_item_snapshot_price_is_none_when_type_id_has_no_market_depth_entry(
+    app_session, session_provider
+):
+    """A decision whose type_id isn't in market_depth_cache must not silently
+    borrow another item's price -- it stays NULL (excluded from freshness'
+    denominator), not some wrong or stale value."""
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    service = _service(session_provider)
+    service._persist_plan_items(
+        plan_id=1,
+        decisions=[_decision()],
+        market_depth_cache={999: {"spot_sell_price": 42.0}},  # unrelated type_id
+    )
+
+    item = app_session.query(BuildPlanItemModel).one()
+    assert item.snapshot_sell_price is None

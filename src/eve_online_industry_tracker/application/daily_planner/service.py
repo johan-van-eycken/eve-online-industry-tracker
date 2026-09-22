@@ -50,22 +50,27 @@ def _spot_sell_price(entry: Any) -> float | None:
         return None
 
 
-def compute_freshness_score(
+def compute_freshness_stats(
     plan_items: list[Any],
     market_depth: dict[int, Any],
     drift_threshold_pct: float,
-) -> float:
-    """Fraction of plan items whose sell price has not drifted past the threshold.
+) -> tuple[float, int, int]:
+    """Compute freshness plus the counts behind it: (score, comparable, total).
 
-    Each item stores the sell price it was planned against
-    (`snapshot_sell_price`); freshness compares that with the current price.
-    Items with no snapshot or no current price are excluded from the
-    denominator — unknown is not the same as stale.
+    `total` is the number of plan items given; `comparable` is how many of
+    them had both a snapshot and a current price and so actually
+    contributed to `score`. Items with no snapshot or no current price are
+    excluded from `comparable` — unknown is not the same as stale.
 
-    Returns 1.0 when nothing is comparable, so a plan is never marked stale
-    purely for lack of data.
+    `score` is 1.0 whenever `comparable` is 0, so a plan is never marked
+    stale purely for lack of data. That means a 1.0 score is ambiguous by
+    itself: it means either "checked and nothing drifted" or "nothing was
+    checkable at all" (e.g. every item's snapshot write silently broke).
+    `comparable` is what tells those two apart — callers that care should
+    surface it next to the score rather than trusting 1.0 alone.
     """
     threshold = abs(float(drift_threshold_pct)) / 100.0
+    total = len(plan_items)
     comparable = 0
     drifted = 0
 
@@ -92,8 +97,30 @@ def compute_freshness_score(
             drifted += 1
 
     if comparable == 0:
-        return 1.0
-    return 1.0 - (drifted / comparable)
+        return 1.0, comparable, total
+    return 1.0 - (drifted / comparable), comparable, total
+
+
+def compute_freshness_score(
+    plan_items: list[Any],
+    market_depth: dict[int, Any],
+    drift_threshold_pct: float,
+) -> float:
+    """Fraction of plan items whose sell price has not drifted past the threshold.
+
+    Each item stores the sell price it was planned against
+    (`snapshot_sell_price`); freshness compares that with the current price.
+    Items with no snapshot or no current price are excluded from the
+    denominator — unknown is not the same as stale.
+
+    Returns 1.0 when nothing is comparable, so a plan is never marked stale
+    purely for lack of data. See `compute_freshness_stats` for a version
+    that also exposes the comparable/total counts behind this score.
+    """
+    score, _comparable, _total = compute_freshness_stats(
+        plan_items, market_depth, drift_threshold_pct
+    )
+    return score
 
 
 def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
@@ -227,13 +254,19 @@ class DailyPlannerService:
         items = self._repo.get_plan_items(int(plan.id))
         actions = self._repo.get_actions(int(plan.id))
 
-        freshness = self._compute_freshness_score(plan, items)
+        freshness, comparable_items, total_items = self._compute_freshness_score(plan, items)
 
         return {
             "plan": _model_to_dict(plan),
             "items": [_model_to_dict(i) for i in items],
             "actions": [_model_to_dict(a) for a in actions],
             "freshness_score": freshness,
+            # A 1.0 freshness_score alone can't distinguish "checked and
+            # nothing drifted" from "nothing was comparable" (e.g. every
+            # item's snapshot_sell_price is NULL). These two counts make
+            # that visible in the response instead of only in a log line.
+            "freshness_comparable_items": comparable_items,
+            "freshness_total_items": total_items,
         }
 
     def mark_action_done(self, action_id: int) -> None:
@@ -990,32 +1023,38 @@ class DailyPlannerService:
 
     def _compute_freshness_score(
         self, plan: Any, plan_items: list[Any] | None = None
-    ) -> float:
+    ) -> tuple[float, int, int]:
         """Compare current spot prices to each item's snapshot price.
 
-        Delegates the actual comparison to the pure `compute_freshness_score`
+        Delegates the actual comparison to the pure `compute_freshness_stats`
         function; this method only wires up the repo-backed inputs (plan
         items and the current market depth) that function needs.
+
+        Returns `(score, comparable, total)`. A 1.0 score by itself does not
+        say whether nothing drifted or nothing was comparable (e.g. every
+        item's `snapshot_sell_price` write silently broke) -- `comparable`
+        is what tells those apart, so callers should surface it alongside
+        the score rather than trusting 1.0 on its own.
         """
         snapshot_hash = getattr(plan, "market_snapshot_hash", None)
         if snapshot_hash is None:
-            return 1.0
+            return 1.0, 0, len(plan_items) if plan_items is not None else 0
 
         try:
             if plan_items is None:
                 plan_items = self._repo.get_plan_items(int(plan.id))
             if not plan_items:
-                return 1.0
+                return 1.0, 0, 0
 
             hub = str(_adm(self._admin, "planner_market_hub", "jita"))
             type_ids = [int(i.type_id) for i in plan_items]
             market_depth = self._repo.get_market_depth(type_ids, hub)
             drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0))
 
-            return compute_freshness_score(plan_items, market_depth, drift_threshold_pct)
+            return compute_freshness_stats(plan_items, market_depth, drift_threshold_pct)
         except (KeyError, TypeError, ValueError, AttributeError):
             logger.exception("DailyPlannerService: failed to compute freshness score")
-            return 1.0
+            return 1.0, 0, len(plan_items) if plan_items is not None else 0
 
     def _compute_snapshot_hash(
         self,
