@@ -1183,11 +1183,30 @@ def index_blueprint_assets(
     return bpos, bpcs
 
 
-def _select_division_one_balance(wallets: Any) -> float:
-    """Master wallet (division 1) balance from either ESI shape."""
-    if isinstance(wallets, str):
-        import json as _json
+#: Bound on repeated JSON decoding in _select_division_one_balance. Existing
+#: `corporations.wallets`/`standings` rows are double-JSON-encoded (a
+#: pre-fix bug in corporation.py's save path stored `json.dumps(...)` into a
+#: column SQLAlchemy's JSON type already serializes), so a single decode can
+#: still leave a str. A handful of iterations comfortably covers that and any
+#: one-off re-encoding, without risking an infinite loop on adversarial input.
+_MAX_WALLET_DECODE_ITERATIONS = 5
 
+
+def _select_division_one_balance(wallets: Any) -> float:
+    """Master wallet (division 1) balance from either ESI shape.
+
+    `wallets` may arrive already decoded (list/dict), singly JSON-encoded
+    (a str), or -- for existing double-encoded `corporations.wallets` rows --
+    a JSON string of a JSON string. Decode repeatedly while the value is
+    still a str, bounded by _MAX_WALLET_DECODE_ITERATIONS, so this is correct
+    for both already-stored double-encoded rows and newly written
+    single-encoded ones.
+    """
+    import json as _json
+
+    for _ in range(_MAX_WALLET_DECODE_ITERATIONS):
+        if not isinstance(wallets, str):
+            break
         try:
             wallets = _json.loads(wallets)
         except ValueError:

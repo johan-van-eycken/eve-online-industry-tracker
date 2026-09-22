@@ -1,6 +1,7 @@
 # tests/test_daily_planner_service_helpers.py
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.service import (
@@ -95,4 +96,42 @@ def test_wallet_balance_from_a_dict_keyed_by_division():
 
 def test_wallet_balance_is_zero_when_division_one_is_absent():
     assert _select_division_one_balance([{"division": 2, "balance": "1"}]) == 0.0
+    assert _select_division_one_balance(None) == 0.0
+
+
+# Real `corporations.wallets` rows store division/balance as strings (e.g.
+# "1", "966956772.5434"), not numbers -- these fixtures mirror that shape
+# rather than the numeric one used above, since that's what the helper
+# actually has to parse in production.
+_REAL_SHAPE_WALLETS = [
+    {"division": "1", "division_name": "Master Wallet", "balance": "966956772.5434"},
+    {"division": "2", "division_name": "Division 2", "balance": "0.0"},
+]
+
+
+def test_wallet_balance_from_a_plain_list():
+    """Already-decoded list (e.g. Corporation.wallets in memory) -- no decoding needed."""
+    assert _select_division_one_balance(_REAL_SHAPE_WALLETS) == 966956772.5434
+
+
+def test_wallet_balance_from_a_single_encoded_string():
+    """Correctly single-JSON-encoded value, as newly written rows will be post-fix."""
+    encoded = json.dumps(_REAL_SHAPE_WALLETS)
+    assert _select_division_one_balance(encoded) == 966956772.5434
+
+
+def test_wallet_balance_from_a_double_encoded_string():
+    """Double-JSON-encoded value, matching existing `corporations.wallets` rows written
+    by the pre-fix bug (json.dumps() called on a value already headed into a
+    SQLAlchemy JSON column, which serializes it again)."""
+    double_encoded = json.dumps(json.dumps(_REAL_SHAPE_WALLETS))
+    assert _select_division_one_balance(double_encoded) == 966956772.5434
+
+
+def test_wallet_balance_from_a_dict_keyed_by_division_string_balance():
+    """Dict-keyed shape with a string balance, matching the real data's types."""
+    assert _select_division_one_balance({"1": "966956772.5434"}) == 966956772.5434
+
+
+def test_wallet_balance_is_zero_for_none():
     assert _select_division_one_balance(None) == 0.0

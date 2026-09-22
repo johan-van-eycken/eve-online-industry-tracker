@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import json
 import logging
+import sqlite3
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError  # pyright: ignore[reportMissingImports]
+
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
+
+#: DatabaseManager wraps SQLAlchemy and raises SQLAlchemyError subclasses, but
+#: some tests pass a lightweight stand-in backed directly by sqlite3 (see
+#: tests/test_daily_planner_repo.py's _FakeDb), which raises the raw DBAPI
+#: error instead. Catching both keeps this module's error handling narrower
+#: than a bare `except Exception` while working against either backend.
+_DB_ERRORS = (SQLAlchemyError, sqlite3.OperationalError)
 
 
 def _ensure_table(db: DatabaseManager, *, ddl: str, table: str) -> None:
@@ -191,6 +202,71 @@ def backfill_job_activity_ids(session: Any) -> int:
     if updated:
         session.commit()
     return updated
+
+
+def normalize_double_encoded_json_column(db: DatabaseManager, *, table: str, column: str) -> int:
+    """Idempotently collapse a double-JSON-encoded column back to single-encoded.
+
+    A prior bug in corporation.py's save path called json.dumps() on
+    `wallets`/`standings` before assigning them to a mapped_column(JSON, ...)
+    column, so SQLAlchemy's JSON type serialized them a second time on
+    write -- every existing `corporations.wallets`/`standings` row is a JSON
+    string *of* a JSON string, needing two json.loads() calls to reach the
+    real value.
+
+    Reads each row's column as raw text via a plain SELECT (bypassing the
+    ORM, which would already undo one layer of encoding on load). A row is
+    only rewritten when decoding it once yields a *string* that itself
+    decodes to a list or dict -- that double-decodability is what marks a
+    row as double-encoded. NULL rows, and rows that decode once straight to
+    a list/dict (already correct), are left untouched, so re-running this
+    against an already-normalized (or never-broken) table is always a
+    no-op: it rewrites nothing and returns 0.
+
+    Returns the number of rows rewritten.
+    """
+    try:
+        rows = db.query(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL")
+    except _DB_ERRORS as e:
+        logging.warning("Failed reading %s.%s for JSON-encoding normalization: %s", table, column, str(e))
+        return 0
+
+    fixed = 0
+    for row_id, raw in rows:
+        if not isinstance(raw, str):
+            continue
+        try:
+            once = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(once, str):
+            # Decodes straight to a list/dict -- already singly-encoded, correct as-is.
+            continue
+        try:
+            twice = json.loads(once)
+        except (TypeError, ValueError):
+            # `once` is a string that isn't itself further-decodable JSON --
+            # not the double-encoding shape this migration targets. Leave it.
+            continue
+        if not isinstance(twice, (list, dict)):
+            continue
+        try:
+            # Bind `once` (the singly-encoded JSON string) directly as raw
+            # text via a parameterized UPDATE -- this bypasses the ORM's JSON
+            # type (which would serialize it a third time) and stores exactly
+            # the single-encoded representation the column should have had.
+            db.execute(
+                f"UPDATE {table} SET {column} = :value WHERE id = :row_id",
+                {"value": once, "row_id": row_id},
+            )
+            fixed += 1
+        except _DB_ERRORS as e:
+            logging.warning(
+                "Failed normalizing %s.%s for id=%s: %s", table, column, row_id, str(e)
+            )
+    if fixed:
+        logging.info("Normalized %d double-encoded %s.%s row(s)", fixed, table, column)
+    return fixed
 
 
 def ensure_app_schema(db_app: DatabaseManager) -> None:
@@ -793,3 +869,12 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
+
+    # Belt-and-braces normalization for existing corporations.wallets/standings
+    # rows written by the pre-fix double-JSON-encoding bug in corporation.py
+    # (see normalize_double_encoded_json_column's docstring). A corp refresh
+    # would eventually self-heal these rows anyway via save_corporation(), so
+    # this is not load-bearing -- just belt-and-braces for rows that are never
+    # refreshed again.
+    for column in ("wallets", "standings"):
+        normalize_double_encoded_json_column(db_app, table="corporations", column=column)
