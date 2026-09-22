@@ -37,6 +37,65 @@ def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
+def _spot_sell_price(entry: Any) -> float | None:
+    """Extract the spot sell price from a market-depth entry, or None."""
+    if entry is None:
+        return None
+    price = _get_attr(entry, "spot_sell_price")
+    if price is None:
+        return None
+    try:
+        return float(price)
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_freshness_score(
+    plan_items: list[Any],
+    market_depth: dict[int, Any],
+    drift_threshold_pct: float,
+) -> float:
+    """Fraction of plan items whose sell price has not drifted past the threshold.
+
+    Each item stores the sell price it was planned against
+    (`snapshot_sell_price`); freshness compares that with the current price.
+    Items with no snapshot or no current price are excluded from the
+    denominator — unknown is not the same as stale.
+
+    Returns 1.0 when nothing is comparable, so a plan is never marked stale
+    purely for lack of data.
+    """
+    threshold = abs(float(drift_threshold_pct)) / 100.0
+    comparable = 0
+    drifted = 0
+
+    for item in plan_items:
+        snapshot = _get_attr(item, "snapshot_sell_price")
+        if snapshot is None:
+            continue
+        try:
+            snapshot_price = float(snapshot)
+        except (TypeError, ValueError):
+            continue
+        if snapshot_price <= 0:
+            continue
+
+        entry = market_depth.get(int(_get_attr(item, "type_id") or 0))
+        if entry is None:
+            continue
+        current_price = _spot_sell_price(entry)
+        if current_price is None:
+            continue
+
+        comparable += 1
+        if abs(current_price - snapshot_price) / snapshot_price > threshold:
+            drifted += 1
+
+    if comparable == 0:
+        return 1.0
+    return 1.0 - (drifted / comparable)
+
+
 def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
     try:
         return admin_settings.get("daily_planner", key)
@@ -155,17 +214,20 @@ class DailyPlannerService:
             return {"status": self._status, "error": self._error}
 
     def get_active_plan(self) -> dict[str, Any]:
-        """Fetch the active plan; recompute freshness_score and write back."""
+        """Fetch the active plan and compute freshness_score for the response.
+
+        Freshness is computed fresh on every call but not persisted here — a
+        GET must not have a write side effect. The persisted freshness_score
+        is only ever updated by the recompute pipeline (`_phase_9_persist`).
+        """
         plan = self._repo.get_active_plan()
         if plan is None:
             return {"plan": None, "items": [], "actions": []}
 
-        # Recompute freshness score
-        freshness = self._compute_freshness_score(plan)
-        self._repo.update_freshness_score(int(plan.id), freshness)
-
         items = self._repo.get_plan_items(int(plan.id))
         actions = self._repo.get_actions(int(plan.id))
+
+        freshness = self._compute_freshness_score(plan, items)
 
         return {
             "plan": _model_to_dict(plan),
@@ -638,8 +700,26 @@ class DailyPlannerService:
         )
         plan_id = self._repo.insert_plan(plan)
 
-        # Build + persist plan items
-        self._persist_plan_items(plan_id, chain_plan.decisions)
+        # Build plan items (each stamped with the snapshot price it was
+        # planned against, taken from the same market_depth_cache used for
+        # the hash above) *before* persisting them. Freshness must be
+        # computed from these in-memory objects, not from the list
+        # insert_plan_items() returns afterwards -- SQLAlchemy expires ORM
+        # attributes on commit, and insert_plan_items() closes its session,
+        # so reading .snapshot_sell_price / .type_id post-insert raises
+        # DetachedInstanceError.
+        plan_items = self._build_plan_items(plan_id, chain_plan.decisions, market_depth_cache)
+
+        drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0))
+        freshness = compute_freshness_score(plan_items, market_depth_cache, drift_threshold_pct)
+
+        if plan_items:
+            self._repo.insert_plan_items(plan_items)
+
+        # This is the only place freshness_score is written -- a plain GET
+        # of the active plan (get_active_plan) must never have a write
+        # side effect.
+        self._repo.update_freshness_score(plan_id, freshness)
 
         # Fix plan_id on action rows (was 0 in Phase 8)
         for row in action_log_rows:
@@ -849,9 +929,18 @@ class DailyPlannerService:
         return index_blueprint_assets(corp_assets, self._meta_resolver)
 
     def _build_plan_items(
-        self, plan_id: int, decisions: list[Any]
+        self,
+        plan_id: int,
+        decisions: list[Any],
+        market_depth_cache: dict[int, Any] | None = None,
     ) -> list[BuildPlanItemModel]:
-        """Convert ItemDecision list to BuildPlanItemModel list."""
+        """Convert ItemDecision list to BuildPlanItemModel list.
+
+        `snapshot_sell_price` is taken from the same market-depth entry that
+        `_compute_snapshot_hash` reads (`spot_sell_price`), so the whole-plan
+        hash and each item's per-item price describe the same observation.
+        """
+        market_depth_cache = market_depth_cache or {}
         items = []
         for d in decisions:
             items.append(BuildPlanItemModel(
@@ -872,56 +961,60 @@ class DailyPlannerService:
                 break_even_days=d.break_even_days,
                 projected_annual_savings=d.projected_annual_savings,
                 effective_velocity=d.effective_velocity,
+                snapshot_sell_price=_spot_sell_price(market_depth_cache.get(d.type_id)),
             ))
         return items
 
-    def _persist_plan_items(self, plan_id: int, decisions: list[Any]) -> None:
+    def _persist_plan_items(
+        self,
+        plan_id: int,
+        decisions: list[Any],
+        market_depth_cache: dict[int, Any] | None = None,
+    ) -> list[BuildPlanItemModel]:
         """Build BuildPlanItemModel rows from decisions and write them via the repo.
 
-        Split out from Phase 9 so the plan-item write (including the resolved
+        Split out so the plan-item write (including the resolved
         meta_group_id -- see ItemDecisionEngine.decide()) is independently
         testable without running the whole compute pipeline.
+
+        Returns the items after they have been inserted and their owning
+        session closed -- callers must not read attributes off them (that
+        raises DetachedInstanceError); use the return value only for its
+        length/identity. `_phase_9_persist` computes freshness from a
+        separate, not-yet-persisted build instead, for exactly this reason.
         """
-        plan_items = self._build_plan_items(plan_id, decisions)
+        plan_items = self._build_plan_items(plan_id, decisions, market_depth_cache)
         if plan_items:
             self._repo.insert_plan_items(plan_items)
+        return plan_items
 
-    def _compute_freshness_score(self, plan: Any) -> float:
-        """Compare current spot prices to snapshot; return freshness (0.0–1.0)."""
+    def _compute_freshness_score(
+        self, plan: Any, plan_items: list[Any] | None = None
+    ) -> float:
+        """Compare current spot prices to each item's snapshot price.
+
+        Delegates the actual comparison to the pure `compute_freshness_score`
+        function; this method only wires up the repo-backed inputs (plan
+        items and the current market depth) that function needs.
+        """
         snapshot_hash = getattr(plan, "market_snapshot_hash", None)
         if snapshot_hash is None:
             return 1.0
 
-        # Re-read current prices from market_depth_cache
         try:
-            plan_items = self._repo.get_plan_items(int(plan.id))
+            if plan_items is None:
+                plan_items = self._repo.get_plan_items(int(plan.id))
+            if not plan_items:
+                return 1.0
+
             hub = str(_adm(self._admin, "planner_market_hub", "jita"))
             type_ids = [int(i.type_id) for i in plan_items]
-            if not type_ids:
-                return 1.0
-
             market_depth = self._repo.get_market_depth(type_ids, hub)
-            drift_threshold = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0)) / 100.0
+            drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0))
 
-            drifted = 0
-            for item in plan_items:
-                tid = int(item.type_id)
-                entry = market_depth.get(tid)
-                if entry is None:
-                    continue
-                current_price = _get_attr(entry, "spot_sell_price")
-                if current_price is None:
-                    continue
-                # Extract snapshot price from hash (simplified: use current to reconstruct)
-                # True staleness check would parse the hash; approximate here
-                # For now just check if we have prices (freshness always 1.0 in Phase A)
-                pass
-
-            total = len(type_ids)
-            if total == 0:
-                return 1.0
-            return 1.0 - (drifted / total)
-        except Exception:
+            return compute_freshness_score(plan_items, market_depth, drift_threshold_pct)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            logger.exception("DailyPlannerService: failed to compute freshness score")
             return 1.0
 
     def _compute_snapshot_hash(

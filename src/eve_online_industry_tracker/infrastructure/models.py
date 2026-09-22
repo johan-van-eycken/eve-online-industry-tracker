@@ -1085,6 +1085,7 @@ class BuildPlanItemModel(BaseApp):
     break_even_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     projected_annual_savings: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     effective_velocity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    snapshot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class DailyActionLogModel(BaseApp):

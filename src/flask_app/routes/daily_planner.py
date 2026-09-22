@@ -25,7 +25,8 @@ def status():
 
 @daily_planner_bp.get("/planner/plan")
 def plan():
-    # Side effect: recomputes freshness_score on each call (intentional per spec)
+    # Freshness is recomputed on every call but not persisted here — a GET
+    # must not have a write side effect (see DailyPlannerService.get_active_plan).
     require_ready(get_state())
     return ok(data=get_state().daily_planner_service.get_active_plan())
 

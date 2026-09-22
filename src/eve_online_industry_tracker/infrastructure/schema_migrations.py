@@ -610,7 +610,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "bpo_market_price REAL NULL,"
             "break_even_days REAL NULL,"
             "projected_annual_savings REAL NULL,"
-            "effective_velocity REAL NULL"
+            "effective_velocity REAL NULL,"
+            "snapshot_sell_price REAL NULL"
             ")"
         ),
     )
@@ -791,3 +792,4 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="build_plan_item", column="projected_annual_savings", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
+    _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
