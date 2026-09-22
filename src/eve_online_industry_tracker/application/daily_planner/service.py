@@ -813,13 +813,31 @@ class DailyPlannerService:
             return []
 
     def _get_industry_jobs(self) -> list[Any]:
-        """Active corp industry jobs -- delivered/cancelled/reverted jobs are not active."""
+        """Active corp + character industry jobs -- delivered/cancelled/reverted jobs are not active.
+
+        Slot capacity in EVE is per character, so a personally-installed job
+        (CharacterIndustryJobsModel) occupies one of that pilot's slots exactly
+        like a corp job they installed (CorporationIndustryJobsModel, keyed by
+        installer_id) -- querying only the corp table under-counts used slots
+        and lets the planner assign work EVE will then refuse to start.
+
+        Mirrors IndustryService.industry_active_jobs() (industry/service.py
+        ~7876-7891), which combines both tables for the same reason, but
+        deliberately diverges from its filter: that method uses
+        status == "active", while this keeps the deny-list
+        (_TERMINAL_JOB_STATUSES) on both queries -- a "paused" job still holds
+        a slot, and the deny-list (unlike an allow-list of "active") keeps it
+        counted as active.
+        """
         try:
             session = self._session_provider.app_session()
             try:
-                from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
+                from eve_online_industry_tracker.infrastructure.models import (
+                    CharacterIndustryJobsModel,
+                    CorporationIndustryJobsModel,
+                )
 
-                return (
+                corp_jobs = (
                     session.query(CorporationIndustryJobsModel)
                     .filter(
                         CorporationIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
@@ -827,6 +845,15 @@ class DailyPlannerService:
                     )
                     .all()
                 )
+                char_jobs = (
+                    session.query(CharacterIndustryJobsModel)
+                    .filter(
+                        CharacterIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
+                        | CharacterIndustryJobsModel.status.is_(None)
+                    )
+                    .all()
+                )
+                return list(char_jobs) + list(corp_jobs)
             finally:
                 session.close()
         except (KeyError, TypeError, ValueError):

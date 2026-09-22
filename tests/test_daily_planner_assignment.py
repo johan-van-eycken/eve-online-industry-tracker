@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.character_assigner import (
     CharacterAssigner,
 )
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
+from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+from eve_online_industry_tracker.infrastructure.models import CharacterIndustryJobsModel
 
 
 def _now():
@@ -136,3 +139,43 @@ def test_invention_prefers_the_higher_science_skilled_pilot():
     invent = [a for a in actions if a.action_type == "invent"]
     assert len(invent) == 1
     assert invent[0].character_id == 2
+
+
+def test_a_character_installed_job_deducts_a_manufacturing_slot(session_provider):
+    """Defect 2 (task-18a remediation): the planner could not see
+    character-installed jobs at all (DailyPlannerService._get_industry_jobs
+    queried only CorporationIndustryJobsModel), so a pilot's own job never
+    counted against their slots and the planner over-assigned work EVE would
+    then refuse to start. This goes through the real _get_industry_jobs (not
+    a hand-built job list) so a regression in either the query or in
+    _compute_available_slots's character_id/installer_id keying would be
+    caught. A wrong implementation (corp-only query) would leave free_mfg at
+    1 -- the character job would simply not exist as far as the planner is
+    concerned."""
+    session = session_provider.app_session()
+    try:
+        session.add(CharacterIndustryJobsModel(
+            character_id=7, job_id=301, status="active", activity_id=1,  # manufacturing
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: []),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        pricing_suggestion_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(),
+        realized_profit_service=SimpleNamespace(),
+        repo=SimpleNamespace(),
+        admin_settings=SimpleNamespace(get=lambda *a, **k: None),
+        session_provider=session_provider,
+    )
+    jobs = svc._get_industry_jobs()
+    assert {j.job_id for j in jobs} == {301}, "the character job must come through the real query"
+
+    chars = [_char(7, "Pilot", [])]  # unskilled: 1 base mfg slot
+    slots = CharacterAssigner()._compute_available_slots(chars, jobs, _now())
+    assert slots[7]["free_mfg"] == 0

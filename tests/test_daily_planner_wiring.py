@@ -18,7 +18,10 @@ from eve_online_industry_tracker.application.daily_planner.input_row import (
 from eve_online_industry_tracker.application.daily_planner.service import (
     DailyPlannerService,
 )
-from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
+from eve_online_industry_tracker.infrastructure.models import (
+    CharacterIndustryJobsModel,
+    CorporationIndustryJobsModel,
+)
 
 GOOD_ROW = {
     "type_id": 12345,
@@ -201,3 +204,30 @@ def test_get_industry_jobs_excludes_only_terminal_statuses(session_provider):
 
     job_ids = {job.job_id for job in jobs}
     assert job_ids == {101, 102}
+
+
+def test_get_industry_jobs_includes_character_jobs_not_only_corp_jobs(session_provider):
+    """Defect 2 (task-18a remediation): the live database holds 945
+    character-installed jobs that a corp-only query can never see. Slot
+    capacity is per character, so a personally-installed job must count
+    against that pilot's slots exactly like a corp job they installed --
+    _get_industry_jobs must query both CorporationIndustryJobsModel and
+    CharacterIndustryJobsModel, applying the same deny-list status filter to
+    each (a wrong implementation that queries only the corp table would
+    return job_ids == {101} here, silently dropping the character job)."""
+    session = session_provider.app_session()
+    try:
+        session.add_all([
+            CorporationIndustryJobsModel(corporation_id=1, job_id=101, status="active"),
+            CharacterIndustryJobsModel(character_id=7, job_id=201, status="active"),
+            CharacterIndustryJobsModel(character_id=7, job_id=202, status="delivered"),
+        ])
+        session.commit()
+    finally:
+        session.close()
+
+    svc = _service(session_provider, [])
+    jobs = svc._get_industry_jobs()
+
+    job_ids = {job.job_id for job in jobs}
+    assert job_ids == {101, 201}
