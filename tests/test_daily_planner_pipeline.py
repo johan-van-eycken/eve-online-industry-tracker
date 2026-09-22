@@ -10,11 +10,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
+from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
 
 
 class _NoBlueprints:
     def is_blueprint(self, type_id):
         return False
+
+    def prefetch(self, type_ids):
+        """No-op: this stub answers is_blueprint() from a fixed rule, not an SDE
+        loader -- there is nothing to warm. Real batching (Defect 3, task-18a
+        remediation) is proved separately below against a recording loader."""
+        return None
 
 
 class _BlueprintFor:
@@ -23,6 +30,9 @@ class _BlueprintFor:
 
     def is_blueprint(self, type_id):
         return int(type_id) in self._ids
+
+    def prefetch(self, type_ids):
+        return None
 
 
 def _input_row(**overrides) -> PlannerInputRow:
@@ -303,3 +313,50 @@ class TestPipelineAnalyzer:
         assert states[0].price_trend_7d_pct == 3.5
         # momentum = 3.5 - (-2.0 / 4)
         assert states[0].momentum_signal == 4.0
+
+
+class _RecordingLoader:
+    """Mirrors tests/test_type_metadata.py's _FakeLoader and
+    test_daily_planner_service_helpers.py's _RecordingLoader: records every
+    batch of type_ids it was asked to load, so a test can assert it was
+    invoked exactly once (batched), not once per corp asset."""
+
+    def __init__(self, data):
+        self._data = data
+        self.calls: list[list[int]] = []
+
+    def __call__(self, session, language, type_ids):
+        self.calls.append(sorted(type_ids))
+        return {tid: self._data[tid] for tid in type_ids if tid in self._data}
+
+
+def test_is_blueprint_lookups_are_prefetched_in_one_batch_not_per_asset():
+    """Defect 3 (task-18a remediation): analyze()'s corp-asset loop calls
+    meta_resolver.is_blueprint(type_id) per asset. Without an up-front batched
+    prefetch, TypeMetadataResolver._entry() self-heals each cache miss with a
+    single-id prefetch, so a real resolver would open one SDE session (with
+    its metaGroups table reflection) per distinct asset type_id -- measured
+    as ~881 reflected open/query/close cycles against this app's live
+    corp_assets table of 4263 rows. A wrong implementation (no prefetch added
+    to analyze(), mirroring the pre-fix code) would make loader.calls contain
+    one entry per distinct type_id instead of a single batched entry."""
+    row = _input_row(blueprint_type_id=999)
+    assets = [
+        SimpleNamespace(type_id=999, is_blueprint_copy=True, blueprint_runs=5, quantity=1),
+        SimpleNamespace(type_id=888, is_blueprint_copy=False, blueprint_runs=None, quantity=1),
+        SimpleNamespace(type_id=999, is_blueprint_copy=True, blueprint_runs=3, quantity=1),
+    ]
+    loader = _RecordingLoader({
+        999: {"type_id": 999, "category_id": 9, "meta_group_id": None, "category_name": "Blueprint"},
+        888: {"type_id": 888, "category_id": 9, "meta_group_id": None, "category_name": "Blueprint"},
+    })
+    resolver = TypeMetadataResolver(sde_session_provider=lambda: None, loader=loader)
+
+    states = PipelineAnalyzer().analyze(
+        input_rows=[row], industry_jobs=[], corp_assets=assets,
+        market_depth_cache={}, weights={}, sell_velocities={},
+        meta_resolver=resolver,
+    )
+
+    assert loader.calls == [[888, 999]], "the loader must be invoked exactly once, batched"
+    assert states[0].bpc_runs_available == 8

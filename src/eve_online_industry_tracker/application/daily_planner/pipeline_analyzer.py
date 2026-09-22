@@ -48,9 +48,11 @@ def _now() -> datetime:
 
 
 class BlueprintCategorySource(Protocol):
-    """The one TypeMetadataResolver method this module needs — see type_metadata.py."""
+    """The TypeMetadataResolver methods this module needs — see type_metadata.py."""
 
     def is_blueprint(self, type_id: int) -> bool: ...
+
+    def prefetch(self, type_ids: Any) -> None: ...
 
 
 class PipelineAnalyzer:
@@ -88,6 +90,21 @@ class PipelineAnalyzer:
         # A blueprint *copy* is is_blueprint_copy=True with blueprint_runs > 0;
         # the category check keeps non-blueprint assets out even if a future
         # schema reuses those column names.
+        #
+        # Pre-warm the resolver's cache with every distinct asset type_id in one
+        # batched SDE query before the per-asset is_blueprint() loop below --
+        # mirrors the same fix already applied to index_blueprint_assets (service.py)
+        # and _build_corp_stock_map. Without this, TypeMetadataResolver._entry()
+        # self-heals a cache miss by calling prefetch() for a single id, so
+        # is_blueprint() here would otherwise open one SDE session (with its
+        # metaGroups table reflection) per distinct type_id -- measured as 881
+        # reflected open/query/close cycles for this app's live corp_assets table
+        # of 4263 rows. prefetch() is idempotent (skips ids already cached or
+        # already marked missing), so this is safe even if a caller already
+        # warmed it.
+        asset_type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
+        meta_resolver.prefetch({t for t in asset_type_ids if t > 0})
+
         bpc_runs_by_type: dict[int, int] = {}
         for asset in corp_assets:
             type_id = int(_asset_attr(asset, "type_id") or 0)
