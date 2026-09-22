@@ -28,6 +28,16 @@ regardless of its value's type, which is still how numeric identity fields
 (`structure_id`, `corporation_id`, ...) are removed rather than merely
 scrambled into another number that happens to look plausible.
 
+Known disclosure: booleans (e.g. `has_bpo`) and the public numeric keys
+(`type_id`, `blueprint_type_id`) are deliberately passed through verbatim —
+tests need the real True/False branching and real type ids, not scrambled
+stand-ins. Combined, that discloses which specific products this corporation
+currently holds a BPO for. This is an accepted trade-off, not an oversight;
+see the capture step's disclosure note in
+docs/superpowers/plans/2026-09-17-daily-planner-remediation.md (Task 3) —
+review captured rows by eye before committing, rather than relying on this
+sanitiser to hide per-item BPO ownership.
+
 Known limitation: magnitudes are scrambled independently per field, so
 cross-field arithmetic invariants in a row do not survive sanitisation
 (profit_amount is not revenue minus cost; material_cost is not the sum of
@@ -99,10 +109,14 @@ def _is_identity_key(key: str) -> bool:
 
 
 def _scramble_number(value: Any, rng: random.Random) -> Any:
-    """Replace a magnitude with a plausible one, preserving type and sign."""
+    """Replace a magnitude with a plausible one, preserving type and sign.
+
+    `value` is never a `bool` here: `_sanitise_value` -- the only caller --
+    already returns bools verbatim before this is ever invoked (`bool` is a
+    subclass of `int` in Python, so without that earlier check a bool would
+    otherwise reach the `int` branch below).
+    """
     factor = rng.uniform(0.5, 1.5)
-    if isinstance(value, bool):
-        return value
     if isinstance(value, int):
         scrambled = int(value * factor)
         if value != 0 and scrambled == 0:
@@ -126,7 +140,14 @@ def _sanitise_value(key: str, value: Any, rng: random.Random) -> Any:
         if key in _PUBLIC_STRING_KEYS:
             return value
         return _REDACTED
-    # Unknown/exotic value type: redact rather than risk leaking it verbatim.
+    # Unknown/exotic value type (tuple, set, datetime, ...): redact rather
+    # than risk leaking it verbatim. Believed unreachable for a real overview
+    # row today -- IndustryService's row builders only ever assign
+    # dict/list/str/int/float/bool/None into a row (every set/tuple found in
+    # service.py is a local working variable, never stored on the row itself,
+    # and every datetime is `.isoformat()`-stringified before assignment) --
+    # but this branch stays as a deliberate defence-in-depth backstop rather
+    # than being removed, since a future enrichment pass could add one.
     return _REDACTED
 
 

@@ -34,7 +34,12 @@ class ShoppingListBuilder:
         assigned_actions: from Phase 6 (includes manufacture, sub_manufacture, invent, copy, me_research, te_research)
         corp_assets: all corp asset objects
         market_depth_cache: keyed by type_id → MarketDepthCacheModel or dict
-        admin_settings: for future config (currently unused)
+        admin_settings: intentionally unused today. Kept as a required parameter
+            (not dropped) because DailyPlannerService's Phase 7 call site already
+            passes it, and a future "future_stock" shopping category -- buying
+            ahead of need rather than net of the current job -- would read admin
+            settings (e.g. a stock-target admin knob) from here. Do not delete
+            this parameter as dead; it is deliberately future-facing.
         blueprint_data: type_id → blueprint manufacturing data (for material lookups)
         meta_resolver: TypeMetadataResolver, used to tell blueprints apart from
             material stock in corp_assets

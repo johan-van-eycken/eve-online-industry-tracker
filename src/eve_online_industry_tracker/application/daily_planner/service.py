@@ -597,6 +597,11 @@ class DailyPlannerService:
         for ps in pipeline_states:
             row = input_by_type.get(ps.type_id)
             if row is None:
+                # Believed unreachable: analyze() derives every
+                # PipelineState.type_id from an input row in input_by_type, so
+                # there is no pipeline state whose type_id isn't a key here.
+                # Left in deliberately as a defensive guard against a future
+                # change to analyze() breaking that invariant silently.
                 continue
             weights = phase1["weights"].get(ps.type_id)
             market_depth = phase1["market_depth_cache"].get(ps.type_id)

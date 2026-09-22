@@ -465,6 +465,14 @@ If `pipeline_units_on_market` / `pipeline_days_supply` / `price_trend_7d_pct` ar
 refresh did not run the enrichment passes that add them. Re-run the refresh with market history
 enabled before continuing — Tasks 6 and 9 depend on those keys being real.
 
+**Disclosure note:** the sanitiser (`fixture_export.py`) passes booleans and the public
+`type_id`/`blueprint_type_id` keys through verbatim, by design — tests need the exact `has_bpo`
+True/False (and other bool flags) to exercise real branching, and a scrambled type id would break
+every type-id-keyed test. The combination discloses, per captured row, which products this
+corporation currently holds a BPO for. That is an accepted trade-off, not an oversight, but it is
+real information about corp holdings — review the captured rows before committing and drop or
+re-roll any row you are not comfortable publishing, rather than relying on the sanitiser to hide it.
+
 - [ ] **Step 5: Commit**
 
 ```bash

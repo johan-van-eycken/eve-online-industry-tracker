@@ -55,6 +55,13 @@ class ProfitabilityScorer:
         confidence_tier_bonus = {"low": 1.0, "medium": 1.05, "high": 1.15}.get(confidence_tier, 1.0)
 
         # ── Market timing factor ──────────────────────────────────────────────
+        # price_trend_7d_pct is 0.0 both when the 7d trend is genuinely flat
+        # and when it was absent/None on the source row (overview_row.py's
+        # get_price_trend_7d_pct treats both as 0.0 by design). That
+        # conflates "no history" with "flat", but it is harmless here: at
+        # price_trend_7d == 0.0, base_factor below evaluates to 1.0 -- neutral,
+        # neither a bonus nor a penalty -- so an unknown trend scores exactly
+        # like a flat one instead of skewing the plan either way.
         price_trend_7d = pipeline.price_trend_7d_pct
         momentum_signal = pipeline.momentum_signal
 
