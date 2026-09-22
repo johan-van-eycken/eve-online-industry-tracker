@@ -116,5 +116,10 @@ def debug_overview_fixture():
             status_code=409,
         )
 
-    limit = int(request.args.get("limit", 20))
+    raw_limit = request.args.get("limit", "20")
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return error(message=f"limit must be an integer, got {raw_limit!r}", status_code=400)
+    limit = max(1, min(limit, 500))
     return ok(data=sanitise_overview_rows(rows[:limit]))

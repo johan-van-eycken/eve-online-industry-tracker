@@ -54,13 +54,11 @@ class TypeMetadataResolver:
         otherwise-successful load is a different, legitimate case and is still
         cached in `_missing` below.
         """
-        wanted = {
-            int(tid)
-            for tid in type_ids
-            if int(tid or 0) > 0
-            and int(tid) not in self._cache
-            and int(tid) not in self._missing
-        }
+        wanted: set[int] = set()
+        for raw_tid in type_ids:
+            tid = int(raw_tid or 0)
+            if tid > 0 and tid not in self._cache and tid not in self._missing:
+                wanted.add(tid)
         if not wanted:
             return
 

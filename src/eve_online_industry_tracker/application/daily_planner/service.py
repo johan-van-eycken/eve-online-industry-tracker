@@ -731,8 +731,12 @@ class DailyPlannerService:
         overview_rows = phase1_data["overview_rows"]
         snapshot_hash = self._compute_snapshot_hash(overview_rows, market_depth_cache)
 
-        # Corp wallet
-        corp_wallet = float(phase1_data.get("corp_wallet") or 0.0)
+        # Corp wallet. `None` means "unparseable balance, unknown" (see
+        # _get_corp_wallet) and must reach the DB as NULL, not as a
+        # misleading 0.0 -- corp_wallet_snapshot is nullable precisely for
+        # this. Only a genuinely absent phase1 key collapses to 0.0.
+        _raw_corp_wallet = phase1_data.get("corp_wallet", 0.0)
+        corp_wallet = None if _raw_corp_wallet is None else float(_raw_corp_wallet)
 
         now = _now()
         plan = BuildPlanModel(
@@ -783,8 +787,15 @@ class DailyPlannerService:
     # Helper methods
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _get_corp_wallet(self) -> float:
-        """Master wallet (division 1) balance, or 0.0 when unavailable."""
+    def _get_corp_wallet(self) -> float | None:
+        """Master wallet (division 1) balance.
+
+        Returns `0.0` when the corp/division-1 wallet is genuinely absent
+        (no corporations, no division-1 entry) and `None` when a division-1
+        balance was present but unparseable -- see `_select_division_one_balance`.
+        Callers must not coerce the `None` case to `0.0`; a real zero balance
+        and "we could not read the wallet" must stay distinguishable.
+        """
         try:
             corps = self._corporations.list_corporations()
         except (KeyError, TypeError, ValueError):
@@ -795,7 +806,13 @@ class DailyPlannerService:
             return 0.0
         corp = corps[0] if isinstance(corps, list) else corps
         wallets = corp.get("wallets") if isinstance(corp, dict) else getattr(corp, "wallets", None)
-        return _select_division_one_balance(wallets)
+        balance = _select_division_one_balance(wallets)
+        if balance is None:
+            logger.warning(
+                "DailyPlannerService: division-1 wallet balance present but unparseable "
+                "-- treating as unknown, not zero"
+            )
+        return balance
 
     def _get_overview_rows(self) -> list[dict[str, Any]]:
         """Get IndustryService overview rows from cache.
@@ -1192,7 +1209,7 @@ def index_blueprint_assets(
 _MAX_WALLET_DECODE_ITERATIONS = 5
 
 
-def _select_division_one_balance(wallets: Any) -> float:
+def _select_division_one_balance(wallets: Any) -> float | None:
     """Master wallet (division 1) balance from either ESI shape.
 
     `wallets` may arrive already decoded (list/dict), singly JSON-encoded
@@ -1201,6 +1218,12 @@ def _select_division_one_balance(wallets: Any) -> float:
     still a str, bounded by _MAX_WALLET_DECODE_ITERATIONS, so this is correct
     for both already-stored double-encoded rows and newly written
     single-encoded ones.
+
+    Returns `0.0` when no division-1 entry is present at all (division-1
+    genuinely absent from the payload). Returns `None` when a division-1
+    entry *is* present but its balance could not be parsed as a number --
+    see `_parse_isk` -- so callers can tell "known zero" apart from
+    "unknown/unparseable".
     """
     import json as _json
 
@@ -1223,8 +1246,15 @@ def _select_division_one_balance(wallets: Any) -> float:
     return 0.0
 
 
-def _parse_isk(raw: Any) -> float:
+def _parse_isk(raw: Any) -> float | None:
+    """Parse an ESI-shaped ISK balance (possibly a comma-grouped string).
+
+    Returns `None` when `raw` cannot be parsed as a number, so a malformed
+    balance is distinguishable from a genuine `0.0` balance -- unlike a
+    plain `float(...) or 0.0` coercion, which would make the two look
+    identical to every caller.
+    """
     try:
         return float(str(raw).replace(",", ""))
     except (TypeError, ValueError):
-        return 0.0
+        return None

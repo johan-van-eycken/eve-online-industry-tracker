@@ -88,3 +88,46 @@ def test_run_compute_completes_end_to_end_and_persists_a_plan_with_items(
         "input row must have produced at least one persisted plan item"
     )
     assert items[0].type_id == GOOD_ROW["type_id"]
+
+
+def test_a_malformed_wallet_balance_persists_as_unknown_not_a_real_zero(
+    session_provider, planner_repo, tmp_path
+):
+    """FIX #1 of the minors backlog: `_parse_isk` returning `0.0` for a
+    malformed balance was indistinguishable from a genuine zero balance --
+    the same silent-swallow shape as the original corporate-wallet review
+    finding. corp_wallet_snapshot is nullable precisely so "unknown" (a
+    present-but-unparseable division-1 balance) can reach the persisted
+    plan as `None`/NULL rather than a misleading `0.0`, without aborting
+    plan computation or changing any other planner output.
+    """
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(
+            get_cached_overview_rows=lambda: [GOOD_ROW],
+        ),
+        corporations_service=SimpleNamespace(
+            list_corporations=lambda: [
+                {"wallets": [{"division": 1, "balance": "not-a-number"}]}
+            ]
+        ),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        pricing_suggestion_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+
+    svc._run_compute()
+
+    assert svc._status == "done", f"plan computation failed: {svc._error}"
+    plan = planner_repo.get_active_plan()
+    assert plan is not None
+    assert plan.corp_wallet_snapshot is None, (
+        "an unparseable division-1 balance must persist as unknown (None/NULL), "
+        "not as a 0.0 that looks like a real zero balance"
+    )

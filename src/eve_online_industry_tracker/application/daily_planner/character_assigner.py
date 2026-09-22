@@ -41,10 +41,28 @@ def skill_levels_by_name(char: dict[str, Any]) -> dict[str, int]:
     ESI's skill list against every published SDE skill and carries skill_name
     alongside trained_skill_level. Note the stored payload has no
     `active_skill_level` key at all — reading one yields 0 for every skill.
+
+    A character with no skills data at all (missing/`None`/empty) is a
+    legitimate, quiet `{}` — nothing trained yet, or not fetched. A `skills`
+    value that *is* present but not the expected `{"skills": [...]}` wrapper
+    (e.g. a bare list) is a malformed payload, not an absence: it is logged
+    at warning and still returns `{}` rather than raising, since one pilot's
+    bad payload must not abort the whole plan -- it just falls back to base
+    slot capacity for that pilot.
     """
-    raw = char.get("skills") or {}
+    raw = char.get("skills")
+    if not raw:
+        return {}
+
     entries = raw.get("skills") if isinstance(raw, dict) else None
     if not isinstance(entries, list):
+        logger.warning(
+            "CharacterAssigner: character %s has a 'skills' payload that is not the "
+            "expected {'skills': [...]} wrapper (got %s) -- treating as no trained "
+            "skills for this pilot rather than aborting the plan",
+            char.get("character_id") or char.get("id") or char.get("character_name") or char.get("name") or "?",
+            type(raw).__name__,
+        )
         return {}
 
     levels: dict[str, int] = {}

@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.service import (
+    _parse_isk,
     _select_division_one_balance,
     index_blueprint_assets,
 )
@@ -135,3 +136,28 @@ def test_wallet_balance_from_a_dict_keyed_by_division_string_balance():
 
 def test_wallet_balance_is_zero_for_none():
     assert _select_division_one_balance(None) == 0.0
+
+
+def test_parse_isk_returns_none_for_unparseable_balance():
+    """A malformed balance must not silently become a real zero -- that is
+    the exact silent-swallow shape the original wallet review finding was
+    about, just one level down."""
+    assert _parse_isk("not-a-number") is None
+    assert _parse_isk(None) is None
+    assert _parse_isk(object()) is None
+
+
+def test_parse_isk_still_parses_a_genuine_zero():
+    assert _parse_isk("0") == 0.0
+    assert _parse_isk(0) == 0.0
+
+
+def test_wallet_balance_is_none_when_division_one_balance_is_unparseable():
+    """A present-but-malformed division-1 balance is `None` (unknown), not
+    `0.0` -- distinguishable from both a real zero and an absent division."""
+    assert _select_division_one_balance([{"division": 1, "balance": "garbage"}]) is None
+    assert _select_division_one_balance({"1": "garbage"}) is None
+
+
+def test_wallet_balance_zero_is_still_a_real_zero():
+    assert _select_division_one_balance([{"division": 1, "balance": "0"}]) == 0.0

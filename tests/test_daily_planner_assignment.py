@@ -74,6 +74,22 @@ def test_skill_levels_of_a_character_without_skills_is_empty():
     assert skill_levels_by_name({"character_id": 1, "skills": {}}) == {}
 
 
+def test_skill_levels_of_a_malformed_bare_list_payload_warns_but_does_not_raise(caplog):
+    """Real payloads are always wrapped as {"skills": [...]}. A bare list is a
+    malformed producer bug, not a legitimate absence -- it must be logged at
+    warning (review finding 1's symptom: every pilot silently collapsing to 1
+    slot) but must never raise, since one pilot's bad payload must not abort
+    the whole plan."""
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        skill_levels_by_name,
+    )
+
+    bare_list_char = {"character_id": 1, "skills": [_skill("Mass Production", 5)]}
+    with caplog.at_level("WARNING"):
+        assert skill_levels_by_name(bare_list_char) == {}
+    assert any("skills" in r.message.lower() for r in caplog.records)
+
+
 def test_slot_capacity_uses_trained_skill_levels():
     # Mass Production 5 + Advanced Mass Production 4 => 1 + 5 + 4 = 10 mfg slots
     chars = [_char(1, "Pilot", [_skill("Mass Production", 5),
