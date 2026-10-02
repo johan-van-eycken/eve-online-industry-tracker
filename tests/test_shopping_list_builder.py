@@ -33,12 +33,12 @@ class _Admin:
         return default
 
 
-def _action(runs, type_id=12345, blueprint_type_id=999):
+def _action(runs, type_id=12345, blueprint_type_id=999, materials=None):
     return AssignedAction(
         type_id=type_id, type_name="Widget", action_type="manufacture",
         character_id=1, character_name="Pilot", quantity=None, runs=runs,
         estimated_cost_isk=None, estimated_profit_isk=None,
-        estimated_completion=None, notes=None,
+        estimated_completion=None, notes=None, materials=materials,
     )
 
 
@@ -323,3 +323,55 @@ def test_invention_input_without_a_price_is_skipped_with_a_warning(caplog):
         str(DATACORE_ID) in r.getMessage() and "no price" in r.getMessage()
         for r in caplog.records if r.levelno == logging.WARNING
     )
+
+
+# --- F4: producer batch materials and sub-manufactured components ------------
+
+def test_a_manufacture_action_buys_the_producers_batch_quantities():
+    """The producer already scaled by runs and ME/structure (1800, not the SDE's
+    100 x 20 = 2000), so the batch quantity is bought as-is."""
+    items = _build([_action(runs=20, materials={34: 1800})], [])
+    assert [(i.type_id, i.quantity) for i in items] == [(34, 1800)]
+
+
+def test_a_sub_manufactured_component_is_not_also_bought_for_the_parent():
+    """F4: the parent bought the full component AND a sub_manufacture action
+    built it. The parent now buys only what sub-manufacture does not cover."""
+    blueprints = {
+        999: {"manufacturing": {"materials": [], "products": [{"type_id": 12345, "quantity": 1}]}},
+        888: {"manufacturing": {
+            "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 2}],
+            "products": [{"type_id": 54321, "quantity": 10}],
+        }},
+    }
+    parent = _action(runs=20, materials={54321: 1800})
+    sub = _sub_manufacture_action(quantity=1500, type_id=54321)
+    depth = {34: {"vwap_5d": 5.0}, 54321: {"vwap_5d": 7.0}}
+
+    items = ShoppingListBuilder().build(
+        assigned_actions=[parent, sub], corp_assets=[], market_depth_cache=depth,
+        admin_settings=_Admin(), blueprint_data=blueprints, meta_resolver=_NoBlueprints(),
+    )
+
+    by_type = {i.type_id: i.quantity for i in items}
+    assert by_type[54321] == 300          # 1800 needed - 1500 built
+    assert by_type[34] == 150 * 2         # the sub job's own input: 150 runs x 2
+
+
+def test_sub_manufacture_covers_several_parents_in_order():
+    blueprints = {
+        999: {"manufacturing": {"materials": [], "products": [{"type_id": 12345, "quantity": 1},
+                                                              {"type_id": 22222, "quantity": 1}]}},
+        888: {"manufacturing": {"materials": [], "products": [{"type_id": 54321, "quantity": 1}]}},
+    }
+    parents = [_action(runs=1, materials={54321: 300}),
+               _action(runs=1, type_id=22222, materials={54321: 200})]
+    sub = _sub_manufacture_action(quantity=400, type_id=54321)
+
+    items = ShoppingListBuilder().build(
+        assigned_actions=[*parents, sub], corp_assets=[],
+        market_depth_cache={54321: {"vwap_5d": 7.0}}, admin_settings=_Admin(),
+        blueprint_data=blueprints, meta_resolver=_NoBlueprints(),
+    )
+
+    assert sum(i.quantity for i in items if i.type_id == 54321) == 100

@@ -92,6 +92,10 @@ class AssignedAction:
     estimated_completion: datetime | None
     notes: str | None
     shopping_category: str | None = None  # for buy_materials rows
+    # manufacture only: {material type_id: units for the whole batch} from the
+    # producer (runs and ME/structure already applied). None = unknown, and the
+    # shopping list then falls back to SDE per-run quantities x runs.
+    materials: dict[int, int] | None = None
 
 
 @dataclass

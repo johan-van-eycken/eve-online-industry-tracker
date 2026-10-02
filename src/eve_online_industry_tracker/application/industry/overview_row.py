@@ -83,6 +83,33 @@ def get_material_cost_total(row: dict[str, Any]) -> float | None:
     return _as_optional_float(get_manufacturing_job(row).get("material_cost"))
 
 
+def get_batch_materials(row: dict[str, Any]) -> dict[int, int] | None:
+    """{material type_id: units for the whole batch}, or None when unknown.
+
+    `manufacturing_job.materials` is keyed by str(type_id), and each entry's
+    `quantity` is what the producer computed for this batch: per-run quantity
+    x runs, after the ME and structure material reduction
+    (industry/service.py, the "Material adjustment" loop). Use it as-is; the
+    SDE's per-run quantity is neither scaled nor reduced.
+
+    None (not {}) when the producer wrote no materials mapping, so a caller
+    cannot mistake "no data" for "this batch needs nothing". Malformed or
+    non-positive entries are skipped.
+    """
+    materials = get_manufacturing_job(row).get("materials")
+    if not isinstance(materials, dict):
+        return None
+    out: dict[int, int] = {}
+    for entry in materials.values():
+        if not isinstance(entry, dict):
+            continue
+        type_id = _as_int(entry.get("type_id"))
+        quantity = _as_int(entry.get("quantity"))
+        if type_id > 0 and quantity > 0:
+            out[type_id] = out.get(type_id, 0) + quantity
+    return out
+
+
 def get_material_cost_per_unit(row: dict[str, Any]) -> float | None:
     """Material cost per produced unit.
 

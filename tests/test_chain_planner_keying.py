@@ -153,8 +153,17 @@ SUB_BLUEPRINT_DATA = {
 }
 
 
+def _batch_materials(**qty_by_type_id):
+    """manufacturing_job.materials as the producer writes it: keyed by
+    str(type_id), quantity already scaled by runs and ME/structure."""
+    return {
+        str(t): {"type_id": int(t), "quantity": q, "type_name": "Widget"}
+        for t, q in qty_by_type_id.items()
+    }
+
+
 def test_sub_manufacture_builds_a_material_whose_blueprint_is_owned():
-    row = _row()
+    row = _row(materials=_batch_materials(**{"54321": 100}))
     phase1 = {
         "bpo_assets_by_type_id": {888: [_bpo(888, me=10, te=20)]},
         "blueprint_data": SUB_BLUEPRINT_DATA,
@@ -176,7 +185,7 @@ def test_sub_manufacture_builds_a_material_whose_blueprint_is_owned():
 
 
 def test_sub_manufacture_buys_a_material_whose_blueprint_is_not_owned():
-    row = _row()
+    row = _row(materials=_batch_materials(**{"54321": 100}))
     phase1 = {
         "bpo_assets_by_type_id": {},
         "blueprint_data": SUB_BLUEPRINT_DATA,
@@ -186,6 +195,51 @@ def test_sub_manufacture_buys_a_material_whose_blueprint_is_not_owned():
     plan = _planner().plan_chain([_decision(row)], phase1)
 
     assert [d for d in plan.decisions if d.is_sub_component] == []
+
+
+_SUB_PHASE1 = {
+    "bpo_assets_by_type_id": {888: [_bpo(888, me=10, te=20)]},
+    "blueprint_data": SUB_BLUEPRINT_DATA,
+    "market_depth_cache": {34: {"vwap_5d": 1.0}, 54321: {"vwap_5d": 1.0}},
+}
+
+
+def test_sub_manufacture_quantity_is_the_parents_batch_quantity_not_one_sde_run():
+    """F4: the SDE says 100 per run. A 20-run parent at ME10 needs 1800, which
+    is what the producer wrote under manufacturing_job.materials."""
+    row = _row(runs=20, materials=_batch_materials(**{"54321": 1800}))
+
+    plan = _planner().plan_chain([_decision(row)], _SUB_PHASE1)
+
+    (sub,) = [d for d in plan.decisions if d.is_sub_component]
+    assert sub.overview_row["quantity_needed"] == 1800
+    # 180 runs x 2 Tritanium x 1 ISK, versus 1800 x 1 ISK on the market.
+    assert sub.overview_row["sub_manufacture_cost"] == 360.0
+    assert sub.overview_row["market_buy_cost"] == 1800.0
+
+
+def test_sub_manufacture_requests_for_one_material_are_merged_across_parents():
+    a = _row(type_id=12345, materials=_batch_materials(**{"54321": 300}))
+    b = _row(type_id=22222, materials=_batch_materials(**{"54321": 200}))
+
+    plan = _planner().plan_chain([_decision(a), _decision(b)], _SUB_PHASE1)
+
+    subs = [d for d in plan.decisions if d.is_sub_component]
+    assert len(subs) == 1
+    assert subs[0].overview_row["quantity_needed"] == 500
+    assert subs[0].overview_row["requested_by_type_ids"] == [12345, 22222]
+
+
+def test_no_producer_batch_materials_means_no_sub_manufacture(caplog):
+    """Without the producer's scaled quantities there is no correct amount to
+    build; one SDE run is not a stand-in for it."""
+    row = _row()  # no manufacturing_job.materials
+
+    with caplog.at_level("WARNING"):
+        plan = _planner().plan_chain([_decision(row)], _SUB_PHASE1)
+
+    assert [d for d in plan.decisions if d.is_sub_component] == []
+    assert any("batch materials" in r.getMessage() for r in caplog.records)
 
 
 # --- service: loading blueprint data -------------------------------------------

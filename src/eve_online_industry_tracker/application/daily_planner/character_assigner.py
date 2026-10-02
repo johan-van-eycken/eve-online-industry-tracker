@@ -302,6 +302,7 @@ class CharacterAssigner:
                 estimated_profit_isk=estimated_profit,
                 estimated_completion=None,
                 notes=f"Build: {decision.decision_reason}",
+                materials=orow.get_batch_materials(row),
             ))
             self._take_slot(char_slots, char_id, "manufacture")
         else:

@@ -118,3 +118,33 @@ def test_get_meta_group_name_normalizes_abyssal_to_tech_i():
 def test_get_meta_group_name_passes_through_unrecognized_names():
     assert orow.get_meta_group_name({"meta_group_name": "Some Weird Name"}) == "Some Weird Name"
     assert orow.get_meta_group_name({}) == ""
+
+
+# --- batch materials (F4) -------------------------------------------------------
+
+def test_batch_materials_read_the_producers_scaled_quantities():
+    """manufacturing_job.materials is keyed by str(type_id) and its `quantity`
+    is already runs x per-run x (1 - ME/structure reduction)."""
+    row = {"manufacturing_job": {"materials": {
+        "34": {"type_id": 34, "quantity": 1800, "quantity_per_run": 100},
+        "35": {"type_id": 35, "quantity": 90, "quantity_per_run": 5},
+    }}}
+    assert orow.get_batch_materials(row) == {34: 1800, 35: 90}
+
+
+def test_batch_materials_are_none_when_the_producer_wrote_none():
+    """Unknown is not 'needs nothing': callers must tell the two apart."""
+    assert orow.get_batch_materials({}) is None
+    assert orow.get_batch_materials({"manufacturing_job": {"materials": None}}) is None
+    assert orow.get_batch_materials({"manufacturing_job": {"materials": []}}) is None
+
+
+def test_batch_materials_skip_malformed_entries():
+    row = {"manufacturing_job": {"materials": {
+        "34": {"type_id": 34, "quantity": 10},
+        "x": "nope",
+        "36": {"type_id": 36, "quantity": "lots"},
+        "37": {"type_id": 0, "quantity": 5},
+        "38": {"type_id": 38, "quantity": 0},
+    }}}
+    assert orow.get_batch_materials(row) == {34: 10}

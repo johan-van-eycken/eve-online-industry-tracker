@@ -67,24 +67,29 @@ class ShoppingListBuilder:
         invention_actions = [a for a in assigned_actions if a.action_type == "invent"]
         # buy_materials and buy_bpo are generated here, not from Phase 6
 
+        # Units of each component that sub_manufacture actions will build. A
+        # parent's batch needs these too, but must not ALSO buy them: that was
+        # the double-buy in final-review finding F4. Consumed parent by parent,
+        # in action order, so one merged sub-manufacture request covering
+        # several parents is subtracted once in total.
+        sub_built: dict[int, int] = {}
         for action in current_job_actions:
-            # Look up materials from blueprint_data by matching product type_id → blueprint type_id
-            mats, per_run_output = self._get_materials_and_output_for_action(
+            if action.action_type == "sub_manufacture":
+                qty = _positive_int(action.quantity)
+                if qty is not None:
+                    sub_built[int(action.type_id)] = sub_built.get(int(action.type_id), 0) + qty
+
+        for action in current_job_actions:
+            for mat_type_id, mat_name, qty_needed in self._material_needs(
                 action, blueprint_data, product_to_blueprint
-            )
-            runs = self._effective_runs(action, per_run_output)
-            for mat in mats:
-                mat_type_id = int(mat.get("type_id") or 0)
-                if mat_type_id <= 0:
-                    continue
-                per_run_qty = int(mat.get("quantity") or 0)
-                if per_run_qty <= 0:
-                    continue
+            ):
+                if action.action_type == "manufacture" and sub_built.get(mat_type_id):
+                    covered = min(qty_needed, sub_built[mat_type_id])
+                    sub_built[mat_type_id] -= covered
+                    qty_needed -= covered
+                    if qty_needed <= 0:
+                        continue
 
-                # Blueprint material quantities are per run.
-                qty_needed = per_run_qty * runs
-
-                mat_name = str(mat.get("type_name") or f"type_{mat_type_id}")
                 net_required = self._compute_net_required(
                     mat_type_id=mat_type_id,
                     qty_needed=qty_needed,
@@ -252,6 +257,55 @@ class ShoppingListBuilder:
             )
             return []
         return materials
+
+    def _material_needs(
+        self,
+        action: AssignedAction,
+        blueprint_data: dict[int, dict[str, Any]],
+        product_to_blueprint: dict[int, int],
+    ) -> list[tuple[int, str, int]]:
+        """(material type_id, name, units needed) for one job.
+
+        A manufacture action carrying the producer's batch materials uses
+        those as-is: they are already per-run x runs after ME/structure
+        reduction. Otherwise (sub_manufacture, or a manufacture action whose
+        row had no materials mapping) the SDE per-run quantities x runs are
+        used, which carry no ME/structure reduction.
+        """
+        mats, per_run_output = self._get_materials_and_output_for_action(
+            action, blueprint_data, product_to_blueprint
+        )
+        names = {
+            int(m.get("type_id") or 0): m.get("type_name") for m in mats if isinstance(m, dict)
+        }
+
+        if action.action_type == "manufacture" and action.materials is not None:
+            return [
+                (t, str(names.get(t) or f"type_{t}"), int(q))
+                for t, q in action.materials.items()
+                if int(t) > 0 and int(q) > 0
+            ]
+        if action.action_type == "manufacture":
+            logger.info(
+                "ShoppingListBuilder: type_id=%s has no producer batch materials; "
+                "buying SDE per-run quantities x runs (no ME/structure reduction)",
+                action.type_id,
+            )
+
+        runs = self._effective_runs(action, per_run_output)
+        needs: list[tuple[int, str, int]] = []
+        for mat in mats:
+            mat_type_id = int(mat.get("type_id") or 0)
+            per_run_qty = int(mat.get("quantity") or 0)
+            if mat_type_id <= 0 or per_run_qty <= 0:
+                continue
+            # Blueprint material quantities are per run.
+            needs.append((
+                mat_type_id,
+                str(mat.get("type_name") or f"type_{mat_type_id}"),
+                per_run_qty * runs,
+            ))
+        return needs
 
     def _effective_runs(self, action: AssignedAction, per_run_output: int) -> int:
         """Runs to buy materials for.

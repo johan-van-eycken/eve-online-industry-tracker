@@ -451,22 +451,15 @@ def test_manufacture_actions_carry_real_runs_and_cost(run, planner_rows):
 # ── Phase 7: shopping list ──────────────────────────────────────────────────
 
 
-def test_shopping_quantities_scale_with_the_job_run_count(run, meta, admin):
-    """Each material is _PER_RUN_QTY units per run in this test's blueprint
-    data, so each line must be _PER_RUN_QTY x the action's run count. Buying
-    for a single run was the old 'materials for one run of a 20-run job' defect."""
-    by_bp = run.blueprint_data
+def test_shopping_quantities_are_the_producers_batch_quantities(run, meta, admin):
+    """A manufacture action buys each material at the quantity the producer
+    wrote under manufacturing_job.materials: already per-run x runs after
+    ME/structure reduction (F4). The old path, SDE per-run x runs, ignored ME,
+    and before that bought for a single run of a 20-run job. Each line is
+    checked against one field of the real row, so it holds on the scrambled
+    fixture."""
     action = next(
-        (
-            a for a in run.actions
-            if a.action_type == "manufacture"
-            and any(
-                entry["manufacturing"]["materials"]
-                for entry in by_bp.values()
-                if entry["manufacturing"]["products"][0]["type_id"] == a.type_id
-            )
-        ),
-        None,
+        (a for a in run.actions if a.action_type == "manufacture" and a.materials), None
     )
     if action is None:
         pytest.fail("no manufacture action whose real row lists any materials")
@@ -477,4 +470,22 @@ def test_shopping_quantities_scale_with_the_job_run_count(run, meta, admin):
     )
     assert shopping, "the shopping list dropped every material of a priced job"
     assert all(item.shopping_category == "current_job" for item in shopping)
+    assert {item.type_id: item.quantity for item in shopping} == action.materials
+
+
+def test_the_sde_fallback_still_scales_with_the_job_run_count(run, meta, admin):
+    """Without producer materials the builder falls back to SDE per-run x
+    runs; it must still not buy for a single run."""
+    action = next(
+        (a for a in run.actions if a.action_type == "manufacture" and a.materials), None
+    )
+    if action is None:
+        pytest.fail("no manufacture action whose real row lists any materials")
+    action = dataclasses.replace(action, materials=None)
+
+    shopping = ShoppingListBuilder().build(
+        assigned_actions=[action], corp_assets=[], market_depth_cache=run.market_depth,
+        admin_settings=admin, blueprint_data=run.blueprint_data, meta_resolver=meta,
+    )
+    assert shopping
     assert all(item.quantity == _PER_RUN_QTY * action.runs for item in shopping)

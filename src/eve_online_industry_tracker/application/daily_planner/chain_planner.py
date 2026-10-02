@@ -165,6 +165,8 @@ class ChainPlanner:
         # BPO ownership and blueprint_data are keyed by blueprint type_id.
         product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
         invention_source = build_invention_source_index(blueprint_data)
+        # {material type_id: merged sub-manufacture request}, in first-seen order.
+        sub_requests: dict[int, dict[str, Any]] = {}
 
         for decision in top_level_decisions:
             if decision.decision != "build":
@@ -208,21 +210,39 @@ class ChainPlanner:
                         bpo_consider_days=bpo_consider_days,
                     )
 
-                # Sub-manufacture decision for each required material
-                sub_decisions = self._resolve_sub_manufacture(
+                # Which of this batch's materials the corp could build itself.
+                # Collected across every parent first, so one material needed
+                # by several builds becomes ONE sub-manufacture decision.
+                for request in self._collect_sub_manufacture_requests(
                     decision=decision,
-                    bp_data=bp_data,
                     bpo_assets_by_type_id=bpo_assets_by_type_id,
                     product_to_blueprint=product_to_blueprint,
-                    market_depth_cache=market_depth_cache,
-                    phase1_data=phase1_data,
-                )
-                all_decisions.extend(sub_decisions)
+                ):
+                    merged = sub_requests.setdefault(request["type_id"], {
+                        **request, "quantity": 0, "requested_by_type_ids": [],
+                    })
+                    merged["quantity"] += request["quantity"]
+                    merged["requested_by_type_ids"].append(int(decision.type_id))
 
             except (TypeError, ValueError):
                 # Per-item isolation for malformed SDE / market values (int()
                 # and float() conversions); anything else is a bug and aborts.
                 logger.exception("ChainPlanner: error planning chain for type_id=%s", decision.type_id)
+
+        for request in sub_requests.values():
+            try:
+                sub_decision = self._resolve_sub_manufacture(
+                    request=request,
+                    market_depth_cache=market_depth_cache,
+                    phase1_data=phase1_data,
+                )
+            except (TypeError, ValueError):
+                logger.exception(
+                    "ChainPlanner: error resolving sub-manufacture for type_id=%s", request["type_id"]
+                )
+                continue
+            if sub_decision is not None:
+                all_decisions.append(sub_decision)
 
         return ChainPlan(
             decisions=all_decisions,
@@ -384,77 +404,104 @@ class ChainPlanner:
             return None
         return blueprint_type_id
 
-    def _resolve_sub_manufacture(
+    def _collect_sub_manufacture_requests(
         self,
         *,
         decision: ItemDecision,
-        bp_data: dict[str, Any],
         bpo_assets_by_type_id: dict[int, list],
         product_to_blueprint: dict[int, int],
-        market_depth_cache: dict[int, Any],
-        phase1_data: dict[str, Any],
-    ) -> list[ItemDecision]:
-        """For each required material, decide: sub-manufacture (build) vs buy.
+    ) -> list[dict[str, Any]]:
+        """This batch's materials that the corp owns a BPO for, with the
+        quantity the batch actually consumes.
 
-        Returns list of sub-component ItemDecisions (decision='build').
-        These bypass Phase 4 gate per the two-pass spec.
+        The quantity is the producer's manufacturing_job.materials entry:
+        already per-run x runs and after ME/structure reduction. The SDE's
+        per-run quantity (what this used to read) is one run at ME0, which
+        under-built the component by the run count. Without the producer's
+        figures there is no correct amount, so nothing is requested and the
+        parent buys the component (logged).
         """
-        sub_decisions: list[ItemDecision] = []
-        manufacturing = bp_data.get("manufacturing", {})
-        materials = manufacturing.get("materials", []) or []
+        batch_materials = orow.get_batch_materials(decision.overview_row)
+        if batch_materials is None:
+            logger.warning(
+                "ChainPlanner: type_id=%s has no producer batch materials "
+                "(manufacturing_job.materials); skipping sub-manufacture analysis, "
+                "its components are bought",
+                decision.type_id,
+            )
+            return []
 
-        for mat in materials:
-            mat_type_id = int(mat.get("type_id") or 0)
-            if mat_type_id <= 0:
-                continue
-
+        names = {
+            int(e.get("type_id") or 0): e.get("type_name")
+            for e in (orow.get_manufacturing_job(decision.overview_row).get("materials") or {}).values()
+            if isinstance(e, dict)
+        }
+        requests: list[dict[str, Any]] = []
+        for mat_type_id, quantity in batch_materials.items():
             # mat_type_id is a product; BPO ownership is keyed by blueprint.
             mat_blueprint_type_id = self._blueprint_for_product(
                 mat_type_id, product_to_blueprint, bpo_assets_by_type_id
             )
             if mat_blueprint_type_id is None:
                 continue  # no BPO for this material → buy from market
+            requests.append({
+                "type_id": mat_type_id,
+                "type_name": str(names.get(mat_type_id) or f"type_{mat_type_id}"),
+                "blueprint_type_id": mat_blueprint_type_id,
+                "quantity": quantity,
+            })
+        return requests
 
-            qty_needed = int(mat.get("quantity") or 0)
-            if qty_needed <= 0:
-                continue
+    def _resolve_sub_manufacture(
+        self,
+        *,
+        request: dict[str, Any],
+        market_depth_cache: dict[int, Any],
+        phase1_data: dict[str, Any],
+    ) -> ItemDecision | None:
+        """Build vs buy for one merged material request.
 
-            # Estimate sub-manufacture cost vs market buy cost
-            sub_cost = self._estimate_sub_manufacture_cost(mat_blueprint_type_id, qty_needed, phase1_data)
-            market_cost = self._estimate_market_cost(mat_type_id, qty_needed, market_depth_cache)
+        Returns a sub-component ItemDecision (decision='build') when building
+        is cheaper, else None (buy). These bypass the Phase 4 gate per the
+        two-pass spec. ShoppingListBuilder subtracts the built quantity from
+        the parents' purchases.
+        """
+        mat_type_id = int(request["type_id"])
+        mat_blueprint_type_id = int(request["blueprint_type_id"])
+        qty_needed = int(request["quantity"])
 
-            if sub_cost is None or market_cost is None:
-                continue  # Can't compare → default to buy
+        sub_cost = self._estimate_sub_manufacture_cost(mat_blueprint_type_id, qty_needed, phase1_data)
+        market_cost = self._estimate_market_cost(mat_type_id, qty_needed, market_depth_cache)
+        if sub_cost is None or market_cost is None:
+            return None  # Can't compare → default to buy
+        if sub_cost >= market_cost:
+            return None
 
-            if sub_cost < market_cost:
-                # Sub-manufacture is cheaper → add as build decision
-                mat_name = str(mat.get("type_name") or f"type_{mat_type_id}")
-                sub_decision = ItemDecision(
-                    type_id=mat_type_id,
-                    type_name=mat_name,
-                    decision="build",
-                    decision_reason="Sub-manufacture: cheaper than market buy",
-                    adjusted_score=0.0,
-                    absolute_profit_per_batch=0.0,
-                    isk_per_hour=0.0,
-                    margin_pct=0.0,
-                    days_of_supply_current=0.0,
-                    effective_velocity=1.0,
-                    meta_group_id=META_GROUP_T1,
-                    pipeline_stage="manufacturing",
-                    is_sub_component=True,
-                    overview_row={
-                        "type_id": mat_type_id,
-                        "type_name": mat_name,
-                        "blueprint_type_id": mat_blueprint_type_id,
-                        "quantity_needed": qty_needed,
-                        "sub_manufacture_cost": sub_cost,
-                        "market_buy_cost": market_cost,
-                    },
-                )
-                sub_decisions.append(sub_decision)
-
-        return sub_decisions
+        mat_name = request["type_name"]
+        return ItemDecision(
+            type_id=mat_type_id,
+            type_name=mat_name,
+            decision="build",
+            decision_reason="Sub-manufacture: cheaper than market buy",
+            adjusted_score=0.0,
+            absolute_profit_per_batch=0.0,
+            isk_per_hour=0.0,
+            margin_pct=0.0,
+            days_of_supply_current=0.0,
+            effective_velocity=1.0,
+            meta_group_id=META_GROUP_T1,
+            pipeline_stage="manufacturing",
+            is_sub_component=True,
+            overview_row={
+                "type_id": mat_type_id,
+                "type_name": mat_name,
+                "blueprint_type_id": mat_blueprint_type_id,
+                "quantity_needed": qty_needed,
+                "requested_by_type_ids": list(request["requested_by_type_ids"]),
+                "sub_manufacture_cost": sub_cost,
+                "market_buy_cost": market_cost,
+            },
+        )
 
     def _estimate_sub_manufacture_cost(
         self,

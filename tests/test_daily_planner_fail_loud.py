@@ -326,6 +326,16 @@ def test_a_manufacture_action_carries_the_batch_unit_total():
     assert action.quantity == 200
 
 
+def test_a_manufacture_action_carries_the_producers_batch_materials():
+    """F4: the shopping list buys these as-is (already scaled by runs and
+    ME/structure) and subtracts what sub-manufacture builds."""
+    row = {"type_id": 12345, "quantity": 200,
+           "manufacturing_job": {"runs": 20, "materials": {
+               "34": {"type_id": 34, "quantity": 1800}}}}
+    (action,) = _assign(row)
+    assert action.materials == {34: 1800}
+
+
 def test_an_unpriced_batch_has_an_unknown_cost_not_zero():
     row = {"type_id": 12345, "quantity": 200, "manufacturing_job": {"runs": 20}}
     (action,) = _assign(row)
