@@ -21,6 +21,7 @@ from eve_online_industry_tracker.application.daily_planner.feedback_processor im
 from eve_online_industry_tracker.application.daily_planner.input_row import (
     PlannerInputError,
     PlannerInputRow,
+    dedupe_by_type_id,
 )
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
@@ -507,8 +508,12 @@ class DailyPlannerService:
         # Corp wallet
         corp_wallet = self._get_corp_wallet()
 
-        # IndustryService overview rows
-        overview_rows = self._get_overview_rows()
+        # IndustryService overview rows, validated and cut to one row per
+        # product (the producer emits one per blueprint variant). From here
+        # on overview_rows holds only the kept rows, so every later phase and
+        # every per-type query sees the same single row per type_id.
+        input_rows = self._build_input_rows(self._get_overview_rows())
+        overview_rows = [r.raw for r in input_rows]
 
         # Active industry jobs (corp + character)
         industry_jobs = self._get_industry_jobs()
@@ -520,8 +525,8 @@ class DailyPlannerService:
         corp_orders = self._get_corp_orders()
 
         # Learning weights
-        type_ids = [int(row.get("type_id") or 0) for row in overview_rows if row.get("type_id")]
-        weights = self._repo.get_weights(type_ids) if type_ids else {}
+        type_ids = [r.type_id for r in input_rows]
+        weights =self._repo.get_weights(type_ids) if type_ids else {}
 
         # Sell velocity per type_id
         sell_velocities = self._get_sell_velocities(type_ids)
@@ -556,7 +561,7 @@ class DailyPlannerService:
         return {
             "corp_wallet": corp_wallet,
             "overview_rows": overview_rows,
-            "input_rows": self._build_input_rows(overview_rows),
+            "input_rows": input_rows,
             "industry_jobs": industry_jobs,
             "corp_assets": corp_assets,
             "corp_orders": corp_orders,
@@ -574,19 +579,21 @@ class DailyPlannerService:
         }
 
     def _build_input_rows(self, overview_rows: list[dict[str, Any]]) -> list[PlannerInputRow]:
-        """Validate every overview row against the planner's input contract.
+        """Validate every overview row against the planner's input contract,
+        then keep one row per product.
 
         Prefetches type metadata in one SDE query, then converts. A contract
         violation propagates: a plan built from the rows that happened to parse
         would silently omit whatever failed, which is the exact failure mode
-        this contract exists to end.
+        this contract exists to end. Every row is validated, including the
+        variants dedupe_by_type_id then drops (logged at WARNING there).
         """
         type_ids = [int(r.get("type_id") or 0) for r in overview_rows if isinstance(r, dict)]
-        self._meta_resolver.prefetch([tid for tid in type_ids if tid > 0])
-        return [
+        self._meta_resolver.prefetch(list(dict.fromkeys(tid for tid in type_ids if tid > 0)))
+        return dedupe_by_type_id([
             PlannerInputRow.from_overview(row, meta_groups=self._meta_resolver)
             for row in overview_rows
-        ]
+        ])
 
     def _phase_2_pipeline(self, phase1: dict[str, Any]) -> list[Any]:
         logger.info("DailyPlannerService: Phase 2 — pipeline analysis")

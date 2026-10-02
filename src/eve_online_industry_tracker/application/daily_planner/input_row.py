@@ -68,10 +68,13 @@ points at.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from eve_online_industry_tracker.application.industry import overview_row as orow
+
+logger = logging.getLogger(__name__)
 
 
 class PlannerInputError(ValueError):
@@ -238,3 +241,61 @@ class PlannerInputRow:
             blueprint_type_id=orow.get_blueprint_type_id(row),
             raw=row,
         )
+
+
+def _variant_rank(row: PlannerInputRow) -> float | None:
+    """The isk/hour a variant would be scored on, or None when it can't be.
+
+    Mirrors ProfitabilityScorer's two unscoreable conditions: no isk/hour, or
+    no cost basis at all (neither a material cost nor the producer's profit).
+    """
+    if row.isk_per_hour is None:
+        return None
+    if row.material_cost_per_unit is None and row.profit_amount is None:
+        return None
+    return row.isk_per_hour
+
+
+def _row_label(row: PlannerInputRow, index: int) -> str:
+    row_id = row.raw.get("overview_row_id") if isinstance(row.raw, dict) else None
+    return str(row_id) if row_id is not None else f"index {index}"
+
+
+def dedupe_by_type_id(rows: list[PlannerInputRow]) -> list[PlannerInputRow]:
+    """Keep ONE row per type_id: the scoreable variant with the highest isk/hour.
+
+    The producer emits one overview row per blueprint variant, so a product
+    can appear several times. Every phase after this one keys by type_id, and
+    with duplicates some lookups kept the first row and others the last: one
+    product got several decisions, each mixing one variant's pipeline state
+    with another's profitability. Unscoreable variants (see _variant_rank)
+    rank last; ties keep the first row seen. Order follows each product's
+    first appearance. Every drop is logged at WARNING with the overview_row_id
+    (or list index) of the kept and the dropped rows, because the cost of a
+    wrong pick is the user losing a variant they preferred.
+    """
+    best: dict[int, tuple[int, PlannerInputRow]] = {}
+    dropped: dict[int, list[str]] = {}
+    for index, row in enumerate(rows):
+        current = best.get(row.type_id)
+        if current is None:
+            best[row.type_id] = (index, row)
+            continue
+        cur_index, cur_row = current
+        new_rank, cur_rank = _variant_rank(row), _variant_rank(cur_row)
+        if new_rank is not None and (cur_rank is None or new_rank > cur_rank):
+            dropped.setdefault(row.type_id, []).append(_row_label(cur_row, cur_index))
+            best[row.type_id] = (index, row)
+        else:
+            dropped.setdefault(row.type_id, []).append(_row_label(row, index))
+
+    for type_id, labels in dropped.items():
+        kept_index, kept = best[type_id]
+        logger.warning(
+            "Daily planner: type_id=%s (%s) has %d overview rows (one per blueprint "
+            "variant); keeping %s (isk/hour %s), dropping %s",
+            type_id, kept.type_name, len(labels) + 1, _row_label(kept, kept_index),
+            kept.isk_per_hour, ", ".join(labels),
+        )
+    # dict order is first insertion, so products keep their first-seen order.
+    return [row for _, row in best.values()]

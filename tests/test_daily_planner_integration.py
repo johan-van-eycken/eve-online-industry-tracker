@@ -36,7 +36,10 @@ from eve_online_industry_tracker.application.daily_planner.chain_planner import 
 from eve_online_industry_tracker.application.daily_planner.character_assigner import (
     CharacterAssigner,
 )
-from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
+from eve_online_industry_tracker.application.daily_planner.input_row import (
+    PlannerInputRow,
+    dedupe_by_type_id,
+)
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import (
     ItemDecisionEngine,
 )
@@ -122,6 +125,13 @@ def meta(overview_rows):
 @pytest.fixture()
 def input_rows(overview_rows, meta):
     return [PlannerInputRow.from_overview(r, meta_groups=meta) for r in overview_rows]
+
+
+@pytest.fixture()
+def planner_rows(input_rows):
+    """One row per product, the way DailyPlannerService._build_input_rows hands
+    them to Phase 2: the real overview lists a product once per blueprint variant."""
+    return dedupe_by_type_id(input_rows)
 
 
 @pytest.fixture()
@@ -235,8 +245,8 @@ def _run_phases(overview_rows, input_rows, meta, admin):
 
 
 @pytest.fixture()
-def run(overview_rows, input_rows, meta, admin):
-    return _run_phases(overview_rows, input_rows, meta, admin)
+def run(planner_rows, meta, admin):
+    return _run_phases([r.raw for r in planner_rows], planner_rows, meta, admin)
 
 
 # ── Phase 1: the input contract over real rows ──────────────────────────────
@@ -365,10 +375,18 @@ def test_manufacturing_jobs_are_indexed_from_the_activity_id_column(
 # ── Phase 4 ─────────────────────────────────────────────────────────────────
 
 
-def test_every_real_row_gets_a_reasoned_decision(run, input_rows):
-    assert len(run.decisions) == len(input_rows)
+def test_every_real_row_gets_a_reasoned_decision(run, planner_rows):
+    assert len(run.decisions) == len(planner_rows)
     assert all(d.decision in ("build", "watch", "pause", "skip") for d in run.decisions)
     assert all(d.decision_reason for d in run.decisions)
+
+
+def test_the_planner_makes_one_decision_per_distinct_product(run, overview_rows):
+    """F2: the producer emits one row per blueprint variant. One decision per
+    ROW mixed one variant's pipeline state with another's profitability.
+    A count, so it holds against the scrambled fixture."""
+    assert len(run.decisions) == len({int(r["type_id"]) for r in overview_rows})
+    assert len({d.type_id for d in run.decisions}) == len(run.decisions)
 
 
 # ── Phase 5: chain planning ─────────────────────────────────────────────────
@@ -414,14 +432,13 @@ def test_a_skilled_pilot_is_assigned_more_than_one_job(run):
     assert all(a.character_id == 1 for a in manufactures)
 
 
-def test_manufacture_actions_carry_real_runs_and_cost(run, input_rows):
+def test_manufacture_actions_carry_real_runs_and_cost(run, planner_rows):
     manufactures = [a for a in run.actions if a.action_type == "manufacture"]
     assert all(a.runs is not None and a.runs > 0 for a in manufactures)
-    # A real overview can list one product more than once (one row per
-    # blueprint variant), so match against any of that product's rows.
+    # One kept row per product (F2), so the runs must be that row's own.
+    runs_by_type = {r.type_id: r.runs for r in planner_rows}
     wrong_runs = [
-        (a.type_id, a.runs) for a in manufactures
-        if a.runs not in {r.runs for r in input_rows if r.type_id == a.type_id}
+        (a.type_id, a.runs) for a in manufactures if a.runs != runs_by_type.get(a.type_id)
     ]
     assert not wrong_runs, (
         f"manufacture runs do not come from manufacturing_job.runs: {wrong_runs}"

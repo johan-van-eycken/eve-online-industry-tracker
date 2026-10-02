@@ -131,3 +131,34 @@ def test_a_malformed_wallet_balance_persists_as_unknown_not_a_real_zero(
         "an unparseable division-1 balance must persist as unknown (None/NULL), "
         "not as a 0.0 that looks like a real zero balance"
     )
+
+
+def test_two_variants_of_one_product_yield_exactly_one_plan_item(
+    session_provider, planner_repo, tmp_path
+):
+    """F2: one overview row per blueprint variant used to produce one
+    decision per ROW, each mixing that row's pipeline state with the last
+    row's profitability. Phase 1 now keeps one row per type_id."""
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    low = dict(GOOD_ROW, overview_row_id="row-a", isk_per_hour=9_800_000.0)
+    high = dict(GOOD_ROW, overview_row_id="row-b", isk_per_hour=20_500_000.0)
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [high, low]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        pricing_suggestion_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+
+    svc._run_compute()
+
+    assert svc._status == "done", f"plan computation failed: {svc._error}"
+    items = planner_repo.get_plan_items(int(planner_repo.get_active_plan().id))
+    assert len(items) == 1
+    assert items[0].isk_per_hour == 20_500_000.0

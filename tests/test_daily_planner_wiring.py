@@ -265,3 +265,62 @@ def test_get_industry_jobs_includes_character_jobs_not_only_corp_jobs(session_pr
 
     job_ids = {job.job_id for job in jobs}
     assert job_ids == {101, 201}
+
+
+# --- F2: one overview row per product -----------------------------------------
+
+def _variant(overview_row_id, isk_per_hour, **extra):
+    return dict(GOOD_ROW, overview_row_id=overview_row_id, isk_per_hour=isk_per_hour, **extra)
+
+
+def test_build_input_rows_keeps_one_row_per_type_id_the_highest_isk_per_hour(
+    session_provider, caplog
+):
+    """The producer emits one row per blueprint variant. Keyed by type_id
+    downstream, the last row silently won some lookups and the first others,
+    so one product got a hybrid decision (row i's pipeline, the last row's
+    profitability) -- and a 20.5M ISK/h variant lost to a 9.8M one."""
+    low = _variant("row-a", 9_800_000.0)
+    high = _variant("row-b", 20_500_000.0)
+    svc = _service(session_provider, [low, high])
+    with caplog.at_level("WARNING"):
+        rows = svc._build_input_rows([low, high])
+    assert len(rows) == 1
+    assert rows[0].isk_per_hour == 20_500_000.0
+    assert rows[0].raw is high
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("12345" in m and "row-a" in m and "row-b" in m for m in warnings), warnings
+
+
+def test_dedupe_ranks_an_unknown_isk_per_hour_last(session_provider):
+    unknown = _variant("row-a", None)
+    known = _variant("row-b", 1.0)
+    svc = _service(session_provider, [unknown, known])
+    (row,) = svc._build_input_rows([unknown, known])
+    assert row.raw is known
+
+
+def test_dedupe_ranks_an_unscoreable_variant_last(session_provider):
+    """No cost basis at all (no material cost and no profit) is unscoreable
+    even with an isk/hour, so a scoreable variant beats it."""
+    no_basis = _variant("row-a", 50_000_000.0, profit_amount=None,
+                        manufacturing_job={"runs": 20})
+    scoreable = _variant("row-b", 1.0)
+    svc = _service(session_provider, [no_basis, scoreable])
+    (row,) = svc._build_input_rows([no_basis, scoreable])
+    assert row.raw is scoreable
+
+
+def test_dedupe_breaks_a_tie_on_the_first_row_seen(session_provider):
+    first = _variant("row-a", 5.0)
+    second = _variant("row-b", 5.0)
+    svc = _service(session_provider, [first, second])
+    (row,) = svc._build_input_rows([first, second])
+    assert row.raw is first
+
+
+def test_distinct_products_are_all_kept_in_order(session_provider):
+    a = dict(GOOD_ROW, type_id=1)
+    b = dict(GOOD_ROW, type_id=2)
+    svc = _service(session_provider, [a, b])
+    assert [r.type_id for r in svc._build_input_rows([a, b])] == [1, 2]
