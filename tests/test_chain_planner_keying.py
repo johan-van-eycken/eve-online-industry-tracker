@@ -212,3 +212,85 @@ def test_service_loads_blueprint_data_for_nested_ids_and_owned_bpos(monkeypatch)
     )
 
     assert seen == [[888, 999]]
+
+
+# --- invention: which T1 BPO feeds a T2 blueprint ------------------------------
+
+from eve_online_industry_tracker.application.daily_planner.chain_planner import (  # noqa: E402
+    build_invention_source_index,
+)
+
+DATACORE = {"type_id": 20410, "quantity": 2}
+INVENTION_BLUEPRINT_DATA = {
+    # T1 blueprint 999 invents into T2 blueprint 1999.
+    999: {"manufacturing": {"products": [{"type_id": 12344, "quantity": 1}], "materials": []},
+          "invention": {"products": [{"type_id": 1999, "quantity": 1}],
+                        "materials": [DATACORE]}},
+    # T2 blueprint 1999 makes the T2 product 12345; it has no invention activity.
+    1999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}], "materials": []},
+           "invention": {"products": [], "materials": []}},
+}
+
+
+def test_invention_source_index_maps_invented_blueprint_to_its_t1_source():
+    assert build_invention_source_index(INVENTION_BLUEPRINT_DATA) == {1999: 999}
+
+
+def test_invention_source_index_tolerates_malformed_entries():
+    assert build_invention_source_index({1: {}, 2: {"invention": None},
+                                         3: {"invention": {"products": "x"}}}) == {}
+
+
+def _t2_row():
+    return _row(type_id=12345, blueprint_type_id=1999)
+
+
+def test_owned_t1_bpo_marks_the_t2_item_for_copy_and_invention():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=10, te=20)]},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA}
+
+    _planner().plan_chain([decision], phase1)
+
+    assert row["has_t1_bpo"] is True
+    assert row["needs_invention"] is True
+    assert row["t1_blueprint_type_id"] == 999
+    # Datacores come from the T1 blueprint's invention activity.
+    assert row["invention_materials"] == [DATACORE]
+    assert "needs_t1_bpo" not in row
+    assert decision.pipeline_stage == "copying"
+
+
+def test_unowned_t1_bpo_means_one_must_be_acquired():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {}, "blueprint_data": INVENTION_BLUEPRINT_DATA}
+
+    _planner().plan_chain([decision], phase1)
+
+    assert row.get("has_t1_bpo") is not True
+    assert row["needs_t1_bpo"] is True
+    assert row["t1_blueprint_type_id"] == 999
+    assert decision.pipeline_stage == "invention"
+
+
+def test_owned_t1_bpo_and_assigner_produce_a_copy_of_the_t1_blueprint():
+    """End to end across the phase-5/phase-6 handoff."""
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        CharacterAssigner,
+    )
+
+    row = _t2_row()
+    phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=10, te=20)]},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA}
+    plan = _planner().plan_chain([_decision(row, meta_group_id=2)], phase1)
+
+    chars = SimpleNamespace(list_characters=lambda: [{
+        "character_id": 1, "character_name": "Pilot",
+        "skills": {"skills": [{"skill_name": "Laboratory Operation", "trained_skill_level": 5}]},
+    }])
+    actions = CharacterAssigner().assign(plan, [], chars, _AdminStub())
+
+    copies = [a for a in actions if a.action_type == "copy"]
+    assert [a.type_id for a in copies] == [999]

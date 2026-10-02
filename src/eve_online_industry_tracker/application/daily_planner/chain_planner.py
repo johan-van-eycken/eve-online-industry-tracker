@@ -72,6 +72,38 @@ def build_product_to_blueprint_index(
     return index
 
 
+def build_invention_source_index(
+    blueprint_data: dict[int, dict[str, Any]]
+) -> dict[int, int]:
+    """{invented blueprint type_id: source (T1) blueprint type_id}.
+
+    In the SDE the invention activity lives on the *source* blueprint, and its
+    products are the blueprints it invents into. A T2 overview row only knows
+    its own (T2) blueprint, so finding the T1 BPO to copy means walking this
+    index backwards. First source seen wins.
+    """
+    index: dict[int, int] = {}
+    for source_type_id, entry in (blueprint_data or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        invention = entry.get("invention")
+        if not isinstance(invention, dict):
+            continue
+        products = invention.get("products")
+        if not isinstance(products, list):
+            continue
+        for product in products:
+            if not isinstance(product, dict):
+                continue
+            try:
+                invented_type_id = int(product.get("type_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if invented_type_id > 0:
+                index.setdefault(invented_type_id, int(source_type_id))
+    return index
+
+
 class ChainPlanner:
     """Phase 5: resolve sub-component chain for each build decision.
 
@@ -123,6 +155,7 @@ class ChainPlanner:
         # Built once per plan: material requirements are product type_ids, but
         # BPO ownership and blueprint_data are keyed by blueprint type_id.
         product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
+        invention_source = build_invention_source_index(blueprint_data)
 
         for decision in top_level_decisions:
             if decision.decision != "build":
@@ -155,6 +188,8 @@ class ChainPlanner:
                         decision=decision,
                         bp_type_id=bp_type_id,
                         bp_data=bp_data,
+                        blueprint_data=blueprint_data,
+                        invention_source=invention_source,
                         bpo_assets_by_type_id=bpo_assets_by_type_id,
                         bpc_assets_by_type_id=bpc_assets_by_type_id,
                         market_depth_cache=market_depth_cache,
@@ -261,6 +296,8 @@ class ChainPlanner:
         decision: ItemDecision,
         bp_type_id: int,
         bp_data: dict[str, Any],
+        blueprint_data: dict[int, dict[str, Any]],
+        invention_source: dict[int, int],
         bpo_assets_by_type_id: dict[int, list],
         bpc_assets_by_type_id: dict[int, list],
         market_depth_cache: dict[int, Any],
@@ -274,23 +311,30 @@ class ChainPlanner:
             decision.pipeline_stage = "manufacturing"
             return
 
-        # No BPC — need invention chain
-        # Find the T1 base BPO type (from invention materials in bp_data)
-        invention_data = bp_data.get("invention", {})
-        invention_materials = invention_data.get("materials", [])
-
-        # Check if T1 BPO is owned (datacores are invention inputs, not BPOs)
-        # The invention input BPO is the blueprint's own T1 copy source
-        # In EVE, you invent from a T1 BPO/BPC; the T1 BPO type_id == bp_type_id for T1→T2 paths
-        # We use the overview row's blueprint_type_id which should be the T1 BPO
-        t1_bpo_owned = bp_type_id in bpo_assets_by_type_id and bool(bpo_assets_by_type_id.get(bp_type_id))
+        # No BPC — need invention chain. bp_type_id is the T2 blueprint; the
+        # blueprint that is copied and invented from is its T1 source, and the
+        # invention activity (with its datacores) lives on that T1 blueprint.
+        t1_bp_type_id = invention_source.get(bp_type_id)
+        t1_bpo_owned = t1_bp_type_id is not None and bool(bpo_assets_by_type_id.get(t1_bp_type_id))
+        if t1_bp_type_id is not None:
+            decision.overview_row["t1_blueprint_type_id"] = t1_bp_type_id
+        else:
+            logger.info(
+                "ChainPlanner: no known T1 source blueprint invents into bp_type_id=%s "
+                "(type_id=%s); treating the T1 BPO as not owned",
+                bp_type_id, decision.type_id,
+            )
 
         if t1_bpo_owned:
+            t1_invention = (blueprint_data.get(t1_bp_type_id) or {}).get("invention") or {}
             decision.pipeline_stage = "copying"
             decision.overview_row["needs_invention"] = True
-            decision.overview_row["invention_materials"] = invention_materials
+            # "We own the T1 BPO, so copy it" — the gate CharacterAssigner reads.
+            decision.overview_row["has_t1_bpo"] = True
+            decision.overview_row["invention_materials"] = list(t1_invention.get("materials") or [])
         else:
             decision.pipeline_stage = "invention"
+            # "A T1 BPO must be acquired first." Read by nothing downstream yet.
             decision.overview_row["needs_t1_bpo"] = True
             # Flag T1 BPO for investment analysis as invention enabler
             self._analyze_bpo_investment(

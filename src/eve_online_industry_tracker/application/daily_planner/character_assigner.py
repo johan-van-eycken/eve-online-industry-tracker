@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
+from eve_online_industry_tracker.application.industry import overview_row as orow
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,7 @@ class CharacterAssigner:
             char_id, char_name = self._best_research_char(char_slots, characters)
             if char_id is not None:
                 actions.append(AssignedAction(
-                    type_id=int(row.get("blueprint_type_id") or type_id),
+                    type_id=orow.get_blueprint_type_id(row) or type_id,
                     type_name=type_name + " BPO",
                     action_type="me_research",
                     character_id=char_id,
@@ -188,7 +189,7 @@ class CharacterAssigner:
             char_id, char_name = self._best_research_char(char_slots, characters)
             if char_id is not None:
                 actions.append(AssignedAction(
-                    type_id=int(row.get("blueprint_type_id") or type_id),
+                    type_id=orow.get_blueprint_type_id(row) or type_id,
                     type_name=type_name + " BPO",
                     action_type="te_research",
                     character_id=char_id,
@@ -221,12 +222,20 @@ class CharacterAssigner:
                 ))
                 self._take_slot(char_slots, char_id, "invent")
 
-        # Copy (T1 BPO copy for invention feed)
-        if row.get("needs_invention") and row.get("has_t1_bpo"):
+        # Copy (T1 BPO copy for invention feed). What is copied is the T1
+        # source blueprint, never the T2 product or the T2 blueprint.
+        t1_blueprint_type_id = int(row.get("t1_blueprint_type_id") or 0)
+        if row.get("needs_invention") and row.get("has_t1_bpo") and t1_blueprint_type_id <= 0:
+            logger.warning(
+                "CharacterAssigner: has_t1_bpo set without a t1_blueprint_type_id for "
+                "type_id=%s; not creating a copy action",
+                type_id,
+            )
+        elif row.get("needs_invention") and row.get("has_t1_bpo"):
             char_id, char_name = self._best_research_char(char_slots, characters)
             if char_id is not None:
                 actions.append(AssignedAction(
-                    type_id=int(row.get("blueprint_type_id") or type_id),
+                    type_id=t1_blueprint_type_id,
                     type_name=type_name + " (copy)",
                     action_type="copy",
                     character_id=char_id,

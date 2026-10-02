@@ -195,3 +195,56 @@ def test_a_character_installed_job_deducts_a_manufacturing_slot(session_provider
     chars = [_char(7, "Pilot", [])]  # unskilled: 1 base mfg slot
     slots = CharacterAssigner()._compute_available_slots(chars, jobs, _now())
     assert slots[7]["free_mfg"] == 0
+
+
+# --- copy action (T1 BPO copy feeding invention) --------------------------------
+# This branch never executed before: nothing wrote has_t1_bpo. ChainPlanner now
+# writes has_t1_bpo + t1_blueprint_type_id when the corp owns the T1 BPO an
+# invention target is invented from.
+
+def _research_pilot():
+    return [_char(1, "Pilot", [_skill("Laboratory Operation", 5)])]
+
+
+def test_a_copy_action_is_created_when_an_owned_t1_bpo_feeds_invention():
+    plan = ChainPlan(decisions=[_decision(
+        overview_row={"type_id": 12345, "needs_invention": True, "has_t1_bpo": True,
+                      "t1_blueprint_type_id": 999,
+                      # The T2 blueprint being invented: NOT what gets copied.
+                      "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999}}},
+    )])
+    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    copies = [a for a in actions if a.action_type == "copy"]
+    assert len(copies) == 1
+    assert copies[0].type_id == 999
+
+
+def test_no_copy_action_without_an_owned_t1_bpo():
+    plan = ChainPlan(decisions=[_decision(
+        overview_row={"type_id": 12345, "needs_invention": True, "needs_t1_bpo": True},
+    )])
+    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    assert [a for a in actions if a.action_type == "copy"] == []
+
+
+def test_no_copy_action_when_the_t1_blueprint_is_unknown(caplog):
+    """Copying the T2 product's type_id would be meaningless; skip loudly."""
+    plan = ChainPlan(decisions=[_decision(
+        overview_row={"type_id": 12345, "needs_invention": True, "has_t1_bpo": True},
+    )])
+    with caplog.at_level("WARNING"):
+        actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    assert [a for a in actions if a.action_type == "copy"] == []
+    assert any("t1_blueprint_type_id" in r.message for r in caplog.records)
+
+
+def test_research_actions_carry_the_nested_blueprint_type_id():
+    """ME/TE research targets the blueprint, read from manufacturing_job.blueprint_sde
+    (a real row has no top-level blueprint_type_id)."""
+    plan = ChainPlan(decisions=[_decision(
+        overview_row={"type_id": 12345, "needs_me_research": True, "needs_te_research": True,
+                      "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 999}}},
+    )])
+    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    research = [a for a in actions if a.action_type.endswith("_research")]
+    assert sorted(a.type_id for a in research) == [999, 999]
