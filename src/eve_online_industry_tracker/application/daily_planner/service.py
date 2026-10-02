@@ -479,17 +479,16 @@ class DailyPlannerService:
             # A contract violation must abort the whole computation, not be
             # swallowed into a generic failure message: naming the offending
             # field and type_id here is what lets someone fix the producer
-            # (or the contract) instead of guessing which row broke.
-            logger.exception(
-                "DailyPlannerService: plan computation failed — input contract violation "
-                "(type_id=%s, field=%s)", exc.type_id, exc.field,
+            # (or the contract) instead of guessing which row broke. It is
+            # caught before the broad handler below so the user sees this
+            # specific message in the status bar's red banner.
+            logger.error(
+                "DailyPlannerService: overview row contract violation on %s (type_id=%s): %s",
+                exc.field, exc.type_id, exc.detail,
             )
             with self._lock:
                 self._status = "failed"
-                self._error = (
-                    f"Overview row type_id={exc.type_id} violates the planner input "
-                    f"contract: {exc.field} {exc.detail}."
-                )
+                self._error = _contract_violation_message(exc)
         except Exception as exc:
             logger.exception("DailyPlannerService: plan computation failed")
             with self._lock:
@@ -1213,6 +1212,16 @@ class DailyPlannerService:
         pairs.sort(key=lambda x: x[0])
         serialized = ",".join(f"{tid}:{price:.2f}" for tid, price in pairs)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _contract_violation_message(exc: PlannerInputError) -> str:
+    """User-facing text for a PlannerInputError, shown in the status bar."""
+    item = f"type_id={exc.type_id}" if exc.type_id is not None else "an unidentified item"
+    return (
+        f"Product overview row for {item} has an invalid '{exc.field}' ({exc.detail}). "
+        "The planner cannot build a plan from incomplete market data — "
+        "refresh the product overview and recompute."
+    )
 
 
 def _model_to_dict(model: Any) -> dict[str, Any]:

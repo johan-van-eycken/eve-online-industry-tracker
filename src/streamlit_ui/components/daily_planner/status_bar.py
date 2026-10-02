@@ -52,6 +52,22 @@ def _fmt_age(hours: float) -> str:
     return f"{hours / 24:.1f}d ago"
 
 
+def compute_failure_banner(status_data: dict[str, Any], *, has_plan: bool) -> str | None:
+    """Text for the red banner shown while the last compute is failed, else None.
+
+    Shown on every render while the backend reports "failed", not only on the
+    poll that saw running -> failed: otherwise a page reload hides the failure
+    and the user reads the previous plan as if it were today's.
+    """
+    if str(status_data.get("status") or "") != "failed":
+        return None
+    error = status_data.get("error") or "no error message was recorded (see the backend log)"
+    message = f"Plan computation failed: {error}"
+    if has_plan:
+        message += "\n\nThe plan shown below is the previous one, not a fresh computation."
+    return message
+
+
 # ---------------------------------------------------------------------------
 # Plan diff summary
 # ---------------------------------------------------------------------------
@@ -111,7 +127,6 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
         status_data = {}
 
     compute_status = str(status_data.get("status") or "idle")
-    error_msg = status_data.get("error")
 
     # ------------------------------------------------------------------
     # 2. Detect transition: was running, now done/failed
@@ -120,9 +135,8 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     if just_completed:
         page_state.status = "idle"
         page_state.recompute_confirmed = False
-        if compute_status == "failed" and error_msg:
-            st.error(f"Plan computation failed: {error_msg}")
-        else:
+        # A failure is rendered by the persistent banner below, not here.
+        if compute_status != "failed":
             # Reload plan and store prior decisions for diff
             try:
                 new_data = get_plan() or {}
@@ -148,6 +162,13 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
                 page_state.plan = data
         except Exception as exc:
             st.error(f"Failed to load plan: {exc}")
+
+    # ------------------------------------------------------------------
+    # 3b. Failed compute: red banner, on every render until the next run
+    # ------------------------------------------------------------------
+    failure_banner = compute_failure_banner(status_data, has_plan=page_state.plan is not None)
+    if failure_banner is not None:
+        st.error(failure_banner)
 
     # ------------------------------------------------------------------
     # 4. Computing state: show spinner and schedule re-poll
