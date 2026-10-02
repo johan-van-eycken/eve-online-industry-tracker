@@ -376,3 +376,45 @@ def test_an_industry_jobs_query_failure_fails_the_compute_not_frees_every_slot()
     svc._session_provider = SimpleNamespace(app_session=lambda: (_ for _ in ()).throw(_sde_error()))
     with pytest.raises(OperationalError):
         svc._get_industry_jobs()
+
+
+# --- Fix round 1: a failed input query fails the compute, it is not "empty" ---
+# An empty corp-assets list plans BPO and material purchases for things the
+# corp already owns; empty blueprint data drops every chain; empty orders skew
+# days-of-supply. Each must reach _run_compute and the status banner instead.
+
+def _raising_app_session():
+    raise _sde_error()
+
+
+def _svc_with_broken_db():
+    svc = _bare_service()
+    svc._session_provider = SimpleNamespace(
+        app_session=_raising_app_session, sde_session=_raising_app_session,
+    )
+    return svc
+
+
+_INPUT_QUERIES = {
+    "_get_corp_assets": lambda svc: svc._get_corp_assets(),
+    "_get_corp_orders": lambda svc: svc._get_corp_orders(),
+    "_get_blueprint_data": lambda svc: svc._get_blueprint_data(
+        [{"type_id": 1, "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 999}}}]
+    ),
+}
+
+
+@pytest.mark.parametrize("method", sorted(_INPUT_QUERIES))
+def test_a_failed_input_query_propagates(method):
+    with pytest.raises(OperationalError):
+        _INPUT_QUERIES[method](_svc_with_broken_db())
+
+
+@pytest.mark.parametrize("method", sorted(_INPUT_QUERIES))
+def test_a_failed_input_query_fails_the_compute_with_a_message(method):
+    svc = _svc_with_broken_db()
+    svc._phase_1_collect = lambda: _INPUT_QUERIES[method](svc)
+    svc._run_compute()
+    status = svc.get_compute_status()
+    assert status["status"] == "failed"
+    assert "database is locked" in status["error"]

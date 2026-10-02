@@ -902,32 +902,33 @@ class DailyPlannerService:
             session.close()
 
     def _get_corp_assets(self) -> list[Any]:
-        """Get corp assets."""
+        """Get corp assets.
+
+        No error handler: an empty list would mean "the corp owns no BPOs and
+        no stock", and the plan would tell the user to buy both. A failed
+        query must fail the compute (see _get_industry_jobs).
+        """
+        session = self._session_provider.app_session()
         try:
-            session = self._session_provider.app_session()
-            try:
-                from eve_online_industry_tracker.infrastructure.models import CorporationAssetsModel
-                return session.query(CorporationAssetsModel).all()
-            finally:
-                session.close()
-        except SQLAlchemyError:
-            logger.exception("DailyPlannerService: failed to get corp assets")
-            return []
+            from eve_online_industry_tracker.infrastructure.models import CorporationAssetsModel
+            return session.query(CorporationAssetsModel).all()
+        finally:
+            session.close()
 
     def _get_corp_orders(self) -> list[Any]:
-        """Get corp market orders."""
+        """Get corp sell orders.
+
+        No error handler: an empty list would read as "nothing on the market"
+        and skew days-of-supply, so a failed query fails the compute.
+        """
+        session = self._session_provider.app_session()
         try:
-            session = self._session_provider.app_session()
-            try:
-                from eve_online_industry_tracker.infrastructure.models import CorporationMarketOrdersModel
-                return session.query(CorporationMarketOrdersModel).filter(
-                    CorporationMarketOrdersModel.is_buy_order == False  # noqa: E712
-                ).all()
-            finally:
-                session.close()
-        except SQLAlchemyError:
-            logger.exception("DailyPlannerService: failed to get corp orders")
-            return []
+            from eve_online_industry_tracker.infrastructure.models import CorporationMarketOrdersModel
+            return session.query(CorporationMarketOrdersModel).filter(
+                CorporationMarketOrdersModel.is_buy_order == False  # noqa: E712
+            ).all()
+        finally:
+            session.close()
 
     def _get_sell_velocities(self, type_ids: list[int]) -> dict[int, float]:
         """Compute sell velocity per day for each type_id using SalesHistoryService.
@@ -1062,29 +1063,29 @@ class DailyPlannerService:
         bp_type_ids.discard(0)
         if not bp_type_ids:
             return {}
+        # No outer error handler: empty blueprint data silently drops every
+        # chain, research job and material from the plan, so a failed SDE
+        # load fails the compute. Only the T1-source sub-lookup degrades.
+        sde_session = self._session_provider.sde_session()
         try:
-            sde_session = self._session_provider.sde_session()
             try:
-                try:
-                    sources = sde_blueprints.get_invention_source_blueprint_ids(
-                        sde_session, bp_type_ids
-                    )
-                except SQLAlchemyError:
-                    # Degrade to the blueprints we were asked for; the shopping
-                    # list then warns per invent action that lacks its source.
-                    logger.warning(
-                        "DailyPlannerService: T1 source blueprint lookup failed; "
-                        "invention inputs for unowned T1 sources will be missing",
-                        exc_info=True,
-                    )
-                    sources = {}
-                bp_type_ids.update(sources.values())
-                return sde_blueprints.get_blueprint_manufacturing_data(sde_session, "en", list(bp_type_ids))
-            finally:
-                sde_session.close()
-        except SQLAlchemyError:
-            logger.exception("DailyPlannerService: failed to load blueprint data")
-            return {}
+                sources = sde_blueprints.get_invention_source_blueprint_ids(
+                    sde_session, bp_type_ids
+                )
+            except SQLAlchemyError:
+                # A strict sub-feature: degrade to the blueprints we were asked
+                # for; the shopping list then warns per invent action that
+                # lacks its source.
+                logger.warning(
+                    "DailyPlannerService: T1 source blueprint lookup failed; "
+                    "invention inputs for unowned T1 sources will be missing",
+                    exc_info=True,
+                )
+                sources = {}
+            bp_type_ids.update(sources.values())
+            return sde_blueprints.get_blueprint_manufacturing_data(sde_session, "en", list(bp_type_ids))
+        finally:
+            sde_session.close()
 
     def _index_blueprint_assets(
         self, corp_assets: list[Any]
