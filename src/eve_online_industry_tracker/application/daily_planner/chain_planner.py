@@ -269,7 +269,9 @@ class ChainPlanner:
 
         if bpo_owned:
             # Compute optimal ME/TE via SDE lookup
-            optimal_me = self._compute_optimal_me(bp_type_id)
+            optimal_me = self._compute_optimal_me(
+                bp_type_id, runs=orow.get_effective_runs(decision.overview_row)
+            )
             optimal_te = self._compute_optimal_te(bp_type_id, optimal_te_threshold)
 
             bpo_assets = bpo_assets_by_type_id[bp_type_id]
@@ -572,10 +574,10 @@ class ChainPlanner:
     ) -> None:
         """Compute BPO break-even and add to bpo_opportunities.
 
-        Break-even = BPO price / (ISK saved per run by researching ME from the
-        blueprint's current level to its optimal level × runs per day). When
-        any input is unavailable the analysis is skipped and the reason is
-        recorded on decision.bpo_analysis_skip_reason; the BPO fields stay None
+        Break-even = BPO price / (ISK saved per planned batch by researching ME
+        from the blueprint's current level to its optimal level × batches per
+        day). When any input is unavailable the analysis is skipped and the
+        reason is recorded on decision.bpo_analysis_skip_reason; the BPO fields stay None
         (unknown) rather than reporting a confident "hold" built on zeros.
         """
         if as_invention_enabler:
@@ -601,20 +603,16 @@ class ChainPlanner:
             self._skip_bpo_analysis(decision, "no material cost (no priced materials)")
             return
 
-        saving_per_run, reason = self._me_saving_isk_per_run(row=row, bp_data=bp_data or {})
-        if saving_per_run is None:
+        saving_per_batch, reason = self._me_saving_isk_per_batch(row=row, bp_data=bp_data or {})
+        if saving_per_batch is None:
             self._skip_bpo_analysis(decision, reason or "ME saving unavailable")
             return
 
-        # effective_velocity is units/day; one run makes quantity/runs units.
-        runs = orow.get_effective_runs(row)
+        # effective_velocity is units/day; one planned batch makes `quantity` units.
         quantity = orow.get_product_quantity(row)
-        if runs <= 0 or quantity <= 0:
-            self._skip_bpo_analysis(
-                decision, f"no units-per-run (quantity={quantity}, runs={runs})"
-            )
+        if quantity <= 0:
+            self._skip_bpo_analysis(decision, f"no batch units (quantity={quantity})")
             return
-        units_per_run = quantity / runs
         if decision.velocity_unknown_reason is not None:
             self._skip_bpo_analysis(
                 decision, f"sell velocity unknown ({decision.velocity_unknown_reason})"
@@ -625,9 +623,9 @@ class ChainPlanner:
                 decision, f"zero sell velocity ({decision.effective_velocity} units/day)"
             )
             return
-        planned_runs_per_day = decision.effective_velocity / units_per_run
+        planned_batches_per_day = decision.effective_velocity / quantity
 
-        saving_per_day = saving_per_run * planned_runs_per_day
+        saving_per_day = saving_per_batch * planned_batches_per_day
         total_investment = bpo_market_price  # simplified (ignores research cost)
         if saving_per_day <= 0:
             break_even_days = float("inf")
@@ -665,21 +663,23 @@ class ChainPlanner:
             "as_invention_enabler": as_invention_enabler,
         })
 
-    def _me_saving_isk_per_run(
+    def _me_saving_isk_per_batch(
         self,
         *,
         row: dict[str, Any],
         bp_data: dict[str, Any],
     ) -> tuple[float | None, str | None]:
-        """ISK saved per run by researching ME from its current to its optimal level.
+        """ISK saved on ONE planned batch by researching ME from its current to its optimal level.
 
         sum over materials of
-            (qty(base, me_current) - qty(base, me_target)) * unit_price
-        with the ceil-rounded per-run quantity from infrastructure/sde/blueprints.
-        Returns (None, reason) when an input is missing; never a constant.
+            (batch_qty(base, runs, me_current) - batch_qty(base, runs, me_target)) * unit_price
+        with batch_qty = blueprints.me_adjusted_batch_quantity: the producer's
+        ceiling over the whole batch, not a per-run ceiling times runs.
+        me_target is the optimal ME at this batch's run count. Returns
+        (None, reason) when an input is missing; never a constant.
         """
         from eve_online_industry_tracker.infrastructure.sde.blueprints import (
-            me_adjusted_quantity,
+            me_adjusted_batch_quantity,
             optimal_me_for_quantities,
         )
 
@@ -708,8 +708,14 @@ class ChainPlanner:
             me_current = int(job["blueprint_material_efficiency"])
         except (KeyError, TypeError, ValueError):
             return None, "unknown current blueprint ME"
+        try:
+            runs = int(job["runs"])
+        except (KeyError, TypeError, ValueError):
+            return None, "unknown batch run count (manufacturing_job.runs)"
+        if runs <= 0:
+            return None, f"non-positive batch run count ({runs})"
 
-        me_target = optimal_me_for_quantities(q for _, q in base)
+        me_target = optimal_me_for_quantities((q for _, q in base), runs=runs)
 
         priced = _material_unit_prices(job)
         saving = 0.0
@@ -717,7 +723,10 @@ class ChainPlanner:
             unit_price = priced.get(mat_type_id)
             if unit_price is None:
                 return None, f"no unit price for material type_id={mat_type_id}"
-            saved_units = me_adjusted_quantity(base_qty, me_current) - me_adjusted_quantity(base_qty, me_target)
+            saved_units = (
+                me_adjusted_batch_quantity(base_qty, runs, me_current)
+                - me_adjusted_batch_quantity(base_qty, runs, me_target)
+            )
             saving += max(0, saved_units) * unit_price
         return saving, None
 
@@ -728,8 +737,8 @@ class ChainPlanner:
             "ChainPlanner: BPO analysis skipped for type_id=%s: %s", decision.type_id, reason
         )
 
-    def _compute_optimal_me(self, blueprint_type_id: int) -> int | None:
-        """Optimal ME from the SDE, or None when the SDE query fails.
+    def _compute_optimal_me(self, blueprint_type_id: int, runs: int = 1) -> int | None:
+        """Optimal ME at a `runs`-run batch from the SDE, or None when the SDE query fails.
 
         Only a database error degrades (logged at WARNING); None must never be
         read as 0 -- that would make every owned BPO look fully researched.
@@ -738,7 +747,7 @@ class ChainPlanner:
         try:
             sde_session = self._session_provider.sde_session()
             try:
-                return compute_optimal_me(blueprint_type_id, sde_session)
+                return compute_optimal_me(blueprint_type_id, sde_session, runs=runs)
             finally:
                 sde_session.close()
         except SQLAlchemyError:

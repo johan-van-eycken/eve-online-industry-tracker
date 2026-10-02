@@ -32,7 +32,7 @@ class _AdminStub:
 
 def _planner(*, optimal_me=10, optimal_te=20):
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
-    planner._compute_optimal_me = lambda bp_type_id: optimal_me
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: optimal_me
     planner._compute_optimal_te = lambda bp_type_id, threshold: optimal_te
     return planner
 
@@ -357,6 +357,7 @@ def test_owned_t1_bpo_and_assigner_produce_a_copy_of_the_t1_blueprint():
 # the saving whenever ceil() rounding eats the ME reduction.
 
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (  # noqa: E402
+    me_adjusted_batch_quantity,
     me_adjusted_quantity,
     optimal_me_for_quantities,
 )
@@ -430,11 +431,9 @@ def test_runs_per_day_uses_units_per_run_not_runs_per_batch():
     assert opps[0]["recommendation"] == "hold"
 
 
-def test_a_small_quantity_blueprint_saves_nothing_from_me_research():
-    """5 base units: ceil(5 * 0.9) = 5 -> no saving at all, where a flat 10% of
-    material cost would have claimed one."""
-    decision, opps = _analyse(_bpo_row(me_current=0), _bpo_bp_data(5))
-
+def test_a_single_run_of_a_small_material_saves_nothing_from_me_research():
+    """1 run of 5 base units: ceil(5 x 0.9) = 5, so no saving."""
+    decision, opps = _analyse(_bpo_row(me_current=0, runs=1, quantity=1), _bpo_bp_data(5))
     assert decision.projected_annual_savings == 0.0
     assert decision.break_even_days is None
     assert decision.bpo_investment_recommended is False
@@ -508,14 +507,13 @@ def test_an_invention_enabler_is_not_valued_as_an_me_saving():
     _assert_skipped(decision, plan.bpo_opportunities, "invention")
 
 
-def test_rounding_eats_the_saving_on_a_small_material_but_not_a_large_one():
-    """Two materials, ME0 -> ME10 (optimal, driven by the 1000-unit one):
-      * 5 units x 1000 ISK:  ceil(4.5) = 5  -> saves nothing
-      * 1000 units x 5 ISK:  1000 -> 900    -> saves 100 x 5 = 500 ISK/run
-    Exact saving 500 ISK/run. A flat 10% of the 10,000 ISK/run material cost
-    would claim 1000 ISK/run. 2 runs/day -> 1000 ISK/day -> a 20,000 ISK BPO
-    breaks even in exactly 20 days (the flat 10% would give 10)."""
-    row = _row(runs=10, material_cost=100_000.0,  # 10 runs x 10,000 ISK/run
+def test_the_batch_saving_counts_both_materials_at_the_batch_ceiling():
+    """10 runs, ME0 -> ME10 (optimal at 10 runs):
+      * 5 x 10 = 50 units x 1000 ISK: 50 -> 45, saves 5 x 1000 = 5000 ISK
+      * 1000 x 10 = 10000 units x 5 ISK: 10000 -> 9000, saves 1000 x 5 = 5000 ISK
+    10,000 ISK per 10-unit batch. At 2 units/day that is 0.2 batches/day,
+    2000 ISK/day, so a 20,000 ISK BPO breaks even in exactly 10 days."""
+    row = _row(runs=10, material_cost=100_000.0,
                blueprint_material_efficiency=0, blueprint_source_kind="owned_blueprint_copy",
                materials={"34": {"type_id": 34, "quantity": 50, "unit_price": 1000.0},
                           "35": {"type_id": 35, "quantity": 9000, "unit_price": 5.0}})
@@ -524,13 +522,66 @@ def test_rounding_eats_the_saving_on_a_small_material_but_not_a_large_one():
                                        "materials": [{"type_id": 34, "quantity": 5},
                                                      {"type_id": 35, "quantity": 1000}]}}}
 
-    assert _planner()._me_saving_isk_per_run(row=row, bp_data=bp_data[999]) == (500.0, None)
+    assert _planner()._me_saving_isk_per_batch(row=row, bp_data=bp_data[999]) == (10_000.0, None)
 
     decision, opps = _analyse(row, bp_data)
     assert decision.bpo_analysis_skip_reason is None
-    assert decision.break_even_days == 20.0
-    assert decision.projected_annual_savings == 365_000.0
+    assert decision.break_even_days == 10.0
+    assert decision.projected_annual_savings == 730_000.0
     assert opps[0]["recommendation"] == "strong_buy"
+
+
+def test_optimal_me_research_target_is_computed_at_the_batch_run_count():
+    """The owned-BPO branch must ask for the optimum at the row's run count."""
+    seen = {}
+    planner = _planner()
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: seen.setdefault("runs", runs) and 10
+    row = _row(runs=20)
+    phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=0, te=0)]}, "blueprint_data": BLUEPRINT_DATA}
+    planner.plan_chain([_decision(row)], phase1)
+    assert seen["runs"] == 20
+
+
+def test_the_ceiling_is_taken_over_the_batch_not_per_run():
+    """5 units/run x 100 runs at ME10: per run ceil(4.5) = 5 saves nothing,
+    the batch ceil(450) = 450 saves 50 units."""
+    assert 100 * (me_adjusted_quantity(5, 0) - me_adjusted_quantity(5, 10)) == 0
+    assert me_adjusted_batch_quantity(5, 100, 0) - me_adjusted_batch_quantity(5, 100, 10) == 50
+    assert me_adjusted_batch_quantity(5, 1, 10) == 5
+    assert me_adjusted_batch_quantity(5, 1000, 10) == 4500
+    assert me_adjusted_batch_quantity(1, 1000, 10) == 1000   # never below one unit per run
+    assert me_adjusted_batch_quantity(0, 10, 10) == 0
+    assert me_adjusted_batch_quantity(5, 0, 10) == 0
+
+
+def test_the_batch_quantity_matches_the_producers_rounding_exactly():
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    for base in (1, 2, 5, 7, 10, 33, 100, 1000, 2500):
+        for runs in (1, 2, 3, 10, 20, 100, 250, 1000):
+            for me in range(11):
+                reduction = IndustryService._combine_reductions([me / 100.0])
+                expected = IndustryService._round_material_quantity(
+                    float(base * runs) * max(0.0, 1.0 - reduction), minimum_quantity=runs,
+                )
+                assert me_adjusted_batch_quantity(base, runs, me) == expected, (base, runs, me)
+
+
+def test_optimal_me_depends_on_the_run_count():
+    assert optimal_me_for_quantities([5]) == 0
+    assert optimal_me_for_quantities([5], runs=10) == 10
+    assert optimal_me_for_quantities([1], runs=100) == 0   # the one-unit-per-run floor
+
+
+def test_a_100_run_batch_of_a_small_material_has_a_real_saving():
+    """Base 5 x 100 runs, ME0 -> ME10: 500 -> 450 units, 50 x 5 ISK = 250 ISK
+    per batch. 2 units/day over 100-unit batches is 0.02 batches/day, so
+    5 ISK/day and a 4000-day break-even ('hold'), not 'saves nothing'."""
+    row = _bpo_row(me_current=0, runs=100, quantity=100)
+    decision, opps = _analyse(row, _bpo_bp_data(5))
+    assert decision.break_even_days == 4000.0
+    assert decision.projected_annual_savings == 1825.0
+    assert opps[0]["recommendation"] == "hold"
 
 
 def test_an_unknown_sell_velocity_skips_the_analysis_with_a_reason():

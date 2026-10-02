@@ -255,7 +255,7 @@ def test_an_unknown_optimal_level_schedules_no_research_and_says_why(caplog):
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
                           blueprint_material_efficiency=0, blueprint_time_efficiency=0)
     planner = ChainPlanner(None, None, _AdminKeyError())
-    planner._compute_optimal_me = lambda bp_type_id: None
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: None
     planner._compute_optimal_te = lambda bp_type_id, threshold: None
 
     with caplog.at_level(logging.WARNING):

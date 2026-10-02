@@ -98,6 +98,15 @@ class TestComputeOptimalMe:
         # Last useful ME = 10 (final improvement within 1..10 range)
         assert result == 10, f"Expected 10, got {result}"
 
+    def test_runs_raise_the_optimum_for_a_small_quantity(self):
+        session = _make_sde_session(321, 1000, [{"typeID": 34, "quantity": 5}])
+        assert compute_optimal_me(321, session) == 0
+        assert compute_optimal_me(321, session, runs=10) == 10
+
+    def test_one_unit_per_run_never_benefits_at_any_run_count(self):
+        session = _make_sde_session(789, 1000, [{"typeID": 34, "quantity": 1}])
+        assert compute_optimal_me(789, session, runs=100) == 0
+
 
 # ---------------------------------------------------------------------------
 # compute_optimal_te

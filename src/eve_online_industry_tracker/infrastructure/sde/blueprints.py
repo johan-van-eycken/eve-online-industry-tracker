@@ -357,7 +357,7 @@ def get_invention_source_blueprint_ids(
     return result
 
 
-def compute_optimal_me(blueprint_type_id: int, session) -> int:
+def compute_optimal_me(blueprint_type_id: int, session, runs: int = 1) -> int:
     """Return the ME level where no material quantity further decreases.
 
     For each material in the blueprint's manufacturing activity, find the last
@@ -369,6 +369,9 @@ def compute_optimal_me(blueprint_type_id: int, session) -> int:
         For ME in 1..10, compute ceil(qty * (1 - 0.01 * ME)) and compare to the
         previous level. The last ME that yields a reduction is the material's
         optimal ME. optimal_ME = max across all materials.
+
+    `runs` is the planned batch size; the ceiling applies to the batch (see
+    me_adjusted_batch_quantity).
     """
     blueprint = session.query(Blueprints).filter(
         Blueprints.blueprintTypeID == int(blueprint_type_id)
@@ -389,22 +392,59 @@ def compute_optimal_me(blueprint_type_id: int, session) -> int:
             quantities.append(int(mat.get("quantity", 0)))
         except (TypeError, ValueError):
             continue
-    return optimal_me_for_quantities(quantities)
+    return optimal_me_for_quantities(quantities, runs=runs)
+
+
+def _me_reduction(me: int) -> float:
+    """ME level as the producer's combined material-reduction fraction.
+
+    IndustryService._combine_reductions([me / 100.0]) for the ME term alone:
+    1 - (1 - me/100), capped at 0.99. Mirrored, not simplified to me/100, so
+    the float result is bit-for-bit the producer's.
+    """
+    fraction = int(me) / 100.0
+    if fraction <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0 - max(0.0, 1.0 - fraction), 0.99))
+
+
+def me_adjusted_batch_quantity(base_qty_per_run: int, runs: int, me: int) -> int:
+    """Units of one material for a whole batch at a blueprint ME level.
+
+    Mirrors the producer's "Material adjustment" loop (application/industry/
+    service.py, `adjusted_total = self._round_material_quantity(...)`): one
+    ceiling over the whole batch, never per run, and never fewer than one
+    unit per run:
+
+        max(runs, ceil(base_qty_per_run * runs * (1 - reduction)))
+
+    0 when base_qty_per_run or runs is not positive.
+    """
+    base = int(base_qty_per_run)
+    runs = int(runs)
+    if base <= 0 or runs <= 0:
+        return 0
+    raw = float(base * runs) * max(0.0, 1.0 - _me_reduction(me))
+    if raw <= 0:
+        return 0
+    return max(runs, int(math.ceil(raw)))
 
 
 def me_adjusted_quantity(base_qty: int, me: int) -> int:
-    """Per-run material quantity at a blueprint ME level.
+    """Per-run material quantity at a blueprint ME level (a one-run batch).
 
-    qty(ME) = ceil(base_qty * (1 - 0.01 * ME)). The ceiling is why ME research
-    saves nothing on small quantities (5 units: ceil(4.5) = 5 at ME10).
+    qty(ME) = ceil(base_qty * (1 - 0.01 * ME)). For a batch of more than one
+    run use me_adjusted_batch_quantity: the ceiling is applied to the batch
+    total, so per-run rounding times runs overstates the quantity.
     """
-    return math.ceil(int(base_qty) * (1.0 - 0.01 * int(me)))
+    return me_adjusted_batch_quantity(base_qty, 1, me)
 
 
-def optimal_me_for_quantities(quantities: Iterable[int]) -> int:
-    """Highest ME level (0-10) that still reduces any of these base quantities.
+def optimal_me_for_quantities(quantities: Iterable[int], *, runs: int = 1) -> int:
+    """Highest ME level (0-10) that still reduces any of these base quantities
+    for a batch of `runs` runs.
 
-    For each quantity, the last ME in 1..10 whose me_adjusted_quantity is lower
+    For each quantity, the last ME in 1..10 whose batch quantity is lower
     than the level below it; the maximum over quantities. 0 when none benefit.
     """
     per_material_optimal: list[int] = []
@@ -412,9 +452,9 @@ def optimal_me_for_quantities(quantities: Iterable[int]) -> int:
         if qty <= 0:
             continue
         last_useful_me = 0
-        prev_qty = qty  # ME0: ceil(qty * 1.0) = qty
+        prev_qty = me_adjusted_batch_quantity(qty, runs, 0)
         for me in range(1, 11):
-            curr_qty = me_adjusted_quantity(qty, me)
+            curr_qty = me_adjusted_batch_quantity(qty, runs, me)
             if curr_qty < prev_qty:
                 last_useful_me = me
             prev_qty = curr_qty
