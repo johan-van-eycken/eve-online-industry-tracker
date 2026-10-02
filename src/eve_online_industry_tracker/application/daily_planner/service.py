@@ -413,7 +413,11 @@ class DailyPlannerService:
                 "id": int(p.id),
                 "created_at": p.created_at.isoformat() if p.created_at else None,
                 "status": str(p.status),
-                "freshness_score": float(p.freshness_score or 1.0),
+                # None stays None (unknown); `or 1.0` showed it, and a real
+                # 0.0, as fully fresh.
+                "freshness_score": (
+                    float(p.freshness_score) if p.freshness_score is not None else None
+                ),
             }
             for p in plan_history_rows
         ]

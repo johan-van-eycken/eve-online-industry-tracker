@@ -52,6 +52,43 @@ def _fmt_age(hours: float) -> str:
     return f"{hours / 24:.1f}d ago"
 
 
+def freshness_summary(plan_data: dict[str, Any] | None) -> tuple[str, float | None]:
+    """(label, score) for the Freshness metric; score is None when unknown.
+
+    Reads the LIVE top-level `freshness_score` that get_active_plan recomputes
+    on every GET, not `plan.freshness_score`: Phase 9 writes that one against
+    the same market cache the plan was computed from, so it is always 1.0.
+    A missing score is unknown, never 100%. So is a score with 0 comparable
+    items: compute_freshness_stats returns 1.0 when nothing could be checked.
+    """
+    data = plan_data or {}
+    raw = data.get("freshness_score")
+    comparable = data.get("freshness_comparable_items")
+    total = data.get("freshness_total_items")
+    counts = (
+        f"{int(comparable)}/{int(total)} items"
+        if isinstance(comparable, (int, float)) and isinstance(total, (int, float))
+        else None
+    )
+    if raw is None:
+        return "unknown", None
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return "unknown", None
+    if comparable == 0:
+        return f"unknown · {counts} comparable" if counts else "unknown", None
+
+    pct = int(score * 100)
+    if score >= 0.90:
+        label = f"{pct}% (fresh)"
+    elif score >= 0.75:
+        label = f"{pct}% (mild drift)"
+    else:
+        label = f"{pct}% (stale)"
+    return (f"{label} · {counts}" if counts else label), score
+
+
 def compute_failure_banner(status_data: dict[str, Any], *, has_plan: bool) -> str | None:
     """Text for the red banner shown while the last compute is failed, else None.
 
@@ -217,7 +254,8 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     if page_state.plan:
         plan_meta = page_state.plan.get("plan") or {}
 
-    freshness_score = float(plan_meta.get("freshness_score") or 1.0)
+    # Live freshness (top level of the GET payload), None when unknown.
+    freshness_display, freshness_score = freshness_summary(page_state.plan)
     corp_wallet = float(plan_meta.get("corp_wallet_snapshot") or 0.0)
     created_at = plan_meta.get("created_at")
 
@@ -243,14 +281,6 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     # Metrics row
     if plan_meta:
         c1, c2, c3, c4, c5 = st.columns(5)
-
-        freshness_pct = int(freshness_score * 100)
-        if freshness_score >= 0.90:
-            freshness_display = f"{freshness_pct}% (fresh)"
-        elif freshness_score >= 0.75:
-            freshness_display = f"{freshness_pct}% (mild drift)"
-        else:
-            freshness_display = f"{freshness_pct}% (stale)"
 
         with c1:
             st.metric("Freshness", freshness_display)
@@ -293,9 +323,9 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
             st.metric("Market Data", market_label)
 
     # Freshness warning
-    if page_state.plan and freshness_score < 0.75:
+    if page_state.plan and freshness_score is not None and freshness_score < 0.75:
         st.warning("Market prices have drifted significantly — consider recomputing.")
-    elif page_state.plan and freshness_score < 0.90:
+    elif page_state.plan and freshness_score is not None and freshness_score < 0.90:
         st.caption("Some prices have drifted slightly — recomputing is recommended.")
 
     # ------------------------------------------------------------------
@@ -308,7 +338,8 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
         and str(a.get("action_type") or "") not in ("buy_materials", "buy_bpo")
     )
 
-    button_type = "primary" if (plan_expired or freshness_score < 0.75 or page_state.plan is None) else "secondary"
+    stale = freshness_score is not None and freshness_score < 0.75
+    button_type = "primary" if (plan_expired or stale or page_state.plan is None) else "secondary"
 
     if st.session_state.get("_dp_confirm_recompute") and pending_char_actions > 0:
         # Confirmation dialog

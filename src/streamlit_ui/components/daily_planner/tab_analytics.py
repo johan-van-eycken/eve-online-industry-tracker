@@ -145,7 +145,10 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
                 {
                     "Created At": str(p.get("created_at") or ""),
                     "Status": str(p.get("status") or ""),
-                    "Freshness": f"{float(p.get('freshness_score') or 1.0) * 100:.0f}%",
+                    "Freshness": (
+                        f"{float(p['freshness_score']) * 100:.0f}%"
+                        if p.get("freshness_score") is not None else "unknown"
+                    ),
                 }
                 for p in plan_history
             ]

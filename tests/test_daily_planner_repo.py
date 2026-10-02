@@ -568,6 +568,27 @@ def test_plan_history_returns_recent_plans(app_session, session_provider):
     assert history_180[0]["status"] == "active"
 
 
+def test_plan_history_keeps_an_unknown_freshness_unknown(app_session, session_provider):
+    """F5: `freshness_score or 1.0` showed a NULL score as 100% fresh and a
+    real 0.0 (everything drifted) as 100% too."""
+    from datetime import datetime
+
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanModel
+
+    now = datetime.utcnow()
+    app_session.add(BuildPlanModel(created_at=now, updated_at=now, status="active",
+                                   freshness_score=None))
+    app_session.add(BuildPlanModel(created_at=now, updated_at=now, status="superseded",
+                                   freshness_score=0.0))
+    app_session.commit()
+
+    history = _service(session_provider, admin_settings=_AdminSettings(planner_history_days=30)
+                       ).get_analytics()["plan_history"]
+
+    assert sorted(h["freshness_score"] is None for h in history) == [False, True]
+    assert [h["freshness_score"] for h in history if h["freshness_score"] is not None] == [0.0]
+
+
 # ---------------------------------------------------------------------------
 # DailyPlannerService._persist_plan_items() -- meta_group_id persistence (D6)
 # ---------------------------------------------------------------------------
