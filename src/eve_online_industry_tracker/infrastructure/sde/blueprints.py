@@ -347,19 +347,38 @@ def compute_optimal_me(blueprint_type_id: int, session) -> int:
     if not materials:
         return 0
 
-    per_material_optimal: list[int] = []
+    quantities: list[int] = []
     for mat in materials:
         try:
-            qty = int(mat.get("quantity", 0))
+            quantities.append(int(mat.get("quantity", 0)))
         except (TypeError, ValueError):
             continue
+    return optimal_me_for_quantities(quantities)
+
+
+def me_adjusted_quantity(base_qty: int, me: int) -> int:
+    """Per-run material quantity at a blueprint ME level.
+
+    qty(ME) = ceil(base_qty * (1 - 0.01 * ME)). The ceiling is why ME research
+    saves nothing on small quantities (5 units: ceil(4.5) = 5 at ME10).
+    """
+    return math.ceil(int(base_qty) * (1.0 - 0.01 * int(me)))
+
+
+def optimal_me_for_quantities(quantities: Iterable[int]) -> int:
+    """Highest ME level (0-10) that still reduces any of these base quantities.
+
+    For each quantity, the last ME in 1..10 whose me_adjusted_quantity is lower
+    than the level below it; the maximum over quantities. 0 when none benefit.
+    """
+    per_material_optimal: list[int] = []
+    for qty in quantities:
         if qty <= 0:
             continue
-
         last_useful_me = 0
         prev_qty = qty  # ME0: ceil(qty * 1.0) = qty
         for me in range(1, 11):
-            curr_qty = math.ceil(qty * (1.0 - 0.01 * me))
+            curr_qty = me_adjusted_quantity(qty, me)
             if curr_qty < prev_qty:
                 last_useful_me = me
             prev_qty = curr_qty

@@ -273,6 +273,7 @@ class ChainPlanner:
             self._analyze_bpo_investment(
                 decision=decision,
                 bp_type_id=bp_type_id,
+                bp_data=bp_data,
                 market_depth_cache=market_depth_cache,
                 bpo_opportunities=bpo_opportunities,
                 bpo_strong_buy_days=bpo_strong_buy_days,
@@ -283,6 +284,7 @@ class ChainPlanner:
             self._analyze_bpo_investment(
                 decision=decision,
                 bp_type_id=bp_type_id,
+                bp_data=bp_data,
                 market_depth_cache=market_depth_cache,
                 bpo_opportunities=bpo_opportunities,
                 bpo_strong_buy_days=bpo_strong_buy_days,
@@ -497,11 +499,24 @@ class ChainPlanner:
         bpo_opportunities: list[dict[str, Any]],
         bpo_strong_buy_days: float,
         bpo_consider_days: float,
+        bp_data: dict[str, Any] | None = None,
         as_invention_enabler: bool = False,
     ) -> None:
-        """Compute BPO break-even and add to bpo_opportunities if worthwhile."""
-        # Effective velocity for planned runs per day
-        eff_velocity = max(0.033, decision.effective_velocity)  # floor at 1/30
+        """Compute BPO break-even and add to bpo_opportunities.
+
+        Break-even = BPO price / (ISK saved per run by researching ME from the
+        blueprint's current level to its optimal level × runs per day). When
+        any input is unavailable the analysis is skipped and the reason is
+        recorded on decision.bpo_analysis_skip_reason; the BPO fields stay None
+        (unknown) rather than reporting a confident "hold" built on zeros.
+        """
+        if as_invention_enabler:
+            # ME research on the T1 BPO does not change T2 material quantities;
+            # its value is enabling invention, which this model does not price.
+            self._skip_bpo_analysis(
+                decision, "invention-enabler BPO: value is not an ME saving (not modelled)"
+            )
+            return
 
         # BPO market price from market depth cache (spot price on BPO type_id)
         bpo_cache_entry = market_depth_cache.get(bp_type_id)
@@ -509,27 +524,40 @@ class ChainPlanner:
         if bpo_cache_entry is not None:
             spot = _get_attr(bpo_cache_entry, "spot_sell_price")
             bpo_market_price = float(spot) if spot is not None else None
-
         if bpo_market_price is None:
-            return  # Can't do analysis without BPO price
+            self._skip_bpo_analysis(decision, f"no BPO market price for bp_type_id={bp_type_id}")
+            return
 
-        # Simplified break-even: total_investment / (savings_per_run × planned_runs_per_day)
-        # Use overview_row's material cost as proxy for savings
         row = decision.overview_row
-        material_cost_base = float(row.get("estimated_material_cost") or row.get("material_cost") or 0.0)
-        # ME10 savings ≈ 10% of base material cost for T1 items (rough approximation)
-        me_savings_per_run = material_cost_base * 0.10 if material_cost_base > 0 else 0.0
+        if orow.get_material_cost_total(row) is None:
+            self._skip_bpo_analysis(decision, "no material cost (no priced materials)")
+            return
 
-        runs_per_batch = int(row.get("runs_per_batch") or row.get("runs") or 1)
-        planned_runs_per_day = max(0.033, eff_velocity / max(1, runs_per_batch))
+        saving_per_run, reason = self._me_saving_isk_per_run(row=row, bp_data=bp_data or {})
+        if saving_per_run is None:
+            self._skip_bpo_analysis(decision, reason or "ME saving unavailable")
+            return
 
+        # effective_velocity is units/day; one run makes quantity/runs units.
+        runs = orow.get_effective_runs(row)
+        quantity = orow.get_product_quantity(row)
+        if runs <= 0 or quantity <= 0:
+            self._skip_bpo_analysis(
+                decision, f"no units-per-run (quantity={quantity}, runs={runs})"
+            )
+            return
+        units_per_run = quantity / runs
+        eff_velocity = max(0.033, decision.effective_velocity)  # floor at 1/30 units/day
+        planned_runs_per_day = eff_velocity / units_per_run
+
+        saving_per_day = saving_per_run * planned_runs_per_day
         total_investment = bpo_market_price  # simplified (ignores research cost)
-        if me_savings_per_run <= 0 or planned_runs_per_day <= 0:
+        if saving_per_day <= 0:
             break_even_days = float("inf")
         else:
-            break_even_days = total_investment / (me_savings_per_run * planned_runs_per_day)
+            break_even_days = total_investment / saving_per_day
 
-        projected_annual_savings = me_savings_per_run * planned_runs_per_day * 365.0
+        projected_annual_savings = saving_per_day * 365.0
 
         # Tag decision with BPO analysis results
         if break_even_days <= bpo_strong_buy_days:
@@ -557,6 +585,69 @@ class ChainPlanner:
             "as_invention_enabler": as_invention_enabler,
         })
 
+    def _me_saving_isk_per_run(
+        self,
+        *,
+        row: dict[str, Any],
+        bp_data: dict[str, Any],
+    ) -> tuple[float | None, str | None]:
+        """ISK saved per run by researching ME from its current to its optimal level.
+
+        sum over materials of
+            (qty(base, me_current) - qty(base, me_target)) * unit_price
+        with the ceil-rounded per-run quantity from infrastructure/sde/blueprints.
+        Returns (None, reason) when an input is missing; never a constant.
+        """
+        from eve_online_industry_tracker.infrastructure.sde.blueprints import (
+            me_adjusted_quantity,
+            optimal_me_for_quantities,
+        )
+
+        manufacturing = bp_data.get("manufacturing") if isinstance(bp_data, dict) else None
+        base_materials = (manufacturing or {}).get("materials") if isinstance(manufacturing, dict) else None
+        base: list[tuple[int, int]] = []
+        for mat in base_materials or []:
+            if not isinstance(mat, dict):
+                continue
+            try:
+                mat_type_id = int(mat.get("type_id") or 0)
+                base_qty = int(mat.get("quantity") or 0)
+            except (TypeError, ValueError):
+                continue
+            if mat_type_id > 0 and base_qty > 0:
+                base.append((mat_type_id, base_qty))
+        if not base:
+            return None, "no SDE base material quantities for the blueprint"
+
+        job = orow.get_manufacturing_job(row)
+        source_kind = job.get("blueprint_source_kind")
+        if source_kind == "blueprint_sde_fallback":
+            # No owned blueprint: the producer assumed a max-researched ME.
+            return None, "blueprint ME is assumed (blueprint_sde_fallback), not owned"
+        try:
+            me_current = int(job["blueprint_material_efficiency"])
+        except (KeyError, TypeError, ValueError):
+            return None, "unknown current blueprint ME"
+
+        me_target = optimal_me_for_quantities(q for _, q in base)
+
+        priced = _material_unit_prices(job)
+        saving = 0.0
+        for mat_type_id, base_qty in base:
+            unit_price = priced.get(mat_type_id)
+            if unit_price is None:
+                return None, f"no unit price for material type_id={mat_type_id}"
+            saved_units = me_adjusted_quantity(base_qty, me_current) - me_adjusted_quantity(base_qty, me_target)
+            saving += max(0, saved_units) * unit_price
+        return saving, None
+
+    @staticmethod
+    def _skip_bpo_analysis(decision: ItemDecision, reason: str) -> None:
+        decision.bpo_analysis_skip_reason = reason
+        logger.info(
+            "ChainPlanner: BPO analysis skipped for type_id=%s: %s", decision.type_id, reason
+        )
+
     def _compute_optimal_me(self, blueprint_type_id: int) -> int:
         try:
             from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_me
@@ -580,6 +671,31 @@ class ChainPlanner:
         except Exception:
             logger.debug("ChainPlanner: compute_optimal_te failed for bp_type_id=%s", blueprint_type_id)
             return 0
+
+
+def _material_unit_prices(manufacturing_job: dict[str, Any]) -> dict[int, float]:
+    """{material type_id: unit_price} from an overview row's manufacturing job.
+
+    The producer prices `procurement_materials` when present and `materials`
+    otherwise (industry/service.py _enrich_product_rows_with_material_prices),
+    so both are read; a direct `materials` price wins.
+    """
+    prices: dict[int, float] = {}
+    for key in ("procurement_materials", "materials"):
+        entries = manufacturing_job.get(key)
+        if not isinstance(entries, dict):
+            continue
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                type_id = int(entry.get("type_id") or 0)
+                price = entry.get("unit_price")
+                if type_id > 0 and price is not None:
+                    prices[type_id] = float(price)
+            except (TypeError, ValueError):
+                continue
+    return prices
 
 
 def _blueprint_efficiency(asset: Any, kind: str) -> int | None:

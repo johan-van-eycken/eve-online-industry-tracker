@@ -66,6 +66,11 @@ class ItemDecision:
     bpo_market_price: float | None = None
     break_even_days: float | None = None
     projected_annual_savings: float | None = None
+    # None when the BPO analysis ran (or was never attempted). Otherwise names
+    # the missing input that made it skip -- e.g. "no unit price for material
+    # type_id=34" -- and the BPO fields above stay None (unknown), same
+    # convention as ScoredItem.unscoreable_reason.
+    bpo_analysis_skip_reason: str | None = None
     # Chain context flag — True for sub-components added in Phase 5 Pass 2
     is_sub_component: bool = False
     # overview row snapshot for downstream phases

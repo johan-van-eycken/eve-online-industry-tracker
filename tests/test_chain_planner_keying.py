@@ -294,3 +294,160 @@ def test_owned_t1_bpo_and_assigner_produce_a_copy_of_the_t1_blueprint():
 
     copies = [a for a in actions if a.action_type == "copy"]
     assert [a.type_id for a in copies] == [999]
+
+
+# --- BPO investment: the exact, ceil-rounded ME saving --------------------------
+# The old analysis read three phantom keys, so it always computed a 0 saving and
+# recommended "hold". It also used a flat 10% of material cost, which overstates
+# the saving whenever ceil() rounding eats the ME reduction.
+
+from eve_online_industry_tracker.infrastructure.sde.blueprints import (  # noqa: E402
+    me_adjusted_quantity,
+    optimal_me_for_quantities,
+)
+
+
+def test_me_adjusted_quantity_rounds_up_per_material():
+    assert me_adjusted_quantity(1000, 0) == 1000
+    assert me_adjusted_quantity(1000, 10) == 900
+    assert me_adjusted_quantity(5, 10) == 5      # ceil(4.5)
+    assert me_adjusted_quantity(1, 10) == 1
+
+
+def test_optimal_me_for_quantities():
+    assert optimal_me_for_quantities([1000]) == 10
+    assert optimal_me_for_quantities([5]) == 0
+    assert optimal_me_for_quantities([5, 30]) == 10   # ceil(27) at ME10 < ceil(27.3) at ME9
+    assert optimal_me_for_quantities([]) == 0
+
+
+def _bpo_row(*, me_current, unit_price=5.0, material_cost=5000.0, quantity=10, runs=10,
+             source_kind="owned_blueprint_copy"):
+    """10 runs, 1 unit per run; one material, type 34, priced at unit_price."""
+    row = _row(runs=runs, material_cost=material_cost,
+               blueprint_material_efficiency=me_current, blueprint_source_kind=source_kind,
+               materials={"34": {"type_id": 34, "quantity": 9000, "unit_price": unit_price}})
+    row["quantity"] = quantity
+    return row
+
+
+def _bpo_bp_data(base_qty):
+    return {999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
+                                    "materials": [{"type_id": 34, "quantity": base_qty}]}}}
+
+
+def _analyse(row, bp_data, *, velocity=2.0, bpo_price=20_000.0, bpc_owned=True):
+    decision = _decision(row, effective_velocity=velocity)
+    phase1 = {
+        "bpo_assets_by_type_id": {},
+        "bpc_assets_by_type_id": {999: [object()]} if bpc_owned else {},
+        "blueprint_data": bp_data,
+        "market_depth_cache": {999: {"spot_sell_price": bpo_price}},
+    }
+    plan = _planner().plan_chain([decision], phase1)
+    return decision, plan.bpo_opportunities
+
+
+def test_a_large_quantity_blueprint_gets_the_exact_isk_saving():
+    """1000 base units: ME0 1000 vs ME10 900 -> 100 units x 5 ISK = 500 ISK/run.
+    1 unit per run at 2 units/day -> 2 runs/day -> 1000 ISK/day.
+    20,000 ISK BPO -> 20-day break-even -> strong_buy (<= 30d)."""
+    decision, opps = _analyse(_bpo_row(me_current=0), _bpo_bp_data(1000))
+
+    assert decision.bpo_analysis_skip_reason is None
+    assert decision.break_even_days == 20.0
+    assert decision.projected_annual_savings == 365_000.0
+    assert decision.bpo_investment_recommended is True
+    assert decision.bpo_market_price == 20_000.0
+    assert len(opps) == 1
+    assert opps[0]["recommendation"] == "strong_buy"
+    assert opps[0]["bp_type_id"] == 999
+
+
+def test_runs_per_day_uses_units_per_run_not_runs_per_batch():
+    """Same item, 10 units per run (quantity 100 over 10 runs): 2 units/day is
+    0.2 runs/day -> 100 ISK/day -> 200-day break-even -> hold."""
+    decision, opps = _analyse(_bpo_row(me_current=0, quantity=100), _bpo_bp_data(1000))
+
+    assert decision.break_even_days == 200.0
+    assert decision.projected_annual_savings == 36_500.0
+    assert decision.bpo_investment_recommended is False
+    assert opps[0]["recommendation"] == "hold"
+
+
+def test_a_small_quantity_blueprint_saves_nothing_from_me_research():
+    """5 base units: ceil(5 * 0.9) = 5 -> no saving at all, where a flat 10% of
+    material cost would have claimed one."""
+    decision, opps = _analyse(_bpo_row(me_current=0), _bpo_bp_data(5))
+
+    assert decision.projected_annual_savings == 0.0
+    assert decision.break_even_days is None
+    assert decision.bpo_investment_recommended is False
+    assert opps[0]["recommendation"] == "hold"
+
+
+def test_an_already_researched_blueprint_saves_nothing():
+    decision, opps = _analyse(_bpo_row(me_current=10), _bpo_bp_data(1000))
+
+    assert decision.projected_annual_savings == 0.0
+    assert decision.bpo_investment_recommended is False
+    assert opps[0]["recommendation"] == "hold"
+
+
+def _assert_skipped(decision, opps, fragment):
+    assert opps == []
+    assert decision.bpo_investment_recommended is None
+    assert decision.projected_annual_savings is None
+    assert decision.bpo_analysis_skip_reason is not None
+    assert fragment in decision.bpo_analysis_skip_reason
+
+
+def test_no_priced_materials_skips_the_analysis_with_a_reason():
+    decision, opps = _analyse(_bpo_row(me_current=0, material_cost=None), _bpo_bp_data(1000))
+    _assert_skipped(decision, opps, "material cost")
+
+
+def test_an_unpriced_material_skips_the_analysis_with_a_reason():
+    decision, opps = _analyse(_bpo_row(me_current=0, unit_price=None), _bpo_bp_data(1000))
+    _assert_skipped(decision, opps, "unit price")
+
+
+def test_missing_base_quantities_skip_the_analysis_with_a_reason():
+    bp_data = {999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
+                                       "materials": []}}}
+    decision, opps = _analyse(_bpo_row(me_current=0), bp_data)
+    _assert_skipped(decision, opps, "base material")
+
+
+def test_unknown_blueprint_me_skips_the_analysis_with_a_reason():
+    decision, opps = _analyse(_bpo_row(me_current=None), _bpo_bp_data(1000))
+    _assert_skipped(decision, opps, "ME")
+
+
+def test_an_assumed_sde_fallback_me_skips_the_analysis_with_a_reason():
+    """With no owned blueprint the producer assumes max ME; that is not a
+    measured level to compute a saving from."""
+    row = _bpo_row(me_current=10, source_kind="blueprint_sde_fallback")
+    decision, opps = _analyse(row, _bpo_bp_data(1000), bpc_owned=False)
+    _assert_skipped(decision, opps, "blueprint_sde_fallback")
+
+
+def test_no_bpo_market_price_skips_the_analysis_with_a_reason():
+    row = _bpo_row(me_current=0)
+    decision = _decision(row)
+    phase1 = {"bpc_assets_by_type_id": {999: [object()]},
+              "blueprint_data": _bpo_bp_data(1000), "market_depth_cache": {}}
+    plan = _planner().plan_chain([decision], phase1)
+    _assert_skipped(decision, plan.bpo_opportunities, "market price")
+
+
+def test_an_invention_enabler_is_not_valued_as_an_me_saving():
+    """ME on a T1 BPO does not change T2 material quantities; that value is
+    not modelled, so it is skipped rather than reported as a 'hold'."""
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {}, "blueprint_data": INVENTION_BLUEPRINT_DATA,
+              "market_depth_cache": {999: {"spot_sell_price": 1.0},
+                                     1999: {"spot_sell_price": 1.0}}}
+    plan = _planner().plan_chain([decision], phase1)
+    _assert_skipped(decision, plan.bpo_opportunities, "invention")
