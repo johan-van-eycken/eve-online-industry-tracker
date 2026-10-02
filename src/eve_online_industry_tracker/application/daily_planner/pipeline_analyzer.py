@@ -33,6 +33,7 @@ from eve_online_industry_tracker.application.daily_planner.character_assigner im
     ACTIVITY_MANUFACTURING,
 )
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
+from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState
 
 logger = logging.getLogger(__name__)
@@ -153,10 +154,7 @@ class PipelineAnalyzer:
     ) -> PipelineState:
         # ── Velocity ──────────────────────────────────────────────────────────
         sell_velocity_per_day = float(sell_velocities.get(type_id, 0.0))
-        velocity_multiplier = 1.0
-        w = weights.get(type_id)
-        if w is not None:
-            velocity_multiplier = float(getattr(w, "velocity_multiplier", 1.0))
+        velocity_multiplier = read_weight(weights.get(type_id), "velocity_multiplier")
 
         # See module docstring: 0.0 here is safe only because of the `> 0.0` guard
         # below, which floors it at 0.01 same as any other non-positive value.

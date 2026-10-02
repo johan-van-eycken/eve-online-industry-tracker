@@ -24,6 +24,7 @@ from eve_online_industry_tracker.application.daily_planner.input_row import (
     dedupe_by_type_id,
 )
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
+from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
 from eve_online_industry_tracker.application.daily_planner.profitability_scorer import ProfitabilityScorer
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
@@ -365,9 +366,9 @@ class DailyPlannerService:
                 "type_id": tid,
                 "type_name": item.type_name,
                 "decision": item.decision,
-                "accuracy_ema": float(getattr(w, "accuracy_ema", 1.0)) if w else 1.0,
-                "velocity_multiplier": float(getattr(w, "velocity_multiplier", 1.0)) if w else 1.0,
-                "cost_multiplier": float(getattr(w, "cost_multiplier", 1.0)) if w else 1.0,
+                "accuracy_ema": read_weight(w, "accuracy_ema"),
+                "velocity_multiplier": read_weight(w, "velocity_multiplier"),
+                "cost_multiplier": read_weight(w, "cost_multiplier"),
                 "sample_count": int(getattr(w, "sample_count", 0)) if w else 0,
                 "confidence_tier": str(getattr(w, "confidence_tier", "low")) if w else "low",
                 "invention_success_rate": invention_rates.get(tid),

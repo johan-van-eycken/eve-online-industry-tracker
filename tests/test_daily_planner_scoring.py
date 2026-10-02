@@ -353,3 +353,21 @@ class TestUnscoreableItems:
         )
         assert scored.margin_pct == 0.0
         assert scored.unscoreable_reason is None
+
+
+def test_the_scorer_clamps_an_out_of_band_stored_weight():
+    scored = ProfitabilityScorer().score(
+        _make_pipeline(days_of_supply=3.0), _input_row(isk_per_hour=10_000_000),
+        _make_weights(accuracy_ema=10.0, velocity_multiplier=-1.0), None, None,
+    )
+    assert scored.accuracy_ema == 4.0
+    assert scored.velocity_multiplier == 0.25
+
+
+def test_an_item_with_a_text_weight_is_still_scored():
+    """float('abc') used to raise inside Phase 3's per-item handler and drop the item."""
+    scored = ProfitabilityScorer().score(
+        _make_pipeline(days_of_supply=3.0), _input_row(isk_per_hour=10_000_000),
+        _make_weights(cost_multiplier="abc"), None, None,
+    )
+    assert scored.cost_multiplier == 1.0

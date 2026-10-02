@@ -360,3 +360,12 @@ def test_is_blueprint_lookups_are_prefetched_in_one_batch_not_per_asset():
 
     assert loader.calls == [[888, 999]], "the loader must be invoked exactly once, batched"
     assert states[0].bpc_runs_available == 8
+
+
+def test_the_analyzer_clamps_an_out_of_band_velocity_multiplier():
+    states = PipelineAnalyzer().analyze(
+        input_rows=[_input_row(type_id=1)], industry_jobs=[], corp_assets=[],
+        market_depth_cache={}, weights={1: SimpleNamespace(type_id=1, velocity_multiplier=10.0)},
+        sell_velocities={1: 2.0}, meta_resolver=_NoBlueprints(),
+    )
+    assert states[0].effective_velocity == 8.0  # 2.0 x 4.0, not 2.0 x 10.0

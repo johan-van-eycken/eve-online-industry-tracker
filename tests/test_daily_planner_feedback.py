@@ -179,6 +179,21 @@ class TestFeedbackProcessor:
             f"Expected accuracy_ema={expected_accuracy}, got {weights_arg.accuracy_ema}"
         )
 
+    def test_an_out_of_band_stored_weight_is_clamped_before_the_ema(self):
+        """A hand-edited 10.0 must enter the EMA as 4.0: 0.8*4.0 + 0.2*0.8 = 3.36,
+        not 0.8*10.0 + 0.2*0.8 = 8.16 clamped to 4.0."""
+        action = _make_action(type_id=220)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {220: _make_weights(accuracy_ema=10.0)}
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=220, isk_per_hour=10_000_000)]
+        self.processor._find_realized_sale.return_value = {
+            "isk_per_hour": 8_000_000.0, "material_cost": None,
+            "priced_quantity": 0, "sell_days": 5.0,
+        }
+        self.processor.process_pending_feedback()
+        weights = self.repo.upsert_weights.call_args[0][0]
+        assert abs(weights.accuracy_ema - (0.8 * 4.0 + 0.2 * 0.8)) < 1e-9
+
     def _run_cost_case(self, *, action_cost, action_qty, sale_cost, sale_qty, old_cost=1.0):
         action = _make_action(type_id=200, estimated_cost_isk=action_cost, quantity=action_qty)
         self.repo.get_unprocessed_done_actions.return_value = [action]

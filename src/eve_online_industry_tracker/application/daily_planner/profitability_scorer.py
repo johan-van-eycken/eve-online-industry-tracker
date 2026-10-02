@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
+from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState, ScoredItem
 
 logger = logging.getLogger(__name__)
@@ -47,9 +48,9 @@ class ProfitabilityScorer:
         margin_pct = margin_fraction * 100.0
 
         # ── Self-learning multipliers ─────────────────────────────────────────
-        accuracy_ema = float(getattr(weights, "accuracy_ema", 1.0)) if weights else 1.0
-        velocity_multiplier = float(getattr(weights, "velocity_multiplier", 1.0)) if weights else 1.0
-        cost_multiplier = float(getattr(weights, "cost_multiplier", 1.0)) if weights else 1.0
+        accuracy_ema = read_weight(weights, "accuracy_ema")
+        velocity_multiplier = read_weight(weights, "velocity_multiplier")
+        cost_multiplier = read_weight(weights, "cost_multiplier")
         confidence_tier = str(getattr(weights, "confidence_tier", "low")) if weights else "low"
 
         confidence_tier_bonus = {"low": 1.0, "medium": 1.05, "high": 1.15}.get(confidence_tier, 1.0)
