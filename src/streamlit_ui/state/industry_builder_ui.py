@@ -6,13 +6,15 @@ from typing import Any, cast
 import pandas as pd
 import streamlit as st
 
+from eve_online_industry_tracker.application.industry.overview_row import (  # noqa: F401
+    get_effective_runs,
+    get_manufacturing_job,
+    get_meta_group_name,
+    get_product_quantity,
+    skill_requirements_met,
+)
 from streamlit_ui.components.assets_data import get_item_image_url
 from streamlit_ui.components.formatters import format_duration
-
-
-def get_manufacturing_job(row: dict[str, Any]) -> dict[str, Any]:
-    value = row.get("manufacturing_job") or {}
-    return value if isinstance(value, dict) else {}
 
 
 def get_node_blueprint_sources(node: dict[str, Any]) -> tuple[str, str]:
@@ -35,47 +37,6 @@ def get_node_primary_activity_child(node: dict[str, Any]) -> dict[str, Any]:
         if child_node_type == "activity" and child_activity in {"manufacturing", "reaction"}:
             return child
     return {}
-
-
-def get_product_quantity(row: dict[str, Any]) -> int:
-    try:
-        return int(row.get("quantity") or 0)
-    except Exception:
-        return 0
-
-
-def get_effective_runs(row: dict[str, Any]) -> int:
-    manufacturing_job = get_manufacturing_job(row)
-    try:
-        runs = int(manufacturing_job.get("runs") or 0)
-    except Exception:
-        runs = 0
-    if runs > 0:
-        return runs
-    return get_product_quantity(row)
-
-
-def skill_requirements_met(row: dict[str, Any]) -> bool:
-    skills = get_manufacturing_job(row).get("skills") or {}
-    if not isinstance(skills, dict):
-        return False
-    return bool(skills.get("skill_requirements_met", False))
-
-
-def get_meta_group_name(row: dict[str, Any]) -> str:
-    raw_name = str(row.get("meta_group_name") or "").strip()
-    normalized = raw_name.lower()
-    if normalized in {"tech i", "structure tech i", "abyssal"}:
-        return "Tech I"
-    if normalized in {"tech ii", "structure tech ii"}:
-        return "Tech II"
-    if normalized in {"tech iii", "structure tech iii"}:
-        return "Tech III"
-    if normalized in {"faction", "structure faction"}:
-        return "Faction"
-    if normalized in {"storyline", "limited time"}:
-        return "Storyline"
-    return raw_name
 
 
 def meta_group_label(meta_group_name: str) -> str:
@@ -279,7 +240,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         material_contention = node.get("material_contention")
         manufacturing_cost_index = node.get("manufacturing_cost_index")
         # Tier 1/2/3 — new fields (top-level product rows only)
-        price_trend_pct = None
+        price_trend_7d_pct = None
         price_avg_7d = None
         price_avg_42w = None
         price_volatility_pct = None
@@ -368,7 +329,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             material_contention = source_row.get("material_contention")
             manufacturing_cost_index = source_row.get("manufacturing_cost_index")
             # Tier 1 — Market trends
-            price_trend_pct = source_row.get("price_trend_pct")
+            price_trend_7d_pct = source_row.get("price_trend_7d_pct")
             price_avg_7d = source_row.get("price_avg_7d")
             price_avg_42w = source_row.get("price_avg_42w")
             price_volatility_pct = source_row.get("price_volatility_pct")
@@ -507,7 +468,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Meta Group": meta_group,
                 "Category": category,
                 # Tier 1 — Market trends (top-level product rows only)
-                "Price Trend %": price_trend_pct,
+                "Price Trend %": price_trend_7d_pct,
                 "7d Avg Price": price_avg_7d,
                 "42w Avg Price": price_avg_42w,
                 "Price Volatility %": price_volatility_pct,

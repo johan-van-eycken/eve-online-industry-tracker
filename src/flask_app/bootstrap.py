@@ -147,6 +147,39 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
                 request_timeout_seconds=float(public_structures_esi_request_timeout_seconds()),
             )
 
+        # Instantiate DailyPlannerService and attach to state
+        from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+        from eve_online_industry_tracker.application.characters.realized_profit import CorporationRealizedProfitLedgerService
+        from eve_online_industry_tracker.infrastructure.persistence.daily_planner_repo import DailyPlannerRepository
+        from eve_online_industry_tracker.application.industry.service import IndustryService as _IndustryService
+        from eve_online_industry_tracker.application.corporations.service import CorporationsService as _CorporationsService
+        from eve_online_industry_tracker.application.characters.service import CharactersService as _CharactersService
+        from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService as _SalesHistoryService
+        from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService as _MarketPricingService
+        from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
+
+        _session_provider = StateSessionProvider(state=state)
+        state.daily_planner_service = DailyPlannerService(
+            industry_service=_IndustryService(state=state),
+            corporations_service=_CorporationsService(state=state),
+            characters_service=_CharactersService(state=state),
+            sales_history_service=_SalesHistoryService(state=state),
+            market_pricing_service=_MarketPricingService(state=state),
+            realized_profit_service=CorporationRealizedProfitLedgerService(
+                app_session=None,
+                sde_session=None,
+            ),
+            repo=DailyPlannerRepository(session_provider=_session_provider),
+            admin_settings=state.admin_settings,
+            session_provider=_session_provider,
+        )
+
+        # Start MarketIntelligenceJob daemon thread
+        from eve_online_industry_tracker.application.market_intelligence.job import MarketIntelligenceJob
+        _mij = MarketIntelligenceJob(state=state)
+        _mij.start()
+        state._market_intelligence_job = _mij
+
         chars_initialized = len(state.char_manager._character_list)
         corps_initialized = len(state.corp_manager._corporation_ids)
         logging.info("All done. Characters: %s, Corporations: %s", chars_initialized, corps_initialized)

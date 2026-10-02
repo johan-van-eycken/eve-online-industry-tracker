@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 from typing import Iterable
+
+from sqlalchemy import bindparam, text
 
 from eve_online_industry_tracker.db_models import Blueprints, Types
 
@@ -318,3 +321,147 @@ def get_blueprint_manufacturing_data(
         }
 
     return result
+
+
+def get_invention_source_blueprint_ids(
+    session,
+    invented_blueprint_type_ids: Iterable[int],
+) -> dict[int, int]:
+    """{invented blueprint type_id: T1 source blueprint type_id} in one query.
+
+    The invention activity lives on the source blueprint, with the blueprints
+    it invents into as its products, so the source is found by searching the
+    invention products. `activities` is a JSON text column; SQLite's
+    json_each expands the products list so this is a single query instead of
+    loading and scanning every blueprint in Python. Ids that nothing invents
+    into are simply absent. First source seen wins when
+    several blueprints invent into the same one.
+    """
+    ids = sorted({int(i) for i in invented_blueprint_type_ids if i is not None})
+    if not ids:
+        return {}
+    rows = session.execute(
+        text(
+            "SELECT CAST(json_extract(p.value, '$.typeID') AS INTEGER) AS invented, "
+            "b.blueprintTypeID AS source "
+            "FROM blueprints b, "
+            "json_each(json_extract(b.activities, '$.invention.products')) p "
+            "WHERE CAST(json_extract(p.value, '$.typeID') AS INTEGER) IN :ids "
+            "ORDER BY b.blueprintTypeID"
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    result: dict[int, int] = {}
+    for invented, source in rows:
+        result.setdefault(int(invented), int(source))
+    return result
+
+
+def compute_optimal_me(blueprint_type_id: int, session) -> int:
+    """Return the ME level where no material quantity further decreases.
+
+    For each material in the blueprint's manufacturing activity, find the last
+    ME level (1–10) that still reduces the required quantity. The optimal ME
+    is the maximum of these per-material values. If no material ever benefits
+    from ME research (e.g. qty=1 for all materials), returns 0.
+
+    Algorithm:
+        For ME in 1..10, compute ceil(qty * (1 - 0.01 * ME)) and compare to the
+        previous level. The last ME that yields a reduction is the material's
+        optimal ME. optimal_ME = max across all materials.
+    """
+    blueprint = session.query(Blueprints).filter(
+        Blueprints.blueprintTypeID == int(blueprint_type_id)
+    ).first()
+    if blueprint is None:
+        return 0
+
+    activities = blueprint.activities if isinstance(blueprint.activities, dict) else {}
+    manufacturing = activities.get("manufacturing", {}) if isinstance(activities.get("manufacturing"), dict) else {}
+    materials = manufacturing.get("materials", []) or []
+
+    if not materials:
+        return 0
+
+    quantities: list[int] = []
+    for mat in materials:
+        try:
+            quantities.append(int(mat.get("quantity", 0)))
+        except (TypeError, ValueError):
+            continue
+    return optimal_me_for_quantities(quantities)
+
+
+def me_adjusted_quantity(base_qty: int, me: int) -> int:
+    """Per-run material quantity at a blueprint ME level.
+
+    qty(ME) = ceil(base_qty * (1 - 0.01 * ME)). The ceiling is why ME research
+    saves nothing on small quantities (5 units: ceil(4.5) = 5 at ME10).
+    """
+    return math.ceil(int(base_qty) * (1.0 - 0.01 * int(me)))
+
+
+def optimal_me_for_quantities(quantities: Iterable[int]) -> int:
+    """Highest ME level (0-10) that still reduces any of these base quantities.
+
+    For each quantity, the last ME in 1..10 whose me_adjusted_quantity is lower
+    than the level below it; the maximum over quantities. 0 when none benefit.
+    """
+    per_material_optimal: list[int] = []
+    for qty in quantities:
+        if qty <= 0:
+            continue
+        last_useful_me = 0
+        prev_qty = qty  # ME0: ceil(qty * 1.0) = qty
+        for me in range(1, 11):
+            curr_qty = me_adjusted_quantity(qty, me)
+            if curr_qty < prev_qty:
+                last_useful_me = me
+            prev_qty = curr_qty
+        per_material_optimal.append(last_useful_me)
+
+    return max(per_material_optimal) if per_material_optimal else 0
+
+
+def compute_optimal_te(
+    blueprint_type_id: int,
+    session,
+    time_savings_threshold_pct: float = 1.0,
+) -> int:
+    """Return the TE level where per-level time savings fall below threshold_pct%.
+
+    Iterates TE levels 1..10. When the time saved by going from TE-1 to TE
+    falls below ``time_savings_threshold_pct``% of the base manufacturing time,
+    returns TE-1 (the last level still worth researching). Returns 10 if the
+    threshold is never reached within 1..10.
+
+    time(TE) = ceil(base_time * (1 - 0.01 * TE))
+    saved_pct(TE) = (time(TE-1) - time(TE)) / base_time * 100
+    """
+    blueprint = session.query(Blueprints).filter(
+        Blueprints.blueprintTypeID == int(blueprint_type_id)
+    ).first()
+    if blueprint is None:
+        return 0
+
+    activities = blueprint.activities if isinstance(blueprint.activities, dict) else {}
+    manufacturing = activities.get("manufacturing", {}) if isinstance(activities.get("manufacturing"), dict) else {}
+    base_time = manufacturing.get("time", 0)
+
+    try:
+        base_time = int(base_time)
+    except (TypeError, ValueError):
+        return 0
+
+    if base_time <= 0:
+        return 0
+
+    prev_time = base_time  # TE=0: ceil(base_time * 1.0) = base_time
+    for te in range(1, 11):
+        curr_time = math.ceil(base_time * (1.0 - 0.01 * te))
+        saved_pct = (prev_time - curr_time) / base_time * 100.0
+        if saved_pct < time_savings_threshold_pct:
+            return te - 1  # last level worth researching is the previous one
+        prev_time = curr_time
+
+    return 10  # threshold never reached within TE 1–10

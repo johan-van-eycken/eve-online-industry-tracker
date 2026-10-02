@@ -14,5 +14,8 @@ tqdm==4.66.1
 # EVE SSO JWT validation
 PyJWT[crypto]==2.10.1
 
+# ESI response validation (Daily Planner DTOs)
+pydantic>=2.0
+
 # pip install --upgrade pip setuptools wheel
 # pip install -r requirements.txt

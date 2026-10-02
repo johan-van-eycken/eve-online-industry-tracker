@@ -9,6 +9,21 @@ import requests
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
+from eve_online_industry_tracker.infrastructure.esi_versions import (
+    ESI_MARKETS_ORDERS,
+    ESI_MARKETS_HISTORY,
+    ESI_MARKETS_PRICES,
+    ESI_UNIVERSE_TYPE,
+    ESI_UNIVERSE_NAMES,
+    ESI_UNIVERSE_STATIONS,
+    ESI_UNIVERSE_STRUCTURES_LIST,
+    ESI_UNIVERSE_STRUCTURE,
+    ESI_UNIVERSE_REGIONS,
+    ESI_UNIVERSE_CONSTELLATIONS,
+    ESI_UNIVERSE_SYSTEMS,
+    ESI_INDUSTRY_FACILITIES,
+    ESI_INDUSTRY_SYSTEMS,
+)
 from utils.requests_ssl import get_requests_ssl_kwargs
 
 try:
@@ -279,7 +294,7 @@ class ESIService:
 
             try:
                 orders = self._public_esi_get(
-                    f"/markets/{region_id}/orders/",
+                    ESI_MARKETS_ORDERS.format(region_id=region_id),
                     params={"order_type": order_type, "type_id": int(type_id)},
                     paginate=True,
                     timeout_seconds=15.0,
@@ -452,7 +467,7 @@ class ESIService:
         def _fetch_one(type_id: int) -> tuple[int, List[Dict[str, Any]]]:
             try:
                 payload = self._public_esi_get(
-                    f"/markets/{int(region_id)}/history/",
+                    ESI_MARKETS_HISTORY.format(region_id=int(region_id)),
                     params={"type_id": int(type_id)},
                     paginate=False,
                     timeout_seconds=15.0,
@@ -514,19 +529,19 @@ class ESIService:
         id_type = self._esi_client.get_id_type(location_id)
         try:
             if id_type == "station":
-                return self._public_esi_get(f"/universe/stations/{location_id}/")
+                return self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=location_id))
             if id_type == "structure":
                 return self._esi_client.esi_get(
-                    f"/universe/structures/{location_id}/",
+                    ESI_UNIVERSE_STRUCTURE.format(structure_id=location_id),
                     suppress_forbidden_log=suppress_forbidden_log,
                     suppress_not_found_log=suppress_not_found_log,
                 )
             if id_type == "region":
-                return self._public_esi_get(f"/universe/regions/{location_id}/")
+                return self._public_esi_get(ESI_UNIVERSE_REGIONS.format(region_id=location_id))
             if id_type == "constellation":
-                return self._public_esi_get(f"/universe/constellations/{location_id}/")
+                return self._public_esi_get(ESI_UNIVERSE_CONSTELLATIONS.format(constellation_id=location_id))
             if id_type == "solar_system":
-                return self._public_esi_get(f"/universe/systems/{location_id}/")
+                return self._public_esi_get(ESI_UNIVERSE_SYSTEMS.format(system_id=location_id))
             return {}
         except Exception as e:
             raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
@@ -550,7 +565,7 @@ class ESIService:
 
         try:
             return self._esi_client.esi_get(
-                f"/universe/structures/{structure_id}/",
+                ESI_UNIVERSE_STRUCTURE.format(structure_id=structure_id),
                 use_cache=False,
                 timeout_seconds=float(timeout_seconds),
                 suppress_forbidden_log=suppress_forbidden_log,
@@ -567,7 +582,7 @@ class ESIService:
             return self._market_prices_cache[1]
 
         try:
-            market_prices = self._esi_client.esi_get("/markets/prices/", paginate=True)
+            market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES, paginate=True)
         except Exception as e:
             raise RuntimeError(f"ESI request failed: {e}")
 
@@ -585,7 +600,7 @@ class ESIService:
             return self._industry_facilities_cache[1]
 
         try:
-            data = self._esi_client.esi_get("/industry/facilities/")
+            data = self._esi_client.esi_get(ESI_INDUSTRY_FACILITIES)
         except Exception as e:
             raise RuntimeError(f"ESI request failed: {e}")
 
@@ -605,7 +620,7 @@ class ESIService:
             return cache[1]
 
         try:
-            data = self._esi_client.esi_get("/industry/systems/", paginate=True)
+            data = self._esi_client.esi_get(ESI_INDUSTRY_SYSTEMS, paginate=True)
         except Exception as e:
             raise RuntimeError(f"ESI request failed: {e}")
 
@@ -632,7 +647,7 @@ class ESIService:
             return cached[1]
 
         try:
-            data = self._esi_client.esi_get(f"/universe/types/{type_id}/")
+            data = self._esi_client.esi_get(ESI_UNIVERSE_TYPE.format(type_id=type_id))
         except Exception as e:
             raise RuntimeError(f"ESI request failed for /universe/types/{type_id}/: {e}")
 
@@ -670,7 +685,7 @@ class ESIService:
         for i in range(0, len(missing), chunk_size):
             chunk = missing[i : i + chunk_size]
             try:
-                data = self._esi_client.esi_post("/universe/names/", json=chunk, use_cache=False)
+                data = self._esi_client.esi_post(ESI_UNIVERSE_NAMES, json=chunk, use_cache=False)
             except Exception:
                 data = None
 
@@ -702,7 +717,7 @@ class ESIService:
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
             try:
-                resp = self._esi_client.esi_post("/universe/names/", json=chunk, timeout=15)
+                resp = self._esi_client.esi_post(ESI_UNIVERSE_NAMES, json=chunk, timeout=15)
             except Exception:
                 continue
 
@@ -728,7 +743,7 @@ class ESIService:
             raise ValueError("Invalid filter value. Must be one of: None, manufacturing_basic, market.")
 
         params = {"filter": filter} if filter is not None else None
-        data = self._esi_client.esi_get("/universe/structures/", params=params, use_cache=False)
+        data = self._esi_client.esi_get(ESI_UNIVERSE_STRUCTURES_LIST, params=params, use_cache=False)
         if data is None:
             raise RuntimeError(
                 "ESI returned no data for /universe/structures (likely 403 Forbidden). "
@@ -769,7 +784,7 @@ class ESIService:
 
         try:
             params = {"filter": filter} if filter is not None else None
-            public_structure_ids = self._esi_client.esi_get("/universe/structures/", params=params)
+            public_structure_ids = self._esi_client.esi_get(ESI_UNIVERSE_STRUCTURES_LIST, params=params)
 
             # ESIClient returns None on 403/404; distinguish that from an empty list.
             if public_structure_ids is None:

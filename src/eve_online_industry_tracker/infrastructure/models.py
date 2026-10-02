@@ -346,8 +346,8 @@ class CorporationModel(BaseApp):
     tax_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     war_eligible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    wallets: Mapped[Optional[str]] = mapped_column(JSON, nullable=True)
-    standings: Mapped[Optional[str]] = mapped_column(JSON, nullable=True)
+    wallets: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
+    standings: Mapped[Optional[list[dict[str, Any]]]] = mapped_column(JSON, nullable=True)
     date_founded: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -462,6 +462,7 @@ class CharacterIndustryJobsModel(BaseApp):
     end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     completed_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    activity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     blueprint_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -508,6 +509,7 @@ class CorporationIndustryJobsModel(BaseApp):
     end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     completed_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    activity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     blueprint_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -1043,3 +1045,139 @@ class StationServices(BaseSde):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     serviceName: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
     description: Mapped[Optional[dict[str, str]]] = mapped_column(JSON, nullable=True)
+
+
+# --------------------------
+# Daily Planner
+# --------------------------
+
+class BuildPlanModel(BaseApp):
+    __tablename__ = "build_plan"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)  # 'active' | 'stale' | 'archived'
+    corp_wallet_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    market_snapshot_hash: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    freshness_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    plan_summary_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class BuildPlanItemModel(BaseApp):
+    __tablename__ = "build_plan_item"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    plan_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    meta_group_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    decision: Mapped[str] = mapped_column(String, nullable=False)  # 'build' | 'watch' | 'pause' | 'skip'
+    decision_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    target_batches: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    priority_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    isk_per_hour: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    margin_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    days_of_supply_current: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pipeline_stage: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    bpo_investment_recommended: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    bpo_market_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    break_even_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    projected_annual_savings: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    effective_velocity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    snapshot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class DailyActionLogModel(BaseApp):
+    __tablename__ = "daily_action_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    plan_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    character_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    character_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    action_type: Mapped[str] = mapped_column(String, nullable=False)
+    shopping_category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    estimated_cost_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    estimated_profit_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    estimated_completion: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    processed_for_feedback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class PlanItemOutcomeModel(BaseApp):
+    __tablename__ = "plan_item_outcome"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    plan_item_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    predicted_isk_per_hour: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    actual_isk_per_hour: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    accuracy_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    predicted_sell_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    actual_sell_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    slow_mover: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    predicted_material_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    actual_material_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class PlanLearningWeightsModel(BaseApp):
+    __tablename__ = "plan_learning_weights"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    accuracy_ema: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    velocity_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    cost_multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_updated: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    confidence_tier: Mapped[str] = mapped_column(String, nullable=False, default="low")
+
+
+class MarketDepthCacheModel(BaseApp):
+    __tablename__ = "market_depth_cache"
+    __table_args__ = (
+        UniqueConstraint("type_id", "hub", name="uq_market_depth_cache_type_hub"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    hub: Mapped[str] = mapped_column(String, nullable=False)
+    competitor_units: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    vwap_5d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    competition_index: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    snapshot_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class InventionOutcomeLogModel(BaseApp):
+    __tablename__ = "invention_outcome_log"
+    __table_args__ = (
+        UniqueConstraint("type_id", "character_id", "completed_at", name="uq_invention_outcome_log_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    blueprint_type_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    decryptor_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    theoretical_success_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    was_success: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    character_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class MarginCorrelationCacheModel(BaseApp):
+    __tablename__ = "margin_correlation_cache"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    type_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    pearson_correlation: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    is_squeeze_sensitive: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    data_points: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

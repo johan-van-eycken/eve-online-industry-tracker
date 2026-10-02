@@ -23,6 +23,24 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
 )
+from eve_online_industry_tracker.infrastructure.esi_versions import (
+    ESI_CHAR_PUBLIC,
+    ESI_CHAR_WALLET,
+    ESI_CHAR_WALLET_JOURNAL,
+    ESI_CHAR_WALLET_TRANSACTIONS,
+    ESI_CHAR_STANDINGS,
+    ESI_CHAR_SKILLS,
+    ESI_CHAR_SKILLQUEUE,
+    ESI_CHAR_IMPLANTS,
+    ESI_CHAR_ORDERS,
+    ESI_CHAR_ASSETS,
+    ESI_CHAR_ASSETS_NAMES,
+    ESI_CHAR_BLUEPRINTS,
+    ESI_CHAR_INDUSTRY_JOBS,
+    ESI_CORP_PUBLIC,
+    ESI_MARKETS_PRICES,
+)
+
 from eve_online_industry_tracker.application.characters.asset_history import (
     backfill_wallet_buy_acquisitions,
     build_historical_input_cost_lookup,
@@ -581,10 +599,10 @@ class Character:
         """Fetch and update the character's profile data from ESI. Enrich with SDE data."""
         try:
             self.ensure_esi()
-            profile_data = self._esi_client.esi_get(f"/characters/{self.character_id}/")
-            corporation_data = self._esi_client.esi_get(f"/corporations/{profile_data.get('corporation_id')}/")
-            wallet_balance = self._esi_client.esi_get(f"/characters/{self.character_id}/wallet/")
-            standings_data = self._esi_client.esi_get(f"/characters/{self.character_id}/standings/")
+            profile_data = self._esi_client.esi_get(ESI_CHAR_PUBLIC.format(character_id=self.character_id))
+            corporation_data = self._esi_client.esi_get(ESI_CORP_PUBLIC.format(corporation_id=profile_data.get('corporation_id')))
+            wallet_balance = self._esi_client.esi_get(ESI_CHAR_WALLET.format(character_id=self.character_id))
+            standings_data = self._esi_client.esi_get(ESI_CHAR_STANDINGS.format(character_id=self.character_id))
 
             # Load additional details from the SDE database
             race_data = self._db_sde.session.query(Races).filter_by(id=profile_data.get("race_id")).first()
@@ -653,10 +671,10 @@ class Character:
         """Fetch and update the character's wallet balance from ESI."""
         try:
             self.ensure_esi()
-            self.wallet_balance = self._esi_client.esi_get(f"/characters/{self.character_id}/wallet/")
+            self.wallet_balance = self._esi_client.esi_get(ESI_CHAR_WALLET.format(character_id=self.character_id))
 
             # Save to database
-            self.save_character()   
+            self.save_character()
 
             logging.debug(f"Wallet balance successfully refreshed for {self.character_name}. Balance: {self.wallet_balance:.2f}")
         
@@ -672,7 +690,7 @@ class Character:
         """Fetch and update the character's wallet journal from ESI. Enrich with SDE and ESI data."""
         try:
             self.ensure_esi()
-            journal_entries = self._esi_client.esi_get(f"/characters/{self.character_id}/wallet/journal/")
+            journal_entries = self._esi_client.esi_get(ESI_CHAR_WALLET_JOURNAL.format(character_id=self.character_id))
 
             new_journal_entries = []
             for entry in journal_entries:
@@ -754,7 +772,7 @@ class Character:
     def refresh_wallet_transactions(self) -> None:
         try:
             self.ensure_esi()
-            transactions = self._esi_client.esi_get(f"/characters/{self.character_id}/wallet/transactions/")
+            transactions = self._esi_client.esi_get(ESI_CHAR_WALLET_TRANSACTIONS.format(character_id=self.character_id))
 
             new_transaction_entries = []
             for entry in transactions:
@@ -931,7 +949,7 @@ class Character:
             self.ensure_esi()
 
             jobs = self._esi_client.esi_get(
-                f"/characters/{self.character_id}/industry/jobs/",
+                ESI_CHAR_INDUSTRY_JOBS.format(character_id=self.character_id),
                 params={"include_completed": True},
                 paginate=True,
             )
@@ -939,7 +957,7 @@ class Character:
                 # No jobs or not authorized
                 return
 
-            market_prices = self._esi_client.esi_get("/markets/prices/")
+            market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES)
             market_price_map = build_market_price_map(market_prices)
             invention_cost_by_blueprint_type = build_invention_cost_per_run_by_blueprint_type(
                 jobs=jobs,
@@ -1076,6 +1094,7 @@ class Character:
                         "start_date": j.get("start_date"),
                         "end_date": j.get("end_date"),
                         "completed_date": j.get("completed_date"),
+                        "activity_id": int(j.get("activity_id") or 0) or None,
                         "blueprint_type_id": j.get("blueprint_type_id"),
                         "product_type_id": j.get("product_type_id"),
                         "runs": j.get("runs"),
@@ -1203,11 +1222,11 @@ class Character:
         try:
             self.ensure_esi()
             # All trained skills for the character from ESI
-            skills = self._esi_client.esi_get(f"/characters/{self.character_id}/skills/")
+            skills = self._esi_client.esi_get(ESI_CHAR_SKILLS.format(character_id=self.character_id))
             skill_list = skills.get("skills", [])
 
             # Current skill queue for the character from ESI
-            skill_queue = self._esi_client.esi_get(f"/characters/{self.character_id}/skillqueue/")
+            skill_queue = self._esi_client.esi_get(ESI_CHAR_SKILLQUEUE.format(character_id=self.character_id))
 
             # Map character skills and skill queue
             character_skill_ids = {s["skill_id"]: s for s in skill_list} 
@@ -1303,7 +1322,7 @@ class Character:
         try:
             self.ensure_esi()
 
-            data = self._esi_client.esi_get(f"/characters/{self.character_id}/implants/")
+            data = self._esi_client.esi_get(ESI_CHAR_IMPLANTS.format(character_id=self.character_id))
             if not isinstance(data, list):
                 logging.warning(
                     "Unexpected implants payload for %s (%s): %r",
@@ -1345,7 +1364,7 @@ class Character:
         """Fetch and update the character's market orders from ESI. Enrich with SDE and ESI data."""
         try:
             self.ensure_esi()
-            order_list = self._esi_client.esi_get(f"/characters/{self.character_id}/orders/")
+            order_list = self._esi_client.esi_get(ESI_CHAR_ORDERS.format(character_id=self.character_id))
 
             # Cache location/region lookups for this refresh to avoid repeated ESI calls.
             # { location_id: (location_name, region_id, region_name) }
@@ -1486,12 +1505,12 @@ class Character:
         """Fetch and update the character's assets from ESI. Enrich with SDE and market price data."""
         try:
             self.ensure_esi()
-            assets = self._esi_client.esi_get(f"/characters/{self.character_id}/assets/", paginate=True)
+            assets = self._esi_client.esi_get(ESI_CHAR_ASSETS.format(character_id=self.character_id), paginate=True)
             logging.debug(f"ESI assets fetched for {self.character_name}: {len(assets) if assets else 0} items")
             print(f"[DEBUG] ESI assets for {self.character_name}: {len(assets) if assets else 0} items")
 
-            blueprints = self._esi_client.esi_get(f"/characters/{self.character_id}/blueprints/", paginate=True)
-            market_prices = self._esi_client.esi_get(f"/markets/prices/")
+            blueprints = self._esi_client.esi_get(ESI_CHAR_BLUEPRINTS.format(character_id=self.character_id), paginate=True)
+            market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES)
 
             # Precompute per-type cost basis using stored wallet tx / industry jobs.
             type_ids_for_cost = [a.get("type_id") for a in assets if isinstance(a, dict)]
@@ -1622,7 +1641,7 @@ class Character:
             container_names = {}
             if container_ids:
                 names_response = self._esi_client.esi_post(
-                    f"/characters/{self.character_id}/assets/names",
+                    ESI_CHAR_ASSETS_NAMES.format(character_id=self.character_id),
                     json=container_ids
                 )
                 if names_response and isinstance(names_response, list):
@@ -1637,7 +1656,7 @@ class Character:
             ship_names = {}
             if ship_ids:
                 names_response = self._esi_client.esi_post(
-                    f"/characters/{self.character_id}/assets/names",
+                    ESI_CHAR_ASSETS_NAMES.format(character_id=self.character_id),
                     json=ship_ids
                 )
                 if names_response and isinstance(names_response, list):

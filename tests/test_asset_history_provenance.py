@@ -52,7 +52,7 @@ class _FakeEsiClient:
     def esi_get(self, endpoint: str, params=None, paginate: bool = False):
         if endpoint.endswith("/industry/jobs/"):
             return list(self._jobs)
-        if endpoint == "/markets/prices/":
+        if endpoint.endswith("/markets/prices/"):
             return []
         raise AssertionError(endpoint)
 

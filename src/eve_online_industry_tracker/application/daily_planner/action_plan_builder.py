@@ -1,0 +1,313 @@
+"""ActionPlanBuilder — Phase 8: build ordered DailyActionLogModel rows.
+
+Order per spec:
+  DELIVER → INVENT → COPY → ME/TE → SUB-MFG → MFG
+
+buy_materials and buy_bpo rows are written (for Tab 2 / Shopping List) but
+NOT rendered in Tab 1. They use character_id=None, character_name=None.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
+from eve_online_industry_tracker.infrastructure.models import DailyActionLogModel
+
+logger = logging.getLogger(__name__)
+
+# Action type sort order (lower = earlier in workflow)
+_ACTION_ORDER = {
+    "deliver": 0,
+    "invent": 1,
+    "copy": 2,
+    "me_research": 3,
+    "te_research": 4,
+    "sub_manufacture": 5,
+    "manufacture": 6,
+    # Corp-level (Tab 2 only, not Tab 1)
+    "buy_materials": 7,
+    "buy_bpo": 8,
+}
+
+
+#: ChainPlanner._analyze_bpo_investment recommendations that mean "buy the BPO".
+#: The third value, "hold", is analysis only and gets no action.
+_BUY_RECOMMENDATIONS = frozenset({"strong_buy", "consider"})
+
+
+def _now() -> datetime:
+    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
+
+
+class ActionPlanBuilder:
+    """Phase 8: convert assigned actions and shopping list into DailyActionLogModel rows."""
+
+    def build(
+        self,
+        plan_id: int,
+        assigned_actions: list[AssignedAction],
+        shopping_items: list[ShoppingItem],
+        industry_jobs: list[Any],         # for DELIVER actions
+        admin_settings: Any,
+        bpo_opportunities: list[Any] | None = None,  # from ChainPlan.bpo_opportunities
+        character_name_map: dict[int, str] | None = None,  # installer/character_id -> name
+        meta_resolver: Any | None = None,  # TypeMetadataResolver, for DELIVER item names
+    ) -> list[DailyActionLogModel]:
+        """Return ordered list of DailyActionLogModel rows ready for persistence."""
+        now = _now()
+        rows: list[DailyActionLogModel] = []
+
+        # ── DELIVER rows (from industry_jobs with end_date < now) ─────────────
+        deliver_rows = self._build_deliver_actions(
+            plan_id, industry_jobs, now, character_name_map, meta_resolver
+        )
+        rows.extend(deliver_rows)
+
+        # ── Job actions (INVENT, COPY, ME/TE, SUB-MFG, MFG) ─────────────────
+        action_rows = self._build_job_actions(plan_id, assigned_actions, now)
+        rows.extend(action_rows)
+
+        # ── BUY_MATERIALS rows (Tab 2 — corp-level) ───────────────────────────
+        buy_rows = self._build_buy_material_actions(plan_id, shopping_items, now)
+        rows.extend(buy_rows)
+
+        # ── BUY_BPO rows (Tab 2 — corp-level) ────────────────────────────────
+        if bpo_opportunities:
+            bpo_rows = self._build_buy_bpo_actions(plan_id, bpo_opportunities, now, meta_resolver)
+            rows.extend(bpo_rows)
+
+        # Sort: corp-level rows (character_id=None) after all character rows
+        rows.sort(key=lambda r: (
+            r.character_id is None,
+            r.character_id or 0,
+            _ACTION_ORDER.get(r.action_type, 99),
+        ))
+
+        return rows
+
+    def _build_deliver_actions(
+        self,
+        plan_id: int,
+        industry_jobs: list[Any],
+        now: datetime,
+        character_name_map: dict[int, str] | None = None,
+        meta_resolver: Any | None = None,
+    ) -> list[DailyActionLogModel]:
+        """Generate DELIVER actions for jobs whose end_date < now."""
+        rows: list[DailyActionLogModel] = []
+        character_name_map = character_name_map or {}
+
+        # Prefetch every distinct product_type_id in one batched SDE query, up
+        # front -- mirrors service.py's index_blueprint_assets prewarm (and the
+        # ruling this same remediation batch re-applies to pipeline_analyzer).
+        # Without this, meta_resolver.type_name() self-heals a per-id cache
+        # miss inside the loop below, opening one SDE session (with its
+        # metaGroups table reflection) per distinct product_type_id instead of
+        # one query total.
+        if meta_resolver is not None:
+            product_type_ids = {
+                int(_job_attr(job, "product_type_id") or 0) for job in industry_jobs
+            }
+            meta_resolver.prefetch({t for t in product_type_ids if t > 0})
+
+        for job in industry_jobs:
+            status = str(_job_attr(job, "status") or "").lower()
+            if status == "delivered":
+                continue  # already done
+
+            end_date_raw = _job_attr(job, "end_date")
+            if end_date_raw is None:
+                continue
+            try:
+                if isinstance(end_date_raw, str):
+                    end_date = datetime.fromisoformat(end_date_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+                elif isinstance(end_date_raw, datetime):
+                    end_date = end_date_raw.replace(tzinfo=None)
+                else:
+                    continue
+            except ValueError:
+                logger.warning(
+                    "ActionPlanBuilder: unparseable end_date %r on job %s; no deliver action",
+                    end_date_raw, _job_attr(job, "job_id"),
+                )
+                continue
+
+            if end_date > now:
+                continue  # not ready yet
+
+            # character_name and installer_name are not columns on either job
+            # ORM model -- neither CorporationIndustryJobsModel nor
+            # CharacterIndustryJobsModel carries a denormalized pilot name.
+            # installer_id *is* real on both, so resolve the name the same
+            # way Phase 6 does: via characters_service.list_characters().
+            character_id = _job_attr(job, "character_id") or _job_attr(job, "installer_id")
+            character_name = (
+                character_name_map.get(int(character_id)) if character_id is not None else None
+            )
+
+            # product_type_name and type_name are likewise not real columns --
+            # product_type_id is. Resolve the item name from the SDE via the
+            # shared TypeMetadataResolver rather than leaving it blank.
+            type_id = int(_job_attr(job, "product_type_id") or _job_attr(job, "type_id") or 0)
+            type_name = ""
+            if meta_resolver is not None and type_id > 0:
+                type_name = meta_resolver.type_name(type_id)
+            if not type_name:
+                # A name that can't be resolved must stay identifiable -- an
+                # empty string in a UI row is indistinguishable from a
+                # rendering bug.
+                type_name = f"type_{type_id}"
+            runs = int(_job_attr(job, "runs") or 1)
+            # output_quantity is the real column on both job models; there is
+            # no product_quantity column to fall back to.
+            output_qty = int(_job_attr(job, "output_quantity") or runs)
+
+            activity_map = {1: "manufacture", 3: "te_research", 4: "me_research", 5: "copy", 8: "invent"}
+            activity_id = int(_job_attr(job, "activity_id") or 1)
+            action_type = activity_map.get(activity_id, "manufacture")
+
+            rows.append(DailyActionLogModel(
+                plan_id=plan_id,
+                generated_at=now,
+                character_id=int(character_id) if character_id is not None else None,
+                character_name=str(character_name) if character_name else None,
+                action_type="deliver",
+                shopping_category=None,
+                type_id=type_id,
+                type_name=type_name,
+                quantity=output_qty,
+                runs=runs,
+                estimated_cost_isk=None,
+                estimated_profit_isk=None,
+                estimated_completion=end_date,
+                status="pending",
+                processed_for_feedback=False,
+                notes=f"Deliver completed {action_type} job",
+            ))
+
+        return rows
+
+    def _build_job_actions(
+        self,
+        plan_id: int,
+        assigned_actions: list[AssignedAction],
+        now: datetime,
+    ) -> list[DailyActionLogModel]:
+        """Convert AssignedAction list to DailyActionLogModel rows (non-deliver)."""
+        rows: list[DailyActionLogModel] = []
+        for action in assigned_actions:
+            if action.action_type == "deliver":
+                continue  # handled separately
+            rows.append(DailyActionLogModel(
+                plan_id=plan_id,
+                generated_at=now,
+                character_id=action.character_id,
+                character_name=action.character_name,
+                action_type=action.action_type,
+                shopping_category=action.shopping_category,
+                type_id=action.type_id,
+                type_name=action.type_name,
+                quantity=action.quantity,
+                runs=action.runs,
+                estimated_cost_isk=action.estimated_cost_isk,
+                estimated_profit_isk=action.estimated_profit_isk,
+                estimated_completion=action.estimated_completion,
+                status="pending",
+                processed_for_feedback=False,
+                notes=action.notes,
+            ))
+        return rows
+
+    def _build_buy_material_actions(
+        self,
+        plan_id: int,
+        shopping_items: list[ShoppingItem],
+        now: datetime,
+    ) -> list[DailyActionLogModel]:
+        """Generate buy_materials rows (Tab 2 only — character_id=None)."""
+        rows: list[DailyActionLogModel] = []
+        for item in shopping_items:
+            rows.append(DailyActionLogModel(
+                plan_id=plan_id,
+                generated_at=now,
+                character_id=None,
+                character_name=None,
+                action_type="buy_materials",
+                shopping_category=item.shopping_category,
+                type_id=item.type_id,
+                type_name=item.type_name,
+                quantity=item.quantity,
+                runs=None,
+                estimated_cost_isk=item.estimated_total,
+                estimated_profit_isk=None,
+                estimated_completion=None,
+                status="pending",
+                processed_for_feedback=False,
+                notes=item.notes,
+            ))
+        return rows
+
+
+    def _build_buy_bpo_actions(
+        self,
+        plan_id: int,
+        bpo_opportunities: list[dict[str, Any]],
+        now: datetime,
+        meta_resolver: Any | None = None,
+    ) -> list[DailyActionLogModel]:
+        """Generate buy_bpo rows from ChainPlan.bpo_opportunities (Tab 2 only).
+
+        Only a recommendation that means "buy" becomes an action; a "hold" is
+        analysis, not a to-do. The thing to buy is the blueprint
+        (`bp_type_id`), not the product the opportunity was analysed for
+        (`type_id`) -- that is named in the notes instead.
+        """
+        rows: list[DailyActionLogModel] = []
+        for opp in bpo_opportunities:
+            recommendation = opp["recommendation"]
+            if recommendation not in _BUY_RECOMMENDATIONS:
+                continue
+            bp_type_id = int(opp["bp_type_id"])
+            if bp_type_id <= 0:
+                continue
+            bp_type_name = str(opp.get("bp_type_name") or "")
+            if not bp_type_name and meta_resolver is not None:
+                bp_type_name = meta_resolver.type_name(bp_type_id)
+            if not bp_type_name:
+                bp_type_name = f"type_{bp_type_id}"
+            market_price = opp.get("bpo_market_price")
+            break_even = opp.get("break_even_days")
+            savings = opp.get("projected_annual_savings")
+
+            notes_parts = [f"{recommendation}: blueprint for {opp.get('type_name') or opp.get('type_id')}"]
+            if break_even is not None:
+                notes_parts.append(f"break-even {float(break_even):.0f}d")
+            if savings is not None:
+                notes_parts.append(f"saves {float(savings)/1e6:.1f}M ISK/yr")
+            rows.append(DailyActionLogModel(
+                plan_id=plan_id,
+                generated_at=now,
+                character_id=None,
+                character_name=None,
+                action_type="buy_bpo",
+                shopping_category="bpo_investment",
+                type_id=bp_type_id,
+                type_name=bp_type_name,
+                quantity=1,
+                runs=None,
+                estimated_cost_isk=float(market_price) if market_price is not None else None,
+                estimated_profit_isk=float(savings) if savings is not None else None,
+                estimated_completion=None,
+                status="pending",
+                processed_for_feedback=False,
+                notes="; ".join(notes_parts),
+            ))
+        return rows
+
+
+def _job_attr(job: Any, attr: str) -> Any:
+    if isinstance(job, dict):
+        return job.get(attr)
+    return getattr(job, attr, None)

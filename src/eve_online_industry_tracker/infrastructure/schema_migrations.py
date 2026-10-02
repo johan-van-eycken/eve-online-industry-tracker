@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import json
 import logging
+import sqlite3
+from typing import Any
+
+from sqlalchemy.exc import SQLAlchemyError  # pyright: ignore[reportMissingImports]
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
+
+#: DatabaseManager wraps SQLAlchemy and raises SQLAlchemyError subclasses, but
+#: some tests pass a lightweight stand-in backed directly by sqlite3 (see
+#: tests/test_daily_planner_repo.py's _FakeDb), which raises the raw DBAPI
+#: error instead. Catching both keeps this module's error handling narrower
+#: than a bare `except Exception` while working against either backend.
+_DB_ERRORS = (SQLAlchemyError, sqlite3.OperationalError)
 
 
 def _ensure_table(db: DatabaseManager, *, ddl: str, table: str) -> None:
@@ -86,6 +98,175 @@ def _ensure_column(db: DatabaseManager, *, table: str, column: str, ddl_type: st
     except Exception as e:
         # SQLite only supports limited ALTER TABLE; this should be safe for ADD COLUMN.
         logging.warning("Failed adding column %s.%s: %s", table, column, str(e))
+
+
+def _backfill_activity_id_sql(db: DatabaseManager, *, table: str) -> None:
+    """Populate activity_id from the stored raw ESI payload, once.
+
+    Additive and idempotent: only touches rows where activity_id is still
+    NULL, so re-running ensure_app_schema on an already-backfilled database
+    is a no-op.
+
+    Deliberately non-fatal: a deployed SQLite build without the JSON1
+    extension (or any other driver quirk) must not crash app boot over a
+    best-effort backfill. But a silent failure here reproduces finding 2 --
+    every pre-existing row stays activity_id IS NULL forever, so historical
+    jobs remain unindexed and has_active_manufacturing_jobs stays False for
+    them -- so both a raised exception and a no-op/partial UPDATE are logged
+    at ERROR, loud enough to be seen, rather than WARNING.
+    """
+    try:
+        db.execute(
+            f"UPDATE {table} "
+            "SET activity_id = json_extract(raw, '$.activity_id') "
+            "WHERE activity_id IS NULL AND raw IS NOT NULL "
+            "AND json_extract(raw, '$.activity_id') IS NOT NULL"
+        )
+        logging.info("Backfilled %s.activity_id from raw", table)
+    except Exception as e:
+        logging.error(
+            "Failed backfilling %s.activity_id: %s -- historical jobs will "
+            "remain unindexed; the daily planner cannot detect active "
+            "manufacturing for them",
+            table,
+            str(e),
+        )
+        return
+
+    _verify_activity_id_backfill(db, table=table)
+
+
+def _verify_activity_id_backfill(db: DatabaseManager, *, table: str) -> None:
+    """Confirm the backfill actually populated every row it should have.
+
+    Catches a partial or no-op backfill that did not raise -- e.g. a JSON1
+    build present but behaving unexpectedly -- not just an exception from the
+    UPDATE itself. This is the check that matters: the UPDATE above can
+    "succeed" (no exception) while still leaving rows unindexed.
+    """
+    try:
+        rows = db.query(
+            f"SELECT COUNT(*) FROM {table} "
+            "WHERE activity_id IS NULL AND raw IS NOT NULL "
+            "AND json_extract(raw, '$.activity_id') IS NOT NULL"
+        )
+        remaining = int(rows[0][0]) if rows else 0
+    except Exception as e:
+        logging.error(
+            "Failed verifying %s.activity_id backfill: %s -- historical jobs "
+            "may remain unindexed; the daily planner cannot detect active "
+            "manufacturing for them",
+            table,
+            str(e),
+        )
+        return
+
+    if remaining:
+        logging.error(
+            "%s.activity_id backfill left %s row(s) unindexed despite a "
+            "matching raw.activity_id -- historical jobs will remain "
+            "unindexed; the daily planner cannot detect active manufacturing "
+            "for them",
+            table,
+            remaining,
+        )
+
+
+def backfill_job_activity_ids(session: Any) -> int:
+    """ORM-level backfill used by tests and by a one-off repair.
+
+    Returns the number of rows updated.
+    """
+    from eve_online_industry_tracker.infrastructure.models import (
+        CorporationIndustryJobsModel,
+    )
+
+    rows = (
+        session.query(CorporationIndustryJobsModel)
+        .filter(CorporationIndustryJobsModel.activity_id.is_(None))
+        .all()
+    )
+    updated = 0
+    for row in rows:
+        raw = row.raw if isinstance(row.raw, dict) else None
+        if not raw:
+            continue
+        value = raw.get("activity_id")
+        if value is None:
+            continue
+        try:
+            row.activity_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        updated += 1
+    if updated:
+        session.commit()
+    return updated
+
+
+def normalize_double_encoded_json_column(db: DatabaseManager, *, table: str, column: str) -> int:
+    """Idempotently collapse a double-JSON-encoded column back to single-encoded.
+
+    A prior bug in corporation.py's save path called json.dumps() on
+    `wallets`/`standings` before assigning them to a mapped_column(JSON, ...)
+    column, so SQLAlchemy's JSON type serialized them a second time on
+    write -- every existing `corporations.wallets`/`standings` row is a JSON
+    string *of* a JSON string, needing two json.loads() calls to reach the
+    real value.
+
+    Reads each row's column as raw text via a plain SELECT (bypassing the
+    ORM, which would already undo one layer of encoding on load). A row is
+    only rewritten when decoding it once yields a *string* that itself
+    decodes to a list or dict -- that double-decodability is what marks a
+    row as double-encoded. NULL rows, and rows that decode once straight to
+    a list/dict (already correct), are left untouched, so re-running this
+    against an already-normalized (or never-broken) table is always a
+    no-op: it rewrites nothing and returns 0.
+
+    Returns the number of rows rewritten.
+    """
+    try:
+        rows = db.query(f"SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL")
+    except _DB_ERRORS as e:
+        logging.warning("Failed reading %s.%s for JSON-encoding normalization: %s", table, column, str(e))
+        return 0
+
+    fixed = 0
+    for row_id, raw in rows:
+        if not isinstance(raw, str):
+            continue
+        try:
+            once = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(once, str):
+            # Decodes straight to a list/dict -- already singly-encoded, correct as-is.
+            continue
+        try:
+            twice = json.loads(once)
+        except (TypeError, ValueError):
+            # `once` is a string that isn't itself further-decodable JSON --
+            # not the double-encoding shape this migration targets. Leave it.
+            continue
+        if not isinstance(twice, (list, dict)):
+            continue
+        try:
+            # Bind `once` (the singly-encoded JSON string) directly as raw
+            # text via a parameterized UPDATE -- this bypasses the ORM's JSON
+            # type (which would serialize it a third time) and stores exactly
+            # the single-encoded representation the column should have had.
+            db.execute(
+                f"UPDATE {table} SET {column} = :value WHERE id = :row_id",
+                {"value": once, "row_id": row_id},
+            )
+            fixed += 1
+        except _DB_ERRORS as e:
+            logging.warning(
+                "Failed normalizing %s.%s for id=%s: %s", table, column, row_id, str(e)
+            )
+    if fixed:
+        logging.info("Normalized %d double-encoded %s.%s row(s)", fixed, table, column)
+    return fixed
 
 
 def ensure_app_schema(db_app: DatabaseManager) -> None:
@@ -318,6 +499,26 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         _ensure_column(db_app, table=table, column="total_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="unit_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="build_cost_source", ddl_type="TEXT")
+        _ensure_column(db_app, table=table, column="activity_id", ddl_type="INTEGER")
+
+    _ensure_index(
+        db_app,
+        name="ix_corporation_industry_jobs_activity_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS ix_corporation_industry_jobs_activity_id "
+            "ON corporation_industry_jobs (activity_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="ix_character_industry_jobs_activity_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS ix_character_industry_jobs_activity_id "
+            "ON character_industry_jobs (activity_id)"
+        ),
+    )
+    for table in ("character_industry_jobs", "corporation_industry_jobs"):
+        _backfill_activity_id_sql(db_app, table=table)
 
     # Market orderbook view cache (persistent hub pricing aggregates)
     _ensure_table(
@@ -443,3 +644,237 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "ON corporation_realized_sales_ledger(corporation_id, date)"
         ),
     )
+
+    # ── Daily Planner tables ───────────────────────────────────────────────
+
+    _ensure_table(
+        db_app,
+        table="build_plan",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS build_plan ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "created_at DATETIME NOT NULL,"
+            "updated_at DATETIME NOT NULL,"
+            "status TEXT NOT NULL,"
+            "corp_wallet_snapshot REAL NULL,"
+            "market_snapshot_hash TEXT NULL,"
+            "freshness_score REAL NULL,"
+            "plan_summary_json TEXT NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="build_plan_item",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS build_plan_item ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "plan_id INTEGER NOT NULL REFERENCES build_plan(id),"
+            "type_id INTEGER NOT NULL,"
+            "type_name TEXT NULL,"
+            "meta_group_id INTEGER NULL,"
+            "decision TEXT NOT NULL,"
+            "decision_reason TEXT NULL,"
+            "target_batches INTEGER NULL,"
+            "priority_score REAL NULL,"
+            "isk_per_hour REAL NULL,"
+            "margin_pct REAL NULL,"
+            "days_of_supply_current REAL NULL,"
+            "pipeline_stage TEXT NULL,"
+            "bpo_investment_recommended INTEGER NULL,"
+            "bpo_market_price REAL NULL,"
+            "break_even_days REAL NULL,"
+            "projected_annual_savings REAL NULL,"
+            "effective_velocity REAL NULL,"
+            "snapshot_sell_price REAL NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="daily_action_log",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS daily_action_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "plan_id INTEGER NOT NULL REFERENCES build_plan(id),"
+            "generated_at DATETIME NOT NULL,"
+            "character_id INTEGER NULL,"
+            "character_name TEXT NULL,"
+            "action_type TEXT NOT NULL,"
+            "shopping_category TEXT NULL,"
+            "type_id INTEGER NOT NULL,"
+            "type_name TEXT NULL,"
+            "quantity INTEGER NULL,"
+            "runs INTEGER NULL,"
+            "estimated_cost_isk REAL NULL,"
+            "estimated_profit_isk REAL NULL,"
+            "estimated_completion DATETIME NULL,"
+            "status TEXT NOT NULL DEFAULT 'pending',"
+            "processed_for_feedback INTEGER NOT NULL DEFAULT 0,"
+            "notes TEXT NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="plan_item_outcome",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS plan_item_outcome ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "plan_item_id INTEGER NOT NULL REFERENCES build_plan_item(id),"
+            "type_id INTEGER NOT NULL,"
+            "completed_at DATETIME NOT NULL,"
+            "predicted_isk_per_hour REAL NULL,"
+            "actual_isk_per_hour REAL NULL,"
+            "accuracy_ratio REAL NULL,"
+            "predicted_sell_days REAL NULL,"
+            "actual_sell_days REAL NULL,"
+            "slow_mover INTEGER NOT NULL DEFAULT 0,"
+            "predicted_material_cost REAL NULL,"
+            "actual_material_cost REAL NULL"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="plan_learning_weights",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS plan_learning_weights ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL UNIQUE,"
+            "accuracy_ema REAL NOT NULL DEFAULT 1.0,"
+            "velocity_multiplier REAL NOT NULL DEFAULT 1.0,"
+            "cost_multiplier REAL NOT NULL DEFAULT 1.0,"
+            "sample_count INTEGER NOT NULL DEFAULT 0,"
+            "last_updated DATETIME NOT NULL,"
+            "confidence_tier TEXT NOT NULL DEFAULT 'low'"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="market_depth_cache",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS market_depth_cache ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL,"
+            "hub TEXT NOT NULL,"
+            "competitor_units INTEGER NULL,"
+            "vwap_5d REAL NULL,"
+            "spot_sell_price REAL NULL,"
+            "competition_index REAL NULL,"
+            "snapshot_at DATETIME NOT NULL,"
+            "UNIQUE(type_id, hub)"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="invention_outcome_log",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS invention_outcome_log ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL,"
+            "blueprint_type_id INTEGER NOT NULL,"
+            "decryptor_type_id INTEGER NULL,"
+            "theoretical_success_pct REAL NULL,"
+            "was_success INTEGER NOT NULL,"
+            "character_id INTEGER NOT NULL,"
+            "completed_at DATETIME NOT NULL,"
+            "UNIQUE(type_id, character_id, completed_at)"
+            ")"
+        ),
+    )
+
+    _ensure_table(
+        db_app,
+        table="margin_correlation_cache",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS margin_correlation_cache ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "type_id INTEGER NOT NULL UNIQUE,"
+            "pearson_correlation REAL NULL,"
+            "is_squeeze_sensitive INTEGER NULL,"
+            "data_points INTEGER NULL,"
+            "computed_at DATETIME NOT NULL"
+            ")"
+        ),
+    )
+
+    # Daily Planner indexes
+    _ensure_index(
+        db_app,
+        name="idx_build_plan_item_plan_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_build_plan_item_plan_id "
+            "ON build_plan_item(plan_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_daily_action_log_plan_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_daily_action_log_plan_id "
+            "ON daily_action_log(plan_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_daily_action_log_type_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_daily_action_log_type_id "
+            "ON daily_action_log(type_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_plan_item_outcome_plan_item_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_plan_item_outcome_plan_item_id "
+            "ON plan_item_outcome(plan_item_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_plan_learning_weights_type_id",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_plan_learning_weights_type_id "
+            "ON plan_learning_weights(type_id)"
+        ),
+    )
+    _ensure_index(
+        db_app,
+        name="idx_market_history_type_region_date",
+        ddl=(
+            "CREATE INDEX IF NOT EXISTS idx_market_history_type_region_date "
+            "ON market_history(type_id, region_id, date DESC)"
+        ),
+    )
+
+    # Daily planner column migrations (for installations that predate some columns)
+    _ensure_column(db_app, table="build_plan", column="freshness_score", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan", column="market_snapshot_hash", ddl_type="TEXT")
+    _ensure_column(db_app, table="build_plan", column="plan_summary_json", ddl_type="TEXT")
+    _ensure_column(db_app, table="build_plan_item", column="effective_velocity", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="bpo_investment_recommended", ddl_type="INTEGER")
+    _ensure_column(db_app, table="build_plan_item", column="bpo_market_price", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="break_even_days", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="projected_annual_savings", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
+    _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
+    _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
+
+    # Belt-and-braces normalization for existing corporations.wallets/standings
+    # rows written by the pre-fix double-JSON-encoding bug in corporation.py
+    # (see normalize_double_encoded_json_column's docstring). A corp refresh
+    # would eventually self-heal these rows anyway via save_corporation(), so
+    # this is not load-bearing -- just belt-and-braces for rows that are never
+    # refreshed again.
+    for column in ("wallets", "standings"):
+        normalize_double_encoded_json_column(db_app, table="corporations", column=column)

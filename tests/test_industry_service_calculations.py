@@ -74,6 +74,18 @@ def _build_service(
         lambda self, product_rows, **kwargs: product_rows,
         service,
     )
+    # `_enrich_product_rows_with_market_trends` needs a live DB session
+    # (`self._sessions.app_session()`) to pull pipeline/order-book/historical
+    # data. These tests are calculation tests (profit, ME/TE, invention,
+    # recursive build-vs-buy) and assert on none of the market-trend fields
+    # it writes (price_trend_*, pipeline_*, margin_buffer_pct, etc.), so it is
+    # stubbed out here rather than backed by a real session, matching the
+    # other enrichment stubs above. It mutates `rows` in place and returns
+    # None, so the stub does the same (a no-op).
+    service._enrich_product_rows_with_market_trends = MethodType(  # type: ignore[attr-defined]
+        lambda self, rows, **kwargs: None,
+        service,
+    )
     return service
 
 

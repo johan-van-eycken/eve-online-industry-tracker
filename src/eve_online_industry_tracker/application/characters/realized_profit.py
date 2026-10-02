@@ -335,11 +335,24 @@ def _corp_journal_fee_breakdown(
     else:
         broker_entry = _find_by_date(brokers_fee_entries, _CORP_FEE_MATCH_WINDOW_SECONDS, sell_division)
         if broker_entry is not None:
-            eid = _safe_int(getattr(broker_entry, "wallet_journal_id", None))
-            if eid is not None:
-                used_journal_ids.add(int(eid))
-            broker_fee = abs(float(_safe_float(getattr(broker_entry, "amount", None)) or 0.0))
-            has_broker = True
+            candidate_fee = abs(float(_safe_float(getattr(broker_entry, "amount", None)) or 0.0))
+            # Reject the match when the implied broker rate is implausible — this prevents a large
+            # broker fee (placed for an expensive item simultaneously) from being attributed to a
+            # cheap-item sell that happens to be the nearest timestamp in the window.
+            _min_r, _max_r = 0.003, 0.25
+            rate_ok = gross <= 0 or (_min_r <= candidate_fee / gross <= _max_r)
+            if rate_ok:
+                eid = _safe_int(getattr(broker_entry, "wallet_journal_id", None))
+                if eid is not None:
+                    used_journal_ids.add(int(eid))
+                broker_fee = candidate_fee
+                has_broker = True
+            else:
+                notes.append(
+                    f"Broker fee match rejected by rate check "
+                    f"(fee={candidate_fee:.2f}, gross={gross:.2f}, "
+                    f"rate={candidate_fee / gross:.4f} outside [{_min_r},{_max_r}])."
+                )
 
     tax_entry = _find_tax_entry(sell_division)
     tax_fee = 0.0
