@@ -1795,3 +1795,4 @@ Low-priority enhancements. No hard deadline. Each is an independent task.
 | D.4 — Seasonal pattern detection | `MarketHistoryModel` must have 12+ months of data | 12 months data accumulated |
 | D.5 — Per-category competition threshold | Override `planner_competition_index_gate` per meta group | Phase B complete |
 | D.6 — BPO push notifications | Alert when BPO break-even drops into Strong Buy range | Phase A complete |
+| D.7 — Predictive invention trigger | Suggest invention when remaining BPC stock covers fewer than N more batches, even when a BPC exists today. Configurable threshold (e.g. `planner_invention_refill_batches_threshold`, default 2). `_plan_t2_chain` counts available BPCs vs runs-per-batch and sets `needs_invention=True` when stock < threshold × runs_per_batch, filling free research slots proactively before BPCs run out. | Phase A complete |
