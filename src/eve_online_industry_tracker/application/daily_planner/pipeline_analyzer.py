@@ -156,18 +156,22 @@ class PipelineAnalyzer:
         sell_velocity_per_day = float(sell_velocities.get(type_id, 0.0))
         velocity_multiplier = read_weight(weights.get(type_id), "velocity_multiplier")
 
-        # See module docstring: 0.0 here is safe only because of the `> 0.0` guard
-        # below, which floors it at 0.01 same as any other non-positive value.
+        # See module docstring: an unknown days_of_supply is 0.0 here, which
+        # the `> 0.0` test below routes to "no signal".
         days_of_supply_for_velocity = row.days_of_supply if row.days_of_supply is not None else 0.0
 
+        velocity_unknown_reason: str | None = None
         if sell_velocity_per_day > 0.0:
             effective_velocity = max(0.01, sell_velocity_per_day * velocity_multiplier)
+        elif days_of_supply_for_velocity > 0.0:
+            effective_velocity = max(0.01, 1.0 / days_of_supply_for_velocity)
         else:
-            # Fallback: 1/days_of_supply, floored at 0.01
-            fallback = (
-                (1.0 / days_of_supply_for_velocity) if days_of_supply_for_velocity > 0.0 else 0.01
-            )
-            effective_velocity = max(0.01, fallback)
+            # No signal at all. 0.01 keeps the pipeline-days division finite;
+            # the reason marks it as a floor so nothing downstream reads it as
+            # a measured sell rate.
+            effective_velocity = 0.01
+            why_no_sales = "no corp sales in 30 days"
+            velocity_unknown_reason = f"{why_no_sales} and no days-of-supply estimate"
 
         # ── Pipeline days ─────────────────────────────────────────────────────
         # The producer already computes this (industry/service.py:2004-2012) as
@@ -227,6 +231,7 @@ class PipelineAnalyzer:
             price_trend_7d_pct=price_trend_7d,
             price_trend_30d_pct=price_trend_30d,
             has_active_manufacturing_jobs=has_active_manufacturing_jobs,
+            velocity_unknown_reason=velocity_unknown_reason,
         )
 
 

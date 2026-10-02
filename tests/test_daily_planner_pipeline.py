@@ -369,3 +369,26 @@ def test_the_analyzer_clamps_an_out_of_band_velocity_multiplier():
         sell_velocities={1: 2.0}, meta_resolver=_NoBlueprints(),
     )
     assert states[0].effective_velocity == 8.0  # 2.0 x 4.0, not 2.0 x 10.0
+
+
+def _analyze_one(row, sell_velocities):
+    return PipelineAnalyzer().analyze(
+        input_rows=[row], industry_jobs=[], corp_assets=[], market_depth_cache={},
+        weights={}, sell_velocities=sell_velocities, meta_resolver=_NoBlueprints(),
+    )[0]
+
+
+def test_no_velocity_signal_is_flagged_not_just_floored():
+    state = _analyze_one(_input_row(type_id=1, days_of_supply=None), {})
+    assert state.effective_velocity == 0.01
+    assert state.velocity_unknown_reason == "no corp sales in 30 days and no days-of-supply estimate"
+
+
+def test_a_measured_velocity_has_no_unknown_reason():
+    assert _analyze_one(_input_row(type_id=1), {1: 2.0}).velocity_unknown_reason is None
+
+
+def test_a_days_of_supply_fallback_has_no_unknown_reason():
+    state = _analyze_one(_input_row(type_id=1, days_of_supply=5.0), {})
+    assert abs(state.effective_velocity - 0.2) < 1e-12
+    assert state.velocity_unknown_reason is None

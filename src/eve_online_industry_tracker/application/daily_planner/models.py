@@ -20,6 +20,10 @@ class PipelineState:
     price_trend_7d_pct: float          # from overview row (may be renamed from price_trend_pct)
     price_trend_30d_pct: float | None  # None if not enough history
     has_active_manufacturing_jobs: bool  # any in-flight mfg jobs for this type_id
+    # None when effective_velocity is a real signal (own sales, or the
+    # producer's days of supply). Otherwise names why there was none, and
+    # effective_velocity is only the analyzer's 0.01 floor.
+    velocity_unknown_reason: str | None = None
 
 
 @dataclass
@@ -71,6 +75,8 @@ class ItemDecision:
     # type_id=34" -- and the BPO fields above stay None (unknown), same
     # convention as ScoredItem.unscoreable_reason.
     bpo_analysis_skip_reason: str | None = None
+    # Copied from PipelineState.velocity_unknown_reason (see there).
+    velocity_unknown_reason: str | None = None
     # Chain context flag — True for sub-components added in Phase 5 Pass 2
     is_sub_component: bool = False
     # overview row snapshot for downstream phases

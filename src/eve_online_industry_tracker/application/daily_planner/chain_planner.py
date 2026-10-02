@@ -615,8 +615,17 @@ class ChainPlanner:
             )
             return
         units_per_run = quantity / runs
-        eff_velocity = max(0.033, decision.effective_velocity)  # floor at 1/30 units/day
-        planned_runs_per_day = eff_velocity / units_per_run
+        if decision.velocity_unknown_reason is not None:
+            self._skip_bpo_analysis(
+                decision, f"sell velocity unknown ({decision.velocity_unknown_reason})"
+            )
+            return
+        if decision.effective_velocity <= 0:
+            self._skip_bpo_analysis(
+                decision, f"zero sell velocity ({decision.effective_velocity} units/day)"
+            )
+            return
+        planned_runs_per_day = decision.effective_velocity / units_per_run
 
         saving_per_day = saving_per_run * planned_runs_per_day
         total_investment = bpo_market_price  # simplified (ignores research cost)

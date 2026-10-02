@@ -531,3 +531,28 @@ def test_rounding_eats_the_saving_on_a_small_material_but_not_a_large_one():
     assert decision.break_even_days == 20.0
     assert decision.projected_annual_savings == 365_000.0
     assert opps[0]["recommendation"] == "strong_buy"
+
+
+def test_an_unknown_sell_velocity_skips_the_analysis_with_a_reason():
+    row = _bpo_row(me_current=0)
+    decision = _decision(
+        row, effective_velocity=0.01,
+        velocity_unknown_reason="no corp sales in 30 days and no days-of-supply estimate",
+    )
+    phase1 = {"bpc_assets_by_type_id": {999: [object()]}, "blueprint_data": _bpo_bp_data(1000),
+              "market_depth_cache": {999: {"spot_sell_price": 20_000.0}}}
+    plan = _planner().plan_chain([decision], phase1)
+    _assert_skipped(decision, plan.bpo_opportunities, "sell velocity unknown")
+
+
+def test_a_zero_sell_velocity_skips_the_analysis_with_a_reason():
+    decision, opps = _analyse(_bpo_row(me_current=0), _bpo_bp_data(1000), velocity=0.0)
+    _assert_skipped(decision, opps, "zero sell velocity")
+
+
+def test_a_slow_measured_velocity_is_used_as_is_not_floored():
+    """5000 ISK saved per 10-unit batch at 0.02 units/day: 10 ISK/day, so a
+    20,000 ISK BPO breaks even in 2000 days. The old 0.033 floor said ~1212."""
+    decision, _ = _analyse(_bpo_row(me_current=0), _bpo_bp_data(1000), velocity=0.02)
+    assert decision.break_even_days == 2000.0
+    assert decision.projected_annual_savings == 3650.0
