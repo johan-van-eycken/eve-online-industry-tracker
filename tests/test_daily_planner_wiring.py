@@ -241,7 +241,7 @@ def test_get_industry_jobs_excludes_only_terminal_statuses(session_provider):
 
 
 def test_get_industry_jobs_includes_character_jobs_not_only_corp_jobs(session_provider):
-    """Defect 2 (task-18a remediation): the live database holds 945
+    """Defect 2 (task-18a remediation): the live database holds hundreds of
     character-installed jobs that a corp-only query can never see. Slot
     capacity is per character, so a personally-installed job must count
     against that pilot's slots exactly like a corp job they installed --

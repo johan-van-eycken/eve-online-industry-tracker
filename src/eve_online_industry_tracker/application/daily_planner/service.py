@@ -1277,7 +1277,7 @@ def index_blueprint_assets(
     # SDE query. Without this, TypeMetadataResolver._entry() self-heals a cache miss by
     # calling prefetch() for a single id, so is_blueprint() inside the per-asset loop
     # below would otherwise open one SDE session (with its metaGroups table reflection)
-    # per distinct type_id -- 881 sessions for a live corp_assets table of 4263 rows in
+    # per distinct type_id -- hundreds of sessions for a live corp_assets table of thousands of rows in
     # this app's own database. prefetch() is idempotent (skips ids already cached or
     # already marked missing), so this is safe even if a caller already warmed it.
     type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}

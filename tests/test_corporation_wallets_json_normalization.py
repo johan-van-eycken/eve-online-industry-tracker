@@ -13,7 +13,7 @@ from eve_online_industry_tracker.infrastructure.schema_migrations import (
 
 # Mirrors real corporations.wallets rows: division/balance are strings, not numbers.
 _WALLETS = [
-    {"division": "1", "division_name": "Master Wallet", "balance": "966956772.5434"},
+    {"division": "1", "division_name": "Master Wallet", "balance": "123456789.1234"},
     {"division": "2", "division_name": "Division 2", "balance": "0.0"},
 ]
 

@@ -336,8 +336,8 @@ def test_is_blueprint_lookups_are_prefetched_in_one_batch_not_per_asset():
     prefetch, TypeMetadataResolver._entry() self-heals each cache miss with a
     single-id prefetch, so a real resolver would open one SDE session (with
     its metaGroups table reflection) per distinct asset type_id -- measured
-    as ~881 reflected open/query/close cycles against this app's live
-    corp_assets table of 4263 rows. A wrong implementation (no prefetch added
+    as hundreds of reflected open/query/close cycles against this app's live
+    corp_assets table of thousands of rows. A wrong implementation (no prefetch added
     to analyze(), mirroring the pre-fix code) would make loader.calls contain
     one entry per distinct type_id instead of a single batched entry."""
     row = _input_row(blueprint_type_id=999)

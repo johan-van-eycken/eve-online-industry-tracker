@@ -62,8 +62,8 @@ def test_non_blueprint_assets_are_excluded():
 def test_index_blueprint_assets_batches_the_sde_lookup_into_one_call():
     """Regression for a fix-round-1 finding: is_blueprint() inside the per-asset loop
     self-heals a resolver cache miss with a single-id prefetch, so calling it without a
-    prior batched prefetch would open one SDE session per distinct asset type_id (881
-    sessions for the live corp_assets table's 881 distinct types). index_blueprint_assets
+    prior batched prefetch would open one SDE session per distinct asset type_id (hundreds
+    of sessions for the live corp_assets table's hundreds of distinct types). index_blueprint_assets
     must prefetch every distinct type_id once, up front, so the loader is invoked exactly
     once regardless of how many assets or distinct types are passed in."""
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False, blueprint_runs=None, quantity=1)
@@ -101,24 +101,24 @@ def test_wallet_balance_is_zero_when_division_one_is_absent():
 
 
 # Real `corporations.wallets` rows store division/balance as strings (e.g.
-# "1", "966956772.5434"), not numbers -- these fixtures mirror that shape
+# "1", "123456789.1234"), not numbers -- these fixtures mirror that shape
 # rather than the numeric one used above, since that's what the helper
 # actually has to parse in production.
 _REAL_SHAPE_WALLETS = [
-    {"division": "1", "division_name": "Master Wallet", "balance": "966956772.5434"},
+    {"division": "1", "division_name": "Master Wallet", "balance": "123456789.1234"},
     {"division": "2", "division_name": "Division 2", "balance": "0.0"},
 ]
 
 
 def test_wallet_balance_from_a_plain_list():
     """Already-decoded list (e.g. Corporation.wallets in memory) -- no decoding needed."""
-    assert _select_division_one_balance(_REAL_SHAPE_WALLETS) == 966956772.5434
+    assert _select_division_one_balance(_REAL_SHAPE_WALLETS) == 123456789.1234
 
 
 def test_wallet_balance_from_a_single_encoded_string():
     """Correctly single-JSON-encoded value, as newly written rows will be post-fix."""
     encoded = json.dumps(_REAL_SHAPE_WALLETS)
-    assert _select_division_one_balance(encoded) == 966956772.5434
+    assert _select_division_one_balance(encoded) == 123456789.1234
 
 
 def test_wallet_balance_from_a_double_encoded_string():
@@ -126,12 +126,12 @@ def test_wallet_balance_from_a_double_encoded_string():
     by the pre-fix bug (json.dumps() called on a value already headed into a
     SQLAlchemy JSON column, which serializes it again)."""
     double_encoded = json.dumps(json.dumps(_REAL_SHAPE_WALLETS))
-    assert _select_division_one_balance(double_encoded) == 966956772.5434
+    assert _select_division_one_balance(double_encoded) == 123456789.1234
 
 
 def test_wallet_balance_from_a_dict_keyed_by_division_string_balance():
     """Dict-keyed shape with a string balance, matching the real data's types."""
-    assert _select_division_one_balance({"1": "966956772.5434"}) == 966956772.5434
+    assert _select_division_one_balance({"1": "123456789.1234"}) == 123456789.1234
 
 
 def test_wallet_balance_is_zero_for_none():

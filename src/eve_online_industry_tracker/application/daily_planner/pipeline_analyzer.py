@@ -97,9 +97,9 @@ class PipelineAnalyzer:
         # and _build_corp_stock_map. Without this, TypeMetadataResolver._entry()
         # self-heals a cache miss by calling prefetch() for a single id, so
         # is_blueprint() here would otherwise open one SDE session (with its
-        # metaGroups table reflection) per distinct type_id -- measured as 881
+        # metaGroups table reflection) per distinct type_id -- measured as hundreds of
         # reflected open/query/close cycles for this app's live corp_assets table
-        # of 4263 rows. prefetch() is idempotent (skips ids already cached or
+        # of thousands of rows. prefetch() is idempotent (skips ids already cached or
         # already marked missing), so this is safe even if a caller already
         # warmed it.
         asset_type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
