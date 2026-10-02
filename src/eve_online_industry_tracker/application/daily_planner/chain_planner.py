@@ -599,6 +599,9 @@ class ChainPlanner:
             "type_id": decision.type_id,
             "type_name": decision.type_name,
             "bp_type_id": bp_type_id,
+            # The SDE entry's own name is the blueprint's ("... Blueprint");
+            # type_name above is the product's.
+            "bp_type_name": str((bp_data or {}).get("type_name") or ""),
             "bpo_market_price": bpo_market_price,
             "break_even_days": break_even_days if break_even_days != float("inf") else None,
             "projected_annual_savings": projected_annual_savings,

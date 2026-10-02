@@ -33,6 +33,11 @@ _ACTION_ORDER = {
 }
 
 
+#: ChainPlanner._analyze_bpo_investment recommendations that mean "buy the BPO".
+#: The third value, "hold", is analysis only and gets no action.
+_BUY_RECOMMENDATIONS = frozenset({"strong_buy", "consider"})
+
+
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
@@ -76,7 +81,7 @@ class ActionPlanBuilder:
 
         # ── BUY_BPO rows (Tab 2 — corp-level) ────────────────────────────────
         if bpo_opportunities:
-            bpo_rows = self._build_buy_bpo_actions(plan_id, bpo_opportunities, now)
+            bpo_rows = self._build_buy_bpo_actions(plan_id, bpo_opportunities, now, meta_resolver)
             rows.extend(bpo_rows)
 
         # Sort: corp-level rows (character_id=None) after all character rows
@@ -307,27 +312,35 @@ class ActionPlanBuilder:
     def _build_buy_bpo_actions(
         self,
         plan_id: int,
-        bpo_opportunities: list[Any],
+        bpo_opportunities: list[dict[str, Any]],
         now: datetime,
+        meta_resolver: Any | None = None,
     ) -> list[DailyActionLogModel]:
-        """Generate buy_bpo rows from ChainPlan.bpo_opportunities (Tab 2 only)."""
+        """Generate buy_bpo rows from ChainPlan.bpo_opportunities (Tab 2 only).
+
+        Only a recommendation that means "buy" becomes an action; a "hold" is
+        analysis, not a to-do. The thing to buy is the blueprint
+        (`bp_type_id`), not the product the opportunity was analysed for
+        (`type_id`) -- that is named in the notes instead.
+        """
         rows: list[DailyActionLogModel] = []
         for opp in bpo_opportunities:
-            if isinstance(opp, dict):
-                type_id = int(opp.get("type_id") or 0)
-                type_name = str(opp.get("type_name") or "")
-                market_price = opp.get("bpo_market_price")
-                break_even = opp.get("break_even_days")
-                savings = opp.get("projected_annual_savings")
-            else:
-                type_id = int(getattr(opp, "type_id", 0))
-                type_name = str(getattr(opp, "type_name", ""))
-                market_price = getattr(opp, "bpo_market_price", None)
-                break_even = getattr(opp, "break_even_days", None)
-                savings = getattr(opp, "projected_annual_savings", None)
-            if type_id <= 0:
+            recommendation = opp["recommendation"]
+            if recommendation not in _BUY_RECOMMENDATIONS:
                 continue
-            notes_parts = []
+            bp_type_id = int(opp["bp_type_id"])
+            if bp_type_id <= 0:
+                continue
+            bp_type_name = str(opp.get("bp_type_name") or "")
+            if not bp_type_name and meta_resolver is not None:
+                bp_type_name = meta_resolver.type_name(bp_type_id)
+            if not bp_type_name:
+                bp_type_name = f"type_{bp_type_id}"
+            market_price = opp.get("bpo_market_price")
+            break_even = opp.get("break_even_days")
+            savings = opp.get("projected_annual_savings")
+
+            notes_parts = [f"{recommendation}: blueprint for {opp.get('type_name') or opp.get('type_id')}"]
             if break_even is not None:
                 notes_parts.append(f"break-even {float(break_even):.0f}d")
             if savings is not None:
@@ -339,8 +352,8 @@ class ActionPlanBuilder:
                 character_name=None,
                 action_type="buy_bpo",
                 shopping_category="bpo_investment",
-                type_id=type_id,
-                type_name=type_name,
+                type_id=bp_type_id,
+                type_name=bp_type_name,
                 quantity=1,
                 runs=None,
                 estimated_cost_isk=float(market_price) if market_price is not None else None,
@@ -348,7 +361,7 @@ class ActionPlanBuilder:
                 estimated_completion=None,
                 status="pending",
                 processed_for_feedback=False,
-                notes="; ".join(notes_parts) or "BPO investment opportunity",
+                notes="; ".join(notes_parts),
             ))
         return rows
 

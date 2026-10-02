@@ -55,7 +55,6 @@ def _job(**kwargs):
         type_id=None,
         runs=1,
         output_quantity=None,
-        product_quantity=None,
         activity_id=1,
     )
     defaults.update(kwargs)
@@ -185,3 +184,100 @@ def test_no_character_name_map_or_resolver_still_uses_honest_fallbacks():
     deliver_rows = [r for r in rows if r.action_type == "deliver"]
     assert deliver_rows[0].character_name is None
     assert deliver_rows[0].type_name == "type_999"
+
+
+# --- buy_bpo rows (Task 18, ruling R4) -----------------------------------------
+# Before Task 16 every BPO opportunity was a zero-saving "hold", so emitting a
+# buy_bpo row for every one of them, keyed by the *product* type_id, was
+# invisible. With real savings it would tell the user to buy the product for
+# every analysed item.
+
+def _opp(recommendation, **overrides):
+    opp = {
+        "type_id": 12345,                 # the product
+        "type_name": "Hobgoblin I",
+        "bp_type_id": 999,                # the blueprint to buy
+        "bp_type_name": "Hobgoblin I Blueprint",
+        "bpo_market_price": 20_000_000.0,
+        "break_even_days": 20.0,
+        "projected_annual_savings": 365_000_000.0,
+        "recommendation": recommendation,
+        "as_invention_enabler": False,
+    }
+    opp.update(overrides)
+    return opp
+
+
+def _buy_bpo_rows(opportunities, meta_resolver=None):
+    rows = ActionPlanBuilder().build(
+        plan_id=1,
+        assigned_actions=[],
+        shopping_items=[],
+        pricing_suggestions=[],
+        industry_jobs=[],
+        admin_settings=SimpleNamespace(),
+        bpo_opportunities=opportunities,
+        meta_resolver=meta_resolver,
+    )
+    return [r for r in rows if r.action_type == "buy_bpo"]
+
+
+def test_a_hold_opportunity_is_not_a_buy_action():
+    assert _buy_bpo_rows([_opp("hold")]) == []
+
+
+def test_strong_buy_and_consider_become_buy_actions_for_the_blueprint():
+    rows = _buy_bpo_rows([_opp("strong_buy"), _opp("consider", bp_type_id=888,
+                                                   bp_type_name="Other Blueprint")])
+    assert [(r.type_id, r.type_name) for r in rows] == [
+        (999, "Hobgoblin I Blueprint"),
+        (888, "Other Blueprint"),
+    ]
+    assert rows[0].estimated_cost_isk == 20_000_000.0
+    assert "Hobgoblin I" in rows[0].notes  # says which product it is for
+    assert "strong_buy" in rows[0].notes
+
+
+def test_an_unnamed_blueprint_gets_an_identifiable_name_not_the_product_name():
+    (row,) = _buy_bpo_rows([_opp("strong_buy", bp_type_name="")])
+    assert row.type_id == 999
+    assert row.type_name == "type_999"
+
+
+def test_chain_planner_puts_the_blueprint_name_on_the_opportunity():
+    from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
+    from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
+
+    class _Admin:
+        def get(self, section, key):
+            raise KeyError(key)
+
+    row = {"type_id": 12345, "type_name": "Hobgoblin I", "quantity": 10,
+           "manufacturing_job": {
+               "runs": 10, "material_cost": 5000.0,
+               "blueprint_material_efficiency": 0,
+               "blueprint_source_kind": "owned_blueprint_copy",
+               "blueprint_sde": {"blueprint_type_id": 999},
+               "materials": {"34": {"type_id": 34, "quantity": 9000, "unit_price": 5.0}},
+           }}
+    decision = ItemDecision(
+        type_id=12345, type_name="Hobgoblin I", decision="build", decision_reason="t",
+        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
+        days_of_supply_current=1.0, effective_velocity=2.0, meta_group_id=1,
+        pipeline_stage="manufacturing", overview_row=row,
+    )
+    phase1 = {
+        "bpo_assets_by_type_id": {},
+        "bpc_assets_by_type_id": {999: [object()]},
+        "blueprint_data": {999: {
+            "type_name": "Hobgoblin I Blueprint",
+            "manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
+                              "materials": [{"type_id": 34, "quantity": 1000}]},
+        }},
+        "market_depth_cache": {999: {"spot_sell_price": 20_000.0}},
+    }
+    plan = ChainPlanner(None, None, _Admin()).plan_chain([decision], phase1)
+
+    (opp,) = plan.bpo_opportunities
+    assert opp["bp_type_id"] == 999
+    assert opp["bp_type_name"] == "Hobgoblin I Blueprint"
