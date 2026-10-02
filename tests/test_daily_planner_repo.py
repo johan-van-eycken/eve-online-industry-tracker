@@ -39,7 +39,6 @@ def _service(session_provider, admin_settings=None) -> DailyPlannerService:
         corporations_service=None,
         characters_service=None,
         sales_history_service=None,
-        pricing_suggestion_service=None,
         market_pricing_service=None,
         realized_profit_service=None,
         repo=repo,

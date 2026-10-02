@@ -368,7 +368,7 @@ class TestFeedbackProcessor:
         self.repo.mark_action_feedback_processed.assert_called_once_with(action.id)
 
     def test_non_manufacture_actions_marked_processed_but_not_counted(self):
-        """deliver / relist actions are marked processed but not counted in return value."""
+        """deliver actions are marked processed but not counted in return value."""
         deliver = _make_action(type_id=600, action_type="deliver")
         manufacture = _make_action(type_id=601, action_type="manufacture")
         self.repo.get_unprocessed_done_actions.return_value = [deliver, manufacture]
@@ -386,6 +386,18 @@ class TestFeedbackProcessor:
         assert result == 1
         # Both should be marked processed
         assert self.repo.mark_action_feedback_processed.call_count == 2
+
+    def test_legacy_relist_order_row_is_marked_processed_and_does_not_crash(self):
+        """The RELIST phase is gone, but plans persisted before its removal may still
+        hold relist_order rows; the feedback reader must consume them like any other
+        non-manufacture action."""
+        legacy = _make_action(type_id=610, action_type="relist_order")
+        self.repo.get_unprocessed_done_actions.return_value = [legacy]
+
+        result = self.processor.process_pending_feedback()
+
+        assert result == 0
+        self.repo.mark_action_feedback_processed.assert_called_once_with(legacy.id)
 
     def test_action_not_yet_slow_mover_skipped_without_realized_sale(self):
         """Action generated recently (within timeout) with no sale → not processed as slow_mover."""

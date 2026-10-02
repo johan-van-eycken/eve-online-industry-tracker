@@ -136,7 +136,7 @@ class FeedbackProcessor:
                         "FeedbackProcessor: failed to mark action_id=%s as processed", action.id
                     )
 
-        # Mark non-manufacture done actions as processed too (deliver, relist, etc.)
+        # Mark non-manufacture done actions as processed too (deliver, etc.)
         non_mfg = [a for a in done_actions if a.action_type != "manufacture"]
         for action in non_mfg:
             try:

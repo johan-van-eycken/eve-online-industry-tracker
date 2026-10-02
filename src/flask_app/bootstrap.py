@@ -155,7 +155,6 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         from eve_online_industry_tracker.application.corporations.service import CorporationsService as _CorporationsService
         from eve_online_industry_tracker.application.characters.service import CharactersService as _CharactersService
         from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService as _SalesHistoryService
-        from eve_online_industry_tracker.application.market_analysis.pricing_suggestion_service import PricingSuggestionService as _PricingSuggestionService
         from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService as _MarketPricingService
         from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
 
@@ -165,7 +164,6 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
             corporations_service=_CorporationsService(state=state),
             characters_service=_CharactersService(state=state),
             sales_history_service=_SalesHistoryService(state=state),
-            pricing_suggestion_service=_PricingSuggestionService(state=state),
             market_pricing_service=_MarketPricingService(state=state),
             realized_profit_service=CorporationRealizedProfitLedgerService(
                 app_session=None,

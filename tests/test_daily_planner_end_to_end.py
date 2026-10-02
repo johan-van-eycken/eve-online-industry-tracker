@@ -23,7 +23,7 @@ exact bug this branch exists to fix:
     session_provider fixture) for the TypeMetadataResolver Phase 1 builds.
 
 Only industry_service, corporations_service, characters_service,
-sales_history_service, pricing_suggestion_service, market_pricing_service and
+sales_history_service, market_pricing_service and
 realized_profit_service are stubs -- none of them are exercised by
 _run_compute's core phase sequence for this scenario (no characters means
 CharacterAssigner assigns nothing, which is fine: the assertions below check
@@ -31,6 +31,7 @@ Phase 9's persisted plan, not the shopping/action lists).
 """
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
@@ -66,7 +67,6 @@ def test_run_compute_completes_end_to_end_and_persists_a_plan_with_items(
         corporations_service=SimpleNamespace(list_corporations=lambda: []),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
-        pricing_suggestion_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
         realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
@@ -114,7 +114,6 @@ def test_a_malformed_wallet_balance_persists_as_unknown_not_a_real_zero(
         ),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
-        pricing_suggestion_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
         realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
@@ -148,7 +147,6 @@ def test_two_variants_of_one_product_yield_exactly_one_plan_item(
         corporations_service=SimpleNamespace(list_corporations=lambda: []),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
-        pricing_suggestion_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
         realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
@@ -162,3 +160,34 @@ def test_two_variants_of_one_product_yield_exactly_one_plan_item(
     items = planner_repo.get_plan_items(int(planner_repo.get_active_plan().id))
     assert len(items) == 1
     assert items[0].isk_per_hour == 20_500_000.0
+
+
+def test_a_compute_logs_no_pricing_suggestion_or_relist_warning(
+    session_provider, planner_repo, tmp_path, caplog
+):
+    """The RELIST phase was removed: it asked a service for a method that never
+    existed and logged a WARNING on every compute. No such warning may return."""
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [GOOD_ROW]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        svc._run_compute()
+
+    assert svc._status == "done", f"plan computation failed: {svc._error}"
+    offending = [
+        r.getMessage() for r in caplog.records
+        if "relist" in r.getMessage().lower()
+        or "get_suggestions" in r.getMessage()
+        or "pricing suggestion" in r.getMessage().lower()
+    ]
+    assert offending == []

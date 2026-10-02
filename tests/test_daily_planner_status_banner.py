@@ -24,7 +24,6 @@ def _bare_service():
         corporations_service=SimpleNamespace(list_corporations=lambda: []),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
-        pricing_suggestion_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
         realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),

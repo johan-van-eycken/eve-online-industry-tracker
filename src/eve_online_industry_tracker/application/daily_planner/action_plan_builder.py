@@ -1,7 +1,7 @@
 """ActionPlanBuilder — Phase 8: build ordered DailyActionLogModel rows.
 
 Order per spec:
-  DELIVER → RELIST → INVENT → COPY → ME/TE → SUB-MFG → MFG
+  DELIVER → INVENT → COPY → ME/TE → SUB-MFG → MFG
 
 buy_materials and buy_bpo rows are written (for Tab 2 / Shopping List) but
 NOT rendered in Tab 1. They use character_id=None, character_name=None.
@@ -20,16 +20,15 @@ logger = logging.getLogger(__name__)
 # Action type sort order (lower = earlier in workflow)
 _ACTION_ORDER = {
     "deliver": 0,
-    "relist_order": 1,
-    "invent": 2,
-    "copy": 3,
-    "me_research": 4,
-    "te_research": 5,
-    "sub_manufacture": 6,
-    "manufacture": 7,
+    "invent": 1,
+    "copy": 2,
+    "me_research": 3,
+    "te_research": 4,
+    "sub_manufacture": 5,
+    "manufacture": 6,
     # Corp-level (Tab 2 only, not Tab 1)
-    "buy_materials": 8,
-    "buy_bpo": 9,
+    "buy_materials": 7,
+    "buy_bpo": 8,
 }
 
 
@@ -50,7 +49,6 @@ class ActionPlanBuilder:
         plan_id: int,
         assigned_actions: list[AssignedAction],
         shopping_items: list[ShoppingItem],
-        pricing_suggestions: list[Any],   # from PricingSuggestionService
         industry_jobs: list[Any],         # for DELIVER actions
         admin_settings: Any,
         bpo_opportunities: list[Any] | None = None,  # from ChainPlan.bpo_opportunities
@@ -66,10 +64,6 @@ class ActionPlanBuilder:
             plan_id, industry_jobs, now, character_name_map, meta_resolver
         )
         rows.extend(deliver_rows)
-
-        # ── RELIST rows (from PricingSuggestionService) ───────────────────────
-        relist_rows = self._build_relist_actions(plan_id, pricing_suggestions, now)
-        rows.extend(relist_rows)
 
         # ── Job actions (INVENT, COPY, ME/TE, SUB-MFG, MFG) ─────────────────
         action_rows = self._build_job_actions(plan_id, assigned_actions, now)
@@ -195,69 +189,16 @@ class ActionPlanBuilder:
 
         return rows
 
-    def _build_relist_actions(
-        self,
-        plan_id: int,
-        pricing_suggestions: list[Any],
-        now: datetime,
-    ) -> list[DailyActionLogModel]:
-        """Generate RELIST actions from PricingSuggestionService output."""
-        rows: list[DailyActionLogModel] = []
-        for suggestion in pricing_suggestions:
-            if isinstance(suggestion, dict):
-                type_id = int(suggestion.get("type_id") or 0)
-                type_name = str(suggestion.get("type_name") or "")
-                character_id = suggestion.get("character_id")
-                character_name = suggestion.get("character_name")
-                advised_price = suggestion.get("advised_price")
-                current_price = suggestion.get("current_price")
-            else:
-                type_id = int(getattr(suggestion, "type_id", 0))
-                type_name = str(getattr(suggestion, "type_name", ""))
-                character_id = getattr(suggestion, "character_id", None)
-                character_name = getattr(suggestion, "character_name", None)
-                advised_price = getattr(suggestion, "advised_price", None)
-                current_price = getattr(suggestion, "current_price", None)
-
-            if type_id <= 0:
-                continue
-
-            margin_note = ""
-            if advised_price and current_price and current_price > 0:
-                pct = (float(advised_price) - float(current_price)) / float(current_price) * 100
-                margin_note = f"advised {float(advised_price)/1e6:.1f}M (currently {float(current_price)/1e6:.1f}M, {pct:+.1f}%)"
-
-            rows.append(DailyActionLogModel(
-                plan_id=plan_id,
-                generated_at=now,
-                character_id=int(character_id) if character_id is not None else None,
-                character_name=str(character_name) if character_name else None,
-                action_type="relist_order",
-                shopping_category=None,
-                type_id=type_id,
-                type_name=type_name,
-                quantity=None,
-                runs=None,
-                estimated_cost_isk=None,
-                estimated_profit_isk=None,
-                estimated_completion=None,
-                status="pending",
-                processed_for_feedback=False,
-                notes=margin_note or "Relist recommended",
-            ))
-
-        return rows
-
     def _build_job_actions(
         self,
         plan_id: int,
         assigned_actions: list[AssignedAction],
         now: datetime,
     ) -> list[DailyActionLogModel]:
-        """Convert AssignedAction list to DailyActionLogModel rows (non-deliver/relist)."""
+        """Convert AssignedAction list to DailyActionLogModel rows (non-deliver)."""
         rows: list[DailyActionLogModel] = []
         for action in assigned_actions:
-            if action.action_type in ("deliver", "relist_order"):
+            if action.action_type == "deliver":
                 continue  # handled separately
             rows.append(DailyActionLogModel(
                 plan_id=plan_id,

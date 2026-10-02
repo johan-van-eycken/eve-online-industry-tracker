@@ -358,7 +358,6 @@ def _bare_service():
         corporations_service=SimpleNamespace(list_corporations=lambda: []),
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
-        pricing_suggestion_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
         realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),
@@ -377,16 +376,6 @@ def test_corp_id_is_read_from_an_object_shaped_corporation_too():
 def test_no_corporation_means_no_sales_history_lookups():
     svc = _bare_service()  # sales_history_service has no get_sold_history at all
     assert svc._get_sell_velocities([12345]) == {}
-
-
-def test_a_pricing_service_without_get_suggestions_warns(caplog):
-    svc = _bare_service()
-    with caplog.at_level(logging.WARNING):
-        assert svc._get_pricing_suggestions() == []
-    assert any("get_suggestions" in r.getMessage() for r in caplog.records
-               if r.levelno == logging.WARNING)
-
-
 
 
 def test_an_industry_jobs_query_failure_fails_the_compute_not_frees_every_slot():

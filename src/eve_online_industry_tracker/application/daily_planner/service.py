@@ -170,7 +170,6 @@ class DailyPlannerService:
         corporations_service: Any,
         characters_service: Any,
         sales_history_service: Any,
-        pricing_suggestion_service: Any,
         market_pricing_service: Any,
         realized_profit_service: Any,
         repo: Any,
@@ -188,7 +187,6 @@ class DailyPlannerService:
         self._corporations = corporations_service
         self._characters = characters_service
         self._sales_history = sales_history_service
-        self._pricing_suggestions = pricing_suggestion_service
         self._market_pricing = market_pricing_service
         self._repo = repo
         self._admin = admin_settings
@@ -549,9 +547,6 @@ class DailyPlannerService:
         # Tritanium 7d price trend (for squeeze penalty gate)
         trit_trend_7d = self._get_trit_trend_7d()
 
-        # Pricing suggestions (for RELIST actions)
-        pricing_suggestions = self._get_pricing_suggestions()
-
         # BPO and BPC asset indexes
         bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
 
@@ -575,7 +570,6 @@ class DailyPlannerService:
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
             "trit_trend_7d": trit_trend_7d,
-            "pricing_suggestions": pricing_suggestions,
             "blueprint_data": blueprint_data,
             "bpo_assets_by_type_id": bpo_assets_by_type_id,
             "bpc_assets_by_type_id": bpc_assets_by_type_id,
@@ -740,7 +734,6 @@ class DailyPlannerService:
             plan_id=0,
             assigned_actions=assigned_actions,
             shopping_items=shopping_items,
-            pricing_suggestions=phase1["pricing_suggestions"],
             industry_jobs=phase1["industry_jobs"],
             admin_settings=self._admin,
             bpo_opportunities=bpo_opportunities,
@@ -1032,24 +1025,6 @@ class DailyPlannerService:
         except SQLAlchemyError:
             logger.warning("DailyPlannerService: Tritanium price trend unavailable", exc_info=True)
             return None
-
-    def _get_pricing_suggestions(self) -> list[Any]:
-        """Get relist suggestions from PricingSuggestionService.
-
-        PricingSuggestionService has no get_suggestions() (it only offers
-        per-item suggest_price), so in production this is always empty and the
-        planner emits no RELIST actions. That used to be hidden behind an
-        `except AttributeError`; it is now a WARNING so the gap stays visible.
-        """
-        get_suggestions = getattr(self._pricing_suggestions, "get_suggestions", None)
-        if not callable(get_suggestions):
-            logger.warning(
-                "DailyPlannerService: pricing suggestion service has no get_suggestions(); "
-                "no relist actions will be planned"
-            )
-            return []
-        result = get_suggestions()
-        return result if isinstance(result, list) else []
 
     def _get_blueprint_data(
         self,

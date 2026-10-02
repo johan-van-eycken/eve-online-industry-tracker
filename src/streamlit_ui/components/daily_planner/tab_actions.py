@@ -23,7 +23,6 @@ _CORP_LEVEL_ACTIONS = frozenset({"buy_materials", "buy_bpo"})
 # Ordered sections for Tab 1
 _ACTION_ORDER: list[tuple[str, str, str]] = [
     ("deliver",          "DELIVER",          "🔴"),
-    ("relist_order",     "RELIST",           "🔵"),
     ("invent",           "INVENT",           "🟡"),
     ("copy",             "COPY",             "🟣"),
     ("me_research",      "ME RESEARCH",      "🔧"),
@@ -64,6 +63,17 @@ def _fmt_completion(estimated_completion: Any) -> str:
         rel = f"est. {mins}m"
     abs_str = dt.strftime("(%a %d %b %H:%M EVE)")
     return f"{rel} {abs_str}"
+
+
+def _character_level_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Actions shown in Tab 1: the types this tab renders.
+
+    Corp-level buy actions belong to Tab 2. Any other type (e.g. one persisted
+    by an older planner version) is dropped here so it neither crashes the tab
+    nor keeps "Day complete" from ever showing as an invisible pending row.
+    """
+    rendered = {action_type for action_type, _, _ in _ACTION_ORDER}
+    return [a for a in actions if str(a.get("action_type") or "") in rendered]
 
 
 def _has_pending_buys(plan: dict[str, Any]) -> bool:
@@ -187,12 +197,6 @@ def _render_workflow_header(actions: list[dict[str, Any]]) -> None:
         if str(a.get("action_type") or "") == "deliver"
     ) and any(str(a.get("action_type") or "") == "deliver" for a in actions)
 
-    relist_done = all(
-        str(a.get("status") or "pending") in ("done", "skipped")
-        for a in actions
-        if str(a.get("action_type") or "") == "relist_order"
-    ) and any(str(a.get("action_type") or "") == "relist_order" for a in actions)
-
     start_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
         for a in actions
@@ -200,12 +204,11 @@ def _render_workflow_header(actions: list[dict[str, Any]]) -> None:
     ) and any(str(a.get("action_type") or "") in _START_ACTIONS for a in actions)
 
     step1 = "Step 1: Deliver ✓" if deliver_done else "Step 1: Deliver"
-    step2 = "Step 2: Sell/Relist ✓" if relist_done else "Step 2: Sell/Relist"
-    step3 = "Step 3: Buy materials → [Shopping List]"
-    step4 = "Step 4: Start jobs ✓" if start_done else "Step 4: Start jobs"
+    step2 = "Step 2: Buy materials → [Shopping List]"
+    step3 = "Step 3: Start jobs ✓" if start_done else "Step 3: Start jobs"
 
     st.markdown(
-        f"**{step1}** &nbsp;→&nbsp; **{step2}** &nbsp;→&nbsp; {step3} &nbsp;→&nbsp; **{step4}**"
+        f"**{step1}** &nbsp;→&nbsp; {step2} &nbsp;→&nbsp; **{step3}**"
     )
     st.markdown("---")
 
@@ -300,11 +303,7 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
 
     all_actions: list[dict[str, Any]] = page_state.plan.get("actions") or []
 
-    # Filter to character-level actions only (exclude corp-level buy actions)
-    char_actions = [
-        a for a in all_actions
-        if str(a.get("action_type") or "") not in _CORP_LEVEL_ACTIONS
-    ]
+    char_actions = _character_level_actions(all_actions)
 
     if not char_actions:
         st.info("No actions for today. The plan has no pending character-level tasks.")
