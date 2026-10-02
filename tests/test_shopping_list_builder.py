@@ -200,3 +200,126 @@ def test_sub_manufacture_with_no_usable_per_run_output_falls_back_to_one_run():
     )
     assert len(items) == 1
     assert items[0].quantity == 100
+
+
+# --- invention inputs ----------------------------------------------------------
+# Real SDE shape (verified against eve_sde.db, e.g. Damage Control I Blueprint
+# 2047 invents into Damage Control II Blueprint 2049, which makes Damage
+# Control II 2048): the invention activity lives on the T1 *source* blueprint,
+# its products are the T2 blueprints it invents into, and the T2 blueprint has
+# no invention activity of its own. The invent action carries the T2 product.
+
+import logging  # noqa: E402
+
+DATACORE_ID = 20416
+INVENTION_BLUEPRINTS = {
+    # T1 source blueprint: invents into T2 blueprint 1999.
+    998: {
+        "manufacturing": {"materials": [], "products": [{"type_id": 12344, "quantity": 1}]},
+        "invention": {
+            "materials": [
+                {"type_id": DATACORE_ID, "type_name": "Datacore - Nanite Engineering", "quantity": 2},
+            ],
+            "products": [{"type_id": 1999, "quantity": 10}],
+        },
+    },
+    # T2 blueprint: manufactures the T2 product 12345, no invention activity.
+    1999: {
+        "manufacturing": {"materials": [], "products": [{"type_id": 12345, "quantity": 1}]},
+        "invention": {"materials": [], "products": []},
+    },
+}
+INVENTION_DEPTH = {DATACORE_ID: {"vwap_5d": 100_000.0}}
+
+
+def _invent_action(type_id=12345, runs=None):
+    # character_assigner builds invent actions with the T2 product's type_id
+    # and runs=None.
+    return AssignedAction(
+        type_id=type_id, type_name="Widget II", action_type="invent",
+        character_id=1, character_name="Pilot", quantity=None, runs=runs,
+        estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None,
+    )
+
+
+def _build_invention(actions, assets=(), blueprints=INVENTION_BLUEPRINTS, depth=INVENTION_DEPTH):
+    return ShoppingListBuilder().build(
+        assigned_actions=actions, corp_assets=list(assets), market_depth_cache=depth,
+        admin_settings=_Admin(), blueprint_data=blueprints,
+        meta_resolver=_NoBlueprints(),
+    )
+
+
+def test_invention_inputs_come_from_the_t1_source_blueprint():
+    items = _build_invention([_invent_action()])
+    datacores = [i for i in items if i.type_id == DATACORE_ID]
+    assert len(datacores) == 1
+    assert datacores[0].quantity == 2  # one attempt
+    assert datacores[0].shopping_category == "invention_input"
+    assert datacores[0].type_name == "Datacore - Nanite Engineering"
+    assert datacores[0].estimated_total == 200_000.0
+
+
+def test_invention_inputs_scale_with_attempts_when_runs_is_set():
+    items = _build_invention([_invent_action(runs=3)])
+    assert [i.quantity for i in items if i.type_id == DATACORE_ID] == [6]
+
+
+def test_datacores_in_stock_are_not_bought_again():
+    stock = SimpleNamespace(type_id=DATACORE_ID, quantity=10, is_blueprint_copy=False)
+    items = _build_invention([_invent_action()], assets=[stock])
+    assert [i for i in items if i.type_id == DATACORE_ID] == []
+
+
+def test_datacore_stock_is_allocated_across_invention_jobs():
+    # 3 in stock, two attempts each needing 2 => buy 0 then 1.
+    stock = SimpleNamespace(type_id=DATACORE_ID, quantity=3, is_blueprint_copy=False)
+    items = _build_invention([_invent_action(), _invent_action()], assets=[stock])
+    assert sum(i.quantity for i in items if i.type_id == DATACORE_ID) == 1
+
+
+def test_invent_action_without_a_t2_blueprint_is_skipped_with_a_warning(caplog):
+    with caplog.at_level(logging.WARNING):
+        items = _build_invention([_invent_action(type_id=404040)])
+    assert items == []
+    assert any(
+        "404040" in r.getMessage() and "no blueprint manufactures" in r.getMessage()
+        for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def test_invent_action_without_a_t1_source_is_skipped_with_a_warning(caplog):
+    only_t2 = {1999: INVENTION_BLUEPRINTS[1999]}
+    with caplog.at_level(logging.WARNING):
+        items = _build_invention([_invent_action()], blueprints=only_t2)
+    assert items == []
+    assert any(
+        "12345" in r.getMessage() and "no T1 source blueprint" in r.getMessage()
+        for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def test_invent_action_whose_source_has_no_invention_materials_is_skipped_with_a_warning(caplog):
+    blueprints = {
+        998: {**INVENTION_BLUEPRINTS[998],
+              "invention": {"materials": [], "products": [{"type_id": 1999, "quantity": 10}]}},
+        1999: INVENTION_BLUEPRINTS[1999],
+    }
+    with caplog.at_level(logging.WARNING):
+        items = _build_invention([_invent_action()], blueprints=blueprints)
+    assert items == []
+    assert any(
+        "12345" in r.getMessage() and "no invention materials" in r.getMessage()
+        for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def test_invention_input_without_a_price_is_skipped_with_a_warning(caplog):
+    with caplog.at_level(logging.WARNING):
+        items = _build_invention([_invent_action()], depth={})
+    assert items == []
+    assert any(
+        str(DATACORE_ID) in r.getMessage() and "no price" in r.getMessage()
+        for r in caplog.records if r.levelno == logging.WARNING
+    )

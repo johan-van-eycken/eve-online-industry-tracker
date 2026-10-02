@@ -11,6 +11,10 @@ import logging
 import math
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.chain_planner import (
+    build_invention_source_index,
+    build_product_to_blueprint_index,
+)
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
 from eve_online_industry_tracker.application.industry import overview_row as orow
 
@@ -52,6 +56,11 @@ class ShoppingListBuilder:
 
         shopping: list[ShoppingItem] = []
 
+        # blueprint_data is keyed by blueprint type_id; actions carry product
+        # type_ids. Cross over once here instead of scanning per action.
+        product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
+        invention_source = build_invention_source_index(blueprint_data)
+
         # Process actions in priority order (current_job first, then future_stock)
         # Split by category
         current_job_actions = [a for a in assigned_actions if a.action_type in ("manufacture", "sub_manufacture")]
@@ -60,7 +69,9 @@ class ShoppingListBuilder:
 
         for action in current_job_actions:
             # Look up materials from blueprint_data by matching product type_id → blueprint type_id
-            mats, per_run_output = self._get_materials_and_output_for_action(action, blueprint_data)
+            mats, per_run_output = self._get_materials_and_output_for_action(
+                action, blueprint_data, product_to_blueprint
+            )
             runs = self._effective_runs(action, per_run_output)
             for mat in mats:
                 mat_type_id = int(mat.get("type_id") or 0)
@@ -105,12 +116,52 @@ class ShoppingListBuilder:
                     notes=None if is_vwap else "price: spot (no VWAP data)",
                 ))
 
-        # Invention inputs (datacores, decryptors)
+        # Invention inputs (datacores). Decryptors are optional and not part of
+        # the SDE invention materials, so they are not bought here.
         for action in invention_actions:
-            inv_mats = action.overview_row.get("invention_materials") or [] if hasattr(action, "overview_row") else []
-            # inv_mats may not be directly on AssignedAction; check notes or skip for now
-            # (full invention input resolution requires SDE data — simplified here)
-            pass
+            inv_mats = self._get_invention_materials(
+                action, blueprint_data, product_to_blueprint, invention_source
+            )
+            # Invention inputs are consumed per attempt; runs=None means one attempt.
+            attempts = _positive_int(action.runs) or 1
+            for mat in inv_mats:
+                mat_type_id = int(mat.get("type_id") or 0)
+                if mat_type_id <= 0:
+                    continue
+                qty_needed = int(mat.get("quantity") or 0) * attempts
+                if qty_needed <= 0:
+                    continue
+
+                net_required = self._compute_net_required(
+                    mat_type_id=mat_type_id,
+                    qty_needed=qty_needed,
+                    corp_stock=corp_stock,
+                    already_allocated=already_allocated,
+                )
+                already_allocated[mat_type_id] = (
+                    already_allocated.get(mat_type_id, 0) + qty_needed
+                )
+                if net_required <= 0:
+                    continue
+
+                unit_price, is_vwap = self._get_price(mat_type_id, market_depth_cache)
+                if unit_price is None or unit_price <= 0:
+                    logger.warning(
+                        "ShoppingListBuilder: skipping invention input type_id=%s for "
+                        "invent type_id=%s: no price in market depth cache",
+                        mat_type_id, action.type_id,
+                    )
+                    continue
+
+                shopping.append(ShoppingItem(
+                    type_id=mat_type_id,
+                    type_name=str(mat.get("type_name") or f"type_{mat_type_id}"),
+                    quantity=net_required,
+                    shopping_category="invention_input",
+                    estimated_unit_price=unit_price,
+                    estimated_total=unit_price * net_required,
+                    notes=None if is_vwap else "price: spot (no VWAP data)",
+                ))
 
         return shopping
 
@@ -118,6 +169,7 @@ class ShoppingListBuilder:
         self,
         action: AssignedAction,
         blueprint_data: dict[int, dict[str, Any]],
+        product_to_blueprint: dict[int, int],
     ) -> tuple[list[dict[str, Any]], int]:
         """Materials and per-run product output for a manufacture/sub_manufacture action.
 
@@ -141,12 +193,10 @@ class ShoppingListBuilder:
         if bp_type_id and bp_type_id in blueprint_data:
             mfg = blueprint_data[bp_type_id].get("manufacturing", {})
         else:
-            # Fallback: search blueprint_data for a blueprint whose product matches action.type_id
-            for bpd in blueprint_data.values():
-                products = bpd.get("manufacturing", {}).get("products", []) or []
-                if any(int(p.get("type_id") or 0) == action.type_id for p in products):
-                    mfg = bpd.get("manufacturing", {})
-                    break
+            # Fallback: the blueprint whose manufacturing products include action.type_id.
+            fallback_bp = product_to_blueprint.get(int(action.type_id))
+            if fallback_bp is not None:
+                mfg = blueprint_data[fallback_bp].get("manufacturing", {})
 
         if mfg is None:
             return [], 0
@@ -159,6 +209,49 @@ class ShoppingListBuilder:
                 break
 
         return materials, per_run_output
+
+    def _get_invention_materials(
+        self,
+        action: AssignedAction,
+        blueprint_data: dict[int, dict[str, Any]],
+        product_to_blueprint: dict[int, int],
+        invention_source: dict[int, int],
+    ) -> list[dict[str, Any]]:
+        """Invention materials for an invent action, or [] with a WARNING.
+
+        The invent action carries the T2 *product*. In the SDE the invention
+        activity lives on the T1 source blueprint, so the chain is:
+        T2 product -> T2 blueprint (manufactures it) -> T1 source blueprint
+        (invents into it) -> that source's invention materials. Each broken
+        link is logged by name so a missing datacore is never silent.
+        """
+        product_type_id = int(action.type_id)
+        t2_blueprint = product_to_blueprint.get(product_type_id)
+        if t2_blueprint is None:
+            logger.warning(
+                "ShoppingListBuilder: skipping invention inputs for type_id=%s: "
+                "no blueprint manufactures this product in blueprint_data",
+                product_type_id,
+            )
+            return []
+        t1_source = invention_source.get(t2_blueprint)
+        if t1_source is None:
+            logger.warning(
+                "ShoppingListBuilder: skipping invention inputs for type_id=%s: "
+                "no T1 source blueprint invents into blueprint %s in blueprint_data",
+                product_type_id, t2_blueprint,
+            )
+            return []
+        invention = (blueprint_data.get(t1_source) or {}).get("invention")
+        materials = invention.get("materials") if isinstance(invention, dict) else None
+        if not isinstance(materials, list) or not materials:
+            logger.warning(
+                "ShoppingListBuilder: skipping invention inputs for type_id=%s: "
+                "T1 source blueprint %s has no invention materials",
+                product_type_id, t1_source,
+            )
+            return []
+        return materials
 
     def _effective_runs(self, action: AssignedAction, per_run_output: int) -> int:
         """Runs to buy materials for.
