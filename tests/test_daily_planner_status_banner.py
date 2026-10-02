@@ -87,3 +87,34 @@ def test_no_banner_unless_the_compute_failed(status):
     from streamlit_ui.components.daily_planner.status_bar import compute_failure_banner
 
     assert compute_failure_banner({"status": status, "error": "stale"}, has_plan=True) is None
+
+
+def test_a_contract_violation_inside_a_per_item_block_still_reaches_the_banner():
+    """Phase 3 isolates items with `except (TypeError, ValueError)`. A
+    PlannerInputError from inside that block must still fail the compute
+    with the red-banner message, not be logged and skipped."""
+    svc = _bare_service()
+    svc._phase_1_collect = lambda: {
+        "overview_rows": [{"type_id": 12345}],
+        "input_rows": [SimpleNamespace(type_id=12345)],
+        "weights": {}, "market_depth_cache": {}, "margin_correlations": {},
+        "trit_trend_7d": None,
+    }
+    svc._phase_2_pipeline = lambda phase1: [SimpleNamespace(type_id=12345)]
+
+    def violate(**_kwargs):
+        raise PlannerInputError(type_id=12345, field="manufacturing_job.runs", detail="is missing")
+
+    svc._profitability_scorer = SimpleNamespace(score=violate)
+    for name in ("_phase_4_decide", "_phase_5_chain", "_phase_6_assign",
+                 "_phase_7_shopping", "_phase_8_actions"):
+        setattr(svc, name, lambda *a, **k: [])
+    svc._phase_9_persist = lambda **k: None
+
+    svc._run_compute()
+
+    status = svc.get_compute_status()
+    assert status["status"] == "failed"
+    assert "'manufacturing_job.runs'" in status["error"]
+    assert "type_id=12345" in status["error"]
+    assert "refresh the product overview" in status["error"]

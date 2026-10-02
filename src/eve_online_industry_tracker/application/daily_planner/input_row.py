@@ -77,8 +77,15 @@ from eve_online_industry_tracker.application.industry import overview_row as oro
 logger = logging.getLogger(__name__)
 
 
-class PlannerInputError(ValueError):
-    """An overview row does not satisfy the planner's input contract."""
+class PlannerInputError(Exception):
+    """An overview row does not satisfy the planner's input contract.
+
+    Deliberately NOT a ValueError subclass. Phases 2-5 and feedback isolate
+    one bad item with `except (TypeError, ValueError)` (a malformed SDE or
+    market number). A contract violation raised beneath one of those handlers
+    must not be logged and skipped like a bad number: it has to reach
+    DailyPlannerService._run_compute, which turns it into the red banner.
+    """
 
     def __init__(self, *, type_id: Any, field: str, detail: str) -> None:
         self.type_id = type_id
