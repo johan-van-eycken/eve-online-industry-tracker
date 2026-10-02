@@ -141,7 +141,11 @@ class ItemDecisionEngine:
             if competition_flooded:
                 reasons.append(f"competition index {competition_index:.1f} ≥ {competition_gate:.1f}")
             reason = "Watch: " + ", ".join(reasons)
-            pipeline_stage = _infer_pipeline_stage(overview_row)
+            # The overview row carries no pipeline stage or in-flight flags
+            # (pipeline_stage / invention_in_flight / bpc_in_flight /
+            # copy_in_flight are written by no producer), so the old
+            # inference always fell through to "watching". Say so directly.
+            pipeline_stage = "watching"
             return ItemDecision(
                 type_id=type_id,
                 type_name=type_name,
@@ -181,20 +185,13 @@ class ItemDecisionEngine:
 
 
 def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
+    """A daily_planner setting, or `fallback` when there is no settings store.
+
+    AttributeError covers stub/None admin objects; KeyError is what
+    AdminSettingsManager.get raises for an unknown key (every key read here is
+    pinned to the schema by tests/test_daily_planner_fail_loud.py).
+    """
     try:
         return admin_settings.get("daily_planner", key)
-    except Exception:
+    except (AttributeError, KeyError):
         return fallback
-
-
-def _infer_pipeline_stage(row: dict[str, Any]) -> str:
-    """Infer current pipeline stage from overview row metadata."""
-    pipeline_stage = str(row.get("pipeline_stage") or "").lower()
-    if pipeline_stage:
-        return pipeline_stage
-    # Fallback: look for in-flight invention/copy signals
-    if row.get("invention_in_flight") or row.get("bpc_in_flight"):
-        return "invention"
-    if row.get("copy_in_flight"):
-        return "copying"
-    return "watching"

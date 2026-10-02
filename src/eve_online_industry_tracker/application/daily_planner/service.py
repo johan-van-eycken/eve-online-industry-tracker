@@ -12,6 +12,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
@@ -125,9 +127,15 @@ def compute_freshness_score(
 
 
 def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
+    """A daily_planner setting, or `fallback` when there is no settings store.
+
+    AttributeError covers stub/None admin objects; KeyError is what
+    AdminSettingsManager.get raises for an unknown key (every key read here is
+    pinned to the schema by tests/test_daily_planner_fail_loud.py).
+    """
     try:
         return admin_settings.get("daily_planner", key)
-    except Exception:
+    except (AttributeError, KeyError):
         return fallback
 
 
@@ -300,7 +308,8 @@ class DailyPlannerService:
         try:
             hub = str(_adm(self._admin, "planner_market_hub", "jita"))
             market_depth = self._repo.get_market_depth(type_ids, hub)
-        except Exception:
+        except SQLAlchemyError:
+            logger.warning("DailyPlannerService: analytics market depth unavailable", exc_info=True)
             market_depth = {}
 
         # Margin correlation data
@@ -314,7 +323,8 @@ class DailyPlannerService:
                 margin_by_type = {int(r.type_id): r for r in margin_rows}
             finally:
                 mc_session.close()
-        except Exception:
+        except SQLAlchemyError:
+            logger.warning("DailyPlannerService: analytics margin correlations unavailable", exc_info=True)
             margin_by_type: dict[int, Any] = {}
 
         # Invention details from raw SQL
@@ -341,7 +351,8 @@ class DailyPlannerService:
                 }
                 for r in inv_rows
             }
-        except Exception:
+        except SQLAlchemyError:
+            logger.warning("DailyPlannerService: analytics invention details unavailable", exc_info=True)
             inv_details: dict[int, Any] = {}
 
         result = []
@@ -621,7 +632,8 @@ class DailyPlannerService:
                     trit_trend_7d=trit_trend_7d,
                 )
                 scored.append(scored_item)
-            except Exception:
+            except (TypeError, ValueError):
+                # float() of a malformed weight or setting; per-item isolation.
                 logger.exception("DailyPlannerService: Phase 3 error for type_id=%s", ps.type_id)
         return scored
 
@@ -654,7 +666,8 @@ class DailyPlannerService:
                     meta_group_id=input_row.meta_group_id if input_row is not None else None,
                 )
                 decisions.append(decision)
-            except Exception:
+            except (TypeError, ValueError):
+                # float() of a malformed setting; per-item isolation.
                 logger.exception("DailyPlannerService: Phase 4 error for type_id=%s", scored.type_id)
         return decisions
 
@@ -829,20 +842,18 @@ class DailyPlannerService:
 
         Returns an empty list when no cached overview is available — callers
         must treat this as a soft abort and surface a user-visible message.
+        Reading the cache does no I/O; an exception here is a bug and fails
+        the compute with its own message instead of posing as "no overview".
         """
-        try:
-            result = self._industry.get_cached_overview_rows()
-            if isinstance(result, list):
-                return result
-            # None → not yet computed
-            logger.warning(
-                "DailyPlannerService: no cached product overview available — "
-                "open the Industry Builder and refresh the product overview first"
-            )
-            return []
-        except Exception:
-            logger.exception("DailyPlannerService: failed to get overview rows")
-            return []
+        result = self._industry.get_cached_overview_rows()
+        if isinstance(result, list):
+            return result
+        # None → not yet computed
+        logger.warning(
+            "DailyPlannerService: no cached product overview available — "
+            "open the Industry Builder and refresh the product overview first"
+        )
+        return []
 
     def _get_industry_jobs(self) -> list[Any]:
         """Active corp + character industry jobs -- delivered/cancelled/reverted jobs are not active.
@@ -888,7 +899,7 @@ class DailyPlannerService:
                 return list(char_jobs) + list(corp_jobs)
             finally:
                 session.close()
-        except (KeyError, TypeError, ValueError):
+        except SQLAlchemyError:
             logger.exception("DailyPlannerService: failed to get industry jobs")
             return []
 
@@ -901,7 +912,7 @@ class DailyPlannerService:
                 return session.query(CorporationAssetsModel).all()
             finally:
                 session.close()
-        except Exception:
+        except SQLAlchemyError:
             logger.exception("DailyPlannerService: failed to get corp assets")
             return []
 
@@ -916,17 +927,25 @@ class DailyPlannerService:
                 ).all()
             finally:
                 session.close()
-        except Exception:
+        except SQLAlchemyError:
             logger.exception("DailyPlannerService: failed to get corp orders")
             return []
 
     def _get_sell_velocities(self, type_ids: list[int]) -> dict[int, float]:
-        """Compute sell velocity per day for each type_id using SalesHistoryService."""
+        """Compute sell velocity per day for each type_id using SalesHistoryService.
+
+        Type ids missing from the result have no known velocity; the analyzer
+        reads them as 0.0, but the reason is logged instead of hidden.
+        """
         velocities: dict[int, float] = {}
         try:
-            # Get corp_id from corporations service
             corp_id = self._get_corp_id()
-        except Exception:
+        except (KeyError, TypeError, ValueError):
+            # Same failure set _get_corp_wallet tolerates from list_corporations.
+            logger.exception("DailyPlannerService: failed to resolve the corporation id")
+            return velocities
+        if corp_id <= 0:
+            logger.warning("DailyPlannerService: no corporation, so no sell velocities")
             return velocities
 
         for type_id in type_ids:
@@ -938,19 +957,27 @@ class DailyPlannerService:
                     days=30,
                 )
                 total_sold = sum(int(tx.get("quantity") or 0) for tx in txs)
-                velocities[type_id] = total_sold / 30.0
-            except Exception:
-                velocities[type_id] = 0.0
+            except (SQLAlchemyError, TypeError, ValueError):
+                logger.warning(
+                    "DailyPlannerService: sell history unavailable for type_id=%s",
+                    type_id, exc_info=True,
+                )
+                continue
+            velocities[type_id] = total_sold / 30.0
         return velocities
 
     def _get_corp_id(self) -> int:
-        """Get corp ID from corporations service."""
-        try:
-            corps = self._corporations.list_corporations()
-            corp = corps[0] if isinstance(corps, list) else corps
-            return int(getattr(corp, "corporation_id", 0) or corp.get("corporation_id", 0) if isinstance(corp, dict) else 0)
-        except Exception:
+        """Corporation id of the first listed corporation, or 0 when there is none.
+
+        Reads dict- and object-shaped entries alike; the old one-liner's
+        operator precedence returned 0 for every object-shaped corporation.
+        """
+        corps = self._corporations.list_corporations()
+        if not corps:
             return 0
+        corp = corps[0] if isinstance(corps, list) else corps
+        raw = corp.get("corporation_id") if isinstance(corp, dict) else getattr(corp, "corporation_id", None)
+        return int(raw or 0)
 
     def _get_margin_correlations(self, type_ids: list[int]) -> dict[int, Any]:
         """Get margin correlation cache entries."""
@@ -966,7 +993,8 @@ class DailyPlannerService:
                 return {int(r.type_id): r for r in rows}
             finally:
                 session.close()
-        except Exception:
+        except SQLAlchemyError:
+            logger.warning("DailyPlannerService: margin correlations unavailable", exc_info=True)
             return {}
 
     def _get_trit_trend_7d(self) -> float | None:
@@ -991,19 +1019,27 @@ class DailyPlannerService:
             if older_avg <= 0:
                 return None
             return (recent_avg - older_avg) / older_avg * 100.0
-        except Exception:
+        except SQLAlchemyError:
+            logger.warning("DailyPlannerService: Tritanium price trend unavailable", exc_info=True)
             return None
 
     def _get_pricing_suggestions(self) -> list[Any]:
-        """Get relist suggestions from PricingSuggestionService."""
-        try:
-            result = self._pricing_suggestions.get_suggestions()
-            return result if isinstance(result, list) else []
-        except AttributeError:
+        """Get relist suggestions from PricingSuggestionService.
+
+        PricingSuggestionService has no get_suggestions() (it only offers
+        per-item suggest_price), so in production this is always empty and the
+        planner emits no RELIST actions. That used to be hidden behind an
+        `except AttributeError`; it is now a WARNING so the gap stays visible.
+        """
+        get_suggestions = getattr(self._pricing_suggestions, "get_suggestions", None)
+        if not callable(get_suggestions):
+            logger.warning(
+                "DailyPlannerService: pricing suggestion service has no get_suggestions(); "
+                "no relist actions will be planned"
+            )
             return []
-        except Exception:
-            logger.exception("DailyPlannerService: failed to get pricing suggestions")
-            return []
+        result = get_suggestions()
+        return result if isinstance(result, list) else []
 
     def _get_blueprint_data(
         self,
@@ -1035,7 +1071,7 @@ class DailyPlannerService:
                     sources = sde_blueprints.get_invention_source_blueprint_ids(
                         sde_session, bp_type_ids
                     )
-                except Exception:
+                except SQLAlchemyError:
                     # Degrade to the blueprints we were asked for; the shopping
                     # list then warns per invent action that lacks its source.
                     logger.warning(
@@ -1048,7 +1084,7 @@ class DailyPlannerService:
                 return sde_blueprints.get_blueprint_manufacturing_data(sde_session, "en", list(bp_type_ids))
             finally:
                 sde_session.close()
-        except Exception:
+        except SQLAlchemyError:
             logger.exception("DailyPlannerService: failed to load blueprint data")
             return {}
 

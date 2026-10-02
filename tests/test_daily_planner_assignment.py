@@ -53,6 +53,10 @@ def _decision(**overrides):
         overview_row={"type_id": 12345},
     )
     base.update(overrides)
+    # Every top-level row has passed PlannerInputRow, which requires a positive
+    # manufacturing_job.runs; the manufacture action now reads it (and raises
+    # PlannerInputError without it), so fixture rows carry one too.
+    base["overview_row"].setdefault("manufacturing_job", {}).setdefault("runs", 1)
     return ItemDecision(**base)
 
 

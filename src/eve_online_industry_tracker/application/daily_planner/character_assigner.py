@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputError
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
 
@@ -276,8 +277,14 @@ class CharacterAssigner:
         # Manufacturing
         char_id, char_name = self._best_mfg_char(char_slots, characters)
         if char_id is not None:
-            runs = int(row.get("runs_per_batch") or row.get("runs") or 1)
-            estimated_cost = float(row.get("estimated_material_cost") or 0.0)
+            # Both live under manufacturing_job. A top-level runs_per_batch /
+            # runs / estimated_material_cost is written by no producer, so
+            # every manufacture action used to get 1 run and a 0 ISK cost --
+            # and the shopping list bought materials for one run of the batch.
+            runs = _batch_runs(type_id, row)
+            # The batch's material cost, or None when the producer could not
+            # price it -- unknown, not free.
+            estimated_cost = orow.get_material_cost_total(row)
             estimated_profit = decision.absolute_profit_per_batch
             actions.append(AssignedAction(
                 type_id=type_id,
@@ -385,7 +392,9 @@ class CharacterAssigner:
                     if end_date is not None and end_date <= now:
                         # Job complete but not delivered — slots already freed in game
                         continue
-                except Exception:
+                except ValueError:
+                    # Unparseable end_date: count the job as active (the
+                    # conservative choice -- it keeps its slot).
                     pass
 
             # activity_id is now a real column on both job ORM models (Task 13),
@@ -461,3 +470,27 @@ def _job_attr(job: Any, attr: str) -> Any:
     if isinstance(job, dict):
         return job.get(attr)
     return getattr(job, attr, None)
+
+
+def _batch_runs(type_id: int, row: dict[str, Any]) -> int:
+    """Blueprint runs for one batch, from manufacturing_job.runs.
+
+    PlannerInputRow already required a positive `manufacturing_job.runs` on
+    every top-level overview row, so a missing or non-positive value here means
+    a row bypassed that contract. Raise the same error rather than default to
+    1: one run on a 20-run job under-buys materials by 20x. Deliberately no
+    fallback to `quantity`, which is a units total, not a run count.
+    """
+    raw = orow.get_manufacturing_job(row).get("runs")
+    try:
+        runs = int(raw)
+    except (TypeError, ValueError):
+        raise PlannerInputError(
+            type_id=type_id, field="manufacturing_job.runs",
+            detail="is missing" if raw is None else f"is not an integer: {raw!r}",
+        ) from None
+    if runs <= 0:
+        raise PlannerInputError(
+            type_id=type_id, field="manufacturing_job.runs", detail=f"must be > 0, got {runs}"
+        )
+    return runs

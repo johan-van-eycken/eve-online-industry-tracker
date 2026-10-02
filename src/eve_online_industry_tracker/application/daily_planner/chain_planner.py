@@ -16,6 +16,8 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner.models import (
     AssignedAction,
@@ -34,9 +36,16 @@ def _now() -> datetime:
 
 
 def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
+    """A daily_planner setting, or `fallback` when there is no settings store.
+
+    AttributeError covers stub/None admin objects; KeyError is what
+    AdminSettingsManager.get raises for an unknown key. Every key the planner
+    reads is pinned to the schema by tests/test_daily_planner_fail_loud.py, so
+    with the real manager the KeyError branch cannot hide a typo.
+    """
     try:
         return admin_settings.get("daily_planner", key)
-    except Exception:
+    except (AttributeError, KeyError):
         return fallback
 
 
@@ -210,7 +219,9 @@ class ChainPlanner:
                 )
                 all_decisions.extend(sub_decisions)
 
-            except Exception:
+            except (TypeError, ValueError):
+                # Per-item isolation for malformed SDE / market values (int()
+                # and float() conversions); anything else is a bug and aborts.
                 logger.exception("ChainPlanner: error planning chain for type_id=%s", decision.type_id)
 
         return ChainPlan(
@@ -254,13 +265,23 @@ class ChainPlanner:
                     bp_type_id, current_me, current_te,
                 )
 
+            # None means the SDE lookup failed (already logged at WARNING by
+            # _compute_optimal_*): schedule no research rather than treating
+            # the optimum as 0, which silently reads as "already optimal".
+            if optimal_me is None or optimal_te is None:
+                logger.warning(
+                    "ChainPlanner: optimal ME/TE unknown for owned BPO %s (optimal_me=%s, "
+                    "optimal_te=%s); not scheduling research for the unknown level(s)",
+                    bp_type_id, optimal_me, optimal_te,
+                )
+
             # Schedule ME/TE research in the action plan (signals to ActionPlanBuilder)
-            if current_me is not None and current_me < optimal_me:
+            if current_me is not None and optimal_me is not None and current_me < optimal_me:
                 decision.overview_row["needs_me_research"] = True
                 decision.overview_row["me_research_target"] = optimal_me
                 decision.overview_row["me_current"] = current_me
 
-            if current_te is not None and current_te < optimal_te:
+            if current_te is not None and optimal_te is not None and current_te < optimal_te:
                 decision.overview_row["needs_te_research"] = True
                 decision.overview_row["te_research_target"] = optimal_te
                 decision.overview_row["te_current"] = current_te
@@ -648,29 +669,41 @@ class ChainPlanner:
             "ChainPlanner: BPO analysis skipped for type_id=%s: %s", decision.type_id, reason
         )
 
-    def _compute_optimal_me(self, blueprint_type_id: int) -> int:
+    def _compute_optimal_me(self, blueprint_type_id: int) -> int | None:
+        """Optimal ME from the SDE, or None when the SDE query fails.
+
+        Only a database error degrades (logged at WARNING); None must never be
+        read as 0 -- that would make every owned BPO look fully researched.
+        """
+        from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_me
         try:
-            from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_me
             sde_session = self._session_provider.sde_session()
             try:
                 return compute_optimal_me(blueprint_type_id, sde_session)
             finally:
                 sde_session.close()
-        except Exception:
-            logger.debug("ChainPlanner: compute_optimal_me failed for bp_type_id=%s", blueprint_type_id)
-            return 0
+        except SQLAlchemyError:
+            logger.warning(
+                "ChainPlanner: SDE lookup of optimal ME failed for bp_type_id=%s",
+                blueprint_type_id, exc_info=True,
+            )
+            return None
 
-    def _compute_optimal_te(self, blueprint_type_id: int, threshold_pct: float) -> int:
+    def _compute_optimal_te(self, blueprint_type_id: int, threshold_pct: float) -> int | None:
+        """Optimal TE from the SDE, or None when the SDE query fails (see _compute_optimal_me)."""
+        from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_te
         try:
-            from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_te
             sde_session = self._session_provider.sde_session()
             try:
                 return compute_optimal_te(blueprint_type_id, sde_session, threshold_pct)
             finally:
                 sde_session.close()
-        except Exception:
-            logger.debug("ChainPlanner: compute_optimal_te failed for bp_type_id=%s", blueprint_type_id)
-            return 0
+        except SQLAlchemyError:
+            logger.warning(
+                "ChainPlanner: SDE lookup of optimal TE failed for bp_type_id=%s",
+                blueprint_type_id, exc_info=True,
+            )
+            return None
 
 
 def _material_unit_prices(manufacturing_job: dict[str, Any]) -> dict[int, float]:

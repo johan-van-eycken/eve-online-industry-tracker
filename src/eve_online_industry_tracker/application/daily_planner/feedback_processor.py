@@ -9,6 +9,8 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.infrastructure.models import (
     PlanItemOutcomeModel,
     PlanLearningWeightsModel,
@@ -48,9 +50,15 @@ class FeedbackProcessor:
         self._session_provider = session_provider
 
     def _adm(self, key: str, fallback: Any) -> Any:
+        """A daily_planner setting, or `fallback` when there is no settings store.
+
+        AttributeError covers stub/None admin objects; KeyError is what
+        AdminSettingsManager.get raises for an unknown key (every key read
+        here is pinned to the schema by tests/test_daily_planner_fail_loud.py).
+        """
         try:
             return self._admin.get("daily_planner", key)
-        except Exception:
+        except (AttributeError, KeyError):
             return fallback
 
     def process_pending_feedback(self) -> int:
@@ -76,7 +84,9 @@ class FeedbackProcessor:
                 did_process = self._process_single_action(action, alpha=alpha, slow_mover_timeout=slow_mover_timeout)
                 if did_process:
                     processed_count += 1
-            except Exception:
+            except (SQLAlchemyError, TypeError, ValueError):
+                # Repo/ledger queries and the float()/int() work on stored
+                # values. Anything else is a bug and must abort the compute.
                 logger.exception(
                     "FeedbackProcessor: error processing action_id=%s type_id=%s",
                     action.id,
@@ -87,7 +97,7 @@ class FeedbackProcessor:
             if did_process:
                 try:
                     self._repo.mark_action_feedback_processed(action.id)
-                except Exception:
+                except SQLAlchemyError:
                     logger.exception(
                         "FeedbackProcessor: failed to mark action_id=%s as processed", action.id
                     )
@@ -97,7 +107,7 @@ class FeedbackProcessor:
         for action in non_mfg:
             try:
                 self._repo.mark_action_feedback_processed(action.id)
-            except Exception:
+            except SQLAlchemyError:
                 logger.exception(
                     "FeedbackProcessor: failed to mark non-mfg action_id=%s as processed", action.id
                 )
@@ -370,5 +380,11 @@ def _action_age_days(action: Any) -> float:
     try:
         delta = now - generated_at.replace(tzinfo=None)
         return delta.total_seconds() / 86400.0
-    except Exception:
+    except (TypeError, AttributeError):
+        # generated_at is not a datetime (a bare date or a string): treat the
+        # action as old, which is what the None case above already does.
+        logger.warning(
+            "FeedbackProcessor: action_id=%s has a non-datetime generated_at %r",
+            getattr(action, "id", None), generated_at,
+        )
         return 999.0

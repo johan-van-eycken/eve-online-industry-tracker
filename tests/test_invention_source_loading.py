@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from eve_online_industry_tracker.infrastructure.models import Blueprints
@@ -93,7 +94,9 @@ def test_a_failed_source_lookup_still_loads_the_rest_and_warns(monkeypatch, capl
     loaded: list[list[int]] = []
 
     def broken_sources(session, invented_ids):
-        raise RuntimeError("boom")
+        # Only a database error degrades; any other exception propagates
+        # (tests/test_daily_planner_fail_loud.py).
+        raise OperationalError("SELECT json_each(...)", {}, Exception("boom"))
 
     def fake_loader(session, language, blueprint_type_ids):
         loaded.append(sorted(blueprint_type_ids))

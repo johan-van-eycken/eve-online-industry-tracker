@@ -128,7 +128,11 @@ class ActionPlanBuilder:
                     end_date = end_date_raw.replace(tzinfo=None)
                 else:
                     continue
-            except Exception:
+            except ValueError:
+                logger.warning(
+                    "ActionPlanBuilder: unparseable end_date %r on job %s; no deliver action",
+                    end_date_raw, _job_attr(job, "job_id"),
+                )
                 continue
 
             if end_date > now:
@@ -157,7 +161,9 @@ class ActionPlanBuilder:
                 # rendering bug.
                 type_name = f"type_{type_id}"
             runs = int(_job_attr(job, "runs") or 1)
-            output_qty = int(_job_attr(job, "output_quantity") or _job_attr(job, "product_quantity") or runs)
+            # output_quantity is the real column on both job models; there is
+            # no product_quantity column to fall back to.
+            output_qty = int(_job_attr(job, "output_quantity") or runs)
 
             activity_map = {1: "manufacture", 3: "te_research", 4: "me_research", 5: "copy", 8: "invent"}
             activity_id = int(_job_attr(job, "activity_id") or 1)
@@ -310,13 +316,13 @@ class ActionPlanBuilder:
             if isinstance(opp, dict):
                 type_id = int(opp.get("type_id") or 0)
                 type_name = str(opp.get("type_name") or "")
-                market_price = opp.get("bpo_market_price") or opp.get("market_price")
+                market_price = opp.get("bpo_market_price")
                 break_even = opp.get("break_even_days")
                 savings = opp.get("projected_annual_savings")
             else:
                 type_id = int(getattr(opp, "type_id", 0))
                 type_name = str(getattr(opp, "type_name", ""))
-                market_price = getattr(opp, "bpo_market_price", None) or getattr(opp, "market_price", None)
+                market_price = getattr(opp, "bpo_market_price", None)
                 break_even = getattr(opp, "break_even_days", None)
                 savings = getattr(opp, "projected_annual_savings", None)
             if type_id <= 0:
