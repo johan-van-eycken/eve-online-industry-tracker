@@ -6,7 +6,14 @@ import streamlit as st
 
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.aggrid_import import import_aggrid
-from streamlit_ui.components.daily_planner.status_bar import _fmt_isk
+from streamlit_ui.components.daily_planner.status_bar import _fmt_isk, wallet_snapshot
+
+
+def budget_fit(corp_wallet: float | None, total_isk: float, cumul_isk: float) -> str:
+    """Whether a BPO fits what the wallet has left after the shopping list."""
+    if corp_wallet is None:
+        return "Unknown"
+    return "Yes" if (corp_wallet - total_isk) >= cumul_isk else "No"
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +190,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     actions: list[dict[str, Any]] = page_state.plan.get("actions") or []
     items: list[dict[str, Any]] = page_state.plan.get("items") or []
     plan_meta: dict[str, Any] = page_state.plan.get("plan") or {}
-    corp_wallet = float(plan_meta.get("corp_wallet_snapshot") or 0.0)
+    corp_wallet = wallet_snapshot(plan_meta)
 
     ag = import_aggrid()
 
@@ -201,7 +208,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         + sum(r["Est. Total"] or 0.0 for r in invention_rows)
     )
 
-    wallet_short = total_isk > corp_wallet and corp_wallet > 0
+    wallet_short = corp_wallet is not None and corp_wallet > 0 and total_isk > corp_wallet
 
     # Current job materials (highest priority)
     _render_materials_section("Current Job Materials", current_rows, deemphasise=False, ag_imports=ag)
@@ -219,7 +226,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     st.markdown("---")
 
     # Budget summary
-    remaining = corp_wallet - total_isk
+    remaining = (corp_wallet - total_isk) if corp_wallet is not None else None
     budget_cols = st.columns(3)
     with budget_cols[0]:
         st.metric("Total to Spend", _fmt_isk(total_isk))
@@ -229,7 +236,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         if wallet_short:
             st.metric("Deficit", _fmt_isk(abs(remaining)), delta=f"-{_fmt_isk(abs(remaining))}", delta_color="inverse")
         else:
-            st.metric("Remaining", _fmt_isk(remaining) if corp_wallet > 0 else "—")
+            st.metric("Remaining", _fmt_isk(remaining) if corp_wallet is not None and corp_wallet > 0 else "—")
 
     if wallet_short:
         st.warning(
@@ -264,8 +271,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         for row in bpo_rows:
             cumul_isk += row["Market Price"]
             row["Cumul. ISK Needed"] = cumul_isk
-            fits = (corp_wallet - total_isk) >= cumul_isk
-            row["Fits Budget?"] = "Yes" if fits else "No"
+            row["Fits Budget?"] = budget_fit(corp_wallet, total_isk, cumul_isk)
 
         bpo_display = pd.DataFrame([
             {

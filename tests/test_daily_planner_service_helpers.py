@@ -95,9 +95,52 @@ def test_wallet_balance_from_a_dict_keyed_by_division():
     assert _select_division_one_balance({1: 500.5}) == 500.5
 
 
-def test_wallet_balance_is_zero_when_division_one_is_absent():
-    assert _select_division_one_balance([{"division": 2, "balance": "1"}]) == 0.0
-    assert _select_division_one_balance(None) == 0.0
+def test_wallet_balance_is_unknown_when_division_one_is_absent():
+    assert _select_division_one_balance([{"division": 2, "balance": "1"}]) is None
+    assert _select_division_one_balance(None) is None
+
+
+def test_wallet_balance_is_unknown_when_the_json_does_not_decode():
+    assert _select_division_one_balance("{not json") is None
+
+
+def test_wallet_balance_is_unknown_for_a_json_scalar():
+    assert _select_division_one_balance(json.dumps(5)) is None
+    assert _select_division_one_balance("null") is None
+
+
+def test_a_non_numeric_division_is_skipped_not_raised():
+    assert _select_division_one_balance(
+        [{"division": "x", "balance": "1"}, {"division": "1", "balance": "2.5"}]
+    ) == 2.5
+    assert _select_division_one_balance([{"division": "x", "balance": "1"}]) is None
+
+
+def _wallet_service(list_corporations):
+    from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+    return DailyPlannerService(
+        industry_service=SimpleNamespace(),
+        corporations_service=SimpleNamespace(list_corporations=list_corporations),
+        characters_service=SimpleNamespace(), sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(), realized_profit_service=SimpleNamespace(),
+        repo=SimpleNamespace(), admin_settings=SimpleNamespace(),
+        session_provider=SimpleNamespace(),
+    )
+
+
+def test_a_failed_corporation_listing_makes_the_wallet_unknown():
+    def boom():
+        raise ValueError("no corporations cached")
+    assert _wallet_service(boom)._get_corp_wallet() is None
+
+
+def test_no_corporation_makes_the_wallet_unknown():
+    assert _wallet_service(lambda: [])._get_corp_wallet() is None
+
+
+def test_a_corp_without_division_one_has_an_unknown_wallet():
+    corps = [{"wallets": [{"division": 2, "balance": "5"}]}]
+    assert _wallet_service(lambda: corps)._get_corp_wallet() is None
 
 
 # Real `corporations.wallets` rows store division/balance as strings (e.g.
@@ -134,8 +177,6 @@ def test_wallet_balance_from_a_dict_keyed_by_division_string_balance():
     assert _select_division_one_balance({"1": "123456789.1234"}) == 123456789.1234
 
 
-def test_wallet_balance_is_zero_for_none():
-    assert _select_division_one_balance(None) == 0.0
 
 
 def test_parse_isk_returns_none_for_unparseable_balance():

@@ -758,11 +758,9 @@ class DailyPlannerService:
         overview_rows = phase1_data["overview_rows"]
         snapshot_hash = self._compute_snapshot_hash(overview_rows, market_depth_cache)
 
-        # Corp wallet. `None` means "unparseable balance, unknown" (see
-        # _get_corp_wallet) and must reach the DB as NULL, not as a
-        # misleading 0.0 -- corp_wallet_snapshot is nullable precisely for
-        # this. Only a genuinely absent phase1 key collapses to 0.0.
-        _raw_corp_wallet = phase1_data.get("corp_wallet", 0.0)
+        # Corp wallet: None means unknown (see _get_corp_wallet) and must reach
+        # the DB as NULL. corp_wallet_snapshot is nullable for exactly this.
+        _raw_corp_wallet = phase1_data.get("corp_wallet")
         corp_wallet = None if _raw_corp_wallet is None else float(_raw_corp_wallet)
 
         now = _now()
@@ -815,29 +813,30 @@ class DailyPlannerService:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _get_corp_wallet(self) -> float | None:
-        """Master wallet (division 1) balance.
+        """Master wallet (division 1) balance, or None when it is unknown.
 
-        Returns `0.0` when the corp/division-1 wallet is genuinely absent
-        (no corporations, no division-1 entry) and `None` when a division-1
-        balance was present but unparseable -- see `_select_division_one_balance`.
-        Callers must not coerce the `None` case to `0.0`; a real zero balance
-        and "we could not read the wallet" must stay distinguishable.
+        Unknown covers: listing corporations failed, there is no corporation,
+        and the corporation has no parseable division-1 balance (see
+        _select_division_one_balance). A real 0 ISK balance and "we could not
+        read the wallet" must stay distinguishable, so nothing here returns 0.0
+        unless the balance itself is 0.
         """
         try:
             corps = self._corporations.list_corporations()
         except (KeyError, TypeError, ValueError):
-            logger.exception("DailyPlannerService: failed to list corporations")
-            return 0.0
+            logger.exception("DailyPlannerService: failed to list corporations; corp wallet unknown")
+            return None
 
         if not corps:
-            return 0.0
+            logger.warning("DailyPlannerService: no corporation listed; corp wallet unknown")
+            return None
         corp = corps[0] if isinstance(corps, list) else corps
         wallets = corp.get("wallets") if isinstance(corp, dict) else getattr(corp, "wallets", None)
         balance = _select_division_one_balance(wallets)
         if balance is None:
             logger.warning(
-                "DailyPlannerService: division-1 wallet balance present but unparseable "
-                "-- treating as unknown, not zero"
+                "DailyPlannerService: no parseable division-1 wallet balance "
+                "(absent, undecodable or malformed); corp wallet unknown, not zero"
             )
         return balance
 
@@ -1291,11 +1290,11 @@ def _select_division_one_balance(wallets: Any) -> float | None:
     for both already-stored double-encoded rows and newly written
     single-encoded ones.
 
-    Returns `0.0` when no division-1 entry is present at all (division-1
-    genuinely absent from the payload). Returns `None` when a division-1
-    entry *is* present but its balance could not be parsed as a number --
-    see `_parse_isk` -- so callers can tell "known zero" apart from
-    "unknown/unparseable".
+    Returns `None` whenever there is no parseable division-1 balance: the
+    payload does not decode, decodes to neither a list nor a dict, has no
+    division-1 entry, or has one whose balance `_parse_isk` cannot read.
+    An entry whose `division` is not an integer is skipped, not raised.
+    Only a balance that parses (including a real `"0"`) is a number.
     """
     import json as _json
 
@@ -1305,17 +1304,23 @@ def _select_division_one_balance(wallets: Any) -> float | None:
         try:
             wallets = _json.loads(wallets)
         except ValueError:
-            return 0.0
+            return None
 
     if isinstance(wallets, list):
         for entry in wallets:
-            if isinstance(entry, dict) and int(entry.get("division") or 0) == 1:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                division = int(entry.get("division") or 0)
+            except (TypeError, ValueError):
+                continue
+            if division == 1:
                 return _parse_isk(entry.get("balance"))
     elif isinstance(wallets, dict):
         raw = wallets.get("1", wallets.get(1))
         if raw is not None:
             return _parse_isk(raw)
-    return 0.0
+    return None
 
 
 def _parse_isk(raw: Any) -> float | None:

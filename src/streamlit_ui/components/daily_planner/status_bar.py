@@ -44,6 +44,17 @@ def _fmt_isk(v: float | None) -> str:
     return f"{v:,.0f} ISK"
 
 
+def wallet_snapshot(plan_meta: dict[str, Any]) -> float | None:
+    """The plan's corp wallet snapshot, or None when it was unknown at compute time."""
+    raw = plan_meta.get("corp_wallet_snapshot")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmt_age(hours: float) -> str:
     if hours < 1.0:
         return f"{int(hours * 60)}m ago"
@@ -256,7 +267,7 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
 
     # Live freshness (top level of the GET payload), None when unknown.
     freshness_display, freshness_score = freshness_summary(page_state.plan)
-    corp_wallet = float(plan_meta.get("corp_wallet_snapshot") or 0.0)
+    corp_wallet = wallet_snapshot(plan_meta)
     created_at = plan_meta.get("created_at")
 
     plan_age_hours: float | None = None
