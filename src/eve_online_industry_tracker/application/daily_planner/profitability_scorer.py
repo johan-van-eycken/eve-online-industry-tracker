@@ -143,7 +143,12 @@ class ProfitabilityScorer:
 def _compute_absolute_profit(
     row: PlannerInputRow, market_depth: Any | None
 ) -> tuple[float, str | None]:
-    """(sell price − material cost per unit) × runs × units per batch.
+    """(sell price − material cost per unit) × units per batch.
+
+    `row.quantity` is already the batch's unit total (units per run × runs,
+    see PlannerInputRow), and material_cost_per_unit is the batch material
+    cost divided by that same total. Multiplying by `row.runs` as well would
+    count the runs twice.
 
     Falls back to the producer's own profit_amount when no market depth is
     available, or when material_cost_per_unit is itself unknown (it is
@@ -155,7 +160,7 @@ def _compute_absolute_profit(
     """
     sell_price = _sell_price(market_depth)
     if sell_price is not None and row.material_cost_per_unit is not None:
-        return (sell_price - row.material_cost_per_unit) * row.runs * row.quantity, None
+        return (sell_price - row.material_cost_per_unit) * row.quantity, None
     if row.profit_amount is not None:
         return row.profit_amount, None
     return 0.0, "no cost basis (material cost and profit unavailable)"

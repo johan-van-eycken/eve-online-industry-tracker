@@ -252,7 +252,8 @@ class TestProfitabilityScorer:
 
 
 def test_absolute_profit_subtracts_the_real_material_cost():
-    row = _input_row(quantity=10, runs=20, material_cost_per_unit=1_000_000.0)
+    # quantity is the batch total: 2 units per run x 20 runs = 40 units.
+    row = _input_row(quantity=40, runs=20, material_cost_per_unit=1_000_000.0)
     scored = ProfitabilityScorer().score(
         pipeline=_pipeline_state(row.type_id),
         row=row,
@@ -260,8 +261,9 @@ def test_absolute_profit_subtracts_the_real_material_cost():
         market_depth={"vwap_5d": 1_500_000.0},
         margin_correlation=None,
     )
-    # (1.5M - 1.0M) * 20 runs * 10 units
-    assert scored.absolute_profit_per_batch == 100_000_000.0
+    # (1.5M - 1.0M) * 40 units. Runs are already inside quantity; multiplying
+    # by them again would give 400M.
+    assert scored.absolute_profit_per_batch == 20_000_000.0
     assert scored.unscoreable_reason is None
 
 
