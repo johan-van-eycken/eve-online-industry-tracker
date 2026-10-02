@@ -230,3 +230,6 @@ __marimo__/
 
 # Claude Code
 .claude/
+
+# Real (sanitised) overview capture for local integration tests; not published (reveals corp product mix)
+tests/fixtures/overview_rows_real.json
