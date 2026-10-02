@@ -24,6 +24,7 @@ from eve_online_industry_tracker.application.daily_planner.item_decision_engine 
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
 from eve_online_industry_tracker.application.daily_planner.profitability_scorer import ProfitabilityScorer
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
 from eve_online_industry_tracker.infrastructure.models import (
     BuildPlanItemModel,
@@ -532,11 +533,15 @@ class DailyPlannerService:
         # Pricing suggestions (for RELIST actions)
         pricing_suggestions = self._get_pricing_suggestions()
 
-        # Blueprint data (SDE) — loaded for chain planning
-        blueprint_data = self._get_blueprint_data(overview_rows)
-
         # BPO and BPC asset indexes
         bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
+
+        # Blueprint data (SDE) — loaded for chain planning. Owned BPOs are
+        # included because sub-manufacture only ever builds from an owned BPO,
+        # and those blueprints are usually not themselves overview rows.
+        blueprint_data = self._get_blueprint_data(
+            overview_rows, extra_blueprint_type_ids=bpo_assets_by_type_id.keys()
+        )
 
         return {
             "corp_wallet": corp_wallet,
@@ -1000,17 +1005,29 @@ class DailyPlannerService:
             logger.exception("DailyPlannerService: failed to get pricing suggestions")
             return []
 
-    def _get_blueprint_data(self, overview_rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-        """Load blueprint SDE data for all blueprints in overview rows."""
-        from eve_online_industry_tracker.infrastructure.sde.blueprints import get_blueprint_manufacturing_data
-        bp_type_ids = {int(r.get("blueprint_type_id") or 0) for r in overview_rows if r.get("blueprint_type_id")}
+    def _get_blueprint_data(
+        self,
+        overview_rows: list[dict[str, Any]],
+        extra_blueprint_type_ids: Any = (),
+    ) -> dict[int, dict[str, Any]]:
+        """Load blueprint SDE data for the overview rows' blueprints plus any extras.
+
+        The row's blueprint type id is nested under
+        manufacturing_job.blueprint_sde, so it is read through the shared
+        accessor -- a top-level read found nothing and left this map empty.
+        """
+        from eve_online_industry_tracker.infrastructure.sde import blueprints as sde_blueprints
+        bp_type_ids = {
+            orow.get_blueprint_type_id(r) or 0 for r in overview_rows if isinstance(r, dict)
+        }
+        bp_type_ids.update(int(t or 0) for t in extra_blueprint_type_ids)
         bp_type_ids.discard(0)
         if not bp_type_ids:
             return {}
         try:
             sde_session = self._session_provider.sde_session()
             try:
-                return get_blueprint_manufacturing_data(sde_session, "en", list(bp_type_ids))
+                return sde_blueprints.get_blueprint_manufacturing_data(sde_session, "en", list(bp_type_ids))
             finally:
                 sde_session.close()
         except Exception:

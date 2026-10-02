@@ -16,6 +16,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
+from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner.models import (
     AssignedAction,
     ChainPlan,
@@ -37,6 +38,38 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
         return admin_settings.get("daily_planner", key)
     except Exception:
         return fallback
+
+
+def build_product_to_blueprint_index(
+    blueprint_data: dict[int, dict[str, Any]]
+) -> dict[int, int]:
+    """{product type_id: blueprint type_id} from SDE blueprint manufacturing data.
+
+    blueprint_data is keyed by *blueprint* type_id. Anything that starts from a
+    product — a material requirement, an overview row — has to cross over
+    through this index. When two blueprints make the same product the first
+    one seen wins (same tie-break as a linear scan over blueprint_data).
+    """
+    index: dict[int, int] = {}
+    for blueprint_type_id, entry in (blueprint_data or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        manufacturing = entry.get("manufacturing")
+        if not isinstance(manufacturing, dict):
+            continue
+        products = manufacturing.get("products")
+        if not isinstance(products, list):
+            continue
+        for product in products:
+            if not isinstance(product, dict):
+                continue
+            try:
+                product_type_id = int(product.get("type_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if product_type_id > 0:
+                index.setdefault(product_type_id, int(blueprint_type_id))
+    return index
 
 
 class ChainPlanner:
@@ -87,6 +120,9 @@ class ChainPlanner:
         blueprint_data: dict[int, dict] = phase1_data.get("blueprint_data", {})
         market_depth_cache: dict[int, Any] = phase1_data.get("market_depth_cache", {})
         invention_success_rates: dict[int, float] = phase1_data.get("invention_success_rates", {})
+        # Built once per plan: material requirements are product type_ids, but
+        # BPO ownership and blueprint_data are keyed by blueprint type_id.
+        product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
 
         for decision in top_level_decisions:
             if decision.decision != "build":
@@ -94,7 +130,9 @@ class ChainPlanner:
 
             row = decision.overview_row
             meta_group_id = decision.meta_group_id
-            bp_type_id = int(row.get("blueprint_type_id") or 0)
+            # Nested under manufacturing_job.blueprint_sde on a real row; there
+            # is no top-level blueprint_type_id key.
+            bp_type_id = orow.get_blueprint_type_id(row) or 0
             bp_data = blueprint_data.get(bp_type_id, {})
 
             try:
@@ -131,6 +169,7 @@ class ChainPlanner:
                     decision=decision,
                     bp_data=bp_data,
                     bpo_assets_by_type_id=bpo_assets_by_type_id,
+                    product_to_blueprint=product_to_blueprint,
                     market_depth_cache=market_depth_cache,
                     phase1_data=phase1_data,
                 )
@@ -168,16 +207,25 @@ class ChainPlanner:
             optimal_te = self._compute_optimal_te(bp_type_id, optimal_te_threshold)
 
             bpo_assets = bpo_assets_by_type_id[bp_type_id]
-            current_me = int(getattr(bpo_assets[0], "material_efficiency", 0) or 0)
-            current_te = int(getattr(bpo_assets[0], "time_efficiency", 0) or 0)
+            # Corp asset columns are blueprint_*-prefixed. None means unknown,
+            # not ME0: an unknown level schedules no research rather than a
+            # job on a blueprint that may already be fully researched.
+            current_me = _blueprint_efficiency(bpo_assets[0], "material")
+            current_te = _blueprint_efficiency(bpo_assets[0], "time")
+            if current_me is None or current_te is None:
+                logger.warning(
+                    "ChainPlanner: owned BPO %s has unknown ME/TE (me=%s, te=%s); "
+                    "not scheduling research for the unknown level(s)",
+                    bp_type_id, current_me, current_te,
+                )
 
             # Schedule ME/TE research in the action plan (signals to ActionPlanBuilder)
-            if current_me < optimal_me:
+            if current_me is not None and current_me < optimal_me:
                 decision.overview_row["needs_me_research"] = True
                 decision.overview_row["me_research_target"] = optimal_me
                 decision.overview_row["me_current"] = current_me
 
-            if current_te < optimal_te:
+            if current_te is not None and current_te < optimal_te:
                 decision.overview_row["needs_te_research"] = True
                 decision.overview_row["te_research_target"] = optimal_te
                 decision.overview_row["te_current"] = current_te
@@ -255,12 +303,27 @@ class ChainPlanner:
                 as_invention_enabler=True,
             )
 
+    def _blueprint_for_product(
+        self,
+        product_type_id: int,
+        product_to_blueprint: dict[int, int],
+        bpo_assets_by_blueprint_type_id: dict[int, list],
+    ) -> int | None:
+        """The blueprint type_id the corp owns for this product, if any."""
+        blueprint_type_id = product_to_blueprint.get(int(product_type_id))
+        if blueprint_type_id is None:
+            return None
+        if not bpo_assets_by_blueprint_type_id.get(blueprint_type_id):
+            return None
+        return blueprint_type_id
+
     def _resolve_sub_manufacture(
         self,
         *,
         decision: ItemDecision,
         bp_data: dict[str, Any],
         bpo_assets_by_type_id: dict[int, list],
+        product_to_blueprint: dict[int, int],
         market_depth_cache: dict[int, Any],
         phase1_data: dict[str, Any],
     ) -> list[ItemDecision]:
@@ -278,21 +341,19 @@ class ChainPlanner:
             if mat_type_id <= 0:
                 continue
 
-            # Find the BPO for this material (if corp owns one)
-            # Lookup by mat_type_id in bpo_assets — we need the blueprint type_id for the material
-            # In practice, bpo_assets_by_type_id is keyed by blueprint type_id, not product type_id.
-            # We check if there's a blueprint for the material's product type_id.
-            if mat_type_id not in bpo_assets_by_type_id:
-                continue  # No BPO → buy from market
-            if not bpo_assets_by_type_id[mat_type_id]:
-                continue
+            # mat_type_id is a product; BPO ownership is keyed by blueprint.
+            mat_blueprint_type_id = self._blueprint_for_product(
+                mat_type_id, product_to_blueprint, bpo_assets_by_type_id
+            )
+            if mat_blueprint_type_id is None:
+                continue  # no BPO for this material → buy from market
 
             qty_needed = int(mat.get("quantity") or 0)
             if qty_needed <= 0:
                 continue
 
             # Estimate sub-manufacture cost vs market buy cost
-            sub_cost = self._estimate_sub_manufacture_cost(mat_type_id, qty_needed, phase1_data)
+            sub_cost = self._estimate_sub_manufacture_cost(mat_blueprint_type_id, qty_needed, phase1_data)
             market_cost = self._estimate_market_cost(mat_type_id, qty_needed, market_depth_cache)
 
             if sub_cost is None or market_cost is None:
@@ -318,6 +379,7 @@ class ChainPlanner:
                     overview_row={
                         "type_id": mat_type_id,
                         "type_name": mat_name,
+                        "blueprint_type_id": mat_blueprint_type_id,
                         "quantity_needed": qty_needed,
                         "sub_manufacture_cost": sub_cost,
                         "market_buy_cost": market_cost,
@@ -474,6 +536,24 @@ class ChainPlanner:
         except Exception:
             logger.debug("ChainPlanner: compute_optimal_te failed for bp_type_id=%s", blueprint_type_id)
             return 0
+
+
+def _blueprint_efficiency(asset: Any, kind: str) -> int | None:
+    """An owned blueprint's ME (kind='material') or TE (kind='time'), or None.
+
+    Corp asset rows name these blueprint_material_efficiency /
+    blueprint_time_efficiency; the unprefixed name is accepted as a fallback
+    for ESI-shaped blueprint dicts.
+    """
+    for attr in (f"blueprint_{kind}_efficiency", f"{kind}_efficiency"):
+        value = _get_attr(asset, attr)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _get_attr(obj: Any, attr: str) -> Any:
