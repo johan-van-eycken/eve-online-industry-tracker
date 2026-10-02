@@ -657,3 +657,69 @@ def test_persisted_plan_item_snapshot_price_is_none_when_type_id_has_no_market_d
 
     item = app_session.query(BuildPlanItemModel).one()
     assert item.snapshot_sell_price is None
+
+
+# ---------------------------------------------------------------------------
+# An unknown sell velocity persists as NULL, never as the analyzer's 0.01 floor
+# ---------------------------------------------------------------------------
+
+def _unknown_velocity_decision() -> ItemDecision:
+    import dataclasses
+
+    return dataclasses.replace(
+        _decision(),
+        effective_velocity=0.01,
+        velocity_unknown_reason="no corp sales in 30 days and no days-of-supply estimate",
+    )
+
+
+def test_an_unknown_velocity_persists_as_null_not_the_floor(app_session, session_provider):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    service = _service(session_provider)
+    service._persist_plan_items(
+        plan_id=1, decisions=[_unknown_velocity_decision()], market_depth_cache={}
+    )
+    assert app_session.query(BuildPlanItemModel).one().effective_velocity is None
+
+
+def test_a_measured_velocity_still_persists_as_is(app_session, session_provider):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    service = _service(session_provider)
+    service._persist_plan_items(plan_id=1, decisions=[_decision()], market_depth_cache={})
+    assert app_session.query(BuildPlanItemModel).one().effective_velocity == 10.0
+
+
+def test_readers_do_not_treat_a_null_velocity_as_measured(app_session, session_provider):
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+        _estimate_predicted_sell_days,
+    )
+    from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import (
+        MarketDepthCollector,
+    )
+    from eve_online_industry_tracker.infrastructure.models import (
+        BuildPlanItemModel,
+        BuildPlanModel,
+    )
+
+    now = datetime(2026, 1, 1)
+    app_session.add(BuildPlanModel(id=1, created_at=now, updated_at=now, status="active"))
+    app_session.commit()
+    _service(session_provider)._persist_plan_items(
+        plan_id=1, decisions=[_unknown_velocity_decision()], market_depth_cache={}
+    )
+    item = app_session.query(BuildPlanItemModel).one()
+
+    # feedback_processor: NULL takes the 7.0 default, not the 30-day clamp of 1/0.01.
+    assert _estimate_predicted_sell_days(item) == 7.0
+    assert _estimate_predicted_sell_days(SimpleNamespace(effective_velocity=0.01)) == 30.0
+
+    # market_depth_collector: the NULL row is skipped, so with no corp to fall
+    # back on the velocity is unknown (None) and competition_index stays None.
+    collector = object.__new__(MarketDepthCollector)
+    collector._sessions = SimpleNamespace(app_session=lambda: app_session)
+    assert collector._get_effective_velocity(item.type_id, None) is None

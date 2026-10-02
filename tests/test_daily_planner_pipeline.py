@@ -392,3 +392,9 @@ def test_a_days_of_supply_fallback_has_no_unknown_reason():
     state = _analyze_one(_input_row(type_id=1, days_of_supply=5.0), {})
     assert abs(state.effective_velocity - 0.2) < 1e-12
     assert state.velocity_unknown_reason is None
+
+
+def test_a_tiny_measured_velocity_floored_to_0_01_is_still_a_signal():
+    state = _analyze_one(_input_row(type_id=1), {1: 0.001})
+    assert state.effective_velocity == 0.01
+    assert state.velocity_unknown_reason is None

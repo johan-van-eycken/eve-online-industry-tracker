@@ -1111,7 +1111,12 @@ class DailyPlannerService:
                 bpo_market_price=d.bpo_market_price,
                 break_even_days=d.break_even_days,
                 projected_annual_savings=d.projected_annual_savings,
-                effective_velocity=d.effective_velocity,
+                # NULL, not the analyzer's 0.01 floor, when there was no signal:
+                # market_depth_collector and feedback_processor read this column
+                # and treat any number as a measured sell rate.
+                effective_velocity=(
+                    None if d.velocity_unknown_reason is not None else d.effective_velocity
+                ),
                 snapshot_sell_price=_spot_sell_price(market_depth_cache.get(d.type_id)),
             ))
         return items
