@@ -367,3 +367,12 @@ def test_a_pricing_service_without_get_suggestions_warns(caplog):
                if r.levelno == logging.WARNING)
 
 
+
+
+def test_an_industry_jobs_query_failure_fails_the_compute_not_frees_every_slot():
+    """An empty job list means "every slot is free, nothing to deliver". Guessing
+    that after a failed query over-assigns work EVE will refuse to start."""
+    svc = _bare_service()
+    svc._session_provider = SimpleNamespace(app_session=lambda: (_ for _ in ()).throw(_sde_error()))
+    with pytest.raises(OperationalError):
+        svc._get_industry_jobs()

@@ -870,37 +870,36 @@ class DailyPlannerService:
         (_TERMINAL_JOB_STATUSES) on both queries -- a "paused" job still holds
         a slot, and the deny-list (unlike an allow-list of "active") keeps it
         counted as active.
-        """
-        try:
-            session = self._session_provider.app_session()
-            try:
-                from eve_online_industry_tracker.infrastructure.models import (
-                    CharacterIndustryJobsModel,
-                    CorporationIndustryJobsModel,
-                )
 
-                corp_jobs = (
-                    session.query(CorporationIndustryJobsModel)
-                    .filter(
-                        CorporationIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
-                        | CorporationIndustryJobsModel.status.is_(None)
-                    )
-                    .all()
+        No error handler: an empty list would mean "every slot is free and
+        nothing to deliver", so a failed query must fail the compute instead.
+        """
+        session = self._session_provider.app_session()
+        try:
+            from eve_online_industry_tracker.infrastructure.models import (
+                CharacterIndustryJobsModel,
+                CorporationIndustryJobsModel,
+            )
+
+            corp_jobs = (
+                session.query(CorporationIndustryJobsModel)
+                .filter(
+                    CorporationIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
+                    | CorporationIndustryJobsModel.status.is_(None)
                 )
-                char_jobs = (
-                    session.query(CharacterIndustryJobsModel)
-                    .filter(
-                        CharacterIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
-                        | CharacterIndustryJobsModel.status.is_(None)
-                    )
-                    .all()
+                .all()
+            )
+            char_jobs = (
+                session.query(CharacterIndustryJobsModel)
+                .filter(
+                    CharacterIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
+                    | CharacterIndustryJobsModel.status.is_(None)
                 )
-                return list(char_jobs) + list(corp_jobs)
-            finally:
-                session.close()
-        except SQLAlchemyError:
-            logger.exception("DailyPlannerService: failed to get industry jobs")
-            return []
+                .all()
+            )
+            return list(char_jobs) + list(corp_jobs)
+        finally:
+            session.close()
 
     def _get_corp_assets(self) -> list[Any]:
         """Get corp assets."""
