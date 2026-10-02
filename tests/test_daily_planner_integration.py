@@ -266,25 +266,56 @@ def test_manufacturing_runs_come_from_the_nested_job(input_rows):
 # ── Phases 2-3: pipeline and scoring ────────────────────────────────────────
 
 
-def test_pipeline_analysis_yields_non_zero_pipeline_days(input_rows, meta):
+@pytest.mark.parametrize(
+    "pipeline_days_supply",
+    [
+        pytest.param(4.0, id="producer-days"),
+        pytest.param(None, id="fallback-units-over-velocity"),
+    ],
+)
+def test_pipeline_supply_on_a_real_row_yields_non_zero_pipeline_days(
+    overview_rows, meta, pipeline_days_supply
+):
+    """A real row with this test's own pipeline supply must show pipeline days.
+
+    The capture's market state is whatever it was that day. Today every row
+    has 0 units in jobs and on market. So the test writes its own supply onto
+    one real row, under the keys the producer fills
+    (_enrich_product_rows_with_market_trends). PipelineAnalyzer reads days
+    only through these keys: industry_jobs just set
+    has_active_manufacturing_jobs, and corp orders are not one of its inputs.
+    With pipeline_days_supply set, the producer's value is used. With None
+    (no 7d volume), units / velocity is used. If the reads went back to the
+    phantom keys, both cases would give 0.
+    """
+    raw = dict(overview_rows[0])
+    raw["pipeline_units_in_jobs"] = 50
+    raw["pipeline_units_on_market"] = 30
+    raw["pipeline_days_supply"] = pipeline_days_supply
+    row = PlannerInputRow.from_overview(raw, meta_groups=meta)
+
     states = PipelineAnalyzer().analyze(
-        input_rows=input_rows, industry_jobs=[], corp_assets=[],
+        input_rows=[row], industry_jobs=[], corp_assets=[],
         market_depth_cache={}, weights={},
-        sell_velocities={r.type_id: 5.0 for r in input_rows},
-        meta_resolver=meta,
+        sell_velocities={row.type_id: 5.0}, meta_resolver=meta,
     )
-    assert len(states) == len(input_rows)
-    assert any(s.total_pipeline_days > 0 for s in states), (
-        "no item has any pipeline supply. Either the phantom-key bug is back or "
-        "the capture lacks pipeline enrichment (re-capture per plan Task 3, Step 4)"
-    )
+    assert states[0].total_pipeline_days > 0
 
 
-def _first_costed_row(input_rows):
+def _first_scoreable_costed_row(input_rows):
+    """A row with an isk/hour and a material cost.
+
+    A row with no isk/hour is unscoreable by design, so it cannot show cost
+    subtraction.
+    """
     for row in input_rows:
-        if row.material_cost_per_unit is not None and row.material_cost_per_unit > 0:
+        if (
+            row.isk_per_hour is not None
+            and row.material_cost_per_unit is not None
+            and row.material_cost_per_unit > 0
+        ):
             return row
-    pytest.fail("no real row carries a material cost")
+    pytest.skip("the captured fixture has no row with both an isk/hour and a material cost")
 
 
 def _score_at_price(row, meta, price):
@@ -300,14 +331,14 @@ def _score_at_price(row, meta, price):
 
 def test_selling_at_material_cost_scores_zero_batch_profit(input_rows, meta):
     """If cost were not subtracted, this would be price x units, which is never 0."""
-    row = _first_costed_row(input_rows)
+    row = _first_scoreable_costed_row(input_rows)
     scored = _score_at_price(row, meta, row.material_cost_per_unit)
     assert scored.unscoreable_reason is None
     assert scored.absolute_profit_per_batch == pytest.approx(0.0, abs=1e-6)
 
 
 def test_selling_above_material_cost_scores_positive_batch_profit(input_rows, meta):
-    row = _first_costed_row(input_rows)
+    row = _first_scoreable_costed_row(input_rows)
     scored = _score_at_price(row, meta, row.material_cost_per_unit * 2.0)
     assert scored.unscoreable_reason is None
     assert scored.absolute_profit_per_batch > 0
