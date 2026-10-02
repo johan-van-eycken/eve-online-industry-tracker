@@ -286,13 +286,17 @@ class CharacterAssigner:
             # price it -- unknown, not free.
             estimated_cost = orow.get_material_cost_total(row)
             estimated_profit = decision.absolute_profit_per_batch
+            # The batch's unit total, so feedback can turn the batch cost into
+            # a per-unit cost (FeedbackProcessor compares per unit). None when
+            # the row carries none -- feedback then skips the cost update.
+            batch_units = orow.get_product_quantity(row)
             actions.append(AssignedAction(
                 type_id=type_id,
                 type_name=type_name,
                 action_type="manufacture",
                 character_id=char_id,
                 character_name=char_name,
-                quantity=None,
+                quantity=batch_units if batch_units > 0 else None,
                 runs=runs,
                 estimated_cost_isk=estimated_cost,
                 estimated_profit_isk=estimated_profit,

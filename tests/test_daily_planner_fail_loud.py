@@ -316,6 +316,16 @@ def test_a_manufacture_action_carries_the_batch_runs_and_material_cost():
     assert action.estimated_cost_isk == 50_000_000.0
 
 
+def test_a_manufacture_action_carries_the_batch_unit_total():
+    """FeedbackProcessor compares PER-UNIT costs (F1): estimated_cost_isk is a
+    whole-batch total, so the action must also carry the batch's units
+    (top-level `quantity` = units per run x runs) to divide it by."""
+    row = {"type_id": 12345, "quantity": 200,
+           "manufacturing_job": {"runs": 20, "material_cost": 50_000_000.0}}
+    (action,) = _assign(row)
+    assert action.quantity == 200
+
+
 def test_an_unpriced_batch_has_an_unknown_cost_not_zero():
     row = {"type_id": 12345, "quantity": 200, "manufacturing_job": {"runs": 20}}
     (action,) = _assign(row)

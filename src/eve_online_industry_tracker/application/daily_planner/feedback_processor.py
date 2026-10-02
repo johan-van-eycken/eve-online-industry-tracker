@@ -18,6 +18,40 @@ from eve_online_industry_tracker.infrastructure.models import (
 
 logger = logging.getLogger(__name__)
 
+# Band every learned weight (accuracy_ema, velocity_multiplier,
+# cost_multiplier) is clamped to after an EMA update. Each one multiplies a
+# product's adjusted_score directly (profitability_scorer), so an unbounded
+# value lets one odd sale move a product's rank by orders of magnitude -- and
+# it is persisted in plan_learning_weights, so it sticks. The admin settings
+# schema defines no bounds for learning weights, hence this named constant:
+# a factor of 4 either way from neutral (1.0).
+LEARNING_WEIGHT_MIN = 0.25
+LEARNING_WEIGHT_MAX = 4.0
+
+
+def _clamp_weight(value: float) -> float:
+    return max(LEARNING_WEIGHT_MIN, min(LEARNING_WEIGHT_MAX, value))
+
+
+def _positive_number(value: Any) -> float | None:
+    """`value` as a float when it is a real, positive number; else None.
+
+    Deliberately not float(value): that accepts strings and MagicMock (as
+    1.0), and the point here is to not invent a cost.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value > 0 else None
+
+
+def _per_unit(total: Any, units: Any) -> float | None:
+    """total / units, or None when either side is unknown or not positive."""
+    total_f = _positive_number(total)
+    units_f = _positive_number(units)
+    if total_f is None or units_f is None:
+        return None
+    return total_f / units_f
+
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
@@ -133,12 +167,15 @@ class FeedbackProcessor:
         plan_item_id = int(matching_item.id) if matching_item is not None else 0
 
         predicted_isk_per_hour: float | None = None
-        predicted_material_cost: float | None = None
         if matching_item is not None:
             predicted_isk_per_hour = matching_item.isk_per_hour
-        # Use the manufacture action's estimated_cost_isk as the predicted material cost
-        if action.estimated_cost_isk and float(action.estimated_cost_isk) > 0:
-            predicted_material_cost = float(action.estimated_cost_isk)
+        # Predicted material cost PER UNIT: estimated_cost_isk is the whole
+        # batch's material cost and quantity the batch's unit total. The
+        # realized side is one sale's allocated cost over its priced units,
+        # so both must be per unit to be comparable at all.
+        predicted_material_cost: float | None = _per_unit(
+            getattr(action, "estimated_cost_isk", None), getattr(action, "quantity", None)
+        )
 
         # Retrieve existing weights (or defaults)
         weights_map = self._repo.get_weights([type_id])
@@ -152,26 +189,45 @@ class FeedbackProcessor:
         if realized is not None:
             # Normal outcome — realized sale found
             actual_isk_per_hour: float | None = realized.get("isk_per_hour")
-            actual_material_cost: float | None = realized.get("material_cost")
+            actual_material_cost: float | None = _per_unit(
+                realized.get("material_cost"), realized.get("priced_quantity")
+            )
             actual_sell_days: float = float(realized.get("sell_days", 1.0))
 
             # Guard denominators
             safe_actual_days = max(0.01, actual_sell_days)
-            safe_predicted_cost = max(0.01, float(predicted_material_cost or 1.0))
             safe_predicted_isk_per_hr = max(0.01, float(predicted_isk_per_hour or 1.0))
 
             # EMA updates
-            new_accuracy_ema = (1.0 - alpha) * old_accuracy_ema + alpha * (
+            new_accuracy_ema = _clamp_weight((1.0 - alpha) * old_accuracy_ema + alpha * (
                 float(actual_isk_per_hour or 0.0) / safe_predicted_isk_per_hr
-            )
+            ))
             # velocity: predicted_days / actual_days  (higher = sold faster than predicted → bonus)
             predicted_days = _estimate_predicted_sell_days(matching_item)
-            new_velocity = (1.0 - alpha) * old_velocity + alpha * (
+            new_velocity = _clamp_weight((1.0 - alpha) * old_velocity + alpha * (
                 float(predicted_days) / safe_actual_days
-            )
-            # cost: predicted / actual  (< 1 = materials cost more than predicted → penalty)
-            actual_mat_cost_safe = max(0.01, float(actual_material_cost or 1.0))
-            new_cost = (1.0 - alpha) * old_cost + alpha * (safe_predicted_cost / actual_mat_cost_safe)
+            ))
+            # cost: predicted / actual per unit (< 1 = materials cost more
+            # than predicted → penalty). Either side unknown or zero means
+            # there is nothing to compare: keep the old weight. Substituting
+            # 1 ISK (the old fallback) turned a 0 allocated cost into a
+            # ratio in the millions.
+            if predicted_material_cost is None or actual_material_cost is None:
+                logger.info(
+                    "FeedbackProcessor: cost update skipped for action_id=%s type_id=%s: "
+                    "predicted per-unit cost %s, actual per-unit cost %s "
+                    "(batch cost=%r units=%r; sale allocated_cost=%r priced_quantity=%r)",
+                    getattr(action, "id", None), type_id,
+                    "unknown" if predicted_material_cost is None else predicted_material_cost,
+                    "unknown" if actual_material_cost is None else actual_material_cost,
+                    getattr(action, "estimated_cost_isk", None), getattr(action, "quantity", None),
+                    realized.get("material_cost"), realized.get("priced_quantity"),
+                )
+                new_cost = old_cost
+            else:
+                new_cost = _clamp_weight((1.0 - alpha) * old_cost + alpha * (
+                    predicted_material_cost / actual_material_cost
+                ))
 
             sample_count += 1
             confidence_tier = _confidence_tier(sample_count)
@@ -205,9 +261,9 @@ class FeedbackProcessor:
             # Slow-mover outcome — write timeout record, only update velocity
             predicted_days = _estimate_predicted_sell_days(matching_item)
             # velocity penalty: predicted / slow_mover_timeout (worse than predicted)
-            new_velocity = (1.0 - alpha) * old_velocity + alpha * (
+            new_velocity = _clamp_weight((1.0 - alpha) * old_velocity + alpha * (
                 float(predicted_days) / slow_mover_timeout
-            )
+            ))
             new_accuracy_ema = old_accuracy_ema  # not updated for slow movers
             new_cost = old_cost                  # not updated for slow movers
             sample_count += 1
@@ -326,12 +382,14 @@ class FeedbackProcessor:
             return None
 
         realized_profit = float(row.realized_profit or 0.0)
-        material_cost = float(row.allocated_cost or 0.0)
         diff = (sale_date - generated_date).days
         sell_days = max(0.1, float(diff)) if diff > 0 else 1.0
         return {
             "isk_per_hour": realized_profit / max(0.01, sell_days * 24.0),
-            "material_cost": material_cost,
+            # allocated_cost covers only this sale's priced units; None stays
+            # None (unknown), the caller turns it into a per-unit cost.
+            "material_cost": row.allocated_cost,
+            "priced_quantity": row.priced_quantity,
             "sell_days": sell_days,
         }
 

@@ -1,6 +1,7 @@
 """Tests for FeedbackProcessor — EMA update logic."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime, timedelta
@@ -67,6 +68,8 @@ def _make_action(
     status: str = "done",
     processed: bool = False,
     generated_at: datetime | None = None,
+    estimated_cost_isk: float | None = None,
+    quantity: int | None = None,
 ) -> MagicMock:
     action = MagicMock()
     action.id = action_id
@@ -76,6 +79,11 @@ def _make_action(
     action.status = status
     action.processed_for_feedback = processed
     action.generated_at = generated_at or datetime.utcnow() - timedelta(days=1)
+    # Set explicitly: a bare MagicMock attribute satisfies float() as 1.0
+    # (see _make_plan_item's docstring), which would silently fabricate a
+    # 1 ISK batch cost over 1 unit.
+    action.estimated_cost_isk = estimated_cost_isk
+    action.quantity = quantity
     return action
 
 
@@ -171,35 +179,100 @@ class TestFeedbackProcessor:
             f"Expected accuracy_ema={expected_accuracy}, got {weights_arg.accuracy_ema}"
         )
 
-    def test_normal_outcome_ema_cost_update(self):
-        """Normal outcome: cost_multiplier = 0.8*old + 0.2*(predicted/actual)."""
-        action = _make_action(type_id=200, action_type="manufacture")
+    def _run_cost_case(self, *, action_cost, action_qty, sale_cost, sale_qty, old_cost=1.0):
+        action = _make_action(type_id=200, estimated_cost_isk=action_cost, quantity=action_qty)
         self.repo.get_unprocessed_done_actions.return_value = [action]
-        old_cost = 1.0
-        self.repo.get_weights.return_value = {
-            200: _make_weights(cost_multiplier=old_cost)
-        }
+        self.repo.get_weights.return_value = {200: _make_weights(cost_multiplier=old_cost)}
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=200, isk_per_hour=10_000_000)]
-
-        # Predicted cost = 1.0 (no plan_item material cost), actual = 6M
-        # cost_multiplier = 0.8 * 1.0 + 0.2 * (max(0.01, 1.0) / max(0.01, 6M))
-        actual_cost = 6_000_000.0
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 8_000_000.0,
-            "material_cost": actual_cost,
+            "material_cost": sale_cost,
+            "priced_quantity": sale_qty,
             "sell_days": 5.0,
         }
-
         self.processor.process_pending_feedback()
+        return (self.repo.upsert_weights.call_args[0][0],
+                self.repo.insert_outcome.call_args[0][0])
 
-        weights_arg = self.repo.upsert_weights.call_args[0][0]
-        # safe_predicted_cost = max(0.01, None→1.0) = 1.0
-        # cost_multiplier = 0.8 * 1.0 + 0.2 * (1.0 / 6000000) ≈ 0.8 + very small ≈ 0.8
-        # Note: predicted_material_cost is None (not stored on plan_item) → defaults to 1.0
-        # This is a limitation; test the direction of the formula
-        assert weights_arg.cost_multiplier < 1.0, (
-            f"cost_multiplier should be < 1.0 when actual > predicted, got {weights_arg.cost_multiplier}"
+    def test_cost_update_compares_per_unit_costs(self):
+        """F1: predicted is a WHOLE-BATCH cost, actual is ONE sale's allocated
+        cost. Compared raw, a 50M batch vs a 10-unit sale gave a ratio of ~24.
+        Per unit: 50M / 100 = 500k predicted vs 6M / 10 = 600k actual."""
+        weights, outcome = self._run_cost_case(
+            action_cost=50_000_000.0, action_qty=100, sale_cost=6_000_000.0, sale_qty=10
         )
+        expected = 0.8 * 1.0 + 0.2 * (500_000.0 / 600_000.0)
+        assert abs(weights.cost_multiplier - expected) < 1e-9
+        assert outcome.predicted_material_cost == 500_000.0
+        assert outcome.actual_material_cost == 600_000.0
+
+    def test_zero_allocated_cost_skips_the_cost_update(self, caplog):
+        """allocated_cost 0 used to fall back to 1.0 ISK -> ratio 10,000,000."""
+        with caplog.at_level(logging.INFO):
+            weights, outcome = self._run_cost_case(
+                action_cost=50_000_000.0, action_qty=100, sale_cost=0.0, sale_qty=10, old_cost=0.9
+            )
+        assert weights.cost_multiplier == 0.9
+        assert outcome.actual_material_cost is None
+        assert any("cost update skipped" in r.getMessage() for r in caplog.records)
+
+    def test_unknown_predicted_cost_skips_the_cost_update(self, caplog):
+        """No batch cost (unpriced) or no batch units: nothing to compare.
+        The old code substituted 1.0 ISK as the predicted cost."""
+        for cost, qty in ((None, 100), (50_000_000.0, None), (50_000_000.0, 0)):
+            caplog.clear()
+            with caplog.at_level(logging.INFO):
+                weights, outcome = self._run_cost_case(
+                    action_cost=cost, action_qty=qty, sale_cost=6_000_000.0, sale_qty=10,
+                    old_cost=1.1,
+                )
+            assert weights.cost_multiplier == 1.1, (cost, qty)
+            assert outcome.predicted_material_cost is None
+            assert any("cost update skipped" in r.getMessage() for r in caplog.records)
+
+    def test_zero_priced_quantity_skips_the_cost_update(self):
+        weights, _ = self._run_cost_case(
+            action_cost=50_000_000.0, action_qty=100, sale_cost=6_000_000.0, sale_qty=0,
+            old_cost=1.2,
+        )
+        assert weights.cost_multiplier == 1.2
+
+    def test_cost_multiplier_is_clamped_to_the_band(self):
+        """Even per-unit, one odd sale must not swing the score by orders of magnitude."""
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+            LEARNING_WEIGHT_MAX, LEARNING_WEIGHT_MIN,
+        )
+        high, _ = self._run_cost_case(
+            action_cost=1_000_000_000.0, action_qty=1, sale_cost=1.0, sale_qty=1
+        )
+        assert high.cost_multiplier == LEARNING_WEIGHT_MAX
+        self.repo.reset_mock()
+        low, _ = self._run_cost_case(
+            action_cost=1.0, action_qty=1, sale_cost=1_000_000_000.0, sale_qty=1, old_cost=0.0
+        )
+        assert low.cost_multiplier == LEARNING_WEIGHT_MIN
+
+    def test_velocity_and_accuracy_are_clamped_to_the_band(self):
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+            LEARNING_WEIGHT_MAX,
+        )
+        action = _make_action(type_id=210)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {
+            210: _make_weights(accuracy_ema=LEARNING_WEIGHT_MAX, velocity_multiplier=LEARNING_WEIGHT_MAX)
+        }
+        # 30-day predicted sell time vs a 0.1-day sale; 1 ISK/h predicted vs 1B.
+        self.repo.get_plan_items.return_value = [
+            _make_plan_item(type_id=210, isk_per_hour=1.0, effective_velocity=1 / 30.0)
+        ]
+        self.processor._find_realized_sale.return_value = {
+            "isk_per_hour": 1_000_000_000.0, "material_cost": None,
+            "priced_quantity": 0, "sell_days": 0.1,
+        }
+        self.processor.process_pending_feedback()
+        weights = self.repo.upsert_weights.call_args[0][0]
+        assert weights.velocity_multiplier == LEARNING_WEIGHT_MAX
+        assert weights.accuracy_ema == LEARNING_WEIGHT_MAX
 
     def test_normal_outcome_ema_velocity_update(self):
         """velocity_multiplier = 0.8*old + 0.2*(predicted_days/actual_days)."""
@@ -464,6 +537,26 @@ class TestFindRealizedSaleAttribution:
         assert found is not None
         assert found["material_cost"] == 100.0
         assert found["sell_days"] == 2.0
+
+    def test_the_sale_carries_its_priced_quantity(self, planner_repo, app_session):
+        """allocated_cost covers only the priced units of THIS sale, so the
+        per-unit actual cost needs priced_quantity alongside it (F1)."""
+        from eve_online_industry_tracker.infrastructure.models import (
+            CorporationRealizedSalesLedgerModel,
+        )
+
+        app_session.add(CorporationRealizedSalesLedgerModel(
+            corporation_id=1, transaction_id=7, quantity=12, priced_quantity=10,
+            unpriced_quantity=2, type_id=12345, realized_profit=500.0,
+            allocated_cost=6_000.0, date="2026-09-12T09:11:27Z",
+        ))
+        app_session.commit()
+
+        processor = _processor(app_session, planner_repo)
+        action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
+        found = processor._find_realized_sale(12345, action=action)
+        assert found["priced_quantity"] == 10
+        assert found["material_cost"] == 6_000.0
 
     def test_a_sale_on_the_same_day_after_the_action_is_credited(self, planner_repo, app_session):
         """Same calendar day, later time-of-day: credited. The filter compares
