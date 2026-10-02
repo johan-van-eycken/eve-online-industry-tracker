@@ -421,7 +421,7 @@ def test_missing_base_quantities_skip_the_analysis_with_a_reason():
 
 def test_unknown_blueprint_me_skips_the_analysis_with_a_reason():
     decision, opps = _analyse(_bpo_row(me_current=None), _bpo_bp_data(1000))
-    _assert_skipped(decision, opps, "ME")
+    _assert_skipped(decision, opps, "unknown current blueprint ME")
 
 
 def test_an_assumed_sde_fallback_me_skips_the_analysis_with_a_reason():
@@ -451,3 +451,28 @@ def test_an_invention_enabler_is_not_valued_as_an_me_saving():
                                      1999: {"spot_sell_price": 1.0}}}
     plan = _planner().plan_chain([decision], phase1)
     _assert_skipped(decision, plan.bpo_opportunities, "invention")
+
+
+def test_rounding_eats_the_saving_on_a_small_material_but_not_a_large_one():
+    """Two materials, ME0 -> ME10 (optimal, driven by the 1000-unit one):
+      * 5 units x 1000 ISK:  ceil(4.5) = 5  -> saves nothing
+      * 1000 units x 5 ISK:  1000 -> 900    -> saves 100 x 5 = 500 ISK/run
+    Exact saving 500 ISK/run. A flat 10% of the 10,000 ISK/run material cost
+    would claim 1000 ISK/run. 2 runs/day -> 1000 ISK/day -> a 20,000 ISK BPO
+    breaks even in exactly 20 days (the flat 10% would give 10)."""
+    row = _row(runs=10, material_cost=100_000.0,  # 10 runs x 10,000 ISK/run
+               blueprint_material_efficiency=0, blueprint_source_kind="owned_blueprint_copy",
+               materials={"34": {"type_id": 34, "quantity": 50, "unit_price": 1000.0},
+                          "35": {"type_id": 35, "quantity": 9000, "unit_price": 5.0}})
+    row["quantity"] = 10
+    bp_data = {999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
+                                       "materials": [{"type_id": 34, "quantity": 5},
+                                                     {"type_id": 35, "quantity": 1000}]}}}
+
+    assert _planner()._me_saving_isk_per_run(row=row, bp_data=bp_data[999]) == (500.0, None)
+
+    decision, opps = _analyse(row, bp_data)
+    assert decision.bpo_analysis_skip_reason is None
+    assert decision.break_even_days == 20.0
+    assert decision.projected_annual_savings == 365_000.0
+    assert opps[0]["recommendation"] == "strong_buy"
