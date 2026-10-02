@@ -4,6 +4,8 @@ import math
 from typing import Any
 from typing import Iterable
 
+from sqlalchemy import bindparam, text
+
 from eve_online_industry_tracker.db_models import Blueprints, Types
 
 from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
@@ -318,6 +320,40 @@ def get_blueprint_manufacturing_data(
             "copying": activities.get("copying", {}).get("time", 0),
         }
 
+    return result
+
+
+def get_invention_source_blueprint_ids(
+    session,
+    invented_blueprint_type_ids: Iterable[int],
+) -> dict[int, int]:
+    """{invented blueprint type_id: T1 source blueprint type_id} in one query.
+
+    The invention activity lives on the source blueprint, with the blueprints
+    it invents into as its products, so the source is found by searching the
+    invention products. `activities` is a JSON text column; SQLite's
+    json_each expands the products list so this is a single query instead of
+    loading and scanning every blueprint in Python. Ids that nothing invents
+    into are simply absent. First source seen wins when
+    several blueprints invent into the same one.
+    """
+    ids = sorted({int(i) for i in invented_blueprint_type_ids if i is not None})
+    if not ids:
+        return {}
+    rows = session.execute(
+        text(
+            "SELECT CAST(json_extract(p.value, '$.typeID') AS INTEGER) AS invented, "
+            "b.blueprintTypeID AS source "
+            "FROM blueprints b, "
+            "json_each(json_extract(b.activities, '$.invention.products')) p "
+            "WHERE CAST(json_extract(p.value, '$.typeID') AS INTEGER) IN :ids "
+            "ORDER BY b.blueprintTypeID"
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    result: dict[int, int] = {}
+    for invented, source in rows:
+        result.setdefault(int(invented), int(source))
     return result
 
 

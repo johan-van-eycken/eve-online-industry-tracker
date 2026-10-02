@@ -1015,6 +1015,10 @@ class DailyPlannerService:
         The row's blueprint type id is nested under
         manufacturing_job.blueprint_sde, so it is read through the shared
         accessor -- a top-level read found nothing and left this map empty.
+
+        Also loads the T1 source blueprint of every invented (T2) blueprint in
+        the set: the invention activity, and so the datacores, lives on the
+        source, and the corp may invent from a BPC without owning that BPO.
         """
         from eve_online_industry_tracker.infrastructure.sde import blueprints as sde_blueprints
         bp_type_ids = {
@@ -1027,6 +1031,20 @@ class DailyPlannerService:
         try:
             sde_session = self._session_provider.sde_session()
             try:
+                try:
+                    sources = sde_blueprints.get_invention_source_blueprint_ids(
+                        sde_session, bp_type_ids
+                    )
+                except Exception:
+                    # Degrade to the blueprints we were asked for; the shopping
+                    # list then warns per invent action that lacks its source.
+                    logger.warning(
+                        "DailyPlannerService: T1 source blueprint lookup failed; "
+                        "invention inputs for unowned T1 sources will be missing",
+                        exc_info=True,
+                    )
+                    sources = {}
+                bp_type_ids.update(sources.values())
                 return sde_blueprints.get_blueprint_manufacturing_data(sde_session, "en", list(bp_type_ids))
             finally:
                 sde_session.close()

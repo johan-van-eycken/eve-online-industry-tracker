@@ -204,6 +204,7 @@ def test_service_loads_blueprint_data_for_nested_ids_and_owned_bpos(monkeypatch)
         return {}
 
     monkeypatch.setattr(sde_blueprints, "get_blueprint_manufacturing_data", fake_loader)
+    monkeypatch.setattr(sde_blueprints, "get_invention_source_blueprint_ids", lambda session, ids: {})
     session = SimpleNamespace(close=lambda: None)
     fake_self = SimpleNamespace(_session_provider=SimpleNamespace(sde_session=lambda: session))
 
