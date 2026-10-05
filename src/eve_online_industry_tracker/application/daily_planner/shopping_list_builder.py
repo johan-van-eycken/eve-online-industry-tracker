@@ -316,10 +316,11 @@ class ShoppingListBuilder:
         directly when positive. A `sub_manufacture` action normally carries
         ChainPlanner's runs and batch materials (used as-is upstream); one
         without them carries only the target component quantity in
-        `action.quantity`, so derive runs as ceil(quantity / per_run_output). Guards the division: a missing, zero,
-        or non-numeric per_run_output falls back to 1 run (never divides by
-        zero), logged at debug since it means the blueprint data is
-        incomplete rather than that only 1 unit was actually needed.
+        `action.quantity`, so derive runs as ceil(quantity / per_run_output).
+        Guards the division: a missing, zero, or non-numeric per_run_output
+        falls back to 1 run (never divides by zero), logged at debug since it
+        means the blueprint data is incomplete rather than that only 1 unit
+        was actually needed.
         """
         runs = _positive_int(action.runs)
         if runs is not None:

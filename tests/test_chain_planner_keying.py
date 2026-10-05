@@ -714,9 +714,16 @@ def test_a_sub_blueprint_that_does_not_make_the_component_is_not_used(caplog):
     blueprint_data = {**SUB_BLUEPRINT_DATA, 888: {"manufacturing": {
         "products": [{"type_id": 77777, "quantity": 10}],
         "materials": [{"type_id": 34, "quantity": 2}]}}}
+    # The index maps nothing to 888 for 54321 now, so there is no request at all.
+    assert _subs(_sub_phase1(blueprint_data=blueprint_data)) == []
+    # The guard itself: asked to build 54321 from a blueprint that makes
+    # something else, _sub_batch refuses and says why.
     with caplog.at_level("WARNING"):
-        # The index maps nothing to 888 for 54321 now, so there is no request at all.
-        assert _subs(_sub_phase1(blueprint_data=blueprint_data)) == []
+        assert _planner()._sub_batch(
+            product_type_id=54321, blueprint_type_id=888, qty_to_build=100, me=10,
+            phase1_data={"blueprint_data": blueprint_data},
+        ) is None
+    assert any("no per-run output" in r.getMessage() for r in caplog.records)
 
 
 def _sub_decision(**overview):
@@ -883,16 +890,19 @@ def test_parents_in_different_structures_use_the_smallest_reduction():
 
 def test_reduced_batch_quantity_matches_the_producers_rounding_with_facility_bonuses():
     from eve_online_industry_tracker.application.industry.service import IndustryService as S
+    from eve_online_industry_tracker.application.daily_planner import facility_bonus
     from eve_online_industry_tracker.infrastructure.sde.blueprints import reduced_batch_quantity
 
     for base in (1, 2, 5, 33, 1000):
         for runs in (1, 3, 10, 100, 1000):
             for me in (0, 5, 10):
                 for structure, rig in ((0.0, 0.0), (0.01, 0.0), (0.01, 0.024), (0.0, 0.042)):
-                    reduction = S._combine_reductions([me / 100.0, structure, rig])
+                    factors = [me / 100.0, structure, rig]
+                    reduction = S._combine_reductions(factors)
                     expected = S._round_material_quantity(
                         float(base * runs) * max(0.0, 1.0 - reduction), minimum_quantity=runs)
-                    assert reduced_batch_quantity(base, runs, reduction) == expected, (
+                    ours = reduced_batch_quantity(base, runs, facility_bonus.combine_reductions(factors))
+                    assert ours == expected, (
                         base, runs, me, structure, rig)
 
 
@@ -908,3 +918,75 @@ def test_an_all_group_rig_still_applies_when_the_component_group_is_unknown():
     # 200 x 0.9 x 0.99 x 0.976 = 173.9 -> 174: the All rig only, not both rigs (169.8 -> 170).
     assert sub.overview_row["sub_batch_materials"] == {34: 174}
     assert sub.overview_row["rig_applicability"] == "unknown"
+
+
+# --- fix round 1 ---------------------------------------------------------------
+
+# SDE group 1136 "Fuel Block" (category 4 "Material"): the producer's inference
+# files any unclassified group under "Modules", which an Equipment rig covers.
+_FUEL_BLOCK_ENTRY = {"type_id": 54321, "type_name": "Widget", "quantity": 1000,
+                     "group_id": 1136, "group_name": "Fuel Block",
+                     "category_id": 4, "category_name": "Material"}
+
+
+def test_an_equipment_rig_does_not_reduce_an_unclassified_component(caplog):
+    """A Fuel Block is not a module: an Equipment ("Modules") rig is not
+    applied, only the 1% structure bonus. 200 x 0.9 x 0.99 = 178.2 -> 179."""
+    with caplog.at_level("WARNING"):
+        (sub,) = _structure_subs(_profile(rig_group="Modules"), entry=_FUEL_BLOCK_ENTRY)
+    assert sub.overview_row["sub_batch_materials"] == {34: 179}
+    assert sub.overview_row["rig_applicability"] == "unknown"
+
+
+def test_an_equipment_rig_reduces_a_real_module():
+    """SDE group 46 "Propulsion Module" (category 7 "Module") is a module."""
+    entry = {**_FUEL_BLOCK_ENTRY, "group_id": 46, "group_name": "Propulsion Module",
+             "category_id": 7, "category_name": "Module"}
+    (sub,) = _structure_subs(_profile(rig_group="Modules"), entry=entry)
+    assert sub.overview_row["sub_batch_materials"] == {34: 174}
+    assert sub.overview_row["rig_applicability"] == "applies"
+
+
+def test_a_ship_token_in_a_non_ship_category_is_not_a_ship_group():
+    """The producer matches ship groups by token ("industrial"); outside the
+    Ship category that is a guess, so a ship rig is not applied."""
+    from eve_online_industry_tracker.application.daily_planner import facility_bonus
+
+    assert facility_bonus.component_manufacturing_group(
+        {"group_name": "Industrial Reconfiguration", "category_name": "Module"}) is None
+    assert facility_bonus.component_manufacturing_group(
+        {"group_name": "Frigate", "category_name": "Ship"}) == "Basic Small Ships"
+
+
+def test_several_owned_bpos_use_the_lowest_known_me():
+    phase1 = _sub_phase1()
+    phase1["bpo_assets_by_type_id"] = {888: [_bpo(888, me=10, te=20), _bpo(888, me=None, te=0),
+                                             _bpo(888, me=0, te=0)]}
+    (sub,) = _subs(phase1)
+    assert sub.overview_row["sub_batch_materials"] == {34: 20}   # ME0, not ME10's 18
+
+
+def test_the_unknown_rig_warning_is_not_logged_for_a_component_covered_by_stock(caplog):
+    entry = {"type_id": 54321, "type_name": "Widget", "quantity": 1000}
+    row = _row(runs=10, industry_profile=_profile(rig_group="Advanced Components"),
+               materials={"54321": entry})
+    phase1 = _sub_phase1(stock={54321: 1000})
+    with caplog.at_level("WARNING"):
+        plan = _planner().plan_chain([_decision(row)], phase1)
+    assert [d for d in plan.decisions if d.is_sub_component] == []
+    assert not any("rig applicability" in r.getMessage() for r in caplog.records)
+
+
+def test_the_adapter_matches_the_producer_statics():
+    from eve_online_industry_tracker.application.daily_planner import facility_bonus
+    from eve_online_industry_tracker.application.industry.service import IndustryService as S
+
+    for factors in ([0.1], [0.1, 0.01], [0.1, 0.01, 0.024], [10, 1, 2.4], [0.0]):
+        assert facility_bonus.combine_reductions(factors) == S._combine_reductions(factors)
+    for profile in (None, _profile(), _profile(rig_group="Advanced Components")):
+        assert facility_bonus.structure_material_reduction(profile) == (
+            S._profile_base_reduction(profile_payload=profile, activity="manufacturing",
+                                      metric="material"))
+    assert facility_bonus.component_manufacturing_group(_COMPONENT_ENTRY) == (
+        S._infer_manufacturing_group_uncached(_COMPONENT_ENTRY))
+
