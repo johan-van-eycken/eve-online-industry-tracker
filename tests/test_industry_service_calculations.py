@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import MethodType, SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 
@@ -826,3 +828,199 @@ def test_owned_blueprint_copy_cost_falls_back_to_adjusted_price() -> None:
     allocated_cost = IndustryService._owned_blueprint_copy_consumption_cost(asset, consumed_runs=10)
 
     assert allocated_cost == 20_000.0
+
+# --- invention inputs in the T2 row's cost ---------------------------------------
+# Fake numbers. The T1 source blueprint 1001 invents into T2 blueprint 9002 at
+# 50% with 10 runs per invented BPC, consuming 2 datacores (type 204) per
+# attempt. The T2 blueprint needs 10 Tritanium (34) per run. Prices: 34 -> 5,
+# 204 -> 100 (sell side, from MarketPricingService), no profile, no skills, so
+# the row's ME and every reduction are 0.
+
+
+def _invented_t2_blueprint_rows() -> list[dict]:
+    return [
+        {
+            "blueprint_type_id": 1001,
+            "blueprint": {"type_id": 1001, "type_name": "T1 Source Blueprint", "base_price": 1000.0},
+            "manufacturing_job": {
+                "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 3, "category_name": "Material"}],
+                "skill_entries": [],
+                "time_seconds": 50,
+                "max_production_limit": 10,
+                "products": [{"type_id": 6001, "type_name": "T1 Source Item", "quantity": 1, "meta_group_name": "Tech I"}],
+            },
+            "copying_job": {"time_seconds": 20},
+            "invention_job": {
+                "materials": [{"type_id": 204, "type_name": "Datacore", "quantity": 2, "category_name": "Material"}],
+                "skill_entries": [],
+                "time_seconds": 40,
+                "products": [
+                    {"probability_pct": 50.0, "quantity": 10, "product": {"type_id": 9002, "type_name": "T2 Blueprint"}}
+                ],
+            },
+        },
+        {
+            "blueprint_type_id": 9002,
+            "blueprint": {"type_id": 9002, "type_name": "T2 Blueprint", "base_price": 5000.0},
+            "manufacturing_job": {
+                "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 10, "category_name": "Material"}],
+                "skill_entries": [],
+                "time_seconds": 100,
+                "max_production_limit": 10,
+                "products": [{"type_id": 5002, "type_name": "T2 Module", "quantity": 1, "meta_group_name": "Tech II"}],
+            },
+        },
+    ]
+
+
+_INVENTION_FAKE_PRICES = {34: 5.0, 204: 100.0}
+
+
+def _invention_overview(monkeypatch, *, owned_assets=([], [], {}, {}, {}), maximize_bp_runs=False, owned_item_inventory=None):
+    monkeypatch.setattr(
+        MarketPricingService,
+        "get_type_price_map",
+        lambda self, *, type_ids, hub="jita", side="sell", progress_callback=None: {
+            int(t): {"unit_price": _INVENTION_FAKE_PRICES[int(t)], "price_source": "market_test"}
+            for t in type_ids if int(t) in _INVENTION_FAKE_PRICES
+        },
+    )
+    service = _build_service(
+        blueprint_rows=_invented_t2_blueprint_rows(),
+        profile=None,
+        character_modifiers={"modifier_skills": [], "implants": []},
+        trained_skill_levels={},
+        owned_assets=owned_assets,
+        owned_item_inventory=owned_item_inventory,
+        adjusted_price_map={t: {"adjusted_price": p} for t, p in _INVENTION_FAKE_PRICES.items()},
+    )
+    # The real pricing step: it is what writes material_cost / total_cost.
+    service._enrich_product_rows_with_material_prices = MethodType(  # type: ignore[attr-defined]
+        IndustryService._enrich_product_rows_with_material_prices, service,
+    )
+    rows = service.industry_manufacturing_product_overview(
+        build_from_bpc=True,
+        have_blueprint_source_only=False,
+        maximize_bp_runs=maximize_bp_runs,
+        character_id=1,
+    )
+    return {row["type_id"]: row for row in rows}
+
+
+def test_invented_t2_row_cost_includes_expected_invention_inputs(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch)[5002]["manufacturing_job"]
+
+    # 1 run: Tritanium 10 x 5 = 50. Invention per run =
+    # (2 datacores x 100) / (0.5 probability x 10 runs per BPC) = 40.
+    assert mj["runs"] == 1
+    assert mj["material_cost"] == pytest.approx(90.0)
+    assert mj["invention_material_cost"] == pytest.approx(40.0)
+    assert mj["total_cost"] == pytest.approx((mj["total_job_cost"] or 0.0) + 90.0)
+    assert mj["expected_invention_materials"]["204"]["quantity"] == pytest.approx(0.4)
+    assert mj["expected_invention_materials"]["204"]["quantity_per_attempt"] == 2
+    assert mj["expected_invention_materials"]["204"]["unit_price"] == 100.0
+
+
+def test_invented_t2_invention_cost_scales_with_runs(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, maximize_bp_runs=True)[5002]["manufacturing_job"]
+
+    # 10 runs: Tritanium 100 x 5 = 500; invention 40 per run x 10 = 400.
+    assert mj["runs"] == 10
+    assert mj["invention_material_cost"] == pytest.approx(400.0)
+    assert mj["material_cost"] == pytest.approx(900.0)
+
+
+def test_invention_inputs_use_owned_cost_like_other_materials(monkeypatch) -> None:
+    # Owned datacores at 60 each are taken before buying, as for every material.
+    mj = _invention_overview(
+        monkeypatch, owned_item_inventory=({204: 100}, {204: 60.0}),
+    )[5002]["manufacturing_job"]
+
+    assert mj["expected_invention_materials"]["204"]["unit_price"] == 60.0
+    assert mj["invention_material_cost"] == pytest.approx(24.0)  # 2 x 60 / (0.5 x 10)
+
+
+def test_invention_inputs_are_not_in_the_batch_materials(monkeypatch) -> None:
+    # The planner buys datacores from its own invent action; `materials` (what
+    # the manufacture action buys) and `procurement_materials` stay free of them.
+    mj = _invention_overview(monkeypatch)[5002]["manufacturing_job"]
+
+    assert "204" not in mj["materials"]
+    assert "204" not in mj["procurement_materials"]
+
+
+def test_t1_row_cost_is_unchanged_by_invention_inputs(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch)[6001]["manufacturing_job"]
+
+    assert mj["material_cost"] == 15.0  # 3 Tritanium x 5, nothing else
+    assert "invention_material_cost" not in mj
+    assert "expected_invention_materials" not in mj
+
+
+def test_t2_row_from_owned_bpc_has_no_invention_cost(monkeypatch) -> None:
+    bpc = SimpleNamespace(
+        type_id=9002, item_id=77, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=10,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    mj = _invention_overview(monkeypatch, owned_assets=([bpc], [], {}, {}, {}))[5002]["manufacturing_job"]
+
+    assert mj["blueprint_source_kind"] == "owned_blueprint_copy"
+    assert mj["material_cost"] == 50.0
+    assert "invention_material_cost" not in mj
+
+
+def test_shopping_list_buys_datacores_once_for_an_invented_t2_row(monkeypatch) -> None:
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+    from eve_online_industry_tracker.application.industry import overview_row as orow
+
+    row = _invention_overview(monkeypatch)[5002]
+    assert row["manufacturing_job"]["invention_material_cost"] == pytest.approx(40.0)
+
+    def action(action_type, materials=None):
+        return AssignedAction(
+            type_id=5002, type_name="T2 Module", action_type=action_type,
+            character_id=1, character_name="Pilot", quantity=None, runs=None,
+            estimated_cost_isk=None, estimated_profit_isk=None,
+            estimated_completion=None, notes=None, materials=materials,
+        )
+
+    blueprint_data = {
+        1001: {
+            "manufacturing": {"materials": [], "products": [{"type_id": 6001, "quantity": 1}]},
+            "invention": {
+                "materials": [{"type_id": 204, "type_name": "Datacore", "quantity": 2}],
+                "products": [{"type_id": 9002, "quantity": 10}],
+            },
+        },
+        9002: {
+            "manufacturing": {
+                "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 10}],
+                "products": [{"type_id": 5002, "quantity": 1}],
+            },
+        },
+    }
+
+    class _Resolver:
+        def is_blueprint(self, type_id):
+            return False
+
+        def prefetch(self, type_ids):
+            return None
+
+    class _Admin:
+        def get(self, section, key, default=None):
+            return default
+
+    items = ShoppingListBuilder().build(
+        assigned_actions=[action("manufacture", orow.get_batch_materials(row)), action("invent")],
+        corp_assets=[], market_depth_cache={34: {"vwap_5d": 5.0}, 204: {"vwap_5d": 100.0}},
+        admin_settings=_Admin(), blueprint_data=blueprint_data, meta_resolver=_Resolver(),
+    )
+
+    datacores = [i for i in items if i.type_id == 204]
+    assert len(datacores) == 1
+    assert datacores[0].quantity == 2  # one attempt, from the invent action only
+    assert datacores[0].shopping_category == "invention_input"

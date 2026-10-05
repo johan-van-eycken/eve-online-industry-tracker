@@ -228,12 +228,17 @@ class FeedbackProcessor:
         #   only reads it back.
         # Predicted = materials + the producer's total_job_cost, which adds the
         #   copy fee, invention fee, source-copy fee and (SDE fallback)
-        #   research-chain fees (industry/service.py).
+        #   research-chain fees (industry/service.py). For an invented T2 row
+        #   materials include the expected invention inputs per run
+        #   (manufacturing_job.invention_material_cost: datacores x runs /
+        #   (success probability x runs per invented BPC)).
         #
-        # 1. T2, towards < 1: the producer's total_cost appears to drop the
-        #    top-level invention materials (its procurement list is replaced
-        #    by the recursive plan's, industry/service.py), while the realized
-        #    side carries them. Fixing it belongs in the producer.
+        # 1. T2: the producer used to drop the invention inputs from
+        #    material_cost (its procurement list is replaced by the recursive
+        #    plan's), which biased T2 towards < 1. That is fixed in the
+        #    producer; what remains is expected-vs-actual: predicted uses the
+        #    base SDE success chance (no skill bonus) and the expected attempt
+        #    count, the realized side the attempts actually made.
         # 2. BPC-copied T1 and SDE-fallback rows, towards > 1: predicted
         #    includes copy/research job fees that the realized side never has.
         #    Probably small (job fees are a few % of materials).
