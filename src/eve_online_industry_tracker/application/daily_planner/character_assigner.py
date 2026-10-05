@@ -305,9 +305,10 @@ class CharacterAssigner:
                 quantity=batch_units if batch_units > 0 else None,
                 runs=runs,
                 estimated_cost_isk=estimated_cost,
-                # Materials + job fees for the batch: the like-for-like
-                # counterpart of a realized industry-build unit cost, which
-                # includes the install fee (FeedbackProcessor compares these).
+                # Materials + job fees for the batch: the closest counterpart
+                # of a realized industry-build unit cost, which includes the
+                # manufacturing install fee (FeedbackProcessor compares these;
+                # the remaining differences are documented there).
                 estimated_build_cost_isk=orow.get_total_cost(row),
                 estimated_profit_isk=estimated_profit,
                 estimated_completion=None,

@@ -734,9 +734,10 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "predicted_sell_days REAL NULL,"
             "actual_sell_days REAL NULL,"
             "slow_mover INTEGER NOT NULL DEFAULT 0,"
-            # predicted_/actual_material_cost hold the per-unit full BUILD
-            # cost (materials + job fees), not materials only; the names
-            # predate that and are kept (see PlanItemOutcomeModel).
+            # predicted_/actual_material_cost hold a per-unit BUILD cost
+            # (materials + job fees), not materials only; the names predate
+            # that and are kept (see PlanItemOutcomeModel for what each side
+            # includes).
             "predicted_material_cost REAL NULL,"
             "actual_material_cost REAL NULL"
             ")"

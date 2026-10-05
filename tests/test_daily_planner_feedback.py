@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
@@ -162,7 +164,6 @@ class TestFeedbackProcessor:
         # Realized sale: actual ISK/hour = 8M
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 8_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 10.0,
         }
 
@@ -189,8 +190,7 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {220: _make_weights(accuracy_ema=10.0)}
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=220, isk_per_hour=10_000_000)]
         self.processor._find_realized_sale.return_value = {
-            "isk_per_hour": 8_000_000.0, "material_cost": None,
-            "priced_quantity": 0, "sell_days": 5.0,
+            "isk_per_hour": 8_000_000.0, "sell_days": 5.0,
         }
         self.processor.process_pending_feedback()
         weights = self.repo.upsert_weights.call_args[0][0]
@@ -244,6 +244,10 @@ class TestFeedbackProcessor:
         )
         assert outcome.actual_material_cost == 600_000.0
 
+    @staticmethod
+    def _skip_messages(caplog):
+        return [r.getMessage() for r in caplog.records if "cost update skipped" in r.getMessage()]
+
     def test_a_sale_with_no_industry_built_units_skips_the_cost_update(self, caplog):
         with caplog.at_level(logging.INFO):
             weights, outcome = self._run_cost_case(
@@ -252,15 +256,31 @@ class TestFeedbackProcessor:
             )
         assert weights.cost_multiplier == 0.9
         assert outcome.actual_material_cost is None
-        assert any("cost update skipped" in r.getMessage() for r in caplog.records)
+        (message,) = self._skip_messages(caplog)
+        assert "no industry-built lots in this sale" in message
+        assert "market_buy" in message
 
-    def test_zero_allocated_cost_skips_the_cost_update(self):
-        weights, outcome = self._run_cost_case(
-            build_cost=55_000_000.0, action_qty=100, old_cost=0.9,
-            allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 0.0}],
-        )
+    def test_zero_allocated_cost_skips_the_cost_update(self, caplog):
+        with caplog.at_level(logging.INFO):
+            weights, outcome = self._run_cost_case(
+                build_cost=55_000_000.0, action_qty=100, old_cost=0.9,
+                allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 0.0}],
+            )
         assert weights.cost_multiplier == 0.9
         assert outcome.actual_material_cost is None
+        (message,) = self._skip_messages(caplog)
+        assert "industry-built lots have no positive cost and quantity" in message
+
+    @pytest.mark.parametrize("allocations", [None, "not-a-list", {"source": "industry_build"}])
+    def test_missing_or_malformed_allocation_details_skips_the_cost_update(self, caplog, allocations):
+        with caplog.at_level(logging.INFO):
+            weights, outcome = self._run_cost_case(
+                build_cost=55_000_000.0, action_qty=100, old_cost=0.9, allocations=allocations,
+            )
+        assert weights.cost_multiplier == 0.9
+        assert outcome.actual_material_cost is None
+        (message,) = self._skip_messages(caplog)
+        assert "allocation_details missing or not a list" in message
 
     def test_unknown_predicted_build_cost_skips_the_cost_update(self, caplog):
         for cost, qty in ((None, 100), (55_000_000.0, None), (55_000_000.0, 0)):
@@ -304,8 +324,7 @@ class TestFeedbackProcessor:
             _make_plan_item(type_id=210, isk_per_hour=1.0, effective_velocity=1 / 30.0)
         ]
         self.processor._find_realized_sale.return_value = {
-            "isk_per_hour": 1_000_000_000.0, "material_cost": None,
-            "priced_quantity": 0, "sell_days": 0.1,
+            "isk_per_hour": 1_000_000_000.0, "sell_days": 0.1,
         }
         self.processor.process_pending_feedback()
         weights = self.repo.upsert_weights.call_args[0][0]
@@ -330,7 +349,6 @@ class TestFeedbackProcessor:
         actual_days = 5.0
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": actual_days,
         }
 
@@ -397,7 +415,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {500: _make_weights()}
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -414,7 +431,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {601: _make_weights()}
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -467,7 +483,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {800: _make_weights(sample_count=old_count)}
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -484,7 +499,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {900: _make_weights(sample_count=4)}  # 4 → 5 after increment
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -501,7 +515,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {901: _make_weights(sample_count=19)}  # 19 → 20
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 

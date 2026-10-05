@@ -89,8 +89,10 @@ def get_total_cost(row: dict[str, Any]) -> float | None:
     The producer writes `manufacturing_job.total_cost = total_job_cost +
     material_cost` (industry/service.py, _enrich_product_rows_with_material_prices),
     and None when neither could be priced. total_job_cost covers the
-    manufacturing install fee plus any planned copy, invention and
-    prerequisite job fees.
+    manufacturing install fee plus any planned copy, invention, source-copy,
+    prerequisite and (SDE fallback) research job fees. A realized build cost
+    carries only the manufacturing fee (+ invention cost for T2), so this is
+    a close, not an exact, counterpart (see FeedbackProcessor).
     """
     return _as_optional_float(get_manufacturing_job(row).get("total_cost"))
 

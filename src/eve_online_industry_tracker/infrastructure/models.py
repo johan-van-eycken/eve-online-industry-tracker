@@ -1126,11 +1126,14 @@ class PlanItemOutcomeModel(BaseApp):
     predicted_sell_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     actual_sell_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     slow_mover: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # Despite the names, both hold the full per-unit BUILD cost (materials +
-    # job install fees, and copy/invention where present), not materials only.
-    # predicted = the action's estimated_build_cost_isk / quantity; actual =
-    # the sale's industry-built lots' allocated cost / their units. Names are
-    # kept to avoid a column rename; see FeedbackProcessor._process_single_action.
+    # Despite the names, both hold a per-unit BUILD cost, not materials only.
+    # predicted = the action's estimated_build_cost_isk / quantity: materials
+    # + the producer's total_job_cost (manufacturing, copy, invention,
+    # source-copy and SDE-fallback research fees). actual = the sale's
+    # industry-built lots' allocated cost / their units: materials + the
+    # manufacturing install fee (+ invention cost for T2; copy cost is never
+    # recorded). Close, not identical; the residual biases are documented in
+    # FeedbackProcessor._process_single_action. Names kept to avoid a rename.
     predicted_material_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     actual_material_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
