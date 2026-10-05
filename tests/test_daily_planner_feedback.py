@@ -379,6 +379,27 @@ class TestFeedbackProcessor:
         assert reason in message
         assert "type_id=320" in message
 
+    @pytest.mark.parametrize("realized_isk", [0.0, -5e6])
+    def test_a_zero_or_negative_realized_isk_per_hour_still_updates_accuracy(self, caplog, realized_isk):
+        """A sale at zero or a loss is real data: it pulls accuracy down, not skipped."""
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import clamp_weight
+
+        action = _make_action(type_id=322)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {322: _make_weights(accuracy_ema=1.0)}
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=322, isk_per_hour=10_000_000.0)]
+        self.processor._find_realized_sale.return_value = {"isk_per_hour": realized_isk, "sell_days": 4.0}
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        ratio = realized_isk / 10_000_000.0
+        assert weights.accuracy_ema == clamp_weight(0.8 * 1.0 + 0.2 * ratio)
+        assert outcome.accuracy_ratio == ratio
+        assert outcome.accuracy_ratio <= 0
+        assert self._accuracy_skip_messages(caplog) == []
+
     def test_a_sale_with_no_plan_item_stores_no_predicted_isk_per_hour(self):
         action = _make_action(type_id=321)
         self.repo.get_unprocessed_done_actions.return_value = [action]
