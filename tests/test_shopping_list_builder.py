@@ -414,3 +414,32 @@ def test_an_unpriced_manufacturing_material_is_skipped_with_a_warning(caplog):
     assert items == []
     assert any("type_id=35" in r.getMessage() and r.levelno == logging.WARNING
                for r in caplog.records)
+
+
+def test_split_sub_jobs_buy_one_merged_line_per_material():
+    """A sub-build split into jobs of 13, 13 and 11 Tritanium is one shopping
+    line of 37, with the summed total, not three lines."""
+    jobs = [
+        AssignedAction(
+            type_id=54321, type_name="Widget", action_type="sub_manufacture",
+            character_id=1, character_name="Pilot", quantity=q, runs=r,
+            estimated_cost_isk=None, estimated_profit_isk=None,
+            estimated_completion=None, notes=None, materials={34: m},
+        )
+        for q, r, m in [(70, 7, 13), (70, 7, 13), (60, 6, 11)]
+    ]
+    items = _build(jobs, [])
+    assert [(i.type_id, i.quantity, i.estimated_total, i.shopping_category) for i in items] == [
+        (34, 37, 37 * 5.0, "current_job")]
+    assert items[0].estimated_unit_price == 5.0
+    assert items[0].notes is None
+
+
+def test_merged_lines_keep_the_spot_price_note():
+    jobs = [_action(runs=1, materials={34: 2}), _action(runs=1, materials={34: 3})]
+    items = ShoppingListBuilder().build(
+        assigned_actions=jobs, corp_assets=[], market_depth_cache={34: {"spot_sell_price": 4.0}},
+        admin_settings=_Admin(), blueprint_data=BLUEPRINTS, meta_resolver=_NoBlueprints(),
+    )
+    assert [(i.quantity, i.estimated_total, i.notes) for i in items] == [
+        (5, 20.0, "price: spot (no VWAP data)")]

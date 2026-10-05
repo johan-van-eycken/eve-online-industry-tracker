@@ -172,7 +172,7 @@ class ShoppingListBuilder:
                     notes=None if is_vwap else "price: spot (no VWAP data)",
                 ))
 
-        return shopping
+        return _merge_lines(shopping)
 
     def _get_materials_and_output_for_action(
         self,
@@ -373,6 +373,28 @@ class ShoppingListBuilder:
             return float(spot), False
 
         return None, False
+
+
+def _merge_lines(shopping: list[ShoppingItem]) -> list[ShoppingItem]:
+    """One line per (category, material): quantities and totals summed.
+
+    A sub-build split over several jobs (or several jobs sharing a material)
+    otherwise lists the material once per job (x13, x13, x11 instead of
+    x37). The unit price per material is one lookup, so it is the same on
+    every line; distinct notes are kept, joined with "; ". First-seen order.
+    """
+    merged: dict[tuple[str, int], ShoppingItem] = {}
+    for item in shopping:
+        key = (item.shopping_category, item.type_id)
+        line = merged.get(key)
+        if line is None:
+            merged[key] = ShoppingItem(**vars(item))
+            continue
+        line.quantity += item.quantity
+        line.estimated_total += item.estimated_total
+        if item.notes and item.notes not in (line.notes or "").split("; "):
+            line.notes = f"{line.notes}; {item.notes}" if line.notes else item.notes
+    return list(merged.values())
 
 
 def build_corp_stock_map(corp_assets: list[Any], meta_resolver: Any) -> dict[int, int]:

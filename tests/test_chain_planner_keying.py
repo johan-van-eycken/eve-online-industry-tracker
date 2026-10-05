@@ -776,7 +776,7 @@ def test_a_sub_batch_over_the_max_runs_is_sized_per_job():
     = 37. One 20-run job would be ceil(36.0) = 36, one unit short."""
     (sub,) = _subs_for(200, _limited_sub_phase1(7))
     assert sub.overview_row["sub_runs"] == 20
-    assert sub.overview_row["sub_jobs"] == 3
+    assert len(sub.overview_row["sub_job_batches"]) == 3
     assert sub.overview_row["sub_max_runs_per_job"] == 7
     assert sub.overview_row["sub_batch_materials"] == {34: 37}
     assert sub.overview_row["sub_manufacture_cost"] == 37.0
@@ -785,13 +785,14 @@ def test_a_sub_batch_over_the_max_runs_is_sized_per_job():
 def test_a_sub_batch_that_divides_into_full_jobs_has_no_remainder_job():
     """20 runs at 10 per job: two jobs of ceil(18.0) = 18, so 36."""
     (sub,) = _subs_for(200, _limited_sub_phase1(10))
-    assert sub.overview_row["sub_jobs"] == 2
+    assert len(sub.overview_row["sub_job_batches"]) == 2
     assert sub.overview_row["sub_batch_materials"] == {34: 36}
 
 
 def test_a_sub_batch_within_the_max_runs_is_one_job():
     (sub,) = _subs_for(200, _limited_sub_phase1(300))
-    assert (sub.overview_row["sub_jobs"], sub.overview_row["sub_batch_materials"]) == (1, {34: 36})
+    assert (len(sub.overview_row["sub_job_batches"]), sub.overview_row["sub_batch_materials"]) == (1, {34: 36})
+    assert "sub_jobs" not in sub.overview_row
 
 
 @pytest.mark.parametrize("limit", [None, 0, -5, "abc", True])
@@ -814,9 +815,9 @@ def test_a_sub_batch_over_the_max_runs_records_each_job():
     13 + 13 + 11 = 37 Tritanium, priced at 1 ISK each."""
     (sub,) = _subs_for(200, _limited_sub_phase1(7))
     assert sub.overview_row["sub_job_batches"] == [
-        {"runs": 7, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
-        {"runs": 7, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
-        {"runs": 6, "quantity": 60, "materials": {34: 11}, "cost": 11.0},
+        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
+        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
+        {"runs": 6, "output": 60, "quantity": 60, "materials": {34: 11}, "cost": 11.0},
     ]
 
 
@@ -827,6 +828,16 @@ def test_the_last_sub_job_outputs_only_the_units_still_needed():
     jobs = sub.overview_row["sub_job_batches"]
     assert [j["quantity"] for j in jobs] == [70, 70, 55]
     assert sum(j["quantity"] for j in jobs) == sub.overview_row["quantity_needed"] == 195
+    assert jobs[-1]["output"] == 60
+
+
+def test_a_capped_last_job_says_what_it_outputs():
+    """The 6-run job makes 60 Widgets though only 55 are needed: the note
+    says so, so the pilot is not surprised by 5 spare units."""
+    (sub,) = _subs_for(195, _limited_sub_phase1(7))
+    actions = _assign([sub], _mfg_pilots(3))
+    assert "outputs 60, 55 needed" in actions[2].notes
+    assert "outputs" not in actions[0].notes
 
 
 def _mfg_pilots(*slots):
@@ -934,6 +945,22 @@ def test_jobs_without_a_slot_are_bought_not_under_bought(pilot_slots, assigned_j
     assert bought.get(34, 0) == [0, 13, 26, 37][assigned_jobs]
 
 
+@pytest.mark.parametrize("batches", ["missing", None, []])
+def test_a_sub_row_without_job_batches_fails_loud_and_is_bought(caplog, batches):
+    """No job list means the job split is unknown: one action on one slot was
+    the overcommit bug. No action is emitted (WARNING), so the parent buys
+    the component instead."""
+    sub = _sub_decision()
+    if batches == "missing":
+        del sub.overview_row["sub_job_batches"]
+    else:
+        sub.overview_row["sub_job_batches"] = batches
+    with caplog.at_level("WARNING"):
+        assert _assign([sub], _mfg_pilots(3)) == []
+    assert any("sub_job_batches" in r.getMessage() and "54321" in r.getMessage()
+               for r in caplog.records if r.levelno == logging.WARNING)
+
+
 def test_jobs_without_a_slot_are_logged(caplog):
     (sub,) = _subs_for(200, _limited_sub_phase1(7))
     with caplog.at_level("INFO"):
@@ -951,6 +978,9 @@ def _sub_decision(**overview):
         pipeline_stage="manufacturing", is_sub_component=True,
         overview_row={"type_id": 54321, "type_name": "Widget", "quantity_needed": 100,
                       "sub_runs": 10, "sub_batch_materials": {34: 18},
+                      "sub_job_batches": [{"runs": 10, "output": 100, "quantity": 100,
+                                           "materials": {34: 18}, "cost": 18.0}],
+                      "sub_max_runs_per_job": 10,
                       "sub_manufacture_cost": 18.0, "market_buy_cost": 100.0, **overview},
     )
 

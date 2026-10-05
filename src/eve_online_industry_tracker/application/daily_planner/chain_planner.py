@@ -592,7 +592,6 @@ class ChainPlanner:
                 "quantity_needed": qty_to_build,
                 "sub_runs": runs,
                 # The runs split into jobs of at most the blueprint's max runs.
-                "sub_jobs": len(job_batches),
                 "sub_max_runs_per_job": max(j["runs"] for j in job_batches),
                 # One entry per job, each taking its own manufacturing slot
                 # (CharacterAssigner): runs, units output, materials, cost.
@@ -619,10 +618,11 @@ class ChainPlanner:
     ) -> tuple[int, dict[int, int], float, list[dict[str, Any]]] | None:
         """(runs, {material type_id: units for all the sub jobs}, combined
         material reduction, jobs) at the owned BPO's ME in the parent's
-        structure. Each job is {"runs", "quantity", "materials"}: its runs,
-        the units it outputs (runs x output per run, the last job capped at
-        what is still needed so the jobs sum to qty_to_build) and its own
-        batch; the jobs' materials sum to the total.
+        structure. Each job is {"runs", "output", "quantity", "materials"}:
+        its runs, the units it makes (runs x output per run), the units it
+        counts toward the need (output, the last job capped at what is still
+        needed so the jobs sum to qty_to_build) and its own batch; the jobs'
+        materials sum to the total.
 
         One job runs at most the blueprint's max_production_limit (SDE
         maxProductionLimit) runs, so the runs are split into full jobs at the
@@ -707,10 +707,12 @@ class ChainPlanner:
         jobs: list[dict[str, Any]] = []
         units_left = qty_to_build
         for runs_in_job in job_runs:
-            quantity = min(runs_in_job * output_per_run, units_left)
+            output = runs_in_job * output_per_run
+            quantity = min(output, units_left)
             units_left -= quantity
             jobs.append({
                 "runs": runs_in_job,
+                "output": output,
                 "quantity": quantity,
                 "materials": {
                     mat_type_id: reduced_batch_quantity(base_qty, runs_in_job, material_reduction)

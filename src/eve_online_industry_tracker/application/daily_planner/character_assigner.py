@@ -269,7 +269,7 @@ class CharacterAssigner:
         # neither buys its materials nor subtracts its units from the
         # parents' purchase: those units are bought instead.
         if decision.is_sub_component:
-            jobs = _sub_jobs(row)
+            jobs = _sub_jobs(type_id, row)
             for index, job in enumerate(jobs):
                 char_id, char_name = self._best_mfg_char(char_slots, characters)
                 if char_id is None:
@@ -290,7 +290,7 @@ class CharacterAssigner:
                     estimated_cost_isk=job["cost"],
                     estimated_profit_isk=None,
                     estimated_completion=None,
-                    notes=_sub_manufacture_notes(row, index, len(jobs)),
+                    notes=_sub_manufacture_notes(row, job, index, len(jobs)),
                     materials=job["materials"],
                 ))
                 self._take_slot(char_slots, char_id, "sub_manufacture")
@@ -528,28 +528,34 @@ def _batch_runs(type_id: int, row: dict[str, Any]) -> int:
     return require_batch_runs(type_id, orow.get_manufacturing_job(row))
 
 
-def _sub_jobs(row: dict[str, Any]) -> list[dict[str, Any]]:
-    """The sub-build's jobs: ChainPlanner's `sub_job_batches`, or, for a row
-    without them, the whole batch as one job (the pre-split shape)."""
+def _sub_jobs(type_id: int, row: dict[str, Any]) -> list[dict[str, Any]]:
+    """The sub-build's jobs, ChainPlanner's `sub_job_batches`, or [] with a
+    WARNING when the row has none.
+
+    Without the job list the split over slots is unknown; one action on one
+    slot for the whole batch was the slot overcommit. No action means the
+    shopping list subtracts nothing from the parents' purchase, so the
+    component is bought instead (the safe direction).
+    """
     jobs = row.get("sub_job_batches")
-    if isinstance(jobs, list) and jobs:
-        return [
-            {"runs": j.get("runs"), "quantity": int(j.get("quantity") or 0),
-             "materials": j.get("materials"), "cost": float(j.get("cost") or 0.0)}
-            for j in jobs
-        ]
-    return [{
-        "runs": row.get("sub_runs"),
-        "quantity": int(row.get("quantity_needed") or 0),
-        "materials": row.get("sub_batch_materials"),
-        "cost": float(row.get("sub_manufacture_cost") or 0.0),
-    }]
+    if not isinstance(jobs, list) or not jobs:
+        logger.warning(
+            "CharacterAssigner: sub-component type_id=%s has no sub_job_batches "
+            "(got %r), so its job split is unknown; not assigning it, the "
+            "component is bought instead",
+            type_id, jobs,
+        )
+        return []
+    return jobs
 
 
-def _sub_manufacture_notes(row: dict[str, Any], index: int, job_count: int) -> str:
+def _sub_manufacture_notes(
+    row: dict[str, Any], job: dict[str, Any], index: int, job_count: int
+) -> str:
     """The sub-manufacture action's note, naming the job when the runs were
     split over several jobs at the blueprint's max runs per job
-    (ChainPlanner._sub_batch)."""
+    (ChainPlanner._sub_batch), and the spare units when the job makes more
+    than it counts toward the need."""
     notes = (
         f"Sub-manufacture: cheaper to build than buy "
         f"(market: {(row.get('market_buy_cost') or 0)/1e6:.1f}M ISK)"
@@ -557,6 +563,8 @@ def _sub_manufacture_notes(row: dict[str, Any], index: int, job_count: int) -> s
     if job_count > 1:
         notes += (
             f"; job {index + 1} of {job_count} "
-            f"(at most {row.get('sub_max_runs_per_job')} runs per job)"
+            f"(at most {row['sub_max_runs_per_job']} runs per job)"
         )
+    if job["output"] > job["quantity"]:
+        notes += f"; outputs {job['output']}, {job['quantity']} needed"
     return notes
