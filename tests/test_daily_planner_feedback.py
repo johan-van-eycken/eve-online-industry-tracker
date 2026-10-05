@@ -335,6 +335,62 @@ class TestFeedbackProcessor:
         assert weights.velocity_multiplier == LEARNING_WEIGHT_MAX
         assert weights.accuracy_ema == LEARNING_WEIGHT_MAX
 
+    @staticmethod
+    def _accuracy_skip_messages(caplog):
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO and "accuracy update skipped" in r.getMessage()
+        ]
+
+    @pytest.mark.parametrize("plan_items, realized_isk, reason", [
+        ([], 8_000_000.0, "predicted ISK/h is unknown (no plan item"),
+        ([_make_plan_item(type_id=320, isk_per_hour=None)], 8_000_000.0, "predicted ISK/h is unknown"),
+        ([_make_plan_item(type_id=320, isk_per_hour=0.0)], 8_000_000.0, "predicted ISK/h is not a positive"),
+        ([_make_plan_item(type_id=320, isk_per_hour=10_000_000.0)], None, "realized ISK/h is unknown"),
+        ([_make_plan_item(type_id=320, isk_per_hour=10_000_000.0)], float("nan"), "realized ISK/h is not a finite"),
+    ])
+    def test_a_sale_with_unknown_isk_per_hour_keeps_the_accuracy_weight(
+        self, caplog, plan_items, realized_isk, reason,
+    ):
+        """No invented 1 ISK/h prediction or 0 ISK/h realization: accuracy stays,
+        velocity and cost still learn from their own inputs."""
+        action = _make_action(type_id=320, estimated_build_cost_isk=55_000_000.0, quantity=100)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {
+            320: _make_weights(accuracy_ema=1.3, velocity_multiplier=1.0, cost_multiplier=1.0)
+        }
+        self.repo.get_plan_items.return_value = plan_items
+        self.processor._find_realized_sale.return_value = {
+            "isk_per_hour": realized_isk, "sell_days": 4.0,
+            "allocation_details": [{"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0}],
+        }
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert weights.accuracy_ema == 1.3
+        assert outcome.accuracy_ratio is None
+        assert abs(weights.cost_multiplier - (0.8 + 0.2 * (550_000.0 / 600_000.0))) < 1e-9
+        if plan_items:
+            # velocity learns from the plan item's own velocity (1.0 -> 1 day / 4 days)
+            assert abs(weights.velocity_multiplier - (0.8 + 0.2 * 0.25)) < 1e-9
+        (message,) = self._accuracy_skip_messages(caplog)
+        assert reason in message
+        assert "type_id=320" in message
+
+    def test_a_sale_with_no_plan_item_stores_no_predicted_isk_per_hour(self):
+        action = _make_action(type_id=321)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {321: _make_weights(accuracy_ema=1.1)}
+        self.repo.get_plan_items.return_value = []
+        self.processor._find_realized_sale.return_value = {"isk_per_hour": 5.0, "sell_days": 2.0}
+        self.processor.process_pending_feedback()
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert outcome.predicted_isk_per_hour is None
+        assert outcome.actual_isk_per_hour == 5.0
+        assert outcome.accuracy_ratio is None
+
     def test_normal_outcome_ema_velocity_update(self):
         """velocity_multiplier = 0.8*old + 0.2*(predicted_days/actual_days),
         predicted_days = 1 / effective_velocity (0.2 units/day -> 5 days)."""

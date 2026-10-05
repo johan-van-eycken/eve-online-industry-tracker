@@ -262,12 +262,23 @@ class FeedbackProcessor:
 
             # Guard denominators
             safe_actual_days = max(0.01, actual_sell_days)
-            safe_predicted_isk_per_hr = max(0.01, float(predicted_isk_per_hour or 1.0))
 
-            # EMA updates
-            new_accuracy_ema = clamp_weight((1.0 - alpha) * old_accuracy_ema + alpha * (
-                float(actual_isk_per_hour or 0.0) / safe_predicted_isk_per_hr
-            ))
+            # accuracy: realized / predicted ISK/h. Either side unknown (or an
+            # unusable predicted denominator) means there is nothing to compare:
+            # keep the old weight. Substituting 1 ISK/h for a missing prediction
+            # or 0 for a missing realization moved the EMA from a constant.
+            accuracy_unknown_reason = _isk_per_hour_unknown_reason(
+                predicted_isk_per_hour, actual_isk_per_hour
+            )
+            if accuracy_unknown_reason is not None:
+                _log_weight_skip(action, type_id, "accuracy", "accuracy_ema", accuracy_unknown_reason)
+                new_accuracy_ema = old_accuracy_ema
+                accuracy_ratio: float | None = None
+                if not _is_finite_number(actual_isk_per_hour):
+                    actual_isk_per_hour = None  # never persist NaN/inf/garbage
+            else:
+                accuracy_ratio = float(actual_isk_per_hour) / float(predicted_isk_per_hour)
+                new_accuracy_ema = clamp_weight((1.0 - alpha) * old_accuracy_ema + alpha * accuracy_ratio)
             # velocity: predicted_days / actual_days  (higher = sold faster than predicted → bonus).
             # No predicted velocity means nothing to compare: keep the old weight.
             predicted_days = _estimate_predicted_sell_days(matching_item)
@@ -304,11 +315,6 @@ class FeedbackProcessor:
             confidence_tier = _confidence_tier(sample_count)
 
             # Write plan_item_outcome
-            accuracy_ratio = (
-                float(actual_isk_per_hour) / safe_predicted_isk_per_hr
-                if actual_isk_per_hour is not None
-                else None
-            )
             outcome = PlanItemOutcomeModel(
                 plan_item_id=plan_item_id,
                 type_id=type_id,
@@ -514,11 +520,39 @@ def _estimate_predicted_sell_days(plan_item: Any) -> float | None:
     return max(0.1, min(30.0, 1.0 / float(plan_item.effective_velocity)))
 
 
-def _log_velocity_skip(action: Any, type_id: int, plan_item: Any) -> None:
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _isk_per_hour_unknown_reason(predicted: Any, actual: Any) -> str | None:
+    """Why predicted/realized ISK/h give no accuracy ratio, or None when they do."""
+    if predicted is None:
+        return "predicted ISK/h is unknown (no plan item or NULL)"
+    if not _is_finite_number(predicted) or predicted <= 0:
+        return f"predicted ISK/h is not a positive finite number: {predicted!r}"
+    if actual is None:
+        return "realized ISK/h is unknown"
+    if not _is_finite_number(actual):
+        return f"realized ISK/h is not a finite number: {actual!r}"
+    return None
+
+
+def _log_weight_skip(action: Any, type_id: int, what: str, weight: str, reason: Any) -> None:
     logger.info(
-        "FeedbackProcessor: velocity update skipped for action_id=%s type_id=%s: "
-        "no predicted sell time (%s); keeping the old velocity_multiplier",
-        getattr(action, "id", None), type_id, _predicted_velocity_unknown_reason(plan_item),
+        "FeedbackProcessor: %s update skipped for action_id=%s type_id=%s: "
+        "%s; keeping the old %s",
+        what, getattr(action, "id", None), type_id, reason, weight,
+    )
+
+
+def _log_velocity_skip(action: Any, type_id: int, plan_item: Any) -> None:
+    _log_weight_skip(
+        action, type_id, "velocity", "velocity_multiplier",
+        f"no predicted sell time ({_predicted_velocity_unknown_reason(plan_item)})",
     )
 
 
