@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import hashlib
 import json
+import logging
 import math
 import threading
 import time
@@ -65,6 +66,8 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 
+
+logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float, str, dict[str, Any] | None], None]
 
@@ -2209,6 +2212,26 @@ class IndustryService:
                         unknown_cost_basis_count += 1
                     else:
                         mat_with_known_cost += 1
+                # Expected invention inputs (invented T2) are material lines too.
+                unpriced_invention_names: list[str] = []
+                invention_materials = manufacturing_job.get("expected_invention_materials")
+                for mat in (invention_materials.values() if isinstance(invention_materials, dict) else []):
+                    if not isinstance(mat, dict):
+                        continue
+                    mat_total += 1
+                    if self._as_float(mat.get("unit_price")) is not None:
+                        mat_priced += 1
+                    else:
+                        unpriced_invention_names.append(str(mat.get("type_name") or mat.get("type_id") or "?"))
+                    if bool(mat.get("uses_unknown_owned_cost_basis", False)):
+                        unknown_cost_basis_count += 1
+                    else:
+                        mat_with_known_cost += 1
+                if unpriced_invention_names:
+                    reasons.append(
+                        f"No price for invention input(s) {', '.join(unpriced_invention_names)} — "
+                        f"left out of the material cost, so the T2 cost is understated."
+                    )
                 if mat_total == 0:
                     material_confidence = "Low"
                 elif mat_priced == mat_total and mat_with_known_cost == mat_total:
@@ -3457,11 +3480,15 @@ class IndustryService:
             if not isinstance(entry, dict):
                 continue
             type_id = int(entry.get("type_id") or 0)
-            quantity = int(entry.get("quantity") or 0)
+            raw_quantity = entry.get("quantity") or 0
+            # Expected (amortized) invention inputs are fractional; keep them so.
+            quantity: int | float = raw_quantity if isinstance(raw_quantity, float) else int(raw_quantity)
             if type_id <= 0 or quantity <= 0:
                 continue
 
-            available_owned_quantity = int(available_owned_quantities.get(type_id, 0))
+            available_owned_quantity = available_owned_quantities.get(type_id, 0) or 0
+            if not isinstance(available_owned_quantity, float):
+                available_owned_quantity = int(available_owned_quantity)
             preferred_owned_unit_cost = cls._as_float(owned_item_unit_costs.get(type_id))
             buy_unit_price, buy_price_source = cls._resolve_preferred_unit_value(
                 type_id=type_id,
@@ -3877,7 +3904,7 @@ class IndustryService:
                 material_cost = sum(child_material_costs)
             else:
                 type_id = int(node.get("type_id") or 0)
-                quantity = int(node.get("quantity") or 0)
+                quantity = float(node.get("quantity") or 0)
                 explicit_unit_price = cls._as_float(node.get("unit_price"))
                 if explicit_unit_price is not None and explicit_unit_price > 0:
                     unit_price = explicit_unit_price
@@ -6788,20 +6815,44 @@ class IndustryService:
                 probability = 0.0
         target_bp_name = str(((target_entry or {}).get("product") or {}).get("type_name") if isinstance((target_entry or {}).get("product"), dict) else "").strip() or str((row.get("blueprint") or {}).get("type_name") or blueprint_type_id)
 
-        effective_probability = max(probability, float(self._adm("industry", "invention_probability_floor", 0.01)))
-        successful_jobs = max(1, int(math.ceil(float(max(1, missing_top_level_copy_runs)) / float(max(1, max_production_limit or 1))))) if requires_invention_chain else 0
-        invention_attempts = max(successful_jobs, int(math.ceil(float(successful_jobs) / effective_probability))) if successful_jobs > 0 else 0
+        probability_floor = float(self._adm("industry", "invention_probability_floor", 0.01))
+        runs_per_invented_blueprint = int((target_entry or {}).get("quantity") or 0)
+        if requires_invention_chain:
+            if probability <= 0:
+                logger.warning(
+                    "Invention plan for blueprint %s: no SDE success probability; using the admin floor %s",
+                    blueprint_type_id, probability_floor,
+                )
+            if runs_per_invented_blueprint <= 0:
+                logger.warning(
+                    "Invention plan for blueprint %s: no SDE runs per invented BPC; falling back to max_production_limit %s",
+                    blueprint_type_id, max(1, max_production_limit or 1),
+                )
+        if runs_per_invented_blueprint <= 0:
+            runs_per_invented_blueprint = max(1, max_production_limit or 1)
+        effective_probability = max(probability, probability_floor)
+        # Expected-value model, amortized over the runs that need an invented BPC:
+        # BPCs needed = runs / runs_per_BPC, attempts = BPCs / probability. Inputs,
+        # fees, time and the source-copy runs all scale with these fractional
+        # attempts, so a 1-run row carries 1/(p x runs_per_BPC) of an attempt.
+        invented_runs = max(0, missing_top_level_copy_runs) if requires_invention_chain else 0
+        successful_jobs = float(invented_runs) / float(runs_per_invented_blueprint)
+        invention_attempts = successful_jobs / effective_probability
 
-        invention_materials = [{**dict(e), "quantity": int(e.get("quantity") or 0) * invention_attempts} for e in (invention_job.get("materials") or []) if isinstance(e, dict)]
-        invention_process_value, _ = self._sum_estimated_item_value(invention_materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+        per_attempt_materials = [dict(e) for e in (invention_job.get("materials") or []) if isinstance(e, dict)]
+        invention_materials = [{**e, "quantity_per_attempt": int(e.get("quantity") or 0), "quantity": float(int(e.get("quantity") or 0)) * invention_attempts} for e in per_attempt_materials]
+        # Fee per attempt as before (EIV of one attempt's inputs), times the attempts.
+        per_attempt_process_value, _ = self._sum_estimated_item_value(per_attempt_materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+        invention_process_value = float(per_attempt_process_value) * invention_attempts if per_attempt_process_value is not None else None
 
-        costs = self._plan_activity_costs(ctx, activity="invention", base_time_seconds=int(invention_job.get("time_seconds") or 0), runs=invention_attempts if invention_attempts > 0 else 0, process_value=invention_process_value)
+        costs = self._plan_activity_costs(ctx, activity="invention", base_time_seconds=int(invention_job.get("time_seconds") or 0), runs=cast(int, invention_attempts), process_value=invention_process_value)
         costs["runs"] = invention_attempts
         costs["estimated_item_value"] = invention_process_value
-        # Inputs for the expected-value invention cost (see _expected_invention_inputs).
         costs["success_probability"] = effective_probability
-        costs["runs_per_invented_blueprint"] = int((target_entry or {}).get("quantity") or 0) or max(1, max_production_limit or 1)
-        if invention_attempts == 0:
+        costs["runs_per_invented_blueprint"] = runs_per_invented_blueprint
+        costs["invented_runs"] = invented_runs
+        costs["expected_successful_blueprints"] = successful_jobs
+        if invention_attempts <= 0:
             costs["duration_seconds"] = 0
 
         planned_inv_materials, inv_material_nodes = self._plan_take_or_buy_material_nodes(
@@ -7097,24 +7148,20 @@ class IndustryService:
             activity_breakdown["invention"] = inv_costs
             if requires_invention_chain:
                 expected_invention_inputs = self._expected_invention_inputs(
-                    per_attempt_materials=[dict(e) for e in (invention_job.get("materials") or []) if isinstance(e, dict)],
-                    planned_materials=inv_procurement,
-                    success_probability=float(inv_costs.get("success_probability") or 0.0),
-                    runs_per_invented_blueprint=int(inv_costs.get("runs_per_invented_blueprint") or 0),
-                    invented_runs=missing_top_level_copy_runs,
+                    planned_materials=inv_procurement, invention_costs=inv_costs,
                 )
                 total_time_seconds += inv_costs["duration_seconds"]
                 if inv_costs.get("total_job_cost") is not None:
                     total_job_cost += float(inv_costs.get("total_job_cost") or 0.0)
                     priced_job_count += 1
-                top_level_procurement_materials.extend(inv_procurement)
-                generated_runs = (max(1, int(math.ceil(float(max(1, missing_top_level_copy_runs)) / float(max(1, max_production_limit or 1))))) if requires_invention_chain else 0) * max(1, max_production_limit or 1)
-                if generated_runs > missing_top_level_copy_runs:
-                    available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) + (generated_runs - missing_top_level_copy_runs))
+                # The invented runs exactly cover the missing runs in the
+                # expected-value model, so no surplus BPC runs are left over.
             else:
                 activity_breakdown.pop("invention", None)
         prerequisite_tree_nodes.extend(inv_tree)
         if source_copy_costs is not None and requires_invention_chain and source_copy_costs.get("duration_seconds", 0) > 0:
+            # Listed so activity_breakdown's fees add up to total_job_cost.
+            activity_breakdown["invention_source_copying"] = source_copy_costs
             total_time_seconds += source_copy_costs["duration_seconds"]
             if source_copy_costs.get("total_job_cost") is not None:
                 total_job_cost += float(source_copy_costs.get("total_job_cost") or 0.0)
@@ -7287,63 +7334,41 @@ class IndustryService:
             )
         return row_out
 
-    @staticmethod
+    @classmethod
     def _expected_invention_inputs(
+        cls,
         *,
-        per_attempt_materials: list[dict[str, Any]],
         planned_materials: list[dict[str, Any]],
-        success_probability: float,
-        runs_per_invented_blueprint: int,
-        invented_runs: int,
+        invention_costs: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Expected invention inputs (datacores, plus any decryptor the SDE lists)
-        for the manufacturing runs that need an invented BPC.
+        """The invention plan's inputs (datacores, plus any decryptor the SDE
+        lists), tagged with the expected-value model they were sized by.
 
-        Every attempt consumes the per-attempt inputs; a successful BPC needs
-        1 / success_probability attempts on average and yields
-        runs_per_invented_blueprint runs. So the batch's expected quantity is
-        per_attempt x invented_runs / (success_probability x runs_per_invented_blueprint),
-        a fractional amortized amount, not a buy quantity.
-
-        unit_price is the one the invention plan already chose for that input
-        (owned FIFO cost when taken from stock, market price when bought), so
-        invention inputs are priced exactly like the job's other materials.
+        _plan_invention_chain_for_variant sizes them as
+        quantity_per_attempt x invented_runs / (success_probability x runs_per_invented_blueprint),
+        a fractional amortized amount, not a buy quantity, and prices them with
+        the same take-or-buy rule as every other material (owned FIFO cost when
+        taken from stock, market price when bought). line_total is quantity x
+        unit_price, set by the pricing step.
         """
-        if invented_runs <= 0 or success_probability <= 0 or runs_per_invented_blueprint <= 0:
+        attempts = cls._as_float(invention_costs.get("runs")) or 0.0
+        if attempts <= 0:
             return []
-        expected_attempts = float(invented_runs) / (float(success_probability) * float(runs_per_invented_blueprint))
-
-        planned_value_by_type_id: dict[int, float] = {}
-        planned_quantity_by_type_id: dict[int, int] = {}
-        planned_source_by_type_id: dict[int, Any] = {}
+        out: list[dict[str, Any]] = []
         for entry in planned_materials:
             type_id = int(entry.get("type_id") or 0)
-            quantity = int(entry.get("quantity") or 0)
-            unit_price = IndustryService._as_float(entry.get("unit_price"))
-            if type_id <= 0 or quantity <= 0 or unit_price is None:
+            quantity = cls._as_float(entry.get("quantity")) or 0.0
+            if type_id <= 0 or quantity <= 0:
                 continue
-            planned_value_by_type_id[type_id] = planned_value_by_type_id.get(type_id, 0.0) + unit_price * quantity
-            planned_quantity_by_type_id[type_id] = planned_quantity_by_type_id.get(type_id, 0) + quantity
-            planned_source_by_type_id.setdefault(type_id, entry.get("price_source"))
-
-        out: list[dict[str, Any]] = []
-        for entry in per_attempt_materials:
-            type_id = int(entry.get("type_id") or 0)
-            per_attempt = int(entry.get("quantity") or 0)
-            if type_id <= 0 or per_attempt <= 0:
-                continue
-            planned_quantity = planned_quantity_by_type_id.get(type_id, 0)
-            unit_price = planned_value_by_type_id[type_id] / planned_quantity if planned_quantity > 0 else None
             out.append({
                 **dict(entry),
-                "quantity": float(per_attempt) * expected_attempts,
-                "quantity_per_attempt": per_attempt,
-                "expected_attempts": expected_attempts,
-                "success_probability": float(success_probability),
-                "runs_per_invented_blueprint": int(runs_per_invented_blueprint),
-                "invented_runs": int(invented_runs),
-                "unit_price": unit_price,
-                "price_source": planned_source_by_type_id.get(type_id) if unit_price is not None else None,
+                "quantity": quantity,
+                "quantity_per_attempt": int(entry.get("quantity_per_attempt") or 0),
+                "expected_attempts": attempts,
+                "success_probability": invention_costs.get("success_probability"),
+                "runs_per_invented_blueprint": invention_costs.get("runs_per_invented_blueprint"),
+                "invented_runs": invention_costs.get("invented_runs"),
+                "amortized_invention_input": True,
             })
         return out
 
@@ -7584,42 +7609,49 @@ class IndustryService:
                         estimated_material_cost += float(line_total)
                 material["line_total"] = line_total
             # Invented T2: the expected invention inputs (fractional, amortized
-            # per run; see _expected_invention_inputs) are part of the cost.
+            # per run; see _expected_invention_inputs) are part of the cost and
+            # count as material lines for the priced/type counts.
             invention_materials = manufacturing_job.get("expected_invention_materials")
-            invention_priced = False
+            invention_line_count = 0
+            invention_priced_count = 0
             if isinstance(invention_materials, dict) and invention_materials:
                 invention_material_cost = 0.0
                 for material in invention_materials.values():
                     if not isinstance(material, dict):
                         continue
+                    invention_line_count += 1
+                    type_id = int(material.get("type_id") or 0)
                     unit_price = self._as_float(material.get("unit_price"))
                     if unit_price is None or unit_price <= 0:
-                        pricing = price_by_type_id.get(int(material.get("type_id") or 0)) or {}
+                        pricing = price_by_type_id.get(type_id) or {}
                         unit_price = self._as_float(pricing.get("unit_price"))
                         material["unit_price"] = unit_price
                         material["price_source"] = pricing.get("price_source")
                     line_total = None
                     if unit_price is not None:
-                        line_total = (
-                            float(unit_price) * float(material.get("quantity_per_attempt") or 0) * float(material.get("invented_runs") or 0)
-                            / (float(material.get("success_probability") or 0.0) * float(material.get("runs_per_invented_blueprint") or 0))
-                        )
+                        line_total = float(unit_price) * float(material.get("quantity") or 0.0)
                         invention_material_cost += line_total
-                        invention_priced = True
+                        invention_priced_count += 1
                         price_source = str(material.get("price_source") or "").lower()
                         if price_source.startswith(("owned_asset_item_value", "market_", "explicit")):
                             certain_material_cost += line_total
                         else:
                             estimated_material_cost += line_total
+                    else:
+                        logger.warning(
+                            "Product overview %s: invention input %s (%s) has no price; "
+                            "it is left out of material_cost",
+                            row.get("type_id"), type_id, material.get("type_name"),
+                        )
                     material["line_total"] = line_total
-                manufacturing_job["invention_material_cost"] = invention_material_cost if invention_priced else None
+                manufacturing_job["invention_material_cost"] = invention_material_cost if invention_priced_count > 0 else None
                 material_cost += invention_material_cost
-            any_priced = priced_material_count > 0 or invention_priced
+            any_priced = (priced_material_count + invention_priced_count) > 0
             manufacturing_job["material_cost"] = material_cost if any_priced else None
             manufacturing_job["certain_material_cost"] = certain_material_cost if any_priced else None
             manufacturing_job["estimated_material_cost"] = estimated_material_cost if any_priced else None
-            manufacturing_job["priced_material_count"] = priced_material_count
-            manufacturing_job["material_type_count"] = len(procurement_materials)
+            manufacturing_job["priced_material_count"] = priced_material_count + invention_priced_count
+            manufacturing_job["material_type_count"] = len(procurement_materials) + invention_line_count
             total_job_cost = manufacturing_job.get("total_job_cost")
             if total_job_cost is not None or any_priced:
                 manufacturing_job["total_cost"] = float(total_job_cost or 0.0) + float(material_cost or 0.0)

@@ -119,7 +119,7 @@ def tree_node_activity_label(node: dict[str, Any]) -> str:
     activity = str(node.get("activity") or "").strip().lower()
     recommendation_action = str(node.get("recommendation_action") or "").strip().lower()
     sourcing_strategy = str(node.get("sourcing_strategy") or "").strip().lower()
-    runs = int(node.get("runs") or 0)
+    runs = float(node.get("runs") or 0)  # invention runs are fractional expected attempts
 
     if recommendation_action in {"build", "take", "buy", "copy", "invent", "research"}:
         return recommendation_action

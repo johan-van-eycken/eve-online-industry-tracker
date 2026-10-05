@@ -876,28 +876,43 @@ def _invented_t2_blueprint_rows() -> list[dict]:
 _INVENTION_FAKE_PRICES = {34: 5.0, 204: 100.0}
 
 
-def _invention_overview(monkeypatch, *, owned_assets=([], [], {}, {}, {}), maximize_bp_runs=False, owned_item_inventory=None):
+def _invention_service(
+    monkeypatch, *, owned_assets=([], [], {}, {}, {}), owned_item_inventory=None,
+    prices=None, profile=None, blueprint_rows=None, real_confidence=False,
+):
+    prices = dict(_INVENTION_FAKE_PRICES if prices is None else prices)
     monkeypatch.setattr(
         MarketPricingService,
         "get_type_price_map",
         lambda self, *, type_ids, hub="jita", side="sell", progress_callback=None: {
-            int(t): {"unit_price": _INVENTION_FAKE_PRICES[int(t)], "price_source": "market_test"}
-            for t in type_ids if int(t) in _INVENTION_FAKE_PRICES
+            int(t): {"unit_price": prices[int(t)], "price_source": "market_test"}
+            for t in type_ids if int(t) in prices
         },
     )
     service = _build_service(
-        blueprint_rows=_invented_t2_blueprint_rows(),
-        profile=None,
+        blueprint_rows=blueprint_rows or _invented_t2_blueprint_rows(),
+        profile=profile,
         character_modifiers={"modifier_skills": [], "implants": []},
         trained_skill_levels={},
         owned_assets=owned_assets,
         owned_item_inventory=owned_item_inventory,
-        adjusted_price_map={t: {"adjusted_price": p} for t, p in _INVENTION_FAKE_PRICES.items()},
+        adjusted_price_map={t: {"adjusted_price": p} for t, p in prices.items()},
     )
     # The real pricing step: it is what writes material_cost / total_cost.
     service._enrich_product_rows_with_material_prices = MethodType(  # type: ignore[attr-defined]
         IndustryService._enrich_product_rows_with_material_prices, service,
     )
+    if real_confidence:
+        monkeypatch.setattr(MarketPricingService, "orderbook_depth", lambda self: 5)
+        monkeypatch.setattr(MarketPricingService, "material_price_cache_ttl_seconds", lambda self: 3600)
+        service._enrich_product_rows_with_pricing_confidence = MethodType(  # type: ignore[attr-defined]
+            IndustryService._enrich_product_rows_with_pricing_confidence, service,
+        )
+    return service
+
+
+def _invention_overview(monkeypatch, *, maximize_bp_runs=False, **kwargs):
+    service = _invention_service(monkeypatch, **kwargs)
     rows = service.industry_manufacturing_product_overview(
         build_from_bpc=True,
         have_blueprint_source_only=False,
@@ -1024,3 +1039,171 @@ def test_shopping_list_buys_datacores_once_for_an_invented_t2_row(monkeypatch) -
     assert len(datacores) == 1
     assert datacores[0].quantity == 2  # one attempt, from the invent action only
     assert datacores[0].shopping_category == "invention_input"
+
+
+# --- fix round 1: fees on the same expected-attempt model, pricing gaps -------
+
+# Only invention has a cost index (2%), no surcharge or reductions, so the
+# row's total_job_cost is exactly the invention fee: per-attempt EIV of the
+# inputs (2 datacores x adjusted 100 = 200) x 0.02 x expected attempts.
+_INVENTION_ONLY_PROFILE = {
+    "installation_cost_modifier": 0.0,
+    "material_efficiency_bonus": 0.0,
+    "time_efficiency_bonus": 0.0,
+    "facility_cost_bonus": 0.0,
+    "system_cost_indices": [{"activity": "invention", "cost_index": 0.02}],
+    "structure_rigs": [],
+}
+
+
+def _rows_with(*, probability_pct: float, bpc_runs: int, t2_limit: int) -> list[dict]:
+    rows = _invented_t2_blueprint_rows()
+    product = rows[0]["invention_job"]["products"][0]
+    product["probability_pct"] = probability_pct
+    product["quantity"] = bpc_runs
+    rows[1]["manufacturing_job"]["max_production_limit"] = t2_limit
+    return rows
+
+
+def test_one_run_invention_fee_is_amortized_not_a_whole_attempt(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, profile=_INVENTION_ONLY_PROFILE)[5002]["manufacturing_job"]
+
+    # attempts = 1 run / (0.5 x 10) = 0.2 (was ceil(1/0.5) = 2 whole attempts -> 8.0).
+    invention = mj["activity_breakdown"]["invention"]
+    assert invention["runs"] == pytest.approx(0.2)
+    assert invention["total_job_cost"] == pytest.approx(200 * 0.02 * 0.2)  # 0.8
+    assert mj["total_job_cost"] == pytest.approx(0.8)
+    assert mj["total_cost"] == pytest.approx(0.8 + 90.0)
+
+
+def test_fees_and_inputs_use_sde_runs_per_bpc_not_the_t2_limit(monkeypatch) -> None:
+    # 10-run invented BPC, 300-run T2 limit, 300 runs, 34%:
+    # attempts = 300 / (0.34 x 10) = 88.235... (the T2 limit would give ceil(1/0.34) = 3).
+    rows = _rows_with(probability_pct=34.0, bpc_runs=10, t2_limit=300)
+    mj = _invention_overview(
+        monkeypatch, profile=_INVENTION_ONLY_PROFILE, blueprint_rows=rows, maximize_bp_runs=True,
+    )[5002]["manufacturing_job"]
+
+    attempts = 300 / (0.34 * 10)
+    invention = mj["activity_breakdown"]["invention"]
+    assert mj["runs"] == 300
+    assert invention["runs_per_invented_blueprint"] == 10
+    assert invention["runs"] == pytest.approx(attempts)
+    assert invention["total_job_cost"] == pytest.approx(200 * 0.02 * attempts)
+    assert mj["invention_material_cost"] == pytest.approx(2 * 100 * attempts)
+    assert mj["material_cost"] == pytest.approx(300 * 10 * 5 + 2 * 100 * attempts)
+
+
+def test_job_tree_adds_up_to_the_row_cost(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, profile=_INVENTION_ONLY_PROFILE)[5002]["manufacturing_job"]
+
+    tree = mj["job_tree"]
+    assert tree["material_cost"] == pytest.approx(mj["material_cost"])
+    assert tree["total_job_cost"] == pytest.approx(mj["total_job_cost"])
+    invention_node = _find_first_activity_node(tree, "invention")
+    assert invention_node is not None and invention_node["runs"] == pytest.approx(0.2)
+
+
+def test_partly_owned_bpc_amortizes_only_the_missing_runs(monkeypatch) -> None:
+    service = _invention_service(monkeypatch)
+    bpc = SimpleNamespace(
+        type_id=9002, item_id=78, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=4,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    service._get_owned_blueprint_assets = MethodType(  # type: ignore[attr-defined]
+        lambda self, *, owned_blueprints_scope: ([bpc], [], {}, {}, {}), service,
+    )
+    ctx = service._build_planning_context(
+        force_refresh=False, build_from_bpc=True, include_reactions=False, maximize_bp_runs=False,
+        group_identical_bpcs=True, have_blueprint_source_only=False, market_hub="jita",
+        material_price_side="sell", product_price_side="sell", industry_profile_id=None,
+        owned_blueprints_scope="all_characters", character_id=1, progress_callback=None,
+    )
+    t2_row = _invented_t2_blueprint_rows()[1]
+    row = service._build_single_product_row(
+        ctx, row=t2_row, raw_product=t2_row["manufacturing_job"]["products"][0],
+        row_index=1, product_index=1, blueprint_copy_assets=[bpc],
+        blueprint_original_asset=None, effective_runs=10,
+    )
+    assert row is not None
+    service._enrich_product_rows_with_material_prices([row])
+    mj = row["manufacturing_job"]
+
+    # 4 runs from the owned BPC, 6 invented: 2 x 100 x 6 / (0.5 x 10) = 240.
+    assert mj["expected_invention_materials"]["204"]["invented_runs"] == 6
+    assert mj["invention_material_cost"] == pytest.approx(240.0)
+    assert mj["material_cost"] == pytest.approx(10 * 10 * 5 + 240.0)
+
+
+def test_owned_t2_bpo_row_has_no_invention_cost(monkeypatch) -> None:
+    bpo = SimpleNamespace(
+        type_id=9002, item_id=79, is_blueprint_copy=False,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    mj = _invention_overview(monkeypatch, owned_assets=([], [bpo], {}, {}, {}))[5002]["manufacturing_job"]
+
+    assert mj["blueprint_source_kind"] == "copied_from_owned_blueprint_original"
+    assert "invention" not in mj["activity_breakdown"]
+    assert "invention_material_cost" not in mj
+    assert mj["material_cost"] == pytest.approx(50.0)
+
+
+def test_unpriced_invention_input_lowers_confidence_and_is_named(monkeypatch, caplog) -> None:
+    # No sell price and no adjusted price for the datacore anywhere.
+    with caplog.at_level("WARNING"):
+        rows = _invention_overview(monkeypatch, prices={34: 5.0}, real_confidence=True)
+    mj = rows[5002]["manufacturing_job"]
+    priced = _invention_overview(monkeypatch, real_confidence=True)[5002]["manufacturing_job"]
+
+    assert mj["expected_invention_materials"]["204"]["unit_price"] is None
+    assert mj["invention_material_cost"] is None
+    assert mj["material_cost"] == pytest.approx(50.0)
+    assert mj["material_type_count"] == 2 and mj["priced_material_count"] == 1
+    assert priced["material_pricing_confidence"] == "High"
+    assert mj["material_pricing_confidence"] != "High"
+    assert any("Datacore" in reason for reason in mj["pricing_confidence_reasons"])
+    assert any("invention input 204" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+
+def test_invention_input_without_a_plan_price_falls_back_to_the_market_map(monkeypatch) -> None:
+    service = _invention_service(monkeypatch, prices={34: 5.0})
+    rows = service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+    )
+    row = next(r for r in rows if r["type_id"] == 5002)
+    assert row["manufacturing_job"]["expected_invention_materials"]["204"]["unit_price"] is None
+
+    # The pricing step's own market lookup now has the datacore.
+    monkeypatch.setattr(
+        MarketPricingService, "get_type_price_map",
+        lambda self, *, type_ids, hub="jita", side="sell", progress_callback=None: {
+            204: {"unit_price": 100.0, "price_source": "market_fallback"},
+        },
+    )
+    service._enrich_product_rows_with_material_prices([row])
+    mj = row["manufacturing_job"]
+
+    assert mj["expected_invention_materials"]["204"]["unit_price"] == 100.0
+    assert mj["expected_invention_materials"]["204"]["price_source"] == "market_fallback"
+    assert mj["expected_invention_materials"]["204"]["line_total"] == pytest.approx(40.0)
+    assert mj["invention_material_cost"] == pytest.approx(40.0)
+
+
+def test_missing_sde_runs_and_probability_log_warnings(monkeypatch, caplog) -> None:
+    rows = _invented_t2_blueprint_rows()
+    product = rows[0]["invention_job"]["products"][0]
+    product["probability_pct"] = 0.0
+    product["quantity"] = 0
+    with caplog.at_level("WARNING"):
+        mj = _invention_overview(monkeypatch, blueprint_rows=rows)[5002]["manufacturing_job"]
+
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("no SDE success probability" in m for m in messages)
+    assert any("no SDE runs per invented BPC" in m for m in messages)
+    invention = mj["activity_breakdown"]["invention"]
+    assert invention["success_probability"] == pytest.approx(0.01)  # the admin floor's default
+    assert invention["runs_per_invented_blueprint"] == 10  # the T2 limit fallback

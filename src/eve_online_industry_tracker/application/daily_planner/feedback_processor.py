@@ -229,16 +229,24 @@ class FeedbackProcessor:
         # Predicted = materials + the producer's total_job_cost, which adds the
         #   copy fee, invention fee, source-copy fee and (SDE fallback)
         #   research-chain fees (industry/service.py). For an invented T2 row
-        #   materials include the expected invention inputs per run
-        #   (manufacturing_job.invention_material_cost: datacores x runs /
-        #   (success probability x runs per invented BPC)).
+        #   the invention inputs, invention fee and source-copy fee are all
+        #   sized by the same expected attempts, runs / (success probability x
+        #   SDE runs per invented BPC), amortized over the batch
+        #   (manufacturing_job.invention_material_cost holds the inputs).
         #
         # 1. T2: the producer used to drop the invention inputs from
-        #    material_cost (its procurement list is replaced by the recursive
-        #    plan's), which biased T2 towards < 1. That is fixed in the
-        #    producer; what remains is expected-vs-actual: predicted uses the
-        #    base SDE success chance (no skill bonus) and the expected attempt
-        #    count, the realized side the attempts actually made.
+        #    material_cost, which biased T2 towards < 1; that is fixed. What
+        #    still differs:
+        #    - predicted uses the base SDE success chance (no skill or
+        #      decryptor bonus), so it expects more attempts than a skilled
+        #      inventor needs: towards > 1;
+        #    - without a persisted invention-job snapshot the realized side
+        #      carries the expected invention MATERIALS only, no invention
+        #      install fee and no source-copy fee, while predicted carries
+        #      both: towards > 1 (small, fees are a few % of the datacores);
+        #    - with a snapshot the realized side carries the attempts actually
+        #      made, so one lucky or unlucky streak moves a single outcome
+        #      either way.
         # 2. BPC-copied T1 and SDE-fallback rows, towards > 1: predicted
         #    includes copy/research job fees that the realized side never has.
         #    Probably small (job fees are a few % of materials).

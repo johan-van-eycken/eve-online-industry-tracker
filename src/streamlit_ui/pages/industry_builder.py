@@ -125,25 +125,44 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
             for reason in reasons:
                 st.write(f"- {reason}")
 
-        top_material_rows = sorted(
+        invention_materials = manufacturing_job.get("expected_invention_materials") or {}
+        if not isinstance(invention_materials, dict):
+            invention_materials = {}
+        # Every line priced into Material Cost: the manufacturing job's own
+        # materials plus, for invented T2, the amortized invention inputs.
+        material_rows = sorted(
             [
-                {
-                    "Type": str(material.get("type_name") or material.get("type_id") or "Material"),
-                    "Qty": int(material.get("quantity") or 0),
-                    "Unit Price": material.get("unit_price"),
-                    "Line Total": material.get("line_total"),
-                    "Source": material.get("price_source"),
-                    "Est. Cost?": "⚠ est." if bool(material.get("uses_unknown_owned_cost_basis")) else "",
-                }
-                for material in procurement_materials.values()
-                if isinstance(material, dict)
+                *[
+                    {
+                        "Type": str(material.get("type_name") or material.get("type_id") or "Material"),
+                        "Qty": int(material.get("quantity") or 0),
+                        "Unit Price": material.get("unit_price"),
+                        "Line Total": material.get("line_total"),
+                        "Source": material.get("price_source"),
+                        "Est. Cost?": "⚠ est." if bool(material.get("uses_unknown_owned_cost_basis")) else "",
+                    }
+                    for material in procurement_materials.values()
+                    if isinstance(material, dict)
+                ],
+                *[
+                    {
+                        "Type": f"{material.get('type_name') or material.get('type_id') or 'Material'} (amortized invention input)",
+                        "Qty": round(float(material.get("quantity") or 0.0), 2),
+                        "Unit Price": material.get("unit_price"),
+                        "Line Total": material.get("line_total"),
+                        "Source": material.get("price_source"),
+                        "Est. Cost?": "⚠ no price" if material.get("unit_price") is None else "",
+                    }
+                    for material in invention_materials.values()
+                    if isinstance(material, dict)
+                ],
             ],
             key=lambda row: float(row.get("Line Total") or 0.0),
             reverse=True,
-        )[:8]
-        if top_material_rows:
-            st.markdown("**Top material cost drivers**")
-            st.dataframe(top_material_rows, width="stretch", hide_index=True)
+        )
+        if material_rows:
+            st.markdown("**Material cost lines** (sum to Material Cost)")
+            st.dataframe(material_rows, width="stretch", hide_index=True)
 
         activity_breakdown = manufacturing_job.get("activity_breakdown") or {}
         if isinstance(activity_breakdown, dict) and activity_breakdown:
