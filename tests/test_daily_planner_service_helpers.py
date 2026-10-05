@@ -193,6 +193,13 @@ def test_parse_isk_still_parses_a_genuine_zero():
     assert _parse_isk(0) == 0.0
 
 
+def test_parse_isk_treats_non_finite_values_as_unparseable():
+    """float() accepts "nan" and "inf"; neither is a wallet balance."""
+    for raw in ("nan", "NaN", "inf", "-inf", "Infinity", float("nan"), float("inf")):
+        assert _parse_isk(raw) is None, raw
+    assert _parse_isk("1,234.5") == 1234.5
+
+
 def test_wallet_balance_is_none_when_division_one_balance_is_unparseable():
     """A present-but-malformed division-1 balance is `None` (unknown), not
     `0.0` -- distinguishable from both a real zero and an absent division."""

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -1372,9 +1373,11 @@ def _parse_isk(raw: Any) -> float | None:
     Returns `None` when `raw` cannot be parsed as a number, so a malformed
     balance is distinguishable from a genuine `0.0` balance -- unlike a
     plain `float(...) or 0.0` coercion, which would make the two look
-    identical to every caller.
+    identical to every caller. `float()` also accepts "nan" and "inf";
+    those are not balances either, so a non-finite result is `None` too.
     """
     try:
-        return float(str(raw).replace(",", ""))
+        value = float(str(raw).replace(",", ""))
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
