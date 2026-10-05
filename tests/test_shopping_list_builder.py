@@ -402,3 +402,15 @@ def test_build_corp_stock_map_is_shared_and_skips_blueprints():
     assets = [SimpleNamespace(type_id=34, quantity=5), SimpleNamespace(type_id=34, quantity=7),
               SimpleNamespace(type_id=999, quantity=1)]
     assert build_corp_stock_map(assets, _BlueprintsAre(999)) == {34: 12}
+
+
+def test_an_unpriced_manufacturing_material_is_skipped_with_a_warning(caplog):
+    with caplog.at_level("WARNING"):
+        items = ShoppingListBuilder().build(
+            assigned_actions=[_action(runs=1, materials={35: 10})], corp_assets=[],
+            market_depth_cache={}, admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
+            meta_resolver=_NoBlueprints(),
+        )
+    assert items == []
+    assert any("type_id=35" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)

@@ -108,7 +108,11 @@ class ShoppingListBuilder:
 
                 estimated_unit_price, is_vwap = self._get_price(mat_type_id, market_depth_cache)
                 if estimated_unit_price is None or estimated_unit_price <= 0:
-                    logger.debug("ShoppingListBuilder: no price for type_id=%s", mat_type_id)
+                    logger.warning(
+                        "ShoppingListBuilder: skipping material type_id=%s for %s type_id=%s: "
+                        "no price in market depth cache",
+                        mat_type_id, action.action_type, action.type_id,
+                    )
                     continue
 
                 shopping.append(ShoppingItem(
