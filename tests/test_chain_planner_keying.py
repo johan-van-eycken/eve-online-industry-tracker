@@ -178,8 +178,8 @@ def test_sub_manufacture_builds_a_material_whose_blueprint_is_owned():
     sub = subs[0]
     assert sub.type_id == 54321
     assert sub.type_name == "Widget"
-    # 10 runs x 2 Tritanium x 1 ISK = 20 ISK, versus 100 x 1 ISK on the market.
-    assert sub.overview_row["sub_manufacture_cost"] == 20.0
+    # 10 runs x 2 Tritanium at ME10 = ceil(18) = 18 x 1 ISK, versus 100 x 1 ISK on the market.
+    assert sub.overview_row["sub_manufacture_cost"] == 18.0
     assert sub.overview_row["market_buy_cost"] == 100.0
     # Downstream phases need the blueprint, not just the product.
     assert sub.overview_row["blueprint_type_id"] == 888
@@ -214,8 +214,8 @@ def test_sub_manufacture_quantity_is_the_parents_batch_quantity_not_one_sde_run(
 
     (sub,) = [d for d in plan.decisions if d.is_sub_component]
     assert sub.overview_row["quantity_needed"] == 1800
-    # 180 runs x 2 Tritanium x 1 ISK, versus 1800 x 1 ISK on the market.
-    assert sub.overview_row["sub_manufacture_cost"] == 360.0
+    # 180 runs x 2 Tritanium at ME10 = 324 x 1 ISK, versus 1800 x 1 ISK on the market.
+    assert sub.overview_row["sub_manufacture_cost"] == 324.0
     assert sub.overview_row["market_buy_cost"] == 1800.0
 
 
@@ -646,3 +646,118 @@ def test_a_slow_measured_velocity_is_used_as_is_not_floored():
     decision, _ = _analyse(_bpo_row(me_current=0), _bpo_bp_data(1000), velocity=0.02)
     assert decision.break_even_days == 2000.0
     assert decision.projected_annual_savings == 3650.0
+
+
+# --- sub-manufacture: corp stock, owned BPO ME, carried batch -----------------
+
+from eve_online_industry_tracker.application.daily_planner.models import ChainPlan  # noqa: E402
+
+
+def _sub_phase1(*, me=10, stock=None, blueprint_data=None):
+    return {
+        "bpo_assets_by_type_id": {888: [_bpo(888, me=me, te=20)]},
+        "blueprint_data": blueprint_data or SUB_BLUEPRINT_DATA,
+        "market_depth_cache": {34: {"vwap_5d": 1.0}, 54321: {"vwap_5d": 1.0}},
+        "corp_material_stock": stock or {},
+    }
+
+
+def _subs(phase1, **row_kwargs):
+    row = _row(materials=_batch_materials(**{"54321": 100}), **row_kwargs)
+    plan = _planner().plan_chain([_decision(row)], phase1)
+    return [d for d in plan.decisions if d.is_sub_component]
+
+
+def test_sub_manufacture_records_the_me_adjusted_batch_it_will_run():
+    (sub,) = _subs(_sub_phase1())
+    assert sub.overview_row["sub_runs"] == 10
+    assert sub.overview_row["sub_batch_materials"] == {34: 18}
+
+
+def test_the_sub_job_inputs_use_the_owned_bpos_me():
+    (sub,) = _subs(_sub_phase1(me=0))
+    assert sub.overview_row["sub_batch_materials"] == {34: 20}
+    assert sub.overview_row["sub_manufacture_cost"] == 20.0
+
+
+def test_an_owned_bpo_with_unknown_me_is_not_sub_built(caplog):
+    with caplog.at_level("WARNING"):
+        assert _subs(_sub_phase1(me=None)) == []
+    assert any("unknown ME" in r.getMessage() for r in caplog.records)
+
+
+def test_a_component_fully_in_corp_stock_is_not_sub_built():
+    assert _subs(_sub_phase1(stock={54321: 100})) == []
+    assert _subs(_sub_phase1(stock={54321: 250})) == []
+
+
+def test_only_the_part_not_in_corp_stock_is_sub_built():
+    """Need 100, stock 60: build 40 = 4 runs; 2 x 4 at ME10 = ceil(7.2) = 8."""
+    (sub,) = _subs(_sub_phase1(stock={54321: 60}))
+    assert sub.overview_row["quantity_requested"] == 100
+    assert sub.overview_row["corp_stock_used"] == 60
+    assert sub.overview_row["quantity_needed"] == 40
+    assert sub.overview_row["sub_runs"] == 4
+    assert sub.overview_row["sub_batch_materials"] == {34: 8}
+    assert sub.overview_row["market_buy_cost"] == 40.0
+
+
+def test_a_sub_blueprint_with_no_materials_is_not_a_free_build(caplog):
+    blueprint_data = {**SUB_BLUEPRINT_DATA, 888: {"manufacturing": {
+        "products": [{"type_id": 54321, "quantity": 10}], "materials": []}}}
+    with caplog.at_level("WARNING"):
+        assert _subs(_sub_phase1(blueprint_data=blueprint_data)) == []
+    assert any("no SDE materials" in r.getMessage() for r in caplog.records)
+
+
+def test_a_sub_blueprint_that_does_not_make_the_component_is_not_used(caplog):
+    blueprint_data = {**SUB_BLUEPRINT_DATA, 888: {"manufacturing": {
+        "products": [{"type_id": 77777, "quantity": 10}],
+        "materials": [{"type_id": 34, "quantity": 2}]}}}
+    with caplog.at_level("WARNING"):
+        # The index maps nothing to 888 for 54321 now, so there is no request at all.
+        assert _subs(_sub_phase1(blueprint_data=blueprint_data)) == []
+
+
+def _sub_decision(**overview):
+    return ItemDecision(
+        type_id=54321, type_name="Widget", decision="build",
+        decision_reason="Sub-manufacture: cheaper than market buy", adjusted_score=0.0,
+        absolute_profit_per_batch=0.0, isk_per_hour=0.0, margin_pct=0.0,
+        days_of_supply_current=0.0, effective_velocity=1.0, meta_group_id=1,
+        pipeline_stage="manufacturing", is_sub_component=True,
+        overview_row={"type_id": 54321, "type_name": "Widget", "quantity_needed": 100,
+                      "sub_runs": 10, "sub_batch_materials": {34: 18},
+                      "sub_manufacture_cost": 18.0, "market_buy_cost": 100.0, **overview},
+    )
+
+
+def _one_slot_pilot():
+    from types import SimpleNamespace as _NS
+    return _NS(list_characters=lambda: [
+        {"character_id": 1, "character_name": "Pilot", "skills": {"skills": []}}])
+
+
+def test_a_sub_manufacture_action_carries_the_planned_runs_and_batch_materials():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        CharacterAssigner,
+    )
+    (action,) = CharacterAssigner().assign(
+        ChainPlan(decisions=[_sub_decision()]), [], _one_slot_pilot(), _AdminStub())
+    assert (action.action_type, action.quantity, action.runs, action.materials) == (
+        "sub_manufacture", 100, 10, {34: 18})
+
+
+def test_sub_components_are_assigned_only_after_every_top_level_item():
+    """With one manufacturing slot, the parent must get it even if a
+    sub-component scores higher. Otherwise the component is built for a
+    parent that never runs."""
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        CharacterAssigner,
+    )
+    parent = _decision(_row(), adjusted_score=1.0)
+    sub = _sub_decision()
+    sub.adjusted_score = 100.0
+    actions = CharacterAssigner().assign(
+        ChainPlan(decisions=[parent, sub]), [], _one_slot_pilot(), _AdminStub())
+    assert [a.action_type for a in actions] == ["manufacture"]

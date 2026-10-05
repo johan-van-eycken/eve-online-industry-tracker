@@ -375,3 +375,30 @@ def test_sub_manufacture_covers_several_parents_in_order():
     )
 
     assert sum(i.quantity for i in items if i.type_id == 54321) == 100
+
+
+def test_a_sub_manufacture_action_buys_its_own_me_adjusted_batch_materials():
+    sub = AssignedAction(
+        type_id=54321, type_name="Widget", action_type="sub_manufacture",
+        character_id=1, character_name="Pilot", quantity=100, runs=10,
+        estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None, materials={34: 18},
+    )
+    blueprints = {888: {"manufacturing": {
+        "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 2}],
+        "products": [{"type_id": 54321, "quantity": 10}],
+    }}}
+    items = ShoppingListBuilder().build(
+        assigned_actions=[sub], corp_assets=[], market_depth_cache={34: {"vwap_5d": 5.0}},
+        admin_settings=_Admin(), blueprint_data=blueprints, meta_resolver=_NoBlueprints(),
+    )
+    assert [(i.type_id, i.quantity) for i in items] == [(34, 18)]   # not the SDE's 2 x 10
+
+
+def test_build_corp_stock_map_is_shared_and_skips_blueprints():
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
+        build_corp_stock_map,
+    )
+    assets = [SimpleNamespace(type_id=34, quantity=5), SimpleNamespace(type_id=34, quantity=7),
+              SimpleNamespace(type_id=999, quantity=1)]
+    assert build_corp_stock_map(assets, _BlueprintsAre(999)) == {34: 12}

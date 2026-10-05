@@ -95,7 +95,7 @@ class PipelineAnalyzer:
         # Pre-warm the resolver's cache with every distinct asset type_id in one
         # batched SDE query before the per-asset is_blueprint() loop below --
         # mirrors the same fix already applied to index_blueprint_assets (service.py)
-        # and _build_corp_stock_map. Without this, TypeMetadataResolver._entry()
+        # and build_corp_stock_map. Without this, TypeMetadataResolver._entry()
         # self-heals a cache miss by calling prefetch() for a single id, so
         # is_blueprint() here would otherwise open one SDE session (with its
         # metaGroups table reflection) per distinct type_id -- measured as hundreds of

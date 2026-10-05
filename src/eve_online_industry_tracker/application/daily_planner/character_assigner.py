@@ -112,21 +112,26 @@ class CharacterAssigner:
         char_slots = self._compute_available_slots(characters, industry_jobs, now)
         assigned_actions: list[AssignedAction] = []
 
-        # Process decisions in priority order: build decisions first (highest score first)
+        # Two passes: every top-level item first (highest score first), then
+        # sub-components. A sub-component's quantity is its parents' need, so
+        # it must never take a slot ahead of a parent. Slots only decrease, so
+        # a parent left without a slot leaves none for its components either.
         build_decisions = [d for d in chain_plan.decisions if d.decision in ("build", "pause")]
-        build_decisions.sort(key=lambda d: -d.adjusted_score)
+        top_level = sorted(
+            (d for d in build_decisions if not d.is_sub_component), key=lambda d: -d.adjusted_score
+        )
+        sub_components = [d for d in build_decisions if d.is_sub_component]
 
-        for decision in build_decisions:
-            row = decision.overview_row
+        for decision in [*top_level, *sub_components]:
             actions = self._assign_decision(
                 decision=decision,
-                row=row,
+                row=decision.overview_row,
                 char_slots=char_slots,
                 characters=characters,
                 now=now,
             )
             # Slots are consumed inside _assign_decision, as each action is
-            # created — two research actions on one item must not share a slot.
+            # created -- two research actions on one item must not share a slot.
             assigned_actions.extend(actions)
 
         return assigned_actions
@@ -262,7 +267,7 @@ class CharacterAssigner:
                     character_id=char_id,
                     character_name=char_name,
                     quantity=qty_needed,
-                    runs=None,
+                    runs=row.get("sub_runs"),
                     estimated_cost_isk=float(row.get("sub_manufacture_cost") or 0.0),
                     estimated_profit_isk=None,
                     estimated_completion=None,
@@ -270,6 +275,7 @@ class CharacterAssigner:
                         f"Sub-manufacture: cheaper to build than buy "
                         f"(market: {(row.get('market_buy_cost') or 0)/1e6:.1f}M ISK)"
                     ),
+                    materials=row.get("sub_batch_materials"),
                 ))
                 self._take_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action

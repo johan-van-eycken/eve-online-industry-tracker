@@ -27,7 +27,10 @@ from eve_online_industry_tracker.application.daily_planner.item_decision_engine 
 from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
 from eve_online_industry_tracker.application.daily_planner.profitability_scorer import ProfitabilityScorer
-from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
+    ShoppingListBuilder,
+    build_corp_stock_map,
+)
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
 from eve_online_industry_tracker.infrastructure.models import (
@@ -523,6 +526,9 @@ class DailyPlannerService:
 
         # Corp assets
         corp_assets = self._get_corp_assets()
+        # Material stock (blueprints excluded), shared by chain planning and
+        # the shopping list.
+        corp_material_stock = build_corp_stock_map(corp_assets, self._meta_resolver)
 
         # Corp market orders
         corp_orders = self._get_corp_orders()
@@ -564,6 +570,7 @@ class DailyPlannerService:
             "input_rows": input_rows,
             "industry_jobs": industry_jobs,
             "corp_assets": corp_assets,
+            "corp_material_stock": corp_material_stock,
             "corp_orders": corp_orders,
             "weights": weights,
             "sell_velocities": sell_velocities,

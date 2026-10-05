@@ -49,7 +49,7 @@ class ShoppingListBuilder:
             material stock in corp_assets
         """
         # Build corp stock map: type_id → available quantity
-        corp_stock: dict[int, int] = self._build_corp_stock_map(corp_assets, meta_resolver)
+        corp_stock: dict[int, int] = build_corp_stock_map(corp_assets, meta_resolver)
 
         # Track allocated quantities to prevent double-buying
         already_allocated: dict[int, int] = {}
@@ -266,11 +266,11 @@ class ShoppingListBuilder:
     ) -> list[tuple[int, str, int]]:
         """(material type_id, name, units needed) for one job.
 
-        A manufacture action carrying the producer's batch materials uses
-        those as-is: they are already per-run x runs after ME/structure
-        reduction. Otherwise (sub_manufacture, or a manufacture action whose
-        row had no materials mapping) the SDE per-run quantities x runs are
-        used, which carry no ME/structure reduction.
+        An action carrying a batch-materials mapping uses it as-is. For
+        manufacture that is the producer's batch (per-run x runs after
+        ME/structure reduction). For sub_manufacture it is ChainPlanner's
+        batch at the owned BPO's ME. Otherwise (no mapping) the SDE per-run
+        quantities x runs are used, which carry no ME/structure reduction.
         """
         mats, per_run_output = self._get_materials_and_output_for_action(
             action, blueprint_data, product_to_blueprint
@@ -279,7 +279,7 @@ class ShoppingListBuilder:
             int(m.get("type_id") or 0): m.get("type_name") for m in mats if isinstance(m, dict)
         }
 
-        if action.action_type == "manufacture" and action.materials is not None:
+        if action.materials is not None:
             return [
                 (t, str(names.get(t) or f"type_{t}"), int(q))
                 for t, q in action.materials.items()
@@ -311,10 +311,10 @@ class ShoppingListBuilder:
         """Runs to buy materials for.
 
         `manufacture` actions carry a real run count in `action.runs`; use it
-        directly when positive. `sub_manufacture` actions instead carry the
-        target component quantity in `action.quantity` with `action.runs` left
-        None (character_assigner.py), so derive runs as
-        ceil(quantity / per_run_output). Guards the division: a missing, zero,
+        directly when positive. A `sub_manufacture` action normally carries
+        ChainPlanner's runs and batch materials (used as-is upstream); one
+        without them carries only the target component quantity in
+        `action.quantity`, so derive runs as ceil(quantity / per_run_output). Guards the division: a missing, zero,
         or non-numeric per_run_output falls back to 1 run (never divides by
         zero), logged at debug since it means the blueprint data is
         incomplete rather than that only 1 unit was actually needed.
@@ -367,35 +367,31 @@ class ShoppingListBuilder:
 
         return None, False
 
-    def _build_corp_stock_map(
-        self, corp_assets: list[Any], meta_resolver: Any
-    ) -> dict[int, int]:
-        """{type_id: quantity} of material stock, excluding blueprints.
 
-        Pre-warms meta_resolver's cache with every distinct asset type_id in one
-        batched SDE query. Without this, TypeMetadataResolver._entry() self-heals
-        a cache miss by calling prefetch() for a single id, so is_blueprint()
-        inside the per-asset loop below would otherwise open one SDE session
-        (with its metaGroups table reflection) per distinct type_id. prefetch()
-        is idempotent (skips ids already cached or already marked missing), so
-        this is safe even if a caller already warmed it. Same shape as
-        index_blueprint_assets in daily_planner/service.py.
-        """
-        type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
-        meta_resolver.prefetch({t for t in type_ids if t > 0})
+def build_corp_stock_map(corp_assets: list[Any], meta_resolver: Any) -> dict[int, int]:
+    """{type_id: quantity} of material stock, excluding blueprints.
 
-        stock: dict[int, int] = {}
-        for asset in corp_assets:
-            type_id = int(_asset_attr(asset, "type_id") or 0)
-            if type_id <= 0:
-                continue
-            if meta_resolver.is_blueprint(type_id):
-                continue  # blueprints are not material stock
-            qty = int(_asset_attr(asset, "quantity") or 0)
-            if qty <= 0:
-                continue
-            stock[type_id] = stock.get(type_id, 0) + qty
-        return stock
+    Shared by ChainPlanner (sub-manufacture nets corp stock before deciding
+    to build) and ShoppingListBuilder, so both read the same stock.
+    Pre-warms meta_resolver's cache with every distinct asset type_id in one
+    batched SDE query (prefetch() is idempotent); without it is_blueprint()
+    below would open one SDE session per distinct type_id.
+    """
+    type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
+    meta_resolver.prefetch({t for t in type_ids if t > 0})
+
+    stock: dict[int, int] = {}
+    for asset in corp_assets:
+        type_id = int(_asset_attr(asset, "type_id") or 0)
+        if type_id <= 0:
+            continue
+        if meta_resolver.is_blueprint(type_id):
+            continue  # blueprints are not material stock
+        qty = int(_asset_attr(asset, "quantity") or 0)
+        if qty <= 0:
+            continue
+        stock[type_id] = stock.get(type_id, 0) + qty
+    return stock
 
 
 def _positive_int(value: Any) -> int | None:

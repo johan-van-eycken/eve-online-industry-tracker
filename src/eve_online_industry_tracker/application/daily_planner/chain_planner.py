@@ -461,6 +461,10 @@ class ChainPlanner:
                 "type_id": mat_type_id,
                 "type_name": str(names.get(mat_type_id) or f"type_{mat_type_id}"),
                 "blueprint_type_id": mat_blueprint_type_id,
+                # None = the owned BPO's ME is unknown; resolution then buys.
+                "blueprint_me": _blueprint_efficiency(
+                    bpo_assets_by_type_id[mat_blueprint_type_id][0], "material"
+                ),
                 "quantity": quantity,
             })
         return requests
@@ -472,21 +476,48 @@ class ChainPlanner:
         market_depth_cache: dict[int, Any],
         phase1_data: dict[str, Any],
     ) -> ItemDecision | None:
-        """Build vs buy for one merged material request.
+        """Build vs buy for one merged material request, net of corp stock.
 
         Returns a sub-component ItemDecision (decision='build') when building
-        is cheaper, else None (buy). These bypass the Phase 4 gate per the
-        two-pass spec. ShoppingListBuilder subtracts the built quantity from
-        the parents' purchases.
+        the part corp stock does not cover is cheaper than buying it, else
+        None (buy). These bypass the Phase 4 gate per the two-pass spec.
+        ShoppingListBuilder subtracts the built quantity from the parents'
+        purchases and nets the rest against the same corp stock.
         """
         mat_type_id = int(request["type_id"])
         mat_blueprint_type_id = int(request["blueprint_type_id"])
-        qty_needed = int(request["quantity"])
+        qty_requested = int(request["quantity"])
 
-        sub_cost = self._estimate_sub_manufacture_cost(mat_blueprint_type_id, qty_needed, phase1_data)
-        market_cost = self._estimate_market_cost(mat_type_id, qty_needed, market_depth_cache)
+        in_stock = max(0, int((phase1_data.get("corp_material_stock") or {}).get(mat_type_id, 0)))
+        qty_to_build = qty_requested - in_stock
+        if qty_to_build <= 0:
+            logger.info(
+                "ChainPlanner: type_id=%s needs %d, corp stock holds %d; not sub-manufacturing",
+                mat_type_id, qty_requested, in_stock,
+            )
+            return None
+
+        me = request.get("blueprint_me")
+        if me is None:
+            logger.warning(
+                "ChainPlanner: owned BPO %s for type_id=%s has unknown ME; buying the "
+                "component instead of sub-manufacturing it",
+                mat_blueprint_type_id, mat_type_id,
+            )
+            return None
+
+        batch = self._sub_batch(
+            product_type_id=mat_type_id, blueprint_type_id=mat_blueprint_type_id,
+            qty_to_build=qty_to_build, me=int(me), phase1_data=phase1_data,
+        )
+        if batch is None:
+            return None
+        runs, batch_materials = batch
+
+        sub_cost = self._price_materials(batch_materials, market_depth_cache)
+        market_cost = self._estimate_market_cost(mat_type_id, qty_to_build, market_depth_cache)
         if sub_cost is None or market_cost is None:
-            return None  # Can't compare → default to buy
+            return None  # Can't compare -> default to buy
         if sub_cost >= market_cost:
             return None
 
@@ -509,49 +540,97 @@ class ChainPlanner:
                 "type_id": mat_type_id,
                 "type_name": mat_name,
                 "blueprint_type_id": mat_blueprint_type_id,
-                "quantity_needed": qty_needed,
+                "quantity_requested": qty_requested,
+                "corp_stock_used": min(in_stock, qty_requested),
+                "quantity_needed": qty_to_build,
+                "sub_runs": runs,
+                "sub_batch_materials": batch_materials,
                 "requested_by_type_ids": list(request["requested_by_type_ids"]),
                 "sub_manufacture_cost": sub_cost,
                 "market_buy_cost": market_cost,
             },
         )
 
-    def _estimate_sub_manufacture_cost(
+    def _sub_batch(
         self,
+        *,
+        product_type_id: int,
         blueprint_type_id: int,
-        qty_needed: int,
+        qty_to_build: int,
+        me: int,
         phase1_data: dict[str, Any],
-    ) -> float | None:
-        """Estimate the cost of sub-manufacturing qty_needed units."""
-        # Delegate to IndustryService if possible, otherwise estimate from blueprint data
-        blueprint_data: dict[int, dict] = phase1_data.get("blueprint_data", {})
-        bp_data = blueprint_data.get(blueprint_type_id)
-        if bp_data is None:
+    ) -> tuple[int, dict[int, int]] | None:
+        """(runs, {material type_id: units for the whole sub job}) at the owned BPO's ME.
+
+        Base quantities are the SDE's per-run figures, reduced by the BPO's ME
+        with the producer's batch ceiling (blueprints.me_adjusted_batch_quantity).
+        Structure and rig bonuses are not applied: the planner does not know
+        where the sub job will run, so these quantities are an upper bound,
+        never an under-buy. None (with a WARNING) when the blueprint cannot
+        say how to build the component.
+        """
+        from eve_online_industry_tracker.infrastructure.sde.blueprints import (
+            me_adjusted_batch_quantity,
+        )
+
+        bp_data = (phase1_data.get("blueprint_data") or {}).get(blueprint_type_id)
+        manufacturing = bp_data.get("manufacturing") if isinstance(bp_data, dict) else None
+        if not isinstance(manufacturing, dict):
+            logger.warning(
+                "ChainPlanner: no SDE manufacturing data for blueprint %s; buying type_id=%s",
+                blueprint_type_id, product_type_id,
+            )
             return None
 
-        manufacturing = bp_data.get("manufacturing", {})
-        materials = manufacturing.get("materials", []) or []
-        market_depth_cache: dict[int, Any] = phase1_data.get("market_depth_cache", {})
-
-        total_cost = 0.0
-        for mat in materials:
-            mat_type_id = int(mat.get("type_id") or 0)
-            mat_qty = int(mat.get("quantity") or 0)
-            if mat_type_id <= 0 or mat_qty <= 0:
-                continue
-            mat_cost = self._estimate_market_cost(mat_type_id, mat_qty, market_depth_cache)
-            if mat_cost is None:
-                return None
-            total_cost += mat_cost
-
-        # Scale to needed quantity (1 run = products_per_run output quantity)
-        products = manufacturing.get("products", []) or []
-        output_per_run = int(products[0].get("quantity") or 1) if products else 1
+        output_per_run = 0
+        for product in manufacturing.get("products") or []:
+            if isinstance(product, dict) and int(product.get("type_id") or 0) == product_type_id:
+                output_per_run = int(product.get("quantity") or 0)
+                break
         if output_per_run <= 0:
-            output_per_run = 1
+            logger.warning(
+                "ChainPlanner: blueprint %s has no per-run output of type_id=%s; buying it",
+                blueprint_type_id, product_type_id,
+            )
+            return None
 
-        runs_needed = math.ceil(qty_needed / output_per_run)
-        return total_cost * runs_needed
+        runs = math.ceil(qty_to_build / output_per_run)
+        batch: dict[int, int] = {}
+        for mat in manufacturing.get("materials") or []:
+            if not isinstance(mat, dict):
+                continue
+            mat_type_id = int(mat.get("type_id") or 0)
+            base_qty = int(mat.get("quantity") or 0)
+            if mat_type_id <= 0 or base_qty <= 0:
+                continue
+            batch[mat_type_id] = batch.get(mat_type_id, 0) + me_adjusted_batch_quantity(
+                base_qty, runs, me
+            )
+        if not batch:
+            # A job with no inputs would price at 0 ISK and always beat the
+            # market: that is missing SDE data, not a free build.
+            logger.warning(
+                "ChainPlanner: blueprint %s has no SDE materials; not sub-manufacturing type_id=%s",
+                blueprint_type_id, product_type_id,
+            )
+            return None
+        return runs, batch
+
+    def _price_materials(
+        self, materials: dict[int, int], market_depth_cache: dict[int, Any]
+    ) -> float | None:
+        """Market cost of a material list, or None when any line has no price."""
+        total = 0.0
+        for mat_type_id, quantity in materials.items():
+            cost = self._estimate_market_cost(mat_type_id, quantity, market_depth_cache)
+            if cost is None:
+                logger.info(
+                    "ChainPlanner: no market price for sub-job input type_id=%s; "
+                    "cannot compare build vs buy", mat_type_id,
+                )
+                return None
+            total += cost
+        return total
 
     def _estimate_market_cost(
         self,
