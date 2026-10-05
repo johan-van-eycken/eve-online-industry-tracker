@@ -16,6 +16,23 @@ def budget_fit(corp_wallet: float | None, total_isk: float, cumul_isk: float) ->
     return "Yes" if (corp_wallet - total_isk) >= cumul_isk else "No"
 
 
+def remaining_after_shopping(corp_wallet: float | None, total_isk: float) -> float | None:
+    """What the wallet has left after the shopping list; negative is a deficit.
+
+    None when the wallet is unknown. A genuine 0.0 wallet is a real balance,
+    so it yields -total_isk, not an unknown.
+    """
+    if corp_wallet is None:
+        return None
+    return corp_wallet - total_isk
+
+
+def wallet_is_short(corp_wallet: float | None, total_isk: float) -> bool:
+    """True when a known wallet (0.0 included) cannot cover the shopping list."""
+    remaining = remaining_after_shopping(corp_wallet, total_isk)
+    return remaining is not None and remaining < 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -208,7 +225,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         + sum(r["Est. Total"] or 0.0 for r in invention_rows)
     )
 
-    wallet_short = corp_wallet is not None and corp_wallet > 0 and total_isk > corp_wallet
+    wallet_short = wallet_is_short(corp_wallet, total_isk)
 
     # Current job materials (highest priority)
     _render_materials_section("Current Job Materials", current_rows, deemphasise=False, ag_imports=ag)
@@ -226,7 +243,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     st.markdown("---")
 
     # Budget summary
-    remaining = (corp_wallet - total_isk) if corp_wallet is not None else None
+    remaining = remaining_after_shopping(corp_wallet, total_isk)
     budget_cols = st.columns(3)
     with budget_cols[0]:
         st.metric("Total to Spend", _fmt_isk(total_isk))
@@ -236,7 +253,8 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         if wallet_short:
             st.metric("Deficit", _fmt_isk(abs(remaining)), delta=f"-{_fmt_isk(abs(remaining))}", delta_color="inverse")
         else:
-            st.metric("Remaining", _fmt_isk(remaining) if corp_wallet is not None and corp_wallet > 0 else "—")
+            # _fmt_isk renders an unknown (None) remainder as "—".
+            st.metric("Remaining", _fmt_isk(remaining))
 
     if wallet_short:
         st.warning(
