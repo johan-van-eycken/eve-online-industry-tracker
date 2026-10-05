@@ -726,6 +726,34 @@ def test_a_sub_blueprint_that_does_not_make_the_component_is_not_used(caplog):
     assert any("no per-run output" in r.getMessage() for r in caplog.records)
 
 
+def test_a_sub_component_has_no_own_sell_velocity_and_persists_it_as_null(
+    app_session, session_provider,
+):
+    """A sub-component is consumed by its parent, never sold, so it has no
+    measured sell rate. Phase 9 must write NULL, not a 1.0 that
+    market_depth_collector would read as a real velocity."""
+    from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+    from eve_online_industry_tracker.infrastructure.persistence.daily_planner_repo import (
+        DailyPlannerRepository,
+    )
+
+    (sub,) = _subs(_sub_phase1())
+    assert sub.velocity_unknown_reason == "sub-component: no own sell velocity"
+
+    service = DailyPlannerService(
+        industry_service=None, corporations_service=None, characters_service=None,
+        sales_history_service=None, market_pricing_service=None,
+        realized_profit_service=None,
+        repo=DailyPlannerRepository(session_provider=session_provider),
+        admin_settings=None, session_provider=session_provider,
+    )
+    service._persist_plan_items(plan_id=1, decisions=[sub], market_depth_cache={})
+    item = app_session.query(BuildPlanItemModel).one()
+    assert item.type_id == 54321
+    assert item.effective_velocity is None
+
+
 def _sub_decision(**overview):
     return ItemDecision(
         type_id=54321, type_name="Widget", decision="build",

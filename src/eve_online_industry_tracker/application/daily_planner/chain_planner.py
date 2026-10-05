@@ -569,7 +569,12 @@ class ChainPlanner:
             isk_per_hour=0.0,
             margin_pct=0.0,
             days_of_supply_current=0.0,
+            # A sub-component is consumed by its parent, not sold, so it has
+            # no sell rate. The reason makes phase 9 persist NULL instead of
+            # this placeholder (market_depth_collector reads that column as
+            # a measured velocity). BPO analysis never runs for subs.
             effective_velocity=1.0,
+            velocity_unknown_reason="sub-component: no own sell velocity",
             meta_group_id=META_GROUP_T1,
             pipeline_stage="manufacturing",
             is_sub_component=True,
