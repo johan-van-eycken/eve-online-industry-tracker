@@ -809,15 +809,137 @@ def test_an_unknown_max_runs_per_job_buys_the_component(caplog, limit):
     )
 
 
-def test_a_split_sub_manufacture_action_names_its_job_count():
+def test_a_sub_batch_over_the_max_runs_records_each_job():
+    """Jobs of 7, 7 and 6 runs at 10 units per run: 70 + 70 + 60 = 200 units,
+    13 + 13 + 11 = 37 Tritanium, priced at 1 ISK each."""
+    (sub,) = _subs_for(200, _limited_sub_phase1(7))
+    assert sub.overview_row["sub_job_batches"] == [
+        {"runs": 7, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
+        {"runs": 7, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
+        {"runs": 6, "quantity": 60, "materials": {34: 11}, "cost": 11.0},
+    ]
+
+
+def test_the_last_sub_job_outputs_only_the_units_still_needed():
+    """Need 195 = 20 runs (200 units). The last job's 60 units are capped at
+    the 55 still needed, so the jobs together output quantity_needed."""
+    (sub,) = _subs_for(195, _limited_sub_phase1(7))
+    jobs = sub.overview_row["sub_job_batches"]
+    assert [j["quantity"] for j in jobs] == [70, 70, 55]
+    assert sum(j["quantity"] for j in jobs) == sub.overview_row["quantity_needed"] == 195
+
+
+def _mfg_pilots(*slots):
+    """Pilots with the given manufacturing slot counts (1 + Mass Production)."""
+    return SimpleNamespace(list_characters=lambda: [
+        {"character_id": i + 1, "character_name": f"Pilot {i + 1}",
+         "skills": {"skills": [{"skill_name": "Mass Production",
+                                "trained_skill_level": n - 1}]}}
+        for i, n in enumerate(slots)
+    ])
+
+
+def _assign(decisions, pilots):
     from eve_online_industry_tracker.application.daily_planner.character_assigner import (
         CharacterAssigner,
     )
-    (action,) = CharacterAssigner().assign(
-        ChainPlan(decisions=[_sub_decision(sub_jobs=3, sub_max_runs_per_job=7, sub_runs=20)]),
-        [], _one_slot_pilot(), _AdminStub())
-    assert action.runs == 20
-    assert "3 jobs of at most 7 runs" in action.notes
+    return CharacterAssigner().assign(ChainPlan(decisions=decisions), [], pilots, _AdminStub())
+
+
+def test_a_split_sub_build_takes_one_manufacturing_slot_per_job():
+    """20 runs at 7 per job: 3 actions of 7, 7 and 6 runs, each with its own
+    batch. Together they buy exactly the pre-split total ({34: 37})."""
+    (sub,) = _subs_for(200, _limited_sub_phase1(7))
+    actions = _assign([sub], _mfg_pilots(3))
+    assert [a.action_type for a in actions] == ["sub_manufacture"] * 3
+    assert [a.runs for a in actions] == [7, 7, 6]
+    assert [a.quantity for a in actions] == [70, 70, 60]
+    assert [a.materials for a in actions] == [{34: 13}, {34: 13}, {34: 11}]
+    assert sum(a.materials[34] for a in actions) == sub.overview_row["sub_batch_materials"][34] == 37
+    assert [a.estimated_cost_isk for a in actions] == [13.0, 13.0, 11.0]
+    assert "job 1 of 3" in actions[0].notes and "job 3 of 3" in actions[2].notes
+
+
+def test_the_three_jobs_use_three_slots():
+    """With four slots, three go to the split build, so a second sub-build
+    gets only the one that is left."""
+    (sub,) = _subs_for(200, _limited_sub_phase1(7))
+    other = _sub_decision()
+    other.type_id = 777
+    actions = _assign([sub, other], _mfg_pilots(4))
+    assert [a.type_id for a in actions] == [54321, 54321, 54321, 777]
+    assert len(_assign([sub, other], _mfg_pilots(3))) == 3
+
+
+def test_split_jobs_spread_over_pilots_with_free_slots():
+    """Each job goes to the pilot with the most free slots at that moment."""
+    (sub,) = _subs_for(200, _limited_sub_phase1(7))
+    actions = _assign([sub], _mfg_pilots(2, 1))
+    assert sorted(a.character_id for a in actions) == [1, 1, 2]
+
+
+def test_an_unsplit_sub_build_is_still_one_action():
+    (sub,) = _subs_for(200, _limited_sub_phase1(300))
+    (action,) = _assign([sub], _mfg_pilots(3))
+    assert (action.runs, action.quantity, action.materials) == (20, 200, {34: 36})
+    assert "job" not in action.notes
+
+
+def _stock_asset(type_id, quantity):
+    return SimpleNamespace(type_id=type_id, quantity=quantity)
+
+
+class _NoBlueprintAssets:
+    def prefetch(self, type_ids):
+        return None
+
+    def is_blueprint(self, type_id):
+        return False
+
+
+def _shopping(actions, *, stock, phase1):
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
+        ShoppingListBuilder,
+    )
+    items = ShoppingListBuilder().build(
+        assigned_actions=actions,
+        corp_assets=[_stock_asset(t, q) for t, q in stock.items()],
+        market_depth_cache=phase1["market_depth_cache"], admin_settings=_AdminStub(),
+        blueprint_data=phase1["blueprint_data"], meta_resolver=_NoBlueprintAssets(),
+    )
+    bought: dict[int, int] = {}
+    for item in items:
+        bought[item.type_id] = bought.get(item.type_id, 0) + item.quantity
+    return bought
+
+
+@pytest.mark.parametrize("pilot_slots, assigned_jobs", [((4,), 3), ((3,), 2), ((2,), 1), ((1,), 0)])
+def test_jobs_without_a_slot_are_bought_not_under_bought(pilot_slots, assigned_jobs):
+    """Parent needs 205 Widgets, 5 in stock, so 200 are sub-built in jobs of
+    70, 70 and 60. The parent takes one slot first; the jobs get the rest.
+    Whatever is not assigned is bought: assigned + bought == need - stock,
+    and only the assigned jobs' Tritanium is bought."""
+    stock = {54321: 5}
+    phase1 = _limited_sub_phase1(7)
+    phase1["corp_material_stock"] = dict(stock)
+    parent = _decision(_row(materials=_batch_materials(**{"54321": 205})))
+    plan = _planner().plan_chain([parent], phase1)
+    actions = _assign(plan.decisions, _mfg_pilots(*pilot_slots))
+
+    subs = [a for a in actions if a.action_type == "sub_manufacture"]
+    assert len(subs) == assigned_jobs
+    bought = _shopping(actions, stock=stock, phase1=phase1)
+    assigned_units = sum(a.quantity for a in subs)
+    assert assigned_units + bought.get(54321, 0) == 205 - 5
+    assert bought.get(34, 0) == [0, 13, 26, 37][assigned_jobs]
+
+
+def test_jobs_without_a_slot_are_logged(caplog):
+    (sub,) = _subs_for(200, _limited_sub_phase1(7))
+    with caplog.at_level("INFO"):
+        _assign([sub], _mfg_pilots(2))
+    assert any("1 of 3" in r.getMessage() and "54321" in r.getMessage()
+               for r in caplog.records)
 
 
 def _sub_decision(**overview):

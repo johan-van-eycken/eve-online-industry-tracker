@@ -549,7 +549,7 @@ class ChainPlanner:
         )
         if batch is None:
             return None
-        runs, batch_materials, material_reduction, job_runs = batch
+        runs, batch_materials, material_reduction, jobs = batch
 
         sub_cost = self._price_materials(batch_materials, market_depth_cache)
         market_cost = self._estimate_market_cost(mat_type_id, qty_to_build, market_depth_cache)
@@ -557,6 +557,11 @@ class ChainPlanner:
             return None  # Can't compare -> default to buy
         if sub_cost >= market_cost:
             return None
+        # Linear pricing, so the per-job costs sum to sub_cost exactly.
+        job_batches = [
+            {**job, "cost": self._price_materials(job["materials"], market_depth_cache)}
+            for job in jobs
+        ]
 
         mat_name = request["type_name"]
         return ItemDecision(
@@ -587,8 +592,11 @@ class ChainPlanner:
                 "quantity_needed": qty_to_build,
                 "sub_runs": runs,
                 # The runs split into jobs of at most the blueprint's max runs.
-                "sub_jobs": len(job_runs),
-                "sub_max_runs_per_job": max(job_runs),
+                "sub_jobs": len(job_batches),
+                "sub_max_runs_per_job": max(j["runs"] for j in job_batches),
+                # One entry per job, each taking its own manufacturing slot
+                # (CharacterAssigner): runs, units output, materials, cost.
+                "sub_job_batches": job_batches,
                 "sub_batch_materials": batch_materials,
                 # Combined ME + structure + rig fraction the batch was cut by.
                 "sub_material_reduction": material_reduction,
@@ -608,10 +616,13 @@ class ChainPlanner:
         me: int,
         phase1_data: dict[str, Any],
         facility_reductions: tuple[float, ...] = (),
-    ) -> tuple[int, dict[int, int], float, list[int]] | None:
+    ) -> tuple[int, dict[int, int], float, list[dict[str, Any]]] | None:
         """(runs, {material type_id: units for all the sub jobs}, combined
-        material reduction, runs per job) at the owned BPO's ME in the
-        parent's structure.
+        material reduction, jobs) at the owned BPO's ME in the parent's
+        structure. Each job is {"runs", "quantity", "materials"}: its runs,
+        the units it outputs (runs x output per run, the last job capped at
+        what is still needed so the jobs sum to qty_to_build) and its own
+        batch; the jobs' materials sum to the total.
 
         One job runs at most the blueprint's max_production_limit (SDE
         maxProductionLimit) runs, so the runs are split into full jobs at the
@@ -693,14 +704,24 @@ class ChainPlanner:
         runs = math.ceil(qty_to_build / output_per_run)
         full_jobs, remainder = divmod(runs, max_runs)
         job_runs = [max_runs] * full_jobs + ([remainder] if remainder else [])
+        jobs: list[dict[str, Any]] = []
+        units_left = qty_to_build
+        for runs_in_job in job_runs:
+            quantity = min(runs_in_job * output_per_run, units_left)
+            units_left -= quantity
+            jobs.append({
+                "runs": runs_in_job,
+                "quantity": quantity,
+                "materials": {
+                    mat_type_id: reduced_batch_quantity(base_qty, runs_in_job, material_reduction)
+                    for mat_type_id, base_qty in base_materials.items()
+                },
+            })
         batch = {
-            mat_type_id: (
-                full_jobs * reduced_batch_quantity(base_qty, max_runs, material_reduction)
-                + reduced_batch_quantity(base_qty, remainder, material_reduction)
-            )
-            for mat_type_id, base_qty in base_materials.items()
+            mat_type_id: sum(job["materials"][mat_type_id] for job in jobs)
+            for mat_type_id in base_materials
         }
-        return runs, batch, material_reduction, job_runs
+        return runs, batch, material_reduction, jobs
 
     def _price_materials(
         self, materials: dict[int, int], market_depth_cache: dict[int, Any]

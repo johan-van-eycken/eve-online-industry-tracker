@@ -264,24 +264,34 @@ class CharacterAssigner:
                 ))
                 self._take_slot(char_slots, char_id, "copy")
 
-        # Sub-manufacture
+        # Sub-manufacture: one action, and one manufacturing slot, per job.
+        # A job left without a slot gets no action, so the shopping list
+        # neither buys its materials nor subtracts its units from the
+        # parents' purchase: those units are bought instead.
         if decision.is_sub_component:
-            char_id, char_name = self._best_mfg_char(char_slots, characters)
-            if char_id is not None:
-                qty_needed = int(row.get("quantity_needed") or 0)
+            jobs = _sub_jobs(row)
+            for index, job in enumerate(jobs):
+                char_id, char_name = self._best_mfg_char(char_slots, characters)
+                if char_id is None:
+                    logger.info(
+                        "CharacterAssigner: no free mfg slot for %d of %d sub-manufacture "
+                        "jobs of type_id=%s; their units are bought instead",
+                        len(jobs) - index, len(jobs), type_id,
+                    )
+                    break
                 actions.append(AssignedAction(
                     type_id=type_id,
                     type_name=type_name,
                     action_type="sub_manufacture",
                     character_id=char_id,
                     character_name=char_name,
-                    quantity=qty_needed,
-                    runs=row.get("sub_runs"),
-                    estimated_cost_isk=float(row.get("sub_manufacture_cost") or 0.0),
+                    quantity=job["quantity"],
+                    runs=job["runs"],
+                    estimated_cost_isk=job["cost"],
                     estimated_profit_isk=None,
                     estimated_completion=None,
-                    notes=_sub_manufacture_notes(row),
-                    materials=row.get("sub_batch_materials"),
+                    notes=_sub_manufacture_notes(row, index, len(jobs)),
+                    materials=job["materials"],
                 ))
                 self._take_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action
@@ -518,14 +528,35 @@ def _batch_runs(type_id: int, row: dict[str, Any]) -> int:
     return require_batch_runs(type_id, orow.get_manufacturing_job(row))
 
 
-def _sub_manufacture_notes(row: dict[str, Any]) -> str:
-    """The sub-manufacture action's note, naming the job split when the runs
-    exceed the blueprint's max runs per job (ChainPlanner._sub_batch)."""
+def _sub_jobs(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """The sub-build's jobs: ChainPlanner's `sub_job_batches`, or, for a row
+    without them, the whole batch as one job (the pre-split shape)."""
+    jobs = row.get("sub_job_batches")
+    if isinstance(jobs, list) and jobs:
+        return [
+            {"runs": j.get("runs"), "quantity": int(j.get("quantity") or 0),
+             "materials": j.get("materials"), "cost": float(j.get("cost") or 0.0)}
+            for j in jobs
+        ]
+    return [{
+        "runs": row.get("sub_runs"),
+        "quantity": int(row.get("quantity_needed") or 0),
+        "materials": row.get("sub_batch_materials"),
+        "cost": float(row.get("sub_manufacture_cost") or 0.0),
+    }]
+
+
+def _sub_manufacture_notes(row: dict[str, Any], index: int, job_count: int) -> str:
+    """The sub-manufacture action's note, naming the job when the runs were
+    split over several jobs at the blueprint's max runs per job
+    (ChainPlanner._sub_batch)."""
     notes = (
         f"Sub-manufacture: cheaper to build than buy "
         f"(market: {(row.get('market_buy_cost') or 0)/1e6:.1f}M ISK)"
     )
-    jobs = row.get("sub_jobs")
-    if isinstance(jobs, int) and jobs > 1:
-        notes += f"; {jobs} jobs of at most {row.get('sub_max_runs_per_job')} runs"
+    if job_count > 1:
+        notes += (
+            f"; job {index + 1} of {job_count} "
+            f"(at most {row.get('sub_max_runs_per_job')} runs per job)"
+        )
     return notes
