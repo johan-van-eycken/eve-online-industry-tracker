@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from eve_online_industry_tracker.application.daily_planner.fixture_export import (
     _PUBLIC_STRING_KEYS,
+    _is_identity_key,
     IDENTITY_KEY_SUBSTRINGS,
     sanitise_overview_rows,
 )
@@ -116,14 +117,27 @@ def _string_values(node, key=""):
 def test_non_allow_listed_string_value_is_redacted():
     """Default-deny: EVERY string value is redacted unless its key is public,
     or it is a blueprint_source_kind with an enum value."""
+    def exempt(key, value):
+        return key in _PUBLIC_STRING_KEYS or (
+            key == "blueprint_source_kind" and value in BLUEPRINT_SOURCE_KINDS
+        )
+
+    raw_strings = list(_string_values(RAW))
+    raw_exempt = [(k, v) for k, v in raw_strings if exempt(k, v)]
+    # Identity keys are dropped outright by design, so they are not redacted.
+    raw_private = [
+        (k, v) for k, v in raw_strings if not exempt(k, v) and not _is_identity_key(k)
+    ]
+    assert len(raw_private) >= 4 and raw_exempt, "the property would be vacuous"
+
     seen = list(_string_values(sanitise_overview_rows(RAW)))
-    assert len(seen) >= 5, "the property would be vacuous on so few strings"
     for key, value in seen:
-        if key in _PUBLIC_STRING_KEYS:
-            continue
-        if key == "blueprint_source_kind" and value in BLUEPRINT_SOURCE_KINDS:
-            continue
-        assert value == REDACTED, f"{key!r} leaked {value!r}"
+        if not exempt(key, value):
+            assert value == REDACTED, f"{key!r} leaked {value!r}"
+    # Nothing private may be dropped instead of redacted, and the public
+    # strings must survive verbatim.
+    assert sum(1 for _, v in seen if v == REDACTED) == len(raw_private)
+    assert sorted(kv for kv in seen if exempt(*kv)) == sorted(raw_exempt)
 
 
 def test_timestamp_string_is_redacted():

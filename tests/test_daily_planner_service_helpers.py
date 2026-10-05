@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.service import (
     _parse_isk,

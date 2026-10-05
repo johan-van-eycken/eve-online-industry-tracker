@@ -130,7 +130,12 @@ def test_every_allowed_broad_except_logs_with_a_traceback():
     for name, path in _module_files():
         if ALLOWED_BROAD_EXCEPT.get(name, 0) == 0:
             continue
-        for handler in _broad_handlers(_parse(path)):
+        handlers = _broad_handlers(_parse(path))
+        assert len(handlers) == ALLOWED_BROAD_EXCEPT[name], (
+            f"{name}: expected {ALLOWED_BROAD_EXCEPT[name]} allowed broad handler(s), "
+            f"found {len(handlers)}"
+        )
+        for handler in handlers:
             assert _logs_traceback(handler), (
                 f"{name}:{handler.lineno}: a broad except must log the traceback"
             )
