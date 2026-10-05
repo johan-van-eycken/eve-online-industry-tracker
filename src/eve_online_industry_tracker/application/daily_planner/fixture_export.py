@@ -20,7 +20,9 @@ The policy is inverted as a result: strings are guilty until proven
 innocent. Every string value is replaced with a redaction placeholder unless
 its *key* is on a small, justified allow-list of public EVE SDE data
 (`type_name`, `meta_group_name` — read verbatim by the contract layer in
-`application/industry/overview_row.py` and by `PlannerInputRow`). Numbers are
+`application/industry/overview_row.py` and by `PlannerInputRow`).
+`blueprint_source_kind` passes only when its value is one of the producer's
+closed enum (`BLUEPRINT_SOURCE_KINDS`). Numbers are
 still scrambled in place (not redacted) because the numeric *shape* — sign,
 rough magnitude, type — is what tests assert on. The key-name deny-list is
 kept as a second, independent layer: a denied key is dropped entirely
@@ -100,6 +102,30 @@ _PUBLIC_STRING_KEYS: frozenset[str] = frozenset({"type_name", "meta_group_name"}
 # Numeric keys that are public SDE identifiers and must survive unscrambled.
 _PUBLIC_NUMERIC_KEYS: frozenset[str] = frozenset({"type_id", "blueprint_type_id"})
 
+#: Every value IndustryService assigns to `blueprint_source_kind`: the
+#: literals at industry/service.py:4102-4146 and :6949-6973, plus the activity
+#: names a prerequisite-chain node inherits (`blueprint_source_kind = activity`).
+#: A closed enum naming no player, corp or place. The ownership values disclose
+#: per-item BPO ownership, the same information `has_bpo` already passes
+#: verbatim (see "Known disclosure" above). Allow-listed by VALUE, so anything
+#: unexpected is still redacted. tests/test_fixture_sanitisation.py pins the
+#: producer's literals to this set.
+BLUEPRINT_SOURCE_KINDS: frozenset[str] = frozenset({
+    "unowned",
+    "owned_blueprint_copy",
+    "copied_from_owned_blueprint_original",
+    "unowned_blueprint_copy",
+    "owned_blueprint_original",
+    "blueprint_sde_fallback",
+    "manufacturing",
+    "reaction",
+})
+
+# Keys whose string value survives verbatim only when it is one of a closed set.
+_PUBLIC_ENUM_VALUES: dict[str, frozenset[str]] = {
+    "blueprint_source_kind": BLUEPRINT_SOURCE_KINDS,
+}
+
 _REDACTED = "<redacted>"
 
 
@@ -138,6 +164,8 @@ def _sanitise_value(key: str, value: Any, rng: random.Random) -> Any:
         return _scramble_number(value, rng)
     if isinstance(value, str):
         if key in _PUBLIC_STRING_KEYS:
+            return value
+        if value in _PUBLIC_ENUM_VALUES.get(key, frozenset()):
             return value
         return _REDACTED
     # Unknown/exotic value type (tuple, set, datetime, ...): redact rather

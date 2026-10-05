@@ -102,7 +102,8 @@ def test_ship_name_is_redacted_when_nested_under_blueprint_copy():
 
 def test_non_allow_listed_string_value_is_redacted():
     row = sanitise_overview_rows(RAW)[0]
-    assert row["blueprint_source_kind"] == REDACTED
+    assert row["market_price_fetched_at"] == REDACTED
+    assert row["manufacturing_job"]["industry_profile"]["profile_name"] == REDACTED
 
 
 def test_timestamp_string_is_redacted():
@@ -121,3 +122,46 @@ def test_magnitudes_are_replaced_but_types_and_signs_kept():
 
 def test_sanitisation_is_deterministic():
     assert sanitise_overview_rows(RAW) == sanitise_overview_rows(RAW)
+
+
+import ast  # noqa: E402
+import os  # noqa: E402
+
+import pytest  # noqa: E402
+
+from eve_online_industry_tracker.application.daily_planner.fixture_export import (  # noqa: E402
+    BLUEPRINT_SOURCE_KINDS,
+)
+
+
+@pytest.mark.parametrize("kind", sorted(BLUEPRINT_SOURCE_KINDS))
+def test_a_blueprint_source_kind_survives_sanitisation(kind):
+    (row,) = sanitise_overview_rows(
+        [{"type_id": 1, "manufacturing_job": {"blueprint_source_kind": kind}}]
+    )
+    assert row["manufacturing_job"]["blueprint_source_kind"] == kind
+
+
+def test_an_unknown_blueprint_source_kind_is_still_redacted():
+    (row,) = sanitise_overview_rows(
+        [{"type_id": 1, "manufacturing_job": {"blueprint_source_kind": "Some Pilot's hangar"}}]
+    )
+    assert row["manufacturing_job"]["blueprint_source_kind"] == "<redacted>"
+
+
+def test_every_literal_source_kind_the_producer_assigns_is_allow_listed():
+    producer = os.path.join(
+        os.path.dirname(__file__), "..", "src", "eve_online_industry_tracker",
+        "application", "industry", "service.py",
+    )
+    with open(producer, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    written = {
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "blueprint_source_kind" for t in node.targets)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    }
+    assert written, "scan found no blueprint_source_kind assignments"
+    assert written <= BLUEPRINT_SOURCE_KINDS, written - BLUEPRINT_SOURCE_KINDS
