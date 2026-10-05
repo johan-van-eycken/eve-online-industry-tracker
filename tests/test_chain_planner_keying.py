@@ -761,3 +761,150 @@ def test_sub_components_are_assigned_only_after_every_top_level_item():
     actions = CharacterAssigner().assign(
         ChainPlan(decisions=[parent, sub]), [], _one_slot_pilot(), _AdminStub())
     assert [a.action_type for a in actions] == ["manufacture"]
+
+
+# --- sub-manufacture in the parent's structure (ruling F-Q2) -------------------
+#
+# A sub-component is built in the same structure as its parent, so its inputs
+# get the parent profile's structure material bonus on top of the sub BPO's
+# ME. A rig bonus applies only where the rig covers the component's own
+# manufacturing group (EVE rigs are category-specific). Need 1000 = 100 runs
+# x 2 Tritanium = 200 base units.
+
+# SDE group 334 "Construction Components" (category 17 "Commodity"), which
+# the producer files under "Advanced Components".
+_COMPONENT_ENTRY = {"type_id": 54321, "type_name": "Widget", "quantity": 1000,
+                    "group_id": 334, "group_name": "Construction Components",
+                    "category_id": 17, "category_name": "Commodity"}
+
+
+def _profile(*, rig_group=None, aggregate_rig=None, structure=0.01):
+    profile = {"material_efficiency_bonus": structure}
+    if rig_group is not None:
+        profile["structure_rigs"] = [{"type_id": 1, "effects": [
+            {"activity": "manufacturing", "metric": "material", "group": rig_group,
+             "value": 0.024},
+        ]}]
+    if aggregate_rig is not None:
+        profile["structure_rig_material_bonus"] = aggregate_rig
+    return profile
+
+
+def _structure_subs(profile, *, entry=_COMPONENT_ENTRY, parents=1):
+    rows = []
+    for i in range(parents):
+        p = profile[i] if isinstance(profile, list) else profile
+        rows.append(_row(type_id=12345 + i, runs=10, industry_profile=p,
+                         materials={"54321": dict(entry)}))
+    plan = _planner().plan_chain([_decision(r) for r in rows], _sub_phase1())
+    return [d for d in plan.decisions if d.is_sub_component]
+
+
+def _producer_batch(profile, entry, *, base=200, runs=100, me=10):
+    """What IndustryService would compute for this job in this structure."""
+    from eve_online_industry_tracker.application.industry.service import IndustryService as S
+
+    group = S._infer_manufacturing_group_uncached(entry)
+    reduction = S._combine_reductions([
+        me / 100.0,
+        S._profile_base_reduction(profile_payload=profile, activity="manufacturing",
+                                  metric="material"),
+        S._profile_rig_reduction(profile_payload=profile, activity="manufacturing",
+                                 metric="material", manufacturing_group=group),
+    ])
+    return S._round_material_quantity(float(base) * max(0.0, 1.0 - reduction),
+                                      minimum_quantity=runs)
+
+
+def test_a_sub_job_in_a_rigged_structure_matches_the_producer():
+    """ME10 + 1% structure + 2.4% Advanced Components rig:
+    200 x 0.9 x 0.99 x 0.976 = 173.9 -> 174 (ME only would be 180)."""
+    profile = _profile(rig_group="Advanced Components")
+    (sub,) = _structure_subs(profile)
+    assert sub.overview_row["sub_runs"] == 100
+    assert sub.overview_row["sub_batch_materials"] == {34: 174}
+    assert _producer_batch(profile, _COMPONENT_ENTRY) == 174
+    assert sub.overview_row["sub_manufacture_cost"] == 174.0
+    assert sub.overview_row["rig_applicability"] == "applies"
+
+
+def test_a_rig_for_another_group_does_not_reduce_the_sub_job():
+    """Structure bonus only: 200 x 0.9 x 0.99 = 178.2 -> 179."""
+    profile = _profile(rig_group="Basic Small Ships")
+    (sub,) = _structure_subs(profile)
+    assert sub.overview_row["sub_batch_materials"] == {34: 179}
+    assert _producer_batch(profile, _COMPONENT_ENTRY) == 179
+    assert sub.overview_row["rig_applicability"] == "not_covered"
+
+
+def test_an_all_group_rig_reduces_the_sub_job():
+    profile = _profile(rig_group="All")
+    (sub,) = _structure_subs(profile)
+    assert sub.overview_row["sub_batch_materials"] == {34: _producer_batch(profile, _COMPONENT_ENTRY)}
+    assert sub.overview_row["sub_batch_materials"] == {34: 174}
+
+
+def test_an_unknown_component_group_gets_the_structure_bonus_only(caplog):
+    """No group/category on the parent's material entry: whether the rig covers
+    the component is unknown, so no rig bonus (an over-buy, never an under-buy)."""
+    entry = {"type_id": 54321, "type_name": "Widget", "quantity": 1000}
+    with caplog.at_level("WARNING"):
+        (sub,) = _structure_subs(_profile(rig_group="Advanced Components"), entry=entry)
+    assert sub.overview_row["sub_batch_materials"] == {34: 179}
+    assert sub.overview_row["rig_applicability"] == "unknown"
+    warnings = [r for r in caplog.records if "rig applicability" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_an_aggregate_only_rig_bonus_is_not_applied_to_the_sub_job(caplog):
+    """The profile's aggregate structure_rig_material_bonus names no group, so
+    it cannot say whether the rig covers the component."""
+    with caplog.at_level("WARNING"):
+        (sub,) = _structure_subs(_profile(aggregate_rig=0.024))
+    assert sub.overview_row["sub_batch_materials"] == {34: 179}
+    assert sub.overview_row["rig_applicability"] == "unknown"
+    assert any("rig applicability" in r.getMessage() for r in caplog.records)
+
+
+def test_no_industry_profile_means_me_only():
+    (sub,) = _structure_subs(None)
+    assert sub.overview_row["sub_batch_materials"] == {34: 180}
+
+
+def test_parents_in_different_structures_use_the_smallest_reduction():
+    """Merged across parents, the sub job gets the least favourable facility
+    bonus of its requesters, so no parent's share is under-bought."""
+    rigged = _profile(rig_group="Advanced Components")
+    subs = _structure_subs([rigged, None], parents=2, entry={**_COMPONENT_ENTRY, "quantity": 500})
+    (sub,) = subs
+    assert sub.overview_row["quantity_needed"] == 1000
+    assert sub.overview_row["sub_batch_materials"] == {34: 180}
+
+
+def test_reduced_batch_quantity_matches_the_producers_rounding_with_facility_bonuses():
+    from eve_online_industry_tracker.application.industry.service import IndustryService as S
+    from eve_online_industry_tracker.infrastructure.sde.blueprints import reduced_batch_quantity
+
+    for base in (1, 2, 5, 33, 1000):
+        for runs in (1, 3, 10, 100, 1000):
+            for me in (0, 5, 10):
+                for structure, rig in ((0.0, 0.0), (0.01, 0.0), (0.01, 0.024), (0.0, 0.042)):
+                    reduction = S._combine_reductions([me / 100.0, structure, rig])
+                    expected = S._round_material_quantity(
+                        float(base * runs) * max(0.0, 1.0 - reduction), minimum_quantity=runs)
+                    assert reduced_batch_quantity(base, runs, reduction) == expected, (
+                        base, runs, me, structure, rig)
+
+
+def test_an_all_group_rig_still_applies_when_the_component_group_is_unknown():
+    """An "All" rig covers every group, so it is certain; a group-specific one
+    next to it is not applied."""
+    profile = _profile(rig_group="All")
+    profile["structure_rigs"].append({"type_id": 2, "effects": [
+        {"activity": "manufacturing", "metric": "material", "group": "Advanced Components",
+         "value": 0.024}]})
+    entry = {"type_id": 54321, "type_name": "Widget", "quantity": 1000}
+    (sub,) = _structure_subs(profile, entry=entry)
+    # 200 x 0.9 x 0.99 x 0.976 = 173.9 -> 174: the All rig only, not both rigs (169.8 -> 170).
+    assert sub.overview_row["sub_batch_materials"] == {34: 174}
+    assert sub.overview_row["rig_applicability"] == "unknown"

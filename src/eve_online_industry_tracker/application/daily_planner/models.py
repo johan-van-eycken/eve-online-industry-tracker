@@ -100,8 +100,10 @@ class AssignedAction:
     shopping_category: str | None = None  # for buy_materials rows
     # manufacture: {material type_id: units for the whole batch} from the
     # producer (runs and ME/structure already applied). sub_manufacture: the
-    # same shape from ChainPlanner, at the owned BPO's ME. None = unknown, and
-    # the shopping list falls back to SDE per-run quantities x runs.
+    # same shape from ChainPlanner, at the owned BPO's ME in the parent's
+    # structure (structure bonus, plus a rig bonus only where the rig covers
+    # the component's group). None = unknown, and the shopping list falls back
+    # to SDE per-run quantities x runs.
     materials: dict[int, int] | None = None
 
 

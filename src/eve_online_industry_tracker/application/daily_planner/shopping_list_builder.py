@@ -269,7 +269,9 @@ class ShoppingListBuilder:
         An action carrying a batch-materials mapping uses it as-is. For
         manufacture that is the producer's batch (per-run x runs after
         ME/structure reduction). For sub_manufacture it is ChainPlanner's
-        batch at the owned BPO's ME. Otherwise (no mapping) the SDE per-run
+        batch at the owned BPO's ME plus the parent structure's material
+        bonus (and the rig bonus where the rig covers the component's own
+        group). Otherwise (no mapping) the SDE per-run
         quantities x runs are used, which carry no ME/structure reduction.
         """
         mats, per_run_output = self._get_materials_and_output_for_action(

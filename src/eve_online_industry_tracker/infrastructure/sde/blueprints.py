@@ -421,11 +421,24 @@ def me_adjusted_batch_quantity(base_qty_per_run: int, runs: int, me: int) -> int
 
     0 when base_qty_per_run or runs is not positive.
     """
+    return reduced_batch_quantity(base_qty_per_run, runs, _me_reduction(me))
+
+
+def reduced_batch_quantity(base_qty_per_run: int, runs: int, material_reduction: float) -> int:
+    """me_adjusted_batch_quantity for an already-combined material reduction.
+
+    `material_reduction` is the producer's combined fraction, i.e.
+    IndustryService._combine_reductions([me / 100, structure, rig, ...]) --
+    the caller combines, so the factors and their order stay the producer's.
+    Same rounding as the producer's _round_material_quantity with a per-run
+    floor: max(runs, ceil(base_qty_per_run * runs * (1 - reduction))).
+    0 when base_qty_per_run or runs is not positive.
+    """
     base = int(base_qty_per_run)
     runs = int(runs)
     if base <= 0 or runs <= 0:
         return 0
-    raw = float(base * runs) * max(0.0, 1.0 - _me_reduction(me))
+    raw = float(base * runs) * max(0.0, 1.0 - float(material_reduction))
     if raw <= 0:
         return 0
     return max(runs, int(math.ceil(raw)))

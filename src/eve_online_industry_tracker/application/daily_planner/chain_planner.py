@@ -113,6 +113,97 @@ def build_invention_source_index(
     return index
 
 
+_FACILITY_KEYS = ("structure_material_reduction", "rig_material_reduction", "rig_applicability")
+
+
+def _facility_reduction(request: dict[str, Any]) -> float:
+    """Combined structure + rig material fraction of one sub-manufacture request."""
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    return IndustryService._combine_reductions([
+        request.get("structure_material_reduction") or 0.0,
+        request.get("rig_material_reduction") or 0.0,
+    ])
+
+
+def _sub_job_facility_reductions(
+    profile: Any, component_entry: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Material bonuses a sub job gets in its parent's structure (ruling F-Q2).
+
+    `profile` is the parent row's manufacturing_job.industry_profile (the
+    producer's selected profile payload); `component_entry` is the parent's
+    manufacturing_job.materials entry for the component, which carries the
+    component's SDE group/category names.
+
+    Reuses the producer's statics (IndustryService), so the figures are the
+    ones it would compute for this job:
+      - structure: _profile_base_reduction(..., metric="material").
+      - rig: _profile_rig_reduction(..., manufacturing_group=<component's
+        group>), but only when a per-effect rig entry explicitly covers that
+        group (or "All"). EVE rigs are category-specific, and the producer's
+        own helper would over-apply here in two ways: with no group it
+        accepts every rig, and with no matching effect it falls back to the
+        profile's aggregate structure_rig_material_bonus, which names no group.
+
+    rig_applicability: "applies", "not_covered" (rigs exist, none for this
+    group), "no_rigs", "no_profile", or "unknown" (the component's group
+    cannot be inferred, or only the aggregate bonus exists). Unknown applies
+    no group-specific rig bonus (only an "All" rig, which covers any group):
+    an over-buy is recoverable, an under-buy stalls the job.
+    """
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    out = {"structure_material_reduction": 0.0, "rig_material_reduction": 0.0,
+           "rig_applicability": "no_profile"}
+    if not isinstance(profile, dict):
+        return out
+    out["structure_material_reduction"] = IndustryService._profile_base_reduction(
+        profile_payload=profile, activity="manufacturing", metric="material"
+    )
+
+    valid_activities = set(IndustryService._ACTIVITY_EFFECT_ALIASES["manufacturing"])
+    material_effects = [
+        effect
+        for rig in (profile.get("structure_rigs") or []) if isinstance(rig, dict)
+        for effect in (rig.get("effects") or []) if isinstance(effect, dict)
+        if str(effect.get("metric") or "") == "material"
+        and str(effect.get("activity") or "") in valid_activities
+        and IndustryService._normalize_fraction(effect.get("value")) > 0.0
+    ]
+    if not material_effects:
+        aggregate = IndustryService._normalize_fraction(profile.get("structure_rig_material_bonus"))
+        out["rig_applicability"] = "unknown" if aggregate > 0.0 else "no_rigs"
+        return out
+
+    # The uncached variant: the producer's cache is keyed by group/category/
+    # meta-group ids, which a material entry may lack, so a cached answer for
+    # another type could be returned.
+    group = (
+        IndustryService._infer_manufacturing_group_uncached(component_entry)
+        if isinstance(component_entry, dict) else None
+    )
+    if group is None:
+        # Only a rig for every group ("All") is certain to cover it. "" as the
+        # group makes the producer's helper skip every group-specific effect.
+        out["rig_applicability"] = "unknown"
+        if any(str(e.get("group") or "All") == "All" for e in material_effects):
+            out["rig_material_reduction"] = IndustryService._profile_rig_reduction(
+                profile_payload=profile, activity="manufacturing", metric="material",
+                manufacturing_group="",
+            )
+        return out
+    if not any(str(e.get("group") or "All") in {"All", group} for e in material_effects):
+        out["rig_applicability"] = "not_covered"
+        return out
+    out["rig_material_reduction"] = IndustryService._profile_rig_reduction(
+        profile_payload=profile, activity="manufacturing", metric="material",
+        manufacturing_group=group,
+    )
+    out["rig_applicability"] = "applies"
+    return out
+
+
 class ChainPlanner:
     """Phase 5: resolve sub-component chain for each build decision.
 
@@ -223,11 +314,28 @@ class ChainPlanner:
                     })
                     merged["quantity"] += request["quantity"]
                     merged["requested_by_type_ids"].append(int(decision.type_id))
+                    # One sub job serves every requester. If their structures
+                    # differ, take the smallest facility bonus so no parent's
+                    # share is under-bought.
+                    if _facility_reduction(request) < _facility_reduction(merged):
+                        merged.update({k: request[k] for k in _FACILITY_KEYS})
 
             except (TypeError, ValueError):
                 # Per-item isolation for malformed SDE / market values (int()
                 # and float() conversions); anything else is a bug and aborts.
                 logger.exception("ChainPlanner: error planning chain for type_id=%s", decision.type_id)
+
+        unknown_rig = sorted(
+            t for t, r in sub_requests.items() if r.get("rig_applicability") == "unknown"
+        )
+        if unknown_rig:
+            logger.warning(
+                "ChainPlanner: rig applicability unknown for sub-manufactured type_ids=%s "
+                "(no manufacturing group for the component, or only an aggregate rig "
+                "bonus on the profile); applying the structure bonus only, so their "
+                "input quantities are an upper bound",
+                unknown_rig,
+            )
 
         for request in sub_requests.values():
             try:
@@ -433,6 +541,10 @@ class ChainPlanner:
         under-built the component by the run count. Without the producer's
         figures there is no correct amount, so nothing is requested and the
         parent buys the component (logged).
+
+        Each request also carries the owned BPO's ME and the material bonuses
+        the sub job gets in this parent's structure
+        (_sub_job_facility_reductions).
         """
         batch_materials = orow.get_batch_materials(decision.overview_row)
         if batch_materials is None:
@@ -444,11 +556,16 @@ class ChainPlanner:
             )
             return []
 
-        names = {
-            int(e.get("type_id") or 0): e.get("type_name")
-            for e in (orow.get_manufacturing_job(decision.overview_row).get("materials") or {}).values()
+        manufacturing_job = orow.get_manufacturing_job(decision.overview_row)
+        entries = {
+            int(e.get("type_id") or 0): e
+            for e in (manufacturing_job.get("materials") or {}).values()
             if isinstance(e, dict)
         }
+        names = {t: e.get("type_name") for t, e in entries.items()}
+        # The sub job runs in the parent's structure (ruling F-Q2), so its
+        # facility bonuses come from the parent's industry profile.
+        profile = manufacturing_job.get("industry_profile")
         requests: list[dict[str, Any]] = []
         for mat_type_id, quantity in batch_materials.items():
             # mat_type_id is a product; BPO ownership is keyed by blueprint.
@@ -466,6 +583,7 @@ class ChainPlanner:
                     bpo_assets_by_type_id[mat_blueprint_type_id][0], "material"
                 ),
                 "quantity": quantity,
+                **_sub_job_facility_reductions(profile, entries.get(mat_type_id)),
             })
         return requests
 
@@ -509,10 +627,14 @@ class ChainPlanner:
         batch = self._sub_batch(
             product_type_id=mat_type_id, blueprint_type_id=mat_blueprint_type_id,
             qty_to_build=qty_to_build, me=int(me), phase1_data=phase1_data,
+            facility_reductions=(
+                float(request.get("structure_material_reduction") or 0.0),
+                float(request.get("rig_material_reduction") or 0.0),
+            ),
         )
         if batch is None:
             return None
-        runs, batch_materials = batch
+        runs, batch_materials, material_reduction = batch
 
         sub_cost = self._price_materials(batch_materials, market_depth_cache)
         market_cost = self._estimate_market_cost(mat_type_id, qty_to_build, market_depth_cache)
@@ -545,6 +667,9 @@ class ChainPlanner:
                 "quantity_needed": qty_to_build,
                 "sub_runs": runs,
                 "sub_batch_materials": batch_materials,
+                # Combined ME + structure + rig fraction the batch was cut by.
+                "sub_material_reduction": material_reduction,
+                "rig_applicability": request.get("rig_applicability", "no_profile"),
                 "requested_by_type_ids": list(request["requested_by_type_ids"]),
                 "sub_manufacture_cost": sub_cost,
                 "market_buy_cost": market_cost,
@@ -559,18 +684,29 @@ class ChainPlanner:
         qty_to_build: int,
         me: int,
         phase1_data: dict[str, Any],
-    ) -> tuple[int, dict[int, int]] | None:
-        """(runs, {material type_id: units for the whole sub job}) at the owned BPO's ME.
+        facility_reductions: tuple[float, ...] = (),
+    ) -> tuple[int, dict[int, int], float] | None:
+        """(runs, {material type_id: units for the whole sub job}, combined
+        material reduction) at the owned BPO's ME in the parent's structure.
 
-        Base quantities are the SDE's per-run figures, reduced by the BPO's ME
-        with the producer's batch ceiling (blueprints.me_adjusted_batch_quantity).
-        Structure and rig bonuses are not applied: the planner does not know
-        where the sub job will run, so these quantities are an upper bound,
-        never an under-buy. None (with a WARNING) when the blueprint cannot
-        say how to build the component.
+        Base quantities are the SDE's per-run figures. The reduction is the
+        producer's own combination, IndustryService._combine_reductions(
+        [me / 100, structure, rig]), applied with its batch ceiling and
+        per-run floor (blueprints.reduced_batch_quantity). `facility_reductions`
+        are the parent structure's material bonus and the rig bonus for the
+        component's own group (see _sub_job_facility_reductions); a rig whose
+        coverage is unknown contributes 0, so the result is then an upper
+        bound, never an under-buy. Implant material bonuses are not applied.
+        None (with a WARNING) when the blueprint cannot say how to build the
+        component.
         """
+        from eve_online_industry_tracker.application.industry.service import IndustryService
         from eve_online_industry_tracker.infrastructure.sde.blueprints import (
-            me_adjusted_batch_quantity,
+            reduced_batch_quantity,
+        )
+
+        material_reduction = IndustryService._combine_reductions(
+            [float(me) / 100.0, *facility_reductions]
         )
 
         bp_data = (phase1_data.get("blueprint_data") or {}).get(blueprint_type_id)
@@ -603,8 +739,8 @@ class ChainPlanner:
             base_qty = int(mat.get("quantity") or 0)
             if mat_type_id <= 0 or base_qty <= 0:
                 continue
-            batch[mat_type_id] = batch.get(mat_type_id, 0) + me_adjusted_batch_quantity(
-                base_qty, runs, me
+            batch[mat_type_id] = batch.get(mat_type_id, 0) + reduced_batch_quantity(
+                base_qty, runs, material_reduction
             )
         if not batch:
             # A job with no inputs would price at 0 ISK and always beat the
@@ -614,7 +750,7 @@ class ChainPlanner:
                 blueprint_type_id, product_type_id,
             )
             return None
-        return runs, batch
+        return runs, batch, material_reduction
 
     def _price_materials(
         self, materials: dict[int, int], market_depth_cache: dict[int, Any]
