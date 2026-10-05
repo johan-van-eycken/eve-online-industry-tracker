@@ -49,3 +49,15 @@ def test_the_pending_count_ignores_legacy_and_corp_level_rows():
                {"action_type": "buy_materials", "status": "pending"},
                {"action_type": "invent", "status": "done"}]
     assert pending_character_action_count(actions) == 1
+
+
+def test_a_missing_action_type_is_logged_as_missing_not_as_an_empty_string(monkeypatch, caplog):
+    monkeypatch.setattr(tab_actions, "_WARNED_UNKNOWN_ACTION_TYPES", set())
+    actions = [{"id": 1, "status": "pending"},
+               {"id": 2, "action_type": None, "status": "pending"},
+               {"id": 3, "action_type": "relist_order", "status": "pending"}]
+    with caplog.at_level(logging.WARNING):
+        _character_level_actions(actions)
+    (message,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "<missing>, relist_order" in message
+    assert "(, " not in message and ", ," not in message

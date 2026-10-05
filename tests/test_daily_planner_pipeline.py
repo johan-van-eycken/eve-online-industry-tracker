@@ -1,6 +1,7 @@
 """Tests for PipelineAnalyzer (Phase 2)."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from types import SimpleNamespace
@@ -410,3 +411,26 @@ def test_a_failed_sell_history_is_the_recorded_reason_when_nothing_else_is_known
     assert state.velocity_unknown_reason == (
         "sell history query failed (OperationalError) and no days-of-supply estimate"
     )
+
+
+def test_days_of_supply_used_while_sell_history_was_unavailable_logs_a_warning(caplog):
+    with caplog.at_level(logging.WARNING):
+        state = PipelineAnalyzer().analyze(
+            input_rows=[_input_row(type_id=1, days_of_supply=5.0)], industry_jobs=[],
+            corp_assets=[], market_depth_cache={}, weights={}, sell_velocities={},
+            sell_velocity_unavailable={1: "corporation id unavailable"},
+            meta_resolver=_NoBlueprints(),
+        )[0]
+    assert abs(state.effective_velocity - 0.2) < 1e-12
+    assert state.velocity_unknown_reason is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "type_id=1" in m and "corporation id unavailable" in m and "days of supply" in m
+        for m in warnings
+    ), warnings
+
+
+def test_days_of_supply_used_when_sell_history_was_read_logs_no_warning(caplog):
+    with caplog.at_level(logging.WARNING):
+        _analyze_one(_input_row(type_id=1, days_of_supply=5.0), {})
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]

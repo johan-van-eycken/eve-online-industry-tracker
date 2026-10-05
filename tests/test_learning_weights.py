@@ -41,3 +41,10 @@ def test_a_non_numeric_stored_weight_is_neutral_and_warned(stored, caplog):
         "cost_multiplier" in r.getMessage() and "type_id=7" in r.getMessage()
         for r in caplog.records if r.levelno == logging.WARNING
     )
+
+
+def test_no_weights_row_reads_as_neutral_without_logging(caplog):
+    """No row is the normal case for a new item. Only a corrupt stored value warns."""
+    with caplog.at_level(logging.WARNING):
+        assert read_weight(None, "accuracy_ema") == 1.0
+    assert caplog.records == []

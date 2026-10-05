@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from eve_online_industry_tracker.application.daily_planner.fixture_export import (
+    _PUBLIC_STRING_KEYS,
     IDENTITY_KEY_SUBSTRINGS,
     sanitise_overview_rows,
 )
@@ -100,10 +101,29 @@ def test_ship_name_is_redacted_when_nested_under_blueprint_copy():
     assert "Some Pilot" not in blueprint_copy["ship_name"]
 
 
+def _string_values(node, key=""):
+    """Yield (key, string) for every string value in a sanitised structure."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _string_values(v, k)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _string_values(item, key)
+    elif isinstance(node, str):
+        yield key, node
+
+
 def test_non_allow_listed_string_value_is_redacted():
-    row = sanitise_overview_rows(RAW)[0]
-    assert row["market_price_fetched_at"] == REDACTED
-    assert row["manufacturing_job"]["industry_profile"]["profile_name"] == REDACTED
+    """Default-deny: EVERY string value is redacted unless its key is public,
+    or it is a blueprint_source_kind with an enum value."""
+    seen = list(_string_values(sanitise_overview_rows(RAW)))
+    assert len(seen) >= 5, "the property would be vacuous on so few strings"
+    for key, value in seen:
+        if key in _PUBLIC_STRING_KEYS:
+            continue
+        if key == "blueprint_source_kind" and value in BLUEPRINT_SOURCE_KINDS:
+            continue
+        assert value == REDACTED, f"{key!r} leaked {value!r}"
 
 
 def test_timestamp_string_is_redacted():
@@ -165,3 +185,19 @@ def test_every_literal_source_kind_the_producer_assigns_is_allow_listed():
     }
     assert written, "scan found no blueprint_source_kind assignments"
     assert written <= BLUEPRINT_SOURCE_KINDS, written - BLUEPRINT_SOURCE_KINDS
+
+
+@pytest.mark.parametrize("kind", sorted(BLUEPRINT_SOURCE_KINDS))
+def test_a_source_kind_under_any_other_key_is_redacted(kind):
+    """The enum is allow-listed per KEY. The same value elsewhere is not public."""
+    (row,) = sanitise_overview_rows([{
+        "type_id": 1,
+        "provenance_note": kind,
+        "nested": {"source": kind},
+        "entries": [{"origin": kind}, {"blueprint_source_kind": kind}],
+    }])
+    assert row["provenance_note"] == REDACTED
+    assert row["nested"]["source"] == REDACTED
+    assert row["entries"][0]["origin"] == REDACTED
+    # control: under the allow-listed key, in the same list, it survives
+    assert row["entries"][1]["blueprint_source_kind"] == kind

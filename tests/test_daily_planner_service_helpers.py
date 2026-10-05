@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.service import (
@@ -209,3 +211,17 @@ def test_wallet_balance_is_none_when_division_one_balance_is_unparseable():
 
 def test_wallet_balance_zero_is_still_a_real_zero():
     assert _select_division_one_balance([{"division": 1, "balance": "0"}]) == 0.0
+
+
+@pytest.mark.parametrize("balance", ["nan", "inf", "-inf", float("nan"), float("inf")])
+def test_a_non_finite_division_one_balance_makes_the_wallet_unknown(balance):
+    corps = [{"wallets": [{"division": 1, "balance": balance}]}]
+    assert _wallet_service(lambda: corps)._get_corp_wallet() is None
+
+
+def test_a_failed_corporation_id_lookup_names_that_reason_for_every_type():
+    def boom():
+        raise ValueError("no corporations cached")
+    velocities, unavailable = _wallet_service(boom)._get_sell_velocities([10, 20])
+    assert velocities == {}
+    assert unavailable == {10: "corporation id unavailable", 20: "corporation id unavailable"}

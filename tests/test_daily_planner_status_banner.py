@@ -118,3 +118,30 @@ def test_a_contract_violation_inside_a_per_item_block_still_reaches_the_banner()
     assert "'manufacturing_job.runs'" in status["error"]
     assert "type_id=12345" in status["error"]
     assert "refresh the product overview" in status["error"]
+
+
+def test_a_second_compute_failing_at_a_later_step_names_that_step():
+    """_failed_step is reset per compute. Without the reset, the first failure's
+    step would stick (innermost-first wins) and mislabel the second banner."""
+    svc = _bare_service()
+    ok_phase1 = {
+        "overview_rows": [{"type_id": 12345}],
+        "input_rows": [SimpleNamespace(type_id=12345)],
+        "weights": {}, "market_depth_cache": {}, "margin_correlations": {},
+        "trit_trend_7d": None,
+    }
+
+    def boom(*_a, **_k):
+        raise RuntimeError("broke")
+
+    svc._phase_1_collect = boom
+    svc._run_compute()
+    first = svc.get_compute_status()["error"]
+    assert "collecting data (phase 1)" in first
+
+    svc._phase_1_collect = lambda: ok_phase1
+    svc._phase_2_pipeline = boom
+    svc._run_compute()
+    second = svc.get_compute_status()["error"]
+    assert "analysing pipelines (phase 2)" in second
+    assert "collecting data" not in second

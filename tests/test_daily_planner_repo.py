@@ -758,3 +758,45 @@ def test_ensure_app_schema_adds_the_skip_reason_column_to_a_legacy_table() -> No
 
     columns = {row[1] for row in db.query("PRAGMA table_info(build_plan_item)")}
     assert "bpo_analysis_skip_reason" in columns
+
+
+def test_a_decision_without_a_skip_reason_stores_null(app_session, session_provider):
+    from sqlalchemy import text
+
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    decision = _decision()
+    assert decision.bpo_analysis_skip_reason is None
+    _service(session_provider)._persist_plan_items(
+        plan_id=1, decisions=[decision], market_depth_cache={}
+    )
+    assert app_session.query(BuildPlanItemModel).one().bpo_analysis_skip_reason is None
+    stored = app_session.execute(
+        text("SELECT bpo_analysis_skip_reason FROM build_plan_item")
+    ).scalar_one()
+    assert stored is None  # SQL NULL, not the string 'None' or ''
+
+
+def test_a_legacy_row_reads_back_with_no_skip_reason_after_the_column_is_added() -> None:
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    BaseApp.metadata.create_all(engine)
+    raw = engine.raw_connection().driver_connection
+    # Make the table look like it did before the column existed, with a row in it.
+    raw.execute("ALTER TABLE build_plan_item DROP COLUMN bpo_analysis_skip_reason")
+    raw.execute(
+        "INSERT INTO build_plan_item (plan_id, type_id, decision) VALUES (1, 590, 'build')"
+    )
+    raw.commit()
+    db = _FakeDb(raw)
+    assert "bpo_analysis_skip_reason" not in {
+        r[1] for r in db.query("PRAGMA table_info(build_plan_item)")
+    }
+
+    ensure_app_schema(db)
+
+    with sessionmaker(bind=engine, future=True)() as session:
+        item = session.query(BuildPlanItemModel).one()
+        assert item.type_id == 590
+        assert item.bpo_analysis_skip_reason is None

@@ -49,3 +49,9 @@ def test_a_wallet_covering_the_list_is_not_short():
     assert wallet_is_short(1000.0, 400.0) is False
     assert remaining_after_shopping(1000.0, 400.0) == 600.0
     assert wallet_is_short(1000.0, 1000.01) is True
+
+
+def test_a_non_finite_wallet_snapshot_is_unknown_not_a_number():
+    for raw in (float("nan"), float("inf"), float("-inf"), "nan", "inf"):
+        assert wallet_snapshot({"corp_wallet_snapshot": raw}) is None, raw
+    assert _fmt_isk(wallet_snapshot({"corp_wallet_snapshot": float("nan")})) == "—"
