@@ -109,15 +109,42 @@ def test_broad_excepts_are_only_where_deliberately_allowed():
     assert not offenders, f"unexpected broad except handlers (lines, allowed): {offenders}"
 
 
+def _logs_traceback(handler: ast.ExceptHandler) -> bool:
+    """True when the handler body calls logger.exception(...) or logger.<x>(..., exc_info=True)."""
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id == "logger"):
+            continue
+        if func.attr == "exception":
+            return True
+        if any(kw.arg == "exc_info" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+               for kw in node.keywords):
+            return True
+    return False
+
+
 def test_every_allowed_broad_except_logs_with_a_traceback():
     for name, path in _module_files():
         if ALLOWED_BROAD_EXCEPT.get(name, 0) == 0:
             continue
         for handler in _broad_handlers(_parse(path)):
-            body = ast.dump(ast.Module(body=handler.body, type_ignores=[]))
-            assert "logger" in body and ("exception" in body or "exc_info" in body), (
+            assert _logs_traceback(handler), (
                 f"{name}:{handler.lineno}: a broad except must log the traceback"
             )
+
+
+def test_the_traceback_check_needs_a_real_logging_call():
+    def handler(src):
+        return _broad_handlers(ast.parse(src))[0]
+
+    assert _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.exception('boom')\n"))
+    assert _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.error('b', exc_info=True)\n"))
+    assert not _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    s = 'logger.exception'\n"))
+    assert not _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.error('exc_info')\n"))
+    assert not _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.error('b', exc_info=False)\n"))
 
 
 def test_no_phantom_overview_row_keys_remain():
