@@ -15,11 +15,30 @@ from __future__ import annotations
 
 from typing import Any
 
-_SHIP_GROUPS = frozenset({
-    "Basic Small Ships", "Advanced Small Ships", "Basic Medium Ships",
-    "Advanced Medium Ships", "Basic Large Ships", "Advanced Large Ships", "Capital Ships",
-})
-_MODULE_CATEGORIES = frozenset({"module", "subsystem"})
+def _category_is(*names: str) -> Any:
+    allowed = frozenset(names)
+    return lambda category: category in allowed
+
+
+# The category each inferred manufacturing group requires before it is
+# trusted. The producer infers most groups from name tokens ("missile",
+# "drone", "structure", "component", ship words) and files anything else
+# under "Modules", so e.g. "Missile Launcher Heavy" (a Module) reads as Ammo &
+# Charges and "Infrastructure Upgrades" as Structures. A group whose category
+# does not match is a guess and counts as unknown (only "All" rigs apply).
+_EXPECTED_CATEGORY: dict[str, Any] = {
+    "Ammo & Charges": _category_is("charge"),
+    "Drones": _category_is("drone"),
+    "Structures": lambda category: category.startswith("structure"),
+    "Advanced Components": _category_is("commodity"),
+    "Capital Components": _category_is("commodity"),
+    "Advanced Capital Components": _category_is("commodity"),
+    "Modules": _category_is("module", "subsystem"),
+    **{ship_group: _category_is("ship") for ship_group in (
+        "Basic Small Ships", "Advanced Small Ships", "Basic Medium Ships",
+        "Advanced Medium Ships", "Basic Large Ships", "Advanced Large Ships", "Capital Ships",
+    )},
+}
 
 FACILITY_KEYS = ("structure_material_reduction", "rig_material_reduction", "rig_applicability")
 
@@ -47,11 +66,13 @@ def component_manufacturing_group(entry: Any) -> str | None:
     """The producer's manufacturing group for a component, or None when unsure.
 
     IndustryService._infer_manufacturing_group_uncached, minus its guesses:
-    - "Modules" is its catch-all for any group name it cannot classify
-      (R.A.M.s, Fuel Blocks, ...); accepted only for the Module or Subsystem
-      category.
-    - ship groups are matched by name tokens ("industrial", ...); accepted
-      only for the Ship category.
+    an inferred group is accepted only when the component's category is the
+    one that group requires (_EXPECTED_CATEGORY). "Modules" is the
+    producer's catch-all for any group name it cannot classify (R.A.M.s,
+    Fuel Blocks, ...); the other groups come from name tokens that also hit
+    modules ("Missile Launcher Heavy", "Drone Damage Modules", "Smart Bomb")
+    or unrelated groups ("Infrastructure Upgrades"). A group not in the
+    table is not trusted either.
     The uncached variant is used because the producer's cache is keyed by
     group/category/meta-group ids, which a material entry may lack.
     """
@@ -59,9 +80,8 @@ def component_manufacturing_group(entry: Any) -> str | None:
         return None
     group = _producer()._infer_manufacturing_group_uncached(entry)
     category = str(entry.get("category_name") or "").strip().lower()
-    if group == "Modules" and category not in _MODULE_CATEGORIES:
-        return None
-    if group in _SHIP_GROUPS and category != "ship":
+    accepts = _EXPECTED_CATEGORY.get(group) if group is not None else None
+    if accepts is None or not accepts(category):
         return None
     return group
 

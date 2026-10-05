@@ -990,3 +990,60 @@ def test_the_adapter_matches_the_producer_statics():
     assert facility_bonus.component_manufacturing_group(_COMPONENT_ENTRY) == (
         S._infer_manufacturing_group_uncached(_COMPONENT_ENTRY))
 
+
+
+# --- fix round 2 ---------------------------------------------------------------
+
+def _entry(group_id, group_name, category_id, category_name):
+    return {"type_id": 54321, "type_name": "Widget", "quantity": 1000, "group_id": group_id,
+            "group_name": group_name, "category_id": category_id, "category_name": category_name}
+
+
+def test_an_ammo_rig_does_not_reduce_a_missile_launcher_module():
+    """SDE group 508 "Missile Launcher Heavy" is a Module (category 7); the
+    producer's "missile" token files it under Ammo & Charges."""
+    (sub,) = _structure_subs(_profile(rig_group="Ammo & Charges"),
+                             entry=_entry(508, "Missile Launcher Heavy", 7, "Module"))
+    assert sub.overview_row["sub_batch_materials"] == {34: 179}
+    assert sub.overview_row["rig_applicability"] == "unknown"
+
+
+def test_a_drone_rig_reduces_a_real_drone():
+    """SDE group 100 "Combat Drone" (category 18 "Drone")."""
+    (sub,) = _structure_subs(_profile(rig_group="Drones"),
+                             entry=_entry(100, "Combat Drone", 18, "Drone"))
+    assert sub.overview_row["sub_batch_materials"] == {34: 174}
+    assert sub.overview_row["rig_applicability"] == "applies"
+
+
+def test_a_drone_rig_does_not_reduce_a_drone_upgrade_module():
+    """SDE group 645 "Drone Damage Modules" is a Module (category 7)."""
+    (sub,) = _structure_subs(_profile(rig_group="Drones"),
+                             entry=_entry(645, "Drone Damage Modules", 7, "Module"))
+    assert sub.overview_row["sub_batch_materials"] == {34: 179}
+
+
+def test_name_token_groups_need_their_category():
+    from eve_online_industry_tracker.application.daily_planner import facility_bonus as fb
+
+    group = fb.component_manufacturing_group
+    assert group({"group_name": "Smart Bomb", "category_name": "Module"}) is None
+    assert group({"group_name": "Infrastructure Upgrades", "category_name": "Infrastructure Upgrades"}) is None
+    assert group({"group_name": "Citadel", "category_name": "Structure"}) == "Structures"
+    assert group({"group_name": "Missile Guidance Enhancer", "category_name": "Module"}) is None
+    assert group({"group_name": "Advanced Hybrid Charge", "category_name": "Charge"}) == "Ammo & Charges"
+    assert group({"group_name": "Construction Components", "category_name": "Commodity"}) == (
+        "Advanced Components")
+    # A hypothetical Module-category group whose name contains "component".
+    assert group({"group_name": "Component Analyzer", "category_name": "Module"}) is None
+    assert group({"group_name": "Capital Construction Components", "category_name": "Commodity"}) == (
+        "Capital Components")
+
+
+def test_an_unknown_me_bpo_beside_a_researched_one_means_buy(caplog):
+    """ME10 + unknown: the pilot may use the unknown one, which could be ME0."""
+    phase1 = _sub_phase1()
+    phase1["bpo_assets_by_type_id"] = {888: [_bpo(888, me=10, te=20), _bpo(888, me=None, te=0)]}
+    with caplog.at_level("WARNING"):
+        assert _subs(phase1) == []
+    assert any("unknown ME" in r.getMessage() for r in caplog.records)

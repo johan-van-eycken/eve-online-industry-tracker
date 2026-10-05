@@ -949,14 +949,24 @@ def _material_unit_prices(manufacturing_job: dict[str, Any]) -> dict[int, float]
 
 
 def _lowest_known_me(bpo_assets: list[Any]) -> int | None:
-    """The lowest known ME among the corp's BPOs of one blueprint, or None.
+    """The worst-case ME across the corp's BPOs of one blueprint, or None.
 
-    The pilot may run the job from any of them, so buying for the worst one
-    covers whichever is used. Unknown levels are ignored; None when none is
-    known.
+    The pilot may run the job from any of them, so the job is sized for the
+    worst one. An unknown level could be anything down to ME0:
+    - lowest known ME is 0: 0, the exact worst case (ME cannot go lower);
+    - any level unknown and the lowest known above 0: None (buy);
+    - otherwise the lowest known ME; None when none is known.
     """
-    known = [me for me in (_blueprint_efficiency(a, "material") for a in bpo_assets) if me is not None]
-    return min(known) if known else None
+    levels = [_blueprint_efficiency(a, "material") for a in bpo_assets]
+    known = [me for me in levels if me is not None]
+    if not known:
+        return None
+    lowest = min(known)
+    if lowest == 0:
+        return 0
+    if len(known) < len(levels):
+        return None
+    return lowest
 
 
 def _blueprint_efficiency(asset: Any, kind: str) -> int | None:
