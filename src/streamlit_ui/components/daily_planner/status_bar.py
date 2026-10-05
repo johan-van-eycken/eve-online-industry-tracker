@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -68,9 +69,11 @@ def wallet_snapshot(plan_meta: dict[str, Any]) -> float | None:
     if raw is None:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    # nan/inf are not balances; "unknown" is the honest reading.
+    return value if math.isfinite(value) else None
 
 
 def _fmt_age(hours: float) -> str:

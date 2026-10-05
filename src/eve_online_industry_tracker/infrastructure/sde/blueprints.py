@@ -334,8 +334,8 @@ def get_invention_source_blueprint_ids(
     invention products. `activities` is a JSON text column; SQLite's
     json_each expands the products list so this is a single query instead of
     loading and scanning every blueprint in Python. Ids that nothing invents
-    into are simply absent. First source seen wins when
-    several blueprints invent into the same one.
+    into are simply absent. The lowest source
+    blueprint id wins when several blueprints invent into the same one.
     """
     ids = sorted({int(i) for i in invented_blueprint_type_ids if i is not None})
     if not ids:

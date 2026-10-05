@@ -87,7 +87,7 @@ def _character_level_actions(actions: list[dict[str, Any]]) -> list[dict[str, An
         logger.warning(
             "Daily planner actions tab: not showing action type(s) %s "
             "(not produced by this planner version)",
-            ", ".join(sorted(unknown)),
+            ", ".join(sorted(t or "<missing>" for t in unknown)),
         )
         _WARNED_UNKNOWN_ACTION_TYPES.update(unknown)
     return [a for a in actions if str(a.get("action_type") or "") in rendered]
