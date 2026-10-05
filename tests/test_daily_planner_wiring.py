@@ -113,9 +113,11 @@ def test_phase_2_passes_input_rows_and_the_resolver(session_provider):
         "market_depth_cache": {},
         "weights": {},
         "sell_velocities": {},
+        "sell_velocity_unavailable": {1: "x"},
     })
 
     assert "input_rows" in captured, "analyze() must receive input_rows"
+    assert captured["sell_velocity_unavailable"] == {1: "x"}
     assert "overview_rows" not in captured, "the old kwarg must be gone"
     assert captured["meta_resolver"] is svc._meta_resolver
     assert all(isinstance(r, PlannerInputRow) for r in captured["input_rows"])

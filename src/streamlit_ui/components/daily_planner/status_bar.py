@@ -15,6 +15,24 @@ PLANNER_MAX_PLAN_AGE_HOURS: float = 36.0
 # Market intel refresh interval: green if fresher than this
 PLANNER_MARKET_REFRESH_INTERVAL_HOURS: float = 3.0
 
+#: Action types Tab 1 (tab_actions) renders, in workflow order. Defined here,
+#: not in tab_actions, because tab_actions imports this module.
+CHARACTER_ACTION_TYPES: tuple[str, ...] = (
+    "deliver", "invent", "copy", "me_research", "te_research", "sub_manufacture", "manufacture",
+)
+#: Corp-level action types: shown in Tab 2 (shopping), never in Tab 1.
+CORP_LEVEL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"})
+
+
+def pending_character_action_count(actions: list[dict[str, Any]]) -> int:
+    """Pending actions a pilot still has to do. Rows of a type this planner
+    no longer produces (e.g. a legacy relist_order) do not count."""
+    return sum(
+        1 for a in actions
+        if str(a.get("status") or "pending") == "pending"
+        and str(a.get("action_type") or "") in CHARACTER_ACTION_TYPES
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -343,11 +361,7 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     # 8. Recompute button (with confirmation when pending actions exist)
     # ------------------------------------------------------------------
     actions = (page_state.plan or {}).get("actions") or []
-    pending_char_actions = sum(
-        1 for a in actions
-        if str(a.get("status") or "pending") == "pending"
-        and str(a.get("action_type") or "") not in ("buy_materials", "buy_bpo")
-    )
+    pending_char_actions = pending_character_action_count(actions)
 
     stale = freshness_score is not None and freshness_score < 0.75
     button_type = "primary" if (plan_expired or stale or page_state.plan is None) else "secondary"

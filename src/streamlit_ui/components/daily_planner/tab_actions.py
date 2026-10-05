@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,17 +9,22 @@ import streamlit as st
 from streamlit_ui.api.daily_planner import mark_action_done, set_action_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.daily_planner.status_bar import (
+    CHARACTER_ACTION_TYPES,
+    CORP_LEVEL_ACTION_TYPES,
     PLANNER_MAX_PLAN_AGE_HOURS,
     _fmt_isk,
     _parse_dt,
 )
 
+logger = logging.getLogger(__name__)
+
+# Unknown action types already reported this process; Streamlit reruns the
+# page on every interaction, and one warning per type is enough.
+_WARNED_UNKNOWN_ACTION_TYPES: set[str] = set()
+
 # ---------------------------------------------------------------------------
 # Action type ordering and display config
 # ---------------------------------------------------------------------------
-
-# Action types that are corp-level and do NOT appear in Tab 1
-_CORP_LEVEL_ACTIONS = frozenset({"buy_materials", "buy_bpo"})
 
 # Ordered sections for Tab 1
 _ACTION_ORDER: list[tuple[str, str, str]] = [
@@ -69,10 +75,21 @@ def _character_level_actions(actions: list[dict[str, Any]]) -> list[dict[str, An
     """Actions shown in Tab 1: the types this tab renders.
 
     Corp-level buy actions belong to Tab 2. Any other type (e.g. one persisted
-    by an older planner version) is dropped here so it neither crashes the tab
-    nor keeps "Day complete" from ever showing as an invisible pending row.
+    by an older planner version) is dropped here, so it neither crashes the
+    tab nor keeps "Day complete" from showing. It is logged once per type, so
+    a type the planner starts producing without a section here is noticed.
     """
-    rendered = {action_type for action_type, _, _ in _ACTION_ORDER}
+    rendered = set(CHARACTER_ACTION_TYPES)
+    unknown = {
+        str(a.get("action_type") or "") for a in actions
+    } - rendered - CORP_LEVEL_ACTION_TYPES - _WARNED_UNKNOWN_ACTION_TYPES
+    if unknown:
+        logger.warning(
+            "Daily planner actions tab: not showing action type(s) %s "
+            "(not produced by this planner version)",
+            ", ".join(sorted(unknown)),
+        )
+        _WARNED_UNKNOWN_ACTION_TYPES.update(unknown)
     return [a for a in actions if str(a.get("action_type") or "") in rendered]
 
 

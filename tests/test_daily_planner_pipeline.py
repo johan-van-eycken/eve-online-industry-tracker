@@ -398,3 +398,15 @@ def test_a_tiny_measured_velocity_floored_to_0_01_is_still_a_signal():
     state = _analyze_one(_input_row(type_id=1), {1: 0.001})
     assert state.effective_velocity == 0.01
     assert state.velocity_unknown_reason is None
+
+
+def test_a_failed_sell_history_is_the_recorded_reason_when_nothing_else_is_known():
+    state = PipelineAnalyzer().analyze(
+        input_rows=[_input_row(type_id=1, days_of_supply=None)], industry_jobs=[],
+        corp_assets=[], market_depth_cache={}, weights={}, sell_velocities={},
+        sell_velocity_unavailable={1: "sell history query failed (OperationalError)"},
+        meta_resolver=_NoBlueprints(),
+    )[0]
+    assert state.velocity_unknown_reason == (
+        "sell history query failed (OperationalError) and no days-of-supply estimate"
+    )

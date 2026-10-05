@@ -165,6 +165,27 @@ def _no_sde_session() -> None:
     return None
 
 
+class _ComputeStep:
+    """Names the input or phase a compute failure came from, for the status banner.
+
+    __exit__ only records the label (innermost wins) and returns False, so the
+    exception propagates unchanged to _run_compute. There is no except clause,
+    which keeps the fail-loud guard's single allowed broad handler where it is.
+    """
+
+    def __init__(self, service: "DailyPlannerService", label: str) -> None:
+        self._service = service
+        self._label = label
+
+    def __enter__(self) -> "_ComputeStep":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is not None and self._service._failed_step is None:
+            self._service._failed_step = self._label
+        return False
+
+
 class DailyPlannerService:
     """Orchestrate plan computation (Phases 1–9) in a background thread."""
 
@@ -200,6 +221,7 @@ class DailyPlannerService:
         self._lock = threading.Lock()
         self._status: str = "idle"   # "idle" | "running" | "done" | "failed"
         self._error: str | None = None
+        self._failed_step: str | None = None
 
         # Sub-components
         self._feedback_processor = FeedbackProcessor(
@@ -433,9 +455,10 @@ class DailyPlannerService:
     def _run_compute(self) -> None:
         """Main compute pipeline — runs in background thread."""
         logger.info("DailyPlannerService: starting plan computation")
+        self._failed_step = None
         try:
-            # Phase 1 — Data collection + feedback processing
-            phase1_data = self._phase_1_collect()
+            with _ComputeStep(self, "collecting data (phase 1)"):
+                phase1_data = self._phase_1_collect()
 
             if not phase1_data["overview_rows"]:
                 logger.error(
@@ -450,33 +473,26 @@ class DailyPlannerService:
                     )
                 return
 
-            # Phase 2 — Pipeline state per item
-            pipeline_states = self._phase_2_pipeline(phase1_data)
-
-            # Phase 3 — Profitability scoring
-            scored_items = self._phase_3_score(pipeline_states, phase1_data)
-
-            # Phase 4 — Item decisions (Pass 1 — top-level only)
-            top_level_decisions = self._phase_4_decide(scored_items, pipeline_states, phase1_data)
-
-            # Phase 5 — Chain planning (Pass 2 — adds sub-components)
-            chain_plan = self._phase_5_chain(top_level_decisions, phase1_data)
-
-            # Phase 6 — Character assignment
-            assigned_actions = self._phase_6_assign(chain_plan, phase1_data)
-
-            # Phase 7 — Shopping list
-            shopping_items = self._phase_7_shopping(assigned_actions, phase1_data)
-
-            # Phase 8 — Action list
-            action_log_rows = self._phase_8_actions(assigned_actions, shopping_items, phase1_data, chain_plan)
-
-            # Phase 9 — Persistence
-            self._phase_9_persist(
-                phase1_data=phase1_data,
-                chain_plan=chain_plan,
-                action_log_rows=action_log_rows,
-            )
+            with _ComputeStep(self, "analysing pipelines (phase 2)"):
+                pipeline_states = self._phase_2_pipeline(phase1_data)
+            with _ComputeStep(self, "scoring profitability (phase 3)"):
+                scored_items = self._phase_3_score(pipeline_states, phase1_data)
+            with _ComputeStep(self, "deciding items (phase 4)"):
+                top_level_decisions = self._phase_4_decide(scored_items, pipeline_states, phase1_data)
+            with _ComputeStep(self, "planning chains (phase 5)"):
+                chain_plan = self._phase_5_chain(top_level_decisions, phase1_data)
+            with _ComputeStep(self, "assigning characters (phase 6)"):
+                assigned_actions = self._phase_6_assign(chain_plan, phase1_data)
+            with _ComputeStep(self, "building the shopping list (phase 7)"):
+                shopping_items = self._phase_7_shopping(assigned_actions, phase1_data)
+            with _ComputeStep(self, "building the action list (phase 8)"):
+                action_log_rows = self._phase_8_actions(assigned_actions, shopping_items, phase1_data, chain_plan)
+            with _ComputeStep(self, "saving the plan (phase 9)"):
+                self._phase_9_persist(
+                    phase1_data=phase1_data,
+                    chain_plan=chain_plan,
+                    action_log_rows=action_log_rows,
+                )
 
             with self._lock:
                 self._status = "done"
@@ -497,72 +513,80 @@ class DailyPlannerService:
                 self._status = "failed"
                 self._error = _contract_violation_message(exc)
         except Exception as exc:
-            logger.exception("DailyPlannerService: plan computation failed")
+            logger.exception(
+                "DailyPlannerService: plan computation failed while %s", self._failed_step or "?"
+            )
             with self._lock:
                 self._status = "failed"
-                self._error = str(exc)
+                self._error = (
+                    f"Plan computation failed while {self._failed_step}: {exc}"
+                    if self._failed_step else str(exc)
+                )
 
     def _phase_1_collect(self) -> dict[str, Any]:
         """Phase 1: collect all data needed for plan computation."""
         logger.info("DailyPlannerService: Phase 1 — data collection")
 
         # Feedback processing first (before new scoring begins)
-        feedback_count = self._feedback_processor.process_pending_feedback()
+        with _ComputeStep(self, "processing feedback on done actions"):
+            feedback_count = self._feedback_processor.process_pending_feedback()
         if feedback_count > 0:
             logger.info("DailyPlannerService: processed %d feedback actions", feedback_count)
 
-        # Corp wallet
-        corp_wallet = self._get_corp_wallet()
+        with _ComputeStep(self, "reading the corp wallet"):
+            corp_wallet = self._get_corp_wallet()
 
         # IndustryService overview rows, validated and cut to one row per
         # product (the producer emits one per blueprint variant). From here
         # on overview_rows holds only the kept rows, so every later phase and
         # every per-type query sees the same single row per type_id.
-        input_rows = self._build_input_rows(self._get_overview_rows())
+        with _ComputeStep(self, "reading the product overview"):
+            input_rows = self._build_input_rows(self._get_overview_rows())
         overview_rows = [r.raw for r in input_rows]
 
-        # Active industry jobs (corp + character)
-        industry_jobs = self._get_industry_jobs()
-
-        # Corp assets
-        corp_assets = self._get_corp_assets()
+        with _ComputeStep(self, "reading industry jobs"):
+            industry_jobs = self._get_industry_jobs()
+        with _ComputeStep(self, "reading corp assets"):
+            corp_assets = self._get_corp_assets()
         # Material stock (blueprints excluded), shared by chain planning and
         # the shopping list.
-        corp_material_stock = build_corp_stock_map(corp_assets, self._meta_resolver)
+        with _ComputeStep(self, "indexing corp material stock"):
+            corp_material_stock = build_corp_stock_map(corp_assets, self._meta_resolver)
+        with _ComputeStep(self, "reading corp market orders"):
+            corp_orders = self._get_corp_orders()
 
-        # Corp market orders
-        corp_orders = self._get_corp_orders()
-
-        # Learning weights
         type_ids = [r.type_id for r in input_rows]
-        weights = self._repo.get_weights(type_ids) if type_ids else {}
-
-        # Sell velocity per type_id
-        sell_velocities = self._get_sell_velocities(type_ids)
+        with _ComputeStep(self, "reading learning weights"):
+            weights = self._repo.get_weights(type_ids) if type_ids else {}
+        with _ComputeStep(self, "reading sell history"):
+            sell_velocities, sell_velocity_unavailable = self._get_sell_velocities(type_ids)
 
         # Market depth cache (from pre-populated tables written by MarketIntelligenceJob)
         hub = str(_adm(self._admin, "planner_market_hub", "jita"))
-        market_depth = self._repo.get_market_depth(type_ids, hub) if type_ids else {}
+        with _ComputeStep(self, "reading market depth"):
+            market_depth = self._repo.get_market_depth(type_ids, hub) if type_ids else {}
 
-        # Margin correlation cache
         margin_correlations = self._get_margin_correlations(type_ids)
 
-        # Invention success rates
         min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
-        invention_rates = self._repo.get_invention_success_rates(type_ids, min_attempts) if type_ids else {}
+        with _ComputeStep(self, "reading invention success rates"):
+            invention_rates = (
+                self._repo.get_invention_success_rates(type_ids, min_attempts) if type_ids else {}
+            )
 
         # Tritanium 7d price trend (for squeeze penalty gate)
         trit_trend_7d = self._get_trit_trend_7d()
 
-        # BPO and BPC asset indexes
-        bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
+        with _ComputeStep(self, "indexing corp blueprints"):
+            bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
 
         # Blueprint data (SDE) — loaded for chain planning. Owned BPOs are
         # included because sub-manufacture only ever builds from an owned BPO,
         # and those blueprints are usually not themselves overview rows.
-        blueprint_data = self._get_blueprint_data(
-            overview_rows, extra_blueprint_type_ids=bpo_assets_by_type_id.keys()
-        )
+        with _ComputeStep(self, "reading blueprint data from the SDE"):
+            blueprint_data = self._get_blueprint_data(
+                overview_rows, extra_blueprint_type_ids=bpo_assets_by_type_id.keys()
+            )
 
         return {
             "corp_wallet": corp_wallet,
@@ -574,6 +598,7 @@ class DailyPlannerService:
             "corp_orders": corp_orders,
             "weights": weights,
             "sell_velocities": sell_velocities,
+            "sell_velocity_unavailable": sell_velocity_unavailable,
             "market_depth_cache": market_depth,
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
@@ -610,6 +635,7 @@ class DailyPlannerService:
             market_depth_cache=phase1["market_depth_cache"],
             weights=phase1["weights"],
             sell_velocities=phase1["sell_velocities"],
+            sell_velocity_unavailable=phase1["sell_velocity_unavailable"],
             meta_resolver=self._meta_resolver,
         )
 
@@ -941,11 +967,13 @@ class DailyPlannerService:
         finally:
             session.close()
 
-    def _get_sell_velocities(self, type_ids: list[int]) -> dict[int, float]:
-        """Compute sell velocity per day for each type_id using SalesHistoryService.
+    def _get_sell_velocities(self, type_ids: list[int]) -> tuple[dict[int, float], dict[int, str]]:
+        """(units sold per day over 30 days, reason per type_id with no reading).
 
-        Type ids missing from the result have no known velocity; the analyzer
-        reads them as 0.0, but the reason is logged instead of hidden.
+        A type id in the second map has no sell-history reading: there is no
+        corporation to query for, or its query failed. That is not "sold
+        nothing". PipelineAnalyzer records the reason on the item when it has
+        no other velocity signal, instead of reading 0.0 as a measurement.
         """
         velocities: dict[int, float] = {}
         try:
@@ -953,11 +981,12 @@ class DailyPlannerService:
         except (KeyError, TypeError, ValueError):
             # Same failure set _get_corp_wallet tolerates from list_corporations.
             logger.exception("DailyPlannerService: failed to resolve the corporation id")
-            return velocities
+            return velocities, {t: "corporation id unavailable" for t in type_ids}
         if corp_id <= 0:
             logger.warning("DailyPlannerService: no corporation, so no sell velocities")
-            return velocities
+            return velocities, {t: "no corporation to read sell history for" for t in type_ids}
 
+        unavailable: dict[int, str] = {}
         for type_id in type_ids:
             try:
                 txs = self._sales_history.get_sold_history(
@@ -967,14 +996,15 @@ class DailyPlannerService:
                     days=30,
                 )
                 total_sold = sum(int(tx.get("quantity") or 0) for tx in txs)
-            except (SQLAlchemyError, TypeError, ValueError):
+            except (SQLAlchemyError, TypeError, ValueError) as exc:
                 logger.warning(
                     "DailyPlannerService: sell history unavailable for type_id=%s",
                     type_id, exc_info=True,
                 )
+                unavailable[type_id] = f"sell history query failed ({type(exc).__name__})"
                 continue
             velocities[type_id] = total_sold / 30.0
-        return velocities
+        return velocities, unavailable
 
     def _get_corp_id(self) -> int:
         """Corporation id of the first listed corporation, or 0 when there is none.

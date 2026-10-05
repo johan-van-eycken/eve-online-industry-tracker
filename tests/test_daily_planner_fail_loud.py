@@ -393,7 +393,7 @@ def test_corp_id_is_read_from_an_object_shaped_corporation_too():
 
 def test_no_corporation_means_no_sales_history_lookups():
     svc = _bare_service()  # sales_history_service has no get_sold_history at all
-    assert svc._get_sell_velocities([12345]) == {}
+    assert svc._get_sell_velocities([12345]) == ({}, {12345: "no corporation to read sell history for"})
 
 
 def test_an_industry_jobs_query_failure_fails_the_compute_not_frees_every_slot():
@@ -444,4 +444,33 @@ def test_a_failed_input_query_fails_the_compute_with_a_message(method):
     svc._run_compute()
     status = svc.get_compute_status()
     assert status["status"] == "failed"
+    assert "database is locked" in status["error"]
+
+
+def test_a_failed_sell_history_query_is_recorded_per_item():
+    svc = _bare_service()
+    svc._corporations = SimpleNamespace(list_corporations=lambda: [{"corporation_id": 98000001}])
+
+    def history(*, character_id, corporation_id, type_id, days):
+        if type_id == 2:
+            raise _sde_error()
+        return [{"quantity": 30}]
+
+    svc._sales_history = SimpleNamespace(get_sold_history=history)
+    assert svc._get_sell_velocities([1, 2]) == (
+        {1: 1.0}, {2: "sell history query failed (OperationalError)"}
+    )
+
+
+def test_a_failed_input_is_named_in_the_compute_banner():
+    svc = _svc_with_broken_db()
+    svc._feedback_processor = SimpleNamespace(process_pending_feedback=lambda: 0)
+    svc._get_corp_wallet = lambda: None
+    svc._get_overview_rows = lambda: [{"type_id": 1}]
+    svc._build_input_rows = lambda rows: [SimpleNamespace(type_id=1, raw={"type_id": 1})]
+    svc._get_industry_jobs = lambda: []
+    svc._run_compute()  # _get_corp_assets hits the broken DB
+    status = svc.get_compute_status()
+    assert status["status"] == "failed"
+    assert status["error"].startswith("Plan computation failed while reading corp assets: ")
     assert "database is locked" in status["error"]

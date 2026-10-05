@@ -68,6 +68,7 @@ class PipelineAnalyzer:
         weights: dict[int, Any],              # keyed by type_id; values are PlanLearningWeightsModel
         sell_velocities: dict[int, float],    # type_id → sell_velocity_per_day (from SalesHistoryService)
         meta_resolver: BlueprintCategorySource,
+        sell_velocity_unavailable: dict[int, str] | None = None,  # type_id → why its sell history could not be read
     ) -> list[PipelineState]:
         """Return one PipelineState for each input row."""
         now = _now()
@@ -132,6 +133,7 @@ class PipelineAnalyzer:
                     market_depth_cache=market_depth_cache,
                     weights=weights,
                     sell_velocities=sell_velocities,
+                    sell_velocity_unavailable=sell_velocity_unavailable or {},
                     now=now,
                 )
                 result.append(state)
@@ -150,6 +152,7 @@ class PipelineAnalyzer:
         market_depth_cache: dict[int, Any],
         weights: dict[int, Any],
         sell_velocities: dict[int, float],
+        sell_velocity_unavailable: dict[int, str],
         now: datetime,
     ) -> PipelineState:
         # ── Velocity ──────────────────────────────────────────────────────────
@@ -165,12 +168,17 @@ class PipelineAnalyzer:
             effective_velocity = max(0.01, sell_velocity_per_day * velocity_multiplier)
         elif days_of_supply_for_velocity > 0.0:
             effective_velocity = max(0.01, 1.0 / days_of_supply_for_velocity)
+            if type_id in sell_velocity_unavailable:
+                logger.warning(
+                    "PipelineAnalyzer: type_id=%s %s; velocity estimated from days of supply",
+                    type_id, sell_velocity_unavailable[type_id],
+                )
         else:
             # No signal at all. 0.01 keeps the pipeline-days division finite;
             # the reason marks it as a floor so nothing downstream reads it as
             # a measured sell rate.
             effective_velocity = 0.01
-            why_no_sales = "no corp sales in 30 days"
+            why_no_sales = sell_velocity_unavailable.get(type_id, "no corp sales in 30 days")
             velocity_unknown_reason = f"{why_no_sales} and no days-of-supply estimate"
 
         # ── Pipeline days ─────────────────────────────────────────────────────
