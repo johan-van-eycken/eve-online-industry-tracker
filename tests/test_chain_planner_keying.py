@@ -9,6 +9,7 @@ BPO's ME/TE was read from attributes the asset model does not have.
 """
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.chain_planner import (
@@ -476,6 +477,44 @@ def test_missing_base_quantities_skip_the_analysis_with_a_reason():
 def test_unknown_blueprint_me_skips_the_analysis_with_a_reason():
     decision, opps = _analyse(_bpo_row(me_current=None), _bpo_bp_data(1000))
     _assert_skipped(decision, opps, "unknown current blueprint ME")
+
+
+def test_a_missing_batch_run_count_skips_the_analysis_with_a_reason():
+    row = _bpo_row(me_current=0)
+    del row["manufacturing_job"]["runs"]
+    decision, opps = _analyse(row, _bpo_bp_data(1000))
+    _assert_skipped(decision, opps, "unknown batch run count (manufacturing_job.runs)")
+
+
+def test_a_non_positive_batch_run_count_skips_the_analysis_with_a_reason():
+    decision, opps = _analyse(_bpo_row(me_current=0, runs=0), _bpo_bp_data(1000))
+    _assert_skipped(decision, opps, "non-positive batch run count (0)")
+
+
+def test_no_batch_units_skips_the_analysis_with_a_reason():
+    decision, opps = _analyse(_bpo_row(me_current=0, quantity=0), _bpo_bp_data(1000))
+    _assert_skipped(decision, opps, "no batch units (quantity=0)")
+
+
+def test_an_owned_bpo_without_a_batch_run_count_schedules_no_me_research(caplog):
+    """No manufacturing_job.runs: the optimum is not computed at a run count
+    guessed from quantity; ME research is not scheduled and a WARNING says why."""
+    asked = []
+    planner = _planner()
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: asked.append(runs) or 10
+    row = _row()
+    row["quantity"] = 50
+    del row["manufacturing_job"]["runs"]
+    phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=0, te=0)]}, "blueprint_data": BLUEPRINT_DATA}
+
+    with caplog.at_level("WARNING"):
+        planner.plan_chain([_decision(row)], phase1)
+
+    assert asked == []
+    assert "needs_me_research" not in row
+    assert row["needs_te_research"] is True   # TE does not depend on the run count
+    assert any("run count" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
 
 
 def test_an_assumed_sde_fallback_me_skips_the_analysis_with_a_reason():

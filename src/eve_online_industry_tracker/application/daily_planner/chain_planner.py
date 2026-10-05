@@ -268,10 +268,21 @@ class ChainPlanner:
         bpo_owned = bp_type_id in bpo_assets_by_type_id and bool(bpo_assets_by_type_id[bp_type_id])
 
         if bpo_owned:
-            # Compute optimal ME/TE via SDE lookup
-            optimal_me = self._compute_optimal_me(
-                bp_type_id, runs=orow.get_effective_runs(decision.overview_row)
+            # Compute optimal ME/TE via SDE lookup. The optimal ME depends on the
+            # batch run count; with no validated manufacturing_job.runs it is
+            # unknown (never guessed from quantity) and no ME research is scheduled.
+            batch_runs, runs_reason = _batch_runs(
+                orow.get_manufacturing_job(decision.overview_row)
             )
+            if batch_runs is None:
+                logger.warning(
+                    "ChainPlanner: owned BPO %s has an unusable batch run count (%s); "
+                    "optimal ME unknown, not scheduling ME research",
+                    bp_type_id, runs_reason,
+                )
+                optimal_me = None
+            else:
+                optimal_me = self._compute_optimal_me(bp_type_id, runs=batch_runs)
             optimal_te = self._compute_optimal_te(bp_type_id, optimal_te_threshold)
 
             bpo_assets = bpo_assets_by_type_id[bp_type_id]
@@ -708,12 +719,9 @@ class ChainPlanner:
             me_current = int(job["blueprint_material_efficiency"])
         except (KeyError, TypeError, ValueError):
             return None, "unknown current blueprint ME"
-        try:
-            runs = int(job["runs"])
-        except (KeyError, TypeError, ValueError):
-            return None, "unknown batch run count (manufacturing_job.runs)"
-        if runs <= 0:
-            return None, f"non-positive batch run count ({runs})"
+        runs, runs_reason = _batch_runs(job)
+        if runs is None:
+            return None, runs_reason
 
         me_target = optimal_me_for_quantities((q for _, q in base), runs=runs)
 
@@ -772,6 +780,21 @@ class ChainPlanner:
                 blueprint_type_id, exc_info=True,
             )
             return None
+
+
+def _batch_runs(manufacturing_job: dict[str, Any]) -> tuple[int | None, str | None]:
+    """The batch run count from manufacturing_job.runs, with no fallback to quantity.
+
+    Returns (runs, None), or (None, reason) when runs is missing, not an
+    integer, or not positive (see input_row: quantity is not a run count).
+    """
+    try:
+        runs = int(manufacturing_job["runs"])
+    except (KeyError, TypeError, ValueError):
+        return None, "unknown batch run count (manufacturing_job.runs)"
+    if runs <= 0:
+        return None, f"non-positive batch run count ({runs})"
+    return runs, None
 
 
 def _material_unit_prices(manufacturing_job: dict[str, Any]) -> dict[int, float]:
