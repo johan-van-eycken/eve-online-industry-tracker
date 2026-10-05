@@ -549,7 +549,7 @@ class ChainPlanner:
         )
         if batch is None:
             return None
-        runs, batch_materials, material_reduction = batch
+        runs, batch_materials, material_reduction, job_runs = batch
 
         sub_cost = self._price_materials(batch_materials, market_depth_cache)
         market_cost = self._estimate_market_cost(mat_type_id, qty_to_build, market_depth_cache)
@@ -586,6 +586,9 @@ class ChainPlanner:
                 "corp_stock_used": min(in_stock, qty_requested),
                 "quantity_needed": qty_to_build,
                 "sub_runs": runs,
+                # The runs split into jobs of at most the blueprint's max runs.
+                "sub_jobs": len(job_runs),
+                "sub_max_runs_per_job": max(job_runs),
                 "sub_batch_materials": batch_materials,
                 # Combined ME + structure + rig fraction the batch was cut by.
                 "sub_material_reduction": material_reduction,
@@ -605,9 +608,17 @@ class ChainPlanner:
         me: int,
         phase1_data: dict[str, Any],
         facility_reductions: tuple[float, ...] = (),
-    ) -> tuple[int, dict[int, int], float] | None:
-        """(runs, {material type_id: units for the whole sub job}, combined
-        material reduction) at the owned BPO's ME in the parent's structure.
+    ) -> tuple[int, dict[int, int], float, list[int]] | None:
+        """(runs, {material type_id: units for all the sub jobs}, combined
+        material reduction, runs per job) at the owned BPO's ME in the
+        parent's structure.
+
+        One job runs at most the blueprint's max_production_limit (SDE
+        maxProductionLimit) runs, so the runs are split into full jobs at the
+        limit plus a remainder job. Each job rounds its own batch up, so the
+        materials are the sum of the per-job batches: one big batch would
+        under-buy by up to (jobs - 1) units per material. An unknown limit
+        means the split is unknown, so the component is bought (WARNING).
 
         Base quantities are the SDE's per-run figures. The reduction is the
         producer's own combination (facility_bonus.combine_reductions of
@@ -651,8 +662,7 @@ class ChainPlanner:
             )
             return None
 
-        runs = math.ceil(qty_to_build / output_per_run)
-        batch: dict[int, int] = {}
+        base_materials: dict[int, int] = {}
         for mat in manufacturing.get("materials") or []:
             if not isinstance(mat, dict):
                 continue
@@ -660,10 +670,8 @@ class ChainPlanner:
             base_qty = int(mat.get("quantity") or 0)
             if mat_type_id <= 0 or base_qty <= 0:
                 continue
-            batch[mat_type_id] = batch.get(mat_type_id, 0) + reduced_batch_quantity(
-                base_qty, runs, material_reduction
-            )
-        if not batch:
+            base_materials[mat_type_id] = base_materials.get(mat_type_id, 0) + base_qty
+        if not base_materials:
             # A job with no inputs would price at 0 ISK and always beat the
             # market: that is missing SDE data, not a free build.
             logger.warning(
@@ -671,7 +679,28 @@ class ChainPlanner:
                 blueprint_type_id, product_type_id,
             )
             return None
-        return runs, batch, material_reduction
+
+        max_runs = _max_runs_per_job(bp_data)
+        if max_runs is None:
+            logger.warning(
+                "ChainPlanner: blueprint %s has no usable max runs per job "
+                "(max_production_limit=%r), so the job split and its rounding are "
+                "unknown; buying type_id=%s",
+                blueprint_type_id, bp_data.get("max_production_limit"), product_type_id,
+            )
+            return None
+
+        runs = math.ceil(qty_to_build / output_per_run)
+        full_jobs, remainder = divmod(runs, max_runs)
+        job_runs = [max_runs] * full_jobs + ([remainder] if remainder else [])
+        batch = {
+            mat_type_id: (
+                full_jobs * reduced_batch_quantity(base_qty, max_runs, material_reduction)
+                + reduced_batch_quantity(base_qty, remainder, material_reduction)
+            )
+            for mat_type_id, base_qty in base_materials.items()
+        }
+        return runs, batch, material_reduction, job_runs
 
     def _price_materials(
         self, materials: dict[int, int], market_depth_cache: dict[int, Any]
@@ -931,6 +960,15 @@ def _batch_runs(manufacturing_job: dict[str, Any]) -> tuple[int | None, str | No
     if runs <= 0:
         return None, f"non-positive batch run count ({runs})"
     return runs, None
+
+
+def _max_runs_per_job(bp_data: dict[str, Any]) -> int | None:
+    """The blueprint's max runs per job (SDE maxProductionLimit), or None
+    when it is missing or not a positive integer."""
+    limit = bp_data.get("max_production_limit")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return None
+    return limit
 
 
 def _material_unit_prices(manufacturing_job: dict[str, Any]) -> dict[int, float]:

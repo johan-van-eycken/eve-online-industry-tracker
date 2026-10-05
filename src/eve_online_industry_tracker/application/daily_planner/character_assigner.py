@@ -280,10 +280,7 @@ class CharacterAssigner:
                     estimated_cost_isk=float(row.get("sub_manufacture_cost") or 0.0),
                     estimated_profit_isk=None,
                     estimated_completion=None,
-                    notes=(
-                        f"Sub-manufacture: cheaper to build than buy "
-                        f"(market: {(row.get('market_buy_cost') or 0)/1e6:.1f}M ISK)"
-                    ),
+                    notes=_sub_manufacture_notes(row),
                     materials=row.get("sub_batch_materials"),
                 ))
                 self._take_slot(char_slots, char_id, "sub_manufacture")
@@ -519,3 +516,16 @@ def _batch_runs(type_id: int, row: dict[str, Any]) -> int:
     fallback to `quantity`, which is a units total, not a run count.
     """
     return require_batch_runs(type_id, orow.get_manufacturing_job(row))
+
+
+def _sub_manufacture_notes(row: dict[str, Any]) -> str:
+    """The sub-manufacture action's note, naming the job split when the runs
+    exceed the blueprint's max runs per job (ChainPlanner._sub_batch)."""
+    notes = (
+        f"Sub-manufacture: cheaper to build than buy "
+        f"(market: {(row.get('market_buy_cost') or 0)/1e6:.1f}M ISK)"
+    )
+    jobs = row.get("sub_jobs")
+    if isinstance(jobs, int) and jobs > 1:
+        notes += f"; {jobs} jobs of at most {row.get('sub_max_runs_per_job')} runs"
+    return notes

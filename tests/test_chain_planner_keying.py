@@ -10,6 +10,8 @@ BPO's ME/TE was read from attributes the asset model does not have.
 from __future__ import annotations
 
 import logging
+
+import pytest
 from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.chain_planner import (
@@ -148,8 +150,10 @@ SUB_BLUEPRINT_DATA = {
     999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
                             "materials": [{"type_id": 54321, "quantity": 100,
                                            "type_name": "Widget"}]}},
-    # Owned blueprint 888: 1 run makes 10 x 54321 from 2 x Tritanium (34).
-    888: {"manufacturing": {"products": [{"type_id": 54321, "quantity": 10}],
+    # Owned blueprint 888: 1 run makes 10 x 54321 from 2 x Tritanium (34),
+    # at most 300 runs per job (SDE maxProductionLimit).
+    888: {"max_production_limit": 300,
+          "manufacturing": {"products": [{"type_id": 54321, "quantity": 10}],
                             "materials": [{"type_id": 34, "quantity": 2}]}},
 }
 
@@ -752,6 +756,68 @@ def test_a_sub_component_has_no_own_sell_velocity_and_persists_it_as_null(
     item = app_session.query(BuildPlanItemModel).one()
     assert item.type_id == 54321
     assert item.effective_velocity is None
+
+
+def _limited_sub_phase1(limit):
+    blueprint_data = {**SUB_BLUEPRINT_DATA, 888: {**SUB_BLUEPRINT_DATA[888],
+                                                   "max_production_limit": limit}}
+    return _sub_phase1(blueprint_data=blueprint_data)
+
+
+def _subs_for(qty, phase1):
+    row = _row(materials=_batch_materials(**{"54321": qty}))
+    plan = _planner().plan_chain([_decision(row)], phase1)
+    return [d for d in plan.decisions if d.is_sub_component]
+
+
+def test_a_sub_batch_over_the_max_runs_is_sized_per_job():
+    """Need 200 = 20 runs, at most 7 runs per job: jobs of 7, 7 and 6.
+    2 Tritanium/run at ME10: ceil(12.6) + ceil(12.6) + ceil(10.8) = 13 + 13 + 11
+    = 37. One 20-run job would be ceil(36.0) = 36, one unit short."""
+    (sub,) = _subs_for(200, _limited_sub_phase1(7))
+    assert sub.overview_row["sub_runs"] == 20
+    assert sub.overview_row["sub_jobs"] == 3
+    assert sub.overview_row["sub_max_runs_per_job"] == 7
+    assert sub.overview_row["sub_batch_materials"] == {34: 37}
+    assert sub.overview_row["sub_manufacture_cost"] == 37.0
+
+
+def test_a_sub_batch_that_divides_into_full_jobs_has_no_remainder_job():
+    """20 runs at 10 per job: two jobs of ceil(18.0) = 18, so 36."""
+    (sub,) = _subs_for(200, _limited_sub_phase1(10))
+    assert sub.overview_row["sub_jobs"] == 2
+    assert sub.overview_row["sub_batch_materials"] == {34: 36}
+
+
+def test_a_sub_batch_within_the_max_runs_is_one_job():
+    (sub,) = _subs_for(200, _limited_sub_phase1(300))
+    assert (sub.overview_row["sub_jobs"], sub.overview_row["sub_batch_materials"]) == (1, {34: 36})
+
+
+@pytest.mark.parametrize("limit", [None, 0, -5, "abc", True])
+def test_an_unknown_max_runs_per_job_buys_the_component(caplog, limit):
+    """Without the limit the job split, and so the rounding, is unknown: one
+    big job could under-buy, so the component is bought instead."""
+    blueprint_data = {**SUB_BLUEPRINT_DATA, 888: {"manufacturing": SUB_BLUEPRINT_DATA[888]["manufacturing"]}}
+    if limit is not None:
+        blueprint_data[888]["max_production_limit"] = limit
+    with caplog.at_level("WARNING"):
+        assert _subs_for(200, _sub_phase1(blueprint_data=blueprint_data)) == []
+    assert any(
+        "max runs per job" in r.getMessage() and "888" in r.getMessage()
+        for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def test_a_split_sub_manufacture_action_names_its_job_count():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        CharacterAssigner,
+    )
+    (action,) = CharacterAssigner().assign(
+        ChainPlan(decisions=[_sub_decision(sub_jobs=3, sub_max_runs_per_job=7, sub_runs=20)]),
+        [], _one_slot_pilot(), _AdminStub())
+    assert action.runs == 20
+    assert "3 jobs of at most 7 runs" in action.notes
 
 
 def _sub_decision(**overview):
