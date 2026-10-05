@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputError
+from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
 
@@ -172,10 +172,14 @@ class CharacterAssigner:
 
         # ME/TE research
         if row.get("needs_me_research"):
-            char_id, char_name = self._best_research_char(char_slots, characters)
+            bp_type_id = self._research_blueprint_type_id(row, type_id, "ME")
+            char_id, char_name = (
+                (None, None) if bp_type_id is None
+                else self._best_research_char(char_slots, characters)
+            )
             if char_id is not None:
                 actions.append(AssignedAction(
-                    type_id=orow.get_blueprint_type_id(row) or type_id,
+                    type_id=bp_type_id,
                     type_name=type_name + " BPO",
                     action_type="me_research",
                     character_id=char_id,
@@ -188,14 +192,18 @@ class CharacterAssigner:
                     notes=f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
                 ))
                 self._take_slot(char_slots, char_id, "me_research")
-            else:
+            elif bp_type_id is not None:
                 logger.debug("CharacterAssigner: no free research slot for ME research on type_id=%s", type_id)
 
         if row.get("needs_te_research"):
-            char_id, char_name = self._best_research_char(char_slots, characters)
+            bp_type_id = self._research_blueprint_type_id(row, type_id, "TE")
+            char_id, char_name = (
+                (None, None) if bp_type_id is None
+                else self._best_research_char(char_slots, characters)
+            )
             if char_id is not None:
                 actions.append(AssignedAction(
-                    type_id=orow.get_blueprint_type_id(row) or type_id,
+                    type_id=bp_type_id,
                     type_name=type_name + " BPO",
                     action_type="te_research",
                     character_id=char_id,
@@ -231,13 +239,14 @@ class CharacterAssigner:
         # Copy (T1 BPO copy for invention feed). What is copied is the T1
         # source blueprint, never the T2 product or the T2 blueprint.
         t1_blueprint_type_id = int(row.get("t1_blueprint_type_id") or 0)
-        if row.get("needs_invention") and row.get("has_t1_bpo") and t1_blueprint_type_id <= 0:
+        wants_copy = bool(row.get("needs_invention") and row.get("has_t1_bpo"))
+        if wants_copy and t1_blueprint_type_id <= 0:
             logger.warning(
                 "CharacterAssigner: has_t1_bpo set without a t1_blueprint_type_id for "
                 "type_id=%s; not creating a copy action",
                 type_id,
             )
-        elif row.get("needs_invention") and row.get("has_t1_bpo"):
+        elif wants_copy:
             char_id, char_name = self._best_research_char(char_slots, characters)
             if char_id is not None:
                 actions.append(AssignedAction(
@@ -447,6 +456,18 @@ class CharacterAssigner:
         best = candidates[0]
         return best[2], best[3]
 
+    @staticmethod
+    def _research_blueprint_type_id(row: dict[str, Any], type_id: int, kind: str) -> int | None:
+        """The blueprint to research, or None (WARNING): a product id is not a blueprint."""
+        bp_type_id = orow.get_blueprint_type_id(row)
+        if bp_type_id is None:
+            logger.warning(
+                "CharacterAssigner: %s research flagged for type_id=%s but its row has no "
+                "blueprint type id; not creating a research action",
+                kind, type_id,
+            )
+        return bp_type_id
+
     def _best_research_char(
         self, char_slots: dict[int, dict], characters: list[dict]
     ) -> tuple[int | None, str | None]:
@@ -489,7 +510,7 @@ def _job_attr(job: Any, attr: str) -> Any:
 
 
 def _batch_runs(type_id: int, row: dict[str, Any]) -> int:
-    """Blueprint runs for one batch, from manufacturing_job.runs.
+    """Blueprint runs for one batch; see input_row.require_batch_runs.
 
     PlannerInputRow already required a positive `manufacturing_job.runs` on
     every top-level overview row, so a missing or non-positive value here means
@@ -497,16 +518,4 @@ def _batch_runs(type_id: int, row: dict[str, Any]) -> int:
     1: one run on a 20-run job under-buys materials by 20x. Deliberately no
     fallback to `quantity`, which is a units total, not a run count.
     """
-    raw = orow.get_manufacturing_job(row).get("runs")
-    try:
-        runs = int(raw)
-    except (TypeError, ValueError):
-        raise PlannerInputError(
-            type_id=type_id, field="manufacturing_job.runs",
-            detail="is missing" if raw is None else f"is not an integer: {raw!r}",
-        ) from None
-    if runs <= 0:
-        raise PlannerInputError(
-            type_id=type_id, field="manufacturing_job.runs", detail=f"must be > 0, got {runs}"
-        )
-    return runs
+    return require_batch_runs(type_id, orow.get_manufacturing_job(row))

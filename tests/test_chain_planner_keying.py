@@ -1047,3 +1047,32 @@ def test_an_unknown_me_bpo_beside_a_researched_one_means_buy(caplog):
     with caplog.at_level("WARNING"):
         assert _subs(phase1) == []
     assert any("unknown ME" in r.getMessage() for r in caplog.records)
+
+
+def test_the_invention_source_index_keeps_the_lowest_source_id_like_the_sde_query():
+    from eve_online_industry_tracker.application.daily_planner.chain_planner import (
+        build_invention_source_index,
+    )
+    data = {
+        2000: {"invention": {"products": [{"type_id": 5000, "quantity": 1}]}},
+        1000: {"invention": {"products": [{"type_id": 5000, "quantity": 1}]}},
+    }
+    assert build_invention_source_index(data) == {5000: 1000}
+
+
+def test_research_without_a_blueprint_id_is_skipped_not_aimed_at_the_product(caplog):
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        CharacterAssigner,
+    )
+    row = {"type_id": 12345, "quantity": 1, "manufacturing_job": {"runs": 1},
+           "needs_me_research": True, "needs_te_research": True}
+    chars = SimpleNamespace(list_characters=lambda: [{
+        "character_id": 1, "character_name": "Pilot",
+        "skills": {"skills": [{"skill_name": "Laboratory Operation", "trained_skill_level": 5}]},
+    }])
+    with caplog.at_level("WARNING"):
+        actions = CharacterAssigner().assign(
+            ChainPlan(decisions=[_decision(row)]), [], chars, _AdminStub())
+    assert [a.action_type for a in actions] == ["manufacture"]
+    assert sum("research" in r.getMessage() and "blueprint type id" in r.getMessage()
+               for r in caplog.records) == 2

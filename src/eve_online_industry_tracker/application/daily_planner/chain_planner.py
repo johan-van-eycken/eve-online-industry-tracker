@@ -90,7 +90,9 @@ def build_invention_source_index(
     In the SDE the invention activity lives on the *source* blueprint, and its
     products are the blueprints it invents into. A T2 overview row only knows
     its own (T2) blueprint, so finding the T1 BPO to copy means walking this
-    index backwards. First source seen wins.
+    index backwards. When several sources invent into one blueprint the lowest
+    source id wins, matching blueprints.get_invention_source_blueprint_ids
+    (ORDER BY blueprintTypeID).
     """
     index: dict[int, int] = {}
     for source_type_id, entry in (blueprint_data or {}).items():
@@ -110,7 +112,10 @@ def build_invention_source_index(
             except (TypeError, ValueError):
                 continue
             if invented_type_id > 0:
-                index.setdefault(invented_type_id, int(source_type_id))
+                source = int(source_type_id)
+                current = index.get(invented_type_id)
+                if current is None or source < current:
+                    index[invented_type_id] = source
     return index
 
 
