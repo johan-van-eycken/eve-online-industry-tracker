@@ -32,16 +32,16 @@ def read_weight(weights: Any | None, name: str) -> float:
 
     `weights is None` means the type has no feedback yet. Its defined value
     is NEUTRAL_WEIGHT, not a fallback. A row whose value is not a finite real
-    number (NaN, text kept by SQLite's REAL affinity, None, a bool) is corrupt.
+    number (NaN, +/-inf, text kept by SQLite's REAL affinity, None, a bool) is corrupt.
     It reads as neutral with a WARNING, so the item is still scored instead
     of being dropped by float() raising inside a per-item handler.
     """
     if weights is None:
         return NEUTRAL_WEIGHT
     raw = getattr(weights, name, None)
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or math.isnan(raw):
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
         logger.warning(
-            "Daily planner: learned weight %s=%r for type_id=%s is not a number; "
+            "Daily planner: learned weight %s=%r for type_id=%s is not a finite number; "
             "reading it as neutral %.1f",
             name, raw, getattr(weights, "type_id", "?"), NEUTRAL_WEIGHT,
         )

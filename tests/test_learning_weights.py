@@ -25,14 +25,16 @@ def test_no_weights_row_reads_as_neutral():
 
 
 @pytest.mark.parametrize("stored, expected", [
-    (6.8, 4.0), (0.0, 0.25), (-2.0, 0.25), (1.3, 1.3), (float("inf"), 4.0), (2, 2.0),
+    (6.8, 4.0), (0.0, 0.25), (-2.0, 0.25), (1.3, 1.3), (2, 2.0),
 ])
 def test_a_stored_weight_is_clamped_on_read(stored, expected):
     w = SimpleNamespace(type_id=1, velocity_multiplier=stored)
     assert read_weight(w, "velocity_multiplier") == expected
 
 
-@pytest.mark.parametrize("stored", [float("nan"), "abc", "1.5", None, True])
+@pytest.mark.parametrize("stored", [
+    float("nan"), float("inf"), float("-inf"), "abc", "1.5", None, True,
+])
 def test_a_non_numeric_stored_weight_is_neutral_and_warned(stored, caplog):
     w = SimpleNamespace(type_id=7, cost_multiplier=stored)
     with caplog.at_level(logging.WARNING):
