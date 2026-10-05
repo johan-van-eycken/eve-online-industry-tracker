@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -175,7 +175,7 @@ def _make_repo() -> tuple[DailyPlannerRepository, sqlite3.Connection]:
 
 
 def _now() -> datetime:
-    return datetime.utcnow().replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +511,7 @@ def test_plan_history_returns_recent_plans(app_session, session_provider):
 
     from eve_online_industry_tracker.infrastructure.models import BuildPlanModel
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     app_session.add(BuildPlanModel(
         created_at=now, updated_at=now, status="active", freshness_score=1.0,
     ))
@@ -574,7 +574,7 @@ def test_plan_history_keeps_an_unknown_freshness_unknown(app_session, session_pr
 
     from eve_online_industry_tracker.infrastructure.models import BuildPlanModel
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     app_session.add(BuildPlanModel(created_at=now, updated_at=now, status="active",
                                    freshness_score=None))
     app_session.add(BuildPlanModel(created_at=now, updated_at=now, status="superseded",

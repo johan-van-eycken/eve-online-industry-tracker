@@ -398,7 +398,7 @@ class DailyPlannerService:
         # against it, so a bare `except` around this used to hide a permanently
         # empty plan_history. Let a genuinely broken query raise instead.
         history_days = int(_adm(self._admin, "planner_history_days", 90))
-        cutoff = datetime.utcnow() - timedelta(days=history_days)
+        cutoff = _now() - timedelta(days=history_days)
         ph_session = self._session_provider.app_session()
         try:
             plan_history_rows = (
@@ -535,7 +535,7 @@ class DailyPlannerService:
 
         # Learning weights
         type_ids = [r.type_id for r in input_rows]
-        weights =self._repo.get_weights(type_ids) if type_ids else {}
+        weights = self._repo.get_weights(type_ids) if type_ids else {}
 
         # Sell velocity per type_id
         sell_velocities = self._get_sell_velocities(type_ids)
@@ -1013,7 +1013,7 @@ class DailyPlannerService:
             from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
             session = self._session_provider.app_session()
             try:
-                cutoff = (datetime.utcnow() - timedelta(days=14)).date().isoformat()
+                cutoff = (_now() - timedelta(days=14)).date().isoformat()
                 rows = session.query(MarketHistoryModel).filter(
                     MarketHistoryModel.type_id == 34,
                     MarketHistoryModel.region_id == 10000002,

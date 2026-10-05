@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -17,6 +17,10 @@ from eve_online_industry_tracker.infrastructure.models import (
     PlanLearningWeightsModel,
     PlanItemOutcomeModel,
 )
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class _StaticSessionProvider:
@@ -81,7 +85,7 @@ def _make_action(
     action.action_type = action_type
     action.status = status
     action.processed_for_feedback = processed
-    action.generated_at = generated_at or datetime.utcnow() - timedelta(days=1)
+    action.generated_at = generated_at or _utcnow() - timedelta(days=1)
     # Set explicitly: a bare MagicMock attribute satisfies float() as 1.0
     # (see _make_plan_item's docstring), which would silently fabricate a
     # 1 ISK batch cost over 1 unit.
@@ -374,7 +378,7 @@ class TestFeedbackProcessor:
         old_action = _make_action(
             type_id=400,
             action_type="manufacture",
-            generated_at=datetime.utcnow() - timedelta(days=65),
+            generated_at=_utcnow() - timedelta(days=65),
         )
         self.repo.get_unprocessed_done_actions.return_value = [old_action]
         self.repo.get_weights.return_value = {
@@ -458,7 +462,7 @@ class TestFeedbackProcessor:
         recent_action = _make_action(
             type_id=700,
             action_type="manufacture",
-            generated_at=datetime.utcnow() - timedelta(days=5),  # only 5 days old, timeout=60
+            generated_at=_utcnow() - timedelta(days=5),  # only 5 days old, timeout=60
         )
         self.repo.get_unprocessed_done_actions.return_value = [recent_action]
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=700)]
