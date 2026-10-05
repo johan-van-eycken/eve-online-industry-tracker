@@ -709,6 +709,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "quantity INTEGER NULL,"
             "runs INTEGER NULL,"
             "estimated_cost_isk REAL NULL,"
+            "estimated_build_cost_isk REAL NULL,"
             "estimated_profit_isk REAL NULL,"
             "estimated_completion DATETIME NULL,"
             "status TEXT NOT NULL DEFAULT 'pending',"
@@ -733,6 +734,9 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "predicted_sell_days REAL NULL,"
             "actual_sell_days REAL NULL,"
             "slow_mover INTEGER NOT NULL DEFAULT 0,"
+            # predicted_/actual_material_cost hold the per-unit full BUILD
+            # cost (materials + job fees), not materials only; the names
+            # predate that and are kept (see PlanItemOutcomeModel).
             "predicted_material_cost REAL NULL,"
             "actual_material_cost REAL NULL"
             ")"
@@ -868,6 +872,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="build_plan_item", column="projected_annual_savings", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
+    _ensure_column(db_app, table="daily_action_log", column="estimated_build_cost_isk", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
 
     # Belt-and-braces normalization for existing corporations.wallets/standings

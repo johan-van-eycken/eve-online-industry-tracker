@@ -70,6 +70,7 @@ def _make_action(
     generated_at: datetime | None = None,
     estimated_cost_isk: float | None = None,
     quantity: int | None = None,
+    estimated_build_cost_isk: float | None = None,
 ) -> MagicMock:
     action = MagicMock()
     action.id = action_id
@@ -83,6 +84,7 @@ def _make_action(
     # (see _make_plan_item's docstring), which would silently fabricate a
     # 1 ISK batch cost over 1 unit.
     action.estimated_cost_isk = estimated_cost_isk
+    action.estimated_build_cost_isk = estimated_build_cost_isk
     action.quantity = quantity
     return action
 
@@ -194,76 +196,97 @@ class TestFeedbackProcessor:
         weights = self.repo.upsert_weights.call_args[0][0]
         assert abs(weights.accuracy_ema - (0.8 * 4.0 + 0.2 * 0.8)) < 1e-9
 
-    def _run_cost_case(self, *, action_cost, action_qty, sale_cost, sale_qty, old_cost=1.0):
-        action = _make_action(type_id=200, estimated_cost_isk=action_cost, quantity=action_qty)
+    def _run_cost_case(self, *, build_cost, action_qty, allocations, old_cost=1.0):
+        action = _make_action(type_id=200, estimated_build_cost_isk=build_cost, quantity=action_qty)
         self.repo.get_unprocessed_done_actions.return_value = [action]
         self.repo.get_weights.return_value = {200: _make_weights(cost_multiplier=old_cost)}
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=200, isk_per_hour=10_000_000)]
         self.processor._find_realized_sale.return_value = {
-            "isk_per_hour": 8_000_000.0,
-            "material_cost": sale_cost,
-            "priced_quantity": sale_qty,
-            "sell_days": 5.0,
+            "isk_per_hour": 8_000_000.0, "allocation_details": allocations, "sell_days": 5.0,
         }
         self.processor.process_pending_feedback()
         return (self.repo.upsert_weights.call_args[0][0],
                 self.repo.insert_outcome.call_args[0][0])
 
-    def test_cost_update_compares_per_unit_costs(self):
-        """F1: predicted is a WHOLE-BATCH cost, actual is ONE sale's allocated
-        cost. Compared raw, a 50M batch vs a 10-unit sale gave a ratio of ~24.
-        Per unit: 50M / 100 = 500k predicted vs 6M / 10 = 600k actual."""
+    def test_cost_update_compares_full_build_cost_per_unit(self):
+        """Both sides are materials + job fees per unit: 55M / 100 = 550k
+        predicted vs 6M / 10 = 600k actual from the sale's industry-built units."""
         weights, outcome = self._run_cost_case(
-            action_cost=50_000_000.0, action_qty=100, sale_cost=6_000_000.0, sale_qty=10
+            build_cost=55_000_000.0, action_qty=100,
+            allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0}],
         )
-        expected = 0.8 * 1.0 + 0.2 * (500_000.0 / 600_000.0)
+        expected = 0.8 * 1.0 + 0.2 * (550_000.0 / 600_000.0)
         assert abs(weights.cost_multiplier - expected) < 1e-9
-        assert outcome.predicted_material_cost == 500_000.0
+        assert outcome.predicted_material_cost == 550_000.0
         assert outcome.actual_material_cost == 600_000.0
 
-    def test_zero_allocated_cost_skips_the_cost_update(self, caplog):
-        """allocated_cost 0 used to fall back to 1.0 ISK -> ratio 10,000,000."""
+    def test_only_industry_built_units_count_as_actual_cost(self):
+        """A market-bought lot's unit price is not a build cost."""
+        weights, outcome = self._run_cost_case(
+            build_cost=55_000_000.0, action_qty=100,
+            allocations=[
+                {"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0},
+                {"source": "market_buy", "quantity": 90, "total_cost": 1.0},
+            ],
+        )
+        assert outcome.actual_material_cost == 600_000.0
+
+    def test_transferred_build_lots_count_as_actual_cost(self):
+        """Character-built units moved to the corp carry the job's
+        unit_build_cost (FIFO-matched or quantity-weighted average)."""
+        weights, outcome = self._run_cost_case(
+            build_cost=55_000_000.0, action_qty=100,
+            allocations=[
+                {"source": "industry_build_transferred", "quantity": 4, "total_cost": 2_000_000.0},
+                {"source": "industry_build_transferred_avg", "quantity": 6, "total_cost": 4_000_000.0},
+                {"source": "opening_inventory", "quantity": 5, "total_cost": 1.0},
+            ],
+        )
+        assert outcome.actual_material_cost == 600_000.0
+
+    def test_a_sale_with_no_industry_built_units_skips_the_cost_update(self, caplog):
         with caplog.at_level(logging.INFO):
             weights, outcome = self._run_cost_case(
-                action_cost=50_000_000.0, action_qty=100, sale_cost=0.0, sale_qty=10, old_cost=0.9
+                build_cost=55_000_000.0, action_qty=100, old_cost=0.9,
+                allocations=[{"source": "market_buy", "quantity": 10, "total_cost": 6_000_000.0}],
             )
         assert weights.cost_multiplier == 0.9
         assert outcome.actual_material_cost is None
         assert any("cost update skipped" in r.getMessage() for r in caplog.records)
 
-    def test_unknown_predicted_cost_skips_the_cost_update(self, caplog):
-        """No batch cost (unpriced) or no batch units: nothing to compare.
-        The old code substituted 1.0 ISK as the predicted cost."""
-        for cost, qty in ((None, 100), (50_000_000.0, None), (50_000_000.0, 0)):
+    def test_zero_allocated_cost_skips_the_cost_update(self):
+        weights, outcome = self._run_cost_case(
+            build_cost=55_000_000.0, action_qty=100, old_cost=0.9,
+            allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 0.0}],
+        )
+        assert weights.cost_multiplier == 0.9
+        assert outcome.actual_material_cost is None
+
+    def test_unknown_predicted_build_cost_skips_the_cost_update(self, caplog):
+        for cost, qty in ((None, 100), (55_000_000.0, None), (55_000_000.0, 0)):
             caplog.clear()
             with caplog.at_level(logging.INFO):
                 weights, outcome = self._run_cost_case(
-                    action_cost=cost, action_qty=qty, sale_cost=6_000_000.0, sale_qty=10,
-                    old_cost=1.1,
+                    build_cost=cost, action_qty=qty, old_cost=1.1,
+                    allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 6e6}],
                 )
             assert weights.cost_multiplier == 1.1, (cost, qty)
             assert outcome.predicted_material_cost is None
             assert any("cost update skipped" in r.getMessage() for r in caplog.records)
 
-    def test_zero_priced_quantity_skips_the_cost_update(self):
-        weights, _ = self._run_cost_case(
-            action_cost=50_000_000.0, action_qty=100, sale_cost=6_000_000.0, sale_qty=0,
-            old_cost=1.2,
-        )
-        assert weights.cost_multiplier == 1.2
-
     def test_cost_multiplier_is_clamped_to_the_band(self):
-        """Even per-unit, one odd sale must not swing the score by orders of magnitude."""
         from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
             LEARNING_WEIGHT_MAX, LEARNING_WEIGHT_MIN,
         )
         high, _ = self._run_cost_case(
-            action_cost=1_000_000_000.0, action_qty=1, sale_cost=1.0, sale_qty=1
+            build_cost=1_000_000_000.0, action_qty=1,
+            allocations=[{"source": "industry_build", "quantity": 1, "total_cost": 1.0}],
         )
         assert high.cost_multiplier == LEARNING_WEIGHT_MAX
         self.repo.reset_mock()
         low, _ = self._run_cost_case(
-            action_cost=1.0, action_qty=1, sale_cost=1_000_000_000.0, sale_qty=1, old_cost=0.0
+            build_cost=1.0, action_qty=1, old_cost=0.0,
+            allocations=[{"source": "industry_build", "quantity": 1, "total_cost": 1e9}],
         )
         assert low.cost_multiplier == LEARNING_WEIGHT_MIN
 
@@ -553,6 +576,7 @@ class TestFindRealizedSaleAttribution:
 
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=2, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 100.0}],
             type_id=12345, realized_profit=500.0, allocated_cost=100.0,
             date="2026-09-12T09:11:27Z",
         ))
@@ -562,28 +586,33 @@ class TestFindRealizedSaleAttribution:
         action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
         found = processor._find_realized_sale(12345, action=action)
         assert found is not None
-        assert found["material_cost"] == 100.0
+        assert found["allocation_details"][0]["total_cost"] == 100.0
         assert found["sell_days"] == 2.0
 
-    def test_the_sale_carries_its_priced_quantity(self, planner_repo, app_session):
-        """allocated_cost covers only the priced units of THIS sale, so the
-        per-unit actual cost needs priced_quantity alongside it (F1)."""
+    def test_the_sale_carries_its_allocation_details(self, planner_repo, app_session):
+        """The actual unit cost is read from the sale's per-lot allocations,
+        so only industry-built lots are compared with the predicted build cost."""
         from eve_online_industry_tracker.infrastructure.models import (
             CorporationRealizedSalesLedgerModel,
         )
 
+        allocations = [
+            {"source": "industry_build", "quantity": 6, "unit_cost": 500.0, "total_cost": 3_000.0},
+            {"source": "market_buy", "quantity": 4, "unit_cost": 750.0, "total_cost": 3_000.0},
+        ]
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=7, quantity=12, priced_quantity=10,
             unpriced_quantity=2, type_id=12345, realized_profit=500.0,
-            allocated_cost=6_000.0, date="2026-09-12T09:11:27Z",
+            allocated_cost=6_000.0, allocation_details=allocations,
+            date="2026-09-12T09:11:27Z",
         ))
         app_session.commit()
 
         processor = _processor(app_session, planner_repo)
         action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
         found = processor._find_realized_sale(12345, action=action)
-        assert found["priced_quantity"] == 10
-        assert found["material_cost"] == 6_000.0
+        assert found["allocation_details"] == allocations
+        assert "material_cost" not in found
 
     def test_a_sale_on_the_same_day_after_the_action_is_credited(self, planner_repo, app_session):
         """Same calendar day, later time-of-day: credited. The filter compares
@@ -598,6 +627,7 @@ class TestFindRealizedSaleAttribution:
 
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=3, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 40.0}],
             type_id=12345, realized_profit=240.0, allocated_cost=40.0,
             date="2026-09-10T23:59:00Z",
         ))
@@ -608,7 +638,7 @@ class TestFindRealizedSaleAttribution:
         found = processor._find_realized_sale(12345, action=action)
         assert found is not None
         assert found["sell_days"] == 1.0
-        assert found["material_cost"] == 40.0
+        assert found["allocation_details"][0]["total_cost"] == 40.0
 
     def test_a_sale_on_the_same_day_before_the_action_is_not_credited(self, planner_repo, app_session):
         """Same calendar date, earlier time-of-day: must NOT be credited.
@@ -652,11 +682,13 @@ class TestFindRealizedSaleAttribution:
 
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=5, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 10.0}],
             type_id=12345, realized_profit=100.0, allocated_cost=10.0,
             date="2026-09-11T00:00:00Z",  # earliest qualifying sale
         ))
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=6, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 999.0}],
             type_id=12345, realized_profit=999.0, allocated_cost=999.0,
             date="2026-09-20T00:00:00Z",  # latest -- must NOT be picked
         ))
@@ -666,7 +698,7 @@ class TestFindRealizedSaleAttribution:
         action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
         found = processor._find_realized_sale(12345, action=action)
         assert found is not None
-        assert found["material_cost"] == 10.0
+        assert found["allocation_details"][0]["total_cost"] == 10.0
         assert found["sell_days"] == 1.0
 
     def test_without_an_action_date_no_sale_is_credited(self, planner_repo, app_session):

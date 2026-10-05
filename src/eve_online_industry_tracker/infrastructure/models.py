@@ -1103,6 +1103,9 @@ class DailyActionLogModel(BaseApp):
     quantity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     runs: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     estimated_cost_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # manufacture only: the batch's materials + job costs (producer's
+    # manufacturing_job.total_cost); FeedbackProcessor's predicted cost basis.
+    estimated_build_cost_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     estimated_profit_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     estimated_completion: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
@@ -1123,6 +1126,11 @@ class PlanItemOutcomeModel(BaseApp):
     predicted_sell_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     actual_sell_days: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     slow_mover: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Despite the names, both hold the full per-unit BUILD cost (materials +
+    # job install fees, and copy/invention where present), not materials only.
+    # predicted = the action's estimated_build_cost_isk / quantity; actual =
+    # the sale's industry-built lots' allocated cost / their units. Names are
+    # kept to avoid a column rename; see FeedbackProcessor._process_single_action.
     predicted_material_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     actual_material_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 

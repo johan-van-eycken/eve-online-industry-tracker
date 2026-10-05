@@ -212,6 +212,7 @@ class ActionPlanBuilder:
                 quantity=action.quantity,
                 runs=action.runs,
                 estimated_cost_isk=action.estimated_cost_isk,
+                estimated_build_cost_isk=action.estimated_build_cost_isk,
                 estimated_profit_isk=action.estimated_profit_isk,
                 estimated_completion=action.estimated_completion,
                 status="pending",

@@ -83,6 +83,18 @@ def get_material_cost_total(row: dict[str, Any]) -> float | None:
     return _as_optional_float(get_manufacturing_job(row).get("material_cost"))
 
 
+def get_total_cost(row: dict[str, Any]) -> float | None:
+    """The batch's full build cost (materials + job costs), or None.
+
+    The producer writes `manufacturing_job.total_cost = total_job_cost +
+    material_cost` (industry/service.py, _enrich_product_rows_with_material_prices),
+    and None when neither could be priced. total_job_cost covers the
+    manufacturing install fee plus any planned copy, invention and
+    prerequisite job fees.
+    """
+    return _as_optional_float(get_manufacturing_job(row).get("total_cost"))
+
+
 def get_batch_materials(row: dict[str, Any]) -> dict[int, int] | None:
     """{material type_id: units for the whole batch}, or None when unknown.
 

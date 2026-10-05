@@ -44,6 +44,42 @@ def _per_unit(total: Any, units: Any) -> float | None:
     return total_f / units_f
 
 
+#: Allocation sources whose unit_cost is a manufacturing job's full build cost
+#: (materials + job costs). industry_build: the corp's own job snapshot
+#: (asset_provenance.resolve_industry_job_cost_snapshot, total_cost =
+#: materials + job.cost + copy + invention), also via corp asset history.
+#: industry_build_transferred(_avg): a character job's unit_build_cost, FIFO
+#: matched or quantity-weighted (realized_profit._load_character_source_lots,
+#: scripts/backfill_corp_transfer_costs.py). Market buys, opening inventory
+#: and untracked units are not build costs and are left out.
+_INDUSTRY_BUILD_SOURCES = frozenset({
+    "industry_build", "industry_build_transferred", "industry_build_transferred_avg",
+})
+
+
+def _industry_build_unit_cost(allocation_details: Any) -> float | None:
+    """Per-unit build cost of the sale's units that came out of an industry job.
+
+    Market-bought and untracked lots are excluded: their unit price is not a
+    build cost, so mixing them in would compare unlike things. None when the
+    sale has no priced industry-built units.
+    """
+    if not isinstance(allocation_details, list):
+        return None
+    total = 0.0
+    units = 0
+    for entry in allocation_details:
+        if not isinstance(entry, dict) or entry.get("source") not in _INDUSTRY_BUILD_SOURCES:
+            continue
+        quantity = _positive_number(entry.get("quantity"))
+        cost = _positive_number(entry.get("total_cost"))
+        if quantity is None or cost is None:
+            continue
+        total += cost
+        units += int(quantity)
+    return total / units if units > 0 else None
+
+
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
@@ -160,12 +196,23 @@ class FeedbackProcessor:
         predicted_isk_per_hour: float | None = None
         if matching_item is not None:
             predicted_isk_per_hour = matching_item.isk_per_hour
-        # Predicted material cost PER UNIT: estimated_cost_isk is the whole
-        # batch's material cost and quantity the batch's unit total. The
-        # realized side is one sale's allocated cost over its priced units,
-        # so both must be per unit to be comparable at all.
+        # Predicted BUILD cost per unit: materials + job costs for the batch
+        # (estimated_build_cost_isk, the producer's manufacturing_job.total_cost)
+        # over the batch's units. That is the same basis as a sale's
+        # industry-build allocated cost, which includes the install fee (and
+        # copy/invention for T2). Comparing materials only against it biased
+        # cost_multiplier below 1 by construction. The outcome columns keep
+        # their *_material_cost names but hold this full build cost per unit.
+        #
+        # Known residual bias (accepted): for an invented T2 item the realized
+        # unit cost carries the invention MATERIALS (datacores/decryptors, as
+        # asset_provenance's expected invention cost), but the producer's
+        # total_cost appears to drop the top-level invention materials (its
+        # procurement list is replaced by the recursive plan's, see
+        # industry/service.py). So T2 cost_multiplier can still sit somewhat
+        # below 1. Fixing it belongs in the producer.
         predicted_material_cost: float | None = _per_unit(
-            getattr(action, "estimated_cost_isk", None), getattr(action, "quantity", None)
+            getattr(action, "estimated_build_cost_isk", None), getattr(action, "quantity", None)
         )
 
         # Retrieve existing weights (or defaults)
@@ -180,8 +227,10 @@ class FeedbackProcessor:
         if realized is not None:
             # Normal outcome — realized sale found
             actual_isk_per_hour: float | None = realized.get("isk_per_hour")
-            actual_material_cost: float | None = _per_unit(
-                realized.get("material_cost"), realized.get("priced_quantity")
+            # Actual BUILD cost per unit, from the sale's industry-built lots
+            # only (see _industry_build_unit_cost).
+            actual_material_cost: float | None = _industry_build_unit_cost(
+                realized.get("allocation_details")
             )
             actual_sell_days: float = float(realized.get("sell_days", 1.0))
 
@@ -198,8 +247,8 @@ class FeedbackProcessor:
             new_velocity = clamp_weight((1.0 - alpha) * old_velocity + alpha * (
                 float(predicted_days) / safe_actual_days
             ))
-            # cost: predicted / actual per unit (< 1 = materials cost more
-            # than predicted → penalty). Either side unknown or zero means
+            # cost: predicted / actual build cost per unit (< 1 = building
+            # cost more than predicted → penalty). Either side unknown or zero means
             # there is nothing to compare: keep the old weight. Substituting
             # 1 ISK (the old fallback) turned a 0 allocated cost into a
             # ratio in the millions.
@@ -207,12 +256,11 @@ class FeedbackProcessor:
                 logger.info(
                     "FeedbackProcessor: cost update skipped for action_id=%s type_id=%s: "
                     "predicted per-unit cost %s, actual per-unit cost %s "
-                    "(batch cost=%r units=%r; sale allocated_cost=%r priced_quantity=%r)",
+                    "(batch build cost=%r units=%r)",
                     getattr(action, "id", None), type_id,
                     "unknown" if predicted_material_cost is None else predicted_material_cost,
                     "unknown" if actual_material_cost is None else actual_material_cost,
-                    getattr(action, "estimated_cost_isk", None), getattr(action, "quantity", None),
-                    realized.get("material_cost"), realized.get("priced_quantity"),
+                    getattr(action, "estimated_build_cost_isk", None), getattr(action, "quantity", None),
                 )
                 new_cost = old_cost
             else:
@@ -377,10 +425,10 @@ class FeedbackProcessor:
         sell_days = max(0.1, float(diff)) if diff > 0 else 1.0
         return {
             "isk_per_hour": realized_profit / max(0.01, sell_days * 24.0),
-            # allocated_cost covers only this sale's priced units; None stays
-            # None (unknown), the caller turns it into a per-unit cost.
-            "material_cost": row.allocated_cost,
-            "priced_quantity": row.priced_quantity,
+            # allocation_details carries each consumed lot's source, quantity
+            # and cost; the caller keeps the industry-built lots only, so the
+            # actual cost is a build cost like the predicted one.
+            "allocation_details": row.allocation_details,
             "sell_days": sell_days,
         }
 

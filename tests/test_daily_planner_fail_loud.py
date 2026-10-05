@@ -326,6 +326,24 @@ def test_a_manufacture_action_carries_the_batch_unit_total():
     assert action.quantity == 200
 
 
+def test_a_manufacture_action_carries_the_batch_build_cost():
+    """Feedback compares like for like: the producer's total_cost is
+    materials plus job install cost, the basis of the realized unit cost."""
+    row = {"type_id": 12345, "quantity": 200,
+           "manufacturing_job": {"runs": 20, "material_cost": 50_000_000.0,
+                                 "total_cost": 55_000_000.0}}
+    (action,) = _assign(row)
+    assert action.estimated_cost_isk == 50_000_000.0
+    assert action.estimated_build_cost_isk == 55_000_000.0
+
+
+def test_a_manufacture_action_without_a_total_cost_has_an_unknown_build_cost():
+    row = {"type_id": 12345, "quantity": 200,
+           "manufacturing_job": {"runs": 20, "material_cost": 50_000_000.0}}
+    (action,) = _assign(row)
+    assert action.estimated_build_cost_isk is None
+
+
 def test_a_manufacture_action_carries_the_producers_batch_materials():
     """F4: the shopping list buys these as-is (already scaled by runs and
     ME/structure) and subtracts what sub-manufacture builds."""

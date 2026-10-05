@@ -105,6 +105,10 @@ class AssignedAction:
     # the component's group). None = unknown, and the shopping list falls back
     # to SDE per-run quantities x runs.
     materials: dict[int, int] | None = None
+    # manufacture only: materials + job costs for the whole batch (producer's
+    # manufacturing_job.total_cost), the basis FeedbackProcessor compares
+    # against a sale's realized industry-build unit cost. None = unknown.
+    estimated_build_cost_isk: float | None = None
 
 
 @dataclass
