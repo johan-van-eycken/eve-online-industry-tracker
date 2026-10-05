@@ -1118,6 +1118,7 @@ class DailyPlannerService:
                 bpo_market_price=d.bpo_market_price,
                 break_even_days=d.break_even_days,
                 projected_annual_savings=d.projected_annual_savings,
+                bpo_analysis_skip_reason=d.bpo_analysis_skip_reason,
                 # NULL, not the analyzer's 0.01 floor, when there was no signal:
                 # market_depth_collector and feedback_processor read this column
                 # and treat any number as a measured sell rate.

@@ -687,7 +687,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "break_even_days REAL NULL,"
             "projected_annual_savings REAL NULL,"
             "effective_velocity REAL NULL,"
-            "snapshot_sell_price REAL NULL"
+            "snapshot_sell_price REAL NULL,"
+            "bpo_analysis_skip_reason TEXT NULL"
             ")"
         ),
     )
@@ -875,6 +876,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="estimated_build_cost_isk", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
 
     # Belt-and-braces normalization for existing corporations.wallets/standings
     # rows written by the pre-fix double-JSON-encoding bug in corporation.py

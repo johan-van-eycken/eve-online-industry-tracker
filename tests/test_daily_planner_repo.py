@@ -723,3 +723,38 @@ def test_readers_do_not_treat_a_null_velocity_as_measured(app_session, session_p
     collector = object.__new__(MarketDepthCollector)
     collector._sessions = SimpleNamespace(app_session=lambda: app_session)
     assert collector._get_effective_velocity(item.type_id, None) is None
+
+
+def test_a_bpo_analysis_skip_reason_is_persisted(app_session, session_provider):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    decision = _decision()
+    decision.bpo_analysis_skip_reason = "no BPO market price for bp_type_id=999"
+    _service(session_provider)._persist_plan_items(
+        plan_id=1, decisions=[decision], market_depth_cache={}
+    )
+    item = app_session.query(BuildPlanItemModel).one()
+    assert item.bpo_analysis_skip_reason == "no BPO market price for bp_type_id=999"
+
+
+def test_ensure_app_schema_adds_the_skip_reason_column_to_a_legacy_table() -> None:
+    conn = sqlite3.connect(":memory:")
+    db = _FakeDb(conn)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS market_history (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "type_id INTEGER NOT NULL, region_id INTEGER NOT NULL, date TEXT NOT NULL,"
+        "close REAL NOT NULL, high REAL, low REAL, volume INTEGER NOT NULL,"
+        "order_count INTEGER NOT NULL, fetched_at DATETIME, updated_at DATETIME,"
+        "UNIQUE(type_id, region_id, date))"
+    )
+    conn.execute(
+        "CREATE TABLE build_plan_item (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "plan_id INTEGER NOT NULL, type_id INTEGER NOT NULL, decision TEXT NOT NULL)"
+    )
+    conn.commit()
+
+    ensure_app_schema(db)
+    ensure_app_schema(db)  # idempotent
+
+    columns = {row[1] for row in db.query("PRAGMA table_info(build_plan_item)")}
+    assert "bpo_analysis_skip_reason" in columns

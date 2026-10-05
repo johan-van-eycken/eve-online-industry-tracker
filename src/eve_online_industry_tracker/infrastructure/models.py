@@ -1086,6 +1086,7 @@ class BuildPlanItemModel(BaseApp):
     projected_annual_savings: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     effective_velocity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     snapshot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bpo_analysis_skip_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class DailyActionLogModel(BaseApp):
