@@ -6,6 +6,7 @@ Each processed action is marked processed_for_feedback=True to prevent re-proces
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -267,11 +268,16 @@ class FeedbackProcessor:
             new_accuracy_ema = clamp_weight((1.0 - alpha) * old_accuracy_ema + alpha * (
                 float(actual_isk_per_hour or 0.0) / safe_predicted_isk_per_hr
             ))
-            # velocity: predicted_days / actual_days  (higher = sold faster than predicted → bonus)
+            # velocity: predicted_days / actual_days  (higher = sold faster than predicted → bonus).
+            # No predicted velocity means nothing to compare: keep the old weight.
             predicted_days = _estimate_predicted_sell_days(matching_item)
-            new_velocity = clamp_weight((1.0 - alpha) * old_velocity + alpha * (
-                float(predicted_days) / safe_actual_days
-            ))
+            if predicted_days is None:
+                _log_velocity_skip(action, type_id, matching_item)
+                new_velocity = old_velocity
+            else:
+                new_velocity = clamp_weight((1.0 - alpha) * old_velocity + alpha * (
+                    predicted_days / safe_actual_days
+                ))
             # cost: predicted / actual build cost per unit (< 1 = building
             # cost more than predicted → penalty). Either side unknown or zero means
             # there is nothing to compare: keep the old weight. Substituting
@@ -325,10 +331,15 @@ class FeedbackProcessor:
 
             # Slow-mover outcome — write timeout record, only update velocity
             predicted_days = _estimate_predicted_sell_days(matching_item)
-            # velocity penalty: predicted / slow_mover_timeout (worse than predicted)
-            new_velocity = clamp_weight((1.0 - alpha) * old_velocity + alpha * (
-                float(predicted_days) / slow_mover_timeout
-            ))
+            if predicted_days is None:
+                # No predicted velocity: no penalty to compute, keep the old weight.
+                _log_velocity_skip(action, type_id, matching_item)
+                new_velocity = old_velocity
+            else:
+                # velocity penalty: predicted / slow_mover_timeout (worse than predicted)
+                new_velocity = clamp_weight((1.0 - alpha) * old_velocity + alpha * (
+                    predicted_days / slow_mover_timeout
+                ))
             new_accuracy_ema = old_accuracy_ema  # not updated for slow movers
             new_cost = old_cost                  # not updated for slow movers
             sample_count += 1
@@ -476,22 +487,39 @@ def _parse_ledger_date(value: Any) -> date | None:
         return None
 
 
-def _estimate_predicted_sell_days(plan_item: Any) -> float:
-    """Estimate predicted sell days from the plan_item's effective_velocity.
+def _predicted_velocity_unknown_reason(plan_item: Any) -> str | None:
+    """Why `plan_item` gives no predicted sell time, or None when it does."""
+    if plan_item is None:
+        return "no plan item for this type in the action's plan"
+    vel = getattr(plan_item, "effective_velocity", None)
+    if vel is None:
+        # Task 4: an unknown velocity is persisted as NULL.
+        return "effective_velocity is unknown (NULL)"
+    if isinstance(vel, bool) or not isinstance(vel, (int, float)):
+        return f"effective_velocity is not a number: {vel!r}"
+    if not math.isfinite(vel) or vel <= 0:
+        return f"effective_velocity is not a positive finite number: {vel!r}"
+    return None
+
+
+def _estimate_predicted_sell_days(plan_item: Any) -> float | None:
+    """Predicted sell days from the plan_item's effective_velocity.
 
     Returns 1 / effective_velocity (days per unit) clamped to [0.1, 30].
-    Falls back to 7 days when velocity is unavailable or zero.
+    Returns None when there is no plan item or its velocity is unknown or
+    unusable: there is then no prediction, and no constant stands in for one.
     """
-    if plan_item is not None:
-        vel = getattr(plan_item, "effective_velocity", None)
-        if vel is not None:
-            try:
-                v = float(vel)
-                if v > 0:
-                    return max(0.1, min(30.0, 1.0 / v))
-            except (TypeError, ValueError):
-                pass
-    return 7.0
+    if _predicted_velocity_unknown_reason(plan_item) is not None:
+        return None
+    return max(0.1, min(30.0, 1.0 / float(plan_item.effective_velocity)))
+
+
+def _log_velocity_skip(action: Any, type_id: int, plan_item: Any) -> None:
+    logger.info(
+        "FeedbackProcessor: velocity update skipped for action_id=%s type_id=%s: "
+        "no predicted sell time (%s); keeping the old velocity_multiplier",
+        getattr(action, "id", None), type_id, _predicted_velocity_unknown_reason(plan_item),
+    )
 
 
 def _action_age_days(action: Any) -> float:

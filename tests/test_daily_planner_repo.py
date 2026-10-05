@@ -714,8 +714,8 @@ def test_readers_do_not_treat_a_null_velocity_as_measured(app_session, session_p
     )
     item = app_session.query(BuildPlanItemModel).one()
 
-    # feedback_processor: NULL takes the 7.0 default, not the 30-day clamp of 1/0.01.
-    assert _estimate_predicted_sell_days(item) == 7.0
+    # feedback_processor: NULL is no prediction at all, not the 30-day clamp of 1/0.01.
+    assert _estimate_predicted_sell_days(item) is None
     assert _estimate_predicted_sell_days(SimpleNamespace(effective_velocity=0.01)) == 30.0
 
     # market_depth_collector: the NULL row is skipped, so with no corp to fall

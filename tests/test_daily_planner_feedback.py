@@ -113,8 +113,8 @@ def _make_plan_item(
     the 7.0 fallback in their `expected_velocity` math while the code under
     test was actually consuming 1.0.
 
-    Pass `effective_velocity=None` explicitly to deliberately exercise the
-    7.0-day fallback instead (as the velocity/slow-mover tests below do).
+    Pass `effective_velocity=None` explicitly to exercise an unknown
+    velocity, which gives no predicted sell time at all (no 7.0 fallback).
     """
     item = MagicMock()
     item.id = 1
@@ -336,21 +336,17 @@ class TestFeedbackProcessor:
         assert weights.accuracy_ema == LEARNING_WEIGHT_MAX
 
     def test_normal_outcome_ema_velocity_update(self):
-        """velocity_multiplier = 0.8*old + 0.2*(predicted_days/actual_days)."""
+        """velocity_multiplier = 0.8*old + 0.2*(predicted_days/actual_days),
+        predicted_days = 1 / effective_velocity (0.2 units/day -> 5 days)."""
         action = _make_action(type_id=300, action_type="manufacture")
         self.repo.get_unprocessed_done_actions.return_value = [action]
         old_velocity = 1.0
         self.repo.get_weights.return_value = {
             300: _make_weights(velocity_multiplier=old_velocity)
         }
-        # effective_velocity=None deliberately exercises the 7.0-day
-        # fallback in _estimate_predicted_sell_days (see _make_plan_item's
-        # docstring for why this must be explicit rather than left to a
-        # bare MagicMock attribute).
-        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=300, effective_velocity=None)]
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=300, effective_velocity=0.2)]
 
-        # Actual sell_days = 5.0; predicted = 7.0 (velocity fallback)
-        actual_days = 5.0
+        actual_days = 4.0
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
             "sell_days": actual_days,
@@ -359,13 +355,80 @@ class TestFeedbackProcessor:
         self.processor.process_pending_feedback()
 
         weights_arg = self.repo.upsert_weights.call_args[0][0]
-        # predicted_days = 7.0 (fallback from _estimate_predicted_sell_days
-        # when effective_velocity is None)
-        # velocity = 0.8 * 1.0 + 0.2 * (7.0 / 5.0) = 0.8 + 0.28 = 1.08
-        expected_velocity = 0.8 * old_velocity + 0.2 * (7.0 / actual_days)
-        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 0.001, (
-            f"Expected {expected_velocity}, got {weights_arg.velocity_multiplier}"
+        expected_velocity = 0.8 * old_velocity + 0.2 * (5.0 / actual_days)
+        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 1e-9
+
+    @staticmethod
+    def _velocity_skip_messages(caplog):
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO and "velocity update skipped" in r.getMessage()
+        ]
+
+    @pytest.mark.parametrize("plan_items, reason", [
+        ([_make_plan_item(type_id=310, effective_velocity=None)], "effective_velocity is unknown"),
+        ([], "no plan item for this type"),
+    ])
+    def test_a_sale_with_unknown_predicted_velocity_keeps_the_velocity_weight(
+        self, caplog, plan_items, reason,
+    ):
+        """No invented 7-day prediction: velocity stays, accuracy and cost still learn."""
+        action = _make_action(type_id=310, estimated_build_cost_isk=55_000_000.0, quantity=100)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {
+            310: _make_weights(accuracy_ema=1.0, velocity_multiplier=1.3, cost_multiplier=1.0)
+        }
+        self.repo.get_plan_items.return_value = plan_items
+        self.processor._find_realized_sale.return_value = {
+            "isk_per_hour": 8_000_000.0, "sell_days": 5.0,
+            "allocation_details": [{"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0}],
+        }
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert weights.velocity_multiplier == 1.3
+        assert outcome.predicted_sell_days is None
+        assert outcome.actual_sell_days == 5.0
+        # Cost has its own inputs and still updates: 0.8 + 0.2 * (550k / 600k).
+        assert abs(weights.cost_multiplier - (0.8 + 0.2 * (550_000.0 / 600_000.0))) < 1e-9
+        if plan_items:
+            # Accuracy needs the plan item's isk_per_hour (10M): 0.8 + 0.2 * 0.8.
+            assert abs(weights.accuracy_ema - (0.8 + 0.2 * 0.8)) < 1e-9
+        (message,) = self._velocity_skip_messages(caplog)
+        assert reason in message
+        assert "type_id=310" in message
+
+    @pytest.mark.parametrize("plan_items, reason", [
+        ([_make_plan_item(type_id=400, effective_velocity=None)], "effective_velocity is unknown"),
+        ([], "no plan item for this type"),
+    ])
+    def test_slow_mover_with_unknown_predicted_velocity_keeps_every_weight(
+        self, caplog, plan_items, reason,
+    ):
+        """Slow mover path: accuracy and cost are never updated, and with no
+        predicted velocity there is no velocity penalty to compute either."""
+        old_action = _make_action(type_id=400, generated_at=_utcnow() - timedelta(days=65))
+        self.repo.get_unprocessed_done_actions.return_value = [old_action]
+        self.repo.get_weights.return_value = {
+            400: _make_weights(accuracy_ema=0.95, cost_multiplier=1.05, velocity_multiplier=1.2)
+        }
+        self.repo.get_plan_items.return_value = plan_items
+        self.processor._find_realized_sale.return_value = None
+
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert (weights.accuracy_ema, weights.cost_multiplier, weights.velocity_multiplier) == (
+            0.95, 1.05, 1.2,
         )
+        assert outcome.slow_mover is True
+        assert outcome.predicted_sell_days is None
+        (message,) = self._velocity_skip_messages(caplog)
+        assert reason in message
 
     def test_slow_mover_skips_accuracy_and_cost(self):
         """Slow mover path: only velocity_multiplier updated; accuracy_ema and cost_multiplier unchanged."""
@@ -384,9 +447,8 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {
             400: _make_weights(accuracy_ema=old_accuracy, cost_multiplier=old_cost, velocity_multiplier=old_velocity)
         }
-        # effective_velocity=None deliberately exercises the 7.0-day
-        # fallback (see _make_plan_item's docstring).
-        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=400, effective_velocity=None)]
+        # 0.125 units/day -> an 8-day predicted sell time.
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=400, effective_velocity=0.125)]
 
         # No realized sale (slow mover)
         self.processor._find_realized_sale.return_value = None
@@ -405,11 +467,9 @@ class TestFeedbackProcessor:
             f"cost_multiplier should not change for slow_mover, got {weights_arg.cost_multiplier}"
         )
 
-        # velocity_multiplier IS updated: 0.8 * 1.0 + 0.2 * (7.0 / 60.0)
-        expected_velocity = 0.8 * old_velocity + 0.2 * (7.0 / slow_mover_timeout)
-        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 0.001, (
-            f"Expected velocity_multiplier={expected_velocity}, got {weights_arg.velocity_multiplier}"
-        )
+        # velocity_multiplier IS updated: 0.8 * 1.0 + 0.2 * (8.0 / 60.0)
+        expected_velocity = 0.8 * old_velocity + 0.2 * (8.0 / slow_mover_timeout)
+        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 1e-9
 
     def test_processed_for_feedback_marked_true(self):
         """After processing, action is marked processed_for_feedback=True."""
@@ -528,31 +588,32 @@ class TestFeedbackProcessor:
         assert weights_arg.confidence_tier == "high", f"Got {weights_arg.confidence_tier}"
 
 
-class TestEstimatePredictedSellDaysFallback:
-    """Direct coverage for `_estimate_predicted_sell_days`'s 7.0-day fallback.
+class TestEstimatePredictedSellDays:
+    """`_estimate_predicted_sell_days` has no constant fallback: an unknown
+    velocity is an unknown prediction (None), never an invented 7 days."""
 
-    `test_normal_outcome_ema_velocity_update` and
-    `test_slow_mover_skips_accuracy_and_cost` above now also exercise this
-    path (via `effective_velocity=None`), but nothing tested the fallback
-    in isolation before -- and it is exactly this function's fallback that
-    the `float(MagicMock())` trap (see `_make_plan_item`'s docstring) hid
-    for so long, by making it look like it always returned 1.0 instead.
-    """
-
-    def test_falls_back_to_seven_days_when_velocity_is_none(self):
+    @pytest.mark.parametrize("velocity", [None, 0.0, -1.0, float("nan"), float("inf"), "abc"])
+    def test_an_unknown_or_unusable_velocity_gives_no_prediction(self, velocity):
         from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
             _estimate_predicted_sell_days,
         )
 
-        item = _make_plan_item(effective_velocity=None)
-        assert _estimate_predicted_sell_days(item) == 7.0
+        assert _estimate_predicted_sell_days(_make_plan_item(effective_velocity=velocity)) is None
 
-    def test_falls_back_to_seven_days_when_plan_item_is_none(self):
+    def test_no_plan_item_gives_no_prediction(self):
         from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
             _estimate_predicted_sell_days,
         )
 
-        assert _estimate_predicted_sell_days(None) == 7.0
+        assert _estimate_predicted_sell_days(None) is None
+
+    @pytest.mark.parametrize("velocity, days", [(0.25, 4.0), (0.01, 30.0), (100.0, 0.1)])
+    def test_a_known_velocity_is_inverted_and_clamped(self, velocity, days):
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+            _estimate_predicted_sell_days,
+        )
+
+        assert _estimate_predicted_sell_days(_make_plan_item(effective_velocity=velocity)) == days
 
 
 class TestFindRealizedSaleAttribution:
