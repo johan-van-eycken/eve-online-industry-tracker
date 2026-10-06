@@ -97,6 +97,24 @@ def get_total_cost(row: dict[str, Any]) -> float | None:
     return _as_optional_float(get_manufacturing_job(row).get("total_cost"))
 
 
+def get_elapsed_time_seconds(row: dict[str, Any]) -> float | None:
+    """Wall-clock time to finish one batch, for latency questions (will it
+    sell before it is built, how long is capital tied up).
+
+    Differs from `manufacturing_job.time_seconds` only for an invented T2 row:
+    time_seconds holds the amortized expected slot time (a fraction of an
+    invention attempt per run, which is right for ISK/h), elapsed_time_seconds
+    the whole invention jobs actually needed (ceil(BPCs needed / probability)
+    attempts in sequence) plus the source copy and the manufacturing.
+    Falls back to time_seconds for a row without the field (older producer).
+    None when the producer could not size the invention (unknown probability).
+    """
+    job = get_manufacturing_job(row)
+    if "elapsed_time_seconds" in job:
+        return _as_optional_float(job.get("elapsed_time_seconds"))
+    return _as_optional_float(job.get("time_seconds"))
+
+
 def get_batch_materials(row: dict[str, Any]) -> dict[int, int] | None:
     """{material type_id: units for the whole batch}, or None when unknown.
 

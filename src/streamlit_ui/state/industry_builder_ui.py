@@ -415,7 +415,13 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Runs": node.get("runs"),
                 "Job Duration": (
                     format_duration(int(duration_seconds or 0))
+                    + (" (expected slot time, amortized)" if node.get("duration_is_amortized") else "")
                     if duration_seconds is not None and int(duration_seconds or 0) > 0
+                    else ""
+                ),
+                "Per-Job Duration": (
+                    format_duration(int(node.get("job_duration_seconds") or 0))
+                    if int(node.get("job_duration_seconds") or 0) > 0
                     else ""
                 ),
                 "Profit": profit_amount,

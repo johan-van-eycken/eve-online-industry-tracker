@@ -758,7 +758,8 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
 
             with metrics_col:
                 mj = cast(dict[str, Any], row.get("manufacturing_job") or {})
-                time_secs = sf(mj.get("time_seconds"))
+                # Elapsed (whole-job) build time; time_seconds is the amortized slot time.
+                time_secs = sf(mj.get("elapsed_time_seconds") if "elapsed_time_seconds" in mj else mj.get("time_seconds"))
                 prep_pct = row.get("prep_time_fraction_pct")
                 me = row.get("blueprint_me")
                 ci = row.get("manufacturing_cost_index")

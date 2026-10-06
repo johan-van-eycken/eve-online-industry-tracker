@@ -107,6 +107,8 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 {
                     "material_cost": manufacturing_job.get("material_cost"),
                     "job_cost": manufacturing_job.get("total_job_cost"),
+                    "slot_time_s (expected, amortized)": manufacturing_job.get("time_seconds"),
+                    "elapsed_time_s (whole jobs)": manufacturing_job.get("elapsed_time_seconds"),
                     "gross_sale_value": selected_row.get("gross_sale_value"),
                     "broker_fee_amount": selected_row.get("broker_fee_amount"),
                     "sales_tax_amount": selected_row.get("sales_tax_amount"),
@@ -169,7 +171,10 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
             activity_rows = [
                 {
                     "Activity": str(activity_name),
-                    "Duration (s)": activity_payload.get("duration_seconds"),
+                    "Expected slot time (s)": activity_payload.get("duration_seconds"),
+                    "Amortized?": "amortized" if activity_payload.get("duration_is_amortized") else "",
+                    "Per-job duration (s)": activity_payload.get("job_duration_seconds"),
+                    "Elapsed, whole jobs (s)": activity_payload.get("elapsed_duration_seconds"),
                     "Job Cost": activity_payload.get("total_job_cost") or activity_payload.get("job_cost"),
                     "Estimated Item Value": activity_payload.get("estimated_item_value"),
                 }
@@ -280,7 +285,12 @@ def _render_overview_grid(
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
+                # Invention runs and datacore quantities are fractional expected
+                # (amortized) values: up to 2 decimals, whole numbers stay whole.
+                valueFormatter=js_eu_number_formatter(
+                    JsCode=runtime.js_code, locale=runtime.locale,
+                    decimals=(0 if col == "ID" else 2), min_decimals=0,
+                ),
                 minWidth=105,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
@@ -600,7 +610,7 @@ function(params) {
     if "Job Duration" in df.columns:
         gb.configure_column(
             "Job Duration",
-            minWidth=140,
+            minWidth=260,
             wrapHeaderText=False,
             autoHeaderHeight=False,
         )
