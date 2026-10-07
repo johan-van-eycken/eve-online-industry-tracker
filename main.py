@@ -67,7 +67,7 @@ def run_flask():
 
 def run_streamlit():
     """Start the Streamlit app in a subprocess"""
-    return subprocess.Popen(["streamlit", "run", "streamlit_app.py"])
+    return subprocess.Popen([sys.executable, "-m", "streamlit", "run", "streamlit_app.py"])
 
 
 def wait_for_flask_ready(flask_proc: multiprocessing.Process | None = None, timeout=120):
@@ -209,6 +209,9 @@ def main():
         # Cleanup on error
         if flask_proc and flask_proc.is_alive():
             flask_proc.terminate()
+            flask_proc.join(timeout=5)
+            if flask_proc.is_alive():
+                flask_proc.kill()
         if streamlit_proc and streamlit_proc.poll() is None:
             streamlit_proc.terminate()
 
