@@ -147,7 +147,7 @@ def test_row_with_no_manufacturing_job_is_skipped() -> None:
 
 
 def test_fallback_when_buy_quantity_key_missing() -> None:
-    """If buy_quantity key is absent, fall back: buy strategy -> full quantity, take -> 0."""
+    """Without a take/buy split nothing is known to be owned: every strategy buys the full quantity."""
     row = _make_row(
         type_id=1001,
         type_name="Item A",
@@ -173,7 +173,7 @@ def test_fallback_when_buy_quantity_key_missing() -> None:
     trit = next(r for r in result if r["type_id"] == 34)
     pye = next(r for r in result if r["type_id"] == 35)
     assert trit["buy"] == 100
-    assert pye["buy"] == 0
+    assert pye["buy"] == 50
 
 
 # --- owned stock is subtracted once, from the gross need of all batches -------
@@ -245,3 +245,39 @@ def test_invention_datacore_line_follows_the_same_rule() -> None:
         },
     }
     assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
+
+
+# --- fix round 1: a take line without a split comes from a stale overview ------
+
+
+def _stale_take_line() -> dict:
+    """A merged take + buy line from an overview cached before take_quantity existed."""
+    return {"type_id": 34, "type_name": "Tritanium", "quantity": 10, "sourcing_strategy": "take", "unit_price": 5.0}
+
+
+def test_stale_take_line_over_several_batches_buys_the_full_need() -> None:
+    row = _make_row(1001, "Item A", 5, {"34": _stale_take_line()})
+    assert _line(aggregate_shopping_list([row])) == (50, 50)
+
+
+def test_stale_take_line_for_one_batch_buys_the_full_need() -> None:
+    row = _make_row(1001, "Item A", 1, {"34": _stale_take_line()})
+    assert _line(aggregate_shopping_list([row])) == (10, 10)
+
+
+def test_stale_lines_log_one_warning_naming_the_types(caplog) -> None:
+    row_a = _make_row(1001, "Item A", 5, {"34": _stale_take_line()})
+    row_b = _make_row(1002, "Item B", 2, {"34": _stale_take_line(), "35": {**_stale_take_line(), "type_id": 35, "type_name": "Pyerite"}})
+    with caplog.at_level("WARNING"):
+        aggregate_shopping_list([row_a, row_b])
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "Tritanium" in warnings[0] and "Pyerite" in warnings[0]
+    assert "refresh" in warnings[0].lower()
+
+
+def test_lines_with_a_split_log_no_warning(caplog) -> None:
+    row = _make_row(1001, "Item A", 5, {"34": _owned_line(4, 3)})
+    with caplog.at_level("WARNING"):
+        aggregate_shopping_list([row])
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
