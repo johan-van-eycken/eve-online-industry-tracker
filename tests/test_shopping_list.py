@@ -318,3 +318,69 @@ def test_overview_without_an_extra_batch_list_scales_batch_one() -> None:
     # Cached before the producer wrote the extra-batch list: batch 1 x batches.
     row = _invention_row(5, batch_one=_datacore(4, take=3), extra=None)
     assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
+
+
+# --- round 3 final wave M5/M6 ---------------------------------------------------
+
+
+def test_unit_price_is_the_first_known_price_not_the_first_line_seen() -> None:
+    unpriced = {**_owned_line(4, 0), "unit_price": None}
+    priced = {**_owned_line(4, 0), "unit_price": 7.5}
+    rows = [_make_row(1001, "Item A", 1, {"34": unpriced}), _make_row(1002, "Item B", 1, {"34": priced})]
+    assert aggregate_shopping_list(rows)[0]["unit_price"] == 7.5
+
+
+def test_unit_price_stays_none_when_no_line_has_one() -> None:
+    unpriced = {**_owned_line(4, 0), "unit_price": None}
+    assert aggregate_shopping_list([_make_row(1001, "Item A", 1, {"34": unpriced})])[0]["unit_price"] is None
+
+
+def test_with_stale_returns_the_stale_type_ids_and_the_same_items() -> None:
+    from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale
+
+    rows = [_make_row(1001, "Item A", 2, {"34": _stale_take_line()})]
+    items, stale = aggregate_shopping_list_with_stale(rows)
+    assert items == aggregate_shopping_list(rows)
+    assert stale == {34: "Tritanium"}
+
+
+def test_with_stale_is_empty_for_lines_with_a_split() -> None:
+    from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale
+
+    _, stale = aggregate_shopping_list_with_stale([_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
+    assert stale == {}
+
+
+def _render_tab_captions(monkeypatch, rows: list[dict]) -> list[str]:
+    from streamlit_ui.pages import portfolio_planner as page
+
+    captions: list[str] = []
+    monkeypatch.setattr(page.st, "caption", lambda text, *a, **k: captions.append(str(text)))
+    monkeypatch.setattr(page.st, "markdown", lambda *a, **k: None)
+    monkeypatch.setattr(page.st, "info", lambda *a, **k: None)
+    monkeypatch.setattr(page.st, "multiselect", lambda label, options, **k: list(options))
+    monkeypatch.setattr(page.st, "stop", lambda: None)
+
+    class _Stop(Exception):
+        pass
+
+    # Everything after the aggregation is table rendering; stop there.
+    monkeypatch.setattr(page.st, "metric", lambda *a, **k: (_ for _ in ()).throw(_Stop()), raising=False)
+    monkeypatch.setattr(page.st, "columns", lambda *a, **k: (_ for _ in ()).throw(_Stop()), raising=False)
+    try:
+        page._render_shopping_list_tab(rows)
+    except Exception:
+        pass
+    return captions
+
+
+def test_tab_shows_the_stale_caption_and_the_new_stock_rule(monkeypatch) -> None:
+    captions = _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _stale_take_line()})])
+    assert any("older overview" in c and "refresh for exact stock use" in c for c in captions)
+    assert any("subtracted once" in c for c in captions)
+    assert not any("sourcing strategy" in c for c in captions)
+
+
+def test_tab_shows_no_stale_caption_for_current_lines(monkeypatch) -> None:
+    captions = _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
+    assert not any("older overview" in c for c in captions)

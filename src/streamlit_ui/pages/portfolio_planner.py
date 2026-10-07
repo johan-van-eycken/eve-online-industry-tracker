@@ -21,7 +21,7 @@ from streamlit_ui.state.industry_builder_page import (
     start_overview_refresh_job,
 )
 from streamlit_ui.state.industry_builder_ui import filter_overview_rows
-from streamlit_ui.shopping_list import aggregate_shopping_list
+from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale
 from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
     load_character_context,
@@ -820,12 +820,16 @@ def _render_page_about() -> None:
 # Shopping List tab
 # ---------------------------------------------------------------------------
 
+STALE_OVERVIEW_CAPTION = "Some lines came from an older overview \u2014 refresh for exact stock use"
+
+
 def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
     st.markdown("### Jita Shopping List")
     st.caption(
         "Select the items you plan to build. "
-        "Quantities reflect what the Industry Builder has already computed "
-        "(owned stock in the Industry hangar is already subtracted via the sourcing strategy)."
+        "Quantities are the gross need minus the owned stock in the Industry hangar, "
+        "subtracted once across all selected items. "
+        "Lines with incomplete stock data count nothing as owned."
     )
 
     if not overview_rows:
@@ -861,7 +865,9 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
         return
 
     selected_rows = [label_to_row[lbl] for lbl in selected_labels]
-    shopping_items = aggregate_shopping_list(selected_rows)
+    shopping_items, stale_types = aggregate_shopping_list_with_stale(selected_rows)
+    if stale_types:
+        st.caption(STALE_OVERVIEW_CAPTION)
 
     if not shopping_items:
         st.info("No buy-sourced materials found for the selected items.")

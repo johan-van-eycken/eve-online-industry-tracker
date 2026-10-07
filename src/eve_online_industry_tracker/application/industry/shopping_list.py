@@ -7,6 +7,13 @@ logger = logging.getLogger(__name__)
 
 
 def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The shopping list alone; see ``aggregate_shopping_list_with_stale``."""
+    return aggregate_shopping_list_with_stale(selected_rows)[0]
+
+
+def aggregate_shopping_list_with_stale(
+    selected_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[int, str]]:
     """Aggregate procurement materials from selected overview rows into a shopping list.
 
     Each material line is ONE batch's take-or-buy plan: ``quantity`` needed, of
@@ -33,8 +40,11 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
     named in one WARNING per call. Every gap therefore errs toward over-buy,
     never under-buy.
 
-    Returns a list of dicts sorted by (buy * unit_price) descending:
+    Returns (items, stale) where items are dicts sorted by (buy * unit_price)
+    descending:
         {"type_id": int, "type_name": str, "need": int, "buy": int, "unit_price": float | None}
+    and stale maps the type_id of every such split-less line to its name, so a
+    UI can tell the user to refresh. ``unit_price`` is the first known price.
     """
     accumulated: dict[int, dict[str, Any]] = {}
     owned_by_type_id: dict[int, int] = {}
@@ -78,6 +88,8 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
                     "buy": 0,
                     "unit_price": _safe_float(mat.get("unit_price")),
                 }
+            if accumulated[mat_type_id]["unit_price"] is None:
+                accumulated[mat_type_id]["unit_price"] = _safe_float(mat.get("unit_price"))
 
         for mat_type_id, row_take in row_take_by_type_id.items():
             owned_by_type_id[mat_type_id] = max(owned_by_type_id.get(mat_type_id, 0), row_take)
@@ -94,7 +106,7 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
 
     result = list(accumulated.values())
     result.sort(key=lambda r: (r["buy"] * (r["unit_price"] or 0.0)), reverse=True)
-    return result
+    return result, stale_type_names
 
 
 _OWNED_STRATEGIES = frozenset({"take", "split", "mixed"})
