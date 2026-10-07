@@ -29,6 +29,12 @@ CORP_LEVEL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"}
 _CAPITAL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"})
 
 
+CAPITAL_RESERVED_HELP = (
+    "Shopping-list total of pending purchases (materials and BPO purchases). "
+    "Excludes job install fees. Purchases without a price count as 0."
+)
+
+
 def compute_capital_reserved(actions: list[dict[str, Any]]) -> float:
     """ISK needed to execute the plan: the pending shopping list.
 
@@ -344,7 +350,11 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
         with c4:
             actions = (page_state.plan or {}).get("actions") or []
             capital_reserved = compute_capital_reserved(actions)
-            st.metric("Capital Reserved", _fmt_isk(capital_reserved) if capital_reserved else "—")
+            st.metric(
+                "Capital Reserved",
+                _fmt_isk(capital_reserved) if capital_reserved else "—",
+                help=CAPITAL_RESERVED_HELP,
+            )
         with c5:
             try:
                 market_status = get_market_intel_status() or {}

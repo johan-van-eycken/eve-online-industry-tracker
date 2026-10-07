@@ -35,3 +35,8 @@ def test_buy_bpo_counts_and_non_pending_and_none_costs_are_ignored():
 
 def test_empty_plan_reserves_nothing():
     assert status_bar.compute_capital_reserved([]) == 0
+
+
+def test_capital_reserved_help_states_scope():
+    h = status_bar.CAPITAL_RESERVED_HELP
+    assert "shopping" in h.lower() and "install fees" in h and "0" in h
