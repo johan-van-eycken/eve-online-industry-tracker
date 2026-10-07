@@ -231,6 +231,9 @@ def main():
                 flask_proc.kill()
         if streamlit_proc and streamlit_proc.poll() is None:
             streamlit_proc.terminate()
+        # Giving up on Flask or Streamlit is a failure: exit non-zero so a
+        # supervisor or shell sees it. Ctrl+C above still exits 0.
+        sys.exit(1)
 
 
 if __name__ == "__main__":
