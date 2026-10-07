@@ -121,6 +121,12 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 }
             )
 
+        if selected_row.get("assumes_owned_t2_bpo"):
+            st.caption(
+                "Costed as if a T2 BPO is owned: Build from BPC is off, so no invention "
+                "cost or datacores are included."
+            )
+
         reasons = selected_row.get("pricing_confidence_reasons") or []
         if isinstance(reasons, list) and reasons:
             st.markdown("**Confidence reasoning**")

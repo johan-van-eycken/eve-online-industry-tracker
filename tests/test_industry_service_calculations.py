@@ -915,10 +915,10 @@ def _invention_service(
     return service
 
 
-def _invention_overview(monkeypatch, *, maximize_bp_runs=False, **kwargs):
+def _invention_overview(monkeypatch, *, maximize_bp_runs=False, build_from_bpc=True, **kwargs):
     service = _invention_service(monkeypatch, **kwargs)
     rows = service.industry_manufacturing_product_overview(
-        build_from_bpc=True,
+        build_from_bpc=build_from_bpc,
         have_blueprint_source_only=False,
         maximize_bp_runs=maximize_bp_runs,
         character_id=1,
@@ -1172,6 +1172,48 @@ def test_owned_t2_bpo_row_has_no_invention_cost(monkeypatch) -> None:
     # copy time, and the 2% invention index must add nothing).
     assert mj["total_job_cost"] == pytest.approx(2.5)
     assert mj["elapsed_time_seconds"] == mj["time_seconds"]
+
+
+_ASSUMES_T2_BPO_REASON = "costed as if a T2 BPO is owned (build_from_bpc off)"
+
+
+def test_t2_row_without_build_from_bpc_is_flagged_as_assuming_an_owned_t2_bpo(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, build_from_bpc=False, real_confidence=True)[5002]["manufacturing_job"]
+
+    assert mj["assumes_owned_t2_bpo"] is True
+    assert _ASSUMES_T2_BPO_REASON in mj["pricing_confidence_reasons"]
+    # Labelling only: still no invention in the cost.
+    assert "invention_material_cost" not in mj
+    assert "invention" not in mj["activity_breakdown"]
+
+
+def test_t2_row_with_build_from_bpc_is_not_flagged(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, build_from_bpc=True, real_confidence=True)[5002]["manufacturing_job"]
+
+    assert not mj.get("assumes_owned_t2_bpo")
+    assert _ASSUMES_T2_BPO_REASON not in mj["pricing_confidence_reasons"]
+
+
+def test_t1_row_without_build_from_bpc_is_not_flagged(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, build_from_bpc=False, real_confidence=True)[6001]["manufacturing_job"]
+
+    assert not mj.get("assumes_owned_t2_bpo")
+    assert _ASSUMES_T2_BPO_REASON not in mj["pricing_confidence_reasons"]
+
+
+def test_owned_t2_bpo_without_build_from_bpc_is_not_flagged(monkeypatch) -> None:
+    bpo = SimpleNamespace(
+        type_id=9002, item_id=79, is_blueprint_copy=False,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    mj = _invention_overview(
+        monkeypatch, build_from_bpc=False, real_confidence=True, owned_assets=([], [bpo], {}, {}, {}),
+    )[5002]["manufacturing_job"]
+
+    assert not mj.get("assumes_owned_t2_bpo")
+    assert _ASSUMES_T2_BPO_REASON not in mj["pricing_confidence_reasons"]
 
 
 def test_unpriced_invention_input_lowers_confidence_and_is_named(monkeypatch, caplog) -> None:

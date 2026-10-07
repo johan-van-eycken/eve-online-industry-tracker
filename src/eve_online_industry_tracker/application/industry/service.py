@@ -2062,6 +2062,8 @@ class IndustryService:
                 row["effective_profit_with_relist"] = None
                 row["effective_margin_with_relist_pct"] = None
 
+    _ASSUMES_OWNED_T2_BPO_REASON = "costed as if a T2 BPO is owned (build_from_bpc off)"
+
     def _enrich_product_rows_with_pricing_confidence(
         self,
         product_rows: list[dict[str, Any]],
@@ -2187,6 +2189,9 @@ class IndustryService:
                 confidence = "Medium"
             else:
                 confidence = "Low"
+
+            if manufacturing_job.get("assumes_owned_t2_bpo"):
+                reasons.append(self._ASSUMES_OWNED_T2_BPO_REASON)
 
             manufacturing_job["pricing_confidence"] = confidence
             manufacturing_job["pricing_confidence_reasons"] = reasons
@@ -7493,6 +7498,11 @@ class IndustryService:
         }
         if invention_cost_unknown_reason is not None:
             row_out["manufacturing_job"]["invention_cost_unknown_reason"] = invention_cost_unknown_reason
+        if not bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals:
+            # A T2 row that would be invented, costed with no invention because
+            # build_from_bpc is off: it silently assumes a T2 BPO the corp does
+            # not own. A label only; no cost number changes.
+            row_out["manufacturing_job"]["assumes_owned_t2_bpo"] = True
         if invention_procurement_materials:
             # Read by the Portfolio / Industry Builder shopping list
             # (industry/shopping_list.py). Not priced by the pricing step and not

@@ -574,6 +574,7 @@ def build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
             "hub_sell_liquidity": manufacturing_job.get("hub_sell_liquidity"),
             "hub_buy_order_count": manufacturing_job.get("hub_buy_order_count"),
             "hub_sell_order_count": manufacturing_job.get("hub_sell_order_count"),
+            "assumes_owned_t2_bpo": bool(manufacturing_job.get("assumes_owned_t2_bpo")),
             "pricing_confidence": manufacturing_job.get("pricing_confidence"),
             "pricing_confidence_reasons": manufacturing_job.get("pricing_confidence_reasons"),
             "market_price_age_minutes": manufacturing_job.get("market_price_age_minutes"),
