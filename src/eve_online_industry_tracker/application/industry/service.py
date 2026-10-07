@@ -7432,7 +7432,10 @@ class IndustryService:
         extra_batch_requirements = [
             *(self._invention_whole_attempt_requirements(
                 invention_job,
-                self._full_batch_invention_whole_attempts(
+                # Batch 1 already invented every run when no owned BPC ran.
+                int(inv_costs.get("whole_attempts") or 0)
+                if requires_invention_chain and owned_target_copy_runs_used <= 0 and inv_costs is not None
+                else self._full_batch_invention_whole_attempts(
                     invention_job=invention_job, blueprint_type_id=blueprint_type_id,
                     runs=effective_runs, max_production_limit=max_production_limit,
                     adjusted_price_map=ctx.adjusted_market_price_map,

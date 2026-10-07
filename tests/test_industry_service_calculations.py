@@ -1694,3 +1694,15 @@ def test_build_from_bpc_off_writes_no_invention_buy_lists(monkeypatch) -> None:
     mj = _invention_overview(monkeypatch, build_from_bpc=False)[5002]["manufacturing_job"]
     assert "invention_procurement_materials" not in mj
     assert "invention_procurement_materials_per_extra_batch" not in mj
+
+
+def test_extra_batch_list_does_not_repeat_the_unknown_odds_warning(monkeypatch, caplog) -> None:
+    # No owned BPC: the extra batch reuses batch 1's attempt count, so the
+    # unknown-odds WARNING is logged once, as before the extra-batch list.
+    with caplog.at_level("WARNING"):
+        _invention_overview(
+            monkeypatch, blueprint_rows=_rows_with(probability_pct=0.0, bpc_runs=10, t2_limit=10),
+            adm_overrides={"invention_probability_floor": 0.0},
+        )
+    unknown = [r for r in caplog.records if "invention cost left unknown" in r.getMessage()]
+    assert len(unknown) == 1
