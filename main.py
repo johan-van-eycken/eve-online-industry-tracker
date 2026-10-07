@@ -65,6 +65,12 @@ def run_flask():
     )
 
 
+#: Streamlit that exits within this many seconds of launch counts as a failed start.
+STREAMLIT_QUICK_EXIT_WINDOW_SECONDS = 30
+#: Give up (and shut Flask down) after this many consecutive failed starts.
+STREAMLIT_MAX_CONSECUTIVE_FAILURES = 5
+
+
 def run_streamlit():
     """Start the Streamlit app in a subprocess"""
     return subprocess.Popen([sys.executable, "-m", "streamlit", "run", "streamlit_app.py"])
@@ -129,6 +135,8 @@ def main():
         max_restart_delay = 30
         max_consecutive_failures = 10
         consecutive_failures = 0
+        streamlit_launched_at = time.monotonic()
+        streamlit_failures = 0
 
         while True:
             time.sleep(5)
@@ -167,8 +175,17 @@ def main():
 
             # Check if Streamlit died (optional)
             if streamlit_proc.poll() is not None:
+                if time.monotonic() - streamlit_launched_at < STREAMLIT_QUICK_EXIT_WINDOW_SECONDS:
+                    streamlit_failures += 1
+                else:
+                    streamlit_failures = 0
+                if streamlit_failures >= STREAMLIT_MAX_CONSECUTIVE_FAILURES:
+                    raise RuntimeError(
+                        f"Streamlit exited {streamlit_failures} times in a row right after launch. Giving up."
+                    )
                 logging.warning("Streamlit process died. Restarting...")
                 streamlit_proc = run_streamlit()
+                streamlit_launched_at = time.monotonic()
 
     except KeyboardInterrupt:
         logging.info("Interrupt received, shutting down...")
