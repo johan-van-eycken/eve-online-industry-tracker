@@ -39,3 +39,9 @@ def test_flattened_grid_row_carries_the_marker():
     plain = ui.flatten_overview_job_tree_rows([_row(None)])
     assert [r["Pricing Confidence"] for r in flagged] == ["High · assumes T2 BPO"]
     assert [r["Pricing Confidence"] for r in plain] == ["High"]
+
+
+def test_drilldown_caption_covers_nested_t2_components():
+    caption = industry_builder.ASSUMES_OWNED_T2_BPO_CAPTION
+    assert "Nested T2 components" in caption
+    assert "owned T2 BPO" in caption and "max ME/TE" in caption

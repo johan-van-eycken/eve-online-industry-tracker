@@ -24,6 +24,14 @@ from streamlit_ui.api.industry_builder import start_product_overview_refresh
 from typing import cast, Any
 
 
+#: Drilldown caption for a row flagged assumes_owned_t2_bpo (Build from BPC off).
+ASSUMES_OWNED_T2_BPO_CAPTION = (
+    "Costed as if a T2 BPO is owned: Build from BPC is off, so no invention "
+    "cost or datacores are included. Nested T2 components are costed the same "
+    "way, as an owned T2 BPO (SDE blueprint, max ME/TE)."
+)
+
+
 def _format_age_minutes(value: Any) -> str:
     try:
         minutes = float(value or 0.0)
@@ -122,10 +130,7 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
             )
 
         if row_assumes_owned_t2_bpo(selected_row):
-            st.caption(
-                "Costed as if a T2 BPO is owned: Build from BPC is off, so no invention "
-                "cost or datacores are included."
-            )
+            st.caption(ASSUMES_OWNED_T2_BPO_CAPTION)
 
         reasons = selected_row.get("pricing_confidence_reasons") or []
         if isinstance(reasons, list) and reasons:
