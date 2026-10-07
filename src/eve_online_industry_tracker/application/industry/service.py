@@ -4004,6 +4004,11 @@ class IndustryService:
                     entry_line_total = float(entry_unit_price) * float(entry_quantity)
 
             existing["quantity"] = int(existing.get("quantity") or 0) + int(entry.get("quantity") or 0)
+            if "take_quantity" in entry or "take_quantity" in existing:
+                # Take legs carry take_quantity; a leg without it is bought.
+                take_quantity = int(existing.get("take_quantity") or 0) + int(entry.get("take_quantity") or 0)
+                existing["take_quantity"] = take_quantity
+                existing["buy_quantity"] = max(0, int(existing["quantity"]) - take_quantity)
             if entry.get("quantity_per_run") is not None or existing.get("quantity_per_run") is not None:
                 existing["quantity_per_run"] = int(existing.get("quantity_per_run") or 0) + int(entry.get("quantity_per_run") or 0)
             if entry.get("base_quantity") is not None or existing.get("base_quantity") is not None:
@@ -4447,6 +4452,10 @@ class IndustryService:
                     {
                         **dict(material),
                         "quantity": owned_quantity_to_take,
+                        # Kept through the per-type merge so the shopping list
+                        # knows how much of the merged line is owned stock.
+                        "take_quantity": owned_quantity_to_take,
+                        "buy_quantity": 0,
                         "unit_price": take_unit_price,
                         "price_source": take_price_source,
                         "line_total": line_total,
@@ -4952,6 +4961,10 @@ class IndustryService:
                     {
                         **dict(material),
                         "quantity": owned_quantity_to_take,
+                        # Kept through the per-type merge so the shopping list
+                        # knows how much of the merged line is owned stock.
+                        "take_quantity": owned_quantity_to_take,
+                        "buy_quantity": 0,
                         "unit_price": take_unit_price,
                         "price_source": take_price_source,
                         "sourcing_strategy": "take",

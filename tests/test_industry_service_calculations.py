@@ -1540,3 +1540,44 @@ def test_evaluating_a_nested_invention_does_not_spend_stock(monkeypatch, compone
     line = mj["invention_procurement_materials"]["204"]
     assert (line["take_quantity"], line["buy_quantity"]) == (take, buy)
     assert isinstance(line["take_quantity"], int) and isinstance(line["buy_quantity"], int)
+
+
+# --- Task H: the shopping list spends owned stock once over all batches -------
+
+
+def test_partly_owned_manufacturing_material_reports_take_and_buy(monkeypatch) -> None:
+    # 3 of the 10 Tritanium are owned. The procurement line merges the take
+    # and buy legs, and must still say which part is owned.
+    row = _invention_overview(monkeypatch, owned_item_inventory=({34: 3}, {34: 1.0}))[5002]
+
+    line = row["manufacturing_job"]["procurement_materials"]["34"]
+    assert (line["quantity"], line["take_quantity"], line["buy_quantity"]) == (10, 3, 7)
+    shopping = _shopping_line(row, 34)
+    assert shopping is not None and (shopping["need"], shopping["buy"]) == (10, 7)
+
+
+def test_shopping_list_spends_owned_material_once_over_batches(monkeypatch) -> None:
+    row = _invention_overview(monkeypatch, owned_item_inventory=({34: 3}, {34: 1.0}))[5002]
+    row["max_batches_total"] = 5
+
+    shopping = _shopping_line(row, 34)
+    assert shopping is not None and (shopping["need"], shopping["buy"]) == (50, 47)
+
+
+def test_shopping_list_spends_owned_datacores_once_over_batches(monkeypatch) -> None:
+    # 3 owned, 4 datacores per batch, 5 batches: 4 x 5 - 3 = 17.
+    row = _invention_overview(monkeypatch, owned_item_inventory=({204: 3}, {204: 60.0}))[5002]
+    row["max_batches_total"] = 5
+
+    shopping = _shopping_line(row, 204)
+    assert shopping is not None and (shopping["need"], shopping["buy"]) == (20, 17)
+
+
+def test_two_products_sharing_owned_material_subtract_it_once(monkeypatch) -> None:
+    # 5002 needs 10 Tritanium, 6001 needs 3; 3 owned. Each row is planned
+    # against the full stock, so both take 3; the list needs 13 - 3 = 10.
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+
+    rows = _invention_overview(monkeypatch, owned_item_inventory=({34: 3}, {34: 1.0}))
+    line = next(item for item in aggregate_shopping_list([rows[5002], rows[6001]]) if item["type_id"] == 34)
+    assert (line["need"], line["buy"]) == (13, 10)
