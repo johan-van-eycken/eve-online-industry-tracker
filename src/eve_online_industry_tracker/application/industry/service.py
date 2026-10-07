@@ -4528,7 +4528,7 @@ class IndustryService:
                     max(0, int(child_plan.get("planned_quantity") or remaining_child_quantity)),
                 )
                 uncovered_child_quantity = max(0, remaining_child_quantity - planned_child_quantity)
-                build_total_cost = self._as_float(child_plan.get("estimated_total_cost"))
+                build_total_cost = self._build_total_cost_or_none(child_plan)
                 buy_total_cost = (
                     float(buy_unit_price) * float(planned_child_quantity)
                     if buy_unit_price is not None and planned_child_quantity > 0
@@ -5125,7 +5125,7 @@ class IndustryService:
                 max(0, int(child_plan.get("planned_quantity") or remaining_material_quantity)),
             )
             uncovered_child_quantity = max(0, remaining_material_quantity - planned_child_quantity)
-            build_total_cost = self._as_float(child_plan.get("estimated_total_cost"))
+            build_total_cost = self._build_total_cost_or_none(child_plan)
             buy_total_cost = (
                 float(buy_unit_price) * float(planned_child_quantity)
                 if buy_unit_price is not None and planned_child_quantity > 0
@@ -6919,6 +6919,15 @@ class IndustryService:
                 "invention_input": True,
             })
         return out
+
+    @classmethod
+    def _build_total_cost_or_none(cls, child_plan: dict[str, Any]) -> float | None:
+        """A sub-build's total cost for the build-vs-buy choice, or None (buy)
+        when its invention cost is unknown: its estimated_total_cost then leaves
+        the invention out, and building it would buy no datacores."""
+        if child_plan.get("invention_cost_unknown_reasons"):
+            return None
+        return cls._as_float(child_plan.get("estimated_total_cost"))
 
     @staticmethod
     def _merge_invention_requirements(requirements: list[dict[str, Any]]) -> list[dict[str, Any]]:

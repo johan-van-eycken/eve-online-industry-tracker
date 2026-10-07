@@ -1449,19 +1449,36 @@ def test_nested_t2_zero_probability_and_zero_floor_never_divides(monkeypatch, ca
             prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE, real_confidence=True,
             adm_overrides={"invention_probability_floor": 0.0},
         )
-    mj = rows[7100]["manufacturing_job"]
-
-    invention = mj["recursive_activity_breakdown"]["manufacturing:5002"]["nested"]["invention:9002"]
-    assert invention["job_cost"] is None
-    assert "no invention success probability" in invention["cost_unknown_reason"]
-    assert "no invention success probability" in mj["invention_cost_unknown_reason"]
-    assert not mj.get("expected_invention_materials")
-    assert mj["elapsed_time_seconds"] is None
-    assert mj["material_pricing_confidence"] == "Low"
-    assert any("Invention cost unknown" in r for r in mj["pricing_confidence_reasons"])
     assert any("invention cost left unknown" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    # The top-level T2 row: invention cost unknown, never divided by zero.
+    t2 = rows[5002]["manufacturing_job"]
+    assert "no invention success probability" in t2["invention_cost_unknown_reason"]
+    assert not t2.get("expected_invention_materials")
+    assert t2["elapsed_time_seconds"] is None
+    assert t2["material_pricing_confidence"] == "Low"
+    assert any("Invention cost unknown" in r for r in t2["pricing_confidence_reasons"])
     # A T1 row in the same refresh is untouched.
     assert rows[6001]["manufacturing_job"]["material_cost"] == pytest.approx(15.0)
+
+
+def test_nested_sub_build_with_unknown_invention_cost_is_bought(monkeypatch) -> None:
+    # Unknown odds leave the sub-build's estimated_total_cost without the
+    # invention, so it looked cheaper than its 10,000 ISK market price and
+    # was built with no datacores bought. It is bought instead.
+    rows = _invention_overview(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(probability_pct=0.0),
+        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE,
+        adm_overrides={"invention_probability_floor": 0.0},
+    )
+    mj = rows[7100]["manufacturing_job"]
+
+    assert "manufacturing:5002" not in mj["recursive_activity_breakdown"]
+    assert mj["procurement_materials"]["5002"]["quantity"] == 1
+    assert mj["material_cost"] == pytest.approx(10_000.0)
+    assert "invention_cost_unknown_reason" not in mj
+    assert "invention_procurement_materials" not in mj
+    assert "invention_procurement_materials_per_extra_batch" not in mj
 
 
 # --- fix round 1: whole-attempt invention buy list ------------------------------
