@@ -6921,6 +6921,43 @@ class IndustryService:
         return out
 
     @staticmethod
+    def _merge_invention_requirements(requirements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Whole-attempt invention requirements merged per type_id (quantities
+        summed), without the per-invention tags."""
+        merged: dict[int, dict[str, Any]] = {}
+        for entry in requirements:
+            type_id = int(entry.get("type_id") or 0)
+            if type_id in merged:
+                merged[type_id]["quantity"] += int(entry.get("quantity") or 0)
+            else:
+                merged[type_id] = {
+                    key: value for key, value in entry.items()
+                    if key not in ("invented_blueprint_type_id", "invented_blueprint_name", "whole_attempts", "quantity_per_attempt")
+                }
+        return list(merged.values())
+
+    def _full_batch_invention_whole_attempts(
+        self,
+        *,
+        invention_job: dict[str, Any],
+        blueprint_type_id: int,
+        runs: int,
+        max_production_limit: int,
+        adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> int:
+        """Whole invention attempts to invent all `runs` of one batch, on the
+        same model as the costed invention (0 when the odds are unknown). Only
+        the attempt count is used, so the activity is not priced."""
+        costs, _ = self._expected_invention_costs(
+            compute_activity=lambda **kw: {"duration_seconds": 0, "total_job_cost": None},
+            invention_job=invention_job,
+            target_entry=self._invention_target_entry(invention_job, int(blueprint_type_id)),
+            blueprint_type_id=int(blueprint_type_id), invented_runs=max(0, int(runs)),
+            max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
+        )
+        return int(costs.get("whole_attempts") or 0)
+
+    @staticmethod
     def _absorb_nested_invention(
         child_plan: dict[str, Any],
         *,
@@ -7370,19 +7407,33 @@ class IndustryService:
               if requires_invention_chain and inv_costs is not None else []),
             *[dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements") or []) if isinstance(e, dict)],
         ]
-        merged_requirements: dict[int, dict[str, Any]] = {}
-        for entry in invention_requirements:
-            type_id = int(entry.get("type_id") or 0)
-            if type_id in merged_requirements:
-                merged_requirements[type_id]["quantity"] += int(entry.get("quantity") or 0)
-            else:
-                merged_requirements[type_id] = {
-                    key: value for key, value in entry.items()
-                    if key not in ("invented_blueprint_type_id", "invented_blueprint_name", "whole_attempts", "quantity_per_attempt")
-                }
         invention_procurement_materials, _ = self._plan_take_or_buy_material_nodes(
-            list(merged_requirements.values()),
+            self._merge_invention_requirements(invention_requirements),
             available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+            owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+            sell_price_map=ctx.material_price_map,
+            adjusted_price_map=ctx.adjusted_market_price_map,
+        )
+        # The list above is batch 1 only: the owned T2 BPC runs are spent on it.
+        # Every further batch of this row invents all its runs, so the shopping
+        # list needs one full batch's whole-attempt inputs with no owned BPC
+        # runs (plus the nested sub-builds' inputs, as in batch 1). Pure
+        # requirements: planned against no stock (take 0), because the
+        # shopping list nets owned stock once over all batches.
+        extra_batch_requirements = [
+            *(self._invention_whole_attempt_requirements(
+                invention_job,
+                self._full_batch_invention_whole_attempts(
+                    invention_job=invention_job, blueprint_type_id=blueprint_type_id,
+                    runs=effective_runs, max_production_limit=max_production_limit,
+                    adjusted_price_map=ctx.adjusted_market_price_map,
+                ),
+            ) if bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals else []),
+            *[dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements") or []) if isinstance(e, dict)],
+        ]
+        invention_procurement_materials_per_extra_batch, _ = self._plan_take_or_buy_material_nodes(
+            self._merge_invention_requirements(extra_batch_requirements),
+            available_owned_item_quantity_by_type_id={},
             owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
             sell_price_map=ctx.material_price_map,
             adjusted_price_map=ctx.adjusted_market_price_map,
@@ -7522,6 +7573,11 @@ class IndustryService:
             # read by the daily planner, which buys datacores via invent actions.
             row_out["manufacturing_job"]["invention_procurement_materials"] = self._overview_keyed_entries(
                 invention_procurement_materials, compactor=lambda e: e,
+            )
+        if invention_procurement_materials_per_extra_batch:
+            # Shopping list only: batches 2..N of this row, see above.
+            row_out["manufacturing_job"]["invention_procurement_materials_per_extra_batch"] = self._overview_keyed_entries(
+                invention_procurement_materials_per_extra_batch, compactor=lambda e: e,
             )
         if expected_invention_inputs or nested_expected_invention_inputs:
             # Priced into material_cost / total_cost by _enrich_product_rows_with_material_prices.

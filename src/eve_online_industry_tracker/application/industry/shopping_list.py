@@ -16,6 +16,11 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
         need = sum over rows of (quantity per batch x that row's batches)
         buy  = max(0, need - owned)
 
+    Invention inputs are the exception: batch 1 may be partly or wholly
+    covered by owned T2 BPC runs, later batches are not, so their need is
+    batch 1's list plus (batches - 1) x the per-extra-batch list (see
+    ``_row_lines_with_batch_counts``).
+
     per type_id. The rows do not carry the total stock, only what each row
     took. Every row is planned against the full stock, and within a row the
     lines spend it in turn, so a row's summed take is stock the producer saw.
@@ -41,22 +46,14 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
         mj = row.get("manufacturing_job")
         if not isinstance(mj, dict):
             continue
-        # procurement_materials: the manufacturing job's buy list.
-        # invention_procurement_materials: an invented T2 row's (and its nested
-        # T2 sub-builds') invention inputs for whole attempts, same line shape.
-        lines = [
-            mat
-            for key in ("procurement_materials", "invention_procurement_materials")
-            if isinstance(mj.get(key), dict)
-            for mat in mj[key].values()
-        ]
+        batches = max(1, int(row.get("max_batches_total") or 1))
+        lines = _row_lines_with_batch_counts(mj, batches)
         if not lines:
             continue
 
-        batches = max(1, int(row.get("max_batches_total") or 1))
         row_take_by_type_id: dict[int, int] = {}
 
-        for mat in lines:
+        for mat, line_batches in lines:
             if not isinstance(mat, dict):
                 continue
             try:
@@ -70,7 +67,7 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
             take_per_batch = max(0, min(quantity_per_batch, quantity_per_batch - _buy_per_batch(mat, quantity_per_batch)))
             row_take_by_type_id[mat_type_id] = row_take_by_type_id.get(mat_type_id, 0) + take_per_batch
 
-            need_total = quantity_per_batch * batches
+            need_total = quantity_per_batch * line_batches
             if mat_type_id in accumulated:
                 accumulated[mat_type_id]["need"] += need_total
             else:
@@ -101,6 +98,33 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
 
 
 _OWNED_STRATEGIES = frozenset({"take", "split", "mixed"})
+
+_EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch"
+
+
+def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple[Any, int]]:
+    """Each material line of a row with the number of batches it is needed for.
+
+    procurement_materials: the manufacturing job's buy list, every batch.
+    invention_procurement_materials: the invention inputs (whole attempts) for
+    batch 1, after the owned T2 BPC runs; absent when they cover batch 1.
+    invention_procurement_materials_per_extra_batch: the invention inputs for
+    one full batch with no owned BPC runs left, needed by batches 2..N; its
+    lines take nothing from stock. An overview cached before that list existed
+    lacks the key, and batch 1's invention list then counts for every batch.
+    """
+    def lines(key: str) -> list[Any]:
+        value = mj.get(key)
+        return list(value.values()) if isinstance(value, dict) else []
+
+    out: list[tuple[Any, int]] = [(mat, batches) for mat in lines("procurement_materials")]
+    if isinstance(mj.get(_EXTRA_BATCH_INVENTION_KEY), dict):
+        out.extend((mat, 1) for mat in lines("invention_procurement_materials"))
+        if batches > 1:
+            out.extend((mat, batches - 1) for mat in lines(_EXTRA_BATCH_INVENTION_KEY))
+    else:
+        out.extend((mat, batches) for mat in lines("invention_procurement_materials"))
+    return out
 
 
 def _buy_per_batch(mat: dict[str, Any], quantity_per_batch: int) -> int:

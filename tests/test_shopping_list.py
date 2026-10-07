@@ -281,3 +281,40 @@ def test_lines_with_a_split_log_no_warning(caplog) -> None:
     with caplog.at_level("WARNING"):
         aggregate_shopping_list([row])
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+# --- round 3 final wave I1: datacores for batches past the owned T2 BPCs -------
+
+
+def _invention_row(batches: int, *, batch_one: dict | None, extra: dict | None) -> dict:
+    mj: dict = {"procurement_materials": {}}
+    if batch_one is not None:
+        mj["invention_procurement_materials"] = {"204": batch_one}
+    if extra is not None:
+        mj["invention_procurement_materials_per_extra_batch"] = {"204": extra}
+    return {"type_id": 5002, "type_name": "Item T2", "max_batches_total": batches, "manufacturing_job": mj}
+
+
+def _datacore(quantity: int, take: int = 0) -> dict:
+    return _owned_line(quantity, take, type_id=204, type_name="Datacore")
+
+
+def test_batch_one_covered_by_an_owned_bpc_buys_the_later_batches() -> None:
+    row = _invention_row(5, batch_one=None, extra=_datacore(4))
+    assert _line(aggregate_shopping_list([row]), 204) == (16, 16)
+
+
+def test_partial_bpc_cover_adds_full_batches_after_batch_one() -> None:
+    row = _invention_row(3, batch_one=_datacore(12), extra=_datacore(20))
+    assert _line(aggregate_shopping_list([row]), 204) == (52, 52)
+
+
+def test_extra_batch_list_nets_owned_stock_once() -> None:
+    row = _invention_row(5, batch_one=_datacore(4, take=3), extra=_datacore(4))
+    assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
+
+
+def test_overview_without_an_extra_batch_list_scales_batch_one() -> None:
+    # Cached before the producer wrote the extra-batch list: batch 1 x batches.
+    row = _invention_row(5, batch_one=_datacore(4, take=3), extra=None)
+    assert _line(aggregate_shopping_list([row]), 204) == (20, 17)

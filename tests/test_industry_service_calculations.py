@@ -1581,3 +1581,99 @@ def test_two_products_sharing_owned_material_subtract_it_once(monkeypatch) -> No
     rows = _invention_overview(monkeypatch, owned_item_inventory=({34: 3}, {34: 1.0}))
     line = next(item for item in aggregate_shopping_list([rows[5002], rows[6001]]) if item["type_id"] == 34)
     assert (line["need"], line["buy"]) == (13, 10)
+
+
+# --- round 3 final wave I1: datacores for the batches past owned T2 BPCs ------
+
+
+def _owned_t2_bpc(*, runs: int, item_id: int = 81) -> SimpleNamespace:
+    return SimpleNamespace(
+        type_id=9002, item_id=item_id, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=runs,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+
+
+def test_owned_bpc_covering_batch_one_still_buys_datacores_for_later_batches(monkeypatch) -> None:
+    # A 10-run owned BPC covers batch 1 (1 run). Every later batch invents its
+    # run: 1 run / 10 per BPC -> 1 BPC, p 0.5 -> 2 whole attempts x 2 = 4.
+    row = _invention_overview(monkeypatch, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}))[5002]
+    mj = row["manufacturing_job"]
+    assert "invention_procurement_materials" not in mj
+    extra = mj["invention_procurement_materials_per_extra_batch"]["204"]
+    assert (extra["quantity"], extra["take_quantity"], extra["buy_quantity"]) == (4, 0, 4)
+
+    row["max_batches_total"] = 5
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (16, 16)  # 4 x (5 - 1)
+
+
+def test_partly_owned_bpc_buys_full_batch_datacores_for_later_batches(monkeypatch) -> None:
+    # 2-run invented BPCs, a 4-run owned BPC, 10 runs per batch, 3 batches.
+    # Batch 1 invents 6 runs: 3 BPCs / 0.5 = 6 attempts x 2 = 12 datacores.
+    # Later batches invent 10 runs: 5 BPCs / 0.5 = 10 attempts x 2 = 20 each.
+    rows = _rows_with(probability_pct=50.0, bpc_runs=2, t2_limit=10)
+    service = _invention_service(monkeypatch, blueprint_rows=rows)
+    bpc = _owned_t2_bpc(runs=4, item_id=82)
+    service._get_owned_blueprint_assets = MethodType(  # type: ignore[attr-defined]
+        lambda self, *, owned_blueprints_scope: ([bpc], [], {}, {}, {}), service,
+    )
+    ctx = service._build_planning_context(
+        force_refresh=False, build_from_bpc=True, include_reactions=False, maximize_bp_runs=False,
+        group_identical_bpcs=True, have_blueprint_source_only=False, market_hub="jita",
+        material_price_side="sell", product_price_side="sell", industry_profile_id=None,
+        owned_blueprints_scope="all_characters", character_id=1, progress_callback=None,
+    )
+    t2_row = rows[1]
+    row = service._build_single_product_row(
+        ctx, row=t2_row, raw_product=t2_row["manufacturing_job"]["products"][0],
+        row_index=1, product_index=1, blueprint_copy_assets=[bpc],
+        blueprint_original_asset=None, effective_runs=10,
+    )
+    assert row is not None
+    mj = row["manufacturing_job"]
+    assert mj["invention_procurement_materials"]["204"]["quantity"] == 12
+    assert mj["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 20
+
+    row["max_batches_total"] = 3
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (52, 52)  # 12 + 2 x 20
+
+
+def test_no_owned_bpc_datacore_buy_is_unchanged(monkeypatch) -> None:
+    row = _invention_overview(monkeypatch)[5002]
+    mj = row["manufacturing_job"]
+    assert mj["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 4
+
+    row["max_batches_total"] = 5
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (20, 20)
+
+
+def test_owned_datacores_are_netted_once_with_an_extra_batch_list(monkeypatch) -> None:
+    # 3 owned: batch 1 takes them, the extra-batch lines take 0. 20 - 3 = 17.
+    row = _invention_overview(monkeypatch, owned_item_inventory=({204: 3}, {204: 60.0}))[5002]
+    extra = row["manufacturing_job"]["invention_procurement_materials_per_extra_batch"]["204"]
+    assert (extra["take_quantity"], extra["buy_quantity"]) == (0, 4)
+
+    row["max_batches_total"] = 5
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (20, 17)
+
+
+def test_nested_invention_is_in_the_extra_batch_list(monkeypatch) -> None:
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
+    )[7100]
+    assert row["manufacturing_job"]["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 4
+
+    row["max_batches_total"] = 3
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (12, 12)
+
+
+def test_build_from_bpc_off_writes_no_invention_buy_lists(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, build_from_bpc=False)[5002]["manufacturing_job"]
+    assert "invention_procurement_materials" not in mj
+    assert "invention_procurement_materials_per_extra_batch" not in mj
