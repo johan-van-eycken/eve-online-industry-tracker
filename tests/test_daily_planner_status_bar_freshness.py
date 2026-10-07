@@ -79,7 +79,7 @@ class _FakeSt:
         self.captions: list[str] = []
         self.buttons: dict[str, str | None] = {}
 
-    def metric(self, label, value):
+    def metric(self, label, value, **kwargs):
         self.metrics[label] = value
 
     def warning(self, text):
