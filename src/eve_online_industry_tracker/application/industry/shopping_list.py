@@ -20,13 +20,21 @@ def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[st
         mj = row.get("manufacturing_job")
         if not isinstance(mj, dict):
             continue
-        proc = mj.get("procurement_materials")
-        if not isinstance(proc, dict):
+        # procurement_materials: the manufacturing job's buy list.
+        # invention_procurement_materials: an invented T2 row's (and its nested
+        # T2 sub-builds') invention inputs for whole attempts, same line shape.
+        lines = [
+            mat
+            for key in ("procurement_materials", "invention_procurement_materials")
+            if isinstance(mj.get(key), dict)
+            for mat in mj[key].values()
+        ]
+        if not lines:
             continue
 
         batches = max(1, int(row.get("max_batches_total") or 1))
 
-        for mat in proc.values():
+        for mat in lines:
             if not isinstance(mat, dict):
                 continue
             try:

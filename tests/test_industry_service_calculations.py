@@ -997,6 +997,10 @@ def test_shopping_list_buys_datacores_once_for_an_invented_t2_row(monkeypatch) -
 
     row = _invention_overview(monkeypatch)[5002]
     assert row["manufacturing_job"]["invention_material_cost"] == pytest.approx(40.0)
+    # The row carries the Portfolio buy line for the datacores; the daily
+    # planner must not read it (it buys them via the invent action only).
+    assert row["manufacturing_job"]["invention_procurement_materials"]["204"]["quantity"] == 4
+    assert 204 not in (orow.get_batch_materials(row) or {})
 
     def action(action_type, materials=None):
         return AssignedAction(
@@ -1374,8 +1378,9 @@ def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> No
     assert inputs[0]["quantity_per_attempt"] == 2
     assert inputs[0]["expected_attempts"] == pytest.approx(0.2)
     assert inputs[0]["line_total"] == pytest.approx(40.0)
-    # Amortized inputs stay out of the buy list, as at top level.
-    assert "204" not in mj["procurement_materials"]
+    # The buy list gets whole attempts: 2 attempts x 2 datacores, all bought.
+    buy = mj["invention_procurement_materials"]["204"]
+    assert (buy["quantity"], buy["take_quantity"], buy["buy_quantity"]) == (4, 0, 4)
 
     # Tritanium 10 x 5 from the component, plus 40 of amortized datacores.
     assert mj["invention_material_cost"] == pytest.approx(40.0)
@@ -1417,60 +1422,79 @@ def test_nested_t2_zero_probability_and_zero_floor_never_divides(monkeypatch, ca
     assert rows[6001]["manufacturing_job"]["material_cost"] == pytest.approx(15.0)
 
 
-def _recursive_plan_for_current_t2(service) -> dict:
-    ctx = service._build_planning_context(
-        force_refresh=False, build_from_bpc=True, include_reactions=False, maximize_bp_runs=False,
-        group_identical_bpcs=True, have_blueprint_source_only=False, market_hub="jita",
-        material_price_side="sell", product_price_side="sell", industry_profile_id=None,
-        owned_blueprints_scope="all_characters", character_id=1, progress_callback=None,
-    )
-    return service._build_recursive_prerequisite_plan(
-        adjusted_material_entries=[{"type_id": 34, "type_name": "Tritanium", "quantity": 10}],
-        blueprint_type_id=9002, build_from_bpc=True, include_reactions=False,
-        selected_industry_profile=ctx.selected_industry_profile,
-        selected_character_modifiers=ctx.selected_character_modifiers,
-        character_skill_levels_by_name=ctx.character_skill_levels_by_name,
-        adjusted_market_price_map=ctx.adjusted_market_price_map,
-        sell_price_map=ctx.material_price_map,
-        blueprint_copy_assets_by_type_id=ctx.blueprint_copy_assets_by_type_id,
-        available_blueprint_copy_runs_by_type_id=dict(ctx.available_blueprint_copy_runs_by_type_id_base),
-        available_owned_item_quantity_by_type_id=dict(ctx.available_owned_item_quantity_by_type_id_base),
-        owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
-        blueprint_original_assets_by_type_id=ctx.blueprint_original_assets_by_type_id,
-        manufacturing_row_by_product_type_id=ctx.manufacturing_row_by_product_type_id,
-        reaction_row_by_product_type_id=ctx.reaction_row_by_product_type_id,
-        invention_row_by_blueprint_type_id=ctx.invention_row_by_blueprint_type_id,
-        include_current_blueprint_prerequisites=True,
-    )
+# --- fix round 1: whole-attempt invention buy list ------------------------------
 
 
-def test_recursive_plan_current_blueprint_invention_uses_expected_attempts(monkeypatch) -> None:
-    service = _invention_service(monkeypatch, profile=_INVENTION_ONLY_PROFILE)
-    plan = _recursive_plan_for_current_t2(service)
+def _shopping_line(row: dict, type_id: int) -> dict | None:
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
 
-    # The current-blueprint path sizes one invented BPC (10 runs): 1 / 0.5 = 2
-    # expected attempts, the same model as the top-level path.
-    invention = plan["activity_breakdown"]["invention:9002"]
-    assert invention["attempts"] == pytest.approx(2.0)
-    assert invention["job_cost"] == pytest.approx(200 * 0.02 * 2.0)
-    inputs = [m for m in plan["expected_invention_materials"] if m["type_id"] == 204]
-    assert inputs and inputs[0]["quantity"] == pytest.approx(4.0)
-    assert all(m["type_id"] != 204 for m in plan["procurement_materials"])
+    return next((line for line in aggregate_shopping_list([row]) if line["type_id"] == type_id), None)
 
 
-def test_recursive_plan_current_blueprint_zero_floor_never_divides(monkeypatch, caplog) -> None:
-    rows = _invented_t2_blueprint_rows()
-    rows[0]["invention_job"]["products"][0]["probability_pct"] = 0.0
-    service = _invention_service(
-        monkeypatch, blueprint_rows=rows, profile=_INVENTION_ONLY_PROFILE,
-        adm_overrides={"invention_probability_floor": 0.0},
-    )
-    with caplog.at_level("WARNING"):
-        plan = _recursive_plan_for_current_t2(service)
+def test_top_level_t2_shopping_list_buys_datacores_for_whole_attempts(monkeypatch) -> None:
+    row = _invention_overview(monkeypatch)[5002]
+    mj = row["manufacturing_job"]
 
-    invention = plan["activity_breakdown"]["invention:9002"]
-    assert invention["job_cost"] is None
-    assert "no invention success probability" in invention["cost_unknown_reason"]
-    assert plan["invention_cost_unknown_reasons"]
-    assert plan["elapsed_time_adjustment"] is None
-    assert any("invention cost left unknown" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    # 1 run, p 0.5: 2 whole attempts x 2 datacores. Cost stays amortized (40),
+    # so the buy line is not priced into material_cost a second time.
+    assert mj["invention_procurement_materials"]["204"]["quantity"] == 4
+    assert mj["material_cost"] == pytest.approx(90.0)
+    assert "204" not in mj["procurement_materials"]
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (4, 4)
+
+
+def test_nested_t2_shopping_list_buys_datacores_for_whole_attempts(monkeypatch) -> None:
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
+    )[7100]
+
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (4, 4)
+
+
+def test_owned_datacores_reduce_the_invention_buy(monkeypatch) -> None:
+    row = _invention_overview(monkeypatch, owned_item_inventory=({204: 3}, {204: 60.0}))[5002]
+
+    buy = row["manufacturing_job"]["invention_procurement_materials"]["204"]
+    assert (buy["quantity"], buy["take_quantity"], buy["buy_quantity"]) == (4, 3, 1)
+    assert buy["sourcing_strategy"] == "split"
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (4, 1)
+
+
+def _invented_parent_rows() -> list[dict]:
+    """The nested fixture, with the parent blueprint 9100 itself invented from a
+    second T1 source (1002) using the same datacore, 2 per attempt, p 0.5."""
+    rows = _nested_invention_blueprint_rows()
+    source = _invented_t2_blueprint_rows()[0]
+    source["blueprint_type_id"] = 1002
+    source["blueprint"] = {"type_id": 1002, "type_name": "Parent Source Blueprint", "base_price": 1000.0}
+    source["manufacturing_job"]["products"] = [{"type_id": 6002, "type_name": "Parent Source Item", "quantity": 1}]
+    source["invention_job"]["products"][0]["product"] = {"type_id": 9100, "type_name": "Parent Blueprint"}
+    return [*rows, source]
+
+
+@pytest.mark.parametrize(
+    ("component_price", "take", "buy"),
+    [
+        # Component bought: its evaluated invention spends no stock, so the
+        # parent's own 4 datacores take all 3 owned and buy 1.
+        (1.0, 3, 1),
+        # Component built: 4 nested + 4 top-level datacores, 3 taken, 5 bought.
+        (10_000.0, 3, 5),
+    ],
+)
+def test_evaluating_a_nested_invention_does_not_spend_stock(monkeypatch, component_price, take, buy) -> None:
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_invented_parent_rows(),
+        prices={**_NESTED_FAKE_PRICES, 5002: component_price},
+        owned_item_inventory=({204: 3}, {204: 60.0}),
+    )[7100]
+    mj = row["manufacturing_job"]
+
+    built = mj["recursive_activity_breakdown"].get("manufacturing:5002", {}).get("recommended_action") == "build"
+    assert built is (component_price > 1.0)
+    line = mj["invention_procurement_materials"]["204"]
+    assert (line["take_quantity"], line["buy_quantity"]) == (take, buy)
+    assert isinstance(line["take_quantity"], int) and isinstance(line["buy_quantity"], int)

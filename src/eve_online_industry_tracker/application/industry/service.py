@@ -4254,6 +4254,7 @@ class IndustryService:
         # elapsed-minus-slot time, and why an invention cost is unknown. Carried
         # up through every parent plan into the product row.
         expected_invention_materials: list[dict[str, Any]] = []
+        invention_requirements: list[dict[str, Any]] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
         duration_is_amortized = False
@@ -4535,6 +4536,7 @@ class IndustryService:
                     leaf_materials.extend([dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)])
                     elapsed_time_adjustment = self._absorb_nested_invention(
                         child_plan, expected_invention_materials=expected_invention_materials,
+                    invention_requirements=invention_requirements,
                         invention_cost_unknown_reasons=invention_cost_unknown_reasons,
                         elapsed_time_adjustment=elapsed_time_adjustment,
                     )
@@ -4735,6 +4737,7 @@ class IndustryService:
                     priced_job_count += 1
                 recursive_activity_breakdown[f"invention:{blueprint_type_id}"] = nested_invention["breakdown"]
                 expected_invention_materials.extend(nested_invention["expected_invention_materials"])
+                invention_requirements.extend(nested_invention["invention_requirements"])
                 if nested_invention["cost_unknown_reason"] is not None:
                     invention_cost_unknown_reasons.append(nested_invention["cost_unknown_reason"])
                 if elapsed_time_adjustment is not None:
@@ -4842,6 +4845,7 @@ class IndustryService:
 
         return {
             "expected_invention_materials": expected_invention_materials,
+            "invention_requirements": invention_requirements,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
             "duration_is_amortized": duration_is_amortized,
@@ -4896,7 +4900,6 @@ class IndustryService:
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
         reaction_row_by_product_type_id: dict[int, dict[str, Any]],
         invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
-        include_current_blueprint_prerequisites: bool = True,
     ) -> dict[str, Any]:
         reactions_enabled = bool(include_reactions) and self._reactions_allowed_for_profile(selected_industry_profile)
         total_time_seconds = 0
@@ -4908,120 +4911,12 @@ class IndustryService:
         material_nodes: list[dict[str, Any]] = []
         # Nested invention results (see _plan_blueprint_chain_for_quantity).
         expected_invention_materials: list[dict[str, Any]] = []
+        invention_requirements: list[dict[str, Any]] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
         duration_is_amortized = False
         available_owned_item_quantities = available_owned_item_quantity_by_type_id or {}
         owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
-
-        matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(int(blueprint_type_id)) or []
-        matched_blueprint_originals = blueprint_original_assets_by_type_id.get(int(blueprint_type_id)) or []
-        if include_current_blueprint_prerequisites and not matched_blueprint_copies and not matched_blueprint_originals:
-            invention_source_row = invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
-            invention_job = (invention_source_row or {}).get("invention_job") or {}
-            if invention_source_row and isinstance(invention_job, dict):
-                invention_blueprint_payload = invention_source_row.get("blueprint") or {}
-                if not isinstance(invention_blueprint_payload, dict):
-                    invention_blueprint_payload = {}
-                invention_blueprint_name = str(
-                    invention_blueprint_payload.get("type_name")
-                    or invention_blueprint_payload.get("name")
-                    or invention_source_row.get("blueprint_type_id")
-                    or "Blueprint"
-                )
-                target_entry = self._invention_target_entry(invention_job, int(blueprint_type_id))
-                target_blueprint_name = str(
-                    ((target_entry or {}).get("product") or {}).get("type_name")
-                    if isinstance((target_entry or {}).get("product"), dict)
-                    else ""
-                ).strip() or str(blueprint_type_id)
-                # No run count reaches this path: size one invented BPC.
-                runs_per_invented_blueprint = int((target_entry or {}).get("quantity") or 0)
-                source_blueprint_type_id = int((invention_source_row or {}).get("blueprint_type_id") or 0)
-                source_has_copy = bool(blueprint_copy_assets_by_type_id.get(source_blueprint_type_id))
-                nested_invention = self._plan_nested_invention(
-                    invention_source_row=invention_source_row, invention_job=invention_job,
-                    target_entry=target_entry, blueprint_type_id=int(blueprint_type_id),
-                    blueprint_display_name=target_blueprint_name,
-                    invented_runs=max(1, runs_per_invented_blueprint),
-                    max_production_limit=1,
-                    selected_industry_profile=selected_industry_profile,
-                    selected_character_modifiers=selected_character_modifiers,
-                    character_skill_levels_by_name=character_skill_levels_by_name,
-                    installation_surcharge=None,
-                    adjusted_market_price_map=adjusted_market_price_map,
-                    sell_price_map=sell_price_map,
-                    available_blueprint_copy_runs_by_type_id=(
-                        available_blueprint_copy_runs_by_type_id if available_blueprint_copy_runs_by_type_id is not None else {}
-                    ),
-                    available_owned_item_quantity_by_type_id=available_owned_item_quantities,
-                    owned_item_unit_cost_by_type_id=owned_item_unit_costs,
-                    source_copy_enabled=not source_has_copy,
-                )
-                invention_job_cost = nested_invention["invention_costs"]
-                source_copy_job_cost = nested_invention["source_copy_costs"]
-                total_time_seconds += int(invention_job_cost["duration_seconds"])
-                if invention_job_cost.get("total_job_cost") is not None:
-                    total_job_cost += float(invention_job_cost.get("total_job_cost") or 0.0)
-                    priced_job_count += 1
-                recursive_activity_breakdown[f"invention:{blueprint_type_id}"] = nested_invention["breakdown"]
-                expected_invention_materials.extend(nested_invention["expected_invention_materials"])
-                if nested_invention["cost_unknown_reason"] is not None:
-                    invention_cost_unknown_reasons.append(nested_invention["cost_unknown_reason"])
-                if elapsed_time_adjustment is not None:
-                    adjustment = nested_invention["elapsed_time_adjustment"]
-                    elapsed_time_adjustment = None if adjustment is None else elapsed_time_adjustment + adjustment
-                duration_is_amortized = duration_is_amortized or bool(invention_job_cost.get("duration_is_amortized"))
-                tree_children.append(
-                    self._job_tree_node(
-                        label=self._ACTIVITY_LABELS["invention"],
-                        node_type="activity",
-                        activity="invention",
-                        blueprint_name=target_blueprint_name,
-                        blueprint_type_id=blueprint_type_id,
-                        runs=invention_job_cost["runs"],
-                        duration_seconds=invention_job_cost["duration_seconds"],
-                        direct_duration_seconds=invention_job_cost["duration_seconds"],
-                        job_duration_seconds=invention_job_cost["job_duration_seconds"],
-                        elapsed_duration_seconds=invention_job_cost["elapsed_duration_seconds"],
-                        duration_is_amortized=invention_job_cost["duration_is_amortized"],
-                        job_cost=invention_job_cost.get("total_job_cost"),
-                        total_job_cost=invention_job_cost.get("total_job_cost"),
-                        children=[
-                            self._job_tree_node(
-                                label=self._ACTIVITY_LABELS["materials"],
-                                node_type="materials",
-                                activity="materials",
-                                children=nested_invention["material_nodes"],
-                            )
-                        ],
-                    )
-                )
-
-                if source_copy_job_cost is not None and source_copy_job_cost.get("duration_seconds", 0) > 0:
-                    total_time_seconds += int(source_copy_job_cost["duration_seconds"])
-                    if source_copy_job_cost.get("total_job_cost") is not None:
-                        total_job_cost += float(source_copy_job_cost.get("total_job_cost") or 0.0)
-                        priced_job_count += 1
-                    recursive_activity_breakdown[f"copying:{source_blueprint_type_id}"] = nested_invention["source_copy_breakdown"]
-                    tree_children.append(
-                        self._job_tree_node(
-                            label=self._ACTIVITY_LABELS["copying"],
-                            node_type="activity",
-                            activity="copying",
-                            blueprint_name=invention_blueprint_name,
-                            blueprint_type_id=source_blueprint_type_id,
-                            runs=nested_invention["missing_source_runs"],
-                            duration_seconds=source_copy_job_cost["duration_seconds"],
-                            direct_duration_seconds=source_copy_job_cost["duration_seconds"],
-                            job_duration_seconds=source_copy_job_cost["job_duration_seconds"],
-                            elapsed_duration_seconds=source_copy_job_cost["elapsed_duration_seconds"],
-                            duration_is_amortized=source_copy_job_cost["duration_is_amortized"],
-                            job_cost=source_copy_job_cost.get("total_job_cost"),
-                            total_job_cost=source_copy_job_cost.get("total_job_cost"),
-                            children=[],
-                        )
-                    )
 
         for material in adjusted_material_entries:
             if not isinstance(material, dict):
@@ -5235,6 +5130,7 @@ class IndustryService:
                 )
                 elapsed_time_adjustment = self._absorb_nested_invention(
                     child_plan, expected_invention_materials=expected_invention_materials,
+                    invention_requirements=invention_requirements,
                     invention_cost_unknown_reasons=invention_cost_unknown_reasons,
                     elapsed_time_adjustment=elapsed_time_adjustment,
                 )
@@ -5352,6 +5248,7 @@ class IndustryService:
 
         return {
             "expected_invention_materials": expected_invention_materials,
+            "invention_requirements": invention_requirements,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
             "duration_is_amortized": duration_is_amortized,
@@ -6915,16 +6812,25 @@ class IndustryService:
             invented_runs=invented_runs, max_production_limit=max_production_limit,
             adjusted_price_map=adjusted_market_price_map,
         )
+        # Priced against a copy of the stock: this only values the amortized
+        # inputs, and the child may still be bought instead of built. The whole
+        # attempts are taken from stock when the row commits the build (see
+        # invention_requirements and _build_single_product_row).
         planned_materials, material_nodes = self._plan_take_or_buy_material_nodes(
             invention_materials,
-            available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+            available_owned_item_quantity_by_type_id=dict(available_owned_item_quantity_by_type_id),
             owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
             sell_price_map=sell_price_map,
             adjusted_price_map=adjusted_market_price_map,
         )
+        invention_tags = {"invented_blueprint_type_id": int(blueprint_type_id), "invented_blueprint_name": blueprint_display_name}
         expected_inputs = [
-            {**entry, "invented_blueprint_type_id": int(blueprint_type_id), "invented_blueprint_name": blueprint_display_name}
+            {**entry, **invention_tags}
             for entry in self._expected_invention_inputs(planned_materials=planned_materials, invention_costs=invention_costs)
+        ]
+        invention_requirements = [
+            {**entry, **invention_tags}
+            for entry in self._invention_whole_attempt_requirements(invention_job, int(invention_costs["whole_attempts"]))
         ]
         source_copy_costs, missing_source_runs = self._invention_source_copy_costs(
             compute_activity=compute_activity, invention_source_row=invention_source_row,
@@ -6965,6 +6871,7 @@ class IndustryService:
             "source_copy_costs": source_copy_costs,
             "missing_source_runs": missing_source_runs,
             "expected_invention_materials": expected_inputs,
+            "invention_requirements": invention_requirements,
             "material_nodes": material_nodes,
             "breakdown": breakdown,
             "source_copy_breakdown": source_copy_breakdown,
@@ -6975,18 +6882,43 @@ class IndustryService:
         }
 
     @staticmethod
+    def _invention_whole_attempt_requirements(invention_job: dict[str, Any], whole_attempts: int) -> list[dict[str, Any]]:
+        """The invention inputs to actually buy or take: quantity_per_attempt x
+        whole attempts, integer units (the amortized quantities are for cost
+        only). [] when the attempts are unknown or zero."""
+        if whole_attempts <= 0:
+            return []
+        out: list[dict[str, Any]] = []
+        for entry in invention_job.get("materials") or []:
+            if not isinstance(entry, dict):
+                continue
+            per_attempt = int(entry.get("quantity") or 0)
+            if int(entry.get("type_id") or 0) <= 0 or per_attempt <= 0:
+                continue
+            out.append({
+                **dict(entry), "quantity": per_attempt * int(whole_attempts),
+                "quantity_per_attempt": per_attempt, "whole_attempts": int(whole_attempts),
+                "invention_input": True,
+            })
+        return out
+
+    @staticmethod
     def _absorb_nested_invention(
         child_plan: dict[str, Any],
         *,
         expected_invention_materials: list[dict[str, Any]],
+        invention_requirements: list[dict[str, Any]],
         invention_cost_unknown_reasons: list[str],
         elapsed_time_adjustment: float | None,
     ) -> float | None:
         """Carry a built child plan's nested-invention results into its parent:
-        extends the two lists in place and returns the combined elapsed-time
+        extends the three lists in place and returns the combined elapsed-time
         adjustment (None once any part is unknown)."""
         expected_invention_materials.extend(
             dict(e) for e in (child_plan.get("expected_invention_materials") or []) if isinstance(e, dict)
+        )
+        invention_requirements.extend(
+            dict(e) for e in (child_plan.get("invention_requirements") or []) if isinstance(e, dict)
         )
         invention_cost_unknown_reasons.extend(str(r) for r in (child_plan.get("invention_cost_unknown_reasons") or []))
         child_adjustment = child_plan.get("elapsed_time_adjustment", 0.0)
@@ -7034,7 +6966,9 @@ class IndustryService:
 
         planned_inv_materials, inv_material_nodes = self._plan_take_or_buy_material_nodes(
             invention_materials,
-            available_owned_item_quantity_by_type_id=(available_owned_item_quantity_by_type_id if requires_invention_chain else dict(available_owned_item_quantity_by_type_id)),
+            # Values the amortized inputs only; the whole attempts are taken
+            # from stock in invention_procurement_materials (integer units).
+            available_owned_item_quantity_by_type_id=dict(available_owned_item_quantity_by_type_id),
             owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
             sell_price_map=ctx.material_price_map,
             adjusted_price_map=ctx.adjusted_market_price_map,
@@ -7390,7 +7324,6 @@ class IndustryService:
             manufacturing_row_by_product_type_id=ctx.manufacturing_row_by_product_type_id,
             reaction_row_by_product_type_id=ctx.reaction_row_by_product_type_id,
             invention_row_by_blueprint_type_id=ctx.invention_row_by_blueprint_type_id,
-            include_current_blueprint_prerequisites=False,
         )
         top_level_procurement_materials = cast(list[dict[str, Any]], recursive_prerequisite_plan.get("procurement_materials") or top_level_procurement_materials)
         # Nested T2 sub-builds invent on the same expected-value model: their
@@ -7410,6 +7343,32 @@ class IndustryService:
             invention_cost_unknown_reason = "; ".join(
                 [*([invention_cost_unknown_reason] if invention_cost_unknown_reason else []), *nested_unknown_reasons]
             )
+        # What to buy for the invention: the top-level and every built nested
+        # invention's inputs for whole attempts (integer units), merged per type
+        # and taken from owned stock first like any other procurement. Buy list
+        # only: the cost is on the amortized expected_invention_materials.
+        invention_requirements = [
+            *(self._invention_whole_attempt_requirements(invention_job, int(inv_costs.get("whole_attempts") or 0))
+              if requires_invention_chain and inv_costs is not None else []),
+            *[dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements") or []) if isinstance(e, dict)],
+        ]
+        merged_requirements: dict[int, dict[str, Any]] = {}
+        for entry in invention_requirements:
+            type_id = int(entry.get("type_id") or 0)
+            if type_id in merged_requirements:
+                merged_requirements[type_id]["quantity"] += int(entry.get("quantity") or 0)
+            else:
+                merged_requirements[type_id] = {
+                    key: value for key, value in entry.items()
+                    if key not in ("invented_blueprint_type_id", "invented_blueprint_name", "whole_attempts", "quantity_per_attempt")
+                }
+        invention_procurement_materials, _ = self._plan_take_or_buy_material_nodes(
+            list(merged_requirements.values()),
+            available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+            owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+            sell_price_map=ctx.material_price_map,
+            adjusted_price_map=ctx.adjusted_market_price_map,
+        )
         total_time_seconds += int(recursive_prerequisite_plan.get("time_seconds") or 0)
         if recursive_prerequisite_plan.get("job_cost") is not None:
             total_job_cost += float(recursive_prerequisite_plan.get("job_cost") or 0.0)
@@ -7534,6 +7493,13 @@ class IndustryService:
         }
         if invention_cost_unknown_reason is not None:
             row_out["manufacturing_job"]["invention_cost_unknown_reason"] = invention_cost_unknown_reason
+        if invention_procurement_materials:
+            # Read by the Portfolio / Industry Builder shopping list
+            # (industry/shopping_list.py). Not priced by the pricing step and not
+            # read by the daily planner, which buys datacores via invent actions.
+            row_out["manufacturing_job"]["invention_procurement_materials"] = self._overview_keyed_entries(
+                invention_procurement_materials, compactor=lambda e: e,
+            )
         if expected_invention_inputs or nested_expected_invention_inputs:
             # Priced into material_cost / total_cost by _enrich_product_rows_with_material_prices.
             # Kept out of `materials` and `procurement_materials`: those are the
