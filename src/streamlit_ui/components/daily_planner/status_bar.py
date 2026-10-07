@@ -25,6 +25,26 @@ CHARACTER_ACTION_TYPES: tuple[str, ...] = (
 CORP_LEVEL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"})
 
 
+#: Action types that spend ISK on the market: the shopping list.
+_CAPITAL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"})
+
+
+def compute_capital_reserved(actions: list[dict[str, Any]]) -> float:
+    """ISK needed to execute the plan: the pending shopping list.
+
+    manufacture / sub_manufacture actions carry the material cost of the same
+    materials the buy_materials rows purchase, so adding them would count
+    every material twice. Job install fees are not on the actions (their
+    estimated_cost_isk is materials only), so they are not included.
+    """
+    return sum(
+        float(a.get("estimated_cost_isk") or 0.0)
+        for a in actions
+        if str(a.get("status") or "pending") == "pending"
+        and str(a.get("action_type") or "") in _CAPITAL_ACTION_TYPES
+    )
+
+
 def pending_character_action_count(actions: list[dict[str, Any]]) -> int:
     """Pending actions a pilot still has to do. Rows of a type this planner
     no longer produces (e.g. a legacy relist_order) do not count."""
@@ -322,16 +342,8 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
         with c3:
             st.metric("Corp Wallet", _fmt_isk(corp_wallet))
         with c4:
-            # Capital reserved: sum of estimated_cost_isk for pending buy/job actions
             actions = (page_state.plan or {}).get("actions") or []
-            capital_reserved = sum(
-                float(a.get("estimated_cost_isk") or 0.0)
-                for a in actions
-                if str(a.get("status") or "pending") == "pending"
-                and str(a.get("action_type") or "") in (
-                    "buy_materials", "buy_bpo", "manufacture", "sub_manufacture"
-                )
-            )
+            capital_reserved = compute_capital_reserved(actions)
             st.metric("Capital Reserved", _fmt_isk(capital_reserved) if capital_reserved else "—")
         with c5:
             try:
