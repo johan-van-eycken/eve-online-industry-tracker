@@ -13,7 +13,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     prepare_shared_industry_snapshot_page,
     render_pricing_batch_panel,
 )
-from streamlit_ui.state.industry_builder_ui import meta_group_label, ordered_meta_group_names, get_meta_group_name
+from streamlit_ui.state.industry_builder_ui import row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name
 from streamlit_ui.components.webpage_ui import require_aggrid
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
@@ -121,7 +121,7 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 }
             )
 
-        if selected_row.get("assumes_owned_t2_bpo"):
+        if row_assumes_owned_t2_bpo(selected_row):
             st.caption(
                 "Costed as if a T2 BPO is owned: Build from BPC is off, so no invention "
                 "cost or datacores are included."

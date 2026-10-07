@@ -179,6 +179,22 @@ def tree_node_icon_url(source_row: dict[str, Any], node: dict[str, Any]) -> str:
     return ""
 
 
+ASSUMES_T2_BPO_MARKER = "assumes T2 BPO"
+
+
+def row_assumes_owned_t2_bpo(row: dict[str, Any]) -> bool:
+    """True when the overview row's manufacturing_job carries the flag (the
+    producer sets it there, never at the row's top level)."""
+    return bool(get_manufacturing_job(row).get("assumes_owned_t2_bpo"))
+
+
+def pricing_confidence_cell(pricing_confidence: Any, manufacturing_job: dict[str, Any]) -> Any:
+    """The grid's Pricing Confidence cell; flagged rows get a visible marker."""
+    if pricing_confidence and manufacturing_job.get("assumes_owned_t2_bpo"):
+        return f"{pricing_confidence} · {ASSUMES_T2_BPO_MARKER}"
+    return pricing_confidence
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     flattened_rows: list[dict[str, Any]] = []
@@ -436,7 +452,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Market Unit Price": market_unit_price,
                 "Gross Sale Value": gross_sale_value,
                 "Type": tree_node_type_label(node),
-                "Pricing Confidence": pricing_confidence,
+                "Pricing Confidence": pricing_confidence_cell(pricing_confidence, manufacturing_job),
                 "Market Price Source": market_price_source,
                 "Market Volume": market_volume,
                 "Region Daily Volume": region_daily_volume,
