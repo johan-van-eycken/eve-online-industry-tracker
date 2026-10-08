@@ -1706,3 +1706,77 @@ def test_extra_batch_list_does_not_repeat_the_unknown_odds_warning(monkeypatch, 
         )
     unknown = [r for r in caplog.records if "invention cost left unknown" in r.getMessage()]
     assert len(unknown) == 1
+
+
+# --- round 4 Task I R1: nested owned BPC in batch 1, datacores for batches 2..N -
+
+
+def test_nested_owned_bpc_in_batch_one_still_buys_nested_datacores_for_later_batches(monkeypatch) -> None:
+    # The parent 7100 builds 1 T2 component (5002) per run. A 10-run owned 9002
+    # BPC covers batch 1's component run, so batch 1 invents nothing. Every
+    # later batch builds that run again without the BPC and invents it:
+    # 1 run / 10 per BPC -> 1 BPC, p 0.5 -> 2 whole attempts x 2 = 4 datacores.
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+    )[7100]
+    mj = row["manufacturing_job"]
+    nested = mj["recursive_activity_breakdown"]["manufacturing:5002"]
+    assert nested["recommended_action"] == "build"
+    assert "invention:9002" not in nested["nested"]
+    assert "invention_procurement_materials" not in mj
+    extra = mj["invention_procurement_materials_per_extra_batch"]["204"]
+    assert (extra["quantity"], extra["take_quantity"], extra["buy_quantity"]) == (4, 0, 4)
+
+    row["max_batches_total"] = 5
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (16, 16)  # 4 x (5 - 1)
+
+
+def test_nested_without_owned_bpc_extra_batch_datacores_are_unchanged(monkeypatch) -> None:
+    # No owned BPC: batch 1 already invents the run (4 datacores), and so does
+    # every later batch: 4 + 4 x 4 = 20.
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
+    )[7100]
+    mj = row["manufacturing_job"]
+    assert mj["invention_procurement_materials"]["204"]["quantity"] == 4
+    assert mj["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 4
+
+    row["max_batches_total"] = 5
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (20, 20)
+
+
+def test_nested_sub_build_bought_in_batch_one_adds_no_extra_batch_datacores(monkeypatch) -> None:
+    # The component is cheaper to buy (1 ISK), so it is bought in batch 1 and
+    # the extra-batch list gets nothing for it, owned BPC or not.
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices={**_NESTED_FAKE_PRICES, 5002: 1.0},
+        owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+    )[7100]
+    mj = row["manufacturing_job"]
+    assert "manufacturing:5002" not in mj["recursive_activity_breakdown"]
+    assert "invention_procurement_materials_per_extra_batch" not in mj
+
+
+def test_nested_partly_owned_bpc_invents_the_built_runs_for_later_batches(monkeypatch) -> None:
+    # 10 parent runs need 10 components. A 4-run owned 9002 BPC (no T2 BPO)
+    # builds 4 and the other 6 are bought, in every batch alike. Later batches
+    # build those 4 runs without the BPC: 4 / 10 per BPC -> 1 BPC, p 0.5 ->
+    # 2 whole attempts x 2 = 4 datacores per extra batch.
+    row = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices=_NESTED_FAKE_PRICES, owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
+    )[7100]
+    mj = row["manufacturing_job"]
+    assert mj["runs"] == 10
+    assert mj["recursive_activity_breakdown"]["manufacturing:5002"]["quantity"] == 4
+    assert mj["procurement_materials"]["5002"]["quantity"] == 6
+    assert "invention_procurement_materials" not in mj
+    assert mj["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 4
+
+    row["max_batches_total"] = 3
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (8, 8)
