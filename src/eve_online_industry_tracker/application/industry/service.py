@@ -66,9 +66,21 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
+from eve_online_industry_tracker.application.industry.invention_model import (
+    NO_DECRYPTOR,
+    DecryptorOption,
+    InventionContext,
+    QuietWarningsFilter,
+    decryptor_options_from_rows,
+    invented_blueprint_efficiency,
+)
+from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
 
 
 logger = logging.getLogger(__name__)
+# Decryptor candidates and the extra-batch plan are evaluated inside
+# invention_model.quiet_warnings(): only the plan that is kept logs.
+logger.addFilter(QuietWarningsFilter())
 
 ProgressCallback = Callable[[float, str, dict[str, Any] | None], None]
 
@@ -121,6 +133,11 @@ class _ProductPlanningContext:
     # Key: (activity, base_time_seconds, runs, process_value, manufacturing_group, bp_me, bp_te)
     # Thread-safe on CPython (dict get/set are atomic under GIL).
     activity_job_cache: dict[tuple, dict[str, Any]] = dataclasses.field(default_factory=dict)
+    # Invention (round 5): the SDE decryptors (NO_DECRYPTOR first), the
+    # refresh's invention inputs, and the blueprint rows by blueprint type id.
+    decryptor_options: tuple = (NO_DECRYPTOR,)
+    invention_context: InventionContext = dataclasses.field(default_factory=InventionContext)
+    blueprint_row_by_type_id: dict = dataclasses.field(default_factory=dict)
 
 
 class IndustryService:
@@ -1351,6 +1368,31 @@ class IndustryService:
             profile_payload["structure_rigs"] = structure_rigs
 
         return profile_payload
+
+    def _load_decryptor_options(self) -> tuple[DecryptorOption, ...]:
+        """(NO_DECRYPTOR, every T2 invention decryptor in the SDE).
+
+        Without SDE access, or with no decryptor rows: (NO_DECRYPTOR,) and a
+        WARNING. Inventions are then planned without a decryptor, never with
+        a guessed one.
+        """
+        if self._sessions is None:
+            logger.warning(
+                "Invention: no SDE session, so no decryptor data; inventions are planned without a decryptor"
+            )
+            return (NO_DECRYPTOR,)
+        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+        session = self._sessions.sde_session()
+        try:
+            rows = get_t2_invention_decryptors(session, language=language)
+        finally:
+            session.close()
+        options = decryptor_options_from_rows(rows)
+        if len(options) == 1:
+            logger.warning(
+                "Invention: the SDE lists no T2 invention decryptors; inventions are planned without a decryptor"
+            )
+        return options
 
     def _get_character_trained_skill_levels(self, *, character_id: int) -> dict[int, int]:
         character = self._get_character(character_id=character_id)
@@ -4110,6 +4152,7 @@ class IndustryService:
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
         reaction_row_by_product_type_id: dict[int, dict[str, Any]],
         invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
+        invention_context: InventionContext,
         visited: set[tuple[str, int]] | None = None,
         depth: int = 0,
     ) -> dict[str, Any] | None:
@@ -4167,6 +4210,8 @@ class IndustryService:
         matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
         owned_copy_runs_used = 0
         missing_blueprint_copy_runs = 0
+        invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
+        has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
         if activity == "manufacturing":
             if bool(build_from_bpc):
                 available_target_copy_runs = int(available_copy_runs.get(blueprint_type_id, 0))
@@ -4190,7 +4235,14 @@ class IndustryService:
                     include_copying_job = missing_blueprint_copy_runs > 0
                 else:
                     blueprint_source_kind = "unowned_blueprint_copy"
-                    include_copying_job = missing_blueprint_copy_runs > 0
+                    if has_invention_path:
+                        # Invented: ME 2 / TE 4 plus the decryptor, and the
+                        # invention supplies the BPC, so no copy job (FU-58).
+                        blueprint_material_efficiency, blueprint_time_efficiency = invented_blueprint_efficiency(
+                            invention_context.decryptor_for_blueprint(blueprint_type_id)
+                        )
+                    else:
+                        include_copying_job = missing_blueprint_copy_runs > 0
                 if runs <= 0:
                     return None
             else:
@@ -4288,8 +4340,6 @@ class IndustryService:
             adjusted_price_map=adjusted_market_price_map,
         )
 
-        invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
-        has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
         owned_blueprint_copy_allocations = self._allocate_owned_blueprint_copy_run_usage(
             cast(list[CharacterAssetsModel | CorporationAssetsModel], matched_blueprint_copies),
             requested_runs=int(owned_copy_runs_used or 0),
@@ -4532,6 +4582,7 @@ class IndustryService:
                     manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                     reaction_row_by_product_type_id=reaction_row_by_product_type_id,
                     invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
+                    invention_context=invention_context,
                     visited=next_visited,
                     depth=depth + 1,
                 )
@@ -4948,6 +4999,7 @@ class IndustryService:
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]],
         reaction_row_by_product_type_id: dict[int, dict[str, Any]],
         invention_row_by_blueprint_type_id: dict[int, dict[str, Any]],
+        invention_context: InventionContext,
     ) -> dict[str, Any]:
         reactions_enabled = bool(include_reactions) and self._reactions_allowed_for_profile(selected_industry_profile)
         total_time_seconds = 0
@@ -5110,6 +5162,7 @@ class IndustryService:
                 manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
                 reaction_row_by_product_type_id=reaction_row_by_product_type_id,
                 invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
+                invention_context=invention_context,
                 visited={("manufacturing", blueprint_type_id)},
                 depth=1,
             )
@@ -6478,12 +6531,16 @@ class IndustryService:
             *[int(tid) for tid in manufacturing_row_by_product_type_id.keys()],
             *[int(tid) for tid in reaction_row_by_product_type_id.keys()],
         })
+        decryptor_options = self._load_decryptor_options()
         material_price_type_ids = sorted({
             int(entry.get("type_id") or 0)
             for row in blueprint_rows if isinstance(row, dict)
             for job_name in ["manufacturing_job", "reaction_job", "invention_job"]
             for entry in (((row.get(job_name) or {}) if isinstance(row.get(job_name), dict) else {}).get("materials") or [])
             if isinstance(entry, dict) and int(entry.get("type_id") or 0) > 0
+        } | {
+            # Decryptors are invention inputs: hub-priced like the datacores.
+            int(option.type_id) for option in decryptor_options if option.type_id is not None
         })
         if progress_callback is not None:
             progress_callback(0.18, "Fetching product sell prices from market hub", {"stage": "product_prices", "product_types": len(product_sell_price_type_ids)})
@@ -6550,6 +6607,12 @@ class IndustryService:
             manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
             reaction_row_by_product_type_id=reaction_row_by_product_type_id,
             invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
+            decryptor_options=decryptor_options,
+            blueprint_row_by_type_id={
+                int(row.get("blueprint_type_id") or 0): row
+                for row in blueprint_rows
+                if isinstance(row, dict) and int(row.get("blueprint_type_id") or 0) > 0
+            },
             blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
             blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
             owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
@@ -7210,6 +7273,7 @@ class IndustryService:
         blueprint_copy_assets: list,
         blueprint_original_asset: Any,
         effective_runs: int,
+        decryptor: DecryptorOption = NO_DECRYPTOR,
     ) -> dict[str, Any] | None:
         """Build a single product row from a blueprint variant (Step 3)."""
         manufacturing_job = row.get("manufacturing_job") or {}
@@ -7263,6 +7327,9 @@ class IndustryService:
         manufacturing_skills: dict[str, Any] = {**manufacturing_skill_entries, "skill_requirements_met": manufacturing_skill_requirements_met}
         manufacturing_skill_entry_list = [se for se in manufacturing_skill_entries.values() if isinstance(se, dict)]
 
+        invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
+        invention_job = (invention_source_row or {}).get("invention_job") or {}
+        has_top_level_invention_path = invention_source_row and isinstance(invention_job, dict)
         # Blueprint source resolution (Step 3a)
         blueprint_material_efficiency = 0
         blueprint_time_efficiency = 0
@@ -7282,6 +7349,10 @@ class IndustryService:
                 include_copying_job = True
             else:
                 blueprint_source_kind = "unowned_blueprint_copy"
+                if has_top_level_invention_path and not matched_blueprint_originals:
+                    # The BPC is invented: ME 2 / TE 4 plus the decryptor
+                    # (EVE). A plain unowned T1 BPC stays at ME 0 / TE 0.
+                    blueprint_material_efficiency, blueprint_time_efficiency = invented_blueprint_efficiency(decryptor)
         else:
             if blueprint_original_asset is not None:
                 blueprint_material_efficiency = int(blueprint_original_asset.blueprint_material_efficiency or 0)
@@ -7353,9 +7424,6 @@ class IndustryService:
         top_level_procurement_materials = cast(list[dict[str, Any]], [*adjusted_material_entries])
 
         # BPC allocation + prerequisite handling
-        invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
-        invention_job = (invention_source_row or {}).get("invention_job") or {}
-        has_top_level_invention_path = invention_source_row and isinstance(invention_job, dict)
         available_target_copy_runs = int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) if bool(ctx.build_from_bpc) else 0
         owned_target_copy_runs_used = min(max(0, available_target_copy_runs), effective_runs) if bool(ctx.build_from_bpc) else 0
         if bool(ctx.build_from_bpc):
@@ -7481,6 +7549,7 @@ class IndustryService:
             manufacturing_row_by_product_type_id=ctx.manufacturing_row_by_product_type_id,
             reaction_row_by_product_type_id=ctx.reaction_row_by_product_type_id,
             invention_row_by_blueprint_type_id=ctx.invention_row_by_blueprint_type_id,
+            invention_context=ctx.invention_context,
         )
         top_level_procurement_materials = cast(list[dict[str, Any]], recursive_prerequisite_plan.get("procurement_materials") or top_level_procurement_materials)
         # Nested T2 sub-builds invent on the same expected-value model: their

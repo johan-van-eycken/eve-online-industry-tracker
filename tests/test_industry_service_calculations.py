@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from eve_online_industry_tracker.application.industry.invention_model import NO_DECRYPTOR, DecryptorOption
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 
@@ -943,10 +944,10 @@ def test_invented_t2_row_cost_includes_expected_invention_inputs(monkeypatch) ->
 def test_invented_t2_invention_cost_scales_with_runs(monkeypatch) -> None:
     mj = _invention_overview(monkeypatch, maximize_bp_runs=True)[5002]["manufacturing_job"]
 
-    # 10 runs: Tritanium 100 x 5 = 500; invention 40 per run x 10 = 400.
+    # 10 runs at ME 2: Tritanium 98 x 5 = 490; invention 40 per run x 10 = 400.
     assert mj["runs"] == 10
     assert mj["invention_material_cost"] == pytest.approx(400.0)
-    assert mj["material_cost"] == pytest.approx(900.0)
+    assert mj["material_cost"] == pytest.approx(890.0)
 
 
 def test_invention_inputs_use_owned_cost_like_other_materials(monkeypatch) -> None:
@@ -1099,7 +1100,8 @@ def test_fees_and_inputs_use_sde_runs_per_bpc_not_the_t2_limit(monkeypatch) -> N
     assert invention["runs"] == pytest.approx(attempts)
     assert invention["total_job_cost"] == pytest.approx(200 * 0.02 * attempts)
     assert mj["invention_material_cost"] == pytest.approx(2 * 100 * attempts)
-    assert mj["material_cost"] == pytest.approx(300 * 10 * 5 + 2 * 100 * attempts)
+    # Tritanium at ME 2: 300 runs x 10 x 0.98 = 2940 units x 5.
+    assert mj["material_cost"] == pytest.approx(2940 * 5 + 2 * 100 * attempts)
 
 
 def test_job_tree_adds_up_to_the_row_cost(monkeypatch) -> None:
@@ -1304,16 +1306,16 @@ def test_elapsed_time_uses_whole_invention_jobs(monkeypatch) -> None:
     invention = mj["activity_breakdown"]["invention"]
     source_copy = mj["activity_breakdown"]["invention_source_copying"]
 
-    # Amortized slot time (ISK/h): manufacturing 100 + invention 40 x 0.2 + copy 20 x 0.2.
-    assert mj["time_seconds"] == 100 + 8 + 4
+    # Amortized slot time (ISK/h): manufacturing 96 (TE 4) + invention 40 x 0.2 + copy 20 x 0.2.
+    assert mj["time_seconds"] == 96 + 8 + 4
     # Elapsed: 1 BPC needed, ceil(1 / 0.5) = 2 whole attempts of 40 s in sequence,
-    # 2 source-copy runs of 20 s, then manufacturing 100 s.
+    # 2 source-copy runs of 20 s, then manufacturing 96 (TE 4).
     assert invention["job_duration_seconds"] == 40
     assert invention["whole_attempts"] == 2
     assert invention["elapsed_duration_seconds"] == 80
     assert source_copy["job_duration_seconds"] == 20
     assert source_copy["elapsed_duration_seconds"] == 40
-    assert mj["elapsed_time_seconds"] == 100 + 80 + 40
+    assert mj["elapsed_time_seconds"] == 96 + 80 + 40
     node = _find_first_activity_node(mj["job_tree"], "invention")
     assert node is not None
     assert node["job_duration_seconds"] == 40 and node["duration_is_amortized"] is True
@@ -1432,16 +1434,17 @@ def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> No
     assert mj["total_job_cost"] == pytest.approx(0.8)
     assert mj["total_cost"] == pytest.approx(90.8)
 
-    # Slot time: parent 200 + component 100 + invention 40 x 0.2 + copy 20 x 0.2.
-    assert mj["time_seconds"] == 200 + 100 + 8 + 4
+    # Slot time: parent 200 + component 96 (1 run x 100 s, TE 4) + invention
+    # 40 x 0.2 + copy 20 x 0.2.
+    assert mj["time_seconds"] == 200 + 96 + 8 + 4
     # Elapsed: 2 whole attempts of 40 s and 2 source-copy runs of 20 s in sequence.
-    assert mj["elapsed_time_seconds"] == 200 + 100 + 80 + 40
+    assert mj["elapsed_time_seconds"] == 200 + 96 + 80 + 40
 
     # The top-level T2 row in the same refresh is unchanged.
     t2 = rows[5002]["manufacturing_job"]
     assert t2["material_cost"] == pytest.approx(90.0)
     assert t2["total_job_cost"] == pytest.approx(0.8)
-    assert t2["elapsed_time_seconds"] == 100 + 80 + 40
+    assert t2["elapsed_time_seconds"] == 96 + 80 + 40  # manufacturing 96 (TE 4)
 
 
 def test_nested_t2_zero_probability_and_zero_floor_never_divides(monkeypatch, caplog) -> None:
@@ -1912,3 +1915,87 @@ def test_nested_extra_batch_unknown_logs_one_warning(monkeypatch, caplog) -> Non
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert sum(m.startswith("Product 7100: datacore need unknown") for m in warnings) == 1
     assert not any("invention cost left unknown" in m for m in warnings)
+
+
+# --- round 5 Task 1: invented BPC baseline ME 2 / TE 4, decryptor data -------
+
+_ACCELERANT_LIKE = DecryptorOption(
+    type_id=34201, type_name="Accelerant Decryptor", probability_multiplier=1.2,
+    me_modifier=2, te_modifier=10, max_run_modifier=1,
+)
+
+
+def _planning_context(service, *, maximize_bp_runs=False):
+    return service._build_planning_context(
+        force_refresh=False, build_from_bpc=True, include_reactions=False, maximize_bp_runs=maximize_bp_runs,
+        group_identical_bpcs=True, have_blueprint_source_only=False, market_hub="jita",
+        material_price_side="sell", product_price_side="sell", industry_profile_id=None,
+        owned_blueprints_scope="all_characters", character_id=1, progress_callback=None,
+    )
+
+
+def test_an_invented_t2_row_is_built_at_me_2_te_4(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, maximize_bp_runs=True)[5002]["manufacturing_job"]
+
+    assert mj["blueprint_source_kind"] == "unowned_blueprint_copy"
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (2, 4)
+    assert mj["materials"]["34"]["quantity"] == 98  # ceil(10 runs x 10 x 0.98), was 100
+    assert mj["manufacturing_time_seconds"] == 960  # 10 x 100 s x 0.96, was 1000
+
+
+def test_an_unowned_t1_bpc_without_an_invention_path_stays_me_0(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, maximize_bp_runs=True)[6001]["manufacturing_job"]
+
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (0, 0)
+    assert mj["materials"]["34"]["quantity"] == 30
+
+
+def test_a_t2_blueprint_nothing_invents_is_not_given_the_invented_baseline(monkeypatch) -> None:
+    rows = _invented_t2_blueprint_rows()[1:]  # the T2 blueprint without its invention source
+    mj = _invention_overview(monkeypatch, maximize_bp_runs=True, blueprint_rows=rows)[5002]["manufacturing_job"]
+
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (0, 0)
+    assert "invention" not in mj["activity_breakdown"]
+    assert mj["materials"]["34"]["quantity"] == 100
+
+
+def test_a_nested_invented_component_is_built_at_me_2_without_a_copy_job(monkeypatch) -> None:
+    rows = _nested_invention_blueprint_rows()
+    # A real T2 blueprint has an SDE copy time. The invention supplies the BPC,
+    # so no copy of the T2 blueprint may be costed (FU-58).
+    rows[1]["copying_job"] = {"time_seconds": 30}
+    out = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=rows,
+        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE,
+    )
+    mj = out[7100]["manufacturing_job"]
+    nested = mj["recursive_activity_breakdown"]["manufacturing:5002"]
+
+    assert nested["recommended_action"] == "build"
+    assert "copying" not in nested["nested"]
+    assert "invention:9002" in nested["nested"]
+    # The parent (no invention path, ME 0) needs 10 components; the component
+    # job runs on the invented BPC at ME 2: ceil(10 x 10 x 0.98) = 98 Tritanium.
+    assert mj["procurement_materials"]["34"]["quantity"] == 98
+
+
+def test_decryptor_options_are_loaded_and_priced_like_datacores(monkeypatch) -> None:
+    service = _invention_service(monkeypatch, prices={**_INVENTION_FAKE_PRICES, 34201: 50.0})
+    service._load_decryptor_options = MethodType(  # type: ignore[attr-defined]
+        lambda self: (NO_DECRYPTOR, _ACCELERANT_LIKE), service,
+    )
+    ctx = _planning_context(service)
+
+    assert ctx.decryptor_options == (NO_DECRYPTOR, _ACCELERANT_LIKE)
+    assert ctx.material_price_map[34201]["unit_price"] == 50.0
+    assert ctx.blueprint_row_by_type_id[9002]["blueprint_type_id"] == 9002
+    assert ctx.invention_context.decryptor_for_blueprint(9002) is NO_DECRYPTOR
+
+
+def test_without_an_sde_session_there_are_no_decryptors_and_a_warning(caplog) -> None:
+    service = object.__new__(IndustryService)
+    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    service._sessions = None  # type: ignore[attr-defined]
+    with caplog.at_level("WARNING"):
+        assert service._load_decryptor_options() == (NO_DECRYPTOR,)
+    assert any("no decryptor data" in r.getMessage() for r in caplog.records)
