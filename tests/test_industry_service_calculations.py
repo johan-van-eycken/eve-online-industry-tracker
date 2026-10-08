@@ -1811,10 +1811,19 @@ def test_unknown_odds_with_owned_bpc_covering_batch_one_flag_the_later_batches(m
     assert mj["invention_datacore_need_unknown"]["from_batch"] == 2
     assert mj["material_pricing_confidence"] == "Low"
     assert mj["overall_pricing_confidence"] == "Low"
-    assert any("Invention cost unknown" in r for r in mj["pricing_confidence_reasons"])
+    # Batch 1 runs on the owned BPC, so its cost is exact: not the
+    # "T2 cost is understated" wording (Task I fix round 1).
+    assert mj["invention_datacore_need_unknown"]["batch_one_cost_exact"] is True
     assert any(
-        "datacore need unknown" in r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        "Datacore need unknown for batches past the owned BPC runs" in r
+        and "batch 1 cost is exact, later batches will cost more" in r
+        for r in mj["pricing_confidence_reasons"]
     )
+    assert not any("Invention cost unknown" in r for r in mj["pricing_confidence_reasons"])
+    # One WARNING for the row, not "invention cost left unknown" as well.
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert sum("datacore need unknown" in m for m in warnings) == 1
+    assert not any("invention cost left unknown" in m for m in warnings)
     # No made-up datacore quantity anywhere.
     assert "invention_procurement_materials" not in mj
     assert "invention_procurement_materials_per_extra_batch" not in mj
@@ -1867,3 +1876,39 @@ def test_known_odds_rows_are_not_flagged(monkeypatch) -> None:
     rows[5002]["max_batches_total"] = 5
     assert "invention_datacore_need_unknown" not in rows[5002]["manufacturing_job"]
     assert _unknown_need_rows(list(rows.values())) == {}
+
+
+
+def test_batch_one_unknown_odds_keep_the_understated_wording(monkeypatch, caplog) -> None:
+    # No owned BPC: batch 1 itself invents with unknown odds, so the T2 cost
+    # really leaves the invention out. One WARNING (the batch-1 evaluation's).
+    rows = _invented_t2_blueprint_rows()
+    rows[0]["invention_job"]["products"][0]["probability_pct"] = 0.0
+    with caplog.at_level("WARNING"):
+        mj = _invention_overview(
+            monkeypatch, blueprint_rows=rows, real_confidence=True,
+            adm_overrides={"invention_probability_floor": 0.0},
+        )[5002]["manufacturing_job"]
+    assert mj["invention_datacore_need_unknown"]["batch_one_cost_exact"] is False
+    assert mj["material_pricing_confidence"] == "Low"
+    assert any(
+        "Invention cost unknown" in r and "so it is understated" in r for r in mj["pricing_confidence_reasons"]
+    )
+    assert not any("batch 1 cost is exact" in r for r in mj["pricing_confidence_reasons"])
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert sum("invention cost left unknown" in m for m in warnings) == 1
+    assert not any("datacore need unknown" in m for m in warnings)
+
+
+def test_nested_extra_batch_unknown_logs_one_warning(monkeypatch, caplog) -> None:
+    with caplog.at_level("WARNING"):
+        mj = _invention_overview(
+            monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(probability_pct=0.0),
+            prices=_NESTED_FAKE_PRICES, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+            real_confidence=True, adm_overrides={"invention_probability_floor": 0.0},
+        )[7100]["manufacturing_job"]
+    assert any("batch 1 cost is exact" in r for r in mj["pricing_confidence_reasons"])
+    # The 5002 row in the same refresh logs its own; 7100 logs exactly one.
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert sum(m.startswith("Product 7100: datacore need unknown") for m in warnings) == 1
+    assert not any("invention cost left unknown" in m for m in warnings)

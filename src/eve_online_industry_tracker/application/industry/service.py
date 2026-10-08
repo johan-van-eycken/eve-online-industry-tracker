@@ -2257,10 +2257,19 @@ class IndustryService:
             invention_cost_unknown_reason = manufacturing_job.get("invention_cost_unknown_reason")
             if invention_cost_unknown_reason:
                 material_confidence = "Low"
-                reasons.append(
-                    f"Invention cost unknown ({invention_cost_unknown_reason}) — the T2 cost leaves out "
-                    f"datacores and invention fees, so it is understated."
-                )
+                datacore_need_unknown = manufacturing_job.get("invention_datacore_need_unknown")
+                if isinstance(datacore_need_unknown, dict) and datacore_need_unknown.get("batch_one_cost_exact"):
+                    # Only the batches past the owned BPC runs invent with
+                    # unknown odds; batch 1 runs on the owned BPC.
+                    reasons.append(
+                        f"Datacore need unknown for batches past the owned BPC runs "
+                        f"({invention_cost_unknown_reason}); batch 1 cost is exact, later batches will cost more."
+                    )
+                else:
+                    reasons.append(
+                        f"Invention cost unknown ({invention_cost_unknown_reason}) — the T2 cost leaves out "
+                        f"datacores and invention fees, so it is understated."
+                    )
 
             overall_confidence_map = {"High": 2, "Medium": 1, "Low": 0}
             overall_score = min(
@@ -6670,6 +6679,7 @@ class IndustryService:
         invented_runs: int,
         max_production_limit: int,
         adjusted_price_map: dict[int, dict[str, Any]],
+        log_unknown_cost: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Invention fees, time and inputs for `invented_runs` runs of an invented
         BPC, on the expected-value model. Shared by the top-level T2 row and the
@@ -6683,6 +6693,10 @@ class IndustryService:
         With no SDE probability and an admin floor of 0 the attempt count is
         unknown: never divides, logs a WARNING, and returns zero attempts with
         `cost_unknown_reason` set, total_job_cost and elapsed time None.
+
+        `log_unknown_cost=False` logs that unknown-cost line at DEBUG: a caller
+        that logs its own row-level WARNING for it (see
+        _full_batch_invention_whole_attempts).
 
         `compute_activity(activity=, base_time_seconds=, runs=, process_value=)`
         prices one activity (the cached ctx calculator or the context-free one).
@@ -6713,7 +6727,7 @@ class IndustryService:
         cost_unknown_reason: str | None = None
         if invented_runs > 0 and effective_probability <= 0:
             cost_unknown_reason = self._NO_INVENTION_PROBABILITY_REASON
-            logger.warning(
+            (logger.warning if log_unknown_cost else logger.debug)(
                 "Invention plan for blueprint %s: %s; invention cost left unknown",
                 blueprint_type_id, cost_unknown_reason,
             )
@@ -6995,6 +7009,8 @@ class IndustryService:
             target_entry=self._invention_target_entry(invention_job, int(blueprint_type_id)),
             blueprint_type_id=int(blueprint_type_id), invented_runs=max(0, int(runs)),
             max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
+            # The row logs one "datacore need unknown" WARNING for this instead.
+            log_unknown_cost=False,
         )
         return int(costs.get("whole_attempts") or 0), costs.get("cost_unknown_reason")
 
@@ -7554,11 +7570,16 @@ class IndustryService:
             r for r in datacore_need_unknown_reasons
             if r not in (invention_cost_unknown_reason or "")
         ]
+        # Batch 1's cost is exact when every unknown is a later batch's.
+        batch_one_cost_exact = invention_cost_unknown_reason is None
         if extra_only_unknown_reasons:
             invention_cost_unknown_reason = "; ".join(
                 [*([invention_cost_unknown_reason] if invention_cost_unknown_reason else []), *extra_only_unknown_reasons]
             )
-        if datacore_need_unknown_reasons:
+        if extra_only_unknown_reasons:
+            # One WARNING per row: the full-batch evaluations log theirs at
+            # DEBUG, and a batch-1 unknown already logged "invention cost left
+            # unknown" for the row's own invention.
             logger.warning(
                 "Product %s: datacore need unknown from batch %s on (%s); "
                 "the shopping list flags it instead of buying 0 datacores",
@@ -7694,6 +7715,8 @@ class IndustryService:
             row_out["manufacturing_job"]["invention_datacore_need_unknown"] = {
                 "reason": "; ".join(datacore_need_unknown_reasons),
                 "from_batch": datacore_need_unknown_from_batch,
+                # Read by the pricing-confidence step for its wording.
+                "batch_one_cost_exact": batch_one_cost_exact,
             }
         if not bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals:
             # A T2 row that would be invented, costed with no invention because

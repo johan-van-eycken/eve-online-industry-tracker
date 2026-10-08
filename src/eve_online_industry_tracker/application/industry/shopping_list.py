@@ -37,7 +37,7 @@ def aggregate_shopping_list_with_stale(
     A line without an explicit ``buy_quantity`` counts nothing as owned and
     buys its full quantity. A "take" / "split" line without the split comes
     from an overview cached before the producer wrote it; those types are
-    named in one WARNING per call. Every gap therefore errs toward over-buy,
+    named in one DEBUG line per call (the UI shows a caption for them). Every gap therefore errs toward over-buy,
     never under-buy.
 
     Returns (items, stale) where items are dicts sorted by (buy * unit_price)
@@ -98,7 +98,9 @@ def aggregate_shopping_list_with_stale(
         item["buy"] = max(0, item["need"] - owned_by_type_id.get(mat_type_id, 0))
 
     if stale_type_names:
-        logger.warning(
+        # DEBUG: this runs on every UI rerun, and the UI shows the stale
+        # caption from the returned names, which is the real signal.
+        logger.debug(
             "Shopping list: %s came from an older overview without a take/buy split; "
             "counted as fully bought (may over-buy). Refresh the Industry Builder overview for exact stock use.",
             ", ".join(sorted(stale_type_names.values())),
@@ -117,7 +119,8 @@ def invention_need_unknown_rows(selected_rows: list[dict[str, Any]]) -> dict[str
     must invent: from batch 1, or from batch 2 when an owned BPC covers batch 1
     only. Those datacores are in no invention list, so the shopping list would
     show 0 for them; a row is named here when its batches reach that batch,
-    so the UI can flag the gap instead. Never guesses a quantity.
+    so the UI can flag the gap instead. Never guesses a quantity. Logs at
+    DEBUG only (see aggregate_shopping_list_with_stale).
     """
     out: dict[str, str] = {}
     for row in selected_rows:
@@ -133,7 +136,9 @@ def invention_need_unknown_rows(selected_rows: list[dict[str, Any]]) -> dict[str
         name = str(row.get("type_name") or row.get("type_id") or "?")
         out[name] = str(unknown.get("reason") or "invention odds unknown")
     if out:
-        logger.warning(
+        # DEBUG: the producer already logged one WARNING per row, this runs on
+        # every UI rerun, and the UI's st.warning is the real signal.
+        logger.debug(
             "Shopping list: datacore need unknown for %s; no datacores counted for those batches",
             ", ".join(sorted(out)),
         )

@@ -265,15 +265,18 @@ def test_stale_take_line_for_one_batch_buys_the_full_need() -> None:
     assert _line(aggregate_shopping_list([row])) == (10, 10)
 
 
-def test_stale_lines_log_one_warning_naming_the_types(caplog) -> None:
+def test_stale_lines_log_one_debug_line_naming_the_types(caplog) -> None:
+    # DEBUG, not WARNING: it runs on every UI rerun, and the UI caption is the
+    # real signal (Task I fix round 1).
     row_a = _make_row(1001, "Item A", 5, {"34": _stale_take_line()})
     row_b = _make_row(1002, "Item B", 2, {"34": _stale_take_line(), "35": {**_stale_take_line(), "type_id": 35, "type_name": "Pyerite"}})
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         aggregate_shopping_list([row_a, row_b])
-    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1
-    assert "Tritanium" in warnings[0] and "Pyerite" in warnings[0]
-    assert "refresh" in warnings[0].lower()
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    debug = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG" and "older overview" in r.getMessage()]
+    assert len(debug) == 1
+    assert "Tritanium" in debug[0] and "Pyerite" in debug[0]
+    assert "refresh" in debug[0].lower()
 
 
 def test_lines_with_a_split_log_no_warning(caplog) -> None:
@@ -423,3 +426,12 @@ def test_tab_shows_no_unknown_need_warning_for_known_rows(monkeypatch) -> None:
     monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
     _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
     assert warnings == []
+
+
+def test_unknown_need_rows_log_debug_not_warning(caplog) -> None:
+    from streamlit_ui.shopping_list import invention_need_unknown_rows
+
+    with caplog.at_level("DEBUG"):
+        assert list(invention_need_unknown_rows([_unknown_need_row(3, 2)])) == ["Item T2"]
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("datacore need unknown" in r.getMessage() for r in caplog.records if r.levelname == "DEBUG")
