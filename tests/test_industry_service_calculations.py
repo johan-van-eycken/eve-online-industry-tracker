@@ -53,6 +53,11 @@ def _build_service(
         lambda self: adjusted_price_map,
         service,
     )
+    # No SDE in the harness: plan without decryptors, without the "no SDE
+    # session" WARNING on every refresh (that branch has its own test).
+    service._load_decryptor_options = MethodType(  # type: ignore[attr-defined]
+        lambda self: (NO_DECRYPTOR,), service,
+    )
     service._compact_owned_blueprint_asset = MethodType(  # type: ignore[attr-defined]
         lambda self, asset, **kwargs: {} if asset is None else {"item_id": getattr(asset, "item_id", None)},
         service,
@@ -1999,3 +2004,70 @@ def test_without_an_sde_session_there_are_no_decryptors_and_a_warning(caplog) ->
     with caplog.at_level("WARNING"):
         assert service._load_decryptor_options() == (NO_DECRYPTOR,)
     assert any("no decryptor data" in r.getMessage() for r in caplog.records)
+
+
+# --- round 5 Task 1, fix round 1: one decryptor source, one invention predicate ---
+
+
+def _top_level_t2_row(service, ctx, **kwargs):
+    t2_row = _invented_t2_blueprint_rows()[1]
+    return service._build_single_product_row(
+        ctx, row=t2_row, raw_product=t2_row["manufacturing_job"]["products"][0],
+        row_index=1, product_index=1, blueprint_copy_assets=[],
+        blueprint_original_asset=None, effective_runs=10, **kwargs,
+    )
+
+
+def test_the_top_level_row_takes_its_decryptor_from_the_invention_context(monkeypatch) -> None:
+    service = _invention_service(monkeypatch)
+    ctx = _planning_context(service)
+    asked: list[int] = []
+    ctx.invention_context.decryptor_for_blueprint = lambda bp: (asked.append(bp), _ACCELERANT_LIKE)[1]
+
+    mj = _top_level_t2_row(service, ctx)["manufacturing_job"]
+
+    # ME 2 + 2 = 4, TE 4 + 10 = 14: the context's decryptor, as in the nested planner.
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (4, 14)
+    assert mj["materials"]["34"]["quantity"] == 96  # ceil(100 x 0.96)
+    assert asked == [9002]
+
+
+def test_an_explicit_decryptor_overrides_the_invention_context(monkeypatch) -> None:
+    service = _invention_service(monkeypatch)
+    ctx = _planning_context(service)
+    ctx.invention_context.decryptor_for_blueprint = lambda bp: _ACCELERANT_LIKE
+
+    mj = _top_level_t2_row(service, ctx, decryptor=NO_DECRYPTOR)["manufacturing_job"]
+
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (2, 4)
+
+
+def test_a_row_that_does_not_invent_never_asks_for_a_decryptor(monkeypatch) -> None:
+    service = _invention_service(monkeypatch)
+    ctx = _planning_context(service)
+
+    def _must_not_be_asked(bp):
+        raise AssertionError(f"asked a decryptor for {bp}")
+
+    ctx.invention_context.decryptor_for_blueprint = _must_not_be_asked
+    t1_row = _invented_t2_blueprint_rows()[0]
+    row = service._build_single_product_row(
+        ctx, row=t1_row, raw_product=t1_row["manufacturing_job"]["products"][0],
+        row_index=0, product_index=0, blueprint_copy_assets=[],
+        blueprint_original_asset=None, effective_runs=10,
+    )
+    assert row is not None
+    assert row["manufacturing_job"]["blueprint_material_efficiency"] == 0
+
+
+def test_a_source_row_without_an_invention_job_dict_is_not_an_invention_path(monkeypatch) -> None:
+    # The nested planner requires invention_job to be a dict; the top level now
+    # uses the same predicate (it used to coerce a None job to {} and invent).
+    service = _invention_service(monkeypatch)
+    ctx = _planning_context(service)
+    ctx.invention_row_by_blueprint_type_id[9002] = {"blueprint_type_id": 1001, "invention_job": None}
+
+    mj = _top_level_t2_row(service, ctx)["manufacturing_job"]
+
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (0, 0)
+    assert mj["materials"]["34"]["quantity"] == 100

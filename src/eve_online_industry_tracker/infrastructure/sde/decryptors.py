@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from sqlalchemy import bindparam, text
 
 from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
+
+logger = logging.getLogger(__name__)
 
 # Dogma attribute IDs (confirmed in SDE dogmaAttributes table)
 _ATTR_INVENTION_PROB_MULT = 1112
@@ -27,7 +30,7 @@ def get_t2_invention_decryptors(sde_session: Any, *, language: str) -> list[dict
 
     Output rows include:
     - type_id, type_name
-    - invention_probability_multiplier (float)
+    - invention_probability_multiplier (float, or None when the SDE omits it)
     - invention_me_modifier (int)
     - invention_te_modifier (int)
     - invention_max_run_modifier (int)
@@ -38,22 +41,22 @@ def get_t2_invention_decryptors(sde_session: Any, *, language: str) -> list[dict
         - The SDE 'Decryptors' category also includes reverse-engineering decryptors
             and subsystem data interfaces. For the T2 invention UI we restrict to the
             'Generic Decryptor' group (id=1304), which matches CCP's T2 decryptor list.
-    - Missing attributes default to neutral values.
+    - A missing ME/TE/run modifier (1113/1114/1124) is 0: CCP omits a zero
+      modifier. A missing success multiplier (1112) is emitted as None, never
+      guessed, so the caller skips that decryptor.
+    - A decryptor whose dogma row is missing, corrupt or has none of the four
+      attributes is left out with a WARNING. Query errors propagate, like the
+      other SDE loaders (types.py, rig_effects.py).
     """
 
     if sde_session is None:
         return []
 
     # Find type IDs for the T2 decryptor group
-    try:
-        type_rows = (
-            sde_session.execute(
-                text("SELECT id FROM types WHERE published = 1 AND groupID = :gid"),
-                {"gid": int(_T2_GENERIC_DECRYPTOR_GROUP_ID)},
-            ).fetchall()
-        )
-    except Exception:
-        return []
+    type_rows = sde_session.execute(
+        text("SELECT id FROM types WHERE published = 1 AND groupID = :gid"),
+        {"gid": int(_T2_GENERIC_DECRYPTOR_GROUP_ID)},
+    ).fetchall()
 
     type_ids = [int(r[0]) for r in (type_rows or []) if r and r[0] is not None]
     type_ids = sorted({tid for tid in type_ids if tid > 0})
@@ -61,25 +64,23 @@ def get_t2_invention_decryptors(sde_session: Any, *, language: str) -> list[dict
         return []
 
     # Load dogmaAttributes for these type IDs (best-effort; not all types have typeDogma rows)
-    try:
-        td_rows = (
-            sde_session.execute(
-                text("SELECT id, dogmaAttributes FROM typeDogma WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
-                {"ids": type_ids},
-            ).fetchall()
-        )
-    except Exception:
-        td_rows = []
+    td_rows = sde_session.execute(
+        text("SELECT id, dogmaAttributes FROM typeDogma WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
+        {"ids": type_ids},
+    ).fetchall()
 
     attrs_by_type_id: dict[int, dict[int, float]] = {}
+    reported_type_ids: set[int] = set()
     for tid, attrs_raw in td_rows or []:
         if tid is None:
             continue
         try:
             attrs = json.loads(attrs_raw) if attrs_raw else []
-        except Exception:
-            attrs = []
+        except (TypeError, ValueError):
+            attrs = None
         if not isinstance(attrs, list):
+            logger.warning("SDE: decryptor %s has corrupt dogmaAttributes; it is left out", tid)
+            reported_type_ids.add(int(tid))
             continue
         m: dict[int, float] = {}
         for a in attrs:
@@ -104,8 +105,7 @@ def get_t2_invention_decryptors(sde_session: Any, *, language: str) -> list[dict
                 m[aid_i] = float(val)
             except Exception:
                 continue
-        if m:
-            attrs_by_type_id[int(tid)] = m
+        attrs_by_type_id[int(tid)] = m
 
     # Attach type names
     type_data = get_type_data(sde_session, language, type_ids)
@@ -113,16 +113,21 @@ def get_t2_invention_decryptors(sde_session: Any, *, language: str) -> list[dict
     out: list[dict[str, Any]] = []
     for tid in type_ids:
         t = type_data.get(int(tid)) or {"type_id": int(tid), "type_name": str(tid)}
-        m = attrs_by_type_id.get(int(tid), {})
-
-        # If it has no relevant dogma attributes at all, it's not useful for invention.
+        if int(tid) in reported_type_ids:
+            continue
+        if int(tid) not in attrs_by_type_id:
+            logger.warning("SDE: decryptor %s has no typeDogma row; it is left out", tid)
+            continue
+        m = attrs_by_type_id[int(tid)]
         if not m:
+            logger.warning("SDE: decryptor %s has none of the invention dogma attributes; it is left out", tid)
             continue
 
-        prob_mult = float(m.get(_ATTR_INVENTION_PROB_MULT, 1.0) or 1.0)
-        me_mod = int(m.get(_ATTR_INVENTION_ME_MOD, 0.0) or 0.0)
-        te_mod = int(m.get(_ATTR_INVENTION_TE_MOD, 0.0) or 0.0)
-        run_mod = int(m.get(_ATTR_INVENTION_MAX_RUN_MOD, 0.0) or 0.0)
+        prob_raw = m.get(_ATTR_INVENTION_PROB_MULT)
+        prob_mult = float(prob_raw) if prob_raw is not None else None
+        me_mod = int(m.get(_ATTR_INVENTION_ME_MOD, 0.0))
+        te_mod = int(m.get(_ATTR_INVENTION_TE_MOD, 0.0))
+        run_mod = int(m.get(_ATTR_INVENTION_MAX_RUN_MOD, 0.0))
 
         out.append(
             {

@@ -7273,9 +7273,15 @@ class IndustryService:
         blueprint_copy_assets: list,
         blueprint_original_asset: Any,
         effective_runs: int,
-        decryptor: DecryptorOption = NO_DECRYPTOR,
+        decryptor: DecryptorOption | None = None,
     ) -> dict[str, Any] | None:
-        """Build a single product row from a blueprint variant (Step 3)."""
+        """Build a single product row from a blueprint variant (Step 3).
+
+        `decryptor`: None (the default) takes the refresh's choice from
+        ctx.invention_context.decryptor_for_blueprint, the same source the
+        nested planner uses. An explicit option overrides it, e.g. to build
+        one decryptor candidate.
+        """
         manufacturing_job = row.get("manufacturing_job") or {}
         if not isinstance(manufacturing_job, dict):
             return None
@@ -7328,8 +7334,19 @@ class IndustryService:
         manufacturing_skill_entry_list = [se for se in manufacturing_skill_entries.values() if isinstance(se, dict)]
 
         invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
+        # The same predicate as the nested planner: the source row really has an invention job.
+        has_top_level_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
         invention_job = (invention_source_row or {}).get("invention_job") or {}
-        has_top_level_invention_path = invention_source_row and isinstance(invention_job, dict)
+        if decryptor is None:
+            # One source for the decryptor, shared with the nested planner. It
+            # is resolved only for a row that invents (the condition of the
+            # invented baseline below), so a non-inventing row never asks.
+            # Callers that evaluate a candidate pass `decryptor=` explicitly.
+            decryptor = (
+                ctx.invention_context.decryptor_for_blueprint(int(blueprint_type_id))
+                if bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals
+                else NO_DECRYPTOR
+            )
         # Blueprint source resolution (Step 3a)
         blueprint_material_efficiency = 0
         blueprint_time_efficiency = 0
