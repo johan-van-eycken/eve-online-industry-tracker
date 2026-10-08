@@ -384,3 +384,42 @@ def test_tab_shows_the_stale_caption_and_the_new_stock_rule(monkeypatch) -> None
 def test_tab_shows_no_stale_caption_for_current_lines(monkeypatch) -> None:
     captions = _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
     assert not any("older overview" in c for c in captions)
+
+
+# --- round 4 Task I R3: unknown datacore need notice ----------------------------
+
+
+def _unknown_need_row(batches: int, from_batch: int) -> dict:
+    row = _invention_row(batches, batch_one=None, extra=None)
+    row["manufacturing_job"]["invention_datacore_need_unknown"] = {
+        "reason": "batches past the owned T2 BPC runs: no invention success probability", "from_batch": from_batch,
+    }
+    return row
+
+
+def test_unknown_need_rows_names_rows_whose_batches_reach_the_unknown_need() -> None:
+    from streamlit_ui.shopping_list import invention_need_unknown_rows
+
+    assert list(invention_need_unknown_rows([_unknown_need_row(3, 2)])) == ["Item T2"]
+    assert invention_need_unknown_rows([_unknown_need_row(1, 2)]) == {}
+    assert list(invention_need_unknown_rows([_unknown_need_row(1, 1)])) == ["Item T2"]
+    assert invention_need_unknown_rows([_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})]) == {}
+
+
+def test_tab_warns_about_an_unknown_datacore_need(monkeypatch) -> None:
+    from streamlit_ui.pages import portfolio_planner as page
+
+    warnings: list[str] = []
+    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
+    _render_tab_captions(monkeypatch, [_unknown_need_row(3, 2)])
+    assert len(warnings) == 1
+    assert "Item T2" in warnings[0] and "datacore" in warnings[0].lower()
+
+
+def test_tab_shows_no_unknown_need_warning_for_known_rows(monkeypatch) -> None:
+    from streamlit_ui.pages import portfolio_planner as page
+
+    warnings: list[str] = []
+    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
+    _render_tab_captions(monkeypatch, [_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)})])
+    assert warnings == []

@@ -21,7 +21,7 @@ from streamlit_ui.state.industry_builder_page import (
     start_overview_refresh_job,
 )
 from streamlit_ui.state.industry_builder_ui import filter_overview_rows
-from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale
+from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale, invention_need_unknown_rows
 from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
     load_character_context,
@@ -868,6 +868,13 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
     shopping_items, stale_types = aggregate_shopping_list_with_stale(selected_rows)
     if stale_types:
         st.caption(STALE_OVERVIEW_CAPTION)
+    unknown_need = invention_need_unknown_rows(selected_rows)
+    if unknown_need:
+        st.warning(
+            "Datacore need unknown (no invention success probability) for: "
+            + ", ".join(sorted(unknown_need))
+            + ". Their invention batches are not in this list; buy those datacores separately."
+        )
 
     if not shopping_items:
         st.info("No buy-sourced materials found for the selected items.")

@@ -4268,6 +4268,7 @@ class IndustryService:
         # The whole-attempt invention inputs one more batch of this plan needs
         # once the owned BPC runs are spent (see _extra_batch_invention_requirements).
         invention_requirements_per_extra_batch: list[dict[str, Any]] = []
+        extra_batch_invention_unknown_reasons: list[str] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
         duration_is_amortized = False
@@ -4555,6 +4556,7 @@ class IndustryService:
                         child_plan, expected_invention_materials=expected_invention_materials,
                         invention_requirements=invention_requirements,
                         invention_requirements_per_extra_batch=invention_requirements_per_extra_batch,
+                        extra_batch_invention_unknown_reasons=extra_batch_invention_unknown_reasons,
                         invention_cost_unknown_reasons=invention_cost_unknown_reasons,
                         elapsed_time_adjustment=elapsed_time_adjustment,
                     )
@@ -4823,14 +4825,19 @@ class IndustryService:
                     )
 
         if activity == "manufacturing" and bool(build_from_bpc) and has_invention_path and not matched_blueprint_originals:
-            invention_requirements_per_extra_batch.extend(self._extra_batch_invention_requirements(
+            extra_requirements, extra_unknown_reason = self._extra_batch_invention_requirements(
                 invention_job=cast(dict[str, Any], (invention_source_row or {}).get("invention_job")),
                 blueprint_type_id=blueprint_type_id, blueprint_display_name=blueprint_display_name,
                 runs=runs, owned_copy_runs_used=owned_copy_runs_used,
                 batch_one_requirements=own_invention_requirements,
                 max_production_limit=int(job.get("max_production_limit") or 0),
                 adjusted_price_map=adjusted_market_price_map,
-            ))
+            )
+            invention_requirements_per_extra_batch.extend(extra_requirements)
+            if extra_unknown_reason is not None:
+                # Not an invention_cost_unknown_reason: batch 1's cost is known,
+                # so this must not force the parent to buy the child.
+                extra_batch_invention_unknown_reasons.append(extra_unknown_reason)
 
         materials_container_node = self._job_tree_node(
             label=self._ACTIVITY_LABELS["materials"],
@@ -4877,6 +4884,7 @@ class IndustryService:
             "expected_invention_materials": expected_invention_materials,
             "invention_requirements": invention_requirements,
             "invention_requirements_per_extra_batch": invention_requirements_per_extra_batch,
+            "extra_batch_invention_unknown_reasons": extra_batch_invention_unknown_reasons,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
             "duration_is_amortized": duration_is_amortized,
@@ -4944,6 +4952,7 @@ class IndustryService:
         expected_invention_materials: list[dict[str, Any]] = []
         invention_requirements: list[dict[str, Any]] = []
         invention_requirements_per_extra_batch: list[dict[str, Any]] = []
+        extra_batch_invention_unknown_reasons: list[str] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
         duration_is_amortized = False
@@ -5168,6 +5177,7 @@ class IndustryService:
                     child_plan, expected_invention_materials=expected_invention_materials,
                     invention_requirements=invention_requirements,
                     invention_requirements_per_extra_batch=invention_requirements_per_extra_batch,
+                    extra_batch_invention_unknown_reasons=extra_batch_invention_unknown_reasons,
                     invention_cost_unknown_reasons=invention_cost_unknown_reasons,
                     elapsed_time_adjustment=elapsed_time_adjustment,
                 )
@@ -5287,6 +5297,7 @@ class IndustryService:
             "expected_invention_materials": expected_invention_materials,
             "invention_requirements": invention_requirements,
             "invention_requirements_per_extra_batch": invention_requirements_per_extra_batch,
+            "extra_batch_invention_unknown_reasons": extra_batch_invention_unknown_reasons,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
             "duration_is_amortized": duration_is_amortized,
@@ -6973,9 +6984,10 @@ class IndustryService:
         runs: int,
         max_production_limit: int,
         adjusted_price_map: dict[int, dict[str, Any]],
-    ) -> int:
+    ) -> tuple[int, str | None]:
         """Whole invention attempts to invent all `runs` of one batch, on the
-        same model as the costed invention (0 when the odds are unknown). Only
+        same model as the costed invention, and why they are unknown (0
+        attempts and a reason when the odds are unknown, never a guess). Only
         the attempt count is used, so the activity is not priced."""
         costs, _ = self._expected_invention_costs(
             compute_activity=lambda **kw: {"duration_seconds": 0, "total_job_cost": None},
@@ -6984,7 +6996,7 @@ class IndustryService:
             blueprint_type_id=int(blueprint_type_id), invented_runs=max(0, int(runs)),
             max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
         )
-        return int(costs.get("whole_attempts") or 0)
+        return int(costs.get("whole_attempts") or 0), costs.get("cost_unknown_reason")
 
     def _extra_batch_invention_requirements(
         self,
@@ -6997,7 +7009,7 @@ class IndustryService:
         batch_one_requirements: list[dict[str, Any]],
         max_production_limit: int,
         adjusted_price_map: dict[int, dict[str, Any]],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str | None]:
         """A nested invented sub-build's whole-attempt invention inputs for one
         more batch of its parent, as if no owned BPC runs were left.
 
@@ -7006,16 +7018,21 @@ class IndustryService:
         spent are gone by then, so every later batch invents all ``runs``.
         With no owned runs spent, batch 1 already invented all of them and its
         requirements are reused (no second evaluation, no repeated WARNING).
-        Tagged like the batch-1 requirements; [] when the attempts are 0."""
+        Tagged like the batch-1 requirements. Returns (requirements, why the
+        need is unknown): ([], reason) when the odds are unknown, so the row is
+        flagged instead of buying 0 datacores for those batches."""
         if owned_copy_runs_used <= 0:
-            return [dict(e) for e in batch_one_requirements]
-        whole_attempts = self._full_batch_invention_whole_attempts(
+            # An unknown batch-1 cost already makes the parent buy this child.
+            return [dict(e) for e in batch_one_requirements], None
+        whole_attempts, unknown_reason = self._full_batch_invention_whole_attempts(
             invention_job=invention_job, blueprint_type_id=blueprint_type_id,
             runs=runs, max_production_limit=max_production_limit,
             adjusted_price_map=adjusted_price_map,
         )
+        if unknown_reason is not None:
+            return [], f"{blueprint_display_name} sub-build, batches past the owned BPC runs: {unknown_reason}"
         tags = {"invented_blueprint_type_id": int(blueprint_type_id), "invented_blueprint_name": blueprint_display_name}
-        return [{**e, **tags} for e in self._invention_whole_attempt_requirements(invention_job, whole_attempts)]
+        return [{**e, **tags} for e in self._invention_whole_attempt_requirements(invention_job, whole_attempts)], None
 
     @staticmethod
     def _absorb_nested_invention(
@@ -7024,6 +7041,7 @@ class IndustryService:
         expected_invention_materials: list[dict[str, Any]],
         invention_requirements: list[dict[str, Any]],
         invention_requirements_per_extra_batch: list[dict[str, Any]],
+        extra_batch_invention_unknown_reasons: list[str],
         invention_cost_unknown_reasons: list[str],
         elapsed_time_adjustment: float | None,
     ) -> float | None:
@@ -7041,6 +7059,9 @@ class IndustryService:
             dict(e) for e in (child_plan.get("invention_requirements_per_extra_batch") or []) if isinstance(e, dict)
         )
         invention_cost_unknown_reasons.extend(str(r) for r in (child_plan.get("invention_cost_unknown_reasons") or []))
+        extra_batch_invention_unknown_reasons.extend(
+            str(r) for r in (child_plan.get("extra_batch_invention_unknown_reasons") or [])
+        )
         child_adjustment = child_plan.get("elapsed_time_adjustment", 0.0)
         if elapsed_time_adjustment is None or child_adjustment is None:
             return None
@@ -7483,21 +7504,40 @@ class IndustryService:
         # Every further batch of this row invents all its runs, so the shopping
         # list needs one full batch's whole-attempt inputs with no owned BPC
         # runs, plus the built nested sub-builds' inputs for one batch with no
-        # owned nested BPC runs either (see _extra_batch_invention_requirements). Pure
-        # requirements: planned against no stock (take 0), because the
+        # owned nested BPC runs either (see _extra_batch_invention_requirements).
+        # Pure requirements: planned against no stock (take 0), because the
         # shopping list nets owned stock once over all batches.
-        extra_batch_requirements = [
-            *(self._invention_whole_attempt_requirements(
-                invention_job,
+        top_level_extra_attempts = 0
+        # Why the shopping list cannot size the datacores, and from which batch
+        # on: 1 when batch 1 itself invents with unknown odds, 2 when only the
+        # batches past the owned BPC runs do. Never replaced by a guessed count.
+        datacore_need_unknown_reasons: list[str] = []
+        datacore_need_unknown_from_batch = 2
+        if bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals:
+            if requires_invention_chain and owned_target_copy_runs_used <= 0 and inv_costs is not None:
                 # Batch 1 already invented every run when no owned BPC ran.
-                int(inv_costs.get("whole_attempts") or 0)
-                if requires_invention_chain and owned_target_copy_runs_used <= 0 and inv_costs is not None
-                else self._full_batch_invention_whole_attempts(
+                top_level_extra_attempts = int(inv_costs.get("whole_attempts") or 0)
+                if inv_costs.get("cost_unknown_reason") is not None:
+                    datacore_need_unknown_reasons.append(str(inv_costs["cost_unknown_reason"]))
+                    datacore_need_unknown_from_batch = 1
+            elif requires_invention_chain and inv_costs is not None and inv_costs.get("cost_unknown_reason") is not None:
+                # Partly owned BPC and unknown odds: batch 1 is unknown already,
+                # so a full batch is too (no second evaluation, no second WARNING).
+                datacore_need_unknown_reasons.append(str(inv_costs["cost_unknown_reason"]))
+                datacore_need_unknown_from_batch = 1
+            else:
+                top_level_extra_attempts, extra_unknown_reason = self._full_batch_invention_whole_attempts(
                     invention_job=invention_job, blueprint_type_id=blueprint_type_id,
                     runs=effective_runs, max_production_limit=max_production_limit,
                     adjusted_price_map=ctx.adjusted_market_price_map,
-                ),
-            ) if bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals else []),
+                )
+                if extra_unknown_reason is not None:
+                    datacore_need_unknown_reasons.append(f"batches past the owned T2 BPC runs: {extra_unknown_reason}")
+        datacore_need_unknown_reasons.extend(
+            str(r) for r in (recursive_prerequisite_plan.get("extra_batch_invention_unknown_reasons") or [])
+        )
+        extra_batch_requirements = [
+            *self._invention_whole_attempt_requirements(invention_job, top_level_extra_attempts),
             *[dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements_per_extra_batch") or []) if isinstance(e, dict)],
         ]
         invention_procurement_materials_per_extra_batch, _ = self._plan_take_or_buy_material_nodes(
@@ -7507,6 +7547,23 @@ class IndustryService:
             sell_price_map=ctx.material_price_map,
             adjusted_price_map=ctx.adjusted_market_price_map,
         )
+        # A batch past the owned BPC runs that must invent with unknown odds
+        # marks the row's invention cost unknown (Low confidence via the
+        # pricing step) even when batch 1's own cost is known.
+        extra_only_unknown_reasons = [
+            r for r in datacore_need_unknown_reasons
+            if r not in (invention_cost_unknown_reason or "")
+        ]
+        if extra_only_unknown_reasons:
+            invention_cost_unknown_reason = "; ".join(
+                [*([invention_cost_unknown_reason] if invention_cost_unknown_reason else []), *extra_only_unknown_reasons]
+            )
+        if datacore_need_unknown_reasons:
+            logger.warning(
+                "Product %s: datacore need unknown from batch %s on (%s); "
+                "the shopping list flags it instead of buying 0 datacores",
+                product_type_id, datacore_need_unknown_from_batch, "; ".join(datacore_need_unknown_reasons),
+            )
         total_time_seconds += int(recursive_prerequisite_plan.get("time_seconds") or 0)
         if recursive_prerequisite_plan.get("job_cost") is not None:
             total_job_cost += float(recursive_prerequisite_plan.get("job_cost") or 0.0)
@@ -7631,6 +7688,13 @@ class IndustryService:
         }
         if invention_cost_unknown_reason is not None:
             row_out["manufacturing_job"]["invention_cost_unknown_reason"] = invention_cost_unknown_reason
+        if datacore_need_unknown_reasons:
+            # Read by the shopping list (invention_need_unknown_rows): these
+            # batches' datacores are not in either invention list.
+            row_out["manufacturing_job"]["invention_datacore_need_unknown"] = {
+                "reason": "; ".join(datacore_need_unknown_reasons),
+                "from_batch": datacore_need_unknown_from_batch,
+            }
         if not bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals:
             # A T2 row that would be invented, costed with no invention because
             # build_from_bpc is off: it silently assumes a T2 BPO the corp does

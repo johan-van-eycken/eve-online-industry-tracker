@@ -1367,7 +1367,9 @@ def test_zero_floor_does_not_break_an_owned_bpc_row(monkeypatch) -> None:
     )[5002]["manufacturing_job"]
 
     assert mj["material_cost"] == pytest.approx(50.0)
-    assert "invention_cost_unknown_reason" not in mj
+    # Batch 1 is fine; only the batches past the owned BPC runs are unknown
+    # (Task I R3, see test_unknown_odds_with_owned_bpc_covering_batch_one_...).
+    assert mj["invention_cost_unknown_reason"].startswith("batches past the owned T2 BPC runs")
 
 
 # --- nested T2 sub-builds: expected attempts, no division by zero ---------------
@@ -1780,3 +1782,88 @@ def test_nested_partly_owned_bpc_invents_the_built_runs_for_later_batches(monkey
     row["max_batches_total"] = 3
     line = _shopping_line(row, 204)
     assert line is not None and (line["need"], line["buy"]) == (8, 8)
+
+
+# --- round 4 Task I R3: unknown odds past an owned BPC are flagged, never 0 ----
+
+
+def _unknown_need_rows(rows: list[dict]) -> dict:
+    from eve_online_industry_tracker.application.industry.shopping_list import invention_need_unknown_rows
+
+    return invention_need_unknown_rows(rows)
+
+
+def test_unknown_odds_with_owned_bpc_covering_batch_one_flag_the_later_batches(monkeypatch, caplog) -> None:
+    # p 0 and floor 0: batch 1 runs on the owned 10-run BPC and needs no
+    # invention, but batches 2..N must invent with unknown odds.
+    rows = _invented_t2_blueprint_rows()
+    rows[0]["invention_job"]["products"][0]["probability_pct"] = 0.0
+    with caplog.at_level("WARNING"):
+        row = _invention_overview(
+            monkeypatch, blueprint_rows=rows, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+            real_confidence=True, adm_overrides={"invention_probability_floor": 0.0},
+        )[5002]
+    mj = row["manufacturing_job"]
+
+    assert mj["material_cost"] == pytest.approx(50.0)  # batch 1 itself is unchanged
+    assert "no invention success probability" in mj["invention_cost_unknown_reason"]
+    assert "past the owned T2 BPC runs" in mj["invention_cost_unknown_reason"]
+    assert mj["invention_datacore_need_unknown"]["from_batch"] == 2
+    assert mj["material_pricing_confidence"] == "Low"
+    assert mj["overall_pricing_confidence"] == "Low"
+    assert any("Invention cost unknown" in r for r in mj["pricing_confidence_reasons"])
+    assert any(
+        "datacore need unknown" in r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    )
+    # No made-up datacore quantity anywhere.
+    assert "invention_procurement_materials" not in mj
+    assert "invention_procurement_materials_per_extra_batch" not in mj
+
+    row["max_batches_total"] = 5
+    assert _shopping_line(row, 204) is None
+    flagged = _unknown_need_rows([row])
+    assert list(flagged) == ["T2 Module"]
+    assert "no invention success probability" in flagged["T2 Module"]
+    # One batch runs on the owned BPC only: nothing unknown to flag.
+    row["max_batches_total"] = 1
+    assert _unknown_need_rows([row]) == {}
+
+
+def test_unknown_odds_with_nested_owned_bpc_covering_batch_one_flag_the_row(monkeypatch, caplog) -> None:
+    with caplog.at_level("WARNING"):
+        row = _invention_overview(
+            monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(probability_pct=0.0),
+            prices=_NESTED_FAKE_PRICES, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+            real_confidence=True, adm_overrides={"invention_probability_floor": 0.0},
+        )[7100]
+    mj = row["manufacturing_job"]
+
+    # Batch 1 builds the component on the owned BPC, a known cost.
+    assert mj["recursive_activity_breakdown"]["manufacturing:5002"]["recommended_action"] == "build"
+    assert "T2 Blueprint sub-build" in mj["invention_cost_unknown_reason"]
+    assert mj["invention_datacore_need_unknown"]["from_batch"] == 2
+    assert mj["material_pricing_confidence"] == "Low"
+    assert any("datacore need unknown" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    assert "invention_procurement_materials_per_extra_batch" not in mj
+
+    row["max_batches_total"] = 3
+    assert _shopping_line(row, 204) is None
+    assert list(_unknown_need_rows([row])) == ["Parent Item"]
+
+
+def test_unknown_odds_without_owned_bpc_flag_every_batch(monkeypatch) -> None:
+    rows = _invented_t2_blueprint_rows()
+    rows[0]["invention_job"]["products"][0]["probability_pct"] = 0.0
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=rows, adm_overrides={"invention_probability_floor": 0.0},
+    )[5002]
+    assert row["manufacturing_job"]["invention_datacore_need_unknown"]["from_batch"] == 1
+    assert _shopping_line(row, 204) is None
+    assert list(_unknown_need_rows([row])) == ["T2 Module"]
+
+
+def test_known_odds_rows_are_not_flagged(monkeypatch) -> None:
+    rows = _invention_overview(monkeypatch, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}))
+    rows[5002]["max_batches_total"] = 5
+    assert "invention_datacore_need_unknown" not in rows[5002]["manufacturing_job"]
+    assert _unknown_need_rows(list(rows.values())) == {}

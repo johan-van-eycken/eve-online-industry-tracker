@@ -109,7 +109,40 @@ def aggregate_shopping_list_with_stale(
     return result, stale_type_names
 
 
+def invention_need_unknown_rows(selected_rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Rows whose datacore need the shopping list cannot size, by row name.
+
+    The producer writes ``manufacturing_job.invention_datacore_need_unknown``
+    = {"reason", "from_batch"} when invention odds are unknown for batches it
+    must invent: from batch 1, or from batch 2 when an owned BPC covers batch 1
+    only. Those datacores are in no invention list, so the shopping list would
+    show 0 for them; a row is named here when its batches reach that batch,
+    so the UI can flag the gap instead. Never guesses a quantity.
+    """
+    out: dict[str, str] = {}
+    for row in selected_rows:
+        if not isinstance(row, dict):
+            continue
+        mj = row.get("manufacturing_job")
+        unknown = mj.get(_UNKNOWN_DATACORE_NEED_KEY) if isinstance(mj, dict) else None
+        if not isinstance(unknown, dict):
+            continue
+        batches = max(1, int(row.get("max_batches_total") or 1))
+        if batches < max(1, int(unknown.get("from_batch") or 1)):
+            continue
+        name = str(row.get("type_name") or row.get("type_id") or "?")
+        out[name] = str(unknown.get("reason") or "invention odds unknown")
+    if out:
+        logger.warning(
+            "Shopping list: datacore need unknown for %s; no datacores counted for those batches",
+            ", ".join(sorted(out)),
+        )
+    return out
+
+
 _OWNED_STRATEGIES = frozenset({"take", "split", "mixed"})
+
+_UNKNOWN_DATACORE_NEED_KEY = "invention_datacore_need_unknown"
 
 _EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch"
 
