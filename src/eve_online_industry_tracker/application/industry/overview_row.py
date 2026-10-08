@@ -223,6 +223,32 @@ def get_blueprint_type_id(row: dict[str, Any]) -> int | None:
     return value if value > 0 else None
 
 
+def get_invention_skill_set(row: dict[str, Any]) -> tuple[tuple[int, int], int | None] | None:
+    """((science skill ids), encryption skill id) the producer's invention
+    chance read for this row (manufacturing_job.invention_chance), or None
+    when the row carries none or the skills could not be identified.
+
+    The encryption id is None for a blueprint whose SDE entry lists no
+    encryption skill (amendment A3, `encryption_skill_type_id: None` with two
+    science ids): ranked by the science skills only."""
+    chance = get_manufacturing_job(row).get("invention_chance")
+    if not isinstance(chance, dict):
+        return None
+    science = chance.get("science_skill_type_ids")
+    if not isinstance(science, list) or len(science) != 2:
+        return None
+    first, second = (_as_int(s) for s in science)
+    if first <= 0 or second <= 0:
+        return None
+    raw_encryption = chance.get("encryption_skill_type_id")
+    if raw_encryption is None:
+        return (first, second), None
+    encryption = _as_int(raw_encryption)
+    if encryption <= 0:
+        return None
+    return (first, second), encryption
+
+
 def get_meta_group_name(row: dict[str, Any]) -> str:
     """Meta group as a normalised display name.
 

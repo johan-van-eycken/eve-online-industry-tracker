@@ -2071,3 +2071,109 @@ def test_a_source_row_without_an_invention_job_dict_is_not_an_invention_path(mon
 
     assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (0, 0)
     assert mj["materials"]["34"]["quantity"] == 100
+
+
+# --- round 5 Task 2: invention chance from the corp's best inventor -----------
+# Fake skill levels only.
+
+_INVENTION_SKILLS = [
+    {"type_id": 11433, "type_name": "High Energy Physics", "group_id": 270},
+    {"type_id": 11454, "type_name": "Caldari Starship Engineering", "group_id": 270},
+    {"type_id": 21790, "type_name": "Caldari Encryption Methods", "group_id": 270},
+]
+
+
+def _skilled_overview(monkeypatch, *, levels, encryption=frozenset({21790}), real_confidence=False,
+                      skill_entries=None, **kwargs):
+    rows = _invented_t2_blueprint_rows()
+    rows[0]["invention_job"]["skill_entries"] = [dict(s) for s in (skill_entries or _INVENTION_SKILLS)]
+    service = _invention_service(monkeypatch, blueprint_rows=rows, real_confidence=real_confidence, **kwargs)
+    service._get_inventor_skill_levels = MethodType(lambda self: levels, service)  # type: ignore[attr-defined]
+    service._load_encryption_skill_type_ids = MethodType(lambda self: encryption, service)  # type: ignore[attr-defined]
+    out = service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+    )
+    return {row["type_id"]: row for row in out}
+
+
+def test_the_best_inventors_skills_raise_the_chance(monkeypatch) -> None:
+    levels = {1: {11433: 4, 11454: 4, 21790: 4}, 2: {11433: 5, 11454: 5, 21790: 3}}
+    mj = _skilled_overview(monkeypatch, levels=levels)[5002]["manufacturing_job"]
+
+    factor = 1 + 10 / 30 + 3 / 40  # pilot 2 beats pilot 1 (1 + 8/30 + 4/40)
+    p = 0.5 * factor
+    chance = mj["invention_chance"]
+    assert chance["inventor_character_id"] == 2
+    assert chance["skill_factor"] == pytest.approx(factor)
+    assert chance["effective_probability"] == pytest.approx(p)
+    assert mj["activity_breakdown"]["invention"]["success_probability"] == pytest.approx(p)
+    # 1 run / 10 per BPC / p attempts, 2 datacores x 100 each.
+    assert mj["invention_material_cost"] == pytest.approx(2 * 100 * (1 / 10) / p)
+    assert chance["skills_unknown_reason"] is None
+    assert chance["note"] is None
+
+
+def test_an_untrained_corp_is_a_known_factor_of_one(monkeypatch) -> None:
+    mj = _skilled_overview(monkeypatch, levels={1: {}})[5002]["manufacturing_job"]
+
+    assert mj["invention_chance"]["skill_factor"] == 1.0
+    assert mj["invention_chance"]["skills_unknown_reason"] is None
+    assert mj["invention_material_cost"] == pytest.approx(40.0)
+
+
+def test_unloaded_skills_fall_back_to_the_base_chance_with_a_reason(monkeypatch, caplog) -> None:
+    with caplog.at_level("WARNING"):
+        mj = _skilled_overview(monkeypatch, levels={}, real_confidence=True)[5002]["manufacturing_job"]
+
+    assert mj["invention_chance"]["skill_factor"] is None
+    assert mj["invention_chance"]["skills_unknown_reason"] == "no corp character has its skills loaded"
+    assert mj["invention_material_cost"] == pytest.approx(40.0)  # base 0.5
+    assert any("SDE base chance" in r for r in mj["pricing_confidence_reasons"])
+    assert sum("no corp character has its skills loaded" in r.getMessage()
+               for r in caplog.records if r.levelname == "WARNING") == 1
+
+
+def test_a_blueprint_without_an_encryption_skill_uses_the_science_term_with_a_row_note(monkeypatch) -> None:
+    """A3: the formula with the science term only, not the base chance."""
+    levels = {1: {11433: 4, 11454: 4, 21790: 5}}
+    mj = _skilled_overview(monkeypatch, levels=levels, skill_entries=_INVENTION_SKILLS[:2])[5002]["manufacturing_job"]
+
+    p = 0.5 * (1 + 8 / 30)
+    chance = mj["invention_chance"]
+    assert chance["skill_factor"] == pytest.approx(1 + 8 / 30)
+    assert chance["encryption_skill_type_id"] is None
+    assert chance["skills_unknown_reason"] is None
+    assert "no encryption skill" in chance["note"]
+    assert mj["invention_material_cost"] == pytest.approx(2 * 100 * (1 / 10) / p)
+
+
+def test_the_admin_floor_still_applies_to_the_skilled_chance(monkeypatch) -> None:
+    rows_levels = {1: {11433: 5, 11454: 5, 21790: 5}}
+    service_rows = _invented_t2_blueprint_rows()
+    service_rows[0]["invention_job"]["products"][0]["probability_pct"] = 0.0
+    service_rows[0]["invention_job"]["skill_entries"] = [dict(s) for s in _INVENTION_SKILLS]
+    service = _invention_service(monkeypatch, blueprint_rows=service_rows, adm_overrides={"invention_probability_floor": 0.05})
+    service._get_inventor_skill_levels = MethodType(lambda self: rows_levels, service)  # type: ignore[attr-defined]
+    service._load_encryption_skill_type_ids = MethodType(lambda self: frozenset({21790}), service)  # type: ignore[attr-defined]
+    rows = {r["type_id"]: r for r in service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+    )}
+    assert rows[5002]["manufacturing_job"]["activity_breakdown"]["invention"]["success_probability"] == pytest.approx(0.05)
+
+
+def test_inventor_skills_come_from_every_loaded_corp_character() -> None:
+    service = object.__new__(IndustryService)
+    service._state = SimpleNamespace(char_manager=SimpleNamespace(get_characters=lambda: [  # type: ignore[attr-defined]
+        {"character_id": 1, "skills": {"skills": [
+            {"skill_id": 11433, "trained_skill_level": 4}, {"skill_id": 21790, "trained_skill_level": 2},
+        ]}},
+        {"character_id": 2, "skills": {}},          # not fetched: unknown, left out
+        {"character_id": 3},                        # not fetched either
+    ]))
+    assert service._get_inventor_skill_levels() == {1: {11433: 4, 21790: 2}}
+
+
+def test_no_character_manager_means_no_inventor_skills() -> None:
+    service = object.__new__(IndustryService)
+    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    assert service._get_inventor_skill_levels() == {}

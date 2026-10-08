@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from eve_online_industry_tracker.application.daily_planner.character_assigner import (
     CharacterAssigner,
 )
@@ -251,3 +253,58 @@ def test_research_actions_carry_the_nested_blueprint_type_id():
     actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
     research = [a for a in actions if a.action_type.endswith("_research")]
     assert sorted(a.type_id for a in research) == [999, 999]
+
+
+def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
+    """D2: rank by the item's own science + encryption skills (the producer's
+    invention_chance), not by a generic Science sum."""
+    chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}
+    generalist = _char(1, "Generalist", [_skill("Laboratory Operation", 5), _skill("Science", 5, 3402)])
+    specialist = _char(2, "Specialist", [
+        _skill("Laboratory Operation", 5), _skill("High Energy Physics", 5, 11433),
+        _skill("Caldari Starship Engineering", 4, 11454), _skill("Caldari Encryption Methods", 4, 21790),
+    ])
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_chance": chance},
+    })])
+    actions = CharacterAssigner().assign(plan, [], _Chars([generalist, specialist]), _AdminStub())
+    assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
+
+
+def test_invention_ranking_without_an_encryption_skill_uses_the_science_skills():
+    """A3: an item whose SDE entry has no encryption skill still ranks by its
+    two science skills."""
+    chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": None}
+    encryptor = _char(1, "Encryptor", [_skill("Laboratory Operation", 5), _skill("Caldari Encryption Methods", 5, 21790),
+                                        _skill("High Energy Physics", 1, 11433)])
+    physicist = _char(2, "Physicist", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 3, 11433)])
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_chance": chance},
+    })])
+    actions = CharacterAssigner().assign(plan, [], _Chars([encryptor, physicist]), _AdminStub())
+    assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
+
+
+def test_skill_levels_by_id_reads_the_enriched_list():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import skill_levels_by_id
+
+    char = _char(1, "Pilot", [_skill("High Energy Physics", 3, 11433), _skill("Science", 5, 3402)])
+    assert skill_levels_by_id(char) == {11433: 3, 3402: 5}
+    assert skill_levels_by_id({"character_id": 1}) == {}
+
+
+@pytest.mark.parametrize(("chance", "expected"), [
+    ({"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}, ((11433, 11454), 21790)),
+    ({"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": None}, ((11433, 11454), None)),  # A3
+    ({"science_skill_type_ids": None, "encryption_skill_type_id": None}, None),  # skills not identified
+    ({"science_skill_type_ids": [11433], "encryption_skill_type_id": 21790}, None),
+    ({"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 0}, None),
+    (None, None),
+])
+def test_get_invention_skill_set_reads_the_producers_chance(chance, expected):
+    from eve_online_industry_tracker.application.industry import overview_row as orow
+
+    row = {"manufacturing_job": {"invention_chance": chance}} if chance is not None else {}
+    assert orow.get_invention_skill_set(row) == expected

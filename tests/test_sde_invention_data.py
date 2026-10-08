@@ -116,3 +116,28 @@ def test_a_decryptor_query_error_propagates(sde_engine):
         session.commit()
         with pytest.raises(Exception, match="typeDogma"):
             get_t2_invention_decryptors(session, language="en")
+
+
+from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
+
+
+def test_encryption_skills_are_science_skills_named_encryption_methods(sde_engine):
+    with Session(sde_engine) as session:
+        session.add(Types(id=21790, name={"en": "Caldari Encryption Methods", "de": "Caldari-Verschlüsselung"},
+                          groupID=270, published=True))
+        session.add(Types(id=11433, name={"en": "High Energy Physics"}, groupID=270, published=True))
+        session.add(Types(id=99001, name={"en": "Old Encryption Methods"}, groupID=270, published=False))
+        session.add(Types(id=99002, name={"en": "Fake Encryption Methods"}, groupID=268, published=True))
+        session.commit()
+        assert get_encryption_skill_type_ids(session) == frozenset({21790})
+
+
+@pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
+def test_the_local_sde_has_seven_encryption_skills():
+    engine = create_engine(f"sqlite:///file:{_LOCAL_SDE}?mode=ro&uri=true")
+    try:
+        with Session(engine) as session:
+            ids = get_encryption_skill_type_ids(session)
+    finally:
+        engine.dispose()
+    assert ids == frozenset({3408, 21790, 21791, 23087, 23121, 52308, 55025})

@@ -73,8 +73,11 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     QuietWarningsFilter,
     decryptor_options_from_rows,
     invented_blueprint_efficiency,
+    invention_chance_payload,
+    resolve_invention_chance,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
+from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
 logger = logging.getLogger(__name__)
@@ -1394,6 +1397,55 @@ class IndustryService:
             )
         return options
 
+    def _get_inventor_skill_levels(self) -> dict[int, dict[int, int]]:
+        """{character_id: {skill type_id: trained level}} for every corp
+        character whose skills are loaded. A character without a loaded skill
+        list is unknown and left out, never read as level 0. No WARNING here:
+        resolve_invention_chance warns once when nobody is left."""
+        char_manager = getattr(self._state, "char_manager", None)
+        if char_manager is None:
+            return {}
+        try:
+            characters = char_manager.get_characters() or []
+        except ValueError:  # CharacterManager: no characters configured yet
+            return {}
+        out: dict[int, dict[int, int]] = {}
+        for char in characters:
+            if not isinstance(char, dict):
+                continue
+            skills = char.get("skills")
+            entries = skills.get("skills") if isinstance(skills, dict) else None
+            try:
+                character_id = int(char.get("character_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if character_id <= 0 or not isinstance(entries, list) or not entries:
+                continue
+            levels: dict[int, int] = {}
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    skill_id = int(entry.get("skill_id") or 0)
+                    level = int(entry.get("trained_skill_level") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if skill_id > 0:
+                    levels[skill_id] = max(level, levels.get(skill_id, 0))
+            out[character_id] = levels
+        return out
+
+    def _load_encryption_skill_type_ids(self) -> frozenset[int]:
+        """The SDE's encryption skills; empty without SDE access (every chance
+        is then the base chance, warned once by resolve_invention_chance)."""
+        if self._sessions is None:
+            return frozenset()
+        session = self._sessions.sde_session()
+        try:
+            return get_encryption_skill_type_ids(session)
+        finally:
+            session.close()
+
     def _get_character_trained_skill_levels(self, *, character_id: int) -> dict[int, int]:
         character = self._get_character(character_id=character_id)
 
@@ -2312,6 +2364,12 @@ class IndustryService:
                         f"Invention cost unknown ({invention_cost_unknown_reason}) — the T2 cost leaves out "
                         f"datacores and invention fees, so it is understated."
                     )
+            invention_chance = manufacturing_job.get("invention_chance")
+            if isinstance(invention_chance, dict) and invention_chance.get("skills_unknown_reason"):
+                reasons.append(
+                    f"Invention chance uses the SDE base chance ({invention_chance['skills_unknown_reason']}) — "
+                    f"inventor skills would raise it, so the T2 cost is overstated."
+                )
 
             overall_confidence_map = {"High": 2, "Medium": 1, "Low": 0}
             overall_score = min(
@@ -4809,6 +4867,8 @@ class IndustryService:
                     available_owned_item_quantity_by_type_id=available_owned_item_quantities,
                     owned_item_unit_cost_by_type_id=owned_item_unit_costs,
                     source_copy_enabled=True,
+                    decryptor=invention_context.decryptor_for_blueprint(blueprint_type_id),
+                    invention_context=invention_context,
                 )
                 invention_job_cost = nested_invention["invention_costs"]
                 source_copy_job_cost = nested_invention["source_copy_costs"]
@@ -4892,6 +4952,8 @@ class IndustryService:
                 batch_one_requirements=own_invention_requirements,
                 max_production_limit=int(job.get("max_production_limit") or 0),
                 adjusted_price_map=adjusted_market_price_map,
+                decryptor=invention_context.decryptor_for_blueprint(blueprint_type_id),
+                invention_context=invention_context,
             )
             invention_requirements_per_extra_batch.extend(extra_requirements)
             if extra_unknown_reason is not None:
@@ -6608,6 +6670,11 @@ class IndustryService:
             reaction_row_by_product_type_id=reaction_row_by_product_type_id,
             invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
             decryptor_options=decryptor_options,
+            # Read-only after construction; shared by the worker threads.
+            invention_context=InventionContext(
+                inventor_skill_levels_by_character_id=self._get_inventor_skill_levels(),
+                encryption_skill_type_ids=self._load_encryption_skill_type_ids(),
+            ),
             blueprint_row_by_type_id={
                 int(row.get("blueprint_type_id") or 0): row
                 for row in blueprint_rows
@@ -6742,6 +6809,8 @@ class IndustryService:
         invented_runs: int,
         max_production_limit: int,
         adjusted_price_map: dict[int, dict[str, Any]],
+        decryptor: DecryptorOption,
+        invention_context: InventionContext,
         log_unknown_cost: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Invention fees, time and inputs for `invented_runs` runs of an invented
@@ -6763,14 +6832,34 @@ class IndustryService:
 
         `compute_activity(activity=, base_time_seconds=, runs=, process_value=)`
         prices one activity (the cached ctx calculator or the context-free one).
+
+        The success chance is EVE's: the SDE base chance x the corp's best
+        inventor's skill factor x the decryptor multiplier, capped at 1, then
+        the admin floor (resolve_invention_chance). Its breakdown is
+        costs["invention_chance"] whenever something is invented.
         Returns (costs, invention_materials sized by the expected attempts).
         """
-        probability = 0.0
+        base_probability = 0.0
         if isinstance(target_entry, dict):
             try:
-                probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
+                base_probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
             except Exception:
-                probability = 0.0
+                base_probability = 0.0
+        # EVE: base x (1 + (sci1 + sci2)/30 + enc/40) x decryptor, for the
+        # corp's best inventor of this blueprint (D2). Resolved only when
+        # something is invented, so a row that invents nothing warns nothing.
+        chance = (
+            resolve_invention_chance(
+                invention_context, blueprint_type_id=int(blueprint_type_id),
+                skill_entries=[e for e in (invention_job.get("skill_entries") or []) if isinstance(e, dict)],
+                base_probability=base_probability, decryptor=decryptor,
+            )
+            if invented_runs > 0 else None
+        )
+        probability = (
+            chance.probability if chance is not None
+            else min(1.0, base_probability * float(decryptor.probability_multiplier))
+        )
         probability_floor = float(self._adm("industry", "invention_probability_floor", 0.01))
         runs_per_invented_blueprint = int((target_entry or {}).get("quantity") or 0)
         if invented_runs > 0:
@@ -6815,6 +6904,8 @@ class IndustryService:
         costs["runs"] = invention_attempts
         costs["estimated_item_value"] = invention_process_value
         costs["success_probability"] = effective_probability
+        if chance is not None:
+            costs["invention_chance"] = invention_chance_payload(chance, effective_probability)
         costs["runs_per_invented_blueprint"] = runs_per_invented_blueprint
         costs["invented_runs"] = invented_runs
         costs["expected_successful_blueprints"] = successful_jobs
@@ -6918,6 +7009,8 @@ class IndustryService:
         available_owned_item_quantity_by_type_id: dict[int, Any],
         owned_item_unit_cost_by_type_id: dict[int, float] | None,
         source_copy_enabled: bool,
+        decryptor: DecryptorOption,
+        invention_context: InventionContext,
     ) -> dict[str, Any]:
         """Invention of a T2 blueprint inside the recursive (sub-build) plan, on
         the same expected-value model as the top-level T2 row: fractional
@@ -6937,6 +7030,7 @@ class IndustryService:
             target_entry=target_entry, blueprint_type_id=blueprint_type_id,
             invented_runs=invented_runs, max_production_limit=max_production_limit,
             adjusted_price_map=adjusted_market_price_map,
+            decryptor=decryptor, invention_context=invention_context,
         )
         # Priced against a copy of the stock: this only values the amortized
         # inputs, and the child may still be bought instead of built. The whole
@@ -7061,21 +7155,25 @@ class IndustryService:
         runs: int,
         max_production_limit: int,
         adjusted_price_map: dict[int, dict[str, Any]],
-    ) -> tuple[int, str | None]:
+        decryptor: DecryptorOption,
+        invention_context: InventionContext,
+    ) -> tuple[int, str | None, dict[str, Any] | None]:
         """Whole invention attempts to invent all `runs` of one batch, on the
-        same model as the costed invention, and why they are unknown (0
-        attempts and a reason when the odds are unknown, never a guess). Only
-        the attempt count is used, so the activity is not priced."""
+        same model as the costed invention, why they are unknown (0 attempts
+        and a reason when the odds are unknown, never a guess), and the chance
+        payload. Only the attempt count is used, so the activity is not
+        priced."""
         costs, _ = self._expected_invention_costs(
             compute_activity=lambda **kw: {"duration_seconds": 0, "total_job_cost": None},
             invention_job=invention_job,
             target_entry=self._invention_target_entry(invention_job, int(blueprint_type_id)),
             blueprint_type_id=int(blueprint_type_id), invented_runs=max(0, int(runs)),
             max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
+            decryptor=decryptor, invention_context=invention_context,
             # The row logs one "datacore need unknown" WARNING for this instead.
             log_unknown_cost=False,
         )
-        return int(costs.get("whole_attempts") or 0), costs.get("cost_unknown_reason")
+        return int(costs.get("whole_attempts") or 0), costs.get("cost_unknown_reason"), costs.get("invention_chance")
 
     def _extra_batch_invention_requirements(
         self,
@@ -7088,6 +7186,8 @@ class IndustryService:
         batch_one_requirements: list[dict[str, Any]],
         max_production_limit: int,
         adjusted_price_map: dict[int, dict[str, Any]],
+        decryptor: DecryptorOption,
+        invention_context: InventionContext,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """A nested invented sub-build's whole-attempt invention inputs for one
         more batch of its parent, as if no owned BPC runs were left.
@@ -7103,10 +7203,11 @@ class IndustryService:
         if owned_copy_runs_used <= 0:
             # An unknown batch-1 cost already makes the parent buy this child.
             return [dict(e) for e in batch_one_requirements], None
-        whole_attempts, unknown_reason = self._full_batch_invention_whole_attempts(
+        whole_attempts, unknown_reason, _chance = self._full_batch_invention_whole_attempts(
             invention_job=invention_job, blueprint_type_id=blueprint_type_id,
             runs=runs, max_production_limit=max_production_limit,
             adjusted_price_map=adjusted_price_map,
+            decryptor=decryptor, invention_context=invention_context,
         )
         if unknown_reason is not None:
             return [], f"{blueprint_display_name} sub-build, batches past the owned BPC runs: {unknown_reason}"
@@ -7159,6 +7260,7 @@ class IndustryService:
         compact_product: dict[str, Any],
         available_blueprint_copy_runs_by_type_id: dict[int, int],
         available_owned_item_quantity_by_type_id: dict[int, int],
+        decryptor: DecryptorOption,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
         """Plan the invention chain for a variant (Step 4). Returns (invention_costs, tree_nodes, procurement_materials, source_copy_costs)."""
         invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
@@ -7181,6 +7283,7 @@ class IndustryService:
             blueprint_type_id=blueprint_type_id, invented_runs=invented_runs,
             max_production_limit=max_production_limit,
             adjusted_price_map=ctx.adjusted_market_price_map,
+            decryptor=decryptor, invention_context=ctx.invention_context,
         )
         invention_attempts = float(costs["runs"])
 
@@ -7492,6 +7595,7 @@ class IndustryService:
             max_production_limit=max_production_limit, compact_product=compact_product,
             available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
             available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+            decryptor=decryptor,
         )
         expected_invention_inputs: list[dict[str, Any]] = []
         # elapsed_time_seconds = time_seconds with the amortized invention and
@@ -7615,6 +7719,7 @@ class IndustryService:
         # batches past the owned BPC runs do. Never replaced by a guessed count.
         datacore_need_unknown_reasons: list[str] = []
         datacore_need_unknown_from_batch = 2
+        extra_chance: dict[str, Any] | None = None
         if bool(ctx.build_from_bpc) and has_top_level_invention_path and not matched_blueprint_originals:
             if requires_invention_chain and owned_target_copy_runs_used <= 0 and inv_costs is not None:
                 # Batch 1 already invented every run when no owned BPC ran.
@@ -7628,10 +7733,11 @@ class IndustryService:
                 datacore_need_unknown_reasons.append(str(inv_costs["cost_unknown_reason"]))
                 datacore_need_unknown_from_batch = 1
             else:
-                top_level_extra_attempts, extra_unknown_reason = self._full_batch_invention_whole_attempts(
+                top_level_extra_attempts, extra_unknown_reason, extra_chance = self._full_batch_invention_whole_attempts(
                     invention_job=invention_job, blueprint_type_id=blueprint_type_id,
                     runs=effective_runs, max_production_limit=max_production_limit,
                     adjusted_price_map=ctx.adjusted_market_price_map,
+                    decryptor=decryptor, invention_context=ctx.invention_context,
                 )
                 if extra_unknown_reason is not None:
                     datacore_need_unknown_reasons.append(f"batches past the owned T2 BPC runs: {extra_unknown_reason}")
@@ -7795,6 +7901,13 @@ class IndustryService:
         }
         if invention_cost_unknown_reason is not None:
             row_out["manufacturing_job"]["invention_cost_unknown_reason"] = invention_cost_unknown_reason
+        top_level_chance = (
+            inv_costs.get("invention_chance") if requires_invention_chain and inv_costs is not None else None
+        ) or extra_chance
+        if isinstance(top_level_chance, dict):
+            # The chance this row's own invention assumes: batch 1's, or the
+            # later batches' when an owned BPC covers batch 1.
+            row_out["manufacturing_job"]["invention_chance"] = top_level_chance
         if datacore_need_unknown_reasons:
             # Read by the shopping list (invention_need_unknown_rows): these
             # batches' datacores are not in either invention list.

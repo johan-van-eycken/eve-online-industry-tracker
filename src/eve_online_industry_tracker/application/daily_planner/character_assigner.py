@@ -2,7 +2,9 @@
 
 Priority rules:
   1. Manufacturing / sub-manufacture → character with most free manufacturing slots
-  2. Invention → character with highest science skill sum + free research slot
+  2. Invention → free research slot + highest invention skill factor for the
+     item's own skills (the producer's invention_chance, D2); a row without
+     them falls back to the generic science skill sum
   3. Copy → character with most free research slots
   4. ME/TE research → character with most free research slots
 """
@@ -15,6 +17,10 @@ from typing import Any
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
+from eve_online_industry_tracker.application.industry.invention_model import (
+    InventionSkillSet,
+    invention_skill_factor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +34,7 @@ ACTIVITY_INVENTION = 8
 # Slot capacity skills. Base one slot, plus one per level of each.
 MFG_SLOT_SKILLS = ("Mass Production", "Advanced Mass Production")
 RESEARCH_SLOT_SKILLS = ("Laboratory Operation", "Advanced Laboratory Operation")
-# Skills that make a pilot a better inventor, used only to rank candidates.
+# Fallback inventor ranking for a row without the producer's invention skills.
 SCIENCE_SKILLS = ("Science", "Advanced Industry", "Metallurgy", "Research")
 
 
@@ -79,6 +85,28 @@ def skill_levels_by_name(char: dict[str, Any]) -> dict[str, int]:
         except (TypeError, ValueError):
             continue
         levels[name] = max(level, levels.get(name, 0))
+    return levels
+
+
+def skill_levels_by_id(char: dict[str, Any]) -> dict[int, int]:
+    """{skill type_id: trained_skill_level} for one character, from the same
+    enriched list as skill_levels_by_name. Ids, not names: the producer's
+    invention chance names its skills by SDE type id."""
+    raw = char.get("skills")
+    entries = raw.get("skills") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    levels: dict[int, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            skill_id = int(entry.get("skill_id") or 0)
+            level = int(entry.get("trained_skill_level") or 0)
+        except (TypeError, ValueError):
+            continue
+        if skill_id > 0:
+            levels[skill_id] = max(level, levels.get(skill_id, 0))
     return levels
 
 
@@ -219,7 +247,7 @@ class CharacterAssigner:
 
         # Invention
         if row.get("needs_invention"):
-            char_id, char_name = self._best_invention_char(char_slots, characters)
+            char_id, char_name = self._best_invention_char(char_slots, characters, row)
             if char_id is not None:
                 actions.append(AssignedAction(
                     type_id=type_id,
@@ -397,6 +425,7 @@ class CharacterAssigner:
                 "free_research": max_research,
                 "total_active_jobs": 0,
                 "skills": levels,
+                "skills_by_id": skill_levels_by_id(char),
             }
 
         # Deduct active jobs (treat end_date < now as already delivered — slots free)
@@ -488,20 +517,25 @@ class CharacterAssigner:
         return best[2], best[3]
 
     def _best_invention_char(
-        self, char_slots: dict[int, dict], characters: list[dict]
+        self, char_slots: dict[int, dict], characters: list[dict], row: dict[str, Any] | None = None,
     ) -> tuple[int | None, str | None]:
-        """Highest science skill sum among characters with a free research slot.
-
-        Ties break toward the character with the fewest active jobs.
-        """
+        """The free pilot with the highest invention skill factor for this
+        item: the producer's invention_chance skills (D2, the same rule as the
+        chance it assumed). A row without them ranks by the generic
+        SCIENCE_SKILLS sum. Ties break toward the fewest active jobs."""
+        skills = orow.get_invention_skill_set(row or {})
+        skill_set = InventionSkillSet(skills[0], skills[1]) if skills is not None else None
         candidates = []
         for slot in char_slots.values():
             if slot.get("free_research", 0) <= 0:
                 continue
-            levels = slot.get("skills") or {}
-            science_sum = sum(int(levels.get(name, 0) or 0) for name in SCIENCE_SKILLS)
+            if skill_set is not None:
+                score = invention_skill_factor(skill_set, slot.get("skills_by_id") or {})
+            else:
+                levels = slot.get("skills") or {}
+                score = float(sum(int(levels.get(name, 0) or 0) for name in SCIENCE_SKILLS))
             candidates.append(
-                (-science_sum, slot.get("total_active_jobs", 0),
+                (-score, slot.get("total_active_jobs", 0),
                  slot["character_id"], slot["character_name"])
             )
         if not candidates:
