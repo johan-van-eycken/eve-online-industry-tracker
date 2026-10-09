@@ -29,8 +29,13 @@ Cost: the producer's invention fee scaled by the expected attempts (it is
 linear in them), plus the row's own expected inputs at the producer's line
 totals, with every expected unit more (or fewer) than the best inventor's at
 the planner's market price (phase-1 price map); an unpriced producer line
-falls back to that price map. None when anything is unpriced or there is no
-fee (the later-batch plan carries none).
+falls back to that price map. None, with an "invention cost unknown: ..."
+reason, a WARNING and the note, when a line has no quantity or price or there
+is no fee (the later-batch plan carries none; its action is also flagged as
+sized for a full batch, which an owned BPC may partly cover).
+
+An SDE base chance of 0 makes every pilot's chance the admin floor, so the
+producer's floored chance is kept (exact) and named in the note.
 """
 from __future__ import annotations
 
@@ -56,6 +61,10 @@ DATACORE_NEED_UNKNOWN = "datacore need unknown"
 NO_INVENTION_PLAN_REASON = "the row carries no sized invention plan"
 NO_ITEM_SKILL_SET_REASON = "the row carries no invention skill set for this item"
 PILOT_SKILLS_UNKNOWN_REASON = "the assigned pilot's skills are not loaded"
+INVENTION_COST_UNKNOWN = "invention cost unknown"
+LATER_BATCH_NO_FEE = "the later-batch plan carries no fee"
+LATER_BATCH_OVER_BUY_NOTE = "sized for a full batch; an owned BPC may cover part of it"
+ZERO_BASE_CHANCE_NOTE = "SDE base chance 0: sized at the admin floor"
 
 
 @dataclass(frozen=True)
@@ -114,6 +123,8 @@ class _Sizing:
     best_expected: float
     best_whole: int
     fee: float | None
+    #: Sized from invention_bpc_plan (I1 case A): one full batch, no fee.
+    later_batch: bool = False
 
 
 def _sizing(row: dict[str, Any], best_probability: float | None) -> tuple[_Sizing | None, str]:
@@ -142,39 +153,41 @@ def _sizing(row: dict[str, Any], best_probability: float | None) -> tuple[_Sizin
         if batch_runs is not None and runs_per_bpc is not None:
             expected, whole = invention_attempts(batch_runs, runs_per_bpc, best_probability)
             if whole > 0:
-                return _Sizing(batch_runs, runs_per_bpc, expected, whole, None), ""
+                return _Sizing(batch_runs, runs_per_bpc, expected, whole, None, later_batch=True), ""
     return None, orow.get_invention_datacore_need_unknown(row) or NO_INVENTION_PLAN_REASON
 
 
 def _input_cost(
     row: dict[str, Any], ratio: float, price_map: Mapping[int, Any],
-) -> float | None:
-    """The row's own expected inputs for `ratio` x the best inventor's
-    expected attempts; None when a line has no price at all."""
+) -> tuple[float | None, str | None]:
+    """(ISK of the row's own expected inputs for `ratio` x the best
+    inventor's expected attempts, None) or (None, why it is unknown): no
+    lines, a line without a quantity, or a line with no price at all."""
     lines = orow.get_own_expected_invention_inputs(row)
     if not lines:
-        return None
+        return None, "the row carries no expected invention inputs"
     total = 0.0
     for line in lines:
+        type_id = int(line.get("type_id") or 0)
         quantity = _positive_float(line.get("quantity"))
         if quantity is None:
-            continue
-        market, _ = price_map_unit_price(price_map.get(int(line.get("type_id") or 0)))
+            return None, f"invention input {type_id} has no quantity"
+        market, _ = price_map_unit_price(price_map.get(type_id))
         own_price = _positive_float(line.get("unit_price"))
         line_total = _positive_float(line.get("line_total"))
         if line_total is None:
             price = own_price if own_price is not None else market
             if price is None:
-                return None
+                return None, f"invention input {type_id} has no price"
             line_total = price * quantity
         extra_units = quantity * (ratio - 1.0)
         if extra_units:
             extra_price = market if market is not None else own_price
             if extra_price is None:
-                return None
+                return None, f"invention input {type_id} has no market price"
             line_total += extra_units * extra_price
         total += line_total
-    return total
+    return total, None
 
 
 def assigned_invention(
@@ -202,22 +215,52 @@ def assigned_invention(
         )
         return AssignedInvention(None, best_probability, None, None, None, reason, reason)
 
-    def cost(expected: float) -> float | None:
+    def cost(expected: float) -> tuple[float | None, str | None]:
         if sizing.fee is None:
-            return None
+            return None, LATER_BATCH_NO_FEE
         ratio = expected / sizing.best_expected
-        inputs = _input_cost(row, ratio, price_map)
-        return None if inputs is None else sizing.fee * ratio + inputs
+        inputs, why = _input_cost(row, ratio, price_map)
+        return (None, why) if inputs is None else (sizing.fee * ratio + inputs, None)
+
+    def finish(
+        probability: float, expected: float, whole: int, note: str, chance_reason: str | None,
+    ) -> AssignedInvention:
+        """The action's figures; an unknown cost and the later-batch sizing
+        are named in the note, and an unknown cost in the reason too."""
+        value, cost_why = cost(expected)
+        notes, reasons = [note], ([chance_reason] if chance_reason else [])
+        if sizing.later_batch:
+            notes.append(LATER_BATCH_OVER_BUY_NOTE)
+        if cost_why is not None:
+            cost_reason = f"{INVENTION_COST_UNKNOWN}: {cost_why}"
+            logger.warning(
+                "Invent action for type_id=%s (pilot %s): %s; its estimated cost is left unknown",
+                type_id, character_id, cost_reason,
+            )
+            notes.append(cost_reason)
+            reasons.append(cost_reason)
+        return AssignedInvention(
+            probability, best_probability, expected, whole, value, "; ".join(notes), "; ".join(reasons) or None,
+        )
+
+    def keep_producer(note: str, chance_reason: str | None = None) -> AssignedInvention:
+        return finish(best_probability, sizing.best_expected, sizing.best_whole, note, chance_reason)
 
     inventor = chance.get("inventor_character_id")
     if inventor is not None and int(inventor) == int(character_id):
-        return AssignedInvention(
-            best_probability, best_probability, sizing.best_expected, sizing.best_whole,
-            cost(sizing.best_expected), f"chance {_pct(best_probability)} (best inventor)",
-        )
+        return keep_producer(f"chance {_pct(best_probability)} (best inventor)")
 
-    base = _positive_float(chance.get("base_probability"))
+    raw_base = chance.get("base_probability")
     multiplier = _positive_float(chance.get("decryptor_multiplier"))
+    if isinstance(raw_base, (int, float)) and not isinstance(raw_base, bool) and raw_base <= 0 and multiplier:
+        # 0 x any skill factor is 0: every pilot invents at the admin floor,
+        # so the producer's (floored) chance is exact for this pilot too.
+        logger.info(
+            "Invent action for type_id=%s (pilot %s): %s (%s)",
+            type_id, character_id, ZERO_BASE_CHANCE_NOTE, _pct(best_probability),
+        )
+        return keep_producer(f"chance {_pct(best_probability)} ({ZERO_BASE_CHANCE_NOTE})")
+    base = _positive_float(raw_base)
     if base is None or multiplier is None:
         # No chance breakdown at all: nothing to recompute from.
         reason = "the row carries no invention chance breakdown"
@@ -225,11 +268,7 @@ def assigned_invention(
             "Invent action for type_id=%s (pilot %s): %s; keeping the producer's chance %s",
             type_id, character_id, reason, _pct(best_probability),
         )
-        return AssignedInvention(
-            best_probability, best_probability, sizing.best_expected, sizing.best_whole,
-            cost(sizing.best_expected), f"chance {_pct(best_probability)} (producer; {reason})", reason,
-        )
-
+        return keep_producer(f"chance {_pct(best_probability)} (producer; {reason})", reason)
     skills = orow.get_invention_skill_set(row)
     reason: str | None = None
     factor: float | None = None
@@ -255,4 +294,4 @@ def assigned_invention(
         note = f"chance {_pct(probability)} (SDE base: {reason}), best inventor {_pct(best_probability)}"
     else:
         note = f"chance {_pct(probability)} (assigned pilot), best inventor {_pct(best_probability)}"
-    return AssignedInvention(probability, best_probability, expected, whole, cost(expected), note, reason)
+    return finish(probability, expected, whole, note, reason)

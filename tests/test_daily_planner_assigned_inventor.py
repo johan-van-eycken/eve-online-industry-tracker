@@ -393,10 +393,21 @@ def test_an_owned_bpc_covering_batch_one_sizes_from_the_later_batch_plan():
 
     assert (best.runs, weak.runs) == (4, 5)
     assert weak.invention_expected_attempts == pytest.approx(E_WEAK)
-    assert weak.invention_chance_reason is None
-    # No top-level invention fee on the row: the cost is unknown, not guessed.
-    assert weak.estimated_cost_isk is None
     assert _buy(weak) == {DATACORE_A: 10, DATACORE_B: 10, DECRYPTOR: 5}
+
+
+def test_the_later_batch_plans_unknown_cost_has_a_reason_a_warning_and_an_over_buy_flag(caplog):
+    """Fix round 2, item 1: no top-level invention fee, so the cost is
+    unknown, not guessed, and the action says so; one full batch is sized
+    although an owned BPC (the planner may not see) can cover part of it."""
+    with caplog.at_level(logging.WARNING):
+        weak = _invent(_row(plan="bpc_plan"), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    assert weak.estimated_cost_isk is None
+    assert weak.invention_chance_reason == "invention cost unknown: the later-batch plan carries no fee"
+    assert "sized for a full batch; an owned BPC may cover part of it" in weak.notes
+    assert "invention cost unknown: the later-batch plan carries no fee" in weak.notes
+    assert any(r.levelno == logging.WARNING and "the later-batch plan carries no fee" in r.getMessage()
+               for r in caplog.records)
 
 
 def test_unknown_odds_buy_no_inputs_and_say_datacore_need_unknown(caplog):
@@ -422,6 +433,36 @@ def test_a_row_without_any_invention_figures_is_datacore_need_unknown():
     assert invent.runs is None
     assert invent.invention_chance_reason.startswith("datacore need unknown")
     assert _buy(invent) == {}
+
+
+def test_an_sde_base_chance_of_zero_keeps_the_producers_floored_chance(caplog):
+    """Fix round 2, item 2: base 0 x any skill factor is 0, so every pilot
+    invents at the admin floor: the producer's chance is exact."""
+    row = _row()
+    mj = row["manufacturing_job"]
+    mj["invention_chance"].update({"base_probability": 0.0, "probability": 0.0, "effective_probability": 0.01})
+    mj["activity_breakdown"]["invention"].update({"runs": 200.0, "whole_attempts": 200, "success_probability": 0.01})
+    with caplog.at_level(logging.WARNING):
+        invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    assert invent.character_id == WEAK_ID
+    assert invent.invention_probability == pytest.approx(0.01)
+    assert invent.runs == 200
+    assert invent.invention_chance_reason is None
+    assert "SDE base chance 0: sized at the admin floor" in invent.notes
+    assert "no invention chance breakdown" not in invent.notes
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_an_input_line_without_a_quantity_makes_the_cost_unknown_with_a_reason(caplog):
+    """Fix round 2, item 3: never a silently dropped line."""
+    row = _row()
+    row["manufacturing_job"]["expected_invention_materials"][str(DATACORE_B)]["quantity"] = None
+    with caplog.at_level(logging.WARNING):
+        invent = _invent(row, [_best_inventor()])
+    assert invent.estimated_cost_isk is None
+    assert invent.invention_chance_reason == f"invention cost unknown: invention input {DATACORE_B} has no quantity"
+    assert invent.runs == 4  # the buy is unaffected
+    assert any(r.levelno == logging.WARNING and "has no quantity" in r.getMessage() for r in caplog.records)
 
 
 def test_invention_attempts_never_divides_by_zero():
