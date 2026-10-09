@@ -238,3 +238,120 @@ def test_the_chance_payload_names_skills_and_the_floored_chance():
     assert payload["effective_probability"] == 0.31
     assert payload["skills_unknown_reason"] is None
     assert payload["note"] is None
+
+
+# --- Task 3: the decryptor selection criterion (amendment A1) ------------------
+# Highest profit per invention cycle; lowest cost per unit when the sell price
+# is unknown. Fake numbers: the service-test fixture at a 500 ISK sell price
+# (no decryptor 4,110 / Accelerant 4,553.33 / Attainment 4,971.67 per cycle).
+
+_ACC = im.DecryptorOption(34201, "Accelerant Decryptor", 1.2, 2, 10, 1)
+_ATT = im.DecryptorOption(34202, "Attainment Decryptor", 1.8, -1, 4, 4)
+
+
+def _ev(option, cost, profit=None, skip=None, units=None):
+    return im.DecryptorEvaluation(
+        option=option, cost_per_unit=cost, skip_reason=skip, profit_per_cycle=profit, units_per_cycle=units,
+    )
+
+
+def test_the_highest_profit_per_cycle_wins_even_at_a_higher_cost_per_unit():
+    choice = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 4110.0), _ev(_ACC, 86.06, 4553.33), _ev(_ATT, 144.88, 4971.67),
+    ])
+    assert choice.option is _ATT
+    assert choice.criterion == im.PROFIT_PER_CYCLE_CRITERION
+    assert (choice.profit_per_cycle, choice.baseline_profit_per_cycle) == (4971.67, 4110.0)
+    assert (choice.cost_per_unit, choice.baseline_cost_per_unit) == (144.88, 89.0)
+    assert choice.fallback_reason is None
+    assert choice.reason == (
+        "Attainment Decryptor: highest profit per invention cycle "
+        "(4,971.67 ISK vs 4,110.00 ISK without a decryptor)"
+    )
+
+
+def test_no_decryptor_wins_when_every_decryptor_earns_less_per_cycle():
+    choice = im.select_best_decryptor([_ev(im.NO_DECRYPTOR, 89.0, 4110.0), _ev(_ATT, 144.88, 900.0)])
+    assert choice.option is im.NO_DECRYPTOR
+    assert choice.reason == (
+        "no decryptor: highest profit per invention cycle "
+        "(4,110.00 ISK; best decryptor Attainment Decryptor 900.00 ISK)"
+    )
+
+
+def test_a_profit_tie_within_the_tolerance_goes_to_no_decryptor():
+    choice = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 4110.0), _ev(_ACC, 86.0, 4110.0 + im.DECRYPTOR_TIE_TOLERANCE_ISK / 2),
+    ])
+    assert choice.option is im.NO_DECRYPTOR
+
+
+def test_an_unknown_sell_price_falls_back_to_the_lowest_cost_per_unit_and_says_so():
+    choice = im.select_best_decryptor([_ev(im.NO_DECRYPTOR, 89.0), _ev(_ACC, 86.06), _ev(_ATT, 144.88)])
+    assert choice.option is _ACC
+    assert choice.criterion == im.COST_PER_UNIT_CRITERION
+    assert choice.fallback_reason == "sell price unknown: chose lowest cost per unit"
+    assert choice.profit_per_cycle is None
+    assert choice.reason == (
+        "Accelerant Decryptor: lowest cost per unit (86.06 ISK vs 89.00 ISK without a decryptor); "
+        "sell price unknown: chose lowest cost per unit"
+    )
+
+
+def test_a_cost_tie_within_the_tolerance_goes_to_no_decryptor():
+    choice = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0), _ev(_ACC, 89.0 - im.DECRYPTOR_TIE_TOLERANCE_ISK / 2),
+    ])
+    assert choice.option is im.NO_DECRYPTOR
+    assert choice.reason.startswith("no decryptor: lowest cost per unit (89.00 ISK")
+    assert choice.fallback_reason == "sell price unknown: chose lowest cost per unit"
+
+
+def test_skipped_or_unknown_candidates_are_never_chosen():
+    choice = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 4110.0),
+        _ev(_ACC, None, None, "no market price for Accelerant Decryptor"),
+        _ev(_ATT, None, None),
+    ])
+    assert choice.option is im.NO_DECRYPTOR
+    assert "no decryptor could be priced" in choice.reason
+
+
+def test_an_unknown_baseline_compares_nothing():
+    choice = im.select_best_decryptor([_ev(im.NO_DECRYPTOR, None), _ev(_ACC, 10.0, 99999.0)])
+    assert choice.option is im.NO_DECRYPTOR
+    assert "unknown" in choice.reason
+
+
+def test_equal_decryptors_break_ties_by_type_id():
+    twin = im.DecryptorOption(34200, "Twin", 1.2, 2, 10, 1)
+    by_profit = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 100.0), _ev(_ACC, 80.0, 500.0), _ev(twin, 80.0, 500.0),
+    ])
+    by_cost = im.select_best_decryptor([_ev(im.NO_DECRYPTOR, 89.0), _ev(_ACC, 80.0), _ev(twin, 80.0)])
+    assert by_profit.option is twin and by_cost.option is twin
+
+
+def test_the_payload_lists_every_candidate_and_the_modifiers():
+    evaluations = [
+        _ev(im.NO_DECRYPTOR, 89.0, 4110.0, units=10), _ev(_ACC, 86.06, 4553.33, units=11),
+        _ev(_ATT, None, None, "no market price for Attainment Decryptor"),
+    ]
+    payload = im.decryptor_choice_payload(im.select_best_decryptor(evaluations))
+    assert payload["type_id"] == 34201 and payload["type_name"] == "Accelerant Decryptor"
+    assert (payload["probability_multiplier"], payload["me_modifier"], payload["te_modifier"],
+            payload["max_run_modifier"]) == (1.2, 2, 10, 1)
+    assert payload["criterion"] == "profit_per_cycle" and payload["fallback_reason"] is None
+    assert (payload["profit_per_cycle"], payload["baseline_profit_per_cycle"]) == (4553.33, 4110.0)
+    assert (payload["cost_per_unit"], payload["baseline_cost_per_unit"]) == (86.06, 89.0)
+    assert [c["type_id"] for c in payload["candidates"]] == [None, 34201, 34202]
+    assert payload["candidates"][1]["units_per_cycle"] == 11
+    assert payload["candidates"][1]["profit_per_cycle"] == 4553.33
+    assert payload["candidates"][2]["skip_reason"] == "no market price for Attainment Decryptor"
+
+
+def test_the_decryptor_switch_is_an_admin_bool_defaulting_on():
+    from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+
+    spec = ADMIN_SETTINGS_SCHEMA["industry"]["settings"]["invention_decryptor_selection_enabled"]
+    assert spec["type"] == "bool" and spec["default"] is True

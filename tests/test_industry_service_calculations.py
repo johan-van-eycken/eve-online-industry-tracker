@@ -2015,7 +2015,9 @@ def test_decryptor_options_are_loaded_and_priced_like_datacores(monkeypatch) -> 
     assert ctx.decryptor_options == (NO_DECRYPTOR, _ACCELERANT_LIKE)
     assert ctx.material_price_map[34201]["unit_price"] == 50.0
     assert ctx.blueprint_row_by_type_id[9002]["blueprint_type_id"] == 9002
-    assert ctx.invention_context.decryptor_for_blueprint(9002) is NO_DECRYPTOR
+    # Task 3: the context now answers with the blueprint's chosen decryptor
+    # (no sell price for 5002 here, so the cheapest per unit: Accelerant).
+    assert ctx.invention_context.decryptor_for_blueprint(9002) is _ACCELERANT_LIKE
 
 
 def test_without_an_sde_session_there_are_no_decryptors_and_a_warning(caplog) -> None:
@@ -2297,3 +2299,231 @@ def test_an_empty_inventor_list_names_why(monkeypatch, caplog, characters, reaso
     assert mj["invention_material_cost"] == pytest.approx(40.0)  # base 0.5
     assert f"Invention chance uses the SDE base chance ({reason})" in " ".join(mj["pricing_confidence_reasons"])
     assert sum(reason in r.getMessage() for r in caplog.records if r.levelname == "WARNING") == 1
+
+
+# --- round 5 Task 3: the best decryptor per invented item (amendment A1) ------
+# Highest profit per invention cycle: the expected attempts for one successful
+# BPC plus the runs that BPC yields. Fixture: p 0.5 (no skills loaded: base
+# chance), 10 runs per BPC, 2 datacores x 100 per attempt, 10 Tritanium x 5 per
+# run, no fees. Fake prices.
+# No decryptor:            10 runs, ME 2 -> 98 Trit = 490; 2 attempts x 200 = 400.
+#                          890 per cycle, 89.00 per unit.
+# Accelerant-like at 50:   11 runs, ME 4 -> 106 Trit = 530; 1/0.6 attempts x 250
+#                          = 416.67. 946.67 per cycle, 86.06 per unit (cheapest).
+# Attainment-like at 1000: 14 runs, ME 1 -> 139 Trit = 695; 1/0.9 attempts x 1200
+#                          = 1333.33. 2028.33 per cycle, 144.88 per unit.
+# At a 500 ISK sell price the profit per cycle is 4110 / 4553.33 / 4971.67.
+
+_ATTAINMENT_LIKE = DecryptorOption(
+    type_id=34202, type_name="Attainment Decryptor", probability_multiplier=1.8,
+    me_modifier=-1, te_modifier=4, max_run_modifier=4,
+)
+_SYMMETRY_LIKE = DecryptorOption(
+    type_id=34206, type_name="Symmetry Decryptor", probability_multiplier=1.0,
+    me_modifier=1, te_modifier=8, max_run_modifier=2,
+)
+_DECRYPTOR_PRICES = {**_INVENTION_FAKE_PRICES, 34201: 50.0, 34202: 1000.0, 34206: 1.0}
+_ACC_CYCLE_COST = 530 + (1 / 0.6) * (2 * 100 + 50)
+_ATT_CYCLE_COST = 695 + (1 / 0.9) * (2 * 100 + 1000)
+
+
+def _decryptor_service(monkeypatch, options, *, prices=None, **kwargs):
+    service = _invention_service(monkeypatch, prices=prices or _DECRYPTOR_PRICES, **kwargs)
+    service._load_decryptor_options = MethodType(  # type: ignore[attr-defined]
+        lambda self: (NO_DECRYPTOR, *options), service,
+    )
+    return service
+
+
+def _decryptor_overview(monkeypatch, options, *, prices=None, maximize_bp_runs=True, **kwargs):
+    service = _decryptor_service(monkeypatch, options, prices=prices, **kwargs)
+    rows = service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False,
+        maximize_bp_runs=maximize_bp_runs, character_id=1,
+    )
+    return {row["type_id"]: row for row in rows}
+
+
+def test_the_highest_profit_per_cycle_wins_over_the_cheapest_per_unit(monkeypatch) -> None:
+    mj = _decryptor_overview(
+        monkeypatch, [_ACCELERANT_LIKE, _ATTAINMENT_LIKE], prices={**_DECRYPTOR_PRICES, 5002: 500.0},
+    )[5002]["manufacturing_job"]
+
+    choice = mj["invention_decryptor"]
+    assert choice["type_id"] == 34202
+    assert choice["criterion"] == "profit_per_cycle" and choice["fallback_reason"] is None
+    assert choice["profit_per_cycle"] == pytest.approx(14 * 500 - _ATT_CYCLE_COST)
+    assert choice["baseline_profit_per_cycle"] == pytest.approx(10 * 500 - 890)
+    candidates = {c["type_id"]: c for c in choice["candidates"]}
+    assert candidates[34201]["profit_per_cycle"] == pytest.approx(11 * 500 - _ACC_CYCLE_COST)
+    assert candidates[34201]["cost_per_unit"] == pytest.approx(_ACC_CYCLE_COST / 11)  # the cheapest
+    assert [candidates[t]["units_per_cycle"] for t in (None, 34201, 34202)] == [10, 11, 14]
+    # The row is built on the chosen Attainment BPC: ME 2 - 1, 14 runs, p 0.9.
+    assert mj["blueprint_material_efficiency"] == 1
+    assert mj["activity_breakdown"]["invention"]["runs_per_invented_blueprint"] == 14
+    assert mj["activity_breakdown"]["invention"]["success_probability"] == pytest.approx(0.9)
+
+
+def test_an_unknown_sell_price_picks_the_cheapest_per_unit_and_says_so(monkeypatch) -> None:
+    mj = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE, _ATTAINMENT_LIKE])[5002]["manufacturing_job"]
+
+    choice = mj["invention_decryptor"]
+    assert choice["type_id"] == 34201
+    assert choice["criterion"] == "cost_per_unit"
+    assert choice["fallback_reason"] == "sell price unknown: chose lowest cost per unit"
+    assert choice["reason"].endswith("; sell price unknown: chose lowest cost per unit")
+    assert choice["cost_per_unit"] == pytest.approx(_ACC_CYCLE_COST / 11)
+    assert choice["baseline_cost_per_unit"] == pytest.approx(89.0)
+    costs = {c["type_id"]: c["cost_per_unit"] for c in choice["candidates"]}
+    assert costs[34202] == pytest.approx(_ATT_CYCLE_COST / 14)
+
+
+def test_the_chosen_decryptor_sets_me_te_runs_and_buys_one_per_attempt(monkeypatch) -> None:
+    mj = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE])[5002]["manufacturing_job"]
+
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (4, 14)
+    assert mj["materials"]["34"]["quantity"] == 96
+    invention = mj["activity_breakdown"]["invention"]
+    assert invention["runs_per_invented_blueprint"] == 11
+    assert invention["success_probability"] == pytest.approx(0.6)
+    attempts = 10 / 11 / 0.6
+    assert mj["expected_invention_materials"]["34201"]["quantity"] == pytest.approx(attempts)
+    assert mj["invention_material_cost"] == pytest.approx(attempts * (2 * 100 + 50))
+    # Whole attempts: ceil(10 / 11) = 1 BPC, ceil(1 / 0.6) = 2 attempts.
+    buy = mj["invention_procurement_materials"]
+    assert (buy["204"]["quantity"], buy["34201"]["quantity"]) == (4, 2)
+    extra = mj["invention_procurement_materials_per_extra_batch"]
+    assert (extra["204"]["quantity"], extra["34201"]["quantity"]) == (4, 2)
+    # The fee basis stays the datacores' EIV only.
+    assert invention["estimated_item_value"] == pytest.approx(2 * 100 * attempts)
+
+
+def test_a_run_modifier_that_crosses_a_bpc_boundary_halves_the_whole_attempts(monkeypatch) -> None:
+    # 12 runs: 2 BPCs at 10 runs each (4 attempts, 8 datacores) without a
+    # decryptor; one 12-run BPC with the +2 decryptor (2 attempts, 4 + 2).
+    rows = _rows_with(probability_pct=50.0, bpc_runs=10, t2_limit=12)
+    mj = _decryptor_overview(monkeypatch, [_SYMMETRY_LIKE], blueprint_rows=rows)[5002]["manufacturing_job"]
+
+    assert mj["invention_decryptor"]["type_id"] == 34206
+    buy = mj["invention_procurement_materials"]
+    assert (buy["204"]["quantity"], buy["34206"]["quantity"]) == (4, 2)
+
+
+def test_a_decryptor_without_a_market_price_is_never_chosen(monkeypatch) -> None:
+    prices = {k: v for k, v in _DECRYPTOR_PRICES.items() if k != 34201}
+    mj = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE], prices=prices)[5002]["manufacturing_job"]
+
+    choice = mj["invention_decryptor"]
+    assert choice["type_id"] is None
+    assert choice["candidates"][1]["skip_reason"] == "no market price for Accelerant Decryptor"
+    assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (2, 4)
+
+
+def test_no_decryptor_data_plans_without_a_decryptor_and_says_why(monkeypatch) -> None:
+    mj = _decryptor_overview(monkeypatch, [])[5002]["manufacturing_job"]
+
+    assert mj["invention_decryptor"]["type_id"] is None
+    assert mj["invention_decryptor"]["reason"] == "no decryptor: the SDE gave no decryptor data"
+
+
+def test_decryptor_selection_off_plans_without_a_decryptor(monkeypatch) -> None:
+    mj = _decryptor_overview(
+        monkeypatch, [_ACCELERANT_LIKE],
+        adm_overrides={"invention_decryptor_selection_enabled": False},
+    )[5002]["manufacturing_job"]
+
+    assert mj["invention_decryptor"]["reason"] == "no decryptor: decryptor selection is off (admin setting)"
+    assert mj["blueprint_material_efficiency"] == 2
+    assert "34201" not in mj["expected_invention_materials"]
+
+
+def test_a_blueprint_without_invention_gets_no_decryptor_payload(monkeypatch) -> None:
+    out = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE], blueprint_rows=_invented_t2_blueprint_rows()[1:])
+    assert "invention_decryptor" not in out[5002]["manufacturing_job"]
+    assert "invention_chance" not in out[5002]["manufacturing_job"]
+    t1 = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE])[6001]["manufacturing_job"]
+    assert "invention_decryptor" not in t1  # the T1 source row invents nothing
+
+
+def test_unknown_invention_odds_compare_no_decryptor_and_warn_once(monkeypatch, caplog) -> None:
+    rows = _rows_with(probability_pct=0.0, bpc_runs=10, t2_limit=10)
+    with caplog.at_level("WARNING"):
+        mj = _decryptor_overview(
+            monkeypatch, [_ACCELERANT_LIKE], blueprint_rows=rows,
+            adm_overrides={"invention_probability_floor": 0.0},
+        )[5002]["manufacturing_job"]
+
+    assert mj["invention_decryptor"]["type_id"] is None
+    assert "unknown" in mj["invention_decryptor"]["reason"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert sum("invention cost left unknown" in m for m in warnings) == 1
+
+
+def test_a_nested_invented_component_uses_its_blueprints_decryptor(monkeypatch) -> None:
+    # 5002 sells for 10,000: Accelerant earns 11 x 10,000 - 946.67 per cycle
+    # against 10 x 10,000 - 890 without a decryptor.
+    out = _decryptor_overview(
+        monkeypatch, [_ACCELERANT_LIKE], blueprint_rows=_nested_invention_blueprint_rows(),
+        prices={**_NESTED_FAKE_PRICES, 34201: 50.0},
+    )
+    mj = out[7100]["manufacturing_job"]
+
+    # The parent's 10 components are built on an Accelerant BPC (ME 4).
+    assert mj["procurement_materials"]["34"]["quantity"] == 96
+    assert any(e["type_id"] == 34201 for e in mj["expected_invention_materials"].values())
+    assert mj["invention_procurement_materials"]["34201"]["quantity"] == 2
+    assert "invention_decryptor" not in mj  # the parent itself is not invented
+    assert out[5002]["manufacturing_job"]["invention_decryptor"]["type_id"] == 34201
+    assert out[5002]["manufacturing_job"]["invention_decryptor"]["criterion"] == "profit_per_cycle"
+
+
+def test_the_decryptor_choice_is_made_once_per_blueprint(monkeypatch) -> None:
+    service = _decryptor_service(monkeypatch, [_ACCELERANT_LIKE])
+    ctx = _planning_context(service)
+    calls: list[int] = []
+    real = service._evaluate_decryptors
+    service._evaluate_decryptors = lambda c, bp: (calls.append(bp), real(c, bp))[1]  # type: ignore[method-assign]
+
+    first = service._decryptor_choice_for(ctx, 9002)
+    assert ctx.invention_context.decryptor_for_blueprint(9002) is first.option
+    assert service._decryptor_choice_for(ctx, 9002) is first
+    assert calls == [9002]
+
+
+def test_the_planners_shopping_list_buys_one_decryptor_per_attempt() -> None:
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+
+    invent = AssignedAction(
+        type_id=5002, type_name="T2 Module", action_type="invent", character_id=1, character_name="Pilot",
+        quantity=None, runs=None, estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None,
+        decryptor_type_id=34201, decryptor_type_name="Accelerant Decryptor",
+    )
+    blueprint_data = {
+        1001: {"manufacturing": {"materials": [], "products": [{"type_id": 6001, "quantity": 1}]},
+               "invention": {"materials": [{"type_id": 204, "type_name": "Datacore", "quantity": 2}],
+                             "products": [{"type_id": 9002, "quantity": 10}]}},
+        9002: {"manufacturing": {"materials": [], "products": [{"type_id": 5002, "quantity": 1}]}},
+    }
+
+    class _Resolver:
+        def is_blueprint(self, type_id):
+            return False
+
+        def prefetch(self, type_ids):
+            return None
+
+    class _Admin:
+        def get(self, section, key, default=None):
+            return default
+
+    items = ShoppingListBuilder().build(
+        assigned_actions=[invent], corp_assets=[],
+        market_depth_cache={204: {"vwap_5d": 100.0}, 34201: {"vwap_5d": 50.0}},
+        admin_settings=_Admin(), blueprint_data=blueprint_data, meta_resolver=_Resolver(),
+    )
+    by_type = {i.type_id: i for i in items}
+    assert by_type[204].quantity == 2
+    assert by_type[34201].quantity == 1
+    assert by_type[34201].shopping_category == "invention_input"

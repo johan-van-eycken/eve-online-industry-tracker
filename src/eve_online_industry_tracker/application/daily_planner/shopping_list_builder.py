@@ -125,12 +125,18 @@ class ShoppingListBuilder:
                     notes=None if is_vwap else "price: spot (no VWAP data)",
                 ))
 
-        # Invention inputs (datacores). Decryptors are optional and not part of
-        # the SDE invention materials, so they are not bought here.
+        # Invention inputs: the datacores, plus the decryptor the producer chose
+        # (one per attempt, AssignedAction.decryptor_type_id).
         for action in invention_actions:
             inv_mats = self._get_invention_materials(
                 action, blueprint_data, product_to_blueprint, invention_source
             )
+            if action.decryptor_type_id:
+                inv_mats = [*inv_mats, {
+                    "type_id": int(action.decryptor_type_id),
+                    "type_name": action.decryptor_type_name or f"type_{action.decryptor_type_id}",
+                    "quantity": 1,
+                }]
             # Invention inputs are consumed per attempt; runs=None means one attempt.
             attempts = _positive_int(action.runs) or 1
             for mat in inv_mats:

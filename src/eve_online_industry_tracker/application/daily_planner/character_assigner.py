@@ -249,6 +249,8 @@ class CharacterAssigner:
         if row.get("needs_invention"):
             char_id, char_name = self._best_invention_char(char_slots, characters, row)
             if char_id is not None:
+                # The producer's choice: bought one per attempt by the shopping list.
+                decryptor = orow.get_invention_decryptor(row)
                 actions.append(AssignedAction(
                     type_id=type_id,
                     type_name=type_name,
@@ -260,7 +262,12 @@ class CharacterAssigner:
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
                     estimated_completion=None,
-                    notes="Invention: BPC stock below pipeline threshold",
+                    notes=(
+                        "Invention: BPC stock below pipeline threshold"
+                        + (f"; use {decryptor[1]}" if decryptor else "")
+                    ),
+                    decryptor_type_id=decryptor[0] if decryptor else None,
+                    decryptor_type_name=decryptor[1] if decryptor else None,
                 ))
                 self._take_slot(char_slots, char_id, "invent")
 

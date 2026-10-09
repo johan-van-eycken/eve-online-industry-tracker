@@ -109,6 +109,10 @@ class AssignedAction:
     # manufacturing_job.total_cost), the basis FeedbackProcessor compares
     # against a sale's realized industry-build unit cost. None = unknown.
     estimated_build_cost_isk: float | None = None
+    # invent only: the decryptor the producer chose (one per attempt), or None
+    # (manufacturing_job.invention_decryptor, see overview_row.get_invention_decryptor).
+    decryptor_type_id: int | None = None
+    decryptor_type_name: str | None = None
 
 
 @dataclass

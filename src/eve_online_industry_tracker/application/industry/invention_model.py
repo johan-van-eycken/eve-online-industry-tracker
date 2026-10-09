@@ -312,3 +312,157 @@ def invention_chance_payload(chance: InventionChance, effective_probability: flo
         "skills_unknown_reason": chance.skills_unknown_reason,
         "note": chance.note,
     }
+
+
+# --- decryptor selection (amendment A1) -----------------------------------
+
+#: Differences below this (ISK per cycle, or ISK per unit in the fallback)
+#: are ties, and ties go to no decryptor.
+DECRYPTOR_TIE_TOLERANCE_ISK = 0.01
+PROFIT_PER_CYCLE_CRITERION = "profit_per_cycle"
+COST_PER_UNIT_CRITERION = "cost_per_unit"
+SELL_PRICE_UNKNOWN_FALLBACK_REASON = "sell price unknown: chose lowest cost per unit"
+DECRYPTOR_SELECTION_OFF_REASON = "no decryptor: decryptor selection is off (admin setting)"
+NO_DECRYPTOR_DATA_REASON = "no decryptor: the SDE gave no decryptor data"
+
+
+@dataclass(frozen=True)
+class DecryptorEvaluation:
+    """One candidate over one invention cycle: the expected attempts for one
+    successful BPC plus the manufacturing runs that BPC yields.
+
+    cost_per_unit: materials + invention inputs (decryptor included) + every
+    job fee of the cycle, per manufactured unit; None when unknown.
+    profit_per_cycle: the cycle's units at the row's sell price minus that
+    cost; None when the sell price is unknown or not positive.
+    skip_reason: why the candidate was not built (it is then never chosen)."""
+
+    option: DecryptorOption
+    cost_per_unit: float | None
+    skip_reason: str | None = None
+    profit_per_cycle: float | None = None
+    units_per_cycle: int | None = None
+
+
+@dataclass(frozen=True)
+class DecryptorChoice:
+    option: DecryptorOption
+    reason: str
+    cost_per_unit: float | None = None
+    baseline_cost_per_unit: float | None = None
+    evaluations: tuple[DecryptorEvaluation, ...] = ()
+    profit_per_cycle: float | None = None
+    baseline_profit_per_cycle: float | None = None
+    #: PROFIT_PER_CYCLE_CRITERION or COST_PER_UNIT_CRITERION; None when nothing was compared.
+    criterion: str | None = None
+    #: Set when the cost-per-unit fallback was used (A1).
+    fallback_reason: str | None = None
+
+
+def _pick(
+    evaluations: tuple[DecryptorEvaluation, ...], metric: Callable[[DecryptorEvaluation], float | None],
+    *, higher_is_better: bool,
+) -> tuple[DecryptorEvaluation | None, float]:
+    """The best decryptor (never NO_DECRYPTOR) on `metric`, ties to the
+    lowest type id, and its metric value. Candidates with a skip reason or an
+    unknown metric are left out."""
+    priced = [
+        e for e in evaluations
+        if e.option.type_id is not None and e.skip_reason is None and metric(e) is not None
+    ]
+    if not priced:
+        return None, 0.0
+    sign = -1.0 if higher_is_better else 1.0
+    best = min(priced, key=lambda e: (sign * float(metric(e) or 0.0), int(e.option.type_id or 0)))
+    return best, float(metric(best) or 0.0)
+
+
+def select_best_decryptor(evaluations: Iterable[DecryptorEvaluation]) -> DecryptorChoice:
+    """THE decryptor selection criterion, kept in this one function so it can
+    be switched later (round-5 amendment A1).
+
+    Highest profit per invention cycle. One cycle is the expected attempts
+    for one successful BPC plus the manufacturing runs that BPC yields;
+    profit is those units at the row's sell price minus materials, invention
+    inputs (decryptor included) and every job fee of the cycle. When the sell
+    price is unknown or not positive (no profit on the no-decryptor
+    candidate), the lowest total cost per manufactured unit decides instead,
+    and the choice records SELL_PRICE_UNKNOWN_FALLBACK_REASON.
+
+    Ties within DECRYPTOR_TIE_TOLERANCE_ISK go to no decryptor, equal
+    decryptors to the lowest type id. A candidate with a skip reason or an
+    unknown figure is never chosen. When the no-decryptor cost itself is
+    unknown nothing can be compared, so no decryptor is used.
+    """
+    evaluations = tuple(evaluations)
+    baseline = next((e for e in evaluations if e.option.type_id is None), None)
+    if baseline is None or baseline.cost_per_unit is None:
+        return DecryptorChoice(
+            NO_DECRYPTOR,
+            "no decryptor: the cost without a decryptor is unknown, so nothing could be compared",
+            evaluations=evaluations,
+        )
+    base_cost = float(baseline.cost_per_unit)
+    if baseline.profit_per_cycle is not None:
+        base_profit = float(baseline.profit_per_cycle)
+        best, best_profit = _pick(evaluations, lambda e: e.profit_per_cycle, higher_is_better=True)
+        if best is None or best_profit <= base_profit + DECRYPTOR_TIE_TOLERANCE_ISK:
+            detail = (
+                f"; best decryptor {best.option.type_name} {best_profit:,.2f} ISK"
+                if best is not None else "; no decryptor could be priced"
+            )
+            return DecryptorChoice(
+                NO_DECRYPTOR,
+                f"no decryptor: highest profit per invention cycle ({base_profit:,.2f} ISK{detail})",
+                base_cost, base_cost, evaluations, base_profit, base_profit, PROFIT_PER_CYCLE_CRITERION,
+            )
+        return DecryptorChoice(
+            best.option,
+            f"{best.option.type_name}: highest profit per invention cycle "
+            f"({best_profit:,.2f} ISK vs {base_profit:,.2f} ISK without a decryptor)",
+            best.cost_per_unit, base_cost, evaluations, best_profit, base_profit, PROFIT_PER_CYCLE_CRITERION,
+        )
+    fallback = SELL_PRICE_UNKNOWN_FALLBACK_REASON
+    best, best_cost = _pick(evaluations, lambda e: e.cost_per_unit, higher_is_better=False)
+    if best is None or best_cost >= base_cost - DECRYPTOR_TIE_TOLERANCE_ISK:
+        detail = (
+            f"; best decryptor {best.option.type_name} {best_cost:,.2f} ISK"
+            if best is not None else "; no decryptor could be priced"
+        )
+        return DecryptorChoice(
+            NO_DECRYPTOR,
+            f"no decryptor: lowest cost per unit ({base_cost:,.2f} ISK{detail}); {fallback}",
+            base_cost, base_cost, evaluations, None, None, COST_PER_UNIT_CRITERION, fallback,
+        )
+    return DecryptorChoice(
+        best.option,
+        f"{best.option.type_name}: lowest cost per unit ({best_cost:,.2f} ISK vs "
+        f"{base_cost:,.2f} ISK without a decryptor); {fallback}",
+        best_cost, base_cost, evaluations, None, None, COST_PER_UNIT_CRITERION, fallback,
+    )
+
+
+def decryptor_choice_payload(choice: DecryptorChoice) -> dict[str, Any]:
+    """The row's manufacturing_job.invention_decryptor (shown in the UI, read
+    by the daily planner's invent action)."""
+    return {
+        "type_id": choice.option.type_id,
+        "type_name": choice.option.type_name,
+        "reason": choice.reason,
+        "criterion": choice.criterion,
+        "fallback_reason": choice.fallback_reason,
+        "profit_per_cycle": choice.profit_per_cycle,
+        "baseline_profit_per_cycle": choice.baseline_profit_per_cycle,
+        "cost_per_unit": choice.cost_per_unit,
+        "baseline_cost_per_unit": choice.baseline_cost_per_unit,
+        "probability_multiplier": choice.option.probability_multiplier,
+        "me_modifier": choice.option.me_modifier,
+        "te_modifier": choice.option.te_modifier,
+        "max_run_modifier": choice.option.max_run_modifier,
+        "candidates": [
+            {"type_id": e.option.type_id, "type_name": e.option.type_name,
+             "cost_per_unit": e.cost_per_unit, "profit_per_cycle": e.profit_per_cycle,
+             "units_per_cycle": e.units_per_cycle, "skip_reason": e.skip_reason}
+            for e in choice.evaluations
+        ],
+    }

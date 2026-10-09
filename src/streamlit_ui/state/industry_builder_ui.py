@@ -188,6 +188,28 @@ def row_assumes_owned_t2_bpo(row: dict[str, Any]) -> bool:
     return bool(get_manufacturing_job(row).get("assumes_owned_t2_bpo"))
 
 
+def invention_summary_lines(row: dict[str, Any]) -> list[str]:
+    """Drilldown captions: which decryptor the producer chose and why, and the
+    invention chance it assumed. [] for a row that does not invent."""
+    manufacturing_job = get_manufacturing_job(row)
+    lines: list[str] = []
+    decryptor = manufacturing_job.get("invention_decryptor")
+    if isinstance(decryptor, dict) and decryptor.get("reason"):
+        lines.append(f"Decryptor: {decryptor['reason']}")
+    chance = manufacturing_job.get("invention_chance")
+    if isinstance(chance, dict) and chance.get("effective_probability") is not None:
+        head = (
+            f"Invention chance {float(chance['effective_probability']):.1%}: "
+            f"SDE base {float(chance.get('base_probability') or 0.0):.1%}"
+        )
+        multiplier = f"{float(chance.get('decryptor_multiplier') or 1.0):g}"
+        if chance.get("skill_factor") is None:
+            lines.append(f"{head} × decryptor {multiplier} (skills unknown: {chance.get('skills_unknown_reason')})")
+        else:
+            lines.append(f"{head} × skills {float(chance['skill_factor']):.3f} (best inventor) × decryptor {multiplier}")
+    return lines
+
+
 def pricing_confidence_cell(pricing_confidence: Any, manufacturing_job: dict[str, Any]) -> Any:
     """The grid's Pricing Confidence cell; flagged rows get a visible marker."""
     if pricing_confidence and manufacturing_job.get("assumes_owned_t2_bpo"):

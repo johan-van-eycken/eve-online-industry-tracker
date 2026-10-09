@@ -375,3 +375,25 @@ def test_an_excluded_pilot_gets_no_job_of_any_type():
 def test_work_stays_unassigned_when_every_pilot_is_excluded():
     actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot()]), _AdminStub())
     assert actions == []
+
+
+def test_the_invent_action_names_the_producers_decryptor():
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_decryptor": {"type_id": 34201, "type_name": "Accelerant Decryptor"}},
+    })])
+    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+                 if a.action_type == "invent"]
+    assert (invent.decryptor_type_id, invent.decryptor_type_name) == (34201, "Accelerant Decryptor")
+    assert "Accelerant Decryptor" in invent.notes
+
+
+def test_an_invent_action_without_a_decryptor_names_none():
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_decryptor": {"type_id": None, "type_name": "No decryptor"}},
+    })])
+    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+                 if a.action_type == "invent"]
+    assert invent.decryptor_type_id is None and invent.decryptor_type_name is None
+    assert invent.notes == "Invention: BPC stock below pipeline threshold"

@@ -316,6 +316,14 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Invention probability floor",
                 "help": "Minimum invention success probability used in attempt calculations.",
             },
+            "invention_decryptor_selection_enabled": {
+                "type": "bool",
+                "default": True,
+                "label": "Pick the best decryptor per invented item",
+                "help": "Evaluate no decryptor and every T2 decryptor for each invented item and use the one "
+                        "with the highest profit per invention cycle (the lowest cost per unit when the sell "
+                        "price is unknown). Off: every invention is planned without a decryptor.",
+            },
             "portfolio_liquidity_threshold": {
                 "type": "int",
                 "default": 100,

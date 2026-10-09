@@ -68,15 +68,23 @@ from eve_online_industry_tracker.application.industry import overview_row as oro
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.application.industry.invention_model import (
     ALL_INVENTORS_EXCLUDED,
+    DECRYPTOR_SELECTION_OFF_REASON,
     NO_CHARACTER_SKILLS,
     NO_DECRYPTOR,
+    NO_DECRYPTOR_DATA_REASON,
+    DecryptorChoice,
+    DecryptorEvaluation,
     DecryptorOption,
     InventionContext,
     QuietWarningsFilter,
+    decryptor_choice_payload,
     decryptor_options_from_rows,
     invented_blueprint_efficiency,
+    invented_runs_per_blueprint,
     invention_chance_payload,
+    quiet_warnings,
     resolve_invention_chance,
+    select_best_decryptor,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
@@ -143,6 +151,14 @@ class _ProductPlanningContext:
     decryptor_options: tuple = (NO_DECRYPTOR,)
     invention_context: InventionContext = dataclasses.field(default_factory=InventionContext)
     blueprint_row_by_type_id: dict = dataclasses.field(default_factory=dict)
+    # Task 3: the best decryptor per invented blueprint (admin switch).
+    decryptor_selection_enabled: bool = True
+    #: {blueprint type_id: DecryptorChoice}, filled lazily by _decryptor_choice_for.
+    #: Worker threads write it with dict.setdefault (atomic under the GIL), so
+    #: every caller of one refresh gets the same choice per blueprint.
+    decryptor_choice_by_blueprint_type_id: dict = dataclasses.field(default_factory=dict)
+    #: Per-thread set of blueprints whose decryptors are being evaluated.
+    decryptor_evaluation_guard: threading.local = dataclasses.field(default_factory=threading.local)
 
 
 class IndustryService:
@@ -6632,7 +6648,8 @@ class IndustryService:
             *[int(tid) for tid in manufacturing_row_by_product_type_id.keys()],
             *[int(tid) for tid in reaction_row_by_product_type_id.keys()],
         })
-        decryptor_options = self._load_decryptor_options()
+        decryptor_selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled", True))
+        decryptor_options = self._load_decryptor_options() if decryptor_selection_enabled else (NO_DECRYPTOR,)
         inventor_skill_levels = self._get_inventor_skill_levels()
         material_price_type_ids = sorted({
             int(entry.get("type_id") or 0)
@@ -6698,7 +6715,7 @@ class IndustryService:
             int(bp_type_id): sum(max(0, int(a.blueprint_runs or 0)) for a in assets)
             for bp_type_id, assets in blueprint_copy_assets_by_type_id.items()
         }
-        return _ProductPlanningContext(
+        ctx = _ProductPlanningContext(
             selected_industry_profile=selected_industry_profile,
             selected_character_modifiers=selected_character_modifiers,
             character_skill_levels=character_skill_levels,
@@ -6710,6 +6727,7 @@ class IndustryService:
             reaction_row_by_product_type_id=reaction_row_by_product_type_id,
             invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
             decryptor_options=decryptor_options,
+            decryptor_selection_enabled=decryptor_selection_enabled,
             # Read-only after construction; shared by the worker threads.
             invention_context=InventionContext(
                 inventor_skill_levels_by_character_id=inventor_skill_levels,
@@ -6738,6 +6756,12 @@ class IndustryService:
             blueprint_rows=blueprint_rows,
             character_id=character_id,
         )
+        # Every invented blueprint, top level or nested, uses its one best
+        # decryptor (set before any worker thread reads the context).
+        ctx.invention_context.decryptor_for_blueprint = (
+            lambda blueprint_type_id: self._decryptor_choice_for(ctx, blueprint_type_id).option
+        )
+        return ctx
 
     def _iter_product_variants(
         self, ctx: _ProductPlanningContext,
@@ -6916,6 +6940,8 @@ class IndustryService:
                 )
         if runs_per_invented_blueprint <= 0:
             runs_per_invented_blueprint = max(1, max_production_limit or 1)
+        # A decryptor adds runs to every invented BPC (EVE).
+        runs_per_invented_blueprint = invented_runs_per_blueprint(runs_per_invented_blueprint, decryptor)
         effective_probability = max(probability, probability_floor)
         cost_unknown_reason: str | None = None
         if invented_runs > 0 and effective_probability <= 0:
@@ -6935,7 +6961,11 @@ class IndustryService:
             whole_attempts = 0
 
         per_attempt_materials = [dict(e) for e in (invention_job.get("materials") or []) if isinstance(e, dict)]
-        invention_materials = [{**e, "quantity_per_attempt": int(e.get("quantity") or 0), "quantity": float(int(e.get("quantity") or 0)) * invention_attempts} for e in per_attempt_materials]
+        # The decryptor is consumed like a datacore, one per attempt, and priced
+        # like one (take-or-buy against the hub price). The fee's EIV below stays
+        # the datacores' (the fee model is unchanged).
+        per_attempt_inputs = [*per_attempt_materials, *self._decryptor_input_entries(decryptor)]
+        invention_materials = [{**e, "quantity_per_attempt": int(e.get("quantity") or 0), "quantity": float(int(e.get("quantity") or 0)) * invention_attempts} for e in per_attempt_inputs]
         # Fee per attempt (EIV of one attempt's inputs), times the attempts.
         per_attempt_process_value, _ = self._sum_estimated_item_value(per_attempt_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map)
         invention_process_value = float(per_attempt_process_value) * invention_attempts if per_attempt_process_value is not None else None
@@ -7091,7 +7121,9 @@ class IndustryService:
         ]
         invention_requirements = [
             {**entry, **invention_tags}
-            for entry in self._invention_whole_attempt_requirements(invention_job, int(invention_costs["whole_attempts"]))
+            for entry in self._invention_whole_attempt_requirements(
+                invention_job, int(invention_costs["whole_attempts"]), decryptor=decryptor,
+            )
         ]
         source_copy_costs, missing_source_runs = self._invention_source_copy_costs(
             compute_activity=compute_activity, invention_source_row=invention_source_row,
@@ -7155,14 +7187,26 @@ class IndustryService:
         }
 
     @staticmethod
-    def _invention_whole_attempt_requirements(invention_job: dict[str, Any], whole_attempts: int) -> list[dict[str, Any]]:
+    def _decryptor_input_entries(decryptor: DecryptorOption) -> list[dict[str, Any]]:
+        """The decryptor as an invention input, one per attempt; [] for none."""
+        if decryptor.type_id is None:
+            return []
+        return [{
+            "type_id": int(decryptor.type_id), "type_name": decryptor.type_name,
+            "quantity": 1, "invention_decryptor": True,
+        }]
+
+    @classmethod
+    def _invention_whole_attempt_requirements(
+        cls, invention_job: dict[str, Any], whole_attempts: int, decryptor: DecryptorOption = NO_DECRYPTOR,
+    ) -> list[dict[str, Any]]:
         """The invention inputs to actually buy or take: quantity_per_attempt x
         whole attempts, integer units (the amortized quantities are for cost
-        only). [] when the attempts are unknown or zero."""
+        only), the decryptor included. [] when the attempts are unknown or zero."""
         if whole_attempts <= 0:
             return []
         out: list[dict[str, Any]] = []
-        for entry in invention_job.get("materials") or []:
+        for entry in [*(invention_job.get("materials") or []), *cls._decryptor_input_entries(decryptor)]:
             if not isinstance(entry, dict):
                 continue
             per_attempt = int(entry.get("quantity") or 0)
@@ -7265,7 +7309,10 @@ class IndustryService:
         if unknown_reason is not None:
             return [], f"{blueprint_display_name} sub-build, batches past the owned BPC runs: {unknown_reason}"
         tags = {"invented_blueprint_type_id": int(blueprint_type_id), "invented_blueprint_name": blueprint_display_name}
-        return [{**e, **tags} for e in self._invention_whole_attempt_requirements(invention_job, whole_attempts)], None
+        return [
+            {**e, **tags}
+            for e in self._invention_whole_attempt_requirements(invention_job, whole_attempts, decryptor=decryptor)
+        ], None
 
     @staticmethod
     def _absorb_nested_invention(
@@ -7422,6 +7469,177 @@ class IndustryService:
             results.append((activity_name, costs, tree_node))
         return results
 
+    @staticmethod
+    def _row_invents(ctx: _ProductPlanningContext, blueprint_type_id: int) -> bool:
+        """Whether rows of this blueprint invent (in batch 1 or the later
+        batches): the predicate _build_single_product_row resolves its
+        decryptor under."""
+        source = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
+        return (
+            bool(ctx.build_from_bpc)
+            and isinstance((source or {}).get("invention_job"), dict)
+            and not ctx.blueprint_original_assets_by_type_id.get(int(blueprint_type_id))
+        )
+
+    def _build_product_row(self, ctx: _ProductPlanningContext, **variant: Any) -> dict[str, Any] | None:
+        """One overview row, invented with its blueprint's best decryptor; the
+        choice is on manufacturing_job.invention_decryptor."""
+        blueprint_type_id = int(variant["row"].get("blueprint_type_id") or 0)
+        if not self._row_invents(ctx, blueprint_type_id):
+            return self._build_single_product_row(ctx, **variant)
+        choice = self._decryptor_choice_for(ctx, blueprint_type_id)
+        row_out = self._build_single_product_row(ctx, decryptor=choice.option, **variant)
+        if row_out is not None:
+            row_out["manufacturing_job"]["invention_decryptor"] = decryptor_choice_payload(choice)
+        return row_out
+
+    def _decryptor_choice_for(self, ctx: _ProductPlanningContext, blueprint_type_id: int) -> DecryptorChoice:
+        """The decryptor to invent `blueprint_type_id` with: chosen once per
+        refresh by invention_model.select_best_decryptor and memoized on ctx.
+
+        Thread-safe without a lock: two workers may evaluate the same
+        blueprint at once (same inputs, same result), and setdefault keeps the
+        first, so every caller uses one choice. No lock is held while
+        evaluating, so nested evaluations on different threads cannot
+        deadlock."""
+        blueprint_type_id = int(blueprint_type_id)
+        cached = ctx.decryptor_choice_by_blueprint_type_id.get(blueprint_type_id)
+        if cached is not None:
+            return cached
+        if not ctx.decryptor_selection_enabled:
+            choice = DecryptorChoice(NO_DECRYPTOR, DECRYPTOR_SELECTION_OFF_REASON)
+        elif len(ctx.decryptor_options) <= 1:
+            choice = DecryptorChoice(NO_DECRYPTOR, NO_DECRYPTOR_DATA_REASON)
+        else:
+            evaluating = getattr(ctx.decryptor_evaluation_guard, "blueprint_type_ids", None)
+            if evaluating is None:
+                evaluating = set()
+                ctx.decryptor_evaluation_guard.blueprint_type_ids = evaluating
+            if blueprint_type_id in evaluating:
+                # Met again inside its own evaluation (a material cycle): this
+                # inner use gets no decryptor, and nothing is cached for it.
+                return DecryptorChoice(NO_DECRYPTOR, "no decryptor: met inside its own decryptor evaluation")
+            evaluating.add(blueprint_type_id)
+            try:
+                choice = self._evaluate_decryptors(ctx, blueprint_type_id)
+            finally:
+                evaluating.discard(blueprint_type_id)
+        return ctx.decryptor_choice_by_blueprint_type_id.setdefault(blueprint_type_id, choice)
+
+    def _evaluate_decryptors(self, ctx: _ProductPlanningContext, blueprint_type_id: int) -> DecryptorChoice:
+        """Build one invention cycle of the blueprint's own row per decryptor
+        option and let select_best_decryptor pick (amendment A1).
+
+        One cycle = the runs one invented BPC yields with that option (SDE
+        runs + its run modifier), every run invented: the expected attempts
+        are then exactly 1 / chance, so the row's materials, amortized
+        invention inputs (decryptor included) and job fees are the cycle's.
+        The builds are thrown away, so their WARNINGs are dropped
+        (quiet_warnings); the row that is kept logs its own."""
+        row = ctx.blueprint_row_by_type_id.get(blueprint_type_id) or {}
+        manufacturing_job = row.get("manufacturing_job") or {}
+        products = [
+            p for p in (manufacturing_job.get("products") or [])
+            if isinstance(p, dict) and int(p.get("type_id") or 0) > 0
+        ] if isinstance(manufacturing_job, dict) else []
+        if not products:
+            return DecryptorChoice(NO_DECRYPTOR, "no decryptor: the blueprint makes no product to compare on")
+        source = ctx.invention_row_by_blueprint_type_id.get(blueprint_type_id) or {}
+        invention_job = source.get("invention_job") if isinstance(source.get("invention_job"), dict) else {}
+        target_entry = self._invention_target_entry(invention_job, blueprint_type_id)
+        base_runs = int((target_entry or {}).get("quantity") or 0)
+        if base_runs <= 0:
+            # The same fallback as _expected_invention_costs.
+            base_runs = max(1, int(manufacturing_job.get("max_production_limit") or 0) or 1)
+        evaluations: list[DecryptorEvaluation] = []
+        with quiet_warnings():
+            for option in ctx.decryptor_options:
+                skip_reason = self._decryptor_price_skip_reason(ctx, option)
+                if skip_reason is not None:
+                    evaluations.append(DecryptorEvaluation(option, None, skip_reason))
+                    continue
+                candidate = self._build_single_product_row(
+                    ctx, row=row, raw_product=products[0], row_index=0, product_index=0,
+                    blueprint_copy_assets=[], blueprint_original_asset=None,
+                    effective_runs=invented_runs_per_blueprint(base_runs, option),
+                    decryptor=option, fully_invented=True,
+                )
+                evaluations.append(self._cycle_evaluation(ctx, option, candidate))
+        return select_best_decryptor(evaluations)
+
+    @classmethod
+    def _decryptor_price_skip_reason(cls, ctx: _ProductPlanningContext, option: DecryptorOption) -> str | None:
+        """Why a decryptor cannot be a candidate: it has no hub market price.
+        An adjusted-price fallback would make an unbuyable decryptor look cheap."""
+        if option.type_id is None:
+            return None
+        unit_price = cls._as_float((ctx.material_price_map.get(int(option.type_id)) or {}).get("unit_price"))
+        if unit_price is None or unit_price <= 0:
+            return f"no market price for {option.type_name}"
+        return None
+
+    @classmethod
+    def _cycle_evaluation(
+        cls, ctx: _ProductPlanningContext, option: DecryptorOption, row_out: dict[str, Any] | None,
+    ) -> DecryptorEvaluation:
+        """A candidate cycle row's cost per unit and profit per cycle. The
+        profit uses the row's own sell price (market_unit_price, the price
+        profit_amount starts from) for the cycle's units; None when that price
+        is unknown or not positive (select_best_decryptor then falls back to
+        cost per unit)."""
+        total_cost = cls._row_total_cost_estimate(ctx, row_out)
+        quantity = int((row_out or {}).get("quantity") or 0)
+        if total_cost is None or quantity <= 0:
+            return DecryptorEvaluation(option, None, units_per_cycle=quantity or None)
+        sell_price = cls._as_float((row_out or {}).get("market_unit_price"))
+        profit = (
+            float(sell_price) * quantity - total_cost
+            if sell_price is not None and sell_price > 0 else None
+        )
+        return DecryptorEvaluation(
+            option, total_cost / quantity, profit_per_cycle=profit, units_per_cycle=quantity,
+        )
+
+    @classmethod
+    def _row_total_cost_estimate(cls, ctx: _ProductPlanningContext, row_out: dict[str, Any] | None) -> float | None:
+        """A row's total cost before the pricing step, priced the way
+        _enrich_product_rows_with_material_prices prices it: each procurement
+        and amortized invention line at its own unit price, else the hub price
+        (ctx.material_price_map), plus the job fees (no fee priced at all reads
+        as 0, the same for every candidate of one row). None when any line is
+        unpriced or the invention cost is unknown: a partial cost cannot be
+        compared."""
+        if not isinstance(row_out, dict):
+            return None
+        mj = row_out.get("manufacturing_job") or {}
+        if mj.get("invention_cost_unknown_reason"):
+            return None
+
+        def unit_price(entry: dict[str, Any]) -> float | None:
+            own = cls._as_float(entry.get("unit_price"))
+            if own is not None and own > 0:
+                return own
+            hub = cls._as_float((ctx.material_price_map.get(int(entry.get("type_id") or 0)) or {}).get("unit_price"))
+            return hub if hub is not None and hub > 0 else None
+
+        total = 0.0
+        procurement = mj.get("procurement_materials") or mj.get("materials") or {}
+        for entry in procurement.values():
+            if not isinstance(entry, dict):
+                continue
+            price = unit_price(entry)
+            if price is None:
+                return None
+            total += price * int(entry.get("quantity") or 0)
+        for entry in (mj.get("expected_invention_materials") or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            price = unit_price(entry)
+            if price is None:
+                return None
+            total += price * float(entry.get("quantity") or 0.0)
+        return total + float(mj.get("total_job_cost") or 0.0)
+
     def _build_single_product_row(
         self,
         ctx: _ProductPlanningContext,
@@ -7434,6 +7652,7 @@ class IndustryService:
         blueprint_original_asset: Any,
         effective_runs: int,
         decryptor: DecryptorOption | None = None,
+        fully_invented: bool = False,
     ) -> dict[str, Any] | None:
         """Build a single product row from a blueprint variant (Step 3).
 
@@ -7441,6 +7660,9 @@ class IndustryService:
         ctx.invention_context.decryptor_for_blueprint, the same source the
         nested planner uses. An explicit option overrides it, e.g. to build
         one decryptor candidate.
+
+        `fully_invented`: plan every run as invented, whatever BPC runs of
+        this blueprint are owned (a decryptor candidate's invention cycle).
         """
         manufacturing_job = row.get("manufacturing_job") or {}
         if not isinstance(manufacturing_job, dict):
@@ -7460,6 +7682,8 @@ class IndustryService:
             if blueprint_copy_assets:
                 available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, blueprint_copy_runs)
             elif blueprint_original_asset is not None:
+                available_blueprint_copy_runs_by_type_id[blueprint_type_id] = 0
+            if fully_invented:
                 available_blueprint_copy_runs_by_type_id[blueprint_type_id] = 0
 
         compact_product = dict(raw_product)
@@ -7752,8 +7976,9 @@ class IndustryService:
         # and taken from owned stock first like any other procurement. Buy list
         # only: the cost is on the amortized expected_invention_materials.
         invention_requirements = [
-            *(self._invention_whole_attempt_requirements(invention_job, int(inv_costs.get("whole_attempts") or 0))
-              if requires_invention_chain and inv_costs is not None else []),
+            *(self._invention_whole_attempt_requirements(
+                invention_job, int(inv_costs.get("whole_attempts") or 0), decryptor=decryptor,
+            ) if requires_invention_chain and inv_costs is not None else []),
             *[dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements") or []) if isinstance(e, dict)],
         ]
         invention_procurement_materials, _ = self._plan_take_or_buy_material_nodes(
@@ -7802,7 +8027,7 @@ class IndustryService:
             str(r) for r in (recursive_prerequisite_plan.get("extra_batch_invention_unknown_reasons") or [])
         )
         extra_batch_requirements = [
-            *self._invention_whole_attempt_requirements(invention_job, top_level_extra_attempts),
+            *self._invention_whole_attempt_requirements(invention_job, top_level_extra_attempts, decryptor=decryptor),
             *[dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements_per_extra_batch") or []) if isinstance(e, dict)],
         ]
         invention_procurement_materials_per_extra_batch, _ = self._plan_take_or_buy_material_nodes(
@@ -8118,7 +8343,7 @@ class IndustryService:
 
         def _build_variant(index: int, variant: tuple) -> tuple[int, dict[str, Any] | None]:
             row_idx, prod_idx, row, raw_product, copy_assets, original_asset, eff_runs = variant
-            return index, self._build_single_product_row(
+            return index, self._build_product_row(
                 ctx, row=row, raw_product=raw_product,
                 row_index=row_idx, product_index=prod_idx,
                 blueprint_copy_assets=copy_assets,

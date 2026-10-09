@@ -249,6 +249,18 @@ def get_invention_skill_set(row: dict[str, Any]) -> tuple[tuple[int, int], int |
     return (first, second), encryption
 
 
+def get_invention_decryptor(row: dict[str, Any]) -> tuple[int, str] | None:
+    """(type_id, name) of the decryptor the producer chose for this row's
+    invention (manufacturing_job.invention_decryptor), or None for none."""
+    choice = get_manufacturing_job(row).get("invention_decryptor")
+    if not isinstance(choice, dict):
+        return None
+    type_id = _as_int(choice.get("type_id"))
+    if type_id <= 0:
+        return None
+    return type_id, str(choice.get("type_name") or type_id)
+
+
 def get_meta_group_name(row: dict[str, Any]) -> str:
     """Meta group as a normalised display name.
 

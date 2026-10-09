@@ -13,7 +13,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     prepare_shared_industry_snapshot_page,
     render_pricing_batch_panel,
 )
-from streamlit_ui.state.industry_builder_ui import row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name
+from streamlit_ui.state.industry_builder_ui import invention_summary_lines, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name
 from streamlit_ui.components.webpage_ui import require_aggrid
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
@@ -131,6 +131,8 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
 
         if row_assumes_owned_t2_bpo(selected_row):
             st.caption(ASSUMES_OWNED_T2_BPO_CAPTION)
+        for line in invention_summary_lines(selected_row):
+            st.caption(line)
 
         reasons = selected_row.get("pricing_confidence_reasons") or []
         if isinstance(reasons, list) and reasons:
