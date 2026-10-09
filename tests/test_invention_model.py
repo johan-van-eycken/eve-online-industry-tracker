@@ -355,3 +355,46 @@ def test_the_decryptor_switch_is_an_admin_bool_defaulting_on():
 
     spec = ADMIN_SETTINGS_SCHEMA["industry"]["settings"]["invention_decryptor_selection_enabled"]
     assert spec["type"] == "bool" and spec["default"] is True
+
+
+# --- Task 3 fix round 1 -------------------------------------------------------
+
+
+def test_decryptors_within_the_tolerance_of_the_best_go_to_the_lower_type_id():
+    # M7: 34201 earns 0.004 ISK more than 34200; within the tolerance that is a
+    # tie, so the lower type id wins (in both criteria).
+    twin = im.DecryptorOption(34200, "Twin", 1.2, 2, 10, 1)
+    tol = im.DECRYPTOR_TIE_TOLERANCE_ISK
+    by_profit = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 100.0), _ev(_ACC, 80.0, 500.0 + tol * 0.4), _ev(twin, 80.0, 500.0),
+    ])
+    by_cost = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0), _ev(_ACC, 80.0 - tol * 0.4), _ev(twin, 80.0),
+    ])
+    assert by_profit.option is twin and by_cost.option is twin
+    # Outside the tolerance the better one wins whatever its id.
+    clear = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 100.0), _ev(_ACC, 80.0, 500.0 + tol * 2), _ev(twin, 80.0, 500.0),
+    ])
+    assert clear.option is _ACC
+
+
+def test_a_tie_with_no_decryptor_beats_a_tied_pair_of_decryptors():
+    twin = im.DecryptorOption(34200, "Twin", 1.2, 2, 10, 1)
+    tol = im.DECRYPTOR_TIE_TOLERANCE_ISK
+    choice = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 500.0), _ev(_ACC, 80.0, 500.0 + tol * 0.8), _ev(twin, 80.0, 500.0 + tol * 0.4),
+    ])
+    assert choice.option is im.NO_DECRYPTOR
+
+
+def test_unknown_market_fees_fall_back_with_a_reason_that_names_them():
+    why = "sales tax unknown (no character to read Accounting from): chose lowest cost per unit"
+    choice = im.select_best_decryptor([
+        im.DecryptorEvaluation(im.NO_DECRYPTOR, 89.0, profit_unknown_reason=why),
+        im.DecryptorEvaluation(_ACC, 86.06, profit_unknown_reason=why),
+    ])
+    assert choice.option is _ACC
+    assert choice.criterion == im.COST_PER_UNIT_CRITERION
+    assert choice.fallback_reason == why
+    assert choice.reason.endswith("; " + why)

@@ -159,6 +159,9 @@ class _ProductPlanningContext:
     decryptor_choice_by_blueprint_type_id: dict = dataclasses.field(default_factory=dict)
     #: Per-thread set of blueprints whose decryptors are being evaluated.
     decryptor_evaluation_guard: threading.local = dataclasses.field(default_factory=threading.local)
+    #: _resolve_npc_market_fee_context for this refresh: the decryptor cycle
+    #: profit and the sale-proceeds step use the same sales tax / broker fee.
+    market_fee_context: dict = dataclasses.field(default_factory=dict)
 
 
 class IndustryService:
@@ -1647,15 +1650,20 @@ class IndustryService:
         character_id: int | None,
         market_hub: str,
         product_price_side: str,
+        fee_context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        """`fee_context`: the refresh's resolved fee context (the planning
+        context's), so the rows and the decryptor choice use the same fees;
+        resolved here when None."""
         if not product_rows:
             return product_rows
 
-        fee_context = self._resolve_npc_market_fee_context(
-            character_id=character_id,
-            market_hub=market_hub,
-            product_price_side=product_price_side,
-        )
+        if fee_context is None:
+            fee_context = self._resolve_npc_market_fee_context(
+                character_id=character_id,
+                market_hub=market_hub,
+                product_price_side=product_price_side,
+            )
         fee_rates = fee_context.get("rates") or {}
         sales_tax_fraction = self._as_float(fee_rates.get("sales_tax_fraction"))
         broker_fee_fraction = self._as_float(fee_rates.get("broker_fee_fraction"))
@@ -6648,6 +6656,12 @@ class IndustryService:
             *[int(tid) for tid in manufacturing_row_by_product_type_id.keys()],
             *[int(tid) for tid in reaction_row_by_product_type_id.keys()],
         })
+        # Resolved once: the decryptor cycle profit and the sale-proceeds step
+        # deduct the same sales tax and broker fee.
+        market_fee_context = self._resolve_npc_market_fee_context(
+            character_id=character_id, market_hub=normalized_market_hub,
+            product_price_side=normalized_product_price_side,
+        )
         decryptor_selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled", True))
         decryptor_options = self._load_decryptor_options() if decryptor_selection_enabled else (NO_DECRYPTOR,)
         inventor_skill_levels = self._get_inventor_skill_levels()
@@ -6728,6 +6742,7 @@ class IndustryService:
             invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
             decryptor_options=decryptor_options,
             decryptor_selection_enabled=decryptor_selection_enabled,
+            market_fee_context=market_fee_context,
             # Read-only after construction; shared by the worker threads.
             invention_context=InventionContext(
                 inventor_skill_levels_by_character_id=inventor_skill_levels,
@@ -7578,42 +7593,75 @@ class IndustryService:
             return f"no market price for {option.type_name}"
         return None
 
+    _MARKET_FEES_UNKNOWN_FALLBACK_REASON = (
+        "sales tax unknown (no character to read Accounting from), so net proceeds are unknown: "
+        "chose lowest cost per unit"
+    )
+
+    @classmethod
+    def _net_sale_fraction(cls, fee_context: dict[str, Any]) -> float | None:
+        """The share of the gross sale value the corp keeps, as
+        _enrich_product_rows_with_sale_proceeds computes net_proceeds:
+        1 - broker fee (when it applies) - sales tax. None when the sales tax
+        is unknown (that step then leaves net_proceeds None too)."""
+        rates = (fee_context or {}).get("rates") or {}
+        tax = cls._as_float(rates.get("sales_tax_fraction"))
+        if tax is None:
+            return None
+        broker = cls._as_float(rates.get("broker_fee_fraction"))
+        applies = bool((fee_context or {}).get("broker_fee_applies"))
+        return 1.0 - (float(broker) if applies and broker is not None else 0.0) - float(tax)
+
     @classmethod
     def _cycle_evaluation(
         cls, ctx: _ProductPlanningContext, option: DecryptorOption, row_out: dict[str, Any] | None,
     ) -> DecryptorEvaluation:
-        """A candidate cycle row's cost per unit and profit per cycle. The
-        profit uses the row's own sell price (market_unit_price, the price
-        profit_amount starts from) for the cycle's units; None when that price
-        is unknown or not positive (select_best_decryptor then falls back to
-        cost per unit)."""
-        total_cost = cls._row_total_cost_estimate(ctx, row_out)
+        """A candidate cycle row's cost per unit and profit per cycle.
+
+        The profit is the cycle's net proceeds, the way the row's
+        profit_amount is: units x the row's sell price (market_unit_price) x
+        (1 - broker fee - sales tax), minus the cycle's cost. Unknown when the
+        sell price is unknown or not positive, or the sales tax is unknown;
+        select_best_decryptor then falls back to cost per unit with that
+        reason. A candidate without a comparable cost gets a skip_reason."""
         quantity = int((row_out or {}).get("quantity") or 0)
+        total_cost, why = cls._row_total_cost_estimate(ctx, row_out)
         if total_cost is None or quantity <= 0:
-            return DecryptorEvaluation(option, None, units_per_cycle=quantity or None)
+            return DecryptorEvaluation(
+                option, None, why or "the candidate build made no units", units_per_cycle=quantity or None,
+            )
         sell_price = cls._as_float((row_out or {}).get("market_unit_price"))
-        profit = (
-            float(sell_price) * quantity - total_cost
-            if sell_price is not None and sell_price > 0 else None
-        )
+        net_fraction = cls._net_sale_fraction(ctx.market_fee_context)
+        profit: float | None = None
+        profit_unknown_reason: str | None = None
+        if sell_price is None or sell_price <= 0:
+            profit_unknown_reason = None  # the default SELL_PRICE_UNKNOWN_FALLBACK_REASON
+        elif net_fraction is None:
+            profit_unknown_reason = cls._MARKET_FEES_UNKNOWN_FALLBACK_REASON
+        else:
+            profit = float(sell_price) * quantity * net_fraction - total_cost
         return DecryptorEvaluation(
             option, total_cost / quantity, profit_per_cycle=profit, units_per_cycle=quantity,
+            profit_unknown_reason=profit_unknown_reason,
         )
 
     @classmethod
-    def _row_total_cost_estimate(cls, ctx: _ProductPlanningContext, row_out: dict[str, Any] | None) -> float | None:
-        """A row's total cost before the pricing step, priced the way
-        _enrich_product_rows_with_material_prices prices it: each procurement
-        and amortized invention line at its own unit price, else the hub price
-        (ctx.material_price_map), plus the job fees (no fee priced at all reads
-        as 0, the same for every candidate of one row). None when any line is
-        unpriced or the invention cost is unknown: a partial cost cannot be
-        compared."""
+    def _row_total_cost_estimate(
+        cls, ctx: _ProductPlanningContext, row_out: dict[str, Any] | None,
+    ) -> tuple[float | None, str | None]:
+        """(a row's total cost before the pricing step, None) or (None, why).
+
+        Priced the way _enrich_product_rows_with_material_prices prices it:
+        each procurement and amortized invention line at its own unit price,
+        else the hub price (ctx.material_price_map), plus the job fees (no fee
+        priced at all reads as 0, the same for every candidate of one row).
+        Unknown when any line is unpriced or the invention cost is unknown: a
+        partial cost cannot be compared."""
         if not isinstance(row_out, dict):
-            return None
+            return None, "the candidate row could not be built"
         mj = row_out.get("manufacturing_job") or {}
         if mj.get("invention_cost_unknown_reason"):
-            return None
+            return None, f"invention cost unknown: {mj['invention_cost_unknown_reason']}"
 
         def unit_price(entry: dict[str, Any]) -> float | None:
             own = cls._as_float(entry.get("unit_price"))
@@ -7623,22 +7671,21 @@ class IndustryService:
             return hub if hub is not None and hub > 0 else None
 
         total = 0.0
-        procurement = mj.get("procurement_materials") or mj.get("materials") or {}
-        for entry in procurement.values():
+        unpriced: list[str] = []
+        lines = [
+            (entry, False) for entry in (mj.get("procurement_materials") or mj.get("materials") or {}).values()
+        ] + [(entry, True) for entry in (mj.get("expected_invention_materials") or {}).values()]
+        for entry, fractional in lines:
             if not isinstance(entry, dict):
                 continue
             price = unit_price(entry)
             if price is None:
-                return None
-            total += price * int(entry.get("quantity") or 0)
-        for entry in (mj.get("expected_invention_materials") or {}).values():
-            if not isinstance(entry, dict):
+                unpriced.append(str(entry.get("type_name") or entry.get("type_id") or "?"))
                 continue
-            price = unit_price(entry)
-            if price is None:
-                return None
-            total += price * float(entry.get("quantity") or 0.0)
-        return total + float(mj.get("total_job_cost") or 0.0)
+            total += price * (float(entry.get("quantity") or 0.0) if fractional else int(entry.get("quantity") or 0))
+        if unpriced:
+            return None, f"an input has no price: {', '.join(dict.fromkeys(unpriced))}"
+        return total + float(mj.get("total_job_cost") or 0.0), None
 
     def _build_single_product_row(
         self,
@@ -8037,6 +8084,52 @@ class IndustryService:
             sell_price_map=ctx.material_price_map,
             adjusted_price_map=ctx.adjusted_market_price_map,
         )
+        # I2: later batches share invented BPCs. One BPC's runs can outlast a
+        # batch (a +run decryptor, or batches shorter than a BPC), so the
+        # shopping list sizes the row's own invention over ALL batches from
+        # this plan: BPCs needed = ceil(runs past the owned BPC runs / runs
+        # per BPC), each bought as whole attempts. Written only when the
+        # attempts are known (unknown odds are flagged instead, see above).
+        invention_bpc_plan: dict[str, Any] | None = None
+        nested_extra_batch_lines: list[dict[str, Any]] = []
+        if top_level_extra_attempts > 0 and inv_costs is not None:
+            runs_per_bpc = max(1, int(inv_costs.get("runs_per_invented_blueprint") or 1))
+            attempts_per_bpc, per_bpc_unknown, _chance = self._full_batch_invention_whole_attempts(
+                invention_job=invention_job, blueprint_type_id=blueprint_type_id,
+                runs=runs_per_bpc, max_production_limit=max_production_limit,
+                adjusted_price_map=ctx.adjusted_market_price_map,
+                decryptor=decryptor, invention_context=ctx.invention_context,
+            )
+            if per_bpc_unknown is None and attempts_per_bpc > 0:
+                per_attempt_lines, _ = self._plan_take_or_buy_material_nodes(
+                    self._invention_whole_attempt_requirements(invention_job, 1, decryptor=decryptor),
+                    available_owned_item_quantity_by_type_id={},
+                    owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+                    sell_price_map=ctx.material_price_map,
+                    adjusted_price_map=ctx.adjusted_market_price_map,
+                )
+                batch_one_invents = requires_invention_chain and missing_top_level_copy_runs > 0
+                invention_bpc_plan = {
+                    "batch_runs": int(effective_runs),
+                    "runs_per_invented_blueprint": runs_per_bpc,
+                    "whole_attempts_per_blueprint": int(attempts_per_bpc),
+                    # Every owned BPC run of this variant, batch 1's included.
+                    "owned_blueprint_runs": max(0, int(available_target_copy_runs)),
+                    "batch_one_invented_blueprints": (
+                        int(math.ceil(missing_top_level_copy_runs / runs_per_bpc)) if batch_one_invents else 0
+                    ),
+                    "per_attempt_materials": self._overview_keyed_entries(per_attempt_lines, compactor=lambda e: e),
+                }
+                nested_extra_batch_lines, _ = self._plan_take_or_buy_material_nodes(
+                    self._merge_invention_requirements([
+                        dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements_per_extra_batch") or [])
+                        if isinstance(e, dict)
+                    ]),
+                    available_owned_item_quantity_by_type_id={},
+                    owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+                    sell_price_map=ctx.material_price_map,
+                    adjusted_price_map=ctx.adjusted_market_price_map,
+                )
         # A batch past the owned BPC runs that must invent with unknown odds
         # marks the row's invention cost unknown (Low confidence via the
         # pricing step) even when batch 1's own cost is known.
@@ -8221,6 +8314,14 @@ class IndustryService:
             row_out["manufacturing_job"]["invention_procurement_materials_per_extra_batch"] = self._overview_keyed_entries(
                 invention_procurement_materials_per_extra_batch, compactor=lambda e: e,
             )
+        if invention_bpc_plan is not None:
+            # Shopping list (industry/shopping_list.py): the row's own invention
+            # over all batches, plus the nested sub-builds' per-batch lines
+            # (the extra-batch list above minus this row's own invention).
+            row_out["manufacturing_job"]["invention_bpc_plan"] = invention_bpc_plan
+            row_out["manufacturing_job"]["invention_procurement_materials_per_extra_batch_nested"] = (
+                self._overview_keyed_entries(nested_extra_batch_lines, compactor=lambda e: e)
+            )
         if expected_invention_inputs or nested_expected_invention_inputs:
             # Priced into material_cost / total_cost by _enrich_product_rows_with_material_prices.
             # Kept out of `materials` and `procurement_materials`: those are the
@@ -8391,7 +8492,7 @@ class IndustryService:
         )
         if progress_callback is not None:
             progress_callback(0.93, "Calculating sale proceeds and profit metrics", {"stage": "profit"})
-        product_rows = self._enrich_product_rows_with_sale_proceeds(product_rows, character_id=character_id, market_hub=normalized_market_hub, product_price_side=normalized_product_price_side)
+        product_rows = self._enrich_product_rows_with_sale_proceeds(product_rows, character_id=character_id, market_hub=normalized_market_hub, product_price_side=normalized_product_price_side, fee_context=ctx.market_fee_context)
         product_rows = self._enrich_product_rows_with_profit_metrics(product_rows)
         product_rows = self._score_inventory_allocation_priority(product_rows)
         product_rows = self._enrich_product_rows_with_manufacturing_signals(product_rows)

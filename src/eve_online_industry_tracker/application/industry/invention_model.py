@@ -333,15 +333,20 @@ class DecryptorEvaluation:
 
     cost_per_unit: materials + invention inputs (decryptor included) + every
     job fee of the cycle, per manufactured unit; None when unknown.
-    profit_per_cycle: the cycle's units at the row's sell price minus that
-    cost; None when the sell price is unknown or not positive.
-    skip_reason: why the candidate was not built (it is then never chosen)."""
+    profit_per_cycle: the cycle's net proceeds (units x sell price, less sales
+    tax and broker fee, as the row's profit_amount) minus that cost; None
+    when the sell price or the market fees are unknown.
+    skip_reason: why the candidate was not built or has no cost (it is then
+    never chosen).
+    profit_unknown_reason: why profit_per_cycle is None, as the fallback
+    reason (default SELL_PRICE_UNKNOWN_FALLBACK_REASON)."""
 
     option: DecryptorOption
     cost_per_unit: float | None
     skip_reason: str | None = None
     profit_per_cycle: float | None = None
     units_per_cycle: int | None = None
+    profit_unknown_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -363,9 +368,10 @@ def _pick(
     evaluations: tuple[DecryptorEvaluation, ...], metric: Callable[[DecryptorEvaluation], float | None],
     *, higher_is_better: bool,
 ) -> tuple[DecryptorEvaluation | None, float]:
-    """The best decryptor (never NO_DECRYPTOR) on `metric`, ties to the
-    lowest type id, and its metric value. Candidates with a skip reason or an
-    unknown metric are left out."""
+    """The best decryptor (never NO_DECRYPTOR) on `metric` and its metric
+    value. Decryptors within DECRYPTOR_TIE_TOLERANCE_ISK of the best value are
+    a tie, which goes to the lowest type id. Candidates with a skip reason or
+    an unknown metric are left out."""
     priced = [
         e for e in evaluations
         if e.option.type_id is not None and e.skip_reason is None and metric(e) is not None
@@ -373,7 +379,9 @@ def _pick(
     if not priced:
         return None, 0.0
     sign = -1.0 if higher_is_better else 1.0
-    best = min(priced, key=lambda e: (sign * float(metric(e) or 0.0), int(e.option.type_id or 0)))
+    top = min(sign * float(metric(e) or 0.0) for e in priced)
+    tied = [e for e in priced if sign * float(metric(e) or 0.0) <= top + DECRYPTOR_TIE_TOLERANCE_ISK]
+    best = min(tied, key=lambda e: int(e.option.type_id or 0))
     return best, float(metric(best) or 0.0)
 
 
@@ -389,8 +397,10 @@ def select_best_decryptor(evaluations: Iterable[DecryptorEvaluation]) -> Decrypt
     candidate), the lowest total cost per manufactured unit decides instead,
     and the choice records SELL_PRICE_UNKNOWN_FALLBACK_REASON.
 
-    Ties within DECRYPTOR_TIE_TOLERANCE_ISK go to no decryptor, equal
-    decryptors to the lowest type id. A candidate with a skip reason or an
+    Ties within DECRYPTOR_TIE_TOLERANCE_ISK go to no decryptor first, then
+    (between decryptors) to the lowest type id. The profit is net of sales
+    tax and broker fee; unknown fees fall back to cost per unit with the
+    evaluation's profit_unknown_reason. A candidate with a skip reason or an
     unknown figure is never chosen. When the no-decryptor cost itself is
     unknown nothing can be compared, so no decryptor is used.
     """
@@ -422,7 +432,7 @@ def select_best_decryptor(evaluations: Iterable[DecryptorEvaluation]) -> Decrypt
             f"({best_profit:,.2f} ISK vs {base_profit:,.2f} ISK without a decryptor)",
             best.cost_per_unit, base_cost, evaluations, best_profit, base_profit, PROFIT_PER_CYCLE_CRITERION,
         )
-    fallback = SELL_PRICE_UNKNOWN_FALLBACK_REASON
+    fallback = baseline.profit_unknown_reason or SELL_PRICE_UNKNOWN_FALLBACK_REASON
     best, best_cost = _pick(evaluations, lambda e: e.cost_per_unit, higher_is_better=False)
     if best is None or best_cost >= base_cost - DECRYPTOR_TIE_TOLERANCE_ISK:
         detail = (

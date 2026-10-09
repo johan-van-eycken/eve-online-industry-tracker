@@ -191,3 +191,78 @@ def test_a_compute_logs_no_pricing_suggestion_or_relist_warning(
         or "pricing suggestion" in r.getMessage().lower()
     ]
     assert offending == []
+
+
+# --- round 5 Task 3 fix round 1, I3: invention inputs are priced in phase 1 ---
+# FAKE prices. The market-depth table only holds the plan's product types, so
+# datacores and decryptors need their own price lookup or the shopping list
+# skips them as unpriced.
+
+
+def _invention_planner(session_provider, planner_repo, tmp_path, *, prices):
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    t2_row = {
+        **GOOD_ROW,
+        "manufacturing_job": {
+            **GOOD_ROW["manufacturing_job"],
+            "blueprint_sde": {"blueprint_type_id": 9002},
+            "invention_decryptor": {"type_id": 34201, "type_name": "Accelerant Decryptor"},
+        },
+    }
+    asked: list[list[int]] = []
+
+    def get_type_price_map(*, type_ids, hub="jita", side="sell", progress_callback=None):
+        asked.append(sorted(type_ids))
+        return {int(t): {"unit_price": prices[int(t)]} for t in type_ids if int(t) in prices}
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [t2_row]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+    # The SDE read (the in-memory SDE has no blueprints); the prices are not injected.
+    svc._get_blueprint_data = lambda rows, extra_blueprint_type_ids=(): {
+        1001: {"manufacturing": {"materials": [], "products": [{"type_id": 6001, "quantity": 1}]},
+               "invention": {"materials": [{"type_id": 204, "type_name": "Datacore", "quantity": 2}],
+                             "products": [{"type_id": 9002, "quantity": 10}]}},
+        9002: {"manufacturing": {"materials": [], "products": [{"type_id": GOOD_ROW["type_id"], "quantity": 1}]}},
+    }
+    invent = AssignedAction(
+        type_id=GOOD_ROW["type_id"], type_name="Hobgoblin II", action_type="invent", character_id=1,
+        character_name="Pilot", quantity=None, runs=None, estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None, decryptor_type_id=34201, decryptor_type_name="Accelerant Decryptor",
+    )
+    return svc, invent, asked
+
+
+def test_phase_1_prices_datacores_and_the_chosen_decryptor(session_provider, planner_repo, tmp_path):
+    svc, invent, asked = _invention_planner(
+        session_provider, planner_repo, tmp_path, prices={204: 100.0, 34201: 50.0},
+    )
+    phase1 = svc._phase_1_collect()
+
+    assert asked == [[204, 34201]]
+    items = {i.type_id: i for i in svc._phase_7_shopping([invent], phase1)}
+    assert (items[204].quantity, items[204].estimated_unit_price) == (2, 100.0)
+    assert (items[34201].quantity, items[34201].estimated_unit_price) == (1, 50.0)
+    assert items[34201].shopping_category == "invention_input"
+
+
+def test_an_unpriced_invention_input_still_warns(session_provider, planner_repo, tmp_path, caplog):
+    svc, invent, _ = _invention_planner(session_provider, planner_repo, tmp_path, prices={204: 100.0})
+    phase1 = svc._phase_1_collect()
+    with caplog.at_level(logging.WARNING):
+        items = {i.type_id: i for i in svc._phase_7_shopping([invent], phase1)}
+
+    assert 204 in items and 34201 not in items
+    assert any(
+        "skipping invention input type_id=34201" in r.getMessage() for r in caplog.records
+    )

@@ -115,6 +115,13 @@ def _build_service(
         lambda self, rows, **kwargs: None,
         service,
     )
+    # The NPC market fee context (resolved once per refresh in the planning
+    # context): no sales tax or broker fee unless a test sets them.
+    service._resolve_npc_market_fee_context = MethodType(  # type: ignore[attr-defined]
+        lambda self, **kwargs: {"rates": {"sales_tax_fraction": 0.0, "broker_fee_fraction": 0.0},
+                                "broker_fee_applies": True},
+        service,
+    )
     return service
 
 
@@ -906,6 +913,7 @@ _INVENTION_FAKE_PRICES = {34: 5.0, 204: 100.0}
 def _invention_service(
     monkeypatch, *, owned_assets=([], [], {}, {}, {}), owned_item_inventory=None,
     prices=None, profile=None, blueprint_rows=None, real_confidence=False, adm_overrides=None,
+    fee_context=None,
 ):
     prices = dict(_INVENTION_FAKE_PRICES if prices is None else prices)
     monkeypatch.setattr(
@@ -925,6 +933,10 @@ def _invention_service(
         owned_item_inventory=owned_item_inventory,
         adjusted_price_map={t: {"adjusted_price": p} for t, p in prices.items()},
     )
+    if fee_context is not None:
+        service._resolve_npc_market_fee_context = MethodType(  # type: ignore[attr-defined]
+            lambda self, **kwargs: fee_context, service,
+        )
     # The real pricing step: it is what writes material_cost / total_cost.
     service._enrich_product_rows_with_material_prices = MethodType(  # type: ignore[attr-defined]
         IndustryService._enrich_product_rows_with_material_prices, service,
@@ -1613,12 +1625,14 @@ def test_shopping_list_spends_owned_material_once_over_batches(monkeypatch) -> N
 
 
 def test_shopping_list_spends_owned_datacores_once_over_batches(monkeypatch) -> None:
-    # 3 owned, 4 datacores per batch, 5 batches: 4 x 5 - 3 = 17.
+    # 1-run batches share 10-run BPCs (fix round 1, I2): 15 batches = 15 runs
+    # = 2 BPCs x 2 attempts x 2 datacores = 8 (was 4 per batch, 60). 3 owned,
+    # netted once: 8 - 3 = 5.
     row = _invention_overview(monkeypatch, owned_item_inventory=({204: 3}, {204: 60.0}))[5002]
-    row["max_batches_total"] = 5
+    row["max_batches_total"] = 15
 
     shopping = _shopping_line(row, 204)
-    assert shopping is not None and (shopping["need"], shopping["buy"]) == (20, 17)
+    assert shopping is not None and (shopping["need"], shopping["buy"]) == (8, 5)
 
 
 def test_two_products_sharing_owned_material_subtract_it_once(monkeypatch) -> None:
@@ -1644,8 +1658,10 @@ def _owned_t2_bpc(*, runs: int, item_id: int = 81) -> SimpleNamespace:
 
 
 def test_owned_bpc_covering_batch_one_still_buys_datacores_for_later_batches(monkeypatch) -> None:
-    # A 10-run owned BPC covers batch 1 (1 run). Every later batch invents its
-    # run: 1 run / 10 per BPC -> 1 BPC, p 0.5 -> 2 whole attempts x 2 = 4.
+    # A 10-run owned BPC covers batch 1 (1 run) and the next 9 one-run
+    # batches (fix round 1, I2: later batches use what an owned BPC covers).
+    # Past those 10 runs the batches invent: 1 BPC (10 runs), p 0.5 -> 2
+    # whole attempts x 2 = 4 datacores.
     row = _invention_overview(monkeypatch, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}))[5002]
     mj = row["manufacturing_job"]
     assert "invention_procurement_materials" not in mj
@@ -1653,8 +1669,10 @@ def test_owned_bpc_covering_batch_one_still_buys_datacores_for_later_batches(mon
     assert (extra["quantity"], extra["take_quantity"], extra["buy_quantity"]) == (4, 0, 4)
 
     row["max_batches_total"] = 5
+    assert _shopping_line(row, 204) is None  # 5 runs, all on the owned BPC
+    row["max_batches_total"] = 15
     line = _shopping_line(row, 204)
-    assert line is not None and (line["need"], line["buy"]) == (16, 16)  # 4 x (5 - 1)
+    assert line is not None and (line["need"], line["buy"]) == (4, 4)  # runs 11..15: 1 BPC
 
 
 def test_partly_owned_bpc_buys_full_batch_datacores_for_later_batches(monkeypatch) -> None:
@@ -1689,19 +1707,36 @@ def test_partly_owned_bpc_buys_full_batch_datacores_for_later_batches(monkeypatc
     assert line is not None and (line["need"], line["buy"]) == (52, 52)  # 12 + 2 x 20
 
 
-def test_no_owned_bpc_datacore_buy_is_unchanged(monkeypatch) -> None:
+def test_one_run_batches_share_invented_bpc_runs(monkeypatch) -> None:
+    # Fix round 1, I2: no owned BPC, 1-run batches, 10-run BPCs at p 0.5.
+    # 5 batches = 5 runs = 1 BPC = 2 attempts = 4 datacores (was 4 per batch, 20);
+    # 25 batches = 3 BPCs = 6 attempts = 12.
     row = _invention_overview(monkeypatch)[5002]
     mj = row["manufacturing_job"]
     assert mj["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 4
 
     row["max_batches_total"] = 5
     line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (4, 4)
+    row["max_batches_total"] = 25
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (12, 12)
+
+
+def test_full_bpc_batches_without_a_decryptor_buy_what_they_did_before(monkeypatch) -> None:
+    # 10-run batches on 10-run BPCs: 1 BPC = 2 attempts = 4 datacores per batch.
+    row = _invention_overview(monkeypatch, maximize_bp_runs=True)[5002]
+    row["max_batches_total"] = 5
+    line = _shopping_line(row, 204)
     assert line is not None and (line["need"], line["buy"]) == (20, 20)
 
 
 def test_owned_datacores_are_netted_once_with_an_extra_batch_list(monkeypatch) -> None:
-    # 3 owned: batch 1 takes them, the extra-batch lines take 0. 20 - 3 = 17.
-    row = _invention_overview(monkeypatch, owned_item_inventory=({204: 3}, {204: 60.0}))[5002]
+    # 3 owned: batch 1 takes them, the later-batch lines take 0. 10-run
+    # batches: 4 datacores each, 5 batches = 20 - 3 = 17.
+    row = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, owned_item_inventory=({204: 3}, {204: 60.0}),
+    )[5002]
     extra = row["manufacturing_job"]["invention_procurement_materials_per_extra_batch"]["204"]
     assert (extra["take_quantity"], extra["buy_quantity"]) == (0, 4)
 
@@ -2527,3 +2562,172 @@ def test_the_planners_shopping_list_buys_one_decryptor_per_attempt() -> None:
     assert by_type[204].quantity == 2
     assert by_type[34201].quantity == 1
     assert by_type[34201].shopping_category == "invention_input"
+
+
+# --- Task 3 fix round 1: net profit per cycle, candidate skip reasons ---------
+
+
+def _fees(tax, broker, applies=True):
+    return {"rates": {"sales_tax_fraction": tax, "broker_fee_fraction": broker}, "broker_fee_applies": applies}
+
+
+def test_cycle_profit_is_net_of_sales_tax_and_broker_fee(monkeypatch) -> None:
+    # Sell price 60. Gross: 10 x 60 - 890 = -290 vs 11 x 60 - 946.67 = -286.67,
+    # so Accelerant. Net of 5% tax + 5% broker: 10 x 54 - 890 = -350 vs
+    # 11 x 54 - 946.67 = -352.67, so no decryptor.
+    prices = {**_DECRYPTOR_PRICES, 5002: 60.0}
+    gross = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE], prices=prices)[5002]["manufacturing_job"]
+    net = _decryptor_overview(
+        monkeypatch, [_ACCELERANT_LIKE], prices=prices, fee_context=_fees(0.05, 0.05),
+    )[5002]["manufacturing_job"]
+
+    assert gross["invention_decryptor"]["type_id"] == 34201
+    choice = net["invention_decryptor"]
+    assert choice["type_id"] is None
+    assert choice["criterion"] == "profit_per_cycle"
+    assert choice["baseline_profit_per_cycle"] == pytest.approx(10 * 60 * 0.9 - 890)
+    assert choice["candidates"][1]["profit_per_cycle"] == pytest.approx(11 * 60 * 0.9 - _ACC_CYCLE_COST)
+
+
+def test_a_broker_fee_that_does_not_apply_is_not_deducted(monkeypatch) -> None:
+    # Instant sale (buy side): only the 5% tax. 10 x 57 - 890 = -320 vs
+    # 11 x 57 - 946.67 = -319.67, so Accelerant.
+    mj = _decryptor_overview(
+        monkeypatch, [_ACCELERANT_LIKE], prices={**_DECRYPTOR_PRICES, 5002: 60.0},
+        fee_context=_fees(0.05, 0.05, applies=False),
+    )[5002]["manufacturing_job"]
+    assert mj["invention_decryptor"]["profit_per_cycle"] == pytest.approx(11 * 57 - _ACC_CYCLE_COST)
+    assert mj["invention_decryptor"]["type_id"] == 34201
+
+
+def test_an_unknown_sales_tax_falls_back_to_cost_per_unit_and_names_the_fees(monkeypatch) -> None:
+    mj = _decryptor_overview(
+        monkeypatch, [_ACCELERANT_LIKE], prices={**_DECRYPTOR_PRICES, 5002: 500.0},
+        fee_context=_fees(None, None),
+    )[5002]["manufacturing_job"]
+
+    choice = mj["invention_decryptor"]
+    assert choice["type_id"] == 34201  # cheapest per unit
+    assert choice["criterion"] == "cost_per_unit"
+    assert choice["fallback_reason"] == (
+        "sales tax unknown (no character to read Accounting from), so net proceeds are unknown: "
+        "chose lowest cost per unit"
+    )
+
+
+def test_the_market_fee_context_is_resolved_once_per_refresh(monkeypatch) -> None:
+    service = _decryptor_service(monkeypatch, [_ACCELERANT_LIKE], prices={**_DECRYPTOR_PRICES, 5002: 500.0})
+    calls: list[dict] = []
+    service._resolve_npc_market_fee_context = MethodType(  # type: ignore[attr-defined]
+        lambda self, **kwargs: (calls.append(kwargs), _fees(0.05, 0.05))[1], service,
+    )
+    # The real sale-proceeds step, so it must reuse the planning context's fees.
+    service._enrich_product_rows_with_sale_proceeds = MethodType(  # type: ignore[attr-defined]
+        IndustryService._enrich_product_rows_with_sale_proceeds, service,
+    )
+    rows = {r["type_id"]: r for r in service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=True, character_id=1,
+    )}
+    assert calls == [{"character_id": 1, "market_hub": "jita", "product_price_side": "sell"}]
+    assert rows[5002]["net_proceeds"] == pytest.approx(10 * 500 * 0.9)
+
+
+def test_a_candidate_without_a_cost_says_why(monkeypatch) -> None:
+    # M4: Tritanium has no price, so no candidate has a comparable cost.
+    prices = {k: v for k, v in _DECRYPTOR_PRICES.items() if k != 34}
+    mj = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE], prices=prices)[5002]["manufacturing_job"]
+    candidates = mj["invention_decryptor"]["candidates"]
+    assert [c["skip_reason"] for c in candidates] == ["an input has no price: Tritanium"] * 2
+
+    rows = _rows_with(probability_pct=0.0, bpc_runs=10, t2_limit=10)
+    mj = _decryptor_overview(
+        monkeypatch, [_ACCELERANT_LIKE], blueprint_rows=rows, adm_overrides={"invention_probability_floor": 0.0},
+    )[5002]["manufacturing_job"]
+    assert mj["invention_decryptor"]["candidates"][0]["skip_reason"] == (
+        "invention cost unknown: no invention success probability (SDE and admin floor are both 0)"
+    )
+
+
+# --- Task 3 fix round 1, I2: later batches share invented BPC runs ------------
+# Damage Control II (public SDE data: 2047 invents 2049 at 34%, 10 runs per
+# BPC, 2 + 2 datacores per attempt). FAKE prices. 10-run batches.
+
+
+def _m(type_id, name, quantity):
+    return {"type_id": type_id, "type_name": name, "quantity": quantity, "category_name": "Material"}
+
+
+def _dc2_rows() -> list[dict]:
+    return [
+        {"blueprint_type_id": 2047, "blueprint": {"type_id": 2047, "type_name": "Damage Control I Blueprint"},
+         "manufacturing_job": {"materials": [_m(34, "Tritanium", 1062), _m(35, "Pyerite", 2), _m(36, "Mexallon", 53)],
+                               "skill_entries": [], "time_seconds": 900, "max_production_limit": 200,
+                               "products": [{"type_id": 2046, "type_name": "Damage Control I", "quantity": 1,
+                                             "meta_group_name": "Tech I"}]},
+         "copying_job": {"time_seconds": 720},
+         "invention_job": {"materials": [_m(20416, "Datacore - Nanite Engineering", 2),
+                                         _m(20415, "Datacore - Molecular Engineering", 2)],
+                           "skill_entries": [], "time_seconds": 13800,
+                           "products": [{"probability_pct": 34.0, "quantity": 10,
+                                         "product": {"type_id": 2049, "type_name": "Damage Control II Blueprint"}}]}},
+        {"blueprint_type_id": 2049, "blueprint": {"type_id": 2049, "type_name": "Damage Control II Blueprint"},
+         "manufacturing_job": {"materials": [
+             _m(11553, "Oscillator Capacitor Unit", 1), _m(11399, "Morphite", 1), _m(3689, "Mechanical Parts", 5),
+             _m(11695, "Plasma Pulse Generator", 1), _m(11475, "R.A.M.- Armor/Hull Tech", 1),
+             _m(3828, "Construction Blocks", 3), _m(11542, "Fernite Carbide Composite Armor Plate", 1),
+             _m(11540, "Quantum Microprocessor", 1), _m(2046, "Damage Control I", 1)],
+             "skill_entries": [], "time_seconds": 2340, "max_production_limit": 10,
+             "products": [{"type_id": 2048, "type_name": "Damage Control II", "quantity": 1,
+                           "meta_group_name": "Tech II"}]}},
+    ]
+
+
+_DC2_FAKE_PRICES = {
+    34: 4.0, 35: 10.0, 36: 80.0, 2046: 30_000.0, 20416: 50_000.0, 20415: 50_000.0,
+    11553: 40_000.0, 11399: 10_000.0, 3689: 9_000.0, 11695: 30_000.0, 11475: 2_000.0, 3828: 9_000.0,
+    11542: 35_000.0, 11540: 45_000.0, 2048: 1_000_000.0, 34203: 250_000.0,
+}
+_AUGMENTATION = DecryptorOption(
+    type_id=34203, type_name="Augmentation Decryptor", probability_multiplier=0.6,
+    me_modifier=-2, te_modifier=2, max_run_modifier=9,
+)
+
+
+def _dc2_row(monkeypatch, options):
+    return _decryptor_overview(monkeypatch, options, prices=_DC2_FAKE_PRICES, blueprint_rows=_dc2_rows())[2048]
+
+
+def test_dc2_with_augmentation_buys_30_attempts_for_10_batches_not_50(monkeypatch) -> None:
+    # 19-run BPCs at p 0.204: 1 BPC = ceil(1 / 0.204) = 5 whole attempts.
+    # 10 batches x 10 runs = 100 runs = ceil(100 / 19) = 6 BPCs = 30 attempts
+    # (per-batch it was 10 x 5 = 50).
+    row = _dc2_row(monkeypatch, [_AUGMENTATION])
+    mj = row["manufacturing_job"]
+    assert mj["invention_decryptor"]["type_id"] == 34203
+    plan = mj["invention_bpc_plan"]
+    assert (plan["batch_runs"], plan["runs_per_invented_blueprint"], plan["whole_attempts_per_blueprint"]) == (10, 19, 5)
+    assert (plan["owned_blueprint_runs"], plan["batch_one_invented_blueprints"]) == (0, 1)
+
+    row["max_batches_total"] = 10
+    for type_id in (20416, 20415):
+        line = _shopping_line(row, type_id)
+        assert line is not None and (line["need"], line["buy"]) == (60, 60)  # 2 x 30 attempts
+    line = _shopping_line(row, 34203)
+    assert line is not None and (line["need"], line["buy"]) == (30, 30)
+
+
+def test_dc2_without_a_decryptor_buys_what_it_did_before(monkeypatch) -> None:
+    # 10-run BPCs at p 0.34: 1 BPC per batch, 3 attempts: 10 x 3 = 30 attempts.
+    row = _dc2_row(monkeypatch, [])
+    row["max_batches_total"] = 10
+    for type_id in (20416, 20415):
+        line = _shopping_line(row, type_id)
+        assert line is not None and (line["need"], line["buy"]) == (60, 60)
+    assert row["manufacturing_job"]["invention_procurement_materials_per_extra_batch"]["20416"]["quantity"] == 6
+
+
+def test_one_batch_buys_only_batch_ones_attempts(monkeypatch) -> None:
+    row = _dc2_row(monkeypatch, [_AUGMENTATION])
+    row["max_batches_total"] = 1
+    line = _shopping_line(row, 34203)
+    assert line is not None and (line["need"], line["buy"]) == (5, 5)

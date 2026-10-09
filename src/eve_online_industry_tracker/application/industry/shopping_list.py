@@ -152,28 +152,76 @@ _UNKNOWN_DATACORE_NEED_KEY = "invention_datacore_need_unknown"
 _EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch"
 
 
+_BPC_PLAN_KEY = "invention_bpc_plan"
+
+_NESTED_EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch_nested"
+
+
 def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple[Any, int]]:
     """Each material line of a row with the number of batches it is needed for.
 
     procurement_materials: the manufacturing job's buy list, every batch.
     invention_procurement_materials: the invention inputs (whole attempts) for
     batch 1, after the owned T2 BPC runs; absent when they cover batch 1.
-    invention_procurement_materials_per_extra_batch: the invention inputs for
-    one full batch with no owned BPC runs left, needed by batches 2..N; its
-    lines take nothing from stock. An overview cached before that list existed
-    lacks the key, and batch 1's invention list then counts for every batch.
+
+    Batches 2..N, with an ``invention_bpc_plan`` (I2): later batches share
+    invented BPC runs, so the row's own invention is sized over all batches
+    (see ``_later_batch_invention_lines``), and only the nested sub-builds'
+    inputs repeat per batch (the ``..._per_extra_batch_nested`` list).
+    Without the plan (unknown odds, or an older overview):
+    invention_procurement_materials_per_extra_batch, the inputs for one full
+    batch with no owned BPC runs left, once per later batch; its lines take
+    nothing from stock. An overview cached before that list existed lacks the
+    key, and batch 1's invention list then counts for every batch.
     """
     def lines(key: str) -> list[Any]:
         value = mj.get(key)
         return list(value.values()) if isinstance(value, dict) else []
 
     out: list[tuple[Any, int]] = [(mat, batches) for mat in lines("procurement_materials")]
-    if isinstance(mj.get(_EXTRA_BATCH_INVENTION_KEY), dict):
+    plan = mj.get(_BPC_PLAN_KEY)
+    if isinstance(plan, dict):
+        out.extend((mat, 1) for mat in lines("invention_procurement_materials"))
+        if batches > 1:
+            out.extend((mat, 1) for mat in _later_batch_invention_lines(plan, batches))
+            out.extend((mat, batches - 1) for mat in lines(_NESTED_EXTRA_BATCH_INVENTION_KEY))
+    elif isinstance(mj.get(_EXTRA_BATCH_INVENTION_KEY), dict):
         out.extend((mat, 1) for mat in lines("invention_procurement_materials"))
         if batches > 1:
             out.extend((mat, batches - 1) for mat in lines(_EXTRA_BATCH_INVENTION_KEY))
     else:
         out.extend((mat, batches) for mat in lines("invention_procurement_materials"))
+    return out
+
+
+def _later_batch_invention_lines(plan: dict[str, Any], batches: int) -> list[dict[str, Any]]:
+    """The row's own invention inputs for batches 2..N, sized over all batches.
+
+    BPCs needed for the whole order = ceil(max(0, batches x batch runs - owned
+    BPC runs) / runs per invented BPC); batch 1 already invented
+    ``batch_one_invented_blueprints`` of them (their leftover runs count). Each
+    further BPC is ``whole_attempts_per_blueprint`` whole attempts (ceil(1 /
+    chance)), so the datacore and decryptor lines scale together. Never less
+    than whole attempts per BPC, so never an under-buy on the expected model.
+    The lines take nothing from stock (stock is netted once over the list).
+    """
+    runs_per_bpc = max(1, int(plan.get("runs_per_invented_blueprint") or 1))
+    runs_to_invent = max(
+        0, batches * max(0, int(plan.get("batch_runs") or 0)) - max(0, int(plan.get("owned_blueprint_runs") or 0)),
+    )
+    bpcs_total = -(-runs_to_invent // runs_per_bpc)
+    later_bpcs = max(0, bpcs_total - max(0, int(plan.get("batch_one_invented_blueprints") or 0)))
+    attempts = later_bpcs * max(0, int(plan.get("whole_attempts_per_blueprint") or 0))
+    if attempts <= 0:
+        return []
+    out: list[dict[str, Any]] = []
+    per_attempt = plan.get("per_attempt_materials")
+    for mat in (per_attempt.values() if isinstance(per_attempt, dict) else []):
+        if not isinstance(mat, dict):
+            continue
+        quantity = int(mat.get("quantity") or 0) * attempts
+        if quantity > 0:
+            out.append({**mat, "quantity": quantity, "take_quantity": 0, "buy_quantity": quantity})
     return out
 
 

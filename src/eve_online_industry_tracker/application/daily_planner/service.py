@@ -589,6 +589,14 @@ class DailyPlannerService:
                 overview_rows, extra_blueprint_type_ids=bpo_assets_by_type_id.keys()
             )
 
+        # The market-depth table holds the plan's product types only, so the
+        # invention inputs (datacores, the producer's chosen decryptors) get
+        # their own hub prices, or the shopping list skips them as unpriced.
+        with _ComputeStep(self, "reading invention input prices"):
+            invention_input_prices = self._get_invention_input_prices(
+                overview_rows, blueprint_data, market_depth, hub,
+            )
+
         return {
             "corp_wallet": corp_wallet,
             "overview_rows": overview_rows,
@@ -601,6 +609,7 @@ class DailyPlannerService:
             "sell_velocities": sell_velocities,
             "sell_velocity_unavailable": sell_velocity_unavailable,
             "market_depth_cache": market_depth,
+            "invention_input_prices": invention_input_prices,
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
             "trit_trend_7d": trit_trend_7d,
@@ -743,7 +752,11 @@ class DailyPlannerService:
         return self._shopping_list_builder.build(
             assigned_actions=assigned_actions,
             corp_assets=phase1["corp_assets"],
-            market_depth_cache=phase1["market_depth_cache"],
+            # Market depth first; the invention inputs' hub prices fill the
+            # types it does not hold (see _get_invention_input_prices).
+            market_depth_cache={
+                **(phase1.get("invention_input_prices") or {}), **phase1["market_depth_cache"],
+            },
             admin_settings=self._admin,
             blueprint_data=phase1["blueprint_data"],
             meta_resolver=self._meta_resolver,
@@ -1110,6 +1123,39 @@ class DailyPlannerService:
             return sde_blueprints.get_blueprint_manufacturing_data(sde_session, "en", list(bp_type_ids))
         finally:
             sde_session.close()
+
+    def _get_invention_input_prices(
+        self,
+        overview_rows: list[dict[str, Any]],
+        blueprint_data: dict[int, dict[str, Any]],
+        market_depth: dict[int, Any],
+        hub: str,
+    ) -> dict[int, dict[str, Any]]:
+        """{type_id: {"spot_sell_price": hub price}} for every invention input
+        the market-depth cache lacks: the SDE invention materials in
+        blueprint_data and each row's chosen decryptor
+        (manufacturing_job.invention_decryptor). A type without a hub price is
+        left out, so the shopping list still warns that it is unpriced."""
+        type_ids: set[int] = set()
+        for data in blueprint_data.values():
+            invention = data.get("invention") if isinstance(data, dict) else None
+            for mat in (invention.get("materials") or []) if isinstance(invention, dict) else []:
+                if isinstance(mat, dict) and int(mat.get("type_id") or 0) > 0:
+                    type_ids.add(int(mat["type_id"]))
+        for row in overview_rows:
+            decryptor = orow.get_invention_decryptor(row) if isinstance(row, dict) else None
+            if decryptor is not None:
+                type_ids.add(decryptor[0])
+        missing = sorted(t for t in type_ids if t not in market_depth)
+        if not missing:
+            return {}
+        prices = self._market_pricing.get_type_price_map(type_ids=missing, hub=hub, side="sell")
+        out: dict[int, dict[str, Any]] = {}
+        for type_id in missing:
+            unit_price = (prices.get(type_id) or {}).get("unit_price")
+            if isinstance(unit_price, (int, float)) and unit_price > 0:
+                out[type_id] = {"spot_sell_price": float(unit_price)}
+        return out
 
     def _index_blueprint_assets(
         self, corp_assets: list[Any]
