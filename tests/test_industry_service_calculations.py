@@ -1188,7 +1188,17 @@ def test_partly_owned_bpc_amortizes_only_the_missing_runs(monkeypatch) -> None:
     # 4 runs from the owned BPC, 6 invented: 2 x 100 x 6 / (0.5 x 10) = 240.
     assert mj["expected_invention_materials"]["204"]["invented_runs"] == 6
     assert mj["invention_material_cost"] == pytest.approx(240.0)
-    assert mj["material_cost"] == pytest.approx(10 * 10 * 5 + 240.0)
+    # D3: two jobs. 4 runs at the owned ME 0 = 40 Tritanium; 6 runs on the
+    # invented BPC at ME 2 = ceil(60 x 0.98) = 59. Was 100 at ME 0 for all 10.
+    assert mj["materials"]["34"]["quantity"] == 99
+    assert mj["material_cost"] == pytest.approx(99 * 5 + 240.0)
+    segments = mj["job_segments"]
+    assert [(s["runs"], s["blueprint_material_efficiency"], s["source"]) for s in segments] == [
+        (4, 0, "owned_blueprint_copy"), (6, 2, "invented_blueprint_copy"),
+    ]
+    assert [s["materials"]["34"] for s in segments] == [40, 59]
+    # Time per job: 4 x 100 s at TE 0, 6 x 100 s at TE 4 = 576.
+    assert mj["manufacturing_time_seconds"] == 400 + 576
 
 
 def test_owned_t2_bpo_row_has_no_invention_cost(monkeypatch) -> None:
@@ -1831,27 +1841,6 @@ def test_nested_sub_build_bought_in_batch_one_adds_no_extra_batch_datacores(monk
     mj = row["manufacturing_job"]
     assert "manufacturing:5002" not in mj["recursive_activity_breakdown"]
     assert "invention_procurement_materials_per_extra_batch" not in mj
-
-
-def test_nested_partly_owned_bpc_invents_the_built_runs_for_later_batches(monkeypatch) -> None:
-    # 10 parent runs need 10 components. A 4-run owned 9002 BPC (no T2 BPO)
-    # builds 4 and the other 6 are bought, in every batch alike. Later batches
-    # build those 4 runs without the BPC: 4 / 10 per BPC -> 1 BPC, p 0.5 ->
-    # 2 whole attempts x 2 = 4 datacores per extra batch.
-    row = _invention_overview(
-        monkeypatch, maximize_bp_runs=True, blueprint_rows=_nested_invention_blueprint_rows(),
-        prices=_NESTED_FAKE_PRICES, owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
-    )[7100]
-    mj = row["manufacturing_job"]
-    assert mj["runs"] == 10
-    assert mj["recursive_activity_breakdown"]["manufacturing:5002"]["quantity"] == 4
-    assert mj["procurement_materials"]["5002"]["quantity"] == 6
-    assert "invention_procurement_materials" not in mj
-    assert mj["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 4
-
-    row["max_batches_total"] = 3
-    line = _shopping_line(row, 204)
-    assert line is not None and (line["need"], line["buy"]) == (8, 8)
 
 
 # --- round 4 Task I R3: unknown odds past an owned BPC are flagged, never 0 ----
@@ -2737,3 +2726,94 @@ def test_one_batch_buys_only_batch_ones_attempts(monkeypatch) -> None:
     row["max_batches_total"] = 1
     line = _shopping_line(row, 34203)
     assert line is not None and (line["need"], line["buy"]) == (5, 5)
+
+
+# --- round 5 Task 4: a partly owned BPC batch is two jobs (D3) ----------------
+
+
+def _owned_t2_bpo(*, me: int, te: int, item_id: int = 95) -> SimpleNamespace:
+    return SimpleNamespace(
+        type_id=9002, item_id=item_id, is_blueprint_copy=False,
+        blueprint_material_efficiency=me, blueprint_time_efficiency=te, blueprint_runs=None,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+
+
+def test_the_runs_past_an_owned_bpc_are_copied_from_the_bpo_at_its_me(monkeypatch) -> None:
+    service = _invention_service(monkeypatch)
+    bpc = _owned_t2_bpc(runs=4, item_id=96)
+    bpo = _owned_t2_bpo(me=10, te=20)
+    service._get_owned_blueprint_assets = MethodType(  # type: ignore[attr-defined]
+        lambda self, *, owned_blueprints_scope: ([bpc], [bpo], {}, {}, {}), service,
+    )
+    ctx = _planning_context(service)
+    t2_row = _invented_t2_blueprint_rows()[1]
+    row = service._build_single_product_row(
+        ctx, row=t2_row, raw_product=t2_row["manufacturing_job"]["products"][0],
+        row_index=1, product_index=1, blueprint_copy_assets=[bpc],
+        blueprint_original_asset=None, effective_runs=10,
+    )
+    assert row is not None
+    mj = row["manufacturing_job"]
+
+    # 4 runs at ME 0 = 40; 6 copied runs at the BPO's ME 10 = ceil(60 x 0.9) = 54.
+    assert mj["materials"]["34"]["quantity"] == 94
+    assert [s["source"] for s in mj["job_segments"]] == ["owned_blueprint_copy", "copied_from_owned_blueprint_original"]
+    # Time: 4 x 100 s at TE 0 = 400; 6 x 100 s at TE 20 = 480.
+    assert [s["duration_seconds"] for s in mj["job_segments"]] == [400, 480]
+    assert mj["manufacturing_time_seconds"] == 880
+
+
+def test_a_fully_covered_batch_is_one_job(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}))[5002]["manufacturing_job"]
+    assert len(mj["job_segments"]) == 1
+    assert mj["job_segments"][0]["materials"] == {"34": 10}
+
+
+def test_a_nested_partly_owned_bpc_invents_the_rest_as_a_second_job(monkeypatch) -> None:
+    # 10 parent runs need 10 components. A 4-run owned 9002 BPC (no BPO)
+    # builds 4 at ME 0, and the other 6 are a second job on an invented BPC
+    # (was: bought). Tritanium 40 + ceil(60 x 0.98) = 59.
+    # Invention for 6 runs: ceil(6 / 10) = 1 BPC, ceil(1 / 0.5) = 2 attempts, 4 datacores.
+    row = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices=_NESTED_FAKE_PRICES, owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
+    )[7100]
+    mj = row["manufacturing_job"]
+
+    assert mj["recursive_activity_breakdown"]["manufacturing:5002"]["quantity"] == 10
+    assert "5002" not in mj["procurement_materials"]
+    assert mj["procurement_materials"]["34"]["quantity"] == 99
+    assert mj["invention_procurement_materials"]["204"]["quantity"] == 4
+
+
+def test_a_nested_partly_owned_bpc_with_a_bpo_copies_the_rest_at_the_bpo_me(monkeypatch) -> None:
+    row = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=4)], [_owned_t2_bpo(me=10, te=20)], {}, {}, {}),
+    )[7100]
+    mj = row["manufacturing_job"]
+
+    assert mj["procurement_materials"]["34"]["quantity"] == 94  # 40 + ceil(60 x 0.9)
+    assert "invention_procurement_materials" not in mj
+
+
+def test_a_nested_partly_owned_bpc_with_unknown_odds_keeps_building_the_owned_runs(monkeypatch) -> None:
+    # p 0 and floor 0: the invented second job can't be costed, and an unknown
+    # invention cost makes the parent buy the whole child. So the D3 second
+    # job falls back to buying the 6 runs past the owned BPC, and the 4 owned
+    # runs are still built at ME 0 (40 Tritanium), not bought with the rest.
+    rows = _nested_invention_blueprint_rows(probability_pct=0.0)
+    row = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=rows, prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
+        adm_overrides={"invention_probability_floor": 0.0},
+    )[7100]
+    mj = row["manufacturing_job"]
+
+    assert mj["recursive_activity_breakdown"]["manufacturing:5002"]["quantity"] == 4
+    assert mj["procurement_materials"]["5002"]["quantity"] == 6
+    assert mj["procurement_materials"]["34"]["quantity"] == 40
+    assert "batches past the owned BPC runs" in mj["invention_cost_unknown_reason"]

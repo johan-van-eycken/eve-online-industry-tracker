@@ -4326,6 +4326,7 @@ class IndustryService:
         matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
         matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
         owned_copy_runs_used = 0
+        second_job: tuple[int, int, int] | None = None  # (runs, ME, TE) of a D3 second job
         missing_blueprint_copy_runs = 0
         invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
         has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
@@ -4341,6 +4342,29 @@ class IndustryService:
                     blueprint_source_kind = "owned_blueprint_copy"
                     if missing_blueprint_copy_runs > 0 and bool(matched_blueprint_originals):
                         include_copying_job = True
+                        # D3: the copied runs are a second job at the BPO's ME/TE.
+                        bpo = matched_blueprint_originals[0]
+                        second_job = (
+                            missing_blueprint_copy_runs,
+                            int(bpo.blueprint_material_efficiency or 0), int(bpo.blueprint_time_efficiency or 0),
+                        )
+                    elif missing_blueprint_copy_runs > 0 and has_invention_path and self._full_batch_invention_whole_attempts(
+                        invention_job=cast(dict[str, Any], (invention_source_row or {}).get("invention_job")),
+                        blueprint_type_id=blueprint_type_id, runs=missing_blueprint_copy_runs,
+                        max_production_limit=int(job.get("max_production_limit") or 0),
+                        adjusted_price_map=adjusted_market_price_map,
+                        decryptor=invention_context.decryptor_for_blueprint(blueprint_type_id),
+                        invention_context=invention_context,
+                    )[1] is None:
+                        # D3: the runs past the owned BPC are a second job on an
+                        # invented BPC (invented below), no longer bought. With
+                        # unknown odds that job can't be costed (the parent would
+                        # buy the whole child, owned runs too), so the branch
+                        # below keeps building the owned runs and buys the rest.
+                        second_job = (
+                            missing_blueprint_copy_runs,
+                            *invented_blueprint_efficiency(invention_context.decryptor_for_blueprint(blueprint_type_id)),
+                        )
                     elif missing_blueprint_copy_runs > 0:
                         runs = owned_copy_runs_used
                         planned_quantity = min(required_quantity, product_quantity_per_run * runs)
@@ -4395,6 +4419,23 @@ class IndustryService:
         material_reduction = _main_act.get("material_reduction", 0.0)
         time_reduction = _main_act["time_reduction"]
         cost_reduction = _main_act["cost_reduction"]
+        # (runs, material reduction, time reduction) per job: one job, or the
+        # owned-BPC job plus the D3 second job.
+        jobs = [(runs, material_reduction, time_reduction)]
+        if second_job is not None:
+            _second_act = self._compute_activity_job(
+                activity=activity, base_time_seconds=0, runs=0, process_value=None,
+                selected_industry_profile=selected_industry_profile,
+                selected_character_modifiers=selected_character_modifiers,
+                character_skill_levels_by_name=character_skill_levels_by_name,
+                manufacturing_group=manufacturing_group, required_skill_entries=required_skill_entries,
+                blueprint_material_efficiency=second_job[1], blueprint_time_efficiency=second_job[2],
+                installation_surcharge=None,
+            )
+            jobs = [
+                (runs - second_job[0], material_reduction, time_reduction),
+                (second_job[0], _second_act.get("material_reduction", 0.0), _second_act["time_reduction"]),
+            ]
 
         adjusted_material_entries: list[dict[str, Any]] = []
         base_material_entries: list[dict[str, Any]] = []
@@ -4402,9 +4443,12 @@ class IndustryService:
             material = dict(raw_material)
             quantity_per_run = int(material.get("quantity") or 0)
             base_total_quantity = quantity_per_run * runs
-            adjusted_total_quantity = self._round_material_quantity(
-                float(base_total_quantity) * max(0.0, 1.0 - material_reduction),
-                minimum_quantity=(runs if quantity_per_run > 0 else 0),
+            adjusted_total_quantity = sum(
+                self._round_material_quantity(
+                    float(quantity_per_run * job_runs) * max(0.0, 1.0 - job_material_reduction),
+                    minimum_quantity=(job_runs if quantity_per_run > 0 else 0),
+                )
+                for job_runs, job_material_reduction, _job_time_reduction in jobs
             )
             material["quantity_per_run"] = quantity_per_run
             material["base_quantity"] = base_total_quantity
@@ -4426,8 +4470,9 @@ class IndustryService:
             cost_reduction=cost_reduction,
             installation_surcharge=installation_surcharge,
         )
-        direct_duration_seconds = self._round_duration_seconds(
-            int(job.get("time_seconds") or 0) * runs * max(0.0, 1.0 - time_reduction)
+        direct_duration_seconds = sum(
+            self._round_duration_seconds(int(job.get("time_seconds") or 0) * job_runs * max(0.0, 1.0 - job_time_reduction))
+            for job_runs, _job_material_reduction, job_time_reduction in jobs
         )
 
         total_time_seconds = direct_duration_seconds
@@ -6575,6 +6620,39 @@ class IndustryService:
         if material_reduction is not None:
             result["material_reduction"] = material_reduction
         return result
+
+    @staticmethod
+    def _manufacturing_job_segments(
+        *,
+        effective_runs: int,
+        owned_copy_runs_used: int,
+        blueprint_source_kind: str,
+        material_efficiency: int,
+        time_efficiency: int,
+        second_source: tuple[int, int, str] | None,
+    ) -> list[dict[str, Any]]:
+        """The batch's manufacturing jobs, one per blueprint source (D3).
+
+        An owned BPC covering part of the batch is one job at its own ME/TE for
+        its runs, plus a second job for the rest on `second_source` = (ME, TE,
+        source): a copy of the owned BPO, or an invented BPC. Every other batch
+        is one job. Materials and time are rounded per job, as EVE does.
+        """
+        if (
+            blueprint_source_kind == "owned_blueprint_copy"
+            and second_source is not None
+            and 0 < int(owned_copy_runs_used) < int(effective_runs)
+        ):
+            second_me, second_te, second_kind = second_source
+            return [
+                {"runs": int(owned_copy_runs_used), "blueprint_material_efficiency": int(material_efficiency),
+                 "blueprint_time_efficiency": int(time_efficiency), "source": "owned_blueprint_copy"},
+                {"runs": int(effective_runs) - int(owned_copy_runs_used), "blueprint_material_efficiency": int(second_me),
+                 "blueprint_time_efficiency": int(second_te), "source": second_kind},
+            ]
+        return [{"runs": int(effective_runs), "blueprint_material_efficiency": int(material_efficiency),
+                 "blueprint_time_efficiency": int(time_efficiency), "source": blueprint_source_kind}]
+
     def _plan_activity_costs(
         self,
         ctx: _ProductPlanningContext,
@@ -7818,29 +7896,73 @@ class IndustryService:
                 blueprint_source_kind = "blueprint_sde_fallback"
                 include_sde_research_chain = True
 
+        # Owned BPC runs this batch uses, and the runs it still lacks.
+        available_target_copy_runs = int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) if bool(ctx.build_from_bpc) else 0
+        owned_target_copy_runs_used = min(max(0, available_target_copy_runs), effective_runs) if bool(ctx.build_from_bpc) else 0
+        if bool(ctx.build_from_bpc):
+            available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, available_target_copy_runs - owned_target_copy_runs_used)
+        missing_top_level_copy_runs = max(0, effective_runs - owned_target_copy_runs_used) if bool(ctx.build_from_bpc) else 0
+
         # Manufacturing costs via unified calculator (Step 2)
         manufacturing_group = self._infer_manufacturing_group(compact_product)
-        mfg_costs = self._plan_activity_costs(
-            ctx, activity="manufacturing",
-            base_time_seconds=int(manufacturing_job.get("time_seconds") or 0),
-            runs=effective_runs, process_value=None,  # process_value computed below
-            manufacturing_group=manufacturing_group,
-            required_skill_entries=manufacturing_skill_entry_list,
-            blueprint_material_efficiency=blueprint_material_efficiency,
-            blueprint_time_efficiency=blueprint_time_efficiency,
+        # D3: a batch partly covered by an owned BPC is two jobs, each sized
+        # and timed at its own blueprint's ME/TE.
+        second_source: tuple[int, int, str] | None = None
+        if matched_blueprint_originals:
+            bpo = matched_blueprint_originals[0]
+            second_source = (
+                int(bpo.blueprint_material_efficiency or 0), int(bpo.blueprint_time_efficiency or 0),
+                "copied_from_owned_blueprint_original",
+            )
+        elif has_top_level_invention_path:
+            second_source = (*invented_blueprint_efficiency(decryptor), "invented_blueprint_copy")
+        job_segments = self._manufacturing_job_segments(
+            effective_runs=effective_runs, owned_copy_runs_used=owned_target_copy_runs_used,
+            blueprint_source_kind=blueprint_source_kind,
+            material_efficiency=blueprint_material_efficiency, time_efficiency=blueprint_time_efficiency,
+            second_source=second_source,
         )
+        base_manufacturing_time = int(manufacturing_job.get("time_seconds") or 0)
+        segment_costs = [
+            self._plan_activity_costs(
+                ctx, activity="manufacturing", base_time_seconds=base_manufacturing_time,
+                runs=int(segment["runs"]), process_value=None,  # process_value computed below
+                manufacturing_group=manufacturing_group,
+                required_skill_entries=manufacturing_skill_entry_list,
+                blueprint_material_efficiency=int(segment["blueprint_material_efficiency"]),
+                blueprint_time_efficiency=int(segment["blueprint_time_efficiency"]),
+            )
+            for segment in job_segments
+        ]
+        for segment, segment_cost in zip(job_segments, segment_costs):
+            segment["material_reduction"] = float(segment_cost.get("material_reduction", 0.0))
+            segment["time_reduction"] = float(segment_cost["time_reduction"])
+            segment["duration_seconds"] = self._round_duration_seconds(
+                base_manufacturing_time * int(segment["runs"]) * max(0.0, 1.0 - segment["time_reduction"])
+            )
+            segment["materials"] = {}
+        mfg_costs = segment_costs[0]
         manufacturing_material_reduction = mfg_costs.get("material_reduction", 0.0)
         manufacturing_time_reduction = mfg_costs["time_reduction"]
         manufacturing_cost_reduction = mfg_costs["cost_reduction"]
 
-        # Material adjustment
+        # Material adjustment, per job (one ceiling per job, never per run).
         base_material_entries: list[dict[str, Any]] = []
         adjusted_material_entries: list[dict[str, Any]] = []
         for raw_mat in [dict(e) for e in (manufacturing_job.get("materials") or [])]:
             mat = self._compact_material_entry(raw_mat)
             qty_per_run = int(mat.get("quantity") or 0)
             base_total = qty_per_run * effective_runs
-            adjusted_total = self._round_material_quantity(float(base_total) * max(0.0, 1.0 - manufacturing_material_reduction), minimum_quantity=(effective_runs if qty_per_run > 0 else 0))
+            adjusted_total = 0
+            for segment in job_segments:
+                segment_runs = int(segment["runs"])
+                segment_quantity = self._round_material_quantity(
+                    float(qty_per_run * segment_runs) * max(0.0, 1.0 - segment["material_reduction"]),
+                    minimum_quantity=(segment_runs if qty_per_run > 0 else 0),
+                )
+                if segment_quantity > 0:
+                    segment["materials"][str(int(mat.get("type_id") or 0))] = segment_quantity
+                adjusted_total += segment_quantity
             mat["quantity_per_run"] = qty_per_run
             mat["base_quantity"] = base_total
             mat["quantity"] = adjusted_total
@@ -7857,7 +7979,7 @@ class IndustryService:
         # Recompute manufacturing job cost with actual process value
         manufacturing_cost_index = self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="manufacturing")
         manufacturing_job_cost = self._job_cost_total(process_value=base_material_eiv_total, cost_index=manufacturing_cost_index, cost_reduction=manufacturing_cost_reduction, installation_surcharge=ctx.installation_surcharge)
-        direct_manufacturing_time_seconds = self._round_duration_seconds(int(manufacturing_job.get("time_seconds") or 0) * effective_runs * max(0.0, 1.0 - manufacturing_time_reduction))
+        direct_manufacturing_time_seconds = sum(int(segment["duration_seconds"]) for segment in job_segments)
 
         # Activity breakdown
         activity_breakdown: dict[str, Any] = {
@@ -7878,11 +8000,6 @@ class IndustryService:
         top_level_procurement_materials = cast(list[dict[str, Any]], [*adjusted_material_entries])
 
         # BPC allocation + prerequisite handling
-        available_target_copy_runs = int(available_blueprint_copy_runs_by_type_id.get(blueprint_type_id, 0)) if bool(ctx.build_from_bpc) else 0
-        owned_target_copy_runs_used = min(max(0, available_target_copy_runs), effective_runs) if bool(ctx.build_from_bpc) else 0
-        if bool(ctx.build_from_bpc):
-            available_blueprint_copy_runs_by_type_id[blueprint_type_id] = max(0, available_target_copy_runs - owned_target_copy_runs_used)
-        missing_top_level_copy_runs = max(0, effective_runs - owned_target_copy_runs_used) if bool(ctx.build_from_bpc) else 0
         requires_copying_job = bool(include_copying_job) and missing_top_level_copy_runs > 0
         requires_invention_chain = missing_top_level_copy_runs > 0 and not matched_blueprint_originals
         owned_top_level_copy_allocations = self._allocate_owned_blueprint_copy_run_usage(blueprint_copy_assets, requested_runs=owned_target_copy_runs_used, available_total_runs=owned_target_copy_runs_used)
@@ -8228,6 +8345,7 @@ class IndustryService:
                 "elapsed_time_seconds": elapsed_time_seconds,
                 "max_production_limit": max_production_limit,
                 "runs": effective_runs,
+                "job_segments": job_segments,
                 "product_quantity_per_run": product_quantity_per_run,
                 "material_reduction": manufacturing_material_reduction,
                 "time_reduction": manufacturing_time_reduction,
