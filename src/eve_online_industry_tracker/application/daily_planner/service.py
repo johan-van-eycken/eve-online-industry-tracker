@@ -187,6 +187,23 @@ class _ComputeStep:
         return False
 
 
+def _has_depth_price(entry: Any) -> bool:
+    """Whether a market-depth entry carries a price the shopping list reads."""
+    return entry is not None and (
+        _get_attr(entry, "vwap_5d") is not None or _get_attr(entry, "spot_sell_price") is not None
+    )
+
+
+def _merge_price_sources(market_depth: dict[int, Any], hub_prices: dict[int, Any]) -> dict[int, Any]:
+    """Market depth wins; a hub price fills a type depth lacks or holds
+    without any price."""
+    merged = dict(hub_prices)
+    for type_id, entry in market_depth.items():
+        if _has_depth_price(entry) or type_id not in merged:
+            merged[type_id] = entry
+    return merged
+
+
 class DailyPlannerService:
     """Orchestrate plan computation (Phases 1–9) in a background thread."""
 
@@ -589,11 +606,12 @@ class DailyPlannerService:
                 overview_rows, extra_blueprint_type_ids=bpo_assets_by_type_id.keys()
             )
 
-        # The market-depth table holds the plan's product types only, so the
-        # invention inputs (datacores, the producer's chosen decryptors) get
-        # their own hub prices, or the shopping list skips them as unpriced.
-        with _ComputeStep(self, "reading invention input prices"):
-            invention_input_prices = self._get_invention_input_prices(
+        # The market-depth table holds the plan's product types only, so every
+        # other type the shopping list can buy (materials, components,
+        # datacores, decryptors) gets its own hub price, or the list would skip
+        # it as unpriced.
+        with _ComputeStep(self, "reading material prices"):
+            material_prices = self._get_material_prices(
                 overview_rows, blueprint_data, market_depth, hub,
             )
 
@@ -609,7 +627,7 @@ class DailyPlannerService:
             "sell_velocities": sell_velocities,
             "sell_velocity_unavailable": sell_velocity_unavailable,
             "market_depth_cache": market_depth,
-            "invention_input_prices": invention_input_prices,
+            "material_prices": material_prices,
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
             "trit_trend_7d": trit_trend_7d,
@@ -752,11 +770,11 @@ class DailyPlannerService:
         return self._shopping_list_builder.build(
             assigned_actions=assigned_actions,
             corp_assets=phase1["corp_assets"],
-            # Market depth first; the invention inputs' hub prices fill the
-            # types it does not hold (see _get_invention_input_prices).
-            market_depth_cache={
-                **(phase1.get("invention_input_prices") or {}), **phase1["market_depth_cache"],
-            },
+            # Market depth first; hub prices fill the types it does not price
+            # (see _get_material_prices).
+            market_depth_cache=_merge_price_sources(
+                phase1["market_depth_cache"], phase1.get("material_prices") or {},
+            ),
             admin_settings=self._admin,
             blueprint_data=phase1["blueprint_data"],
             meta_resolver=self._meta_resolver,
@@ -1124,29 +1142,42 @@ class DailyPlannerService:
         finally:
             sde_session.close()
 
-    def _get_invention_input_prices(
+    def _get_material_prices(
         self,
         overview_rows: list[dict[str, Any]],
         blueprint_data: dict[int, dict[str, Any]],
         market_depth: dict[int, Any],
         hub: str,
     ) -> dict[int, dict[str, Any]]:
-        """{type_id: {"spot_sell_price": hub price}} for every invention input
-        the market-depth cache lacks: the SDE invention materials in
-        blueprint_data and each row's chosen decryptor
-        (manufacturing_job.invention_decryptor). A type without a hub price is
-        left out, so the shopping list still warns that it is unpriced."""
+        """{type_id: {"spot_sell_price": hub price}} for every type the
+        shopping list can buy that market depth does not price:
+
+        - the SDE manufacturing materials of every blueprint in
+          blueprint_data (the overview blueprints and the owned BPOs, so
+          sub_manufacture is covered);
+        - the SDE invention materials there, and each row's chosen decryptor
+          (manufacturing_job.invention_decryptor);
+        - each overview row's producer batch materials (the manufacture
+          action's materials).
+
+        A depth entry with neither vwap_5d nor spot_sell_price counts as
+        absent. A type without a hub price is left out, so the shopping list
+        still warns that it is unpriced."""
         type_ids: set[int] = set()
         for data in blueprint_data.values():
-            invention = data.get("invention") if isinstance(data, dict) else None
-            for mat in (invention.get("materials") or []) if isinstance(invention, dict) else []:
-                if isinstance(mat, dict) and int(mat.get("type_id") or 0) > 0:
-                    type_ids.add(int(mat["type_id"]))
+            for activity in ("manufacturing", "invention"):
+                job = data.get(activity) if isinstance(data, dict) else None
+                for mat in (job.get("materials") or []) if isinstance(job, dict) else []:
+                    if isinstance(mat, dict) and int(mat.get("type_id") or 0) > 0:
+                        type_ids.add(int(mat["type_id"]))
         for row in overview_rows:
-            decryptor = orow.get_invention_decryptor(row) if isinstance(row, dict) else None
+            if not isinstance(row, dict):
+                continue
+            decryptor = orow.get_invention_decryptor(row)
             if decryptor is not None:
                 type_ids.add(decryptor[0])
-        missing = sorted(t for t in type_ids if t not in market_depth)
+            type_ids.update((orow.get_batch_materials(row) or {}).keys())
+        missing = sorted(t for t in type_ids if not _has_depth_price(market_depth.get(t)))
         if not missing:
             return {}
         prices = self._market_pricing.get_type_price_map(type_ids=missing, hub=hub, side="sell")

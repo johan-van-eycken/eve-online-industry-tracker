@@ -367,22 +367,23 @@ class DecryptorChoice:
 def _pick(
     evaluations: tuple[DecryptorEvaluation, ...], metric: Callable[[DecryptorEvaluation], float | None],
     *, higher_is_better: bool,
-) -> tuple[DecryptorEvaluation | None, float]:
-    """The best decryptor (never NO_DECRYPTOR) on `metric` and its metric
-    value. Decryptors within DECRYPTOR_TIE_TOLERANCE_ISK of the best value are
-    a tie, which goes to the lowest type id. Candidates with a skip reason or
+) -> tuple[DecryptorEvaluation | None, float, float]:
+    """(the chosen decryptor (never NO_DECRYPTOR), its own metric value, the
+    best metric value). Decryptors within DECRYPTOR_TIE_TOLERANCE_ISK of the
+    best value are a tie, which goes to the lowest type id; the comparison
+    against no decryptor uses the best value. Candidates with a skip reason or
     an unknown metric are left out."""
     priced = [
         e for e in evaluations
         if e.option.type_id is not None and e.skip_reason is None and metric(e) is not None
     ]
     if not priced:
-        return None, 0.0
+        return None, 0.0, 0.0
     sign = -1.0 if higher_is_better else 1.0
     top = min(sign * float(metric(e) or 0.0) for e in priced)
     tied = [e for e in priced if sign * float(metric(e) or 0.0) <= top + DECRYPTOR_TIE_TOLERANCE_ISK]
     best = min(tied, key=lambda e: int(e.option.type_id or 0))
-    return best, float(metric(best) or 0.0)
+    return best, float(metric(best) or 0.0), sign * top
 
 
 def select_best_decryptor(evaluations: Iterable[DecryptorEvaluation]) -> DecryptorChoice:
@@ -415,8 +416,8 @@ def select_best_decryptor(evaluations: Iterable[DecryptorEvaluation]) -> Decrypt
     base_cost = float(baseline.cost_per_unit)
     if baseline.profit_per_cycle is not None:
         base_profit = float(baseline.profit_per_cycle)
-        best, best_profit = _pick(evaluations, lambda e: e.profit_per_cycle, higher_is_better=True)
-        if best is None or best_profit <= base_profit + DECRYPTOR_TIE_TOLERANCE_ISK:
+        best, best_profit, top_profit = _pick(evaluations, lambda e: e.profit_per_cycle, higher_is_better=True)
+        if best is None or top_profit <= base_profit + DECRYPTOR_TIE_TOLERANCE_ISK:
             detail = (
                 f"; best decryptor {best.option.type_name} {best_profit:,.2f} ISK"
                 if best is not None else "; no decryptor could be priced"
@@ -433,8 +434,8 @@ def select_best_decryptor(evaluations: Iterable[DecryptorEvaluation]) -> Decrypt
             best.cost_per_unit, base_cost, evaluations, best_profit, base_profit, PROFIT_PER_CYCLE_CRITERION,
         )
     fallback = baseline.profit_unknown_reason or SELL_PRICE_UNKNOWN_FALLBACK_REASON
-    best, best_cost = _pick(evaluations, lambda e: e.cost_per_unit, higher_is_better=False)
-    if best is None or best_cost >= base_cost - DECRYPTOR_TIE_TOLERANCE_ISK:
+    best, best_cost, top_cost = _pick(evaluations, lambda e: e.cost_per_unit, higher_is_better=False)
+    if best is None or top_cost >= base_cost - DECRYPTOR_TIE_TOLERANCE_ISK:
         detail = (
             f"; best decryptor {best.option.type_name} {best_cost:,.2f} ISK"
             if best is not None else "; no decryptor could be priced"

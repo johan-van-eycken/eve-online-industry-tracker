@@ -266,3 +266,92 @@ def test_an_unpriced_invention_input_still_warns(session_provider, planner_repo,
     assert any(
         "skipping invention input type_id=34201" in r.getMessage() for r in caplog.records
     )
+
+
+# --- round 5 Task 3 fix round 2: every buyable material is priced in phase 1 --
+# FAKE prices. A mineral (Tritanium) from the producer's batch materials and a
+# component (Intact Armor Plates 25624) from an owned BPO's SDE materials are
+# both outside the market-depth table; a depth row without any price must not
+# block the spot fill either.
+
+
+def _material_planner(session_provider, planner_repo, tmp_path, *, prices):
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    row = {
+        **GOOD_ROW,
+        "manufacturing_job": {
+            **GOOD_ROW["manufacturing_job"],
+            "blueprint_sde": {"blueprint_type_id": 999},
+            "materials": {"34": {"type_id": 34, "type_name": "Tritanium", "quantity": 500}},
+        },
+    }
+    asked: list[list[int]] = []
+
+    def get_type_price_map(*, type_ids, hub="jita", side="sell", progress_callback=None):
+        asked.append(sorted(type_ids))
+        return {int(t): {"unit_price": prices[int(t)]} for t in type_ids if int(t) in prices}
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [row]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+    # The SDE read only: blueprint 999 builds the row's product; owned BPO
+    # 7777 builds a component from Intact Armor Plates.
+    svc._get_blueprint_data = lambda rows, extra_blueprint_type_ids=(): {
+        999: {"manufacturing": {"materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 50}],
+                                "products": [{"type_id": GOOD_ROW["type_id"], "quantity": 1}]}},
+        7777: {"manufacturing": {"materials": [{"type_id": 25624, "type_name": "Intact Armor Plates", "quantity": 120}],
+                                 "products": [{"type_id": 7778, "quantity": 1}]}},
+    }
+    # A depth row with neither vwap_5d nor spot_sell_price for Tritanium.
+    real_depth = svc._repo.get_market_depth
+    svc._repo = SimpleNamespace(**{
+        name: getattr(planner_repo, name) for name in dir(planner_repo) if not name.startswith("__")
+    })
+    svc._repo.get_market_depth = lambda type_ids, hub: {
+        **real_depth(type_ids, hub), 34: SimpleNamespace(vwap_5d=None, spot_sell_price=None),
+    }
+
+    def action(action_type, type_id, materials):
+        return AssignedAction(
+            type_id=type_id, type_name=str(type_id), action_type=action_type, character_id=1,
+            character_name="Pilot", quantity=None, runs=1, estimated_cost_isk=None, estimated_profit_isk=None,
+            estimated_completion=None, notes=None, materials=materials,
+        )
+
+    actions = [
+        action("manufacture", GOOD_ROW["type_id"], {34: 500}),
+        action("sub_manufacture", 7778, None),
+    ]
+    return svc, actions, asked
+
+
+def test_phase_1_prices_minerals_and_components_so_they_are_bought(session_provider, planner_repo, tmp_path):
+    svc, actions, asked = _material_planner(
+        session_provider, planner_repo, tmp_path, prices={34: 4.0, 25624: 2_000.0},
+    )
+    phase1 = svc._phase_1_collect()
+
+    assert asked == [[34, 25624]]
+    items = {i.type_id: i for i in svc._phase_7_shopping(actions, phase1)}
+    assert (items[34].quantity, items[34].estimated_unit_price) == (500, 4.0)
+    assert (items[25624].quantity, items[25624].estimated_unit_price) == (120, 2_000.0)
+
+
+def test_a_material_with_no_hub_price_still_warns(session_provider, planner_repo, tmp_path, caplog):
+    svc, actions, _ = _material_planner(session_provider, planner_repo, tmp_path, prices={34: 4.0})
+    phase1 = svc._phase_1_collect()
+    with caplog.at_level(logging.WARNING):
+        items = {i.type_id: i for i in svc._phase_7_shopping(actions, phase1)}
+
+    assert 34 in items and 25624 not in items
+    assert any("skipping material type_id=25624" in r.getMessage() for r in caplog.records)

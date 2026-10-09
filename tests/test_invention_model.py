@@ -398,3 +398,20 @@ def test_unknown_market_fees_fall_back_with_a_reason_that_names_them():
     assert choice.criterion == im.COST_PER_UNIT_CRITERION
     assert choice.fallback_reason == why
     assert choice.reason.endswith("; " + why)
+
+
+def test_the_no_decryptor_check_uses_the_best_metric_not_the_tied_lower_id():
+    # Fix round 2 (M7): 34201 beats no decryptor by 0.015 (outside the
+    # tolerance); 34200 is within the tolerance of 34201, so it is the pick.
+    # The no-decryptor check must use the best value (500.015), not 34200's
+    # own 500.006, which alone would be a tie with no decryptor.
+    twin = im.DecryptorOption(34200, "Twin", 1.2, 2, 10, 1)
+    by_profit = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0, 500.0), _ev(_ACC, 80.0, 500.015), _ev(twin, 80.0, 500.006),
+    ])
+    assert by_profit.option is twin
+    assert by_profit.profit_per_cycle == 500.006  # the chosen decryptor's own figure
+    by_cost = im.select_best_decryptor([
+        _ev(im.NO_DECRYPTOR, 89.0), _ev(_ACC, 88.985), _ev(twin, 88.994),
+    ])
+    assert by_cost.option is twin and by_cost.cost_per_unit == 88.994
