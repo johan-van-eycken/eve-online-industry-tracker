@@ -165,7 +165,11 @@ class ChainPlanner:
         bpo_assets_by_type_id: dict[int, list] = phase1_data.get("bpo_assets_by_type_id", {})
         bpc_assets_by_type_id: dict[int, list] = phase1_data.get("bpc_assets_by_type_id", {})
         blueprint_data: dict[int, dict] = phase1_data.get("blueprint_data", {})
-        market_depth_cache: dict[int, Any] = phase1_data.get("market_depth_cache", {})
+        # Phase 1's merged price map (market depth, plus hub prices for the
+        # materials depth does not hold), the same source as the shopping list.
+        market_depth_cache: dict[int, Any] = phase1_data.get(
+            "price_map", phase1_data.get("market_depth_cache", {}),
+        )
         invention_success_rates: dict[int, float] = phase1_data.get("invention_success_rates", {})
         # Built once per plan: material requirements are product type_ids, but
         # BPO ownership and blueprint_data are keyed by blueprint type_id.
@@ -754,10 +758,11 @@ class ChainPlanner:
 
         vwap = _get_attr(entry, "vwap_5d")
         spot = _get_attr(entry, "spot_sell_price")
-        price = vwap or spot
+        # 0 or negative is no price, never a free material.
+        price = next((float(p) for p in (vwap, spot) if p is not None and float(p) > 0), None)
         if price is None:
             return None
-        return float(price) * quantity
+        return price * quantity
 
     def _analyze_bpo_investment(
         self,

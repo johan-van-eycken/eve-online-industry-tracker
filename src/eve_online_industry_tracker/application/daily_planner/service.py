@@ -187,10 +187,15 @@ class _ComputeStep:
         return False
 
 
+def _positive_price(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
 def _has_depth_price(entry: Any) -> bool:
-    """Whether a market-depth entry carries a price the shopping list reads."""
+    """Whether a market-depth entry carries a usable (> 0) vwap_5d or
+    spot_sell_price; 0 or a negative value is no price."""
     return entry is not None and (
-        _get_attr(entry, "vwap_5d") is not None or _get_attr(entry, "spot_sell_price") is not None
+        _positive_price(_get_attr(entry, "vwap_5d")) or _positive_price(_get_attr(entry, "spot_sell_price"))
     )
 
 
@@ -614,6 +619,11 @@ class DailyPlannerService:
             material_prices = self._get_material_prices(
                 overview_rows, blueprint_data, market_depth, hub,
             )
+        # The ONE price source of phase 5 (build vs buy, BPO analysis) and
+        # phase 7 (shopping list). Prices only: market_depth_cache itself stays
+        # the raw depth rows for scoring, velocity, the snapshot hash and
+        # freshness, which read its other fields.
+        price_map = _merge_price_sources(market_depth, material_prices)
 
         return {
             "corp_wallet": corp_wallet,
@@ -628,6 +638,7 @@ class DailyPlannerService:
             "sell_velocity_unavailable": sell_velocity_unavailable,
             "market_depth_cache": market_depth,
             "material_prices": material_prices,
+            "price_map": price_map,
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
             "trit_trend_7d": trit_trend_7d,
@@ -770,11 +781,9 @@ class DailyPlannerService:
         return self._shopping_list_builder.build(
             assigned_actions=assigned_actions,
             corp_assets=phase1["corp_assets"],
-            # Market depth first; hub prices fill the types it does not price
-            # (see _get_material_prices).
-            market_depth_cache=_merge_price_sources(
-                phase1["market_depth_cache"], phase1.get("material_prices") or {},
-            ),
+            # Phase 1's merged price map (market depth first, hub prices for
+            # the rest), the same source phase 5 priced build vs buy with.
+            market_depth_cache=phase1.get("price_map", phase1["market_depth_cache"]),
             admin_settings=self._admin,
             blueprint_data=phase1["blueprint_data"],
             meta_resolver=self._meta_resolver,

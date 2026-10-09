@@ -370,12 +370,13 @@ class ShoppingListBuilder:
         if entry is None:
             return None, False
 
+        # 0 or negative is no price: fall through to the next one.
         vwap = _get_attr(entry, "vwap_5d")
-        if vwap is not None:
+        if vwap is not None and float(vwap) > 0:
             return float(vwap), True
 
         spot = _get_attr(entry, "spot_sell_price")
-        if spot is not None:
+        if spot is not None and float(spot) > 0:
             return float(spot), False
 
         return None, False

@@ -32,6 +32,8 @@ Phase 9's persisted plan, not the shopping/action lists).
 from __future__ import annotations
 
 import logging
+
+import pytest
 from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
@@ -355,3 +357,112 @@ def test_a_material_with_no_hub_price_still_warns(session_provider, planner_repo
 
     assert 34 in items and 25624 not in items
     assert any("skipping material type_id=25624" in r.getMessage() for r in caplog.records)
+
+
+# --- round 5 Task 3 fix round 3: one merged price map for phases 5 and 7 -----
+# FAKE prices. A T1 parent (12345) needs 10 x component 7778 per batch; the
+# corp owns BPO 7777 (ME 10) for it, 100 Tritanium per run. Depth holds only
+# the parent, so the component and the mineral are priced in phase 1. Build:
+# 10 runs x ceil(100 x 0.9) = 900 Tritanium x 4 = 3,600 < 10 x 1,000 = 10,000.
+
+
+def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_extra=None):
+    from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
+
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    row = {
+        **GOOD_ROW,
+        "manufacturing_job": {
+            **GOOD_ROW["manufacturing_job"],
+            "blueprint_sde": {"blueprint_type_id": 999},
+            "materials": {"7778": {"type_id": 7778, "type_name": "Component", "quantity": 10}},
+        },
+    }
+    prices = {34: 4.0, 7778: 1_000.0}
+
+    def get_type_price_map(*, type_ids, hub="jita", side="sell", progress_callback=None):
+        return {int(t): {"unit_price": prices[int(t)]} for t in type_ids if int(t) in prices}
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [row]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+    # SDE reads only (the in-memory SDE holds no blueprints or categories).
+    svc._get_blueprint_data = lambda rows, extra_blueprint_type_ids=(): {
+        999: {"max_production_limit": 100,
+              "manufacturing": {"materials": [{"type_id": 7778, "type_name": "Component", "quantity": 1}],
+                                "products": [{"type_id": GOOD_ROW["type_id"], "quantity": 1}]}},
+        7777: {"max_production_limit": 100,
+               "manufacturing": {"materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 100}],
+                                 "products": [{"type_id": 7778, "quantity": 1}]}},
+    }
+    svc._index_blueprint_assets = lambda assets: (
+        {7777: [SimpleNamespace(type_id=7777, blueprint_material_efficiency=10, blueprint_time_efficiency=20)]}, {},
+    )
+    if depth_extra:
+        real_depth = planner_repo.get_market_depth
+        svc._repo = SimpleNamespace(**{
+            name: getattr(planner_repo, name) for name in dir(planner_repo) if not name.startswith("__")
+        })
+        svc._repo.get_market_depth = lambda type_ids, hub: {**real_depth(type_ids, hub), **depth_extra}
+    decision = ItemDecision(
+        type_id=GOOD_ROW["type_id"], type_name="Parent", decision="build", decision_reason="test",
+        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
+        days_of_supply_current=1.0, effective_velocity=1.0, meta_group_id=1,
+        pipeline_stage="manufacturing", overview_row=row,
+    )
+    return svc, decision
+
+
+def _sub_action(sub):
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    (job,) = sub.overview_row["sub_job_batches"]
+    # What CharacterAssigner makes of the sub decision's one job.
+    return AssignedAction(
+        type_id=sub.type_id, type_name=sub.type_name, action_type="sub_manufacture", character_id=1,
+        character_name="Pilot", quantity=job["quantity"], runs=job["runs"], estimated_cost_isk=job["cost"],
+        estimated_profit_isk=None, estimated_completion=None, notes=None, materials=job["materials"],
+    )
+
+
+def test_a_component_whose_minerals_are_not_in_depth_is_sub_manufactured(session_provider, planner_repo, tmp_path):
+    svc, decision = _sub_manufacture_planner(session_provider, planner_repo, tmp_path)
+    phase1 = svc._phase_1_collect()
+    plan = svc._phase_5_chain([decision], phase1)
+
+    subs = [d for d in plan.decisions if d.is_sub_component]
+    assert [s.type_id for s in subs] == [7778]
+    assert subs[0].overview_row["sub_job_batches"][0]["cost"] == pytest.approx(900 * 4.0)
+
+    items = {i.type_id: i for i in svc._phase_7_shopping([_sub_action(subs[0])], phase1)}
+    assert (items[34].quantity, items[34].estimated_unit_price) == (900, 4.0)
+    # Phases 2-4 and 9 still see the raw depth map, unchanged.
+    assert 34 not in phase1["market_depth_cache"] and 34 in phase1["price_map"]
+
+
+def test_a_zero_depth_price_does_not_block_the_hub_price(session_provider, planner_repo, tmp_path):
+    # Tritanium has a depth row whose vwap_5d is 0.0 and spot is unknown.
+    svc, decision = _sub_manufacture_planner(
+        session_provider, planner_repo, tmp_path,
+        depth_extra={34: SimpleNamespace(vwap_5d=0.0, spot_sell_price=None)},
+    )
+    phase1 = svc._phase_1_collect()
+    assert phase1["price_map"][34] == {"spot_sell_price": 4.0}
+    plan = svc._phase_5_chain([decision], phase1)
+    (sub,) = [d for d in plan.decisions if d.is_sub_component]
+    items = {i.type_id: i for i in svc._phase_7_shopping([_sub_action(sub)], phase1)}
+    assert items[34].estimated_unit_price == 4.0
+
+
+def test_a_zero_vwap_falls_through_to_the_spot_price():
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+
+    assert ShoppingListBuilder()._get_price(34, {34: SimpleNamespace(vwap_5d=0.0, spot_sell_price=5.0)}) == (5.0, False)
