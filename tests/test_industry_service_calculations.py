@@ -1041,10 +1041,10 @@ def test_shopping_list_buys_datacores_once_for_an_invented_t2_row(monkeypatch) -
     assert row["manufacturing_job"]["invention_procurement_materials"]["204"]["quantity"] == 4
     assert 204 not in (orow.get_batch_materials(row) or {})
 
-    def action(action_type, materials=None):
+    def action(action_type, materials=None, runs=None):
         return AssignedAction(
             type_id=5002, type_name="T2 Module", action_type=action_type,
-            character_id=1, character_name="Pilot", quantity=None, runs=None,
+            character_id=1, character_name="Pilot", quantity=None, runs=runs,
             estimated_cost_isk=None, estimated_profit_isk=None,
             estimated_completion=None, notes=None, materials=materials,
         )
@@ -1077,14 +1077,20 @@ def test_shopping_list_buys_datacores_once_for_an_invented_t2_row(monkeypatch) -
             return default
 
     items = ShoppingListBuilder().build(
-        assigned_actions=[action("manufacture", orow.get_batch_materials(row)), action("invent")],
+        # The invent action carries the producer's whole attempts (A4: the
+        # best inventor's, CharacterAssigner sets them).
+        assigned_actions=[
+            action("manufacture", orow.get_batch_materials(row)),
+            action("invent", runs=orow.get_invention_costs(row)["whole_attempts"]),
+        ],
         corp_assets=[], market_depth_cache={34: {"vwap_5d": 5.0}, 204: {"vwap_5d": 100.0}},
         admin_settings=_Admin(), blueprint_data=blueprint_data, meta_resolver=_Resolver(),
     )
 
     datacores = [i for i in items if i.type_id == 204]
     assert len(datacores) == 1
-    assert datacores[0].quantity == 2  # one attempt, from the invent action only
+    # Whole attempts x 2, from the invent action only: the Portfolio line's 4.
+    assert datacores[0].quantity == 4
     assert datacores[0].shopping_category == "invention_input"
 
 
@@ -2531,7 +2537,7 @@ def test_the_planners_shopping_list_buys_one_decryptor_per_attempt() -> None:
 
     invent = AssignedAction(
         type_id=5002, type_name="T2 Module", action_type="invent", character_id=1, character_name="Pilot",
-        quantity=None, runs=None, estimated_cost_isk=None, estimated_profit_isk=None,
+        quantity=None, runs=1, estimated_cost_isk=None, estimated_profit_isk=None,
         estimated_completion=None, notes=None,
         decryptor_type_id=34201, decryptor_type_name="Accelerant Decryptor",
     )

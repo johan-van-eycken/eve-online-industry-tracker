@@ -9,7 +9,8 @@ datacore and decryptor buy and the invention cost follow that pilot.
 Fake numbers throughout. Base chance 30%, 20 invented runs, 10 runs per BPC
 (2 BPCs). Best inventor: science 5 + 5, encryption 5 -> factor 1 + 10/30 +
 5/40 = 1.458333. Weaker pilot: science 2 + 2, no encryption -> 1 + 4/30 =
-1.133333.
+1.133333. Per attempt: 2 x Datacore A, 2 x Datacore B, 1 decryptor. Market
+prices: datacores 100, decryptor 500. Datacore A is held at a FIFO cost of 50.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from eve_online_industry_tracker.application.daily_planner.shopping_list_builder
 SCIENCE_A, SCIENCE_B, ENCRYPTION = 11433, 11454, 21790
 DATACORE_A, DATACORE_B, DECRYPTOR = 20416, 20417, 34201
 BEST_ID, WEAK_ID = 1, 2
+BEST_FACTOR = 1 + 10 / 30 + 5 / 40
 
 BLUEPRINTS = {
     # T1 source blueprint 998 invents into T2 blueprint 1999 (makes product 12345).
@@ -84,7 +86,9 @@ def _best_inventor():
 
 
 def _weaker_pilot(skills=None):
+    # Laboratory Operation 1: two research slots (the invent and the copy action).
     entries = [_skill("Science A", 2, SCIENCE_A), _skill("Science B", 2, SCIENCE_B)] if skills is None else skills
+    entries = [*entries, _skill("Laboratory Operation", 1, 3406)]
     return {"character_id": WEAK_ID, "character_name": "Weaker", "skills": {"skills": entries}}
 
 
@@ -94,37 +98,67 @@ def _busy(character_id):
     return {"character_id": character_id, "activity_id": 8, "status": "active", "end_date": end}
 
 
-def _row(*, multiplier, decryptor=True, skills_unknown_reason=None, invention_costs=True):
-    """An overview row as the producer writes it, sized for the best inventor."""
-    best_factor = 1 + 10 / 30 + 5 / 40
-    best_p = min(1.0, 0.30 * best_factor * multiplier)
+def _row(*, multiplier=1.2, base=0.30, decryptor=True, skills_unknown_reason=None, plan="breakdown",
+         inventor=BEST_ID, best_factor=BEST_FACTOR, unpriced_b=False, t1_bpo=False):
+    """An overview row as the producer writes it, sized for the best inventor.
+
+    plan="breakdown": batch 1 invents (activity_breakdown.invention).
+    plan="bpc_plan": an owned T2 BPC covers batch 1, so only the later-batch
+    invention_bpc_plan is written. plan="unknown": the odds are unknown."""
+    best_p = min(1.0, base * (best_factor or 1.0) * multiplier)
     expected = 2 / best_p
     mj = {
         "runs": 20,
         "invention_chance": {
-            "base_probability": 0.30, "skill_factor": best_factor, "decryptor_multiplier": multiplier,
+            "base_probability": base, "skill_factor": best_factor, "decryptor_multiplier": multiplier,
             "probability": best_p, "effective_probability": best_p,
-            "inventor_character_id": BEST_ID,
+            "inventor_character_id": inventor,
             "science_skill_type_ids": [SCIENCE_A, SCIENCE_B], "encryption_skill_type_id": ENCRYPTION,
             "skills_unknown_reason": skills_unknown_reason, "note": None,
         },
-        # Amortized inputs at the best inventor's expected attempts: 9000 ISK, fee 1000 ISK.
-        "expected_invention_materials": {
-            str(DATACORE_A): {"type_id": DATACORE_A, "quantity": 2 * expected, "line_total": 4500.0},
-            str(DATACORE_B): {"type_id": DATACORE_B, "quantity": 2 * expected, "line_total": 4500.0},
-            # A nested sub-build's input: not this action's invention.
-            f"{DATACORE_A}@5555": {"type_id": DATACORE_A, "line_total": 99999.0, "invented_blueprint_type_id": 5555},
-        },
     }
-    if invention_costs:
+    if plan == "breakdown":
         mj["activity_breakdown"] = {"invention": {
             "runs": expected, "whole_attempts": math.ceil(2 / best_p - 1e-9),
             "invented_runs": 20, "runs_per_invented_blueprint": 10,
             "success_probability": best_p, "total_job_cost": 1000.0,
         }}
+        lines = {
+            # Held in stock: priced at its FIFO cost 50, below the market 100.
+            str(DATACORE_A): {"type_id": DATACORE_A, "quantity": 2 * expected, "quantity_per_attempt": 2,
+                              "unit_price": 50.0, "line_total": 100.0 * expected},
+            str(DATACORE_B): {"type_id": DATACORE_B, "quantity": 2 * expected, "quantity_per_attempt": 2,
+                              "unit_price": None if unpriced_b else 100.0,
+                              "line_total": None if unpriced_b else 200.0 * expected},
+            # A nested sub-build's input: not this action's invention.
+            f"{DATACORE_A}@5555": {"type_id": DATACORE_A, "quantity": 9.0, "unit_price": 100.0,
+                                    "line_total": 900.0, "invented_blueprint_type_id": 5555},
+        }
+        if decryptor:
+            lines[str(DECRYPTOR)] = {"type_id": DECRYPTOR, "quantity": expected, "quantity_per_attempt": 1,
+                                     "unit_price": 500.0, "line_total": 500.0 * expected}
+        mj["expected_invention_materials"] = lines
+    elif plan == "bpc_plan":
+        mj["invention_bpc_plan"] = {
+            "batch_runs": 20, "runs_per_invented_blueprint": 10,
+            "whole_attempts_per_blueprint": math.ceil(1 / best_p - 1e-9),
+            "owned_blueprint_runs": 20, "batch_one_invented_blueprints": 0, "per_attempt_materials": {},
+        }
+    elif plan == "unknown":
+        mj["activity_breakdown"] = {"invention": {
+            "runs": 0.0, "whole_attempts": 0, "invented_runs": 20, "runs_per_invented_blueprint": 10,
+            "success_probability": 0.0, "total_job_cost": None,
+            "cost_unknown_reason": "no SDE success probability and an admin floor of 0",
+        }}
+        mj["invention_datacore_need_unknown"] = {
+            "reason": "no SDE success probability and an admin floor of 0", "from_batch": 1,
+        }
     if decryptor:
         mj["invention_decryptor"] = {"type_id": DECRYPTOR, "type_name": "Fake Decryptor"}
-    return {"type_id": 12345, "needs_invention": True, "manufacturing_job": mj}
+    row = {"type_id": 12345, "needs_invention": True, "manufacturing_job": mj}
+    if t1_bpo:
+        row.update({"has_t1_bpo": True, "t1_blueprint_type_id": 998})
+    return row
 
 
 def _plan(row):
@@ -136,9 +170,14 @@ def _plan(row):
     )])
 
 
+def _assign(row, chars, jobs=(), admin=None):
+    return CharacterAssigner().assign(
+        _plan(row), list(jobs), _Chars(chars), admin or _Admin(), price_map=PRICES,
+    )
+
+
 def _invent(row, chars, jobs=(), admin=None):
-    actions = CharacterAssigner().assign(_plan(row), list(jobs), _Chars(chars), admin or _Admin())
-    (invent,) = [a for a in actions if a.action_type == "invent"]
+    (invent,) = [a for a in _assign(row, chars, jobs, admin) if a.action_type == "invent"]
     return invent
 
 
@@ -150,8 +189,25 @@ def _buy(action):
     return {i.type_id: i.quantity for i in items}
 
 
+E_BEST = 2 / 0.525
+E_WEAK = 2 / 0.408
+
+
+def _cost(expected):
+    """Fee scaled by the expected attempts; the best inventor's inputs at their
+    own line totals (FIFO 50 for Datacore A), every unit more at the market."""
+    return (
+        1000.0 * expected / E_BEST
+        + 800.0 * E_BEST
+        + (expected - E_BEST) * (2 * 100.0 + 2 * 100.0 + 500.0)
+    )
+
+
+# --- the weaker pilot (A4) ---------------------------------------------------------
+
+
 def test_a_weaker_assigned_pilot_gets_its_own_lower_chance_and_buys_more():
-    row = _row(multiplier=1.2)
+    row = _row()
     invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
 
     assert invent.character_id == WEAK_ID
@@ -159,79 +215,49 @@ def test_a_weaker_assigned_pilot_gets_its_own_lower_chance_and_buys_more():
     assert invent.invention_probability == pytest.approx(0.408)
     assert invent.invention_best_probability == pytest.approx(0.525)
     # 2 BPCs / 0.408 = 4.902 expected, ceil -> 5 whole (best inventor: 4).
-    assert invent.invention_expected_attempts == pytest.approx(2 / 0.408)
+    assert invent.invention_expected_attempts == pytest.approx(E_WEAK)
     assert invent.runs == 5
-    # (1000 fee + 9000 inputs) x 0.525 / 0.408; the nested sub-build line is not counted.
-    assert invent.estimated_cost_isk == pytest.approx(10_000.0 * 0.525 / 0.408)
-    assert invent.estimated_cost_isk == pytest.approx(12_867.647, abs=0.001)
     assert invent.invention_chance_reason is None
     assert "chance 40.8% (assigned pilot), best inventor 52.5%" in invent.notes
     # 2 per attempt x 5 attempts; one decryptor per attempt.
     assert _buy(invent) == {DATACORE_A: 10, DATACORE_B: 10, DECRYPTOR: 5}
 
 
-def test_the_best_inventor_keeps_the_producers_numbers():
-    row = _row(multiplier=1.2)
-    invent = _invent(row, [_best_inventor(), _weaker_pilot()])
-
-    assert invent.character_id == BEST_ID
-    best = row["manufacturing_job"]["activity_breakdown"]["invention"]
-    assert invent.invention_probability == best["success_probability"]
-    assert invent.invention_expected_attempts == best["runs"]
-    assert invent.runs == best["whole_attempts"] == 4
-    assert invent.estimated_cost_isk == 10_000.0
-    assert invent.invention_chance_reason is None
-    assert "chance 52.5% (best inventor)" in invent.notes
-    assert _buy(invent) == {DATACORE_A: 8, DATACORE_B: 8, DECRYPTOR: 4}
+def test_the_extra_expected_units_are_priced_at_the_market_not_the_fifo_cost():
+    """Minor 2: the best inventor's inputs keep their line totals (Datacore A
+    at FIFO 50); the weaker pilot's extra 1.0924 expected attempts buy at the
+    market (900 ISK per attempt), the fee scales with the attempts."""
+    invent = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    assert invent.estimated_cost_isk == pytest.approx(_cost(E_WEAK))
+    # 1286.765 fee + 3047.619 best inputs + 1.092437 x 900 (983.193) = 5317.577
+    assert invent.estimated_cost_isk == pytest.approx(5317.577, abs=0.001)
 
 
-def test_the_best_inventor_recomputed_without_its_id_gives_the_same_numbers():
-    """The fixture sanitiser drops inventor_character_id: recomputing the best
-    inventor's own chance must land on the producer's figures."""
-    row = _row(multiplier=1.2)
-    del row["manufacturing_job"]["invention_chance"]["inventor_character_id"]
-    invent = _invent(row, [_best_inventor()])
-    assert invent.invention_probability == pytest.approx(0.525)
-    assert invent.runs == 4
-    assert invent.estimated_cost_isk == pytest.approx(10_000.0)
+def test_the_assigned_pilots_chance_caps_at_one():
+    row = _row(base=0.90)
+    invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    # 0.90 x 1.133333 x 1.2 = 1.224 -> 1.0: one attempt per BPC.
+    assert invent.invention_probability == 1.0
+    assert invent.runs == 2
 
 
-def test_unknown_pilot_skills_keep_the_best_inventor_figure_with_a_warning(caplog):
-    row = _row(multiplier=1.2)
-    no_skills = {"character_id": WEAK_ID, "character_name": "Weaker"}
+def test_the_admin_floor_applies_to_the_assigned_pilot():
+    invent = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)], admin=_Admin(floor=0.45))
+    # 0.408 is below the floor 0.45: ceil(2 / 0.45) = 5.
+    assert invent.invention_probability == pytest.approx(0.45)
+    assert invent.runs == 5
+
+
+def test_a_bad_floor_value_warns_and_uses_the_default(caplog):
     with caplog.at_level(logging.WARNING):
-        invent = _invent(row, [_best_inventor(), no_skills], jobs=[_busy(BEST_ID)])
-
-    assert invent.character_id == WEAK_ID
-    assert invent.invention_probability == pytest.approx(0.525)
-    assert invent.runs == 4
-    assert invent.estimated_cost_isk == 10_000.0
-    assert invent.invention_chance_reason == "the assigned pilot's skills are not loaded"
-    assert "assigned pilot unknown: the assigned pilot's skills are not loaded" in invent.notes
-    assert any(
-        r.levelno == logging.WARNING and "12345" in r.getMessage() and "not loaded" in r.getMessage()
-        for r in caplog.records
-    )
-    assert _buy(invent) == {DATACORE_A: 8, DATACORE_B: 8, DECRYPTOR: 4}
-
-
-def test_unknown_item_skills_keep_the_best_inventor_figure_with_a_warning(caplog):
-    row = _row(multiplier=1.2, skills_unknown_reason="no corp character has its skills loaded")
-    row["manufacturing_job"]["invention_chance"]["science_skill_type_ids"] = None
-    with caplog.at_level(logging.WARNING):
-        invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
-
-    assert invent.runs == 4
-    assert invent.invention_chance_reason == (
-        "the item's invention skills are unknown (no corp character has its skills loaded)"
-    )
-    assert any(r.levelno == logging.WARNING and "invention skills are unknown" in r.getMessage()
+        invent = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)], admin=_Admin(floor="x"))
+    assert invent.invention_probability == pytest.approx(0.408)
+    assert any(r.levelno == logging.WARNING and "invention_probability_floor" in r.getMessage()
                for r in caplog.records)
 
 
 def test_without_a_decryptor_only_the_datacores_scale():
-    row = _row(multiplier=1.0, decryptor=False)
-    best = _invent(row, [_best_inventor(), _weaker_pilot()])
+    best = _invent(_row(multiplier=1.0, decryptor=False), [_best_inventor(), _weaker_pilot()])
     weak = _invent(_row(multiplier=1.0, decryptor=False), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
 
     # Best 0.4375 -> ceil(2 / 0.4375) = 5; weaker 0.30 x 1.133333 = 0.34 -> ceil(5.88) = 6.
@@ -242,22 +268,160 @@ def test_without_a_decryptor_only_the_datacores_scale():
     assert _buy(weak) == {DATACORE_A: 12, DATACORE_B: 12}
 
 
-def test_the_admin_floor_applies_to_the_assigned_pilot():
-    row = _row(multiplier=1.2)
-    invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)], admin=_Admin(floor=0.45))
-    # 0.408 is below the floor 0.45: ceil(2 / 0.45) = 5.
-    assert invent.invention_probability == pytest.approx(0.45)
+def test_the_copy_action_makes_one_t1_bpc_run_per_invention_attempt():
+    """Minor 6: the copy feeding the invention covers its whole attempts."""
+    actions = _assign(_row(t1_bpo=True), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    (invent,) = [a for a in actions if a.action_type == "invent"]
+    (copy,) = [a for a in actions if a.action_type == "copy"]
     assert invent.runs == 5
+    assert copy.runs == 5
 
 
-def test_a_row_without_a_sized_invention_buys_one_attempt_and_warns(caplog):
-    row = _row(multiplier=1.2, invention_costs=False)
+# --- the best inventor -------------------------------------------------------------
+
+
+def test_the_best_inventor_keeps_the_producers_numbers():
+    row = _row()
+    invent = _invent(row, [_best_inventor(), _weaker_pilot()])
+
+    assert invent.character_id == BEST_ID
+    best = row["manufacturing_job"]["activity_breakdown"]["invention"]
+    assert invent.invention_probability == best["success_probability"]
+    assert invent.invention_expected_attempts == best["runs"]
+    assert invent.runs == best["whole_attempts"] == 4
+    # Fee + the row's own line totals; the nested sub-build line is not counted.
+    assert invent.estimated_cost_isk == pytest.approx(1000.0 + 800.0 * E_BEST)
+    assert invent.invention_chance_reason is None
+    assert "chance 52.5% (best inventor)" in invent.notes
+    assert _buy(invent) == {DATACORE_A: 8, DATACORE_B: 8, DECRYPTOR: 4}
+
+
+def test_the_best_inventor_recomputed_without_its_id_gives_the_same_numbers():
+    """The fixture sanitiser drops inventor_character_id: recomputing the best
+    inventor's own chance must land on the producer's figures."""
+    row = _row()
+    del row["manufacturing_job"]["invention_chance"]["inventor_character_id"]
+    invent = _invent(row, [_best_inventor()])
+    assert invent.invention_probability == pytest.approx(0.525)
+    assert invent.runs == 4
+    assert invent.estimated_cost_isk == pytest.approx(1000.0 + 800.0 * E_BEST)
+
+
+def test_an_unpriced_input_line_falls_back_to_the_hub_price():
+    """Minor 3: Datacore B has no producer price; the planner's price map (100) prices it."""
+    invent = _invent(_row(unpriced_b=True), [_best_inventor()])
+    assert invent.estimated_cost_isk == pytest.approx(1000.0 + 800.0 * E_BEST)
+
+
+# --- unknown skills (I2, minor 1, minor 7) -----------------------------------------
+
+
+def test_unloaded_pilot_skills_buy_at_the_sde_base_chance_with_a_warning(caplog):
+    """I2: never the best inventor's chance (that under-buys); the SDE base
+    chance x the decryptor is a lower bound."""
+    no_skills = {"character_id": WEAK_ID, "character_name": "Weaker"}
     with caplog.at_level(logging.WARNING):
-        invent = _invent(row, [_best_inventor()])
+        invent = _invent(_row(), [_best_inventor(), no_skills], jobs=[_busy(BEST_ID)])
+
+    assert invent.character_id == WEAK_ID
+    # 0.30 x 1.2 = 0.36 -> ceil(2 / 0.36) = 6.
+    assert invent.invention_probability == pytest.approx(0.36)
+    assert invent.invention_best_probability == pytest.approx(0.525)
+    assert invent.runs == 6
+    assert invent.invention_chance_reason == "the assigned pilot's skills are not loaded"
+    assert "chance 36% (SDE base: the assigned pilot's skills are not loaded), best inventor 52.5%" in invent.notes
+    assert any(
+        r.levelno == logging.WARNING and "12345" in r.getMessage() and "not loaded" in r.getMessage()
+        for r in caplog.records
+    )
+    assert _buy(invent) == {DATACORE_A: 12, DATACORE_B: 12, DECRYPTOR: 6}
+
+
+@pytest.mark.parametrize("skills", [
+    [],  # loaded, nothing trained
+    [_skill("Mass Production", 5, 3387)],  # loaded, none of the item's skills
+])
+def test_loaded_skills_without_the_items_skills_are_level_zero(skills, caplog):
+    """Minor 7 / I2: a loaded list without the item's skills is level 0, computed, no warning."""
+    with caplog.at_level(logging.WARNING):
+        invent = _invent(_row(), [_best_inventor(), _weaker_pilot(skills=skills)], jobs=[_busy(BEST_ID)])
+    assert invent.invention_probability == pytest.approx(0.36)
+    assert invent.runs == 6
+    assert invent.invention_chance_reason is None
+    assert "chance 36% (assigned pilot), best inventor 52.5%" in invent.notes
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_the_pilots_chance_is_computed_when_the_producer_had_no_skills_loaded():
+    """Minor 1: the producer used the base chance (no corp character with
+    skills), but the item's skill set is known and the planner has this
+    pilot's skills: compute them."""
+    row = _row(skills_unknown_reason="no corp character has its skills loaded", inventor=None, best_factor=None)
+    invent = _invent(row, [_weaker_pilot()])
+    assert invent.invention_probability == pytest.approx(0.408)
+    assert invent.invention_best_probability == pytest.approx(0.36)
+    assert invent.runs == 5
+    assert invent.invention_chance_reason is None
+
+
+def test_an_unknown_item_skill_set_buys_at_the_sde_base_chance_with_a_warning(caplog):
+    row = _row(skills_unknown_reason="the SDE lists no invention skills for this blueprint",
+               inventor=None, best_factor=None)
+    row["manufacturing_job"]["invention_chance"]["science_skill_type_ids"] = None
+    with caplog.at_level(logging.WARNING):
+        invent = _invent(row, [_weaker_pilot()])
+
+    assert invent.invention_probability == pytest.approx(0.36)
+    assert invent.runs == 6
+    assert invent.invention_chance_reason == (
+        "the row carries no invention skill set for this item "
+        "(the SDE lists no invention skills for this blueprint)"
+    )
+    assert any(r.levelno == logging.WARNING and "no invention skill set" in r.getMessage()
+               for r in caplog.records)
+
+
+# --- unsized plans (I1) ------------------------------------------------------------
+
+
+def test_an_owned_bpc_covering_batch_one_sizes_from_the_later_batch_plan():
+    """I1 case A: no activity_breakdown.invention, but the producer's
+    invention_bpc_plan and chance: one batch of 20 runs at the pilot's chance."""
+    row = _row(plan="bpc_plan")
+    weak = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    best = _invent(_row(plan="bpc_plan"), [_best_inventor(), _weaker_pilot()])
+
+    assert (best.runs, weak.runs) == (4, 5)
+    assert weak.invention_expected_attempts == pytest.approx(E_WEAK)
+    assert weak.invention_chance_reason is None
+    # No top-level invention fee on the row: the cost is unknown, not guessed.
+    assert weak.estimated_cost_isk is None
+    assert _buy(weak) == {DATACORE_A: 10, DATACORE_B: 10, DECRYPTOR: 5}
+
+
+def test_unknown_odds_buy_no_inputs_and_say_datacore_need_unknown(caplog):
+    """I1 case B: never a constant one attempt."""
+    with caplog.at_level(logging.WARNING):
+        invent = _invent(_row(plan="unknown"), [_best_inventor()])
+        bought = _buy(invent)
+
     assert invent.runs is None and invent.estimated_cost_isk is None
-    assert invent.invention_chance_reason.startswith("the row carries no sized invention plan")
-    assert any(r.levelno == logging.WARNING and "no sized invention plan" in r.getMessage() for r in caplog.records)
-    assert _buy(invent) == {DATACORE_A: 2, DATACORE_B: 2, DECRYPTOR: 1}
+    assert invent.invention_chance_reason.startswith("datacore need unknown")
+    assert "datacore need unknown" in invent.notes
+    assert bought == {}
+    assert any(
+        r.levelno == logging.WARNING and "ShoppingListBuilder" in r.getMessage()
+        and "datacore need unknown" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_row_without_any_invention_figures_is_datacore_need_unknown():
+    row = _row(plan="none")
+    invent = _invent(row, [_best_inventor()])
+    assert invent.runs is None
+    assert invent.invention_chance_reason.startswith("datacore need unknown")
+    assert _buy(invent) == {}
 
 
 def test_invention_attempts_never_divides_by_zero():

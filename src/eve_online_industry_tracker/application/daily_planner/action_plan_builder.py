@@ -218,6 +218,11 @@ class ActionPlanBuilder:
                 status="pending",
                 processed_for_feedback=False,
                 notes=action.notes,
+                invention_probability=action.invention_probability,
+                invention_best_probability=action.invention_best_probability,
+                invention_expected_attempts=action.invention_expected_attempts,
+                decryptor_type_id=action.decryptor_type_id,
+                decryptor_type_name=action.decryptor_type_name,
             ))
         return rows
 

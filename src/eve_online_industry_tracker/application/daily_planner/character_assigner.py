@@ -114,6 +114,13 @@ def skill_levels_by_id(char: dict[str, Any]) -> dict[int, int]:
     return levels
 
 
+def _skills_loaded(char: dict[str, Any]) -> bool:
+    """Whether the character carries a loaded skill list ({"skills": [...]},
+    possibly empty). Without one its levels are unknown, not 0."""
+    raw = char.get("skills")
+    return isinstance(raw, dict) and isinstance(raw.get("skills"), list)
+
+
 def _slot_capacity(levels: dict[str, int], skill_names: tuple[str, ...]) -> int:
     """One base slot plus one per trained level of each contributing skill."""
     return 1 + sum(int(levels.get(name, 0)) for name in skill_names)
@@ -131,8 +138,12 @@ class CharacterAssigner:
         industry_jobs: list[Any],            # active corp + character industry jobs
         characters_service: Any,             # CharactersService
         admin_settings: Any,
+        price_map: dict[int, Any] | None = None,
     ) -> list[AssignedAction]:
-        """Return list of AssignedAction for all planned jobs."""
+        """Return list of AssignedAction for all planned jobs.
+
+        price_map: phase 1's merged price map, the market price of the extra
+        invention inputs a weaker assigned inventor needs (A4)."""
         now = _now()
 
         # Build character capability map
@@ -164,6 +175,7 @@ class CharacterAssigner:
                 characters=characters,
                 now=now,
                 probability_floor=probability_floor,
+                price_map=price_map or {},
             )
             # Slots are consumed inside _assign_decision, as each action is
             # created -- two research actions on one item must not share a slot.
@@ -190,6 +202,7 @@ class CharacterAssigner:
         characters: list[dict[str, Any]],
         now: datetime,
         probability_floor: float,
+        price_map: dict[int, Any],
     ) -> list[AssignedAction]:
         """Return AssignedAction(s) for a single ItemDecision."""
         actions: list[AssignedAction] = []
@@ -254,6 +267,7 @@ class CharacterAssigner:
                 self._take_slot(char_slots, char_id, "te_research")
 
         # Invention
+        invent_whole_attempts: int | None = None
         if row.get("needs_invention"):
             char_id, char_name = self._best_invention_char(char_slots, characters, row)
             if char_id is not None:
@@ -265,9 +279,11 @@ class CharacterAssigner:
                 # shopping list; None (unknown) buys one attempt.
                 invention = assigned_invention(
                     row, character_id=char_id,
-                    skill_levels_by_id=char_slots[char_id].get("skills_by_id") or {},
-                    probability_floor=probability_floor,
+                    # None: this pilot's skills are not loaded (not level 0).
+                    skill_levels_by_id=char_slots[char_id].get("skills_by_id"),
+                    probability_floor=probability_floor, price_map=price_map,
                 )
+                invent_whole_attempts = invention.whole_attempts
                 actions.append(AssignedAction(
                     type_id=type_id,
                     type_name=type_name,
@@ -313,7 +329,9 @@ class CharacterAssigner:
                     character_id=char_id,
                     character_name=char_name,
                     quantity=None,
-                    runs=None,
+                    # One T1 BPC run per invention attempt; None when the
+                    # invent action's attempts are unknown (or it has no slot).
+                    runs=invent_whole_attempts,
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
                     estimated_completion=None,
@@ -464,7 +482,8 @@ class CharacterAssigner:
                 "free_research": max_research,
                 "total_active_jobs": 0,
                 "skills": levels,
-                "skills_by_id": skill_levels_by_id(char),
+                # None: no skill list loaded for this pilot (unknown, not level 0).
+                "skills_by_id": skill_levels_by_id(char) if _skills_loaded(char) else None,
             }
         if excluded:
             logger.info(

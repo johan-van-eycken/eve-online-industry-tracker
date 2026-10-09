@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.infrastructure.models import (
     PlanItemOutcomeModel,
     PlanLearningWeightsModel,
@@ -130,10 +131,7 @@ class FeedbackProcessor:
         AdminSettingsManager.get raises for an unknown key (every key read
         here is pinned to the schema by tests/test_daily_planner_fail_loud.py).
         """
-        try:
-            return self._admin.get("daily_planner", key)
-        except (AttributeError, KeyError):
-            return fallback
+        return admin_setting(self._admin, "daily_planner", key, fallback)
 
     def process_pending_feedback(self) -> int:
         """Match done actions to realized sales, write outcomes, update EMA weights.

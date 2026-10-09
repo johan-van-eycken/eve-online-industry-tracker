@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner import facility_bonus
 from eve_online_industry_tracker.application.daily_planner.models import (
@@ -44,10 +45,7 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
     reads is pinned to the schema by tests/test_daily_planner_fail_loud.py, so
     with the real manager the KeyError branch cannot hide a typo.
     """
-    try:
-        return admin_settings.get("daily_planner", key)
-    except (AttributeError, KeyError):
-        return fallback
+    return admin_setting(admin_settings, "daily_planner", key, fallback)
 
 
 def build_product_to_blueprint_index(

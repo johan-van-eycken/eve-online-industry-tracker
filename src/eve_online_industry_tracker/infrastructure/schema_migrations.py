@@ -715,7 +715,12 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "estimated_completion DATETIME NULL,"
             "status TEXT NOT NULL DEFAULT 'pending',"
             "processed_for_feedback INTEGER NOT NULL DEFAULT 0,"
-            "notes TEXT NULL"
+            "notes TEXT NULL,"
+            "invention_probability REAL NULL,"
+            "invention_best_probability REAL NULL,"
+            "invention_expected_attempts REAL NULL,"
+            "decryptor_type_id INTEGER NULL,"
+            "decryptor_type_name TEXT NULL"
             ")"
         ),
     )
@@ -875,6 +880,12 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="estimated_build_cost_isk", ddl_type="REAL")
+    # A4: the invent action's chance figures and Task 3's decryptor.
+    _ensure_column(db_app, table="daily_action_log", column="invention_probability", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="invention_best_probability", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="invention_expected_attempts", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="decryptor_type_id", ddl_type="INTEGER")
+    _ensure_column(db_app, table="daily_action_log", column="decryptor_type_name", ddl_type="TEXT")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
 

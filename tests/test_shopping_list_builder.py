@@ -232,9 +232,9 @@ INVENTION_BLUEPRINTS = {
 INVENTION_DEPTH = {DATACORE_ID: {"vwap_5d": 100_000.0}}
 
 
-def _invent_action(type_id=12345, runs=None):
+def _invent_action(type_id=12345, runs=1):
     # character_assigner builds invent actions with the T2 product's type_id
-    # and runs=None.
+    # and runs = the assigned pilot's whole attempts (None: need unknown).
     return AssignedAction(
         type_id=type_id, type_name="Widget II", action_type="invent",
         character_id=1, character_name="Pilot", quantity=None, runs=runs,

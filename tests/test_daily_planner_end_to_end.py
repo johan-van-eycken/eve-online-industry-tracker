@@ -239,7 +239,7 @@ def _invention_planner(session_provider, planner_repo, tmp_path, *, prices):
     }
     invent = AssignedAction(
         type_id=GOOD_ROW["type_id"], type_name="Hobgoblin II", action_type="invent", character_id=1,
-        character_name="Pilot", quantity=None, runs=None, estimated_cost_isk=None, estimated_profit_isk=None,
+        character_name="Pilot", quantity=None, runs=1, estimated_cost_isk=None, estimated_profit_isk=None,
         estimated_completion=None, notes=None, decryptor_type_id=34201, decryptor_type_name="Accelerant Decryptor",
     )
     return svc, invent, asked

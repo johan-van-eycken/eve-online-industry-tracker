@@ -800,3 +800,58 @@ def test_a_legacy_row_reads_back_with_no_skip_reason_after_the_column_is_added()
         item = session.query(BuildPlanItemModel).one()
         assert item.type_id == 590
         assert item.bpo_analysis_skip_reason is None
+
+
+_INVENT_COLUMNS = (
+    "invention_probability", "invention_best_probability", "invention_expected_attempts",
+    "decryptor_type_id", "decryptor_type_name",
+)
+
+
+def test_an_invent_actions_chance_and_decryptor_survive_a_reload_on_a_legacy_table() -> None:
+    """A4 fix round 1, minor 5: the assigned chance, the best inventor's, the
+    expected attempts and Task 3's decryptor are persisted. ensure_app_schema
+    adds the columns to a pre-existing daily_action_log (idempotent: run twice)."""
+    from sqlalchemy import text
+
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    repo, engine = _make_repo()
+    legacy_cols = [c for c in DailyActionLogModel.__table__.columns if c.name not in _INVENT_COLUMNS]
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE daily_action_log"))
+        conn.execute(text(
+            "CREATE TABLE daily_action_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            + ", ".join(f"{c.name} {c.type.compile(engine.dialect)}" for c in legacy_cols if c.name != "id")
+            + ")"
+        ))
+
+    class _EngineDb:
+        def execute(self, query, params=None):
+            with engine.begin() as conn:
+                conn.execute(text(query), params or {})
+
+        def query(self, query, params=None):
+            with engine.begin() as conn:
+                return conn.execute(text(query), params or {}).fetchall()
+
+    ensure_app_schema(_EngineDb())
+    ensure_app_schema(_EngineDb())
+
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    invent = AssignedAction(
+        type_id=12345, type_name="Widget II", action_type="invent", character_id=2, character_name="Weaker",
+        quantity=None, runs=5, estimated_cost_isk=5317.56, estimated_profit_isk=None, estimated_completion=None,
+        notes="chance 40.8% (assigned pilot), best inventor 52.5%",
+        decryptor_type_id=34201, decryptor_type_name="Fake Decryptor",
+        invention_probability=0.408, invention_best_probability=0.525, invention_expected_attempts=4.902,
+    )
+    repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [invent], now))
+
+    (row,) = repo.get_actions(plan_id)
+    assert (row.runs, row.decryptor_type_id, row.decryptor_type_name) == (5, 34201, "Fake Decryptor")
+    assert (row.invention_probability, row.invention_best_probability, row.invention_expected_attempts) == (
+        0.408, 0.525, 4.902,
+    )

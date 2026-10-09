@@ -397,5 +397,5 @@ def test_an_invent_action_without_a_decryptor_names_none():
                  if a.action_type == "invent"]
     assert invent.decryptor_type_id is None and invent.decryptor_type_name is None
     # The row carries no sized invention plan, so the note says so (A4); no decryptor is named.
-    assert invent.notes.startswith("Invention: BPC stock below pipeline threshold; invention attempts unknown")
+    assert invent.notes.startswith("Invention: BPC stock below pipeline threshold; datacore need unknown")
     assert "use " not in invent.notes

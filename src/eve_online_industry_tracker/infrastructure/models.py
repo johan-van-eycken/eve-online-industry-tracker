@@ -1112,6 +1112,14 @@ class DailyActionLogModel(BaseApp):
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     processed_for_feedback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # invent only (A4): the assigned pilot's effective chance, the producer's
+    # best inventor's, the expected (fractional) attempts, and the decryptor
+    # the producer chose (Task 3). None = unknown / not an invent action.
+    invention_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    invention_best_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    invention_expected_attempts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    decryptor_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    decryptor_type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 class PlanItemOutcomeModel(BaseApp):

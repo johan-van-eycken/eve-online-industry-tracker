@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.application.daily_planner.models import (
     ItemDecision,
     PipelineState,
@@ -196,7 +197,4 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
     AdminSettingsManager.get raises for an unknown key (every key read here is
     pinned to the schema by tests/test_daily_planner_fail_loud.py).
     """
-    try:
-        return admin_settings.get("daily_planner", key)
-    except (AttributeError, KeyError):
-        return fallback
+    return admin_setting(admin_settings, "daily_planner", key, fallback)

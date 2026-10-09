@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
@@ -139,10 +140,7 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
     AdminSettingsManager.get raises for an unknown key (every key read here is
     pinned to the schema by tests/test_daily_planner_fail_loud.py).
     """
-    try:
-        return admin_settings.get("daily_planner", key)
-    except (AttributeError, KeyError):
-        return fallback
+    return admin_setting(admin_settings, "daily_planner", key, fallback)
 
 
 #: Job statuses ESI reports for a *finished* job -- excluded from "active" job
@@ -770,6 +768,8 @@ class DailyPlannerService:
             industry_jobs=phase1["industry_jobs"],
             characters_service=self._characters,
             admin_settings=self._admin,
+            # The invent action prices a weaker pilot's extra inputs with it (A4).
+            price_map=phase1.get("price_map", phase1["market_depth_cache"]),
         )
 
     def _phase_7_shopping(

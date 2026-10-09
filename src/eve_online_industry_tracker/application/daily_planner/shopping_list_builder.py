@@ -128,6 +128,17 @@ class ShoppingListBuilder:
         # Invention inputs: the datacores, plus the decryptor the producer chose
         # (one per attempt, AssignedAction.decryptor_type_id).
         for action in invention_actions:
+            # runs = the assigned pilot's whole attempts (CharacterAssigner,
+            # A4). None: the datacore need is unknown (unknown odds). Nothing
+            # is bought for it, never a guessed attempt count; the reason is
+            # on the action, as on the Portfolio shopping list.
+            attempts = _positive_int(action.runs)
+            if attempts is None:
+                logger.warning(
+                    "ShoppingListBuilder: skipping invention inputs for invent type_id=%s: %s",
+                    action.type_id, action.invention_chance_reason or "datacore need unknown",
+                )
+                continue
             inv_mats = self._get_invention_materials(
                 action, blueprint_data, product_to_blueprint, invention_source
             )
@@ -137,10 +148,7 @@ class ShoppingListBuilder:
                     "type_name": action.decryptor_type_name or f"type_{action.decryptor_type_id}",
                     "quantity": 1,
                 }]
-            # Invention inputs are consumed per attempt. runs = the assigned
-            # pilot's whole attempts (CharacterAssigner, A4); None (attempts
-            # unknown, already warned) means one attempt.
-            attempts = _positive_int(action.runs) or 1
+            # Invention inputs are consumed per attempt.
             for mat in inv_mats:
                 mat_type_id = int(mat.get("type_id") or 0)
                 if mat_type_id <= 0:
@@ -368,20 +376,22 @@ class ShoppingListBuilder:
         self, type_id: int, market_depth_cache: dict[int, Any]
     ) -> tuple[float | None, bool]:
         """Return (price, is_vwap). Prefers vwap_5d over spot_sell_price."""
-        entry = market_depth_cache.get(type_id)
-        if entry is None:
-            return None, False
+        return price_map_unit_price(market_depth_cache.get(type_id))
 
-        # 0 or negative is no price: fall through to the next one.
-        vwap = _get_attr(entry, "vwap_5d")
-        if vwap is not None and float(vwap) > 0:
-            return float(vwap), True
 
-        spot = _get_attr(entry, "spot_sell_price")
-        if spot is not None and float(spot) > 0:
-            return float(spot), False
-
+def price_map_unit_price(entry: Any) -> tuple[float | None, bool]:
+    """(unit price, is_vwap) of one phase-1 price map entry: vwap_5d, else
+    spot_sell_price; 0 or negative is no price. Shared with the invent
+    action's cost (assigned_invention), so both price one way."""
+    if entry is None:
         return None, False
+    vwap = _get_attr(entry, "vwap_5d")
+    if vwap is not None and float(vwap) > 0:
+        return float(vwap), True
+    spot = _get_attr(entry, "spot_sell_price")
+    if spot is not None and float(spot) > 0:
+        return float(spot), False
+    return None, False
 
 
 def _merge_lines(shopping: list[ShoppingItem]) -> list[ShoppingItem]:

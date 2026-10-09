@@ -268,22 +268,35 @@ def get_invention_costs(row: dict[str, Any]) -> dict[str, Any] | None:
     return invention if isinstance(invention, dict) else None
 
 
-def get_own_invention_input_cost(row: dict[str, Any]) -> float | None:
-    """ISK of the row's own expected (amortized) invention inputs, datacores
-    and decryptor, as priced by the producer: the line_total of every
+def get_own_expected_invention_inputs(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """The row's own expected (amortized) invention inputs, datacores and
+    decryptor, as the producer priced them (quantity, unit_price, line_total;
+    see IndustryService._expected_invention_inputs): every
     manufacturing_job.expected_invention_materials entry that is not a nested
-    sub-build's (those carry invented_blueprint_type_id). None when there is
-    no such entry or one of them is unpriced (unknown, not free)."""
+    sub-build's (those carry invented_blueprint_type_id). [] when none."""
     entries = get_manufacturing_job(row).get("expected_invention_materials")
     if not isinstance(entries, dict):
+        return []
+    return [e for e in entries.values() if isinstance(e, dict) and not e.get("invented_blueprint_type_id")]
+
+
+def get_invention_bpc_plan(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The later-batch invention plan (manufacturing_job.invention_bpc_plan:
+    batch_runs, runs_per_invented_blueprint, whole_attempts_per_blueprint,
+    ...), written when an owned T2 BPC covers batch 1 or batches follow.
+    None when absent."""
+    plan = get_manufacturing_job(row).get("invention_bpc_plan")
+    return plan if isinstance(plan, dict) else None
+
+
+def get_invention_datacore_need_unknown(row: dict[str, Any]) -> str | None:
+    """Why the producer could not size this row's datacores
+    (manufacturing_job.invention_datacore_need_unknown.reason), or None."""
+    unknown = get_manufacturing_job(row).get("invention_datacore_need_unknown")
+    if not isinstance(unknown, dict):
         return None
-    own = [e for e in entries.values() if isinstance(e, dict) and not e.get("invented_blueprint_type_id")]
-    if not own:
-        return None
-    totals = [_as_optional_float(e.get("line_total")) for e in own]
-    if any(t is None for t in totals):
-        return None
-    return float(sum(t for t in totals if t is not None))
+    reason = unknown.get("reason")
+    return str(reason) if reason else None
 
 
 def get_invention_decryptor(row: dict[str, Any]) -> tuple[int, str] | None:

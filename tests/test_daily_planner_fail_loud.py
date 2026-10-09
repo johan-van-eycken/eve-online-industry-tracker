@@ -506,3 +506,28 @@ def test_a_failed_input_is_named_in_the_compute_banner():
     assert status["status"] == "failed"
     assert status["error"].startswith("Plan computation failed while reading corp assets: ")
     assert "database is locked" in status["error"]
+
+
+def test_every_shared_admin_setting_read_exists_in_the_admin_schema():
+    """admin_setting(admin, "<section>", "<key>", fallback): the shared reader
+    behind every _adm. A literal section/key it is called with must exist."""
+    from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+
+    used = set()
+    for name, path in _module_files():
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if fname != "admin_setting":
+                continue
+            literals = [a.value for a in node.args[1:3] if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+            if len(literals) == 2:
+                used.add((name, literals[0], literals[1]))
+    assert used, "found no literal admin_setting(...) reads -- the scan is broken"
+    unknown = sorted(
+        (n, s, k) for n, s, k in used
+        if k not in ADMIN_SETTINGS_SCHEMA.get(s, {}).get("settings", {})
+    )
+    assert not unknown, f"settings read but missing from the schema: {unknown}"
