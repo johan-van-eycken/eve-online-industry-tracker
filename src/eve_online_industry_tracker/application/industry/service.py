@@ -4326,7 +4326,8 @@ class IndustryService:
         matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
         matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
         owned_copy_runs_used = 0
-        second_job: tuple[int, int, int] | None = None  # (runs, ME, TE) of a D3 second job
+        second_job: tuple[int, int, int, str] | None = None  # (runs, ME, TE, source) of a D3 second job
+        bought_past_owned_note: str | None = None  # batch 1 buys the runs past the owned BPC
         missing_blueprint_copy_runs = 0
         invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id) if activity == "manufacturing" else None
         has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
@@ -4347,28 +4348,40 @@ class IndustryService:
                         second_job = (
                             missing_blueprint_copy_runs,
                             int(bpo.blueprint_material_efficiency or 0), int(bpo.blueprint_time_efficiency or 0),
+                            "copied_from_owned_blueprint_original",
                         )
-                    elif missing_blueprint_copy_runs > 0 and has_invention_path and self._full_batch_invention_whole_attempts(
-                        invention_job=cast(dict[str, Any], (invention_source_row or {}).get("invention_job")),
-                        blueprint_type_id=blueprint_type_id, runs=missing_blueprint_copy_runs,
-                        max_production_limit=int(job.get("max_production_limit") or 0),
-                        adjusted_price_map=adjusted_market_price_map,
-                        decryptor=invention_context.decryptor_for_blueprint(blueprint_type_id),
-                        invention_context=invention_context,
-                    )[1] is None:
+                    elif missing_blueprint_copy_runs > 0:
                         # D3: the runs past the owned BPC are a second job on an
                         # invented BPC (invented below), no longer bought. With
                         # unknown odds that job can't be costed (the parent would
-                        # buy the whole child, owned runs too), so the branch
-                        # below keeps building the owned runs and buys the rest.
-                        second_job = (
-                            missing_blueprint_copy_runs,
-                            *invented_blueprint_efficiency(invention_context.decryptor_for_blueprint(blueprint_type_id)),
+                        # buy the whole child, owned runs too), so the owned runs
+                        # are still built and the rest is bought, with a reason.
+                        second_job_decryptor = invention_context.decryptor_for_blueprint(blueprint_type_id) if has_invention_path else NO_DECRYPTOR
+                        second_job_odds_unknown = (
+                            self._full_batch_invention_whole_attempts(
+                                invention_job=cast(dict[str, Any], (invention_source_row or {}).get("invention_job")),
+                                blueprint_type_id=blueprint_type_id, runs=missing_blueprint_copy_runs,
+                                max_production_limit=int(job.get("max_production_limit") or 0),
+                                adjusted_price_map=adjusted_market_price_map,
+                                decryptor=second_job_decryptor, invention_context=invention_context,
+                            )[1]
+                            if has_invention_path else None
                         )
-                    elif missing_blueprint_copy_runs > 0:
-                        runs = owned_copy_runs_used
-                        planned_quantity = min(required_quantity, product_quantity_per_run * runs)
-                        missing_blueprint_copy_runs = 0
+                        if has_invention_path and second_job_odds_unknown is None:
+                            second_job = (
+                                missing_blueprint_copy_runs,
+                                *invented_blueprint_efficiency(second_job_decryptor),
+                                "invented_blueprint_copy",
+                            )
+                        else:
+                            if second_job_odds_unknown is not None:
+                                bought_past_owned_note = (
+                                    f"{blueprint_display_name} sub-build: {missing_blueprint_copy_runs} runs past the "
+                                    f"owned BPC bought, invention odds unknown ({second_job_odds_unknown})"
+                                )
+                            runs = owned_copy_runs_used
+                            planned_quantity = min(required_quantity, product_quantity_per_run * runs)
+                            missing_blueprint_copy_runs = 0
                 elif matched_blueprint_originals:
                     blueprint_material_efficiency = int(matched_blueprint_originals[0].blueprint_material_efficiency or 0)
                     blueprint_time_efficiency = int(matched_blueprint_originals[0].blueprint_time_efficiency or 0)
@@ -4420,8 +4433,13 @@ class IndustryService:
         time_reduction = _main_act["time_reduction"]
         cost_reduction = _main_act["cost_reduction"]
         # (runs, material reduction, time reduction) per job: one job, or the
-        # owned-BPC job plus the D3 second job.
+        # owned-BPC job plus the D3 second job. job_segments describes them
+        # like the top-level row's manufacturing_job.job_segments.
         jobs = [(runs, material_reduction, time_reduction)]
+        job_segments: list[dict[str, Any]] = [{
+            "runs": int(runs), "blueprint_material_efficiency": int(blueprint_material_efficiency),
+            "blueprint_time_efficiency": int(blueprint_time_efficiency), "source": blueprint_source_kind,
+        }]
         if second_job is not None:
             _second_act = self._compute_activity_job(
                 activity=activity, base_time_seconds=0, runs=0, process_value=None,
@@ -4436,6 +4454,18 @@ class IndustryService:
                 (runs - second_job[0], material_reduction, time_reduction),
                 (second_job[0], _second_act.get("material_reduction", 0.0), _second_act["time_reduction"]),
             ]
+            job_segments = [
+                {**job_segments[0], "runs": int(runs - second_job[0])},
+                {"runs": int(second_job[0]), "blueprint_material_efficiency": int(second_job[1]),
+                 "blueprint_time_efficiency": int(second_job[2]), "source": second_job[3]},
+            ]
+        for job_segment, (_job_runs, job_material_reduction, job_time_reduction) in zip(job_segments, jobs):
+            job_segment["material_reduction"] = float(job_material_reduction)
+            job_segment["time_reduction"] = float(job_time_reduction)
+            job_segment["duration_seconds"] = self._round_duration_seconds(
+                int(job.get("time_seconds") or 0) * int(job_segment["runs"]) * max(0.0, 1.0 - float(job_time_reduction))
+            )
+            job_segment["materials"] = {}
 
         adjusted_material_entries: list[dict[str, Any]] = []
         base_material_entries: list[dict[str, Any]] = []
@@ -4443,13 +4473,15 @@ class IndustryService:
             material = dict(raw_material)
             quantity_per_run = int(material.get("quantity") or 0)
             base_total_quantity = quantity_per_run * runs
-            adjusted_total_quantity = sum(
-                self._round_material_quantity(
+            adjusted_total_quantity = 0
+            for job_segment, (job_runs, job_material_reduction, _job_time_reduction) in zip(job_segments, jobs):
+                job_quantity = self._round_material_quantity(
                     float(quantity_per_run * job_runs) * max(0.0, 1.0 - job_material_reduction),
                     minimum_quantity=(job_runs if quantity_per_run > 0 else 0),
                 )
-                for job_runs, job_material_reduction, _job_time_reduction in jobs
-            )
+                if job_quantity > 0:
+                    job_segment["materials"][str(int(material.get("type_id") or 0))] = job_quantity
+                adjusted_total_quantity += job_quantity
             material["quantity_per_run"] = quantity_per_run
             material["base_quantity"] = base_total_quantity
             material["quantity"] = adjusted_total_quantity
@@ -4470,10 +4502,7 @@ class IndustryService:
             cost_reduction=cost_reduction,
             installation_surcharge=installation_surcharge,
         )
-        direct_duration_seconds = sum(
-            self._round_duration_seconds(int(job.get("time_seconds") or 0) * job_runs * max(0.0, 1.0 - job_time_reduction))
-            for job_runs, _job_material_reduction, job_time_reduction in jobs
-        )
+        direct_duration_seconds = sum(int(job_segment["duration_seconds"]) for job_segment in job_segments)
 
         total_time_seconds = direct_duration_seconds
         total_job_cost = float(job_cost.get("total_job_cost") or 0.0)
@@ -4496,6 +4525,10 @@ class IndustryService:
         invention_cost_unknown_reasons: list[str] = []
         # Nested inventions' chance fallbacks and notes (row reasons, not unknown costs).
         invention_chance_notes: list[str] = []
+        if bought_past_owned_note is not None:
+            # Batch 1 itself buys these runs; the extra-batch reason only
+            # speaks of batches 2..N.
+            invention_chance_notes.append(bought_past_owned_note)
         duration_is_amortized = False
 
         per_run_material_eiv, _ = self._sum_estimated_item_value(
@@ -4791,6 +4824,7 @@ class IndustryService:
                         "type_id": child_type_id,
                         "type_name": material.get("type_name"),
                         "quantity": planned_child_quantity,
+                        "job_segments": child_plan.get("job_segments"),
                         "time_seconds": child_plan.get("total_time_seconds"),
                         "job_cost": child_plan.get("total_job_cost"),
                         "direct_job_cost": child_plan.get("direct_job_cost"),
@@ -5127,6 +5161,7 @@ class IndustryService:
             "required_quantity": required_quantity,
             "planned_quantity": planned_quantity,
             "runs": runs,
+            "job_segments": job_segments,
             "direct_time_seconds": direct_duration_seconds,
             "total_time_seconds": total_time_seconds,
             "direct_job_cost": job_cost.get("total_job_cost"),
@@ -5423,6 +5458,7 @@ class IndustryService:
                     "type_id": material_type_id,
                     "type_name": material.get("type_name"),
                     "quantity": planned_child_quantity,
+                    "job_segments": child_plan.get("job_segments"),
                     "time_seconds": child_plan.get("total_time_seconds"),
                     "job_cost": child_plan.get("total_job_cost"),
                     "nested": child_plan.get("recursive_activity_breakdown") or {},
@@ -6667,7 +6703,13 @@ class IndustryService:
         blueprint_time_efficiency: int = 0,
     ) -> dict[str, Any]:
         """Unified activity cost calculator — delegates to _compute_activity_job with per-refresh caching."""
-        cache_key = (activity, base_time_seconds, runs, process_value, manufacturing_group, blueprint_material_efficiency, blueprint_time_efficiency)
+        # The required skills' trained levels change the time reduction
+        # (_manufacturing_required_skill_time_reduction), so they are part of the key.
+        skill_fingerprint = tuple(sorted(
+            (int(entry.get("type_id") or 0), str(entry.get("type_name") or ""), str(entry.get("trained_skill_level") or 0))
+            for entry in (required_skill_entries or []) if isinstance(entry, dict)
+        ))
+        cache_key = (activity, base_time_seconds, runs, process_value, manufacturing_group, blueprint_material_efficiency, blueprint_time_efficiency, skill_fingerprint)
         cached = ctx.activity_job_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
@@ -7026,13 +7068,17 @@ class IndustryService:
         probability_floor = float(self._adm("industry", "invention_probability_floor", DEFAULT_INVENTION_PROBABILITY_FLOOR))
         runs_per_invented_blueprint = int((target_entry or {}).get("quantity") or 0)
         if invented_runs > 0:
+            # Once per blueprint per refresh: batch 1, the later batches and
+            # the D3 pre-check all evaluate the same blueprint's odds.
             if probability <= 0:
-                logger.warning(
+                invention_context.warn_once(
+                    f"invention-no-sde-probability:{int(blueprint_type_id)}",
                     "Invention plan for blueprint %s: no SDE success probability; using the admin floor %s",
                     blueprint_type_id, probability_floor,
                 )
             if runs_per_invented_blueprint <= 0:
-                logger.warning(
+                invention_context.warn_once(
+                    f"invention-no-sde-runs:{int(blueprint_type_id)}",
                     "Invention plan for blueprint %s: no SDE runs per invented BPC; falling back to max_production_limit %s",
                     blueprint_type_id, max(1, max_production_limit or 1),
                 )

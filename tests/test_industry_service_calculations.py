@@ -2817,3 +2817,70 @@ def test_a_nested_partly_owned_bpc_with_unknown_odds_keeps_building_the_owned_ru
     assert mj["procurement_materials"]["5002"]["quantity"] == 6
     assert mj["procurement_materials"]["34"]["quantity"] == 40
     assert "batches past the owned BPC runs" in mj["invention_cost_unknown_reason"]
+
+
+# --- round 5 Task 4 fix round 1 ------------------------------------------------
+
+
+def test_unknown_odds_past_an_owned_bpc_warn_once_and_name_the_bought_runs(monkeypatch, caplog) -> None:
+    rows = _nested_invention_blueprint_rows(probability_pct=0.0)
+    with caplog.at_level("WARNING"):
+        row = _invention_overview(
+            monkeypatch, maximize_bp_runs=True, blueprint_rows=rows, prices=_NESTED_FAKE_PRICES,
+            owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
+            adm_overrides={"invention_probability_floor": 0.0},
+        )[7100]
+    mj = row["manufacturing_job"]
+
+    floor_warnings = [
+        r for r in caplog.records
+        if "no SDE success probability; using the admin floor" in r.getMessage() and "9002" in r.getMessage()
+    ]
+    assert len(floor_warnings) == 1
+    # Batch 1 itself buys the 6 runs past the owned BPC: said for batch 1 too.
+    assert any(
+        "T2 Blueprint sub-build: 6 runs past the owned BPC bought, invention odds unknown" in n
+        for n in mj["invention_chance_notes"]
+    )
+
+
+def test_the_activity_cost_cache_tells_required_skill_levels_apart(monkeypatch) -> None:
+    service = _invention_service(monkeypatch)
+    ctx = _planning_context(service)
+
+    def _time_reduction(level: int) -> float:
+        return service._plan_activity_costs(
+            ctx, activity="manufacturing", base_time_seconds=100, runs=10, process_value=None,
+            manufacturing_group=None,
+            required_skill_entries=[{"type_id": 3380, "type_name": "Fake Construction", "trained_skill_level": level}],
+        )["time_reduction"]
+
+    # Same (base time, runs, group, ME, TE); a required skill at 5 gives 5 %,
+    # at 1 gives 1 %. Was: the second call got the first one's cached 5 %.
+    assert _time_reduction(5) == pytest.approx(0.05)
+    assert _time_reduction(1) == pytest.approx(0.01)
+
+
+def test_a_nested_invented_second_job_carries_the_decryptor_me_and_te(monkeypatch) -> None:
+    # Accelerant-like (+2 ME, +10 TE): the invented job runs at ME 4 / TE 14.
+    # Owned 4 runs at ME 0 / TE 0: 40 Tritanium, 4 x 100 = 400 s.
+    # Invented 6 runs: ceil(60 x 0.96) = ceil(57.6) = 58 Tritanium,
+    # 6 x 100 x 0.86 = 516 s. Total 98 Tritanium, 916 s of manufacturing.
+    service = _decryptor_service(
+        monkeypatch, [_ACCELERANT_LIKE], prices={**_NESTED_FAKE_PRICES, 34201: 50.0},
+        blueprint_rows=_nested_invention_blueprint_rows(),
+        owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
+    )
+    rows = service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=True, character_id=1,
+    )
+    mj = {r["type_id"]: r for r in rows}[7100]["manufacturing_job"]
+    child = mj["recursive_activity_breakdown"]["manufacturing:5002"]
+
+    segments = child["job_segments"]
+    assert [(s["runs"], s["blueprint_material_efficiency"], s["blueprint_time_efficiency"], s["source"]) for s in segments] == [
+        (4, 0, 0, "owned_blueprint_copy"), (6, 4, 14, "invented_blueprint_copy"),
+    ]
+    assert [s["materials"]["34"] for s in segments] == [40, 58]
+    assert [s["duration_seconds"] for s in segments] == [400, 516]
+    assert mj["procurement_materials"]["34"]["quantity"] == 98

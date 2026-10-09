@@ -1322,3 +1322,24 @@ def test_research_without_a_blueprint_id_is_skipped_not_aimed_at_the_product(cap
     assert [a.action_type for a in actions] == ["manufacture"]
     assert sum("research" in r.getMessage() and "blueprint type id" in r.getMessage()
                for r in caplog.records) == 2
+
+
+def test_a_two_job_batch_saves_only_on_the_runs_a_researched_bpo_would_build():
+    """D3: 4 runs on an owned ME 0 BPC (a BPO can't change those) plus 6
+    invented runs at ME 2, which a BPO at the optimal ME 10 would build:
+      * 5 x 6 = 30 units x 1000 ISK: ceil(29.4) = 30 -> 27, saves 3000 ISK
+      * 1000 x 6 = 6000 units x 5 ISK: 5880 -> 5400, saves 2400 ISK
+    5400 ISK, not the 10,000 of applying the first job's ME 0 to all 10 runs."""
+    row = _row(runs=10, material_cost=100_000.0,
+               blueprint_material_efficiency=0, blueprint_source_kind="owned_blueprint_copy",
+               job_segments=[
+                   {"runs": 4, "blueprint_material_efficiency": 0, "source": "owned_blueprint_copy"},
+                   {"runs": 6, "blueprint_material_efficiency": 2, "source": "invented_blueprint_copy"},
+               ],
+               materials={"34": {"type_id": 34, "quantity": 50, "unit_price": 1000.0},
+                          "35": {"type_id": 35, "quantity": 9000, "unit_price": 5.0}})
+    bp_data = {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
+                                 "materials": [{"type_id": 34, "quantity": 5},
+                                               {"type_id": 35, "quantity": 1000}]}}
+
+    assert _planner()._me_saving_isk_per_batch(row=row, bp_data=bp_data) == (5_400.0, None)

@@ -877,7 +877,8 @@ class ChainPlanner:
             (batch_qty(base, runs, me_current) - batch_qty(base, runs, me_target)) * unit_price
         with batch_qty = blueprints.me_adjusted_batch_quantity: the producer's
         ceiling over the whole batch, not a per-run ceiling times runs.
-        me_target is the optimal ME at this batch's run count. Returns
+        me_target is the optimal ME at the job's run count (per job on a D3
+        two-job batch, see job_segments). Returns
         (None, reason) when an input is missing; never a constant.
         """
         from eve_online_industry_tracker.infrastructure.sde.blueprints import (
@@ -914,19 +915,35 @@ class ChainPlanner:
         if runs is None:
             return None, runs_reason
 
-        me_target = optimal_me_for_quantities((q for _, q in base), runs=runs)
+        # (runs, current ME) per job. A batch partly covered by an owned BPC is
+        # two jobs (D3, manufacturing_job.job_segments): the owned BPC's runs
+        # stay at its ME whatever BPO is bought, so only the other job's runs
+        # (invented or copied) would be built on the researched BPO.
+        jobs: list[tuple[int, int]] = [(runs, me_current)]
+        segments = job.get("job_segments")
+        if isinstance(segments, list) and len(segments) > 1:
+            try:
+                jobs = [
+                    (int(segment["runs"]), int(segment["blueprint_material_efficiency"]))
+                    for segment in segments
+                    if isinstance(segment, dict) and segment.get("source") != "owned_blueprint_copy"
+                ]
+            except (KeyError, TypeError, ValueError):
+                return None, "malformed job_segments on a two-job batch"
 
         priced = _material_unit_prices(job)
         saving = 0.0
-        for mat_type_id, base_qty in base:
-            unit_price = priced.get(mat_type_id)
-            if unit_price is None:
-                return None, f"no unit price for material type_id={mat_type_id}"
-            saved_units = (
-                me_adjusted_batch_quantity(base_qty, runs, me_current)
-                - me_adjusted_batch_quantity(base_qty, runs, me_target)
-            )
-            saving += max(0, saved_units) * unit_price
+        for job_runs, job_me in jobs:
+            me_target = optimal_me_for_quantities((q for _, q in base), runs=job_runs)
+            for mat_type_id, base_qty in base:
+                unit_price = priced.get(mat_type_id)
+                if unit_price is None:
+                    return None, f"no unit price for material type_id={mat_type_id}"
+                saved_units = (
+                    me_adjusted_batch_quantity(base_qty, job_runs, job_me)
+                    - me_adjusted_batch_quantity(base_qty, job_runs, me_target)
+                )
+                saving += max(0, saved_units) * unit_price
         return saving, None
 
     @staticmethod
