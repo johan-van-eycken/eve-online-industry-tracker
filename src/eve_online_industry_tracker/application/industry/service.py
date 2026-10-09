@@ -1400,7 +1400,9 @@ class IndustryService:
     def _get_inventor_skill_levels(self) -> dict[int, dict[int, int]]:
         """{character_id: {skill type_id: trained level}} for every corp
         character whose skills are loaded. A character without a loaded skill
-        list is unknown and left out, never read as level 0. No WARNING here:
+        list is unknown and left out, never read as level 0. A character with
+        industry_enabled=False (excluded from industry by the user, the same
+        flag the UI filters on) is never the inventor. No WARNING here:
         resolve_invention_chance warns once when nobody is left."""
         char_manager = getattr(self._state, "char_manager", None)
         if char_manager is None:
@@ -1411,7 +1413,7 @@ class IndustryService:
             return {}
         out: dict[int, dict[int, int]] = {}
         for char in characters:
-            if not isinstance(char, dict):
+            if not isinstance(char, dict) or not char.get("industry_enabled", True):
                 continue
             skills = char.get("skills")
             entries = skills.get("skills") if isinstance(skills, dict) else None
@@ -2370,6 +2372,11 @@ class IndustryService:
                     f"Invention chance uses the SDE base chance ({invention_chance['skills_unknown_reason']}) — "
                     f"inventor skills would raise it, so the T2 cost is overstated."
                 )
+            if isinstance(invention_chance, dict) and invention_chance.get("note"):
+                # Informational (A3): the chance is exact, confidence unchanged.
+                reasons.append(f"Invention chance: {invention_chance['note']}.")
+            for nested_note in manufacturing_job.get("invention_chance_notes") or []:
+                reasons.append(f"Invention chance: {nested_note}.")
 
             overall_confidence_map = {"High": 2, "Medium": 1, "Low": 0}
             overall_score = min(
@@ -4390,6 +4397,8 @@ class IndustryService:
         extra_batch_invention_unknown_reasons: list[str] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
+        # Nested inventions' chance fallbacks and notes (row reasons, not unknown costs).
+        invention_chance_notes: list[str] = []
         duration_is_amortized = False
 
         per_run_material_eiv, _ = self._sum_estimated_item_value(
@@ -4676,6 +4685,7 @@ class IndustryService:
                         invention_requirements_per_extra_batch=invention_requirements_per_extra_batch,
                         extra_batch_invention_unknown_reasons=extra_batch_invention_unknown_reasons,
                         invention_cost_unknown_reasons=invention_cost_unknown_reasons,
+                        invention_chance_notes=invention_chance_notes,
                         elapsed_time_adjustment=elapsed_time_adjustment,
                     )
                     duration_is_amortized = duration_is_amortized or bool(child_plan.get("duration_is_amortized"))
@@ -4882,6 +4892,7 @@ class IndustryService:
                 own_invention_requirements = list(nested_invention["invention_requirements"])
                 if nested_invention["cost_unknown_reason"] is not None:
                     invention_cost_unknown_reasons.append(nested_invention["cost_unknown_reason"])
+                invention_chance_notes.extend(nested_invention["invention_chance_notes"])
                 if elapsed_time_adjustment is not None:
                     adjustment = nested_invention["elapsed_time_adjustment"]
                     elapsed_time_adjustment = None if adjustment is None else elapsed_time_adjustment + adjustment
@@ -5009,6 +5020,7 @@ class IndustryService:
             "extra_batch_invention_unknown_reasons": extra_batch_invention_unknown_reasons,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
+            "invention_chance_notes": invention_chance_notes,
             "duration_is_amortized": duration_is_amortized,
             "activity": activity,
             "blueprint_type_id": blueprint_type_id,
@@ -5078,6 +5090,8 @@ class IndustryService:
         extra_batch_invention_unknown_reasons: list[str] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
+        # Nested inventions' chance fallbacks and notes (row reasons, not unknown costs).
+        invention_chance_notes: list[str] = []
         duration_is_amortized = False
         available_owned_item_quantities = available_owned_item_quantity_by_type_id or {}
         owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
@@ -5303,6 +5317,7 @@ class IndustryService:
                     invention_requirements_per_extra_batch=invention_requirements_per_extra_batch,
                     extra_batch_invention_unknown_reasons=extra_batch_invention_unknown_reasons,
                     invention_cost_unknown_reasons=invention_cost_unknown_reasons,
+                    invention_chance_notes=invention_chance_notes,
                     elapsed_time_adjustment=elapsed_time_adjustment,
                 )
                 duration_is_amortized = duration_is_amortized or bool(child_plan.get("duration_is_amortized"))
@@ -5424,6 +5439,7 @@ class IndustryService:
             "extra_batch_invention_unknown_reasons": extra_batch_invention_unknown_reasons,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
+            "invention_chance_notes": invention_chance_notes,
             "duration_is_amortized": duration_is_amortized,
             "enabled": bool(recursive_activity_breakdown),
             "reactions_enabled": reactions_enabled,
@@ -7075,6 +7091,17 @@ class IndustryService:
         }
         if cost_unknown_reason is not None:
             breakdown["cost_unknown_reason"] = cost_unknown_reason
+        nested_chance = invention_costs.get("invention_chance")
+        invention_chance_notes: list[str] = []
+        if isinstance(nested_chance, dict):
+            breakdown["invention_chance"] = nested_chance
+            if nested_chance.get("skills_unknown_reason"):
+                invention_chance_notes.append(
+                    f"{blueprint_display_name} sub-build: uses the SDE base chance "
+                    f"({nested_chance['skills_unknown_reason']}), so its invention cost is overstated"
+                )
+            if nested_chance.get("note"):
+                invention_chance_notes.append(f"{blueprint_display_name} sub-build: {nested_chance['note']}")
         source_copy_breakdown = None
         if source_copy_costs is not None:
             source_copy_breakdown = {
@@ -7099,6 +7126,7 @@ class IndustryService:
                 f"{blueprint_display_name} sub-build: {cost_unknown_reason}" if cost_unknown_reason is not None else None
             ),
             "elapsed_time_adjustment": self._invention_elapsed_adjustment(invention_costs, source_copy_costs),
+            "invention_chance_notes": invention_chance_notes,
         }
 
     @staticmethod
@@ -7223,6 +7251,7 @@ class IndustryService:
         invention_requirements_per_extra_batch: list[dict[str, Any]],
         extra_batch_invention_unknown_reasons: list[str],
         invention_cost_unknown_reasons: list[str],
+        invention_chance_notes: list[str],
         elapsed_time_adjustment: float | None,
     ) -> float | None:
         """Carry a built child plan's nested-invention results into its parent:
@@ -7239,6 +7268,7 @@ class IndustryService:
             dict(e) for e in (child_plan.get("invention_requirements_per_extra_batch") or []) if isinstance(e, dict)
         )
         invention_cost_unknown_reasons.extend(str(r) for r in (child_plan.get("invention_cost_unknown_reasons") or []))
+        invention_chance_notes.extend(str(r) for r in (child_plan.get("invention_chance_notes") or []))
         extra_batch_invention_unknown_reasons.extend(
             str(r) for r in (child_plan.get("extra_batch_invention_unknown_reasons") or [])
         )
@@ -7264,7 +7294,9 @@ class IndustryService:
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
         """Plan the invention chain for a variant (Step 4). Returns (invention_costs, tree_nodes, procurement_materials, source_copy_costs)."""
         invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
-        invention_job = ((invention_source_row or {}).get("invention_job") or {})
+        invention_job = (invention_source_row or {}).get("invention_job")
+        # The shared invention predicate: the source row really has an
+        # invention job dict (a None job is no invention path, not {}).
         if not (invention_source_row and isinstance(invention_job, dict)):
             return None, [], [], None
 
@@ -7908,6 +7940,11 @@ class IndustryService:
             # The chance this row's own invention assumes: batch 1's, or the
             # later batches' when an owned BPC covers batch 1.
             row_out["manufacturing_job"]["invention_chance"] = top_level_chance
+        nested_chance_notes = list(dict.fromkeys(
+            str(r) for r in (recursive_prerequisite_plan.get("invention_chance_notes") or [])
+        ))
+        if nested_chance_notes:
+            row_out["manufacturing_job"]["invention_chance_notes"] = nested_chance_notes
         if datacore_need_unknown_reasons:
             # Read by the shopping list (invention_need_unknown_rows): these
             # batches' datacores are not in either invention list.

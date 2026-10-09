@@ -1,6 +1,7 @@
 # tests/test_daily_planner_assignment.py
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -308,3 +309,30 @@ def test_get_invention_skill_set_reads_the_producers_chance(chance, expected):
 
     row = {"manufacturing_job": {"invention_chance": chance}} if chance is not None else {}
     assert orow.get_invention_skill_set(row) == expected
+
+
+def test_invention_skips_a_pilot_excluded_from_industry():
+    """Ruling: industry_enabled=False pilots are out of the invent ranking."""
+    chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}
+    excluded = {**_char(1, "Excluded", [
+        _skill("Laboratory Operation", 5), _skill("High Energy Physics", 5, 11433),
+        _skill("Caldari Starship Engineering", 5, 11454), _skill("Caldari Encryption Methods", 5, 21790),
+    ]), "industry_enabled": False}
+    weaker = {**_char(2, "Weaker", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 1, 11433)]),
+              "industry_enabled": True}
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_chance": chance},
+    })])
+    actions = CharacterAssigner().assign(plan, [], _Chars([excluded, weaker]), _AdminStub())
+    assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
+
+
+def test_the_generic_inventor_ranking_is_logged_at_info(caplog):
+    plan = ChainPlan(decisions=[_decision(overview_row={"type_id": 12345, "needs_invention": True})])
+    pilot = _char(1, "Pilot", [_skill("Laboratory Operation", 5), _skill("Science", 5, 3402)])
+    with caplog.at_level(logging.INFO, logger="eve_online_industry_tracker.application.daily_planner.character_assigner"):
+        actions = CharacterAssigner().assign(plan, [], _Chars([pilot]), _AdminStub())
+    assert [a.character_id for a in actions if a.action_type == "invent"] == [1]
+    assert any(r.levelno == logging.INFO and "generic" in r.getMessage() and "12345" in r.getMessage()
+               for r in caplog.records)

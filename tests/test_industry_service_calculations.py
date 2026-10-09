@@ -9,6 +9,13 @@ from eve_online_industry_tracker.application.industry.invention_model import NO_
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 
+# Public SDE ids: High Energy Physics, Caldari Starship Engineering, Caldari Encryption Methods.
+_HARNESS_INVENTION_SKILLS = (
+    {"type_id": 11433, "type_name": "High Energy Physics", "group_id": 270},
+    {"type_id": 11454, "type_name": "Caldari Starship Engineering", "group_id": 270},
+    {"type_id": 21790, "type_name": "Caldari Encryption Methods", "group_id": 270},
+)
+
 
 def _build_service(
     *,
@@ -57,6 +64,20 @@ def _build_service(
     # session" WARNING on every refresh (that branch has its own test).
     service._load_decryptor_options = MethodType(  # type: ignore[attr-defined]
         lambda self: (NO_DECRYPTOR,), service,
+    )
+    # Invention chance: one loaded, untrained pilot (factor exactly 1.0, so
+    # every chance is the SDE base chance and no number moves) and identifiable
+    # invention skills, like real SDE rows. No skills-unknown WARNING on every
+    # refresh; the fallback branches have their own tests, which override these.
+    for row in blueprint_rows:
+        invention_job = row.get("invention_job") if isinstance(row, dict) else None
+        if isinstance(invention_job, dict) and not invention_job.get("skill_entries"):
+            invention_job["skill_entries"] = [dict(s) for s in _HARNESS_INVENTION_SKILLS]
+    service._get_inventor_skill_levels = MethodType(  # type: ignore[attr-defined]
+        lambda self: {1: {}}, service,
+    )
+    service._load_encryption_skill_type_ids = MethodType(  # type: ignore[attr-defined]
+        lambda self: frozenset({21790}), service,
     )
     service._compact_owned_blueprint_asset = MethodType(  # type: ignore[attr-defined]
         lambda self, asset, **kwargs: {} if asset is None else {"item_id": getattr(asset, "item_id", None)},
@@ -2136,7 +2157,9 @@ def test_unloaded_skills_fall_back_to_the_base_chance_with_a_reason(monkeypatch,
 def test_a_blueprint_without_an_encryption_skill_uses_the_science_term_with_a_row_note(monkeypatch) -> None:
     """A3: the formula with the science term only, not the base chance."""
     levels = {1: {11433: 4, 11454: 4, 21790: 5}}
-    mj = _skilled_overview(monkeypatch, levels=levels, skill_entries=_INVENTION_SKILLS[:2])[5002]["manufacturing_job"]
+    mj = _skilled_overview(
+        monkeypatch, levels=levels, skill_entries=_INVENTION_SKILLS[:2], real_confidence=True,
+    )[5002]["manufacturing_job"]
 
     p = 0.5 * (1 + 8 / 30)
     chance = mj["invention_chance"]
@@ -2145,12 +2168,21 @@ def test_a_blueprint_without_an_encryption_skill_uses_the_science_term_with_a_ro
     assert chance["skills_unknown_reason"] is None
     assert "no encryption skill" in chance["note"]
     assert mj["invention_material_cost"] == pytest.approx(2 * 100 * (1 / 10) / p)
+    # The note reaches the UI as an informational reason line ...
+    assert f"Invention chance: {chance['note']}." in mj["pricing_confidence_reasons"]
+    assert not any("SDE base chance" in r for r in mj["pricing_confidence_reasons"])
+    # ... and does not change the confidence level.
+    with_encryption = _skilled_overview(monkeypatch, levels=levels, real_confidence=True)[5002]["manufacturing_job"]
+    assert mj["overall_pricing_confidence"] == with_encryption["overall_pricing_confidence"]
+    assert mj["material_pricing_confidence"] == with_encryption["material_pricing_confidence"]
 
 
 def test_the_admin_floor_still_applies_to_the_skilled_chance(monkeypatch) -> None:
+    """A non-zero base whose skilled chance stays under the floor:
+    0.02 x (1 + 10/30 + 5/40) = 0.0292 < 0.05."""
     rows_levels = {1: {11433: 5, 11454: 5, 21790: 5}}
     service_rows = _invented_t2_blueprint_rows()
-    service_rows[0]["invention_job"]["products"][0]["probability_pct"] = 0.0
+    service_rows[0]["invention_job"]["products"][0]["probability_pct"] = 2.0
     service_rows[0]["invention_job"]["skill_entries"] = [dict(s) for s in _INVENTION_SKILLS]
     service = _invention_service(monkeypatch, blueprint_rows=service_rows, adm_overrides={"invention_probability_floor": 0.05})
     service._get_inventor_skill_levels = MethodType(lambda self: rows_levels, service)  # type: ignore[attr-defined]
@@ -2158,7 +2190,10 @@ def test_the_admin_floor_still_applies_to_the_skilled_chance(monkeypatch) -> Non
     rows = {r["type_id"]: r for r in service.industry_manufacturing_product_overview(
         build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
     )}
-    assert rows[5002]["manufacturing_job"]["activity_breakdown"]["invention"]["success_probability"] == pytest.approx(0.05)
+    mj = rows[5002]["manufacturing_job"]
+    assert mj["invention_chance"]["probability"] == pytest.approx(0.02 * (1 + 10 / 30 + 5 / 40))
+    assert mj["invention_chance"]["effective_probability"] == pytest.approx(0.05)
+    assert mj["activity_breakdown"]["invention"]["success_probability"] == pytest.approx(0.05)
 
 
 def test_inventor_skills_come_from_every_loaded_corp_character() -> None:
@@ -2169,11 +2204,53 @@ def test_inventor_skills_come_from_every_loaded_corp_character() -> None:
         ]}},
         {"character_id": 2, "skills": {}},          # not fetched: unknown, left out
         {"character_id": 3},                        # not fetched either
+        {"character_id": 4, "industry_enabled": False, "skills": {"skills": [  # excluded from industry
+            {"skill_id": 11433, "trained_skill_level": 5},
+        ]}},
+        {"character_id": 5, "industry_enabled": True, "skills": {"skills": [
+            {"skill_id": 11433, "trained_skill_level": 1},
+        ]}},
     ]))
-    assert service._get_inventor_skill_levels() == {1: {11433: 4, 21790: 2}}
+    assert service._get_inventor_skill_levels() == {1: {11433: 4, 21790: 2}, 5: {11433: 1}}
 
 
 def test_no_character_manager_means_no_inventor_skills() -> None:
     service = object.__new__(IndustryService)
     service._state = SimpleNamespace()  # type: ignore[attr-defined]
     assert service._get_inventor_skill_levels() == {}
+
+
+def _nested_skilled_overview(monkeypatch, *, levels, real_confidence=False):
+    service = _invention_service(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE, real_confidence=real_confidence,
+    )
+    service._get_inventor_skill_levels = MethodType(lambda self: levels, service)  # type: ignore[attr-defined]
+    out = service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+    )
+    return {row["type_id"]: row for row in out}
+
+
+def test_a_nested_invention_uses_the_best_inventors_chance(monkeypatch) -> None:
+    mj = _nested_skilled_overview(monkeypatch, levels={1: {11433: 4, 11454: 4, 21790: 4}})[7100]["manufacturing_job"]
+
+    factor = 1 + 8 / 30 + 4 / 40
+    invention = mj["recursive_activity_breakdown"]["manufacturing:5002"]["nested"]["invention:9002"]
+    assert invention["success_probability"] == pytest.approx(0.5 * factor)
+    assert invention["invention_chance"]["skill_factor"] == pytest.approx(factor)
+    assert invention["invention_chance"]["inventor_character_id"] == 1
+    # 1 component run / 10 per BPC / p.
+    assert invention["attempts"] == pytest.approx(0.1 / (0.5 * factor))
+    assert "invention_chance_notes" not in mj
+
+
+def test_a_nested_skills_fallback_is_a_row_reason(monkeypatch) -> None:
+    mj = _nested_skilled_overview(monkeypatch, levels={}, real_confidence=True)[7100]["manufacturing_job"]
+
+    invention = mj["recursive_activity_breakdown"]["manufacturing:5002"]["nested"]["invention:9002"]
+    assert invention["success_probability"] == pytest.approx(0.5)
+    assert invention["invention_chance"]["skills_unknown_reason"] == "no corp character has its skills loaded"
+    assert len(mj["invention_chance_notes"]) == 1
+    assert "sub-build: uses the SDE base chance (no corp character has its skills loaded)" in mj["invention_chance_notes"][0]
+    assert f"Invention chance: {mj['invention_chance_notes'][0]}." in mj["pricing_confidence_reasons"]

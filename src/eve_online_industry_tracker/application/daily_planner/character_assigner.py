@@ -426,6 +426,8 @@ class CharacterAssigner:
                 "total_active_jobs": 0,
                 "skills": levels,
                 "skills_by_id": skill_levels_by_id(char),
+                # The user's industry exclusion (same flag the UI filters on).
+                "industry_enabled": bool(char.get("industry_enabled", True)),
             }
 
         # Deduct active jobs (treat end_date < now as already delivered — slots free)
@@ -522,12 +524,19 @@ class CharacterAssigner:
         """The free pilot with the highest invention skill factor for this
         item: the producer's invention_chance skills (D2, the same rule as the
         chance it assumed). A row without them ranks by the generic
-        SCIENCE_SKILLS sum. Ties break toward the fewest active jobs."""
+        SCIENCE_SKILLS sum (logged at INFO). Pilots with industry_enabled=False
+        are never ranked. Ties break toward the fewest active jobs."""
         skills = orow.get_invention_skill_set(row or {})
         skill_set = InventionSkillSet(skills[0], skills[1]) if skills is not None else None
+        if skill_set is None:
+            logger.info(
+                "CharacterAssigner: type_id=%s carries no invention skills from the producer; "
+                "ranking inventors by the generic %s sum",
+                (row or {}).get("type_id"), "/".join(SCIENCE_SKILLS),
+            )
         candidates = []
         for slot in char_slots.values():
-            if slot.get("free_research", 0) <= 0:
+            if slot.get("free_research", 0) <= 0 or not slot.get("industry_enabled", True):
                 continue
             if skill_set is not None:
                 score = invention_skill_factor(skill_set, slot.get("skills_by_id") or {})
