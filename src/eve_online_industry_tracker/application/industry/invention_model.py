@@ -10,6 +10,7 @@ infrastructure/sde/decryptors.py:get_t2_invention_decryptors.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -186,6 +187,42 @@ def invention_skill_factor(skill_set: InventionSkillSet, levels_by_skill_type_id
     return 1.0 + science / 30.0 + encryption / 40.0
 
 
+def invention_probability(base_probability: float, skill_factor: float | None, decryptor_multiplier: float) -> float:
+    """EVE's success chance: base x skill factor x decryptor multiplier,
+    capped at 1, before the admin floor. skill_factor None (skills unknown)
+    counts as 1: the SDE base chance. The single copy, used by the producer's
+    best inventor and the daily planner's assigned pilot."""
+    factor = 1.0 if skill_factor is None else float(skill_factor)
+    return min(1.0, float(base_probability) * factor * float(decryptor_multiplier))
+
+
+#: The schema default of industry.invention_probability_floor.
+DEFAULT_INVENTION_PROBABILITY_FLOOR = 0.01
+
+
+def effective_invention_probability(probability: float, floor: float) -> float:
+    """The chance the attempt counts divide by: the admin floor, then the cap at 1."""
+    return min(1.0, max(float(probability), float(floor)))
+
+
+def invention_attempts(
+    invented_runs: int, runs_per_invented_blueprint: int, effective_probability: float,
+) -> tuple[float, int]:
+    """(expected attempts, whole attempts) to invent `invented_runs` runs.
+
+    Expected = runs / runs per BPC / chance (fractional, for cost). Whole =
+    ceil(whole BPCs needed / chance), at least 1 (what to buy and run).
+    (0.0, 0) when nothing is invented or the chance is not positive: never a
+    division by zero."""
+    if invented_runs <= 0 or effective_probability <= 0:
+        return 0.0, 0
+    runs_per_bpc = max(1, int(runs_per_invented_blueprint))
+    expected = float(invented_runs) / float(runs_per_bpc) / float(effective_probability)
+    whole_blueprints = int(math.ceil(float(invented_runs) / float(runs_per_bpc)))
+    whole = max(1, int(math.ceil(float(whole_blueprints) / float(effective_probability) - 1e-9)))
+    return expected, whole
+
+
 @dataclass(frozen=True)
 class InventorChoice:
     character_id: int | None
@@ -285,12 +322,12 @@ def resolve_invention_chance(
             blueprint_type_id, why,
         )
         return InventionChance(
-            base_probability, None, multiplier, min(1.0, base_probability * multiplier),
+            base_probability, None, multiplier, invention_probability(base_probability, None, multiplier),
             None, skill_set, why,
         )
     return InventionChance(
         base_probability, choice.skill_factor, multiplier,
-        min(1.0, base_probability * float(choice.skill_factor) * multiplier),
+        invention_probability(base_probability, choice.skill_factor, multiplier),
         choice.character_id, skill_set, None,
         note=NO_ENCRYPTION_SKILL_NOTE if skill_set.encryption_skill_type_id is None else None,
     )

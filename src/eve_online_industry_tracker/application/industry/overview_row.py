@@ -249,6 +249,43 @@ def get_invention_skill_set(row: dict[str, Any]) -> tuple[tuple[int, int], int |
     return (first, second), encryption
 
 
+def get_invention_chance(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The producer's invention chance breakdown for this row's own invention
+    (manufacturing_job.invention_chance, see invention_model.invention_chance_payload),
+    or None when the row carries none."""
+    chance = get_manufacturing_job(row).get("invention_chance")
+    return chance if isinstance(chance, dict) else None
+
+
+def get_invention_costs(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The row's own (top-level) invention plan, best inventor:
+    manufacturing_job.activity_breakdown.invention (expected attempts in
+    `runs`, `whole_attempts`, `invented_runs`, `runs_per_invented_blueprint`,
+    `success_probability`, the fee in `total_job_cost`). None when the row
+    invents nothing itself."""
+    breakdown = get_manufacturing_job(row).get("activity_breakdown")
+    invention = breakdown.get("invention") if isinstance(breakdown, dict) else None
+    return invention if isinstance(invention, dict) else None
+
+
+def get_own_invention_input_cost(row: dict[str, Any]) -> float | None:
+    """ISK of the row's own expected (amortized) invention inputs, datacores
+    and decryptor, as priced by the producer: the line_total of every
+    manufacturing_job.expected_invention_materials entry that is not a nested
+    sub-build's (those carry invented_blueprint_type_id). None when there is
+    no such entry or one of them is unpriced (unknown, not free)."""
+    entries = get_manufacturing_job(row).get("expected_invention_materials")
+    if not isinstance(entries, dict):
+        return None
+    own = [e for e in entries.values() if isinstance(e, dict) and not e.get("invented_blueprint_type_id")]
+    if not own:
+        return None
+    totals = [_as_optional_float(e.get("line_total")) for e in own]
+    if any(t is None for t in totals):
+        return None
+    return float(sum(t for t in totals if t is not None))
+
+
 def get_invention_decryptor(row: dict[str, Any]) -> tuple[int, str] | None:
     """(type_id, name) of the decryptor the producer chose for this row's
     invention (manufacturing_job.invention_decryptor), or None for none."""

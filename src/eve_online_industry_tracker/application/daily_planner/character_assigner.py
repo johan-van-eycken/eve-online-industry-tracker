@@ -14,6 +14,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.assigned_invention import (
+    assigned_invention,
+    invention_probability_floor,
+)
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
@@ -138,6 +142,8 @@ class CharacterAssigner:
             return []
 
         char_slots = self._compute_available_slots(characters, industry_jobs, now)
+        # The producer's floor, so an assigned pilot's chance is floored the same way.
+        probability_floor = invention_probability_floor(admin_settings)
         assigned_actions: list[AssignedAction] = []
 
         # Two passes: every top-level item first (highest score first), then
@@ -157,6 +163,7 @@ class CharacterAssigner:
                 char_slots=char_slots,
                 characters=characters,
                 now=now,
+                probability_floor=probability_floor,
             )
             # Slots are consumed inside _assign_decision, as each action is
             # created -- two research actions on one item must not share a slot.
@@ -182,6 +189,7 @@ class CharacterAssigner:
         char_slots: dict[int, dict[str, Any]],
         characters: list[dict[str, Any]],
         now: datetime,
+        probability_floor: float,
     ) -> list[AssignedAction]:
         """Return AssignedAction(s) for a single ItemDecision."""
         actions: list[AssignedAction] = []
@@ -251,6 +259,15 @@ class CharacterAssigner:
             if char_id is not None:
                 # The producer's choice: bought one per attempt by the shopping list.
                 decryptor = orow.get_invention_decryptor(row)
+                # A4: the assigned pilot's chance, whole attempts and cost (the
+                # best inventor's when this pilot is the best inventor or its
+                # skills are unknown). runs = whole attempts, read by the
+                # shopping list; None (unknown) buys one attempt.
+                invention = assigned_invention(
+                    row, character_id=char_id,
+                    skill_levels_by_id=char_slots[char_id].get("skills_by_id") or {},
+                    probability_floor=probability_floor,
+                )
                 actions.append(AssignedAction(
                     type_id=type_id,
                     type_name=type_name,
@@ -258,16 +275,21 @@ class CharacterAssigner:
                     character_id=char_id,
                     character_name=char_name,
                     quantity=None,
-                    runs=None,
-                    estimated_cost_isk=None,
+                    runs=invention.whole_attempts,
+                    estimated_cost_isk=invention.cost_isk,
                     estimated_profit_isk=None,
                     estimated_completion=None,
-                    notes=(
-                        "Invention: BPC stock below pipeline threshold"
-                        + (f"; use {decryptor[1]}" if decryptor else "")
-                    ),
+                    notes="; ".join([
+                        "Invention: BPC stock below pipeline threshold",
+                        *([f"use {decryptor[1]}"] if decryptor else []),
+                        *([invention.note] if invention.note else []),
+                    ]),
                     decryptor_type_id=decryptor[0] if decryptor else None,
                     decryptor_type_name=decryptor[1] if decryptor else None,
+                    invention_probability=invention.probability,
+                    invention_best_probability=invention.best_probability,
+                    invention_expected_attempts=invention.expected_attempts,
+                    invention_chance_reason=invention.reason,
                 ))
                 self._take_slot(char_slots, char_id, "invent")
 

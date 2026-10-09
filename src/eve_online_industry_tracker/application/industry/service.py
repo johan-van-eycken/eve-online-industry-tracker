@@ -68,6 +68,7 @@ from eve_online_industry_tracker.application.industry import overview_row as oro
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.application.industry.invention_model import (
     ALL_INVENTORS_EXCLUDED,
+    DEFAULT_INVENTION_PROBABILITY_FLOOR,
     DECRYPTOR_SELECTION_OFF_REASON,
     NO_CHARACTER_SKILLS,
     NO_DECRYPTOR,
@@ -79,11 +80,15 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     QuietWarningsFilter,
     decryptor_choice_payload,
     decryptor_options_from_rows,
+    effective_invention_probability,
     invented_blueprint_efficiency,
     invented_runs_per_blueprint,
     invention_chance_payload,
+    invention_probability,
     quiet_warnings,
     resolve_invention_chance,
+    # Aliased: _expected_invention_costs has a local named invention_attempts.
+    invention_attempts as expected_and_whole_invention_attempts,
     select_best_decryptor,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
@@ -6938,9 +6943,9 @@ class IndustryService:
         )
         probability = (
             chance.probability if chance is not None
-            else min(1.0, base_probability * float(decryptor.probability_multiplier))
+            else invention_probability(base_probability, None, decryptor.probability_multiplier)
         )
-        probability_floor = float(self._adm("industry", "invention_probability_floor", 0.01))
+        probability_floor = float(self._adm("industry", "invention_probability_floor", DEFAULT_INVENTION_PROBABILITY_FLOOR))
         runs_per_invented_blueprint = int((target_entry or {}).get("quantity") or 0)
         if invented_runs > 0:
             if probability <= 0:
@@ -6957,7 +6962,7 @@ class IndustryService:
             runs_per_invented_blueprint = max(1, max_production_limit or 1)
         # A decryptor adds runs to every invented BPC (EVE).
         runs_per_invented_blueprint = invented_runs_per_blueprint(runs_per_invented_blueprint, decryptor)
-        effective_probability = max(probability, probability_floor)
+        effective_probability = effective_invention_probability(probability, probability_floor)
         cost_unknown_reason: str | None = None
         if invented_runs > 0 and effective_probability <= 0:
             cost_unknown_reason = self._NO_INVENTION_PROBABILITY_REASON
@@ -6967,9 +6972,10 @@ class IndustryService:
             )
         if invented_runs > 0 and cost_unknown_reason is None:
             successful_jobs = float(invented_runs) / float(runs_per_invented_blueprint)
-            invention_attempts = successful_jobs / effective_probability
-            whole_blueprints_needed = int(math.ceil(float(invented_runs) / float(runs_per_invented_blueprint)))
-            whole_attempts = max(1, int(math.ceil(float(whole_blueprints_needed) / effective_probability - 1e-9)))
+            # Shared with the daily planner's assigned-pilot attempts.
+            invention_attempts, whole_attempts = expected_and_whole_invention_attempts(
+                invented_runs, runs_per_invented_blueprint, effective_probability,
+            )
         else:
             successful_jobs = 0.0
             invention_attempts = 0.0

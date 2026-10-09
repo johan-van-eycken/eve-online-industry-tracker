@@ -113,6 +113,16 @@ class AssignedAction:
     # (manufacturing_job.invention_decryptor, see overview_row.get_invention_decryptor).
     decryptor_type_id: int | None = None
     decryptor_type_name: str | None = None
+    # invent only (amendment A4): the success chance of the pilot this action
+    # is assigned to (admin floor and cap applied), the producer's best
+    # inventor's for comparison, and the expected (fractional) attempts. runs
+    # holds the whole attempts the shopping list buys inputs for. A reason is
+    # set when the assigned pilot's chance could not be computed and the
+    # best-inventor figures were kept. None = unknown.
+    invention_probability: float | None = None
+    invention_best_probability: float | None = None
+    invention_expected_attempts: float | None = None
+    invention_chance_reason: str | None = None
 
 
 @dataclass

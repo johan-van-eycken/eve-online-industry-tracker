@@ -137,7 +137,9 @@ class ShoppingListBuilder:
                     "type_name": action.decryptor_type_name or f"type_{action.decryptor_type_id}",
                     "quantity": 1,
                 }]
-            # Invention inputs are consumed per attempt; runs=None means one attempt.
+            # Invention inputs are consumed per attempt. runs = the assigned
+            # pilot's whole attempts (CharacterAssigner, A4); None (attempts
+            # unknown, already warned) means one attempt.
             attempts = _positive_int(action.runs) or 1
             for mat in inv_mats:
                 mat_type_id = int(mat.get("type_id") or 0)

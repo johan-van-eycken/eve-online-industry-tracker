@@ -396,4 +396,6 @@ def test_an_invent_action_without_a_decryptor_names_none():
     (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
                  if a.action_type == "invent"]
     assert invent.decryptor_type_id is None and invent.decryptor_type_name is None
-    assert invent.notes == "Invention: BPC stock below pipeline threshold"
+    # The row carries no sized invention plan, so the note says so (A4); no decryptor is named.
+    assert invent.notes.startswith("Invention: BPC stock below pipeline threshold; invention attempts unknown")
+    assert "use " not in invent.notes
