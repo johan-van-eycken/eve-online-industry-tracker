@@ -67,6 +67,8 @@ from eve_online_industry_tracker.application.industry.job_manager import Industr
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.application.industry.invention_model import (
+    ALL_INVENTORS_EXCLUDED,
+    NO_CHARACTER_SKILLS,
     NO_DECRYPTOR,
     DecryptorOption,
     InventionContext,
@@ -1397,6 +1399,42 @@ class IndustryService:
             )
         return options
 
+    def _corp_characters(self) -> list[dict[str, Any]]:
+        """The character manager's characters, [] when there are none."""
+        char_manager = getattr(self._state, "char_manager", None)
+        if char_manager is None:
+            return []
+        try:
+            characters = char_manager.get_characters() or []
+        except ValueError:  # CharacterManager: no characters configured yet
+            return []
+        return [c for c in characters if isinstance(c, dict)]
+
+    @staticmethod
+    def _loaded_skill_levels(char: dict[str, Any]) -> tuple[int, dict[int, int]] | None:
+        """(character_id, {skill type_id: trained level}), or None when the
+        character has no loaded skill list (unknown, never level 0)."""
+        skills = char.get("skills")
+        entries = skills.get("skills") if isinstance(skills, dict) else None
+        try:
+            character_id = int(char.get("character_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        if character_id <= 0 or not isinstance(entries, list) or not entries:
+            return None
+        levels: dict[int, int] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                skill_id = int(entry.get("skill_id") or 0)
+                level = int(entry.get("trained_skill_level") or 0)
+            except (TypeError, ValueError):
+                continue
+            if skill_id > 0:
+                levels[skill_id] = max(level, levels.get(skill_id, 0))
+        return character_id, levels
+
     def _get_inventor_skill_levels(self) -> dict[int, dict[int, int]]:
         """{character_id: {skill type_id: trained level}} for every corp
         character whose skills are loaded. A character without a loaded skill
@@ -1404,38 +1442,23 @@ class IndustryService:
         industry_enabled=False (excluded from industry by the user, the same
         flag the UI filters on) is never the inventor. No WARNING here:
         resolve_invention_chance warns once when nobody is left."""
-        char_manager = getattr(self._state, "char_manager", None)
-        if char_manager is None:
-            return {}
-        try:
-            characters = char_manager.get_characters() or []
-        except ValueError:  # CharacterManager: no characters configured yet
-            return {}
         out: dict[int, dict[int, int]] = {}
-        for char in characters:
-            if not isinstance(char, dict) or not char.get("industry_enabled", True):
+        for char in self._corp_characters():
+            if not char.get("industry_enabled", True):
                 continue
-            skills = char.get("skills")
-            entries = skills.get("skills") if isinstance(skills, dict) else None
-            try:
-                character_id = int(char.get("character_id") or 0)
-            except (TypeError, ValueError):
-                continue
-            if character_id <= 0 or not isinstance(entries, list) or not entries:
-                continue
-            levels: dict[int, int] = {}
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                try:
-                    skill_id = int(entry.get("skill_id") or 0)
-                    level = int(entry.get("trained_skill_level") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if skill_id > 0:
-                    levels[skill_id] = max(level, levels.get(skill_id, 0))
-            out[character_id] = levels
+            loaded = self._loaded_skill_levels(char)
+            if loaded is not None:
+                out[loaded[0]] = loaded[1]
         return out
+
+    def _no_inventor_reason(self) -> str:
+        """Why there is no inventor: skills are loaded only for characters
+        excluded from industry, or for nobody."""
+        excluded_with_skills = any(
+            not char.get("industry_enabled", True) and self._loaded_skill_levels(char) is not None
+            for char in self._corp_characters()
+        )
+        return ALL_INVENTORS_EXCLUDED if excluded_with_skills else NO_CHARACTER_SKILLS
 
     def _load_encryption_skill_type_ids(self) -> frozenset[int]:
         """The SDE's encryption skills; empty without SDE access (every chance
@@ -6610,6 +6633,7 @@ class IndustryService:
             *[int(tid) for tid in reaction_row_by_product_type_id.keys()],
         })
         decryptor_options = self._load_decryptor_options()
+        inventor_skill_levels = self._get_inventor_skill_levels()
         material_price_type_ids = sorted({
             int(entry.get("type_id") or 0)
             for row in blueprint_rows if isinstance(row, dict)
@@ -6688,8 +6712,9 @@ class IndustryService:
             decryptor_options=decryptor_options,
             # Read-only after construction; shared by the worker threads.
             invention_context=InventionContext(
-                inventor_skill_levels_by_character_id=self._get_inventor_skill_levels(),
+                inventor_skill_levels_by_character_id=inventor_skill_levels,
                 encryption_skill_type_ids=self._load_encryption_skill_type_ids(),
+                no_inventor_reason=NO_CHARACTER_SKILLS if inventor_skill_levels else self._no_inventor_reason(),
             ),
             blueprint_row_by_type_id={
                 int(row.get("blueprint_type_id") or 0): row

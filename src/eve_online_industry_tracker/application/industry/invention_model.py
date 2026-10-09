@@ -117,6 +117,8 @@ logger.addFilter(QuietWarningsFilter())
 SCIENCE_SKILL_GROUP_ID = 270
 
 NO_CHARACTER_SKILLS = "no corp character has its skills loaded"
+#: Skills are loaded, but only for characters with industry_enabled=False.
+ALL_INVENTORS_EXCLUDED = "every corp character with loaded skills is excluded from industry"
 _NO_SKILL_ENTRIES = "the SDE lists no invention skills for this blueprint"
 _NO_ENCRYPTION_SKILLS = "no Encryption Methods skills were found in the SDE"
 #: Amendment A3: 6 SDE blueprints (the Exotic Plasma family) list two science
@@ -193,11 +195,12 @@ class InventorChoice:
 
 def best_inventor(
     skill_set: InventionSkillSet, levels_by_character_id: Mapping[int, Mapping[int, int]],
+    *, empty_reason: str = NO_CHARACTER_SKILLS,
 ) -> InventorChoice:
     """The corp character with the highest skill factor for `skill_set`
-    (ties: lowest character id), or an unknown reason when none is loaded."""
+    (ties: lowest character id), or `empty_reason` when there is none."""
     if not levels_by_character_id:
-        return InventorChoice(None, None, NO_CHARACTER_SKILLS)
+        return InventorChoice(None, None, empty_reason)
     factor, negative_id = max(
         (invention_skill_factor(skill_set, levels), -int(character_id))
         for character_id, levels in levels_by_character_id.items()
@@ -235,6 +238,8 @@ class InventionContext:
     #: {character_id: {skill type_id: trained level}}, only characters whose skills are loaded.
     inventor_skill_levels_by_character_id: Mapping[int, Mapping[int, int]] = field(default_factory=dict)
     encryption_skill_type_ids: frozenset[int] = frozenset()
+    #: Why inventor_skill_levels_by_character_id is empty, when it is.
+    no_inventor_reason: str = NO_CHARACTER_SKILLS
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
@@ -267,10 +272,12 @@ def resolve_invention_chance(
     skill_set, reason = invention_skill_set(skill_entries, context.encryption_skill_type_ids)
     choice: InventorChoice | None = None
     if skill_set is not None:
-        choice = best_inventor(skill_set, context.inventor_skill_levels_by_character_id)
+        choice = best_inventor(
+            skill_set, context.inventor_skill_levels_by_character_id, empty_reason=context.no_inventor_reason,
+        )
         reason = choice.unknown_reason
     if reason is not None or choice is None or choice.skill_factor is None:
-        why = reason or NO_CHARACTER_SKILLS
+        why = reason or context.no_inventor_reason
         context.warn_once(
             why,
             "Invention chance (first seen for blueprint %s): %s; using the SDE base chance, "

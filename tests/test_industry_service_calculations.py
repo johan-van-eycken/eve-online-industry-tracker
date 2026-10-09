@@ -2081,17 +2081,23 @@ def test_a_row_that_does_not_invent_never_asks_for_a_decryptor(monkeypatch) -> N
     assert row["manufacturing_job"]["blueprint_material_efficiency"] == 0
 
 
-def test_a_source_row_without_an_invention_job_dict_is_not_an_invention_path(monkeypatch) -> None:
+def test_a_source_row_without_an_invention_job_dict_is_not_an_invention_path(monkeypatch, caplog) -> None:
     # The nested planner requires invention_job to be a dict; the top level now
     # uses the same predicate (it used to coerce a None job to {} and invent).
     service = _invention_service(monkeypatch)
     ctx = _planning_context(service)
     ctx.invention_row_by_blueprint_type_id[9002] = {"blueprint_type_id": 1001, "invention_job": None}
 
-    mj = _top_level_t2_row(service, ctx)["manufacturing_job"]
+    with caplog.at_level("WARNING"):
+        mj = _top_level_t2_row(service, ctx)["manufacturing_job"]
 
     assert (mj["blueprint_material_efficiency"], mj["blueprint_time_efficiency"]) == (0, 0)
     assert mj["materials"]["34"]["quantity"] == 100
+    # No invention, so no chance and no base-chance fallback for it.
+    assert "invention" not in mj["activity_breakdown"]
+    assert "invention_chance" not in mj
+    assert "invention_chance_notes" not in mj
+    assert not any("Invention chance" in r.getMessage() for r in caplog.records)
 
 
 # --- round 5 Task 2: invention chance from the corp's best inventor -----------
@@ -2254,3 +2260,40 @@ def test_a_nested_skills_fallback_is_a_row_reason(monkeypatch) -> None:
     assert len(mj["invention_chance_notes"]) == 1
     assert "sub-build: uses the SDE base chance (no corp character has its skills loaded)" in mj["invention_chance_notes"][0]
     assert f"Invention chance: {mj['invention_chance_notes'][0]}." in mj["pricing_confidence_reasons"]
+
+
+def _overview_with_real_skill_loader(monkeypatch, characters):
+    """The real _get_inventor_skill_levels over a fake character manager."""
+    rows = _invented_t2_blueprint_rows()
+    rows[0]["invention_job"]["skill_entries"] = [dict(s) for s in _INVENTION_SKILLS]
+    service = _invention_service(monkeypatch, blueprint_rows=rows, real_confidence=True)
+    del service._get_inventor_skill_levels  # back to the class method
+    service._state.char_manager = SimpleNamespace(get_characters=lambda: characters)  # type: ignore[attr-defined]
+    out = service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+    )
+    return {row["type_id"]: row for row in out}[5002]["manufacturing_job"]
+
+
+_SKILLED = {"skills": [{"skill_id": 11433, "trained_skill_level": 5}]}
+
+
+@pytest.mark.parametrize(("characters", "reason"), [
+    # Every character with loaded skills is excluded from industry.
+    ([{"character_id": 1, "industry_enabled": False, "skills": _SKILLED},
+      {"character_id": 2, "industry_enabled": True, "skills": {}}],
+     "every corp character with loaded skills is excluded from industry"),
+    # Nobody has loaded skills (an excluded pilot without skills changes nothing).
+    ([{"character_id": 1, "industry_enabled": True, "skills": {}},
+      {"character_id": 2, "industry_enabled": False}],
+     "no corp character has its skills loaded"),
+])
+def test_an_empty_inventor_list_names_why(monkeypatch, caplog, characters, reason) -> None:
+    with caplog.at_level("WARNING"):
+        mj = _overview_with_real_skill_loader(monkeypatch, characters)
+
+    assert mj["invention_chance"]["skills_unknown_reason"] == reason
+    assert mj["invention_chance"]["skill_factor"] is None
+    assert mj["invention_material_cost"] == pytest.approx(40.0)  # base 0.5
+    assert f"Invention chance uses the SDE base chance ({reason})" in " ".join(mj["pricing_confidence_reasons"])
+    assert sum(reason in r.getMessage() for r in caplog.records if r.levelname == "WARNING") == 1

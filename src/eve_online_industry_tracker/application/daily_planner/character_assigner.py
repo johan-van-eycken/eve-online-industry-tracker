@@ -408,11 +408,21 @@ class CharacterAssigner:
         industry_jobs: list[Any],
         now: datetime,
     ) -> dict[int, dict[str, Any]]:
-        """Compute free slot counts per character, treating end_date < now as already delivered."""
+        """Compute free slot counts per character, treating end_date < now as already delivered.
+
+        The one place the user's industry exclusion applies: a character with
+        industry_enabled=False (the flag the UI filters on) gets no slot, so
+        no assignment of any type (manufacture, sub_manufacture, copy, ME/TE
+        research, invent) can pick it. Its in-flight jobs are still delivered
+        (ActionPlanBuilder works from the jobs, not from these slots)."""
         slot_map: dict[int, dict[str, Any]] = {}
+        excluded: list[int] = []
         for char in characters:
             char_id = int(char.get("character_id") or char.get("id") or 0)
             if char_id <= 0:
+                continue
+            if not char.get("industry_enabled", True):
+                excluded.append(char_id)
                 continue
 
             levels = skill_levels_by_name(char)
@@ -426,9 +436,12 @@ class CharacterAssigner:
                 "total_active_jobs": 0,
                 "skills": levels,
                 "skills_by_id": skill_levels_by_id(char),
-                # The user's industry exclusion (same flag the UI filters on).
-                "industry_enabled": bool(char.get("industry_enabled", True)),
             }
+        if excluded:
+            logger.info(
+                "CharacterAssigner: characters %s are excluded from industry (industry_enabled=False); "
+                "no job is assigned to them", sorted(excluded),
+            )
 
         # Deduct active jobs (treat end_date < now as already delivered — slots free)
         for job in industry_jobs:
@@ -524,8 +537,9 @@ class CharacterAssigner:
         """The free pilot with the highest invention skill factor for this
         item: the producer's invention_chance skills (D2, the same rule as the
         chance it assumed). A row without them ranks by the generic
-        SCIENCE_SKILLS sum (logged at INFO). Pilots with industry_enabled=False
-        are never ranked. Ties break toward the fewest active jobs."""
+        SCIENCE_SKILLS sum (logged at INFO). Pilots excluded from industry
+        have no slot (see _compute_available_slots). Ties break toward the
+        fewest active jobs."""
         skills = orow.get_invention_skill_set(row or {})
         skill_set = InventionSkillSet(skills[0], skills[1]) if skills is not None else None
         if skill_set is None:
@@ -536,7 +550,7 @@ class CharacterAssigner:
             )
         candidates = []
         for slot in char_slots.values():
-            if slot.get("free_research", 0) <= 0 or not slot.get("industry_enabled", True):
+            if slot.get("free_research", 0) <= 0:
                 continue
             if skill_set is not None:
                 score = invention_skill_factor(skill_set, slot.get("skills_by_id") or {})

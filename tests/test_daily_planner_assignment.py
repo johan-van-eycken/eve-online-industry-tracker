@@ -336,3 +336,42 @@ def test_the_generic_inventor_ranking_is_logged_at_info(caplog):
     assert [a.character_id for a in actions if a.action_type == "invent"] == [1]
     assert any(r.levelno == logging.INFO and "generic" in r.getMessage() and "12345" in r.getMessage()
                for r in caplog.records)
+
+
+def _every_assignment_plan():
+    """One item that needs every assignment type, plus a sub-component."""
+    return ChainPlan(decisions=[
+        _decision(overview_row={
+            "type_id": 12345, "needs_invention": True, "has_t1_bpo": True, "t1_blueprint_type_id": 999,
+            "needs_me_research": True, "needs_te_research": True,
+            "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999}},
+        }),
+        _decision(type_id=777, type_name="Component", is_sub_component=True, overview_row={
+            "type_id": 777,
+            "sub_job_batches": [{"quantity": 10, "output": 10, "runs": 10, "cost": 100.0, "materials": []}],
+        }),
+    ])
+
+
+def _excluded_strong_pilot():
+    return {**_char(1, "Excluded", [
+        _skill("Mass Production", 5), _skill("Advanced Mass Production", 5),
+        _skill("Laboratory Operation", 5), _skill("Advanced Laboratory Operation", 5), _skill("Science", 5, 3402),
+    ]), "industry_enabled": False}
+
+
+def test_an_excluded_pilot_gets_no_job_of_any_type():
+    """Ruling: industry_enabled=False pilots are out of every assignment."""
+    enabled = {**_char(2, "Enabled", [_skill("Mass Production", 1), _skill("Laboratory Operation", 5)]),
+               "industry_enabled": True}
+    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot(), enabled]), _AdminStub())
+
+    assert {a.action_type for a in actions} == {
+        "manufacture", "sub_manufacture", "copy", "me_research", "te_research", "invent",
+    }
+    assert {a.character_id for a in actions} == {2}
+
+
+def test_work_stays_unassigned_when_every_pilot_is_excluded():
+    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot()]), _AdminStub())
+    assert actions == []
