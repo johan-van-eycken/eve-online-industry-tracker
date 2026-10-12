@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,12 @@ def aggregate_shopping_list_with_stale(
         need = sum over rows of (quantity per batch x that row's batches)
         buy  = max(0, need - owned)
 
-    Invention inputs are the exception: batch 1 may be partly or wholly
-    covered by owned T2 BPC runs, later batches are not, so their need is
-    batch 1's list plus (batches - 1) x the per-extra-batch list (see
+    Batches 2..N need not repeat batch 1: batch 1 may run on owned BPC runs
+    (top level or in a sub-build) that later batches no longer have, and a
+    later batch may be split over two invented BPCs (one job and one ME
+    rounding each). Such a row carries ``extra_batch_schedule``: one plan per
+    distinct later batch, and which plan each later batch uses. The need is
+    then batch 1 plus each later batch's own plan (see
     ``_row_lines_with_batch_counts``).
 
     per type_id. The rows do not carry the total stock, only what each row
@@ -154,44 +157,111 @@ _EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch"
 
 _BPC_PLAN_KEY = "invention_bpc_plan"
 
+_EXTRA_BATCH_SCHEDULE_KEY = "extra_batch_schedule"
+
 _NESTED_EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch_nested"
 
 
 def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple[Any, int]]:
     """Each material line of a row with the number of batches it is needed for.
 
-    procurement_materials: the manufacturing job's buy list, every batch.
+    procurement_materials: batch 1's manufacturing buy list.
     invention_procurement_materials: the invention inputs (whole attempts) for
     batch 1, after the owned T2 BPC runs; absent when they cover batch 1.
 
-    Batches 2..N, with an ``invention_bpc_plan`` (I2): later batches share
-    invented BPC runs, so the row's own invention is sized over all batches
-    (see ``_later_batch_invention_lines``), and only the nested sub-builds'
-    inputs repeat per batch (the ``..._per_extra_batch_nested`` list).
-    Without the plan (unknown odds, or an older overview):
-    invention_procurement_materials_per_extra_batch, the inputs for one full
-    batch with no owned BPC runs left, once per later batch; its lines take
-    nothing from stock. An overview cached before that list existed lacks the
-    key, and batch 1's invention list then counts for every batch.
+    Batches 2..N, with an ``extra_batch_schedule`` (the producer writes it
+    when a later batch differs from batch 1): each later batch takes its own
+    plan's ``procurement_materials`` and invention inputs (see
+    ``_later_batch_plan_counts``). Without it every later batch repeats batch
+    1's procurement_materials.
+
+    The row's own invention for batches 2..N, with an ``invention_bpc_plan``
+    (I2): later batches share invented BPC runs, so it is sized over all
+    batches (``_later_batch_invention_lines``), and only the nested
+    sub-builds' inputs come per batch (a plan's
+    ``invention_procurement_materials_nested``, or the row's
+    ``..._per_extra_batch_nested`` list without a schedule). Without the
+    plan (unknown odds, or an older overview): one full later batch's inputs
+    per later batch (a plan's ``invention_procurement_materials``, or the
+    row's invention_procurement_materials_per_extra_batch). An overview cached
+    before that list existed lacks the key, and batch 1's invention list then
+    counts for every batch. Every later-batch line takes nothing from stock.
     """
-    def lines(key: str) -> list[Any]:
-        value = mj.get(key)
+    def lines(source: dict[str, Any], key: str) -> list[Any]:
+        value = source.get(key)
         return list(value.values()) if isinstance(value, dict) else []
 
-    out: list[tuple[Any, int]] = [(mat, batches) for mat in lines("procurement_materials")]
     plan = mj.get(_BPC_PLAN_KEY)
-    if isinstance(plan, dict):
-        out.extend((mat, 1) for mat in lines("invention_procurement_materials"))
+    has_bpc_plan = isinstance(plan, dict)
+    schedule = mj.get(_EXTRA_BATCH_SCHEDULE_KEY)
+    if schedule is not None:
+        out: list[tuple[Any, int]] = [(mat, 1) for mat in lines(mj, "procurement_materials")]
+        out.extend((mat, 1) for mat in lines(mj, "invention_procurement_materials"))
+        plans = schedule.get("plans") if isinstance(schedule, dict) else None
+        invention_key = "invention_procurement_materials_nested" if has_bpc_plan else "invention_procurement_materials"
+        for plan_index, count in _later_batch_plan_counts(schedule, batches - 1).items():
+            later_plan = cast(list[dict[str, Any]], plans)[plan_index]
+            out.extend((mat, count) for mat in lines(later_plan, "procurement_materials"))
+            out.extend((mat, count) for mat in lines(later_plan, invention_key))
+        if has_bpc_plan and batches > 1:
+            out.extend((mat, 1) for mat in _later_batch_invention_lines(cast(dict[str, Any], plan), batches))
+        return out
+
+    out = [(mat, batches) for mat in lines(mj, "procurement_materials")]
+    if has_bpc_plan:
+        out.extend((mat, 1) for mat in lines(mj, "invention_procurement_materials"))
         if batches > 1:
-            out.extend((mat, 1) for mat in _later_batch_invention_lines(plan, batches))
-            out.extend((mat, batches - 1) for mat in lines(_NESTED_EXTRA_BATCH_INVENTION_KEY))
+            out.extend((mat, 1) for mat in _later_batch_invention_lines(cast(dict[str, Any], plan), batches))
+            out.extend((mat, batches - 1) for mat in lines(mj, _NESTED_EXTRA_BATCH_INVENTION_KEY))
     elif isinstance(mj.get(_EXTRA_BATCH_INVENTION_KEY), dict):
-        out.extend((mat, 1) for mat in lines("invention_procurement_materials"))
+        out.extend((mat, 1) for mat in lines(mj, "invention_procurement_materials"))
         if batches > 1:
-            out.extend((mat, batches - 1) for mat in lines(_EXTRA_BATCH_INVENTION_KEY))
+            out.extend((mat, batches - 1) for mat in lines(mj, _EXTRA_BATCH_INVENTION_KEY))
     else:
-        out.extend((mat, batches) for mat in lines("invention_procurement_materials"))
+        out.extend((mat, batches) for mat in lines(mj, "invention_procurement_materials"))
     return out
+
+
+def _later_batch_plan_counts(schedule: Any, later_batches: int) -> dict[int, int]:
+    """How many of batches 2..N use each plan of an ``extra_batch_schedule``.
+
+    The schedule is {"plans": [...], "lead": [[plan index, count], ...],
+    "cycle": [plan index, ...]}: batches 2, 3, ... take the lead entries in
+    order (count batches each), then the cycle repeats for every batch after.
+    Raises ValueError on a malformed schedule: scaling batch 1 instead is the
+    under-buy the schedule exists to prevent.
+    """
+    plans = schedule.get("plans") if isinstance(schedule, dict) else None
+    lead = schedule.get("lead") if isinstance(schedule, dict) else None
+    cycle = schedule.get("cycle") if isinstance(schedule, dict) else None
+
+    def valid_index(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < len(plans or [])
+
+    if (
+        not isinstance(plans, list) or not plans or not all(isinstance(p, dict) for p in plans)
+        or not isinstance(lead, list) or not isinstance(cycle, list) or not cycle
+        or not all(valid_index(i) for i in cycle)
+        or not all(
+            isinstance(e, (list, tuple)) and len(e) == 2 and valid_index(e[0])
+            and isinstance(e[1], int) and not isinstance(e[1], bool) and e[1] >= 0
+            for e in lead
+        )
+    ):
+        raise ValueError(f"malformed extra_batch_schedule: {schedule!r}")
+    counts: dict[int, int] = {}
+    remaining = max(0, int(later_batches))
+    for plan_index, count in lead:
+        used = min(int(count), remaining)
+        if used > 0:
+            counts[int(plan_index)] = counts.get(int(plan_index), 0) + used
+        remaining -= used
+    full_cycles, rest = divmod(remaining, len(cycle))
+    for position, plan_index in enumerate(cycle):
+        used = full_cycles + (1 if position < rest else 0)
+        if used > 0:
+            counts[int(plan_index)] = counts.get(int(plan_index), 0) + used
+    return counts
 
 
 def _later_batch_invention_lines(plan: dict[str, Any], batches: int) -> list[dict[str, Any]]:

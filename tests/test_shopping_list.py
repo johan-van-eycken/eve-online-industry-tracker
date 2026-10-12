@@ -435,3 +435,109 @@ def test_unknown_need_rows_log_debug_not_warning(caplog) -> None:
         assert list(invention_need_unknown_rows([_unknown_need_row(3, 2)])) == ["Item T2"]
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("datacore need unknown" in r.getMessage() for r in caplog.records if r.levelname == "DEBUG")
+
+
+# --- round 5 Task 5: batches 2..N from their own plans ---------------------------
+# A row whose later batches differ from batch 1 carries
+# manufacturing_job.extra_batch_schedule: distinct later-batch plans, and which
+# plan each of batches 2..N uses ("lead" run-length [plan, count] pairs, then
+# "cycle" repeating). Every plan line is one batch's pure requirement (take 0).
+
+
+def _plan(tritanium: int, *, datacores: int = 0, nested: dict | None = None, jobs=((10, 2, 4),)) -> dict:
+    return {
+        "job_segments": [
+            {"runs": r, "blueprint_material_efficiency": me, "blueprint_time_efficiency": te} for r, me, te in jobs
+        ],
+        "procurement_materials": {"34": _owned_line(tritanium, 0)},
+        "invention_procurement_materials": (
+            {"204": _owned_line(datacores, 0, type_id=204, type_name="Datacore")} if datacores else {}
+        ),
+        "invention_procurement_materials_nested": dict(nested or {}),
+    }
+
+
+def _scheduled_row(batches: int, *, batch_one: int, plans: list[dict], lead: list, cycle: list[int]) -> dict:
+    row = _make_row(1001, "Item T2", batches, {"34": _owned_line(batch_one, 0)})
+    row["manufacturing_job"]["extra_batch_schedule"] = {"plans": plans, "lead": lead, "cycle": cycle}
+    return row
+
+
+def test_one_later_batch_plan_replaces_batch_one_for_batches_two_to_n() -> None:
+    # An owned ME 4 BPC covers batch 1 (96); batches 2..N invent at ME 2 (98).
+    row = _scheduled_row(3, batch_one=96, plans=[_plan(98)], lead=[], cycle=[0])
+    assert _line(aggregate_shopping_list([row])) == (96 + 2 * 98, 96 + 2 * 98)
+
+
+def test_the_later_batch_plans_are_ignored_for_a_single_batch() -> None:
+    row = _scheduled_row(1, batch_one=96, plans=[_plan(98)], lead=[], cycle=[0])
+    assert _line(aggregate_shopping_list([row])) == (96, 96)
+
+
+def test_later_batch_plans_net_owned_stock_once() -> None:
+    row = _scheduled_row(3, batch_one=96, plans=[_plan(98)], lead=[], cycle=[0])
+    row["manufacturing_job"]["procurement_materials"]["34"] = _owned_line(96, 10)
+    assert _line(aggregate_shopping_list([row])) == (292, 282)
+
+
+def _split_bpc_row(batches: int) -> dict:
+    # 10-run batches on 11-run invented BPCs: batch 1 is one job (96); batch 2
+    # is 1 run on BPC 1's leftover + 9 on BPC 2 (97, two ceilings); batch 3 is
+    # 2 + 8 (97). The lead names batch 2, the cycle batches 3, 4, 5, ...
+    plans = [_plan(96), _plan(97, jobs=((1, 4, 14), (9, 4, 14))), _plan(97, jobs=((2, 4, 14), (8, 4, 14)))]
+    return _scheduled_row(batches, batch_one=96, plans=plans, lead=[[1, 1]], cycle=[2, 0])
+
+
+@pytest.mark.parametrize(
+    ("batches", "need"),
+    [(1, 96), (2, 96 + 97), (3, 96 + 97 + 97), (4, 96 + 97 + 97 + 96), (7, 96 + 97 + 2 * (97 + 96) + 97)],
+)
+def test_each_later_batch_is_sized_from_its_own_plan(batches, need) -> None:
+    assert _line(aggregate_shopping_list([_split_bpc_row(batches)])) == (need, need)
+
+
+def test_a_lead_run_length_covers_several_batches_before_the_cycle() -> None:
+    # A 1-run batch on a 10-run owned BPC: batches 2..10 on the owned BPC
+    # (plan 0), from batch 11 on invented (plan 1).
+    row = _scheduled_row(14, batch_one=10, plans=[_plan(10), _plan(11)], lead=[[0, 9]], cycle=[1])
+    assert _line(aggregate_shopping_list([row])) == (10 + 9 * 10 + 4 * 11,) * 2
+    row["max_batches_total"] = 5  # the lead is cut at batch 5
+    assert _line(aggregate_shopping_list([row])) == (50, 50)
+
+
+def test_without_a_bpc_plan_each_later_batch_buys_its_plans_invention_inputs() -> None:
+    plans = [_plan(96, datacores=4), _plan(97, datacores=6)]
+    row = _scheduled_row(4, batch_one=96, plans=plans, lead=[[1, 2]], cycle=[0])  # batches 2..4: 1, 1, 0
+    assert _line(aggregate_shopping_list([row]), 204) == (6 + 6 + 4, 6 + 6 + 4)
+
+
+def test_with_a_bpc_plan_each_later_batch_adds_only_its_nested_inputs() -> None:
+    nested = {"205": _owned_line(1, 0, type_id=205, type_name="Nested")}
+    plans = [_plan(96, datacores=4), _plan(97, datacores=6, nested=nested)]
+    row = _scheduled_row(3, batch_one=96, plans=plans, lead=[[1, 1]], cycle=[1, 0])  # batches 2, 3: 1, 1
+    row["manufacturing_job"]["invention_bpc_plan"] = {
+        "batch_runs": 10, "runs_per_invented_blueprint": 11, "whole_attempts_per_blueprint": 2,
+        "owned_blueprint_runs": 0, "batch_one_invented_blueprints": 1,
+        "per_attempt_materials": {"204": {"type_id": 204, "type_name": "Datacore", "quantity": 2}},
+    }
+    result = aggregate_shopping_list([row])
+    # 30 runs = 3 BPCs, batch 1 invented 1: 2 more x 2 attempts x 2 = 8.
+    assert _line(result, 204) == (8, 8)
+    assert _line(result, 205) == (2, 2)
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        {"plans": [], "lead": [], "cycle": [0]},
+        {"plans": [_plan(98)], "lead": [], "cycle": []},
+        {"plans": [_plan(98)], "lead": [[3, 1]], "cycle": [0]},
+        {"plans": [_plan(98)], "lead": [[0, -1]], "cycle": [0]},
+    ],
+)
+def test_a_malformed_schedule_fails_loud(schedule) -> None:
+    # Never fall back to batch 1 x N: that is the under-buy this list prevents.
+    row = _make_row(1001, "Item T2", 3, {"34": _owned_line(96, 0)})
+    row["manufacturing_job"]["extra_batch_schedule"] = schedule
+    with pytest.raises(ValueError, match="extra_batch_schedule"):
+        aggregate_shopping_list([row])
