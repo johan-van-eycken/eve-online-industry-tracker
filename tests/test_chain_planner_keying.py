@@ -1343,3 +1343,25 @@ def test_a_two_job_batch_saves_only_on_the_runs_a_researched_bpo_would_build():
                                                {"type_id": 35, "quantity": 1000}]}}
 
     assert _planner()._me_saving_isk_per_batch(row=row, bp_data=bp_data) == (5_400.0, None)
+
+
+def test_consecutive_invented_jobs_are_one_researched_bpo_job():
+    """Task 5: a batch split over invented BPCs is several jobs, but a
+    researched BPO would build their runs as one job. 4 owned runs plus 3 + 3
+    invented at ME 2: current ceil(14.7) x 2 = 30 -> one 6-run job at ME 10
+    = 27 (3000 ISK); 2940 x 2 = 5880 -> 5400 (2400 ISK). Valuing each 3-run
+    job on its own would give ceil(13.5) = 14 per job, 28, and 4400 ISK."""
+    row = _row(runs=10, material_cost=100_000.0,
+               blueprint_material_efficiency=0, blueprint_source_kind="owned_blueprint_copy",
+               job_segments=[
+                   {"runs": 4, "blueprint_material_efficiency": 0, "source": "owned_blueprint_copy"},
+                   {"runs": 3, "blueprint_material_efficiency": 2, "source": "invented_blueprint_copy"},
+                   {"runs": 3, "blueprint_material_efficiency": 2, "source": "invented_blueprint_copy"},
+               ],
+               materials={"34": {"type_id": 34, "quantity": 50, "unit_price": 1000.0},
+                          "35": {"type_id": 35, "quantity": 9000, "unit_price": 5.0}})
+    bp_data = {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
+                                 "materials": [{"type_id": 34, "quantity": 5},
+                                               {"type_id": 35, "quantity": 1000}]}}
+
+    assert _planner()._me_saving_isk_per_batch(row=row, bp_data=bp_data) == (5_400.0, None)

@@ -820,7 +820,7 @@ def _render_page_about() -> None:
 # Shopping List tab
 # ---------------------------------------------------------------------------
 
-STALE_OVERVIEW_CAPTION = "Some lines came from an older overview \u2014 refresh for exact stock use"
+STALE_OVERVIEW_CAPTION = "Some lines came from an older overview \u2014 refresh for exact stock use and later-batch sizing"
 
 
 def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:

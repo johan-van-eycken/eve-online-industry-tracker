@@ -5,6 +5,12 @@ from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
+#: Stamped by the producer on every build_from_bpc row
+#: (manufacturing_job.later_batch_plan_version) since batches 2..N got their
+#: own plans (extra_batch_schedule). A row without it comes from an older
+#: overview whose later batches repeat batch 1.
+LATER_BATCH_PLAN_VERSION = 1
+
 
 def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The shopping list alone; see ``aggregate_shopping_list_with_stale``."""
@@ -48,10 +54,17 @@ def aggregate_shopping_list_with_stale(
         {"type_id": int, "type_name": str, "need": int, "buy": int, "unit_price": float | None}
     and stale maps the type_id of every such split-less line to its name, so a
     UI can tell the user to refresh. ``unit_price`` is the first known price.
+
+    stale also maps a row's own type_id to its name when the row comes from an
+    overview older than the later-batch plans (no ``later_batch_plan_version``)
+    and runs on an owned BPC, top level or in a sub-build, over more than one
+    batch: its later batches repeat batch 1, which can under-buy once the
+    owned BPC runs are spent (see ``_row_predates_later_batch_plans``).
     """
     accumulated: dict[int, dict[str, Any]] = {}
     owned_by_type_id: dict[int, int] = {}
     stale_type_names: dict[int, str] = {}
+    stale_row_names: dict[int, str] = {}  # rows older than the later-batch plans
 
     for row in selected_rows:
         if not isinstance(row, dict):
@@ -60,6 +73,11 @@ def aggregate_shopping_list_with_stale(
         if not isinstance(mj, dict):
             continue
         batches = max(1, int(row.get("max_batches_total") or 1))
+        if batches > 1 and _row_predates_later_batch_plans(mj):
+            try:
+                stale_row_names.setdefault(int(row.get("type_id") or 0), str(row.get("type_name") or row.get("type_id")))
+            except (TypeError, ValueError):
+                stale_row_names.setdefault(0, str(row.get("type_name") or "?"))
         lines = _row_lines_with_batch_counts(mj, batches)
         if not lines:
             continue
@@ -109,9 +127,16 @@ def aggregate_shopping_list_with_stale(
             ", ".join(sorted(stale_type_names.values())),
         )
 
+    if stale_row_names:
+        logger.debug(
+            "Shopping list: %s came from an older overview whose later batches repeat batch 1 "
+            "(may under-buy past the owned BPC runs). Refresh the Industry Builder overview.",
+            ", ".join(sorted(stale_row_names.values())),
+        )
+
     result = list(accumulated.values())
     result.sort(key=lambda r: (r["buy"] * (r["unit_price"] or 0.0)), reverse=True)
-    return result, stale_type_names
+    return result, {**stale_type_names, **stale_row_names}
 
 
 def invention_need_unknown_rows(selected_rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -220,6 +245,32 @@ def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple
     else:
         out.extend((mat, batches) for mat in lines(mj, "invention_procurement_materials"))
     return out
+
+
+def _row_predates_later_batch_plans(mj: dict[str, Any]) -> bool:
+    """An unstamped row (no later_batch_plan_version) whose batch 1 runs on an
+    owned BPC, at the top level or in a nested sub-build (job_segments)."""
+    if mj.get("later_batch_plan_version") is not None:
+        return False
+
+    def owned(segments: Any) -> bool:
+        return isinstance(segments, list) and any(
+            isinstance(s, dict) and s.get("source") == "owned_blueprint_copy" for s in segments
+        )
+
+    def nested_owned(breakdown: Any) -> bool:
+        if not isinstance(breakdown, dict):
+            return False
+        return any(
+            isinstance(entry, dict) and (owned(entry.get("job_segments")) or nested_owned(entry.get("nested")))
+            for entry in breakdown.values()
+        )
+
+    return (
+        mj.get("blueprint_source_kind") == "owned_blueprint_copy"
+        or owned(mj.get("job_segments"))
+        or nested_owned(mj.get("recursive_activity_breakdown"))
+    )
 
 
 def _later_batch_plan_counts(schedule: Any, later_batches: int) -> dict[int, int]:

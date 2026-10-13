@@ -3013,7 +3013,7 @@ def test_a_later_batch_split_over_two_invented_bpcs_is_two_jobs(monkeypatch) -> 
     mj = row["manufacturing_job"]
     assert mj["invention_decryptor"]["type_id"] == 34201
     assert mj["materials"]["34"]["quantity"] == 96
-    assert _jobs(_later_plan(mj, 2)) == [(1, 4, 14, "unowned_blueprint_copy"), (9, 4, 14, "unowned_blueprint_copy")]
+    assert _jobs(_later_plan(mj, 2)) == [(1, 4, 14, "invented_blueprint_copy"), (9, 4, 14, "invented_blueprint_copy")]
     assert [s["materials"]["34"] for s in _later_plan(mj, 2)["job_segments"]] == [10, 87]
     assert [s["duration_seconds"] for s in _later_plan(mj, 2)["job_segments"]] == [86, 774]
     assert _later_plan(mj, 2)["procurement_materials"]["34"]["quantity"] == 97
@@ -3038,7 +3038,7 @@ def test_a_batch_longer_than_an_invented_bpc_is_one_job_per_bpc(monkeypatch) -> 
     # 100 Tritanium (one 10-run job would say 98). Every batch is the same.
     rows = _rows_with(probability_pct=50.0, bpc_runs=2, t2_limit=10)
     mj = _invention_overview(monkeypatch, blueprint_rows=rows, maximize_bp_runs=True)[5002]["manufacturing_job"]
-    assert _jobs(mj) == [(2, 2, 4, "unowned_blueprint_copy")] * 5
+    assert _jobs(mj) == [(2, 2, 4, "invented_blueprint_copy")] * 5
     assert mj["materials"]["34"]["quantity"] == 100
     assert mj["manufacturing_time_seconds"] == 5 * 192
     assert "extra_batch_schedule" not in mj
@@ -3096,3 +3096,92 @@ def test_row_reductions_of_a_two_job_batch_are_runs_weighted_and_labelled(monkey
     # A one-job batch keeps its single reduction and no label.
     single = _invention_overview(monkeypatch)[5002]["manufacturing_job"]
     assert "reduction_basis" not in single
+
+
+# --- round 5 Task 5 fix round 1 ------------------------------------------------
+
+
+def test_every_build_from_bpc_row_is_stamped_with_the_later_batch_plan_version(monkeypatch) -> None:
+    from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
+
+    assert _invention_overview(monkeypatch)[5002]["manufacturing_job"]["later_batch_plan_version"] == LATER_BATCH_PLAN_VERSION
+    assert "later_batch_plan_version" not in _invention_overview(monkeypatch, build_from_bpc=False)[5002]["manufacturing_job"]
+
+
+def test_spare_nested_bpc_runs_after_batch_one_are_noted(monkeypatch) -> None:
+    # 1-run batches: batch 1 uses 1 of the nested BPC's 10 runs; later batches
+    # are planned without the other 9 (over-buy only), and the row says so.
+    mj = _invention_overview(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}), real_confidence=True,
+    )[7100]["manufacturing_job"]
+    assert any(
+        "later batches assume nested BPC runs are spent" in n and "T2 Blueprint" in n and "9 runs" in n
+        for n in mj["later_batch_notes"]
+    )
+    assert any("later batches assume nested BPC runs are spent" in r for r in mj["pricing_confidence_reasons"])
+
+
+def test_a_nested_bpc_spent_by_batch_one_needs_no_note(monkeypatch) -> None:
+    mj = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices=_NESTED_FAKE_PRICES, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+    )[7100]["manufacturing_job"]
+    assert "later_batch_notes" not in mj
+
+
+def test_layout_datacore_plan_and_decryptor_cycle_share_one_runs_per_bpc(monkeypatch) -> None:
+    # One source for the runs per invented BPC: patched to 7, the batch-1
+    # jobs, the shared-BPC plan and the decryptor cycle all use 7.
+    calls: list[int] = []
+    real = IndustryService._runs_per_invented_blueprint
+
+    def seven(target_entry, *, max_production_limit, decryptor):
+        calls.append(1)
+        return 7
+
+    monkeypatch.setattr(IndustryService, "_runs_per_invented_blueprint", staticmethod(seven))
+    mj = _invention_overview(monkeypatch, maximize_bp_runs=True)[5002]["manufacturing_job"]
+    assert [s["runs"] for s in mj["job_segments"]] == [7, 3]
+    assert mj["invention_bpc_plan"]["runs_per_invented_blueprint"] == 7
+    assert mj["activity_breakdown"]["invention"]["runs_per_invented_blueprint"] == 7
+    assert real is not seven and calls
+
+
+def test_missing_sde_runs_per_bpc_still_warn_once(monkeypatch, caplog) -> None:
+    rows = _rows_with(probability_pct=50.0, bpc_runs=0, t2_limit=10)
+    with caplog.at_level("WARNING"):
+        mj = _invention_overview(monkeypatch, blueprint_rows=rows, maximize_bp_runs=True)[5002]["manufacturing_job"]
+    assert mj["invention_bpc_plan"]["runs_per_invented_blueprint"] == 10
+    assert sum("no SDE runs per invented BPC" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_fully_invented_jobs_are_labelled_invented(monkeypatch) -> None:
+    mj = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE])[5002]["manufacturing_job"]
+    assert mj["blueprint_source_kind"] == "unowned_blueprint_copy"
+    assert {s["source"] for s in mj["job_segments"]} == {"invented_blueprint_copy"}
+    assert {s["source"] for s in _later_plan(mj, 2)["job_segments"]} == {"invented_blueprint_copy"}
+
+
+def test_reduction_labels_on_nested_and_activity_breakdowns(monkeypatch) -> None:
+    # Nested: 4 owned runs at ME 0 + 6 invented at ME 2: (6 x 0.02) / 10 = 0.012.
+    mj = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices=_NESTED_FAKE_PRICES, owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
+    )[7100]["manufacturing_job"]
+    child = mj["recursive_activity_breakdown"]["manufacturing:5002"]
+    assert child["reduction_basis"] == "runs_weighted_job_segments"
+    assert child["material_reduction"] == pytest.approx(0.012)
+    # Top level: the two-job BPO row labels activity_breakdown.manufacturing too.
+    service = _invention_service(monkeypatch)
+    bpc = _owned_t2_bpc(runs=4, item_id=96)
+    service._get_owned_blueprint_assets = MethodType(  # type: ignore[attr-defined]
+        lambda self, *, owned_blueprints_scope: ([bpc], [_owned_t2_bpo(me=10, te=20)], {}, {}, {}), service,
+    )
+    t2_row = _invented_t2_blueprint_rows()[1]
+    row = service._build_single_product_row(
+        _planning_context(service), row=t2_row, raw_product=t2_row["manufacturing_job"]["products"][0],
+        row_index=1, product_index=1, blueprint_copy_assets=[bpc], blueprint_original_asset=None, effective_runs=10,
+    )
+    assert row is not None
+    assert row["manufacturing_job"]["activity_breakdown"]["manufacturing"]["reduction_basis"] == "runs_weighted_job_segments"

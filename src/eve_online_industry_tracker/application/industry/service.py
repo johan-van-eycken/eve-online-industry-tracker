@@ -65,6 +65,7 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
 )
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry import overview_row as orow
+from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.application.industry.invention_model import (
     ALL_INVENTORS_EXCLUDED,
@@ -2526,6 +2527,9 @@ class IndustryService:
                 reasons.append(f"Invention chance: {invention_chance['note']}.")
             for nested_note in manufacturing_job.get("invention_chance_notes") or []:
                 reasons.append(f"Invention chance: {nested_note}.")
+            for later_batch_note in manufacturing_job.get("later_batch_notes") or []:
+                # Informational: the shopping list may over-buy, never under-buy.
+                reasons.append(f"Shopping list: {later_batch_note}.")
 
             overall_confidence_map = {"High": 2, "Medium": 1, "Low": 0}
             overall_score = min(
@@ -4529,14 +4533,20 @@ class IndustryService:
                 next_source = (int(blueprint_material_efficiency), int(blueprint_time_efficiency), blueprint_source_kind)
             nested_runs_per_blueprint = (
                 self._runs_per_invented_blueprint(
-                    cast(dict[str, Any], (invention_source_row or {}).get("invention_job")),
-                    blueprint_type_id=blueprint_type_id, max_production_limit=int(job.get("max_production_limit") or 0),
+                    self._invention_target_entry(
+                        cast(dict[str, Any], (invention_source_row or {}).get("invention_job")), blueprint_type_id,
+                    ),
+                    max_production_limit=int(job.get("max_production_limit") or 0),
                     decryptor=invention_context.decryptor_for_blueprint(blueprint_type_id),
                 )
                 if has_invention_path and not matched_blueprint_originals
                 and next_source[2] in ("invented_blueprint_copy", "unowned_blueprint_copy")
                 else None
             )
+            if nested_runs_per_blueprint:
+                # Invented runs are labelled so on their jobs (the plan's
+                # blueprint_source_kind stays "unowned_blueprint_copy").
+                next_source = (next_source[0], next_source[1], "invented_blueprint_copy")
             layout = _BatchRunLayout(
                 self._owned_blueprint_copy_jobs(matched_blueprint_copies, runs=owned_copy_runs_used)
                 if blueprint_source_kind == "owned_blueprint_copy" else (),
@@ -4567,7 +4577,10 @@ class IndustryService:
             job_segment["materials"] = {}
         cost_reduction = next(iter(activity_by_efficiency.values()))["cost_reduction"]
         # Runs-weighted over the jobs when they differ; job_segments has each job's own.
-        material_reduction, _material_differs = self._runs_weighted_reduction(job_segments, "material_reduction")
+        material_reduction, material_differs = self._runs_weighted_reduction(job_segments, "material_reduction")
+        _time_reduction, time_differs = self._runs_weighted_reduction(job_segments, "time_reduction")
+        # Labels the runs-weighted material_reduction (see the top-level row).
+        reduction_basis = "runs_weighted_job_segments" if material_differs or time_differs else None
 
         adjusted_material_entries: list[dict[str, Any]] = []
         base_material_entries: list[dict[str, Any]] = []
@@ -4922,6 +4935,8 @@ class IndustryService:
                         "type_name": material.get("type_name"),
                         "quantity": planned_child_quantity,
                         "job_segments": child_plan.get("job_segments"),
+                        "material_reduction": child_plan.get("material_reduction"),
+                        **({"reduction_basis": child_plan["reduction_basis"]} if child_plan.get("reduction_basis") else {}),
                         "time_seconds": child_plan.get("total_time_seconds"),
                         "job_cost": child_plan.get("total_job_cost"),
                         "direct_job_cost": child_plan.get("direct_job_cost"),
@@ -5238,6 +5253,8 @@ class IndustryService:
             "planned_quantity": planned_quantity,
             "runs": runs,
             "job_segments": job_segments,
+            "material_reduction": material_reduction,
+            **({"reduction_basis": reduction_basis} if reduction_basis else {}),
             "direct_time_seconds": direct_duration_seconds,
             "total_time_seconds": total_time_seconds,
             "direct_job_cost": job_cost.get("total_job_cost"),
@@ -5531,6 +5548,8 @@ class IndustryService:
                     "type_name": material.get("type_name"),
                     "quantity": planned_child_quantity,
                     "job_segments": child_plan.get("job_segments"),
+                    "material_reduction": child_plan.get("material_reduction"),
+                    **({"reduction_basis": child_plan["reduction_basis"]} if child_plan.get("reduction_basis") else {}),
                     "time_seconds": child_plan.get("total_time_seconds"),
                     "job_cost": child_plan.get("total_job_cost"),
                     "nested": child_plan.get("recursive_activity_breakdown") or {},
@@ -6772,16 +6791,19 @@ class IndustryService:
         invents = bool(has_top_level_invention_path) and not matched_blueprint_originals
         runs_per_blueprint = (
             self._runs_per_invented_blueprint(
-                invention_job, blueprint_type_id=blueprint_type_id,
+                self._invention_target_entry(invention_job, int(blueprint_type_id)),
                 max_production_limit=max_production_limit, decryptor=decryptor,
             )
             if invents else None
         )
         if blueprint_source_kind != "owned_blueprint_copy":
-            return _BatchRunLayout(
-                (), int(material_efficiency), int(time_efficiency), blueprint_source_kind,
-                runs_per_blueprint if blueprint_source_kind == "unowned_blueprint_copy" else None,
-            )
+            if blueprint_source_kind == "unowned_blueprint_copy" and runs_per_blueprint:
+                # Every run is invented: the jobs say so (the row's
+                # blueprint_source_kind stays "unowned_blueprint_copy").
+                return _BatchRunLayout(
+                    (), int(material_efficiency), int(time_efficiency), "invented_blueprint_copy", runs_per_blueprint,
+                )
+            return _BatchRunLayout((), int(material_efficiency), int(time_efficiency), blueprint_source_kind)
         owned = self._owned_blueprint_copy_jobs(blueprint_copy_assets, runs=owned_copy_runs)
         if matched_blueprint_originals:
             bpo = matched_blueprint_originals[0]
@@ -6875,16 +6897,18 @@ class IndustryService:
             "reductions_differ": material_differs or time_differs,
         }
 
+    @staticmethod
     def _runs_per_invented_blueprint(
-        self, invention_job: dict[str, Any], *, blueprint_type_id: int, max_production_limit: int,
-        decryptor: DecryptorOption,
+        target_entry: dict[str, Any] | None, *, max_production_limit: int, decryptor: DecryptorOption,
     ) -> int:
-        """Runs on one BPC invented for `blueprint_type_id` with `decryptor`:
-        the SDE's runs (else max_production_limit, as _expected_invention_costs
-        does, which also warns about it) plus the decryptor's, at least 1."""
-        base_runs = int((self._invention_target_entry(invention_job, int(blueprint_type_id)) or {}).get("quantity") or 0)
+        """Runs on one invented BPC: the SDE's runs of the invention product
+        `target_entry` (else max_production_limit; _expected_invention_costs
+        warns about that once per blueprint) plus the decryptor's, at least 1.
+        The one source for the run layout's BPC boundaries, the invention
+        costs and the shared-BPC plan, and the decryptor cycle."""
+        base_runs = int((target_entry or {}).get("quantity") or 0)
         if base_runs <= 0:
-            base_runs = max(1, max_production_limit or 1)
+            base_runs = max(1, int(max_production_limit or 0) or 1)
         return invented_runs_per_blueprint(base_runs, decryptor)
 
     def _plan_activity_costs(
@@ -7280,10 +7304,10 @@ class IndustryService:
                     "Invention plan for blueprint %s: no SDE runs per invented BPC; falling back to max_production_limit %s",
                     blueprint_type_id, max(1, max_production_limit or 1),
                 )
-        if runs_per_invented_blueprint <= 0:
-            runs_per_invented_blueprint = max(1, max_production_limit or 1)
         # A decryptor adds runs to every invented BPC (EVE).
-        runs_per_invented_blueprint = invented_runs_per_blueprint(runs_per_invented_blueprint, decryptor)
+        runs_per_invented_blueprint = self._runs_per_invented_blueprint(
+            target_entry, max_production_limit=max_production_limit, decryptor=decryptor,
+        )
         effective_probability = effective_invention_probability(probability, probability_floor)
         cost_unknown_reason: str | None = None
         if invented_runs > 0 and effective_probability <= 0:
@@ -7996,10 +8020,7 @@ class IndustryService:
         source = ctx.invention_row_by_blueprint_type_id.get(blueprint_type_id) or {}
         invention_job = source.get("invention_job") if isinstance(source.get("invention_job"), dict) else {}
         target_entry = self._invention_target_entry(invention_job, blueprint_type_id)
-        base_runs = int((target_entry or {}).get("quantity") or 0)
-        if base_runs <= 0:
-            # The same fallback as _expected_invention_costs.
-            base_runs = max(1, int(manufacturing_job.get("max_production_limit") or 0) or 1)
+        max_production_limit = int(manufacturing_job.get("max_production_limit") or 0)
         evaluations: list[DecryptorEvaluation] = []
         with quiet_warnings():
             for option in ctx.decryptor_options:
@@ -8010,7 +8031,9 @@ class IndustryService:
                 candidate = self._build_single_product_row(
                     ctx, row=row, raw_product=products[0], row_index=0, product_index=0,
                     blueprint_copy_assets=[], blueprint_original_asset=None,
-                    effective_runs=invented_runs_per_blueprint(base_runs, option),
+                    effective_runs=self._runs_per_invented_blueprint(
+                        target_entry, max_production_limit=max_production_limit, decryptor=option,
+                    ),
                     decryptor=option, fully_invented=True,
                 )
                 evaluations.append(self._cycle_evaluation(ctx, option, candidate))
@@ -8302,6 +8325,8 @@ class IndustryService:
                 "estimated_item_value": base_material_eiv_total,
                 "estimated_item_value_priced_material_count": base_material_eiv_priced_count,
                 **manufacturing_job_cost,
+                # The reductions above are runs-weighted over job_segments.
+                **({"reduction_basis": "runs_weighted_job_segments"} if sized_batch["reductions_differ"] else {}),
             }
         }
         total_time_seconds = direct_manufacturing_time_seconds
@@ -8573,6 +8598,21 @@ class IndustryService:
                         sub_build_plan_cache=sub_build_plan_cache,
                     ),
                 )
+        # Later batches are planned without any nested owned BPC run batch 1
+        # used, even when that BPC has runs left (it may also be counted by
+        # another selected row): over-buy only, and the row says so.
+        later_batch_notes: list[str] = []
+        if extra_batch_schedule is not None:
+            for spare_type_id, spare_runs in sorted(available_blueprint_copy_runs_by_type_id.items()):
+                before = int(copy_runs_before_batch_one.get(spare_type_id, 0) or 0)
+                if int(spare_type_id) == blueprint_type_id or not (0 < int(spare_runs or 0) < before):
+                    continue
+                spare_blueprint = (ctx.blueprint_row_by_type_id.get(int(spare_type_id)) or {}).get("blueprint") or {}
+                spare_name = str((spare_blueprint if isinstance(spare_blueprint, dict) else {}).get("type_name") or spare_type_id)
+                later_batch_notes.append(
+                    f"later batches assume nested BPC runs are spent: {spare_name} has {int(spare_runs)} runs "
+                    f"left after batch 1, so batches 2+ may over-buy its sub-build"
+                )
         invention_procurement_materials_per_extra_batch: list[dict[str, Any]] = []
         nested_extra_batch_lines: list[dict[str, Any]] = []
         if extra_batch_schedule is None:
@@ -8799,6 +8839,13 @@ class IndustryService:
         if extra_batch_schedule is not None:
             # Shopping list only: batches 2..N, each from its own plan.
             row_out["manufacturing_job"]["extra_batch_schedule"] = extra_batch_schedule
+        if bool(ctx.build_from_bpc):
+            # Read by the shopping list: a row without it is from an older
+            # overview whose later batches repeat batch 1.
+            row_out["manufacturing_job"]["later_batch_plan_version"] = LATER_BATCH_PLAN_VERSION
+        if later_batch_notes:
+            # Informational (pricing-confidence reasons): over-buy only.
+            row_out["manufacturing_job"]["later_batch_notes"] = later_batch_notes
         if sized_batch["reductions_differ"]:
             # material_reduction / time_reduction above (and each material's)
             # are the runs-weighted mean over job_segments, which holds each

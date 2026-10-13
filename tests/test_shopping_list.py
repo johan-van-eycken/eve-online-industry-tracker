@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
-from streamlit_ui.shopping_list import aggregate_shopping_list
+from streamlit_ui.shopping_list import aggregate_shopping_list, aggregate_shopping_list_with_stale
 
 
 def _make_row(
@@ -541,3 +541,44 @@ def test_a_malformed_schedule_fails_loud(schedule) -> None:
     row["manufacturing_job"]["extra_batch_schedule"] = schedule
     with pytest.raises(ValueError, match="extra_batch_schedule"):
         aggregate_shopping_list([row])
+
+
+# --- round 5 Task 5 fix round 1: overviews from before the later-batch plans --
+
+
+def _round_four_row(batches: int, *, owned_top: bool = False, owned_nested: bool = False) -> dict:
+    """A row as an overview cached before extra_batch_schedule existed: no
+    later_batch_plan_version, batch 1 x N on the material lines."""
+    row = _make_row(1001, "Item T2", batches, {"34": _owned_line(96, 0)})
+    mj = row["manufacturing_job"]
+    mj["job_segments"] = [{"runs": 10, "blueprint_material_efficiency": 4, "source": (
+        "owned_blueprint_copy" if owned_top else "unowned_blueprint_copy")}]
+    mj["recursive_activity_breakdown"] = {"manufacturing:5002": {
+        "recommended_action": "build",
+        "job_segments": [{"runs": 10, "source": "owned_blueprint_copy" if owned_nested else "invented_blueprint_copy"}],
+        "nested": {},
+    }}
+    return row
+
+
+@pytest.mark.parametrize(("owned_top", "owned_nested"), [(True, False), (False, True)])
+def test_an_unstamped_row_on_an_owned_bpc_is_stale(owned_top, owned_nested) -> None:
+    # Its later batches repeat batch 1, which may under-buy: ask for a refresh.
+    _items, stale = aggregate_shopping_list_with_stale([_round_four_row(3, owned_top=owned_top, owned_nested=owned_nested)])
+    assert stale == {1001: "Item T2"}
+
+
+def test_an_unstamped_row_without_an_owned_bpc_or_one_batch_is_not_stale() -> None:
+    assert aggregate_shopping_list_with_stale([_round_four_row(3)])[1] == {}
+    assert aggregate_shopping_list_with_stale([_round_four_row(1, owned_top=True)])[1] == {}
+
+
+def test_a_stamped_row_is_not_stale() -> None:
+    row = _round_four_row(3, owned_top=True)
+    row["manufacturing_job"]["later_batch_plan_version"] = 1
+    assert aggregate_shopping_list_with_stale([row])[1] == {}
+
+
+def test_the_tab_asks_to_refresh_an_unstamped_owned_bpc_row(monkeypatch) -> None:
+    captions = _render_tab_captions(monkeypatch, [_round_four_row(3, owned_top=True)])
+    assert any("older overview" in c for c in captions)
