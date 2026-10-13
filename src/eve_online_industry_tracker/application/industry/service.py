@@ -8938,12 +8938,18 @@ class IndustryService:
                 "material_price_side": material_price_side, "product_price_side": product_price_side,
                 "industry_profile_id": industry_profile_id, "owned_blueprints_scope": owned_blueprints_scope,
                 "character_id": character_id,
+                # A cached overview planned before this version of the
+                # later-batch plans misses and is rebuilt (shopping_list).
+                "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
             }, sort_keys=True).encode()
         ).hexdigest()
 
         if not force_refresh:
             cached = getattr(self._state, "_overview_result_cache", None)
-            if isinstance(cached, dict) and cached.get("hash") == overview_input_hash:
+            if (
+                isinstance(cached, dict) and cached.get("hash") == overview_input_hash
+                and cached.get("later_batch_plan_version") == LATER_BATCH_PLAN_VERSION
+            ):
                 cached_rows = cached.get("rows")
                 if isinstance(cached_rows, list):
                     if progress_callback is not None:
@@ -9033,13 +9039,16 @@ class IndustryService:
         if progress_callback is not None:
             progress_callback(1.0, "Product overview ready", {"stage": "completed", "rows": len(product_rows)})
 
-        self._state._overview_result_cache = {"hash": overview_input_hash, "rows": product_rows}
+        self._state._overview_result_cache = {
+            "hash": overview_input_hash, "rows": product_rows, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
+        }
         return product_rows
 
     def get_cached_overview_rows(self) -> list[dict] | None:
-        """Return the most recent product overview rows from in-memory cache, or None if not yet computed."""
+        """Return the most recent product overview rows from in-memory cache, or None if not yet computed
+        or computed by an older version of the later-batch plans (it must be rebuilt)."""
         cached = getattr(self._state, "_overview_result_cache", None)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and cached.get("later_batch_plan_version") == LATER_BATCH_PLAN_VERSION:
             rows = cached.get("rows")
             if isinstance(rows, list):
                 return [dict(r) for r in rows]

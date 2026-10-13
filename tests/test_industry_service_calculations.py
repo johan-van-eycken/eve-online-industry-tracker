@@ -3131,21 +3131,31 @@ def test_a_nested_bpc_spent_by_batch_one_needs_no_note(monkeypatch) -> None:
 
 
 def test_layout_datacore_plan_and_decryptor_cycle_share_one_runs_per_bpc(monkeypatch) -> None:
-    # One source for the runs per invented BPC: patched to 7, the batch-1
-    # jobs, the shared-BPC plan and the decryptor cycle all use 7.
-    calls: list[int] = []
-    real = IndustryService._runs_per_invented_blueprint
+    # One source for the runs per invented BPC: patched to 7, every call site
+    # uses 7 - the top-level and nested run layouts, the invention costs and
+    # shared-BPC plan, and the decryptor candidates' cycle runs.
+    sites: list[int | None] = []
 
     def seven(target_entry, *, max_production_limit, decryptor):
-        calls.append(1)
+        sites.append(decryptor.type_id)
         return 7
 
     monkeypatch.setattr(IndustryService, "_runs_per_invented_blueprint", staticmethod(seven))
-    mj = _invention_overview(monkeypatch, maximize_bp_runs=True)[5002]["manufacturing_job"]
-    assert [s["runs"] for s in mj["job_segments"]] == [7, 3]
-    assert mj["invention_bpc_plan"]["runs_per_invented_blueprint"] == 7
+    mj = _decryptor_overview(monkeypatch, [_ACCELERANT_LIKE])[5002]["manufacturing_job"]
+    assert [s["runs"] for s in mj["job_segments"]] == [7, 3]  # top-level layout
+    assert mj["invention_bpc_plan"]["runs_per_invented_blueprint"] == 7  # invention costs
     assert mj["activity_breakdown"]["invention"]["runs_per_invented_blueprint"] == 7
-    assert real is not seven and calls
+    # Decryptor cycle: each candidate is built for 7 runs, so 7 units.
+    candidates = mj["invention_decryptor"]["candidates"]
+    assert {c["type_id"] for c in candidates} == {None, 34201}
+    assert {c["units_per_cycle"] for c in candidates} == {7}
+    assert 34201 in sites and None in sites
+
+    nested = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
+    )[7100]["manufacturing_job"]
+    child = nested["recursive_activity_breakdown"]["manufacturing:5002"]
+    assert [s["runs"] for s in child["job_segments"]] == [7, 3]  # nested layout
 
 
 def test_missing_sde_runs_per_bpc_still_warn_once(monkeypatch, caplog) -> None:
@@ -3185,3 +3195,32 @@ def test_reduction_labels_on_nested_and_activity_breakdowns(monkeypatch) -> None
     )
     assert row is not None
     assert row["manufacturing_job"]["activity_breakdown"]["manufacturing"]["reduction_basis"] == "runs_weighted_job_segments"
+
+
+# --- round 5 Task 5 fix round 2: the version stamp is a validity check ---------
+
+
+def test_an_overview_cached_before_the_later_batch_plans_is_rebuilt(monkeypatch) -> None:
+    import hashlib
+    import json
+
+    service = _invention_service(monkeypatch)
+    kwargs = dict(build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1)
+    # The cache entry an overview from before this change left: the input
+    # hash without the plan version, rows without the stamp.
+    old_hash = hashlib.sha256(json.dumps({
+        "maximize_bp_runs": False, "group_identical_bpcs": True, "build_from_bpc": True,
+        "have_blueprint_source_only": False, "include_reactions": False, "market_hub": "jita",
+        "material_price_side": "sell", "product_price_side": "sell", "industry_profile_id": None,
+        "owned_blueprints_scope": "all_characters", "character_id": 1,
+    }, sort_keys=True).encode()).hexdigest()
+    service._state._overview_result_cache = {"hash": old_hash, "rows": [{"type_id": 1, "stale": True}]}
+    assert service.get_cached_overview_rows() is None
+
+    rows = service.industry_manufacturing_product_overview(**kwargs)
+    assert all("stale" not in r for r in rows)
+    assert all(r["manufacturing_job"]["later_batch_plan_version"] == 1 for r in rows)
+    # The rebuilt overview is cached and served again.
+    service._state._overview_result_cache["rows"][0]["cache_marker"] = True
+    assert any(r.get("cache_marker") for r in service.industry_manufacturing_product_overview(**kwargs))
+    assert service.get_cached_overview_rows() is not None

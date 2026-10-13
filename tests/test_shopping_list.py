@@ -7,6 +7,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 from streamlit_ui.shopping_list import aggregate_shopping_list, aggregate_shopping_list_with_stale
+from eve_online_industry_tracker.application.industry.shopping_list import (
+    OLDER_OVERVIEW_REASON,
+    rows_built_by_an_older_version,
+)
 
 
 def _make_row(
@@ -19,7 +23,8 @@ def _make_row(
         "type_id": type_id,
         "type_name": type_name,
         "max_batches_total": max_batches,
-        "manufacturing_job": {"procurement_materials": materials},
+        # A current overview row (see the fix round 2 tests for older ones).
+        "manufacturing_job": {"procurement_materials": materials, "later_batch_plan_version": 1},
     }
 
 
@@ -242,6 +247,7 @@ def test_invention_datacore_line_follows_the_same_rule() -> None:
         "manufacturing_job": {
             "procurement_materials": {},
             "invention_procurement_materials": {"204": _owned_line(4, 3, type_id=204, type_name="Datacore")},
+            "later_batch_plan_version": 1,
         },
     }
     assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
@@ -290,7 +296,7 @@ def test_lines_with_a_split_log_no_warning(caplog) -> None:
 
 
 def _invention_row(batches: int, *, batch_one: dict | None, extra: dict | None) -> dict:
-    mj: dict = {"procurement_materials": {}}
+    mj: dict = {"procurement_materials": {}, "later_batch_plan_version": 1}
     if batch_one is not None:
         mj["invention_procurement_materials"] = {"204": batch_one}
     if extra is not None:
@@ -543,42 +549,56 @@ def test_a_malformed_schedule_fails_loud(schedule) -> None:
         aggregate_shopping_list([row])
 
 
-# --- round 5 Task 5 fix round 1: overviews from before the later-batch plans --
+# --- round 5 Task 5 fix rounds 1-2: overviews from before the later-batch plans --
+# A build_from_bpc row without later_batch_plan_version comes from an older
+# overview whose later batches repeat batch 1, which can under-buy. Its
+# quantities are never shown: the list names it and asks for a refresh.
 
 
-def _round_four_row(batches: int, *, owned_top: bool = False, owned_nested: bool = False) -> dict:
-    """A row as an overview cached before extra_batch_schedule existed: no
-    later_batch_plan_version, batch 1 x N on the material lines."""
-    row = _make_row(1001, "Item T2", batches, {"34": _owned_line(96, 0)})
+def _round_four_row(batches: int, *, kind: str = "owned_blueprint_copy", type_id: int = 1001, name: str = "Item T2") -> dict:
+    """A row as an overview cached before extra_batch_schedule existed."""
+    row = _make_row(type_id, name, batches, {"34": _owned_line(96, 0)})
     mj = row["manufacturing_job"]
-    mj["job_segments"] = [{"runs": 10, "blueprint_material_efficiency": 4, "source": (
-        "owned_blueprint_copy" if owned_top else "unowned_blueprint_copy")}]
-    mj["recursive_activity_breakdown"] = {"manufacturing:5002": {
-        "recommended_action": "build",
-        "job_segments": [{"runs": 10, "source": "owned_blueprint_copy" if owned_nested else "invented_blueprint_copy"}],
-        "nested": {},
-    }}
+    del mj["later_batch_plan_version"]
+    mj["blueprint_source_kind"] = kind
+    mj["job_segments"] = [{"runs": 10, "blueprint_material_efficiency": 4, "source": kind}]
     return row
 
 
-@pytest.mark.parametrize(("owned_top", "owned_nested"), [(True, False), (False, True)])
-def test_an_unstamped_row_on_an_owned_bpc_is_stale(owned_top, owned_nested) -> None:
-    # Its later batches repeat batch 1, which may under-buy: ask for a refresh.
-    _items, stale = aggregate_shopping_list_with_stale([_round_four_row(3, owned_top=owned_top, owned_nested=owned_nested)])
-    assert stale == {1001: "Item T2"}
+@pytest.mark.parametrize("kind", ["owned_blueprint_copy", "unowned_blueprint_copy", "copied_from_owned_blueprint_original", None])
+@pytest.mark.parametrize("batches", [1, 3])
+def test_an_unstamped_build_from_bpc_row_is_refused(kind, batches) -> None:
+    # Owned, invented (the fully-invented 96-vs-97 case) or copied, any batch
+    # count; an unknown source kind is refused too.
+    row = _round_four_row(batches, kind=kind or "x")
+    if kind is None:
+        del row["manufacturing_job"]["blueprint_source_kind"]
+    assert rows_built_by_an_older_version([row]) == {"Item T2": OLDER_OVERVIEW_REASON}
+    assert aggregate_shopping_list([row]) == []
 
 
-def test_an_unstamped_row_without_an_owned_bpc_or_one_batch_is_not_stale() -> None:
-    assert aggregate_shopping_list_with_stale([_round_four_row(3)])[1] == {}
-    assert aggregate_shopping_list_with_stale([_round_four_row(1, owned_top=True)])[1] == {}
+def test_only_the_unstamped_rows_are_left_out() -> None:
+    current = _make_row(1002, "Item Current", 2, {"34": _owned_line(10, 0)})
+    old = _round_four_row(3, type_id=1001, name="Item Old")
+    assert _line(aggregate_shopping_list([current, old])) == (20, 20)
+    assert list(rows_built_by_an_older_version([current, old])) == ["Item Old"]
 
 
-def test_a_stamped_row_is_not_stale() -> None:
-    row = _round_four_row(3, owned_top=True)
-    row["manufacturing_job"]["later_batch_plan_version"] = 1
-    assert aggregate_shopping_list_with_stale([row])[1] == {}
+@pytest.mark.parametrize("kind", ["owned_blueprint_original", "blueprint_sde_fallback"])
+def test_an_unstamped_row_planned_without_bpcs_is_not_refused(kind) -> None:
+    # build_from_bpc off: one job from a BPO (owned or assumed), every batch
+    # the same, so an older overview's batch 1 x N is exact.
+    row = _round_four_row(3, kind=kind)
+    assert rows_built_by_an_older_version([row]) == {}
+    assert _line(aggregate_shopping_list([row])) == (288, 288)
 
 
-def test_the_tab_asks_to_refresh_an_unstamped_owned_bpc_row(monkeypatch) -> None:
-    captions = _render_tab_captions(monkeypatch, [_round_four_row(3, owned_top=True)])
-    assert any("older overview" in c for c in captions)
+def test_the_tab_warns_and_shows_no_numbers_for_an_unstamped_row(monkeypatch) -> None:
+    from streamlit_ui.pages import portfolio_planner as page
+
+    warnings: list[str] = []
+    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
+    infos: list[str] = []
+    monkeypatch.setattr(page.st, "info", lambda text, *a, **k: infos.append(str(text)))
+    _render_tab_captions(monkeypatch, [_round_four_row(3)])
+    assert any("Item T2" in w and OLDER_OVERVIEW_REASON in w for w in warnings)

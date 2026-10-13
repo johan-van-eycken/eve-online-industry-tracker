@@ -21,7 +21,11 @@ from streamlit_ui.state.industry_builder_page import (
     start_overview_refresh_job,
 )
 from streamlit_ui.state.industry_builder_ui import filter_overview_rows
-from streamlit_ui.shopping_list import aggregate_shopping_list_with_stale, invention_need_unknown_rows
+from streamlit_ui.shopping_list import (
+    aggregate_shopping_list_with_stale,
+    invention_need_unknown_rows,
+    rows_built_by_an_older_version,
+)
 from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
     load_character_context,
@@ -820,7 +824,7 @@ def _render_page_about() -> None:
 # Shopping List tab
 # ---------------------------------------------------------------------------
 
-STALE_OVERVIEW_CAPTION = "Some lines came from an older overview \u2014 refresh for exact stock use and later-batch sizing"
+STALE_OVERVIEW_CAPTION = "Some lines came from an older overview \u2014 refresh for exact stock use"
 
 
 def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
@@ -865,6 +869,12 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
         return
 
     selected_rows = [label_to_row[lbl] for lbl in selected_labels]
+    older_rows = rows_built_by_an_older_version(selected_rows)
+    if older_rows:
+        # Their later batches may be short, so the list leaves them out.
+        st.warning(
+            "Not in this list: " + ", ".join(sorted(older_rows)) + f" \u2014 {next(iter(older_rows.values()))}."
+        )
     shopping_items, stale_types = aggregate_shopping_list_with_stale(selected_rows)
     if stale_types:
         st.caption(STALE_OVERVIEW_CAPTION)

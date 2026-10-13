@@ -43,28 +43,27 @@ def aggregate_shopping_list_with_stale(
     ``owned`` is the largest such figure over the selected rows, so it is never
     more stock than the producer reported.
 
-    A line without an explicit ``buy_quantity`` counts nothing as owned and
-    buys its full quantity. A "take" / "split" line without the split comes
-    from an overview cached before the producer wrote it; those types are
-    named in one DEBUG line per call (the UI shows a caption for them). Every gap therefore errs toward over-buy,
-    never under-buy.
+    Gaps in the data never make the list short:
+    - A line without an explicit ``buy_quantity`` counts nothing as owned and
+      buys its full quantity. A "take" / "split" line without the split comes
+      from an overview cached before the producer wrote it; those types are
+      named in one DEBUG line per call (the UI shows a caption for them).
+      That gap over-buys.
+    - A build_from_bpc row without ``later_batch_plan_version`` comes from an
+      overview older than the later-batch plans: its later batches repeat
+      batch 1, which can under-buy. Such a row contributes NOTHING to the
+      list; ``rows_built_by_an_older_version`` names it so the UI can ask for
+      a refresh before buying.
 
     Returns (items, stale) where items are dicts sorted by (buy * unit_price)
     descending:
         {"type_id": int, "type_name": str, "need": int, "buy": int, "unit_price": float | None}
     and stale maps the type_id of every such split-less line to its name, so a
     UI can tell the user to refresh. ``unit_price`` is the first known price.
-
-    stale also maps a row's own type_id to its name when the row comes from an
-    overview older than the later-batch plans (no ``later_batch_plan_version``)
-    and runs on an owned BPC, top level or in a sub-build, over more than one
-    batch: its later batches repeat batch 1, which can under-buy once the
-    owned BPC runs are spent (see ``_row_predates_later_batch_plans``).
     """
     accumulated: dict[int, dict[str, Any]] = {}
     owned_by_type_id: dict[int, int] = {}
     stale_type_names: dict[int, str] = {}
-    stale_row_names: dict[int, str] = {}  # rows older than the later-batch plans
 
     for row in selected_rows:
         if not isinstance(row, dict):
@@ -72,12 +71,10 @@ def aggregate_shopping_list_with_stale(
         mj = row.get("manufacturing_job")
         if not isinstance(mj, dict):
             continue
+        if _row_predates_later_batch_plans(mj):
+            # Possibly short: never counted (rows_built_by_an_older_version).
+            continue
         batches = max(1, int(row.get("max_batches_total") or 1))
-        if batches > 1 and _row_predates_later_batch_plans(mj):
-            try:
-                stale_row_names.setdefault(int(row.get("type_id") or 0), str(row.get("type_name") or row.get("type_id")))
-            except (TypeError, ValueError):
-                stale_row_names.setdefault(0, str(row.get("type_name") or "?"))
         lines = _row_lines_with_batch_counts(mj, batches)
         if not lines:
             continue
@@ -127,16 +124,33 @@ def aggregate_shopping_list_with_stale(
             ", ".join(sorted(stale_type_names.values())),
         )
 
-    if stale_row_names:
-        logger.debug(
-            "Shopping list: %s came from an older overview whose later batches repeat batch 1 "
-            "(may under-buy past the owned BPC runs). Refresh the Industry Builder overview.",
-            ", ".join(sorted(stale_row_names.values())),
-        )
-
     result = list(accumulated.values())
     result.sort(key=lambda r: (r["buy"] * (r["unit_price"] or 0.0)), reverse=True)
-    return result, {**stale_type_names, **stale_row_names}
+    return result, stale_type_names
+
+
+OLDER_OVERVIEW_REASON = "this overview was built by an older version; refresh it before buying"
+
+
+def rows_built_by_an_older_version(selected_rows: list[dict[str, Any]]) -> dict[str, str]:
+    """The selected rows the shopping list leaves out, by row name, with why.
+
+    A build_from_bpc row without ``later_batch_plan_version`` was planned
+    before batches 2..N got their own plans, so its later batches may be short
+    (an owned BPC's runs spent, or a batch split over two invented BPCs). The
+    list shows none of its quantities; the UI warns with these names. Logs at
+    DEBUG only (it runs on every UI rerun; the UI warning is the signal).
+    """
+    out: dict[str, str] = {}
+    for row in selected_rows:
+        if not isinstance(row, dict):
+            continue
+        mj = row.get("manufacturing_job")
+        if isinstance(mj, dict) and _row_predates_later_batch_plans(mj):
+            out[str(row.get("type_name") or row.get("type_id") or "?")] = OLDER_OVERVIEW_REASON
+    if out:
+        logger.debug("Shopping list: left out %s (%s)", ", ".join(sorted(out)), OLDER_OVERVIEW_REASON)
+    return out
 
 
 def invention_need_unknown_rows(selected_rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -247,30 +261,18 @@ def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple
     return out
 
 
+#: The source kinds of a row planned with build_from_bpc off: one job from an
+#: owned or assumed BPO, every batch the same, so batch 1 x N is exact.
+_NON_BPC_SOURCE_KINDS = frozenset({"owned_blueprint_original", "blueprint_sde_fallback"})
+
+
 def _row_predates_later_batch_plans(mj: dict[str, Any]) -> bool:
-    """An unstamped row (no later_batch_plan_version) whose batch 1 runs on an
-    owned BPC, at the top level or in a nested sub-build (job_segments)."""
+    """A row without later_batch_plan_version that was (or may have been)
+    planned with build_from_bpc: any source kind but the non-BPC ones,
+    an unknown kind included."""
     if mj.get("later_batch_plan_version") is not None:
         return False
-
-    def owned(segments: Any) -> bool:
-        return isinstance(segments, list) and any(
-            isinstance(s, dict) and s.get("source") == "owned_blueprint_copy" for s in segments
-        )
-
-    def nested_owned(breakdown: Any) -> bool:
-        if not isinstance(breakdown, dict):
-            return False
-        return any(
-            isinstance(entry, dict) and (owned(entry.get("job_segments")) or nested_owned(entry.get("nested")))
-            for entry in breakdown.values()
-        )
-
-    return (
-        mj.get("blueprint_source_kind") == "owned_blueprint_copy"
-        or owned(mj.get("job_segments"))
-        or nested_owned(mj.get("recursive_activity_breakdown"))
-    )
+    return mj.get("blueprint_source_kind") not in _NON_BPC_SOURCE_KINDS
 
 
 def _later_batch_plan_counts(schedule: Any, later_batches: int) -> dict[int, int]:
