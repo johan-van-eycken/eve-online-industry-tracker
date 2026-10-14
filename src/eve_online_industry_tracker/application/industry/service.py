@@ -4363,6 +4363,7 @@ class IndustryService:
         blueprint_copy_assets_by_type_id: dict[int, list[Any]],
         available_blueprint_copy_runs_by_type_id: dict[int, int] | None,
         available_owned_item_quantity_by_type_id: dict[int, int] | None,
+        invention_valuation_stock: dict[int, Any],
         owned_item_unit_cost_by_type_id: dict[int, float] | None,
         blueprint_original_assets_by_type_id: dict[int, list[Any]],
         character_name_by_id: dict[int, str] | None = None,
@@ -4421,8 +4422,10 @@ class IndustryService:
         blueprint_source_kind = activity
         include_copying_job = False
         include_sde_research_chain = False
-        available_copy_runs = available_blueprint_copy_runs_by_type_id or {}
-        available_owned_item_quantities = available_owned_item_quantity_by_type_id or {}
+        available_copy_runs = available_blueprint_copy_runs_by_type_id if available_blueprint_copy_runs_by_type_id is not None else {}
+        available_owned_item_quantities = (
+            available_owned_item_quantity_by_type_id if available_owned_item_quantity_by_type_id is not None else {}
+        )
         owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
         matched_blueprint_copies = blueprint_copy_assets_by_type_id.get(blueprint_type_id) or []
         matched_blueprint_originals = blueprint_original_assets_by_type_id.get(blueprint_type_id) or []
@@ -4868,6 +4871,11 @@ class IndustryService:
                 child_row = manufacturing_row_by_product_type_id.get(child_type_id)
 
             child_plan = None
+            # Evaluate the child on copies: a rejected build must not spend
+            # stock, BPC runs or invention valuation stock (FU-61).
+            trial_copy_runs = dict(available_copy_runs)
+            trial_stock = dict(available_owned_item_quantities)
+            trial_valuation = dict(invention_valuation_stock)
             if child_row is not None and child_type_id != int(desired_product_type_id):
                 child_plan = self._plan_blueprint_chain_for_quantity(
                     blueprint_row=child_row,
@@ -4882,8 +4890,9 @@ class IndustryService:
                     adjusted_market_price_map=adjusted_market_price_map,
                     sell_price_map=sell_price_map,
                     blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
-                    available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
-                    available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+                    available_blueprint_copy_runs_by_type_id=trial_copy_runs,
+                    available_owned_item_quantity_by_type_id=trial_stock,
+                    invention_valuation_stock=trial_valuation,
                     owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                     blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
                     character_name_by_id=character_name_by_id,
@@ -4916,6 +4925,9 @@ class IndustryService:
                 )
 
                 if choose_build:
+                    self._commit_trial(available_copy_runs, trial_copy_runs)
+                    self._commit_trial(available_owned_item_quantities, trial_stock)
+                    self._commit_trial(invention_valuation_stock, trial_valuation)
                     total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
                     if child_plan.get("total_job_cost") is not None:
                         total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
@@ -5117,6 +5129,7 @@ class IndustryService:
                     sell_price_map=sell_price_map,
                     available_blueprint_copy_runs_by_type_id=available_copy_runs,
                     available_owned_item_quantity_by_type_id=available_owned_item_quantities,
+                    invention_valuation_stock=invention_valuation_stock,
                     owned_item_unit_cost_by_type_id=owned_item_unit_costs,
                     source_copy_enabled=True,
                     decryptor=invention_context.decryptor_for_blueprint(blueprint_type_id),
@@ -5291,6 +5304,7 @@ class IndustryService:
         blueprint_copy_assets_by_type_id: dict[int, list[Any]],
         available_blueprint_copy_runs_by_type_id: dict[int, int] | None,
         available_owned_item_quantity_by_type_id: dict[int, int] | None,
+        invention_valuation_stock: dict[int, Any],
         owned_item_unit_cost_by_type_id: dict[int, float] | None,
         blueprint_original_assets_by_type_id: dict[int, list[Any]],
         character_name_by_id: dict[int, str] | None = None,
@@ -5316,7 +5330,9 @@ class IndustryService:
         # Nested inventions' chance fallbacks and notes (row reasons, not unknown costs).
         invention_chance_notes: list[str] = []
         duration_is_amortized = False
-        available_owned_item_quantities = available_owned_item_quantity_by_type_id or {}
+        available_owned_item_quantities = (
+            available_owned_item_quantity_by_type_id if available_owned_item_quantity_by_type_id is not None else {}
+        )
         owned_item_unit_costs = owned_item_unit_cost_by_type_id or {}
 
         for material in adjusted_material_entries:
@@ -5439,6 +5455,11 @@ class IndustryService:
                 )
                 continue
 
+            # Evaluate the child on copies: a rejected build must not spend
+            # stock, BPC runs or invention valuation stock (FU-61).
+            trial_copy_runs = dict(available_blueprint_copy_runs_by_type_id or {})
+            trial_stock = dict(available_owned_item_quantities)
+            trial_valuation = dict(invention_valuation_stock)
             child_plan = self._plan_blueprint_chain_for_quantity(
                 blueprint_row=child_row,
                 activity=child_activity,
@@ -5452,8 +5473,9 @@ class IndustryService:
                 adjusted_market_price_map=adjusted_market_price_map,
                 sell_price_map=sell_price_map,
                 blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
-                available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
-                available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+                available_blueprint_copy_runs_by_type_id=trial_copy_runs,
+                available_owned_item_quantity_by_type_id=trial_stock,
+                invention_valuation_stock=trial_valuation,
                 owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
                 blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
                 character_name_by_id=character_name_by_id,
@@ -5527,6 +5549,9 @@ class IndustryService:
                 and (buy_total_cost is None or build_total_cost <= buy_total_cost)
             )
             if choose_build:
+                self._commit_trial(available_blueprint_copy_runs_by_type_id, trial_copy_runs)
+                self._commit_trial(available_owned_item_quantities, trial_stock)
+                self._commit_trial(invention_valuation_stock, trial_valuation)
                 total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
                 if child_plan.get("total_job_cost") is not None:
                     total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
@@ -7384,11 +7409,14 @@ class IndustryService:
         cost_unknown = invention_costs.get("cost_unknown_reason") is not None
         source_copying_job = invention_source_row.get("copying_job") or {}
         source_bp_type_id = int(invention_source_row.get("blueprint_type_id") or 0)
-        available_source_runs = int(available_blueprint_copy_runs_by_type_id.get(source_bp_type_id, 0))
-        source_runs_used = min(max(0, available_source_runs), attempts)
-        available_blueprint_copy_runs_by_type_id[source_bp_type_id] = max(0, available_source_runs - source_runs_used)
-        missing_source_runs = max(0, attempts - source_runs_used)
-        whole_missing_source_runs = max(0, whole_attempts - max(0, available_source_runs))
+        # Expected-value model: the runs are fractional, read and kept as such
+        # (int() here read a 0.7-run remainder as 0, FU-50). The whole-run
+        # elapsed time counts only whole runs left on the owned copies.
+        available_source_runs = max(0.0, float(available_blueprint_copy_runs_by_type_id.get(source_bp_type_id, 0) or 0))
+        source_runs_used = min(available_source_runs, attempts)
+        available_blueprint_copy_runs_by_type_id[source_bp_type_id] = available_source_runs - source_runs_used
+        missing_source_runs = max(0.0, attempts - source_runs_used)
+        whole_missing_source_runs = max(0, whole_attempts - int(math.floor(available_source_runs + 1e-9)))
         if not (enabled and isinstance(source_copying_job, dict) and int(source_copying_job.get("time_seconds") or 0) > 0):
             return None, missing_source_runs
 
@@ -7445,6 +7473,7 @@ class IndustryService:
         sell_price_map: dict[int, dict[str, Any]] | None,
         available_blueprint_copy_runs_by_type_id: dict[int, Any],
         available_owned_item_quantity_by_type_id: dict[int, Any],
+        invention_valuation_stock: dict[int, Any],
         owned_item_unit_cost_by_type_id: dict[int, float] | None,
         source_copy_enabled: bool,
         decryptor: DecryptorOption,
@@ -7470,13 +7499,14 @@ class IndustryService:
             adjusted_price_map=adjusted_market_price_map,
             decryptor=decryptor, invention_context=invention_context,
         )
-        # Priced against a copy of the stock: this only values the amortized
-        # inputs, and the child may still be bought instead of built. The whole
-        # attempts are taken from stock when the row commits the build (see
-        # invention_requirements and _build_single_product_row).
+        # Valued against the row's one invention valuation stock (FU-63): the
+        # top-level invention spends it first, then each nested invention in
+        # turn. The caller evaluates a child on a copy and commits it only when
+        # the child is built. The whole attempts are taken from the real stock
+        # in invention_procurement_materials (_build_single_product_row).
         planned_materials, material_nodes = self._plan_take_or_buy_material_nodes(
             invention_materials,
-            available_owned_item_quantity_by_type_id=dict(available_owned_item_quantity_by_type_id),
+            available_owned_item_quantity_by_type_id=invention_valuation_stock,
             owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
             sell_price_map=sell_price_map,
             adjusted_price_map=adjusted_market_price_map,
@@ -7594,6 +7624,15 @@ class IndustryService:
         if child_plan.get("invention_cost_unknown_reasons"):
             return None
         return cls._as_float(child_plan.get("estimated_total_cost"))
+
+    @staticmethod
+    def _commit_trial(target: dict[int, Any] | None, trial: dict[int, Any]) -> None:
+        """Make a built child's evaluation real: the trial map replaces the
+        live one in place (the caller's dict object stays shared)."""
+        if target is None:
+            return
+        target.clear()
+        target.update(trial)
 
     @staticmethod
     def _merge_invention_requirements(requirements: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -7749,6 +7788,7 @@ class IndustryService:
             blueprint_copy_assets_by_type_id=ctx.blueprint_copy_assets_by_type_id,
             available_blueprint_copy_runs_by_type_id={},
             available_owned_item_quantity_by_type_id={},
+            invention_valuation_stock={},
             owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
             blueprint_original_assets_by_type_id=ctx.blueprint_original_assets_by_type_id,
             character_name_by_id=ctx.character_name_by_id, corporation_name_by_id=ctx.corporation_name_by_id,
@@ -7835,6 +7875,7 @@ class IndustryService:
         compact_product: dict[str, Any],
         available_blueprint_copy_runs_by_type_id: dict[int, int],
         available_owned_item_quantity_by_type_id: dict[int, int],
+        invention_valuation_stock: dict[int, Any],
         decryptor: DecryptorOption,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
         """Plan the invention chain for a variant (Step 4). Returns (invention_costs, tree_nodes, procurement_materials, source_copy_costs)."""
@@ -7866,9 +7907,11 @@ class IndustryService:
 
         planned_inv_materials, inv_material_nodes = self._plan_take_or_buy_material_nodes(
             invention_materials,
-            # Values the amortized inputs only; the whole attempts are taken
-            # from stock in invention_procurement_materials (integer units).
-            available_owned_item_quantity_by_type_id=dict(available_owned_item_quantity_by_type_id),
+            # Values the amortized inputs only, against the row's invention
+            # valuation stock (spent here first, then by the nested inventions,
+            # FU-63); the whole attempts are taken from the real stock in
+            # invention_procurement_materials (integer units).
+            available_owned_item_quantity_by_type_id=invention_valuation_stock,
             owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
             sell_price_map=ctx.material_price_map,
             adjusted_price_map=ctx.adjusted_market_price_map,
@@ -8373,6 +8416,8 @@ class IndustryService:
                 activity_breakdown.pop("copying", None)
         prerequisite_tree_nodes.extend(copying_tree)
 
+        # One valuation stock per row for every invention's amortized inputs.
+        invention_valuation_stock = dict(available_owned_item_quantity_by_type_id)
         # Invention (Step 4)
         inv_costs, inv_tree, inv_procurement, source_copy_costs = self._plan_invention_chain_for_variant(
             ctx, row=row, blueprint_type_id=blueprint_type_id,
@@ -8382,6 +8427,7 @@ class IndustryService:
             max_production_limit=max_production_limit, compact_product=compact_product,
             available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
             available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+            invention_valuation_stock=invention_valuation_stock,
             decryptor=decryptor,
         )
         expected_invention_inputs: list[dict[str, Any]] = []
@@ -8451,6 +8497,7 @@ class IndustryService:
             blueprint_copy_assets_by_type_id=ctx.blueprint_copy_assets_by_type_id,
             available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
             available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
+            invention_valuation_stock=invention_valuation_stock,
             owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
             blueprint_original_assets_by_type_id=ctx.blueprint_original_assets_by_type_id,
             character_name_by_id=ctx.character_name_by_id, corporation_name_by_id=ctx.corporation_name_by_id,

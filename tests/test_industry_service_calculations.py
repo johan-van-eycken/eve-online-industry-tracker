@@ -1845,9 +1845,14 @@ def test_nested_sub_build_bought_in_batch_one_adds_no_extra_batch_datacores(monk
     mj = row["manufacturing_job"]
     assert "manufacturing:5002" not in mj["recursive_activity_breakdown"]
     assert "invention_procurement_materials_per_extra_batch" not in mj
-    later = _later_plan(mj, 2)
-    assert later["procurement_materials"]["5002"]["quantity"] == 1
-    assert later["invention_procurement_materials"] == {}
+    # The rejected sub-build spends no owned BPC run (FU-61), so every later
+    # batch repeats batch 1: no schedule, the component bought each batch.
+    assert "extra_batch_schedule" not in mj
+    assert mj["procurement_materials"]["5002"]["quantity"] == 1
+    row["max_batches_total"] = 5
+    component = _shopping_line(row, 5002)
+    assert component is not None and component["buy"] == 5
+    assert _shopping_line(row, 204) is None
 
 
 # --- round 4 Task I R3: unknown odds past an owned BPC are flagged, never 0 ----
@@ -3224,3 +3229,85 @@ def test_an_overview_cached_before_the_later_batch_plans_is_rebuilt(monkeypatch)
     service._state._overview_result_cache["rows"][0]["cache_marker"] = True
     assert any(r.get("cache_marker") for r in service.industry_manufacturing_product_overview(**kwargs))
     assert service.get_cached_overview_rows() is not None
+
+
+# --- round 5 Task 6: nested-plan hygiene (C5, C6, C7) ---------------------------
+
+
+def _parent_with_cheap_component_rows() -> list[dict]:
+    """Parent 7200 needs 1 component 6200 and 5 Tritanium per run; the
+    component's own blueprint needs 10 Tritanium. The component is cheaper to
+    buy (1 ISK) than to build."""
+    return [
+        {
+            "blueprint_type_id": 9200,
+            "blueprint": {"type_id": 9200, "type_name": "Parent Blueprint", "base_price": 1000.0},
+            "manufacturing_job": {
+                "materials": [
+                    {"type_id": 6200, "type_name": "Component", "quantity": 1, "category_name": "Commodity"},
+                    {"type_id": 34, "type_name": "Tritanium", "quantity": 5, "category_name": "Material"},
+                ],
+                "skill_entries": [], "time_seconds": 100, "max_production_limit": 10,
+                "products": [{"type_id": 7200, "type_name": "Parent", "quantity": 1, "meta_group_name": "Tech I"}],
+            },
+        },
+        {
+            "blueprint_type_id": 9300,
+            "blueprint": {"type_id": 9300, "type_name": "Component Blueprint", "base_price": 1000.0},
+            "manufacturing_job": {
+                "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 10, "category_name": "Material"}],
+                "skill_entries": [], "time_seconds": 100, "max_production_limit": 10,
+                "products": [{"type_id": 6200, "type_name": "Component", "quantity": 1, "meta_group_name": "Tech I"}],
+            },
+        },
+    ]
+
+
+def test_a_rejected_sub_build_spends_no_stock(monkeypatch) -> None:
+    # 10 Tritanium owned. Evaluating the component build took all 10, then the
+    # component was bought anyway and the parent's own 5 were bought too (FU-61).
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_parent_with_cheap_component_rows(),
+        prices={34: 5.0, 6200: 1.0}, owned_item_inventory=({34: 10}, {34: 1.0}),
+    )[7200]
+    procurement = row["manufacturing_job"]["procurement_materials"]
+
+    assert procurement["6200"]["quantity"] == 1                       # bought
+    assert (procurement["34"]["take_quantity"], procurement["34"]["buy_quantity"]) == (5, 0)
+
+
+def test_owned_datacores_are_valued_once_across_a_rows_inventions(monkeypatch) -> None:
+    # Parent 9100 (invented) and its component 5002 (invented) each need 4
+    # amortized datacores over 10 runs; 5 are owned at 60, the market is 100.
+    # The top level takes 4 at 60 (240); the component gets 1 at 60 + 3 at 100
+    # (360). Was 4 x 60 twice (480): the owned datacores were counted twice (FU-63).
+    row = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, blueprint_rows=_invented_parent_rows(),
+        prices=_NESTED_FAKE_PRICES, owned_item_inventory=({204: 5}, {204: 60.0}),
+    )[7100]
+    mj = row["manufacturing_job"]
+
+    assert mj["recursive_activity_breakdown"]["manufacturing:5002"]["recommended_action"] == "build"
+    assert mj["invention_material_cost"] == pytest.approx(4 * 60 + 1 * 60 + 3 * 100)
+
+
+def test_fractional_source_copy_runs_carry_to_the_next_invention() -> None:
+    service = object.__new__(IndustryService)
+    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    source_row = {"blueprint_type_id": 1001, "copying_job": {"time_seconds": 20},
+                  "manufacturing_job": {"materials": [{"type_id": 34, "quantity": 3}]}}
+    runs = {1001: 1}
+    compute = lambda **kw: {"duration_seconds": 0, "total_job_cost": None}  # noqa: E731
+    costs = {"runs": 0.3, "whole_attempts": 1}
+
+    service._invention_source_copy_costs(
+        compute_activity=compute, invention_source_row=source_row, invention_costs=costs,
+        available_blueprint_copy_runs_by_type_id=runs, adjusted_price_map={}, enabled=True,
+    )
+    assert runs[1001] == pytest.approx(0.7)
+    _, missing = service._invention_source_copy_costs(
+        compute_activity=compute, invention_source_row=source_row, invention_costs=costs,
+        available_blueprint_copy_runs_by_type_id=runs, adjusted_price_map={}, enabled=True,
+    )
+    assert missing == 0  # 0.7 runs left cover 0.3 attempts (was truncated to 0, so 0.3 missing)
+    assert runs[1001] == pytest.approx(0.4)
