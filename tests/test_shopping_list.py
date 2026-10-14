@@ -713,3 +713,108 @@ def test_published_stock_on_another_row_covers_a_keyless_row() -> None:
     items, stale = aggregate_shopping_list_with_stale([old, new])
     assert _line(items) == (16, 9)
     assert stale == {}
+
+
+# --- round 5 Task 7 fix round 1 ---------------------------------------------------
+
+
+def _pooled(row: dict, stock: dict, pool: str) -> dict:
+    _with_stock(row, stock)["manufacturing_job"]["owned_stock_pool_id"] = pool
+    return row
+
+
+def test_rows_from_one_stock_pool_keep_the_published_figure() -> None:
+    from streamlit_ui.shopping_list import rows_from_different_stock_pools
+
+    rows = [
+        _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 10}, "p1"),
+        _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 8)}), {34: 10}, "p1"),
+    ]
+    assert _line(aggregate_shopping_list(rows)) == (16, 6)
+    assert rows_from_different_stock_pools(rows) is False
+
+
+def test_rows_from_different_stock_pools_net_the_smallest_figure_and_warn() -> None:
+    from streamlit_ui.shopping_list import rows_from_different_stock_pools
+
+    # Refresh 1 saw 12, refresh 2 saw 9: net 9 (never more than either saw).
+    rows = [
+        _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
+        _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 8)}), {34: 9}, "p2"),
+    ]
+    assert _line(aggregate_shopping_list(rows)) == (16, 7)
+    assert rows_from_different_stock_pools(rows) is True
+
+
+def test_mixed_stock_pools_never_net_less_than_a_take() -> None:
+    rows = [
+        _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
+        _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 3)}), {34: 3}, "p2"),
+    ]
+    assert _line(aggregate_shopping_list(rows)) == (16, 8)
+
+
+def test_the_tab_warns_about_rows_from_different_refreshes(monkeypatch) -> None:
+    from streamlit_ui.pages import portfolio_planner as page
+
+    warnings: list[str] = []
+    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
+    rows = [
+        _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
+        _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 8)}), {34: 9}, "p2"),
+    ]
+    _render_tab_captions(monkeypatch, rows)
+    assert any("different refreshes" in w and "refresh before buying" in w for w in warnings)
+
+
+def test_the_tab_does_not_warn_for_one_refresh(monkeypatch) -> None:
+    from streamlit_ui.pages import portfolio_planner as page
+
+    warnings: list[str] = []
+    monkeypatch.setattr(page.st, "warning", lambda text, *a, **k: warnings.append(str(text)))
+    rows = [
+        _pooled(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
+        _pooled(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 8)}), {34: 12}, "p1"),
+    ]
+    _render_tab_captions(monkeypatch, rows)
+    assert not any("different refreshes" in w for w in warnings)
+
+
+def test_a_type_emptied_by_another_keyless_row_is_not_stale() -> None:
+    # Row B's batch 1 bought Tritanium: its take is the whole stock, so the
+    # take bound is exact for row A's line of that type too.
+    rows = [
+        _make_row(1001, "Item A", 3, {"34": _owned_line(4, 4)}),
+        _make_row(1002, "Item B", 3, {"34": _owned_line(9, 6)}),
+    ]
+    items, stale = aggregate_shopping_list_with_stale(rows)
+    assert _line(items) == (39, 33)
+    assert stale == {}
+
+
+def test_the_buy_list_keys_cover_every_line_the_list_reads() -> None:
+    # The producer publishes stock for the types under these keys; the list
+    # reads its lines from the same keys, so the two cannot drift.
+    from eve_online_industry_tracker.application.industry import shopping_list as sl
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    def line(type_id: int) -> dict:
+        return _owned_line(2, 0, type_id=type_id, type_name=f"T{type_id}")
+
+    plan = {key: {str(300 + i): line(300 + i)} for i, key in enumerate(sl.LATER_BATCH_PLAN_BUY_LIST_KEYS)}
+    plan["job_segments"] = []
+    base = {key: {str(200 + i): line(200 + i)} for i, key in enumerate(sl.ROW_BUY_LIST_KEYS)}
+    for mj in (
+        {**base, "later_batch_plan_version": 1},
+        {
+            **base, "later_batch_plan_version": 1,
+            sl.BPC_PLAN_KEY: {
+                "batch_runs": 10, "runs_per_invented_blueprint": 10, "whole_attempts_per_blueprint": 1,
+                "owned_blueprint_runs": 0, "batch_one_invented_blueprints": 1,
+                sl.BPC_PLAN_LINES_KEY: {"400": {"type_id": 400, "type_name": "T400", "quantity": 1}},
+            },
+            sl.EXTRA_BATCH_SCHEDULE_KEY: {"plans": [plan], "lead": [], "cycle": [0]},
+        },
+    ):
+        read = {int(mat["type_id"]) for mat, _n in sl._row_lines_with_batch_counts(mj, 5)}
+        assert read and read <= set(IndustryService._buy_line_type_ids(mj))

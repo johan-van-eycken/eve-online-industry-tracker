@@ -11,6 +11,28 @@ logger = logging.getLogger(__name__)
 #: overview whose later batches repeat batch 1.
 LATER_BATCH_PLAN_VERSION = 1
 
+#: The material lists the shopping list reads, shared with the producer
+#: (IndustryService._buy_line_type_ids publishes the stock of exactly these
+#: lines' types). A row's own lists: batch 1's manufacturing and invention
+#: lists, then the per-later-batch lists of a row without a schedule.
+PROCUREMENT_KEY = "procurement_materials"
+INVENTION_KEY = "invention_procurement_materials"
+EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch"
+NESTED_EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch_nested"
+ROW_BUY_LIST_KEYS = (PROCUREMENT_KEY, INVENTION_KEY, EXTRA_BATCH_INVENTION_KEY, NESTED_EXTRA_BATCH_INVENTION_KEY)
+#: One extra_batch_schedule plan's lists.
+PLAN_NESTED_INVENTION_KEY = "invention_procurement_materials_nested"
+LATER_BATCH_PLAN_BUY_LIST_KEYS = (PROCUREMENT_KEY, INVENTION_KEY, PLAN_NESTED_INVENTION_KEY)
+#: The row's own invention over all batches, and its per-attempt inputs.
+BPC_PLAN_KEY = "invention_bpc_plan"
+BPC_PLAN_LINES_KEY = "per_attempt_materials"
+EXTRA_BATCH_SCHEDULE_KEY = "extra_batch_schedule"
+#: manufacturing_job.owned_stock_by_type_id: {str(type_id): quantity}, the
+#: hangar stock the producer planned the row against, for its buy-line types,
+#: and owned_stock_pool_id: one id per compute (a hash of that stock).
+OWNED_STOCK_KEY = "owned_stock_by_type_id"
+OWNED_STOCK_POOL_KEY = "owned_stock_pool_id"
+
 
 def aggregate_shopping_list(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The shopping list alone; see ``aggregate_shopping_list_with_stale``."""
@@ -40,7 +62,9 @@ def aggregate_shopping_list_with_stale(
     ``owned`` per type_id is the hangar stock the producer planned the rows
     against (``manufacturing_job.owned_stock_by_type_id``). Every row of one
     overview is planned against a copy of the same stock, so the aggregated
-    need (batch 1's takes included) is netted against it exactly once. A row
+    need (batch 1's takes included) is netted against it exactly once. Rows
+    from different refreshes (different ``owned_stock_pool_id``) net the
+    smallest published figure; ``rows_from_different_stock_pools`` flags them. A row
     without that key (an overview cached before it existed) falls back to what
     it took: within a row the lines spend the stock in turn, so a row's summed
     take is stock the producer saw. ``owned`` is the largest of these figures,
@@ -54,8 +78,9 @@ def aggregate_shopping_list_with_stale(
       That gap over-buys.
     - A row without ``owned_stock_by_type_id`` may hold more stock than it
       took: the take bound then over-buys. Its types are named in the stale
-      map too, unless another row published the stock for that type or its
-      batch 1 bought some of it (that take emptied the stock, so it is exact).
+      map too, unless a selected row published the stock for that type or
+      some row's batch 1 bought some of it (that take emptied the stock, and
+      owned is at least that take, so it is exact).
     - A build_from_bpc row without ``later_batch_plan_version`` comes from an
       overview older than the later-batch plans: its later batches repeat
       batch 1, which can under-buy. Such a row contributes NOTHING to the
@@ -70,7 +95,9 @@ def aggregate_shopping_list_with_stale(
     """
     accumulated: dict[int, dict[str, Any]] = {}
     owned_by_type_id: dict[int, int] = {}
-    published_stock_by_type_id: dict[int, int] = {}
+    # Per type, every published figure: one per stock pool (refresh).
+    published_figures_by_type_id: dict[int, list[int]] = {}
+    emptied_type_ids: set[int] = set()
     stale_type_names: dict[int, str] = {}
     # Keyless rows' types whose take may understate the stock (see above).
     take_bound_type_names: dict[int, str] = {}
@@ -90,14 +117,14 @@ def aggregate_shopping_list_with_stale(
             continue
 
         row_take_by_type_id: dict[int, int] = {}
-        stock = mj.get(_OWNED_STOCK_KEY)
+        stock = mj.get(OWNED_STOCK_KEY)
         row_published: set[int] = set()
         for type_key, quantity in (stock.items() if isinstance(stock, dict) else []):
             parsed = _published_quantity(type_key, quantity)
             if parsed is not None:
                 row_published.add(parsed[0])
-                published_stock_by_type_id[parsed[0]] = max(published_stock_by_type_id.get(parsed[0], 0), parsed[1])
-        batch_one_emptied = _batch_one_emptied_type_ids(mj)
+                published_figures_by_type_id.setdefault(parsed[0], []).append(parsed[1])
+        emptied_type_ids |= _batch_one_emptied_type_ids(mj)
 
         for mat, line_batches in lines:
             if not isinstance(mat, dict):
@@ -110,7 +137,7 @@ def aggregate_shopping_list_with_stale(
             quantity_per_batch = int(mat.get("quantity") or 0)
             if "buy_quantity" not in mat and str(mat.get("sourcing_strategy") or "").lower() in _OWNED_STRATEGIES:
                 stale_type_names.setdefault(mat_type_id, str(mat.get("type_name") or mat_type_id))
-            if mat_type_id not in row_published and mat_type_id not in batch_one_emptied:
+            if mat_type_id not in row_published:
                 take_bound_type_names.setdefault(mat_type_id, str(mat.get("type_name") or mat_type_id))
             take_per_batch = max(0, min(quantity_per_batch, quantity_per_batch - _buy_per_batch(mat, quantity_per_batch)))
             row_take_by_type_id[mat_type_id] = row_take_by_type_id.get(mat_type_id, 0) + take_per_batch
@@ -132,11 +159,19 @@ def aggregate_shopping_list_with_stale(
         for mat_type_id, row_take in row_take_by_type_id.items():
             owned_by_type_id[mat_type_id] = max(owned_by_type_id.get(mat_type_id, 0), row_take)
 
+    # One pool: every figure is the same stock. Rows from different refreshes
+    # (rows_from_different_stock_pools): the smallest, which every one of
+    # them saw. Never below a row's take.
+    published_stock_by_type_id = {
+        type_id: min(figures) for type_id, figures in published_figures_by_type_id.items()
+    }
     for mat_type_id, item in accumulated.items():
         owned = max(owned_by_type_id.get(mat_type_id, 0), published_stock_by_type_id.get(mat_type_id, 0))
         item["buy"] = max(0, item["need"] - owned)
     for mat_type_id, name in take_bound_type_names.items():
-        if mat_type_id not in published_stock_by_type_id:
+        # Exact when any row published the type, or any row's batch 1 bought
+        # some (that row's take is the whole stock, and owned >= that take).
+        if mat_type_id not in published_stock_by_type_id and mat_type_id not in emptied_type_ids:
             stale_type_names.setdefault(mat_type_id, name)
 
     if stale_type_names:
@@ -151,6 +186,26 @@ def aggregate_shopping_list_with_stale(
     result = list(accumulated.values())
     result.sort(key=lambda r: (r["buy"] * (r["unit_price"] or 0.0)), reverse=True)
     return result, stale_type_names
+
+
+DIFFERENT_REFRESHES_WARNING = "Rows from different refreshes \u2014 refresh before buying."
+
+
+def rows_from_different_stock_pools(selected_rows: list[dict[str, Any]]) -> bool:
+    """True when the selected rows published stock from more than one pool.
+
+    Every row of one overview compute carries the same owned_stock_pool_id.
+    Rows from different refreshes may have seen different hangar stock; the
+    list then nets the smallest published figure per type (never more than
+    any of them saw), and the UI warns with DIFFERENT_REFRESHES_WARNING. A
+    row with stock but no pool id counts as a pool of its own.
+    """
+    pools: set[Any] = set()
+    for row in selected_rows:
+        mj = row.get("manufacturing_job") if isinstance(row, dict) else None
+        if isinstance(mj, dict) and isinstance(mj.get(OWNED_STOCK_KEY), dict):
+            pools.add(mj.get(OWNED_STOCK_POOL_KEY) or ("no pool id", id(mj)))
+    return len(pools) > 1
 
 
 OLDER_OVERVIEW_REASON = "this overview was built by an older version; refresh it before buying"
@@ -213,20 +268,8 @@ def invention_need_unknown_rows(selected_rows: list[dict[str, Any]]) -> dict[str
 
 _OWNED_STRATEGIES = frozenset({"take", "split", "mixed"})
 
-#: manufacturing_job.owned_stock_by_type_id: {str(type_id): quantity}, the
-#: hangar stock the producer planned the row against, for its buy-line types.
-_OWNED_STOCK_KEY = "owned_stock_by_type_id"
-
 _UNKNOWN_DATACORE_NEED_KEY = "invention_datacore_need_unknown"
 
-_EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch"
-
-
-_BPC_PLAN_KEY = "invention_bpc_plan"
-
-_EXTRA_BATCH_SCHEDULE_KEY = "extra_batch_schedule"
-
-_NESTED_EXTRA_BATCH_INVENTION_KEY = "invention_procurement_materials_per_extra_batch_nested"
 
 
 def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple[Any, int]]:
@@ -258,34 +301,34 @@ def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple
         value = source.get(key)
         return list(value.values()) if isinstance(value, dict) else []
 
-    plan = mj.get(_BPC_PLAN_KEY)
+    plan = mj.get(BPC_PLAN_KEY)
     has_bpc_plan = isinstance(plan, dict)
-    schedule = mj.get(_EXTRA_BATCH_SCHEDULE_KEY)
+    schedule = mj.get(EXTRA_BATCH_SCHEDULE_KEY)
     if schedule is not None:
-        out: list[tuple[Any, int]] = [(mat, 1) for mat in lines(mj, "procurement_materials")]
-        out.extend((mat, 1) for mat in lines(mj, "invention_procurement_materials"))
+        out: list[tuple[Any, int]] = [(mat, 1) for mat in lines(mj, PROCUREMENT_KEY)]
+        out.extend((mat, 1) for mat in lines(mj, INVENTION_KEY))
         plans = schedule.get("plans") if isinstance(schedule, dict) else None
-        invention_key = "invention_procurement_materials_nested" if has_bpc_plan else "invention_procurement_materials"
+        invention_key = PLAN_NESTED_INVENTION_KEY if has_bpc_plan else INVENTION_KEY
         for plan_index, count in _later_batch_plan_counts(schedule, batches - 1).items():
             later_plan = cast(list[dict[str, Any]], plans)[plan_index]
-            out.extend((mat, count) for mat in lines(later_plan, "procurement_materials"))
+            out.extend((mat, count) for mat in lines(later_plan, PROCUREMENT_KEY))
             out.extend((mat, count) for mat in lines(later_plan, invention_key))
         if has_bpc_plan and batches > 1:
             out.extend((mat, 1) for mat in _later_batch_invention_lines(cast(dict[str, Any], plan), batches))
         return out
 
-    out = [(mat, batches) for mat in lines(mj, "procurement_materials")]
+    out = [(mat, batches) for mat in lines(mj, PROCUREMENT_KEY)]
     if has_bpc_plan:
-        out.extend((mat, 1) for mat in lines(mj, "invention_procurement_materials"))
+        out.extend((mat, 1) for mat in lines(mj, INVENTION_KEY))
         if batches > 1:
             out.extend((mat, 1) for mat in _later_batch_invention_lines(cast(dict[str, Any], plan), batches))
-            out.extend((mat, batches - 1) for mat in lines(mj, _NESTED_EXTRA_BATCH_INVENTION_KEY))
-    elif isinstance(mj.get(_EXTRA_BATCH_INVENTION_KEY), dict):
-        out.extend((mat, 1) for mat in lines(mj, "invention_procurement_materials"))
+            out.extend((mat, batches - 1) for mat in lines(mj, NESTED_EXTRA_BATCH_INVENTION_KEY))
+    elif isinstance(mj.get(EXTRA_BATCH_INVENTION_KEY), dict):
+        out.extend((mat, 1) for mat in lines(mj, INVENTION_KEY))
         if batches > 1:
-            out.extend((mat, batches - 1) for mat in lines(mj, _EXTRA_BATCH_INVENTION_KEY))
+            out.extend((mat, batches - 1) for mat in lines(mj, EXTRA_BATCH_INVENTION_KEY))
     else:
-        out.extend((mat, batches) for mat in lines(mj, "invention_procurement_materials"))
+        out.extend((mat, batches) for mat in lines(mj, INVENTION_KEY))
     return out
 
 
@@ -366,7 +409,7 @@ def _later_batch_invention_lines(plan: dict[str, Any], batches: int) -> list[dic
     if attempts <= 0:
         return []
     out: list[dict[str, Any]] = []
-    per_attempt = plan.get("per_attempt_materials")
+    per_attempt = plan.get(BPC_PLAN_LINES_KEY)
     for mat in (per_attempt.values() if isinstance(per_attempt, dict) else []):
         if not isinstance(mat, dict):
             continue
@@ -399,7 +442,7 @@ def _batch_one_emptied_type_ids(mj: dict[str, Any]) -> set[int]:
     take is the whole stock: the take bound is exact for these types.
     """
     out: set[int] = set()
-    for key in ("procurement_materials", "invention_procurement_materials"):
+    for key in (PROCUREMENT_KEY, INVENTION_KEY):
         value = mj.get(key)
         for mat in (value.values() if isinstance(value, dict) else []):
             if not isinstance(mat, dict) or "buy_quantity" not in mat:

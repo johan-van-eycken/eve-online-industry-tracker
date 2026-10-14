@@ -3426,3 +3426,11 @@ def test_two_products_sharing_a_material_net_the_real_stock_once_over_batches(mo
     lines = {item["type_id"]: item for item in aggregate_shopping_list([rows[5002], rows[6001]])}
     assert (lines[34]["need"], lines[34]["buy"]) == (162, 150)
     assert (lines[204]["need"], lines[204]["buy"]) == (8, 5)
+
+
+def test_every_row_of_one_overview_publishes_one_stock_pool_id(monkeypatch) -> None:
+    rows = _invention_overview(monkeypatch, owned_item_inventory=({34: 12, 204: 3}, {34: 1.0, 204: 60.0}))
+    pool_ids = {row["manufacturing_job"]["owned_stock_pool_id"] for row in rows.values()}
+    assert len(pool_ids) == 1 and all(isinstance(p, str) and p for p in pool_ids)
+    other = _invention_overview(monkeypatch, owned_item_inventory=({34: 11, 204: 3}, {34: 1.0, 204: 60.0}))
+    assert other[5002]["manufacturing_job"]["owned_stock_pool_id"] not in pool_ids

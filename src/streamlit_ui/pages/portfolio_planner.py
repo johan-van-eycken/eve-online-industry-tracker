@@ -22,9 +22,11 @@ from streamlit_ui.state.industry_builder_page import (
 )
 from streamlit_ui.state.industry_builder_ui import filter_overview_rows
 from streamlit_ui.shopping_list import (
+    DIFFERENT_REFRESHES_WARNING,
     aggregate_shopping_list_with_stale,
     invention_need_unknown_rows,
     rows_built_by_an_older_version,
+    rows_from_different_stock_pools,
 )
 from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
@@ -875,6 +877,9 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
         st.warning(
             "Not in this list: " + ", ".join(sorted(older_rows)) + f" \u2014 {next(iter(older_rows.values()))}."
         )
+    if rows_from_different_stock_pools(selected_rows):
+        # The list nets the smallest stock any of them saw (never an under-buy).
+        st.warning(DIFFERENT_REFRESHES_WARNING)
     shopping_items, stale_types = aggregate_shopping_list_with_stale(selected_rows)
     if stale_types:
         st.caption(STALE_OVERVIEW_CAPTION)

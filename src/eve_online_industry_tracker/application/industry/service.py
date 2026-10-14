@@ -65,6 +65,7 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
 )
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry import overview_row as orow
+from eve_online_industry_tracker.application.industry import shopping_list as _shopping_list
 from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.application.industry.invention_model import (
@@ -265,6 +266,10 @@ class _ProductPlanningContext:
     #: _resolve_npc_market_fee_context for this refresh: the decryptor cycle
     #: profit and the sale-proceeds step use the same sales tax / broker fee.
     market_fee_context: dict = dataclasses.field(default_factory=dict)
+    #: One id per compute for available_owned_item_quantity_by_type_id_base
+    #: (a hash of it), published on every row next to its stock so the
+    #: shopping list can tell rows from different refreshes apart.
+    owned_stock_pool_id: str = ""
 
 
 class IndustryService:
@@ -7140,6 +7145,7 @@ class IndustryService:
             top_location_name_by_id=top_location_name_by_id,
             available_blueprint_copy_runs_by_type_id_base=available_blueprint_copy_runs_by_type_id_base,
             available_owned_item_quantity_by_type_id_base=available_owned_item_quantity_by_type_id_base,
+            owned_stock_pool_id=self._owned_stock_pool_id(available_owned_item_quantity_by_type_id_base),
             build_from_bpc=build_from_bpc,
             include_reactions=effective_include_reactions,
             maximize_bp_runs=maximize_bp_runs,
@@ -8943,32 +8949,36 @@ class IndustryService:
         # buy lists (batch 1 and every later batch). Every row of one overview
         # is planned against a copy of the same stock, so the shopping list
         # nets its aggregated need against it once (C8, C9).
-        row_out["manufacturing_job"]["owned_stock_by_type_id"] = {
+        row_out["manufacturing_job"][_shopping_list.OWNED_STOCK_KEY] = {
             str(type_id): max(0, int(ctx.available_owned_item_quantity_by_type_id_base.get(type_id, 0) or 0))
             for type_id in self._buy_line_type_ids(row_out["manufacturing_job"])
         }
+        row_out["manufacturing_job"][_shopping_list.OWNED_STOCK_POOL_KEY] = ctx.owned_stock_pool_id
         return row_out
 
     @staticmethod
+    def _owned_stock_pool_id(stock: dict[int, Any]) -> str:
+        """A short hash of one compute's owned stock (sorted type_id, quantity)."""
+        payload = json.dumps(sorted((int(t), int(q or 0)) for t, q in (stock or {}).items()))
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+    @staticmethod
     def _buy_line_type_ids(manufacturing_job: dict[str, Any]) -> list[int]:
-        """Every type_id on a row's shopping-list lines, sorted: batch 1's
-        procurement and invention lists, the later-batch lists, the
-        extra_batch_schedule plans and the invention_bpc_plan's per-attempt
-        inputs (industry/shopping_list.py reads exactly these)."""
+        """Every type_id on a row's shopping-list lines, sorted: the lists
+        under the keys industry/shopping_list.py reads (its ROW_BUY_LIST_KEYS,
+        each extra_batch_schedule plan's LATER_BATCH_PLAN_BUY_LIST_KEYS, and
+        the invention_bpc_plan's per-attempt inputs), shared so they cannot
+        drift."""
         def entries(source: Any, key: str) -> list[Any]:
             value = source.get(key) if isinstance(source, dict) else None
             return list(value.values()) if isinstance(value, dict) else []
 
-        lines: list[Any] = [
-            *entries(manufacturing_job, "procurement_materials"),
-            *entries(manufacturing_job, "invention_procurement_materials"),
-            *entries(manufacturing_job, "invention_procurement_materials_per_extra_batch"),
-            *entries(manufacturing_job, "invention_procurement_materials_per_extra_batch_nested"),
-            *entries(manufacturing_job.get("invention_bpc_plan"), "per_attempt_materials"),
-        ]
-        schedule = manufacturing_job.get("extra_batch_schedule")
+        sl = _shopping_list
+        lines: list[Any] = [entry for key in sl.ROW_BUY_LIST_KEYS for entry in entries(manufacturing_job, key)]
+        lines.extend(entries(manufacturing_job.get(sl.BPC_PLAN_KEY), sl.BPC_PLAN_LINES_KEY))
+        schedule = manufacturing_job.get(sl.EXTRA_BATCH_SCHEDULE_KEY)
         for plan in (schedule.get("plans") or []) if isinstance(schedule, dict) else []:
-            for key in ("procurement_materials", "invention_procurement_materials", "invention_procurement_materials_nested"):
+            for key in sl.LATER_BATCH_PLAN_BUY_LIST_KEYS:
                 lines.extend(entries(plan, key))
         type_ids: set[int] = set()
         for line in lines:
