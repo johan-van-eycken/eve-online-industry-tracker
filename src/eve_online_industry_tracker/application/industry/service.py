@@ -8939,7 +8939,48 @@ class IndustryService:
                     key = f"{base_key}#{n}"
                 keyed_invention_inputs[key] = entry
             row_out["manufacturing_job"]["expected_invention_materials"] = keyed_invention_inputs
+        # The hangar stock this row was planned against, for every type on its
+        # buy lists (batch 1 and every later batch). Every row of one overview
+        # is planned against a copy of the same stock, so the shopping list
+        # nets its aggregated need against it once (C8, C9).
+        row_out["manufacturing_job"]["owned_stock_by_type_id"] = {
+            str(type_id): max(0, int(ctx.available_owned_item_quantity_by_type_id_base.get(type_id, 0) or 0))
+            for type_id in self._buy_line_type_ids(row_out["manufacturing_job"])
+        }
         return row_out
+
+    @staticmethod
+    def _buy_line_type_ids(manufacturing_job: dict[str, Any]) -> list[int]:
+        """Every type_id on a row's shopping-list lines, sorted: batch 1's
+        procurement and invention lists, the later-batch lists, the
+        extra_batch_schedule plans and the invention_bpc_plan's per-attempt
+        inputs (industry/shopping_list.py reads exactly these)."""
+        def entries(source: Any, key: str) -> list[Any]:
+            value = source.get(key) if isinstance(source, dict) else None
+            return list(value.values()) if isinstance(value, dict) else []
+
+        lines: list[Any] = [
+            *entries(manufacturing_job, "procurement_materials"),
+            *entries(manufacturing_job, "invention_procurement_materials"),
+            *entries(manufacturing_job, "invention_procurement_materials_per_extra_batch"),
+            *entries(manufacturing_job, "invention_procurement_materials_per_extra_batch_nested"),
+            *entries(manufacturing_job.get("invention_bpc_plan"), "per_attempt_materials"),
+        ]
+        schedule = manufacturing_job.get("extra_batch_schedule")
+        for plan in (schedule.get("plans") or []) if isinstance(schedule, dict) else []:
+            for key in ("procurement_materials", "invention_procurement_materials", "invention_procurement_materials_nested"):
+                lines.extend(entries(plan, key))
+        type_ids: set[int] = set()
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            try:
+                type_id = int(line.get("type_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if type_id > 0:
+                type_ids.add(type_id)
+        return sorted(type_ids)
 
     @classmethod
     def _expected_invention_inputs(

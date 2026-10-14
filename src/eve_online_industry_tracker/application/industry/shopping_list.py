@@ -37,11 +37,14 @@ def aggregate_shopping_list_with_stale(
     then batch 1 plus each later batch's own plan (see
     ``_row_lines_with_batch_counts``).
 
-    per type_id. The rows do not carry the total stock, only what each row
-    took. Every row is planned against the full stock, and within a row the
-    lines spend it in turn, so a row's summed take is stock the producer saw.
-    ``owned`` is the largest such figure over the selected rows, so it is never
-    more stock than the producer reported.
+    ``owned`` per type_id is the hangar stock the producer planned the rows
+    against (``manufacturing_job.owned_stock_by_type_id``). Every row of one
+    overview is planned against a copy of the same stock, so the aggregated
+    need (batch 1's takes included) is netted against it exactly once. A row
+    without that key (an overview cached before it existed) falls back to what
+    it took: within a row the lines spend the stock in turn, so a row's summed
+    take is stock the producer saw. ``owned`` is the largest of these figures,
+    never more than the stock the producer reported, so never an under-buy.
 
     Gaps in the data never make the list short:
     - A line without an explicit ``buy_quantity`` counts nothing as owned and
@@ -49,6 +52,10 @@ def aggregate_shopping_list_with_stale(
       from an overview cached before the producer wrote it; those types are
       named in one DEBUG line per call (the UI shows a caption for them).
       That gap over-buys.
+    - A row without ``owned_stock_by_type_id`` may hold more stock than it
+      took: the take bound then over-buys. Its types are named in the stale
+      map too, unless another row published the stock for that type or its
+      batch 1 bought some of it (that take emptied the stock, so it is exact).
     - A build_from_bpc row without ``later_batch_plan_version`` comes from an
       overview older than the later-batch plans: its later batches repeat
       batch 1, which can under-buy. Such a row contributes NOTHING to the
@@ -58,12 +65,15 @@ def aggregate_shopping_list_with_stale(
     Returns (items, stale) where items are dicts sorted by (buy * unit_price)
     descending:
         {"type_id": int, "type_name": str, "need": int, "buy": int, "unit_price": float | None}
-    and stale maps the type_id of every such split-less line to its name, so a
-    UI can tell the user to refresh. ``unit_price`` is the first known price.
+    and stale maps the type_id of every such split-less or take-bound line to
+    its name, so a UI can tell the user to refresh. ``unit_price`` is the first known price.
     """
     accumulated: dict[int, dict[str, Any]] = {}
     owned_by_type_id: dict[int, int] = {}
+    published_stock_by_type_id: dict[int, int] = {}
     stale_type_names: dict[int, str] = {}
+    # Keyless rows' types whose take may understate the stock (see above).
+    take_bound_type_names: dict[int, str] = {}
 
     for row in selected_rows:
         if not isinstance(row, dict):
@@ -80,6 +90,14 @@ def aggregate_shopping_list_with_stale(
             continue
 
         row_take_by_type_id: dict[int, int] = {}
+        stock = mj.get(_OWNED_STOCK_KEY)
+        row_published: set[int] = set()
+        for type_key, quantity in (stock.items() if isinstance(stock, dict) else []):
+            parsed = _published_quantity(type_key, quantity)
+            if parsed is not None:
+                row_published.add(parsed[0])
+                published_stock_by_type_id[parsed[0]] = max(published_stock_by_type_id.get(parsed[0], 0), parsed[1])
+        batch_one_emptied = _batch_one_emptied_type_ids(mj)
 
         for mat, line_batches in lines:
             if not isinstance(mat, dict):
@@ -92,6 +110,8 @@ def aggregate_shopping_list_with_stale(
             quantity_per_batch = int(mat.get("quantity") or 0)
             if "buy_quantity" not in mat and str(mat.get("sourcing_strategy") or "").lower() in _OWNED_STRATEGIES:
                 stale_type_names.setdefault(mat_type_id, str(mat.get("type_name") or mat_type_id))
+            if mat_type_id not in row_published and mat_type_id not in batch_one_emptied:
+                take_bound_type_names.setdefault(mat_type_id, str(mat.get("type_name") or mat_type_id))
             take_per_batch = max(0, min(quantity_per_batch, quantity_per_batch - _buy_per_batch(mat, quantity_per_batch)))
             row_take_by_type_id[mat_type_id] = row_take_by_type_id.get(mat_type_id, 0) + take_per_batch
 
@@ -113,14 +133,18 @@ def aggregate_shopping_list_with_stale(
             owned_by_type_id[mat_type_id] = max(owned_by_type_id.get(mat_type_id, 0), row_take)
 
     for mat_type_id, item in accumulated.items():
-        item["buy"] = max(0, item["need"] - owned_by_type_id.get(mat_type_id, 0))
+        owned = max(owned_by_type_id.get(mat_type_id, 0), published_stock_by_type_id.get(mat_type_id, 0))
+        item["buy"] = max(0, item["need"] - owned)
+    for mat_type_id, name in take_bound_type_names.items():
+        if mat_type_id not in published_stock_by_type_id:
+            stale_type_names.setdefault(mat_type_id, name)
 
     if stale_type_names:
         # DEBUG: this runs on every UI rerun, and the UI shows the stale
         # caption from the returned names, which is the real signal.
         logger.debug(
-            "Shopping list: %s came from an older overview without a take/buy split; "
-            "counted as fully bought (may over-buy). Refresh the Industry Builder overview for exact stock use.",
+            "Shopping list: %s came from an older overview (no take/buy split, or no published hangar "
+            "stock); counted conservatively (may over-buy). Refresh the Industry Builder overview for exact stock use.",
             ", ".join(sorted(stale_type_names.values())),
         )
 
@@ -188,6 +212,10 @@ def invention_need_unknown_rows(selected_rows: list[dict[str, Any]]) -> dict[str
 
 
 _OWNED_STRATEGIES = frozenset({"take", "split", "mixed"})
+
+#: manufacturing_job.owned_stock_by_type_id: {str(type_id): quantity}, the
+#: hangar stock the producer planned the row against, for its buy-line types.
+_OWNED_STOCK_KEY = "owned_stock_by_type_id"
 
 _UNKNOWN_DATACORE_NEED_KEY = "invention_datacore_need_unknown"
 
@@ -345,6 +373,42 @@ def _later_batch_invention_lines(plan: dict[str, Any], batches: int) -> list[dic
         quantity = int(mat.get("quantity") or 0) * attempts
         if quantity > 0:
             out.append({**mat, "quantity": quantity, "take_quantity": 0, "buy_quantity": quantity})
+    return out
+
+
+def _published_quantity(type_key: Any, quantity: Any) -> tuple[int, int] | None:
+    """(type_id, quantity) of one published stock entry, None when malformed.
+
+    A malformed entry counts as unpublished (the take bound applies): never
+    more stock than the producer reported. A fraction truncates down.
+    """
+    try:
+        type_id = int(type_key)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(quantity, bool) or not isinstance(quantity, (int, float)) or quantity < 0:
+        return None
+    return type_id, int(quantity)
+
+
+def _batch_one_emptied_type_ids(mj: dict[str, Any]) -> set[int]:
+    """The types a row's batch 1 bought some of (an explicit buy_quantity > 0).
+
+    Batch 1's lists are the only ones planned against stock, and a line buys
+    only what the stock it was planned against could not cover, so that row's
+    take is the whole stock: the take bound is exact for these types.
+    """
+    out: set[int] = set()
+    for key in ("procurement_materials", "invention_procurement_materials"):
+        value = mj.get(key)
+        for mat in (value.values() if isinstance(value, dict) else []):
+            if not isinstance(mat, dict) or "buy_quantity" not in mat:
+                continue
+            try:
+                if int(mat["buy_quantity"]) > 0:
+                    out.add(int(mat["type_id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
     return out
 
 

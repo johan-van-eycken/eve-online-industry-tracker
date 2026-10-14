@@ -602,3 +602,114 @@ def test_the_tab_warns_and_shows_no_numbers_for_an_unstamped_row(monkeypatch) ->
     monkeypatch.setattr(page.st, "info", lambda text, *a, **k: infos.append(str(text)))
     _render_tab_captions(monkeypatch, [_round_four_row(3)])
     assert any("Item T2" in w and OLDER_OVERVIEW_REASON in w for w in warnings)
+
+
+# --- round 5 Task 7: net against the published hangar stock (C8, C9) -----------
+# Every row of one overview is planned against the same hangar stock and
+# publishes it (manufacturing_job.owned_stock_by_type_id) for the types on its
+# buy lists, so the aggregated need is netted against the real stock once.
+
+
+def _with_stock(row: dict, stock: dict) -> dict:
+    row["manufacturing_job"]["owned_stock_by_type_id"] = {str(k): v for k, v in stock.items()}
+    return row
+
+
+def test_published_stock_is_netted_exactly_once() -> None:
+    # 10 owned; two rows each take 8 of them. The take bound said 8 owned
+    # (buy 8); the stock the producer planned against says 10 (buy 6).
+    row_a = _with_stock(_make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)}), {34: 10})
+    row_b = _with_stock(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 8)}), {34: 10})
+    assert _line(aggregate_shopping_list([row_a, row_b])) == (16, 6)
+
+
+def test_extra_batch_datacores_net_the_published_hangar_stock() -> None:
+    # C8: an owned BPC covers batch 1, so no row took the 3 owned datacores.
+    row = _with_stock(_invention_row(5, batch_one=None, extra=_datacore(4)), {204: 3})
+    assert _line(aggregate_shopping_list([row]), 204) == (16, 13)
+
+
+def test_a_row_without_published_stock_keeps_the_take_bound() -> None:
+    row_a = _make_row(1001, "Item A", 1, {"34": _owned_line(8, 8)})
+    row_b = _with_stock(_make_row(1002, "Item B", 1, {"34": _owned_line(8, 3)}), {34: 5})
+    # Published 5 < the other row's take 8: owned is 8, never less than a take.
+    assert _line(aggregate_shopping_list([row_a, row_b])) == (16, 8)
+
+
+def test_published_stock_nets_later_batch_plans_and_batch_one_takes_once() -> None:
+    # 50 owned; batch 1 needs 20 and takes them all; batches 2 and 3 (their
+    # own plan, take 0) need 98 each. Need 20 + 2 x 98 = 216; the 50 count
+    # once: 166 (the take bound said 20 owned, buy 196).
+    row = _scheduled_row(3, batch_one=20, plans=[_plan(98)], lead=[], cycle=[0])
+    row["manufacturing_job"]["procurement_materials"]["34"] = _owned_line(20, 20)
+    assert _line(aggregate_shopping_list([_with_stock(row, {34: 50})])) == (216, 166)
+
+
+def test_published_stock_reaches_the_bpc_plan_datacores() -> None:
+    # The invention_bpc_plan's later-batch datacores take nothing from stock;
+    # 8 needed (2 BPCs x 2 attempts x 2), 3 owned: buy 5.
+    row = _make_row(1001, "Item T2", 3, {})
+    row["manufacturing_job"]["invention_bpc_plan"] = {
+        "batch_runs": 10, "runs_per_invented_blueprint": 10, "whole_attempts_per_blueprint": 2,
+        "owned_blueprint_runs": 10, "batch_one_invented_blueprints": 0,
+        "per_attempt_materials": {"204": {"type_id": 204, "type_name": "Datacore", "quantity": 2}},
+    }
+    assert _line(aggregate_shopping_list([_with_stock(row, {204: 3})]), 204) == (8, 5)
+
+
+def test_published_stock_never_exceeds_the_need() -> None:
+    row = _with_stock(_make_row(1001, "Item A", 2, {"34": _owned_line(4, 4)}), {34: 100})
+    assert _line(aggregate_shopping_list([row])) == (8, 0)
+
+
+@pytest.mark.parametrize("bad", [None, "x", -5, 2.5])
+def test_a_malformed_published_quantity_counts_as_the_take_bound(bad) -> None:
+    # Never more than a take a row reported; 2.5 truncates to 2 < take 3.
+    row = _with_stock(_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)}), {34: bad})
+    assert _line(aggregate_shopping_list([row])) == (8, 5)
+
+
+def test_a_malformed_published_quantity_where_the_take_may_understate_is_stale() -> None:
+    row = _with_stock(_make_row(1001, "Item A", 2, {"34": _owned_line(4, 4)}), {34: "x"})
+    assert aggregate_shopping_list_with_stale([row])[1] == {34: "Tritanium"}
+
+
+def test_a_type_missing_from_a_rows_published_stock_keeps_the_take_bound() -> None:
+    row = _with_stock(_make_row(1001, "Item A", 2, {"34": _owned_line(4, 3)}), {35: 9})
+    assert _line(aggregate_shopping_list([row])) == (8, 5)
+
+
+def test_published_stock_marks_nothing_stale() -> None:
+    row = _with_stock(_make_row(1001, "Item A", 3, {"34": _owned_line(4, 4)}), {34: 6})
+    _, stale = aggregate_shopping_list_with_stale([row])
+    assert stale == {}
+
+
+def test_a_row_without_published_stock_is_stale_where_the_take_may_understate_it() -> None:
+    # Took all 4 it needed: the hangar may hold more (C9). Datacores only on a
+    # later-batch list: none taken, the hangar may hold some (C8). Both may
+    # over-buy, so the caption asks for a refresh.
+    row = _make_row(1001, "Item A", 3, {"34": _owned_line(4, 4)})
+    row["manufacturing_job"]["invention_procurement_materials_per_extra_batch"] = {"204": _datacore(4)}
+    _, stale = aggregate_shopping_list_with_stale([row])
+    assert stale == {34: "Tritanium", 204: "Datacore"}
+
+
+def test_a_row_without_published_stock_is_exact_where_batch_one_bought() -> None:
+    # Batch 1 bought some: its take emptied the stock it was planned against,
+    # so the take is the whole stock and nothing is stale.
+    rows = [
+        _make_row(1001, "Item A", 3, {"34": _owned_line(4, 3)}),
+        _make_row(1002, "Item B", 3, {"35": _owned_line(4, 0, type_id=35, type_name="Pyerite")}),
+    ]
+    _, stale = aggregate_shopping_list_with_stale(rows)
+    assert stale == {}
+
+
+def test_published_stock_on_another_row_covers_a_keyless_row() -> None:
+    # The same overview, one pool: the published figure is exact for both.
+    old = _make_row(1001, "Item A", 2, {"34": _owned_line(4, 4)})
+    new = _with_stock(_make_row(1002, "Item B", 2, {"34": _owned_line(4, 4)}), {34: 7})
+    items, stale = aggregate_shopping_list_with_stale([old, new])
+    assert _line(items) == (16, 9)
+    assert stale == {}

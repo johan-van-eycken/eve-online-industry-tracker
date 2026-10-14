@@ -3370,3 +3370,59 @@ def test_a_sub_build_keeps_the_fractional_bpc_run_remainder(monkeypatch) -> None
         invention_context=cast(Any, None),
     )
     assert runs[1001] == pytest.approx(0.7)
+
+
+# --- round 5 Task 7: rows publish the stock they were planned against ----------
+
+
+def test_a_row_publishes_the_stock_of_its_buy_line_types(monkeypatch) -> None:
+    # Only the types on its buy lists (Tritanium, datacores), not the hangar.
+    mj = _invention_overview(
+        monkeypatch, owned_item_inventory=({34: 3, 204: 7, 99999: 5}, {34: 1.0, 204: 60.0}),
+    )[5002]["manufacturing_job"]
+    assert mj["owned_stock_by_type_id"] == {"204": 7, "34": 3}
+
+
+def test_a_row_publishes_zero_for_a_buy_line_type_it_does_not_own(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, owned_item_inventory=({34: 3}, {34: 1.0}))[5002]["manufacturing_job"]
+    assert mj["owned_stock_by_type_id"] == {"204": 0, "34": 3}
+
+
+def test_every_row_of_one_overview_publishes_the_same_stock(monkeypatch) -> None:
+    # One pool per overview: each row is planned against a copy of it.
+    rows = _invention_overview(monkeypatch, owned_item_inventory=({34: 12, 204: 3}, {34: 1.0, 204: 60.0}))
+    assert rows[5002]["manufacturing_job"]["owned_stock_by_type_id"]["34"] == 12
+    assert rows[6001]["manufacturing_job"]["owned_stock_by_type_id"]["34"] == 12
+
+
+def test_owned_datacores_net_against_later_batches_when_an_owned_bpc_covers_batch_one(monkeypatch) -> None:
+    # FU-75 / C8: 3 datacores in the hangar, a 10-run owned BPC covers batch 1
+    # (and batches 2..10). 25 one-run batches: runs 11..25 = 15 runs = 2
+    # invented BPCs x 2 whole attempts x 2 datacores = 8 needed. No row took
+    # the 3 owned (no batch-1 invention list), so the take bound bought 8.
+    row = _invention_overview(
+        monkeypatch, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+        owned_item_inventory=({204: 3}, {204: 60.0}),
+    )[5002]
+    assert "invention_procurement_materials" not in row["manufacturing_job"]
+    assert row["manufacturing_job"]["owned_stock_by_type_id"]["204"] == 3
+    row["max_batches_total"] = 25
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (8, 5)
+
+
+def test_two_products_sharing_a_material_net_the_real_stock_once_over_batches(monkeypatch) -> None:
+    # C9: 12 Tritanium and 3 datacores owned. 5002 (10 Tritanium a run) at 15
+    # one-run batches: batch 1 takes 10, batches 2..15 need 10 each. 6001 (3 a
+    # run) at 4 batches: batch 1 takes 3. Need 150 + 12 = 162; the 12 owned
+    # count once: buy 150 (the take bound said 10 owned, buy 152). Datacores:
+    # batch 1 invents 1 BPC (2 attempts x 2 = 4, takes the 3), the 15 runs need
+    # 2 BPCs, so 4 more: 8 - 3 = 5.
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+
+    rows = _invention_overview(monkeypatch, owned_item_inventory=({34: 12, 204: 3}, {34: 1.0, 204: 60.0}))
+    rows[5002]["max_batches_total"] = 15
+    rows[6001]["max_batches_total"] = 4
+    lines = {item["type_id"]: item for item in aggregate_shopping_list([rows[5002], rows[6001]])}
+    assert (lines[34]["need"], lines[34]["buy"]) == (162, 150)
+    assert (lines[204]["need"], lines[204]["buy"]) == (8, 5)
