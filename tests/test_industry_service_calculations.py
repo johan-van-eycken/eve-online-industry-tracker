@@ -3311,3 +3311,62 @@ def test_fractional_source_copy_runs_carry_to_the_next_invention() -> None:
     )
     assert missing == 0  # 0.7 runs left cover 0.3 attempts (was truncated to 0, so 0.3 missing)
     assert runs[1001] == pytest.approx(0.4)
+
+
+# --- round 5 Task 6 fix round 1: whole-run budget, fractional write-back -------
+
+
+def _source_copy_elapsed_seconds(service, runs: dict, attempts: float, whole_attempts: int) -> int:
+    """One invention's source-copy elapsed time: 10 s per whole missing run."""
+    source_row = {"blueprint_type_id": 1001, "copying_job": {"time_seconds": 10},
+                  "manufacturing_job": {"materials": [{"type_id": 34, "quantity": 3}]}}
+    compute = lambda **kw: {"duration_seconds": 10 * kw["runs"], "total_job_cost": None}  # noqa: E731
+    costs, _ = service._invention_source_copy_costs(
+        compute_activity=compute, invention_source_row=source_row,
+        invention_costs={"runs": attempts, "whole_attempts": whole_attempts},
+        available_blueprint_copy_runs_by_type_id=runs, adjusted_price_map={}, enabled=True,
+    )
+    return costs["elapsed_duration_seconds"]
+
+
+def _bare_service() -> IndustryService:
+    service = object.__new__(IndustryService)
+    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    return service
+
+
+def test_whole_source_copy_runs_are_budgeted_across_inventions() -> None:
+    # 2 owned runs, three inventions of 1 whole attempt (0.5 expected) each:
+    # the third must copy 1 whole run. floor(2 - 0.5 - 0.5) = 1 said 0.
+    service, runs = _bare_service(), {1001: 2}
+    elapsed = [_source_copy_elapsed_seconds(service, runs, 0.5, 1) for _ in range(3)]
+    assert elapsed == [0, 0, 10]
+    assert runs[1001] == pytest.approx(0.5)  # the expected-value remainder is kept
+
+
+def test_whole_source_copy_runs_spent_by_more_whole_than_expected_attempts() -> None:
+    # 0.6 expected / 2 whole, then 0.6 / 1: both owned whole runs go to the
+    # first, so the second copies 1 run (floor(1.4) = 1 said 0).
+    service, runs = _bare_service(), {1001: 2}
+    assert _source_copy_elapsed_seconds(service, runs, 0.6, 2) == 0
+    assert _source_copy_elapsed_seconds(service, runs, 0.6, 1) == 10
+
+
+def test_a_sub_build_keeps_the_fractional_bpc_run_remainder(monkeypatch) -> None:
+    # 1.7 runs left on the T1 source (an invention used 0.3). A 1-run
+    # manufacturing sub-build takes 1 whole run; 0.7 stays for later
+    # inventions (was int(1.7) - 1 = 0).
+    service = _invention_service(monkeypatch)
+    runs: dict = {1001: 1.7}
+    service._plan_blueprint_chain_for_quantity(
+        blueprint_row=_invented_t2_blueprint_rows()[0], activity="manufacturing",
+        desired_product_type_id=6001, required_quantity=1, build_from_bpc=True, include_reactions=False,
+        selected_industry_profile=None, selected_character_modifiers=None, character_skill_levels_by_name={},
+        adjusted_market_price_map={}, sell_price_map=None, blueprint_copy_assets_by_type_id={},
+        available_blueprint_copy_runs_by_type_id=runs, available_owned_item_quantity_by_type_id={},
+        invention_valuation_stock={}, owned_item_unit_cost_by_type_id=None,
+        blueprint_original_assets_by_type_id={}, manufacturing_row_by_product_type_id={},
+        reaction_row_by_product_type_id={}, invention_row_by_blueprint_type_id={},
+        invention_context=cast(Any, None),
+    )
+    assert runs[1001] == pytest.approx(0.7)

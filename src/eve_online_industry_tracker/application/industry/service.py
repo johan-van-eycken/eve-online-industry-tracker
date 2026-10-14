@@ -4437,10 +4437,13 @@ class IndustryService:
         has_invention_path = isinstance((invention_source_row or {}).get("invention_job"), dict)
         if activity == "manufacturing":
             if bool(build_from_bpc):
-                available_target_copy_runs = int(available_copy_runs.get(blueprint_type_id, 0))
+                # Whole runs only for a job; a fractional remainder an
+                # invention left (0.7) is written back for later inventions.
+                available_target_copy_runs_float = max(0.0, float(available_copy_runs.get(blueprint_type_id, 0) or 0))
+                available_target_copy_runs = int(math.floor(available_target_copy_runs_float + 1e-9))
                 owned_copy_runs_used = min(max(0, available_target_copy_runs), requested_runs)
                 missing_blueprint_copy_runs = max(0, requested_runs - owned_copy_runs_used)
-                available_copy_runs[blueprint_type_id] = max(0, available_target_copy_runs - owned_copy_runs_used)
+                available_copy_runs[blueprint_type_id] = max(0.0, available_target_copy_runs_float - owned_copy_runs_used)
                 if owned_copy_runs_used > 0 and matched_blueprint_copies:
                     blueprint_material_efficiency = int(matched_blueprint_copies[0].blueprint_material_efficiency or 0)
                     blueprint_time_efficiency = int(matched_blueprint_copies[0].blueprint_time_efficiency or 0)
@@ -4871,12 +4874,15 @@ class IndustryService:
                 child_row = manufacturing_row_by_product_type_id.get(child_type_id)
 
             child_plan = None
-            # Evaluate the child on copies: a rejected build must not spend
-            # stock, BPC runs or invention valuation stock (FU-61).
-            trial_copy_runs = dict(available_copy_runs)
-            trial_stock = dict(available_owned_item_quantities)
-            trial_valuation = dict(invention_valuation_stock)
+            trial_copy_runs: dict[int, Any] = {}
+            trial_stock: dict[int, Any] = {}
+            trial_valuation: dict[int, Any] = {}
             if child_row is not None and child_type_id != int(desired_product_type_id):
+                # Evaluate the child on copies: a rejected build must not spend
+                # stock, BPC runs or invention valuation stock (FU-61).
+                trial_copy_runs = dict(available_copy_runs)
+                trial_stock = dict(available_owned_item_quantities)
+                trial_valuation = dict(invention_valuation_stock)
                 child_plan = self._plan_blueprint_chain_for_quantity(
                     blueprint_row=child_row,
                     activity=child_activity,
@@ -7410,13 +7416,24 @@ class IndustryService:
         source_copying_job = invention_source_row.get("copying_job") or {}
         source_bp_type_id = int(invention_source_row.get("blueprint_type_id") or 0)
         # Expected-value model: the runs are fractional, read and kept as such
-        # (int() here read a 0.7-run remainder as 0, FU-50). The whole-run
-        # elapsed time counts only whole runs left on the owned copies.
+        # (int() here read a 0.7-run remainder as 0, FU-50).
         available_source_runs = max(0.0, float(available_blueprint_copy_runs_by_type_id.get(source_bp_type_id, 0) or 0))
         source_runs_used = min(available_source_runs, attempts)
         available_blueprint_copy_runs_by_type_id[source_bp_type_id] = available_source_runs - source_runs_used
         missing_source_runs = max(0.0, attempts - source_runs_used)
-        whole_missing_source_runs = max(0, whole_attempts - int(math.floor(available_source_runs + 1e-9)))
+        # The whole-run elapsed time has its own budget of whole owned runs,
+        # spent by whole attempts: the floor of the expected-value remainder
+        # (2 - 0.5 - 0.5 = 1) undercounts after a second invention. It lives
+        # in the same map under a negative key, so trial copies and commits
+        # carry it, and it never exceeds the whole runs physically left.
+        whole_source_runs_left = int(math.floor(available_source_runs + 1e-9))
+        if source_bp_type_id > 0:
+            whole_key = self._whole_source_runs_key(source_bp_type_id)
+            whole_source_runs_left = min(
+                int(available_blueprint_copy_runs_by_type_id.get(whole_key, whole_source_runs_left)), whole_source_runs_left,
+            )
+            available_blueprint_copy_runs_by_type_id[whole_key] = max(0, whole_source_runs_left - whole_attempts)
+        whole_missing_source_runs = max(0, whole_attempts - whole_source_runs_left)
         if not (enabled and isinstance(source_copying_job, dict) and int(source_copying_job.get("time_seconds") or 0) > 0):
             return None, missing_source_runs
 
@@ -7435,6 +7452,12 @@ class IndustryService:
         ) if not cost_unknown else None
         source_copy_costs["duration_is_amortized"] = missing_source_runs > 0
         return source_copy_costs, missing_source_runs
+
+    @staticmethod
+    def _whole_source_runs_key(source_bp_type_id: int) -> int:
+        """The BPC-run map key of a T1 source's whole-run budget (see
+        _invention_source_copy_costs): the negated type id, never a real one."""
+        return -int(source_bp_type_id)
 
     @staticmethod
     def _invention_elapsed_adjustment(
