@@ -117,12 +117,19 @@ def test_weaker_lanes_count_at_their_own_chance():
         base_pct=34.0, invented_runs=300,
     )
     assert costs["success_probability"] == pytest.approx(0.34 * (1 + 10 / 30 + 5 / 40))
-    assert costs["whole_attempts"] == 61  # the best inventor's: cost and the producer's procurement
     parallel = costs["elapsed_parallel"]
     assert (parallel["lanes"], parallel["lanes_used"], parallel["pilots_used"]) == (21, 20, 5)
     assert parallel["rounds"] == 4
-    assert costs["lane_whole_attempts"] == parallel["lane_whole_jobs"] == 80
     assert costs["elapsed_duration_seconds"] == 4 * 100
+    # Fix round 2: the row's attempts ARE the lanes' (cost, procurement, budget).
+    # The best inventor alone: 61 whole, 30 / 0.495833 = 60.50 expected.
+    p_best, p_alt = 0.34 * (1 + 10 / 30 + 5 / 40), 0.34 * (1 + 2 / 30 + 1 / 40)
+    assert costs["best_inventor_whole_attempts"] == 61
+    assert costs["best_inventor_expected_attempts"] == pytest.approx(30 / p_best)  # 60.50
+    assert costs["whole_attempts"] == costs["lane_whole_attempts"] == parallel["lane_whole_jobs"] == 80
+    # Expected: 30 BPCs x 80 / (4 x p_best + 76 x p_alt) = 79.49.
+    assert costs["runs"] == pytest.approx(30 * 80 / (4 * p_best + 76 * p_alt))
+    assert costs["runs"] == pytest.approx(79.49, abs=0.01)
 
 
 def test_split_invention_attempts_is_the_single_lane_count_for_one_lane():
@@ -207,6 +214,10 @@ def test_a_dc_ii_style_example_with_a_known_whole_attempt_count():
     assert costs["whole_attempts"] == 7
     assert costs["elapsed_parallel"]["lanes"] == 5
     assert costs["lane_whole_attempts"] == 7
+    # Every lane at the same chance: the lane expected attempts equal the
+    # best inventor's, 3 / 0.4647 = 6.456 (fix round 2: unchanged).
+    assert costs["runs"] == pytest.approx(costs["best_inventor_expected_attempts"])
+    assert costs["runs"] == pytest.approx(3 / (0.34 * (1 + 8 / 30 + 4 / 40)))
     assert costs["elapsed_parallel"]["lane_duration_seconds"] == 910
     assert costs["elapsed_duration_seconds"] == 2 * 910  # sequential was 7 x 1000
 
@@ -303,22 +314,26 @@ def test_source_copies_stay_sequential_without_a_second_lane_or_slot_data(contex
     assert costs["elapsed_parallel"]["sequential_reason"] == reason
 
 
-def test_copies_cover_the_lane_attempts_not_only_the_best_inventors():
+def test_the_whole_run_budget_and_the_copies_use_the_lanes_attempts():
+    """Fix round 2: whole_attempts is the lanes' total (7 here), and both the
+    whole-run budget of owned source runs and the copy elapsed time spend it."""
     context = InventionContext(
         slot_capacity_by_character_id={1: _capacity(2)},
         source_originals_by_type_id={1001: SourceOriginals(corporation=2)},
     )
     source_row = {"blueprint_type_id": 1001, "copying_job": {"time_seconds": 20},
                   "manufacturing_job": {"materials": []}}
+    runs = {1001: 3}  # 3 owned source runs
     costs, _ = _service()._invention_source_copy_costs(
         compute_activity=_fake_compute, invention_source_row=source_row,
-        invention_costs={"runs": 5.0, "whole_attempts": 5, "lane_whole_attempts": 7},
-        available_blueprint_copy_runs_by_type_id={}, adjusted_price_map={}, enabled=True,
+        invention_costs={"runs": 6.5, "whole_attempts": 7, "best_inventor_whole_attempts": 5},
+        available_blueprint_copy_runs_by_type_id=runs, adjusted_price_map={}, enabled=True,
         invention_context=context,
     )
     assert costs is not None
-    assert costs["elapsed_parallel"]["lane_whole_jobs"] == 7
-    assert costs["elapsed_duration_seconds"] == 4 * 20  # 7 runs over 2 corp BPOs
+    assert runs[IndustryService._whole_source_runs_key(1001)] == 0  # 3 owned whole runs, 7 spent
+    assert costs["elapsed_parallel"]["lane_whole_jobs"] == 4  # 7 - 3 owned
+    assert costs["elapsed_duration_seconds"] == 2 * 20  # 4 runs over 2 corp BPOs
 
 
 def test_the_producer_reads_bpo_owners_from_the_assets():
@@ -350,3 +365,21 @@ def test_producer_and_planner_count_the_same_research_slots():
         for cid, slot in CharacterAssigner()._compute_available_slots(characters, [], datetime(2026, 1, 1)).items()
     }
     assert producer == planner == {1: 7, 2: 1, 3: 1}
+
+
+def test_later_batches_per_bpc_attempts_never_under_buy_the_lanes():
+    """Fix round 2: one BPC over lanes (0.9, 0.1, 0.1, 0.1) takes 2 attempts
+    (split_invention_attempts), but 10 BPCs take 28, more than 10 x 2: the
+    per-BPC figure the shopping list multiplies is ceil(28 / 10) = 3."""
+    lanes = [0.9, 0.1, 0.1, 0.1]
+    assert sum(im.split_invention_attempts(1, lanes)) == 2
+    assert sum(im.split_invention_attempts(10, lanes)) == 28
+    service = _service()
+    service._full_batch_invention_whole_attempts = MethodType(  # type: ignore[attr-defined]
+        lambda self, *, runs, **kw: (sum(im.split_invention_attempts(runs // 10, lanes)), None, None), service,
+    )
+    per_bpc, why = service._whole_attempts_per_blueprint(
+        invention_job={}, blueprint_type_id=9002, runs_per_bpc=10, batch_runs=100, max_production_limit=100,
+        adjusted_price_map={}, decryptor=NO_DECRYPTOR, invention_context=InventionContext(),
+    )
+    assert (per_bpc, why) == (3, None)

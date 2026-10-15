@@ -349,6 +349,8 @@ def _every_assignment_plan():
     return ChainPlan(decisions=[
         _decision(overview_row={
             "type_id": 12345, "needs_invention": True, "has_t1_bpo": True, "t1_blueprint_type_id": 999,
+            # One T1 BPC run on hand: invent today and copy for the rest.
+            "t1_bpc_runs_on_hand": 1,
             "needs_me_research": True, "needs_te_research": True,
             # Built from an owned BPC, so the BPO's research does not block
             # the manufacture (research first, Task 8c fix round 1).

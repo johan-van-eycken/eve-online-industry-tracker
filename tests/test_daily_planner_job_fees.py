@@ -55,12 +55,14 @@ def _actions(row, **overrides):
     return {a.action_type: a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin())}
 
 
-def _invent_row(*, per_attempt=4.4, per_copy_run=0.0099, whole_attempts=4):
+def _invent_row(*, per_attempt=4.4, per_copy_run=0.0099, whole_attempts=4, bpc_runs_on_hand=2):
     """A T2 row whose batch 1 invents: 20 runs, 10 runs per BPC, chance 0.5
-    for the best inventor (the only pilot), so 4 whole attempts."""
+    for the best inventor (the only pilot), so 4 whole attempts. Task 12 fix
+    round 2: the T1 BPC runs on hand cap today's attempts; the copy covers
+    the rest (2 + 2 by default)."""
     return {
         "type_id": 12345, "quantity": 20, "needs_invention": True, "has_t1_bpo": True,
-        "t1_blueprint_type_id": 999,
+        "t1_blueprint_type_id": 999, "t1_bpc_runs_on_hand": bpc_runs_on_hand,
         "manufacturing_job": {
             "runs": 20, "manufacturing_job_cost": 2_500.0,
             "invention_chance": {
@@ -80,14 +82,17 @@ def _invent_row(*, per_attempt=4.4, per_copy_run=0.0099, whole_attempts=4):
 
 
 def test_manufacture_invent_and_copy_actions_carry_their_fees():
-    actions = _actions(_invent_row())
+    actions = _actions(_invent_row(bpc_runs_on_hand=4))
     assert actions["manufacture"].estimated_job_fee_isk == 2_500.0
     # 4 whole attempts x 4.4 per attempt: the cash for the jobs really launched.
     assert actions["invent"].runs == 4
     assert actions["invent"].estimated_job_fee_isk == pytest.approx(17.6)
-    # One source-copy run per attempt: 4 x 0.0099.
-    assert actions["copy"].runs == 4
-    assert actions["copy"].estimated_job_fee_isk == pytest.approx(0.0396)
+    assert "copy" not in actions  # 4 T1 BPC runs on hand cover every attempt
+    # No BPC on hand: only the copy today, one source-copy run per attempt: 4 x 0.0099.
+    copy_first = _actions(_invent_row(bpc_runs_on_hand=0))
+    assert "invent" not in copy_first
+    assert copy_first["copy"].runs == 4
+    assert copy_first["copy"].estimated_job_fee_isk == pytest.approx(0.0396)
 
 
 def test_an_unpriced_fee_stays_unknown_and_warns(caplog):

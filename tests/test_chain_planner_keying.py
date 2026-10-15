@@ -323,6 +323,23 @@ def test_owned_t1_bpo_marks_the_t2_item_for_copy_and_invention():
     assert decision.pipeline_stage == "copying"
 
 
+def test_the_t1_bpc_runs_on_hand_and_the_bpo_count_reach_the_assigner():
+    """Task 12 fix round 2: CharacterAssigner copies first and caps today's
+    invent attempts by the free T1 BPC runs on hand."""
+    from types import SimpleNamespace
+
+    row = _t2_row()
+    bpcs = [SimpleNamespace(type_id=999, item_id=71, is_blueprint_copy=True, blueprint_runs=3,
+                            blueprint_material_efficiency=0, blueprint_time_efficiency=0),
+            SimpleNamespace(type_id=999, item_id=72, is_blueprint_copy=True, blueprint_runs=2,
+                            blueprint_material_efficiency=0, blueprint_time_efficiency=0)]
+    phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=10, te=20), _bpo(999, me=10, te=20)]},
+              "bpc_assets_by_type_id": {999: bpcs},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA}
+    _planner().plan_chain([_decision(row, meta_group_id=2)], phase1)
+    assert (row["t1_bpo_count"], row["t1_bpc_runs_on_hand"]) == (2, 5)
+
+
 def test_unowned_t1_bpo_means_one_must_be_acquired():
     row = _t2_row()
     decision = _decision(row, meta_group_id=2)

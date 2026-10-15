@@ -127,6 +127,14 @@ class _Sizing:
     fee: float | None
     #: Sized from invention_bpc_plan (I1 case A): one full batch, no fee.
     later_batch: bool = False
+    #: The expected attempts the row's fee and expected input lines are
+    #: priced at: the producer's lanes' when they run in parallel (Task 12
+    #: fix round 2), else the best inventor's. None: best_expected.
+    basis_expected: float | None = None
+
+    @property
+    def basis(self) -> float:
+        return self.basis_expected if self.basis_expected is not None else self.best_expected
 
 
 def _sizing(row: dict[str, Any], best_probability: float | None) -> tuple[_Sizing | None, str]:
@@ -137,15 +145,21 @@ def _sizing(row: dict[str, Any], best_probability: float | None) -> tuple[_Sizin
             return None, str(costs["cost_unknown_reason"])
         invented_runs = _positive_int(costs.get("invented_runs"))
         runs_per_bpc = _positive_int(costs.get("runs_per_invented_blueprint"))
-        best_expected = _positive_float(costs.get("runs"))
-        best_whole = _positive_int(costs.get("whole_attempts"))
-        if None not in (invented_runs, runs_per_bpc, best_expected, best_whole):
+        basis_expected = _positive_float(costs.get("runs"))
+        # The best inventor alone (Task 12 fix round 2); a row from before it
+        # carries only the row's attempts, which were the best inventor's.
+        best_expected = _positive_float(costs.get("best_inventor_expected_attempts")) or basis_expected
+        best_whole = _positive_int(costs.get("best_inventor_whole_attempts")) or _positive_int(costs.get("whole_attempts"))
+        if None not in (invented_runs, runs_per_bpc, best_expected, best_whole, basis_expected):
             raw_fee = costs.get("total_job_cost")
             fee = (
                 float(raw_fee) if isinstance(raw_fee, (int, float)) and not isinstance(raw_fee, bool) and raw_fee >= 0
                 else None
             )
-            return _Sizing(int(invented_runs), int(runs_per_bpc), float(best_expected), int(best_whole), fee), ""
+            return _Sizing(
+                int(invented_runs), int(runs_per_bpc), float(best_expected), int(best_whole), fee,
+                basis_expected=float(basis_expected),
+            ), ""
     # I1 case A: an owned T2 BPC (one the planner may not see) covers batch 1,
     # so the producer wrote only the later-batch plan: one batch of runs.
     plan = orow.get_invention_bpc_plan(row)
@@ -294,19 +308,21 @@ class _Sized:
         assert sizing is not None
         if sizing.fee is None:
             return None, LATER_BATCH_NO_FEE
-        ratio = expected / sizing.best_expected
+        ratio = expected / sizing.basis
         inputs, why = _input_cost(self.row, ratio, self.price_map)
         return (None, why) if inputs is None else (sizing.fee * ratio + inputs, None)
 
     def finish(
         self, character_id: int, probability: float, expected: float, whole: int, note: str,
-        chance_reason: str | None,
+        chance_reason: str | None, priced: tuple[float | None, str | None] | None = None,
     ) -> AssignedInvention:
         """The action's figures; an unknown cost and the later-batch sizing
-        are named in the note, and an unknown cost in the reason too."""
+        are named in the note, and an unknown cost in the reason too.
+        `priced`: the (cost, why unknown) already worked out for this action
+        (a lane's share of the lanes' one cost), else self.cost(expected)."""
         sizing = self.sizing
         assert sizing is not None
-        value, cost_why = self.cost(expected)
+        value, cost_why = priced if priced is not None else self.cost(expected)
         notes, reasons = [note], ([chance_reason] if chance_reason else [])
         if sizing.later_batch:
             notes.append(LATER_BATCH_OVER_BUY_NOTE)
@@ -366,9 +382,10 @@ def assigned_invention_lanes(
     lane that runs at least one attempt.
 
     Each lane's expected attempts are its share of the expected BPCs over its
-    chance: E x a_i / sum(a_j x p_j), so the costs add up over the lanes;
-    the whole attempts (what is bought) add up to at least what one pilot
-    would buy. One lane: exactly assigned_invention. Unknown odds: one
+    chance: E x a_i / sum(a_j x p_j). The lanes' total expected attempts are
+    priced once (fix round 2: the held stock's discount counts once) and each
+    lane carries its share of that cost. The whole attempts (what is
+    bought) add up to at least what one pilot would buy. One lane: exactly assigned_invention. Unknown odds: one
     action, as assigned_invention."""
     if not lanes:
         return []
@@ -399,10 +416,18 @@ def assigned_invention_lanes(
     covered = sum(a * p for a, p in zip(attempts, probabilities))
     expected_blueprints = float(sizing.invented_runs) / float(sizing.runs_per_bpc)
     used = [(cid, a) for cid, a in zip(ordered, attempts) if a > 0]
+    # Fix round 2: the lanes' expected attempts are priced ONCE (the row's
+    # held stock discount counts once), then each lane takes its share.
+    total_expected = expected_blueprints * sum(a for _, a in used) / covered
+    total_cost, cost_why = sized.cost(total_expected)
     out: list[tuple[int, AssignedInvention]] = []
     for index, (cid, whole) in enumerate(used, start=1):
         pilot = chances[cid]
         expected = expected_blueprints * whole / covered
+        share = expected / total_expected
         note = f"{pilot.note}; lane {index} of {len(used)}"
-        out.append((cid, sized.finish(cid, pilot.probability, expected, whole, note, pilot.reason)))
+        out.append((cid, sized.finish(
+            cid, pilot.probability, expected, whole, note, pilot.reason,
+            priced=(None if total_cost is None else total_cost * share, cost_why),
+        )))
     return out

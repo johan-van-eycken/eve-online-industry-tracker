@@ -273,12 +273,21 @@ def test_without_a_decryptor_only_the_datacores_scale():
 
 
 def test_the_copy_action_makes_one_t1_bpc_run_per_invention_attempt():
-    """Minor 6: the copy feeding the invention covers its whole attempts."""
+    """Minor 6, Task 12 fix round 2: the copy covers the attempts the T1 BPC
+    runs on hand do not (the row's 4); with none on hand it is the only
+    action, and with them on hand today's attempts are capped by them."""
     actions = _assign(_row(t1_bpo=True), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
-    (invent,) = [a for a in actions if a.action_type == "invent"]
+    assert [a for a in actions if a.action_type == "invent"] == []
     (copy,) = [a for a in actions if a.action_type == "copy"]
-    assert invent.runs == 5
-    assert copy.runs == 5
+    assert copy.runs == 4
+    assert "no T1 BPC on hand: no invention today" in copy.notes
+    row = _row(t1_bpo=True)
+    row["t1_bpc_runs_on_hand"] = 4
+    actions = _assign(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    (invent,) = [a for a in actions if a.action_type == "invent"]
+    assert [a for a in actions if a.action_type == "copy"] == []
+    assert invent.runs == 4  # the weaker pilot's 5, capped at the 4 runs on hand
+    assert "capped at the 4 T1 BPC run(s) on hand" in invent.notes
 
 
 # --- the best inventor -------------------------------------------------------------
@@ -523,8 +532,11 @@ def test_two_free_inventors_get_one_invent_action_each_at_their_own_chance():
     # Each lane's share of the 2 expected BPCs over its own chance.
     assert best.invention_expected_attempts == pytest.approx(2 * 3 / COVERED)
     assert second.invention_expected_attempts == pytest.approx(2 * 1 / COVERED)
-    assert best.estimated_cost_isk == pytest.approx(_cost(2 * 3 / COVERED))
-    assert second.estimated_cost_isk == pytest.approx(_cost(2 * 1 / COVERED))
+    # Fix round 2: the lanes' 2 x 4 / COVERED expected attempts are priced
+    # once (Datacore A's FIFO discount counts once); each lane takes its share.
+    total = 2 * 4 / COVERED
+    assert best.estimated_cost_isk == pytest.approx(_cost(total) * 3 / 4)
+    assert second.estimated_cost_isk == pytest.approx(_cost(total) * 1 / 4)
     # Capital Reserved: the fee of the attempts each lane launches.
     assert (best.estimated_job_fee_isk, second.estimated_job_fee_isk) == (pytest.approx(12.0), pytest.approx(4.0))
 
@@ -551,8 +563,9 @@ def test_copies_go_one_per_free_corp_bpo_with_the_runs_spread():
     row["t1_bpo_count"] = 2
     actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
     copies = [a for a in actions if a.action_type == "copy"]
+    assert [a for a in actions if a.action_type == "invent"] == []  # no T1 BPC on hand yet
     assert [c.runs for c in copies] == [2, 2]  # 4 attempts over 2 BPOs
-    assert all(c.character_id == COPIER_ID for c in copies)
+    assert copies[0].character_id == COPIER_ID  # the most free research slots
     assert [c.estimated_job_fee_isk for c in copies] == [pytest.approx(1.0), pytest.approx(1.0)]
     assert "BPO 1 of 2" in copies[0].notes
 
@@ -561,3 +574,70 @@ def test_one_corp_bpo_keeps_one_copy_action():
     actions = _assign(_row(t1_bpo=True), [_best_inventor(), _second_inventor(), _copier()])
     (copy,) = [a for a in actions if a.action_type == "copy"]
     assert copy.runs == 4
+
+
+def _alt(character_id):
+    """A 3/3/3 inventor with Laboratory Operation 4: five research slots."""
+    alt = _second_inventor()
+    alt["character_id"], alt["character_name"] = character_id, f"Alt {character_id}"
+    alt["skills"]["skills"].append(_skill("Laboratory Operation", 4, 3406))
+    return alt
+
+
+def test_the_lanes_costs_add_up_to_one_pricing_of_their_expected_attempts():
+    """Fix round 2 (review probe): five lanes priced one by one applied the
+    held stock's discount five times (summing to 3019 ISK where 4543 is
+    right, and a lane could go negative). Now the lanes' total expected
+    attempts are priced once and split by share."""
+    invents = _invents(_row(), [_best_inventor(), *(_alt(cid) for cid in (3, 5, 6, 7))])
+    assert len(invents) > 2
+    total_expected = sum(a.invention_expected_attempts for a in invents)
+    assert sum(a.estimated_cost_isk for a in invents) == pytest.approx(_cost(total_expected))
+    assert all(a.estimated_cost_isk > 0 for a in invents)
+    for a in invents:
+        assert a.estimated_cost_isk == pytest.approx(_cost(total_expected) * a.invention_expected_attempts / total_expected)
+
+
+# --- fix round 2: copy first in the copying stage --------------------------------
+
+
+def test_a_small_corp_of_inventors_copies_first_and_does_not_livelock():
+    """Review probe: two inventors with one research slot each and an owned
+    T1 BPO but no T1 BPC. Invention used to take both slots and the copy
+    none, so no BPC was ever made. Now only the copy is planned today."""
+    actions = _assign(_row(t1_bpo=True), [_best_inventor(), _second_inventor()])
+    kinds = [a.action_type for a in actions]
+    assert "invent" not in kinds
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    assert copy.runs == 4  # the row's whole attempts
+    assert "no T1 BPC on hand: no invention today" in copy.notes
+
+
+def test_bpc_runs_on_hand_cap_todays_invention_after_the_copy():
+    """1 T1 BPC run on hand of 4 needed: the copy takes one slot for the
+    other 3, the second slot invents the 1 attempt the BPC run allows."""
+    row = _row(t1_bpo=True)
+    row["t1_bpc_runs_on_hand"] = 1
+    actions = _assign(row, [_best_inventor(), _second_inventor()])
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    (invent,) = [a for a in actions if a.action_type == "invent"]
+    assert copy.runs == 3
+    assert invent.runs == 1
+    assert copy.character_id != invent.character_id
+    assert "capped at the 1 T1 BPC run(s) on hand" in invent.notes
+    # Bought for the attempt launched today only.
+    assert _buy(invent) == {DATACORE_A: 2, DATACORE_B: 2, DECRYPTOR: 1}
+
+
+def test_fewer_free_lanes_than_the_build_time_assumes_are_said_on_the_invent_action():
+    row = _row()
+    row["manufacturing_job"]["activity_breakdown"]["invention"]["elapsed_parallel"] = {
+        "lanes": 3, "lanes_used": 3, "pilots_used": 3, "sequential_reason": None,
+    }
+    best, second = _invents(row, [_best_inventor(), _second_inventor()])
+    note = "2 of 3 lanes free today; completion later than the overview's Build time"
+    assert note in best.notes and note in second.notes
+    (alone,) = _invents(row, [_best_inventor(), _second_inventor()], jobs=[_busy(SECOND_ID)])
+    assert "1 of 3 lanes free today" in alone.notes
+    full = _invents(_row(), [_best_inventor(), _second_inventor()])
+    assert all("lanes free today" not in a.notes for a in full)

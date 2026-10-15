@@ -2433,6 +2433,44 @@ def test_the_daily_plan_schedules_the_lanes_the_producers_elapsed_assumes(monkey
     assert sum(a.runs for a in invents) == parallel["lane_whole_jobs"]
 
 
+def _lane_skills(level: int, lab_operation: int = 0) -> dict:
+    return {"skills": [
+        {"skill_id": 11433, "skill_name": "High Energy Physics", "trained_skill_level": level},
+        {"skill_id": 11454, "skill_name": "Caldari Starship Engineering", "trained_skill_level": level},
+        {"skill_id": 21790, "skill_name": "Caldari Encryption Methods", "trained_skill_level": level},
+        {"skill_id": 990001, "skill_name": "Laboratory Operation", "trained_skill_level": lab_operation},
+    ]}
+
+
+def test_the_portfolio_list_buys_the_lanes_whole_attempts(monkeypatch) -> None:
+    """Fix round 2: base 10 %, 1 BPC. The 5/5/5 pilot alone (p 0.1458)
+    needs ceil(1 / 0.1458) = 7 attempts; its 1 slot plus a 1/1/1 alt's 5
+    (p 0.1092) run ceil(1 / 0.6917) = 2 rounds: 2 + 2 + 2 + 2 + 1 = 9
+    attempts. The Portfolio buys the 9, and the cost prices the lanes'
+    expected attempts, 1 x 9 / (2 x 0.1458 + 7 x 0.1092)."""
+    rows = _invented_t2_blueprint_rows()
+    rows[0]["invention_job"]["skill_entries"] = [dict(s) for s in _INVENTION_SKILLS]
+    rows[0]["invention_job"]["products"][0]["probability_pct"] = 10.0
+    service = _invention_service(monkeypatch, blueprint_rows=rows)
+    del service._get_inventor_skill_levels  # back to the class method
+    service._state.char_manager = SimpleNamespace(get_characters=lambda: [  # type: ignore[attr-defined]
+        {"character_id": 1, "skills": _lane_skills(5)},
+        {"character_id": 2, "skills": _lane_skills(1, lab_operation=4)},
+    ])
+    out = {r["type_id"]: r for r in service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=True, character_id=1,
+    )}
+    mj = out[5002]["manufacturing_job"]
+    invention = mj["activity_breakdown"]["invention"]
+    p_best, p_alt = 0.1 * (1 + 10 / 30 + 5 / 40), 0.1 * (1 + 2 / 30 + 1 / 40)
+    assert invention["best_inventor_whole_attempts"] == 7
+    assert invention["whole_attempts"] == 9
+    assert invention["runs"] == pytest.approx(9 / (2 * p_best + 7 * p_alt))
+    assert mj["invention_procurement_materials"]["204"]["quantity"] == 2 * 9  # was 2 x 7
+    # The copies cover every lane attempt too (no owned source runs).
+    assert mj["activity_breakdown"]["invention_source_copying"]["elapsed_parallel"]["whole_jobs"] == 9
+
+
 def test_no_qualifying_inventor_is_a_build_time_note(monkeypatch) -> None:
     untrained = {"skills": [{"skill_id": 11433, "skill_name": "High Energy Physics", "trained_skill_level": 5}]}
     mj = _overview_with_real_skill_loader(monkeypatch, [{"character_id": 1, "skills": untrained}])

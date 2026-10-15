@@ -7690,6 +7690,33 @@ class IndustryService:
             successful_jobs = 0.0
             invention_attempts = 0.0
             whole_attempts = 0
+        # The corp's best inventor alone (A4: the daily planner's single
+        # invent action keeps these when its pilot is that inventor).
+        best_inventor_expected, best_inventor_whole = invention_attempts, whole_attempts
+        # Parallel lanes (Task 12): every qualifying corp inventor's research
+        # slots, each at its own chance, sized by split_invention_attempts.
+        # Fix round 2: when they run in parallel the row's whole and expected
+        # attempts ARE the lanes', so the cost, the Portfolio procurement, the
+        # whole-run copy budget and the elapsed time all assume one plan.
+        # Unknown slots or skills: the best inventor in sequence, as before.
+        lanes = (
+            invention_lanes(
+                invention_context, chance, invention_job.get("skill_entries") or [],
+                probability_floor=probability_floor,
+            )
+            if whole_attempts > 0 else None
+        )
+        lane_attempts = (
+            split_invention_attempts(
+                int(math.ceil(float(invented_runs) / float(runs_per_invented_blueprint))), lanes.probabilities,
+            )
+            if lanes is not None and lanes.sequential_reason is None else None
+        )
+        if lane_attempts and sum(lane_attempts) > 0:
+            covered = sum(a * p for a, p in zip(lane_attempts, lanes.probabilities))  # type: ignore[union-attr]
+            whole_attempts = int(sum(lane_attempts))
+            # Each lane's share of the expected BPCs over its own chance.
+            invention_attempts = successful_jobs * float(whole_attempts) / covered
 
         per_attempt_materials = [dict(e) for e in (invention_job.get("materials") or []) if isinstance(e, dict)]
         # The decryptor is consumed like a datacore, one per attempt, and priced
@@ -7739,33 +7766,15 @@ class IndustryService:
             if costs["job_cost_per_attempt"] is None else None
         )
         costs["whole_attempts"] = whole_attempts
-        # Whole attempts over the parallel invention lanes (Task 12): every
-        # qualifying corp inventor's total research slots. Unknown slots or
-        # skills: one slot in sequence, as before, with the reason.
-        # Each lane at its own pilot's chance (split_invention_attempts):
-        # whole_attempts stays the best inventor's (cost and procurement);
-        # lane_whole_attempts is what the lanes run, never fewer.
-        lanes = (
-            invention_lanes(
-                invention_context, chance, invention_job.get("skill_entries") or [],
-                probability_floor=probability_floor,
-            )
-            if whole_attempts > 0 else None
-        )
-        lane_attempts = (
-            split_invention_attempts(
-                int(math.ceil(float(invented_runs) / float(runs_per_invented_blueprint))), lanes.probabilities,
-            )
-            if lanes is not None and lanes.sequential_reason is None else None
-        )
+        costs["best_inventor_expected_attempts"] = best_inventor_expected
+        costs["best_inventor_whole_attempts"] = best_inventor_whole
         costs["elapsed_duration_seconds"], costs["elapsed_parallel"] = self._lane_elapsed_seconds(
             compute_activity=compute_activity, invention_context=invention_context, lanes=lanes,
             jobs_per_lane=lane_attempts, activity="invention", base_time_seconds=invention_base_time,
             whole_jobs=whole_attempts,
         )
-        costs["lane_whole_attempts"] = (
-            int(costs["elapsed_parallel"]["lane_whole_jobs"]) if costs["elapsed_parallel"] else whole_attempts
-        )
+        # Kept for readers of round 1: the row's whole attempts.
+        costs["lane_whole_attempts"] = whole_attempts
         costs["duration_is_amortized"] = invention_attempts > 0
         if cost_unknown_reason is not None:
             costs["cost_unknown_reason"] = cost_unknown_reason
@@ -7840,10 +7849,10 @@ class IndustryService:
             compute_activity=compute_activity, invention_source_row=invention_source_row,
             adjusted_price_map=adjusted_price_map,
         )
-        # The lanes' attempts (each lane at its own chance) need one source
-        # run each: never fewer copies than the invention elapsed assumes.
-        lane_whole_attempts = max(whole_attempts, int(invention_costs.get("lane_whole_attempts") or 0))
-        elapsed_missing_runs = max(0, lane_whole_attempts - whole_source_runs_left)
+        # One source run per whole attempt: the lanes' total when they run
+        # in parallel (whole_attempts is then the lanes', fix round 2), so
+        # the whole-run budget and the copy elapsed time agree.
+        elapsed_missing_runs = whole_missing_source_runs
         copy_lanes = (
             source_copy_lanes(invention_context, source_bp_type_id)
             if invention_context is not None else ParallelLanes((), (), "no invention context")
@@ -8143,10 +8152,10 @@ class IndustryService:
         if invented_runs <= 0 or int(invention_costs.get("whole_attempts") or 0) <= 0:
             return None
         runs_per_bpc = max(1, int(invention_costs.get("runs_per_invented_blueprint") or 1))
-        attempts_per_bpc, unknown_reason, _chance = self._full_batch_invention_whole_attempts(
-            invention_job=invention_job, blueprint_type_id=blueprint_type_id, runs=runs_per_bpc,
-            max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
-            decryptor=decryptor, invention_context=invention_context,
+        attempts_per_bpc, unknown_reason = self._whole_attempts_per_blueprint(
+            invention_job=invention_job, blueprint_type_id=blueprint_type_id, runs_per_bpc=runs_per_bpc,
+            batch_runs=invented_runs, max_production_limit=max_production_limit,
+            adjusted_price_map=adjusted_price_map, decryptor=decryptor, invention_context=invention_context,
         )
         if unknown_reason is not None or attempts_per_bpc <= 0:
             return None
@@ -8227,6 +8236,42 @@ class IndustryService:
                     if key not in ("invented_blueprint_type_id", "invented_blueprint_name", "whole_attempts", "quantity_per_attempt")
                 }
         return list(merged.values())
+
+    def _whole_attempts_per_blueprint(
+        self,
+        *,
+        invention_job: dict[str, Any],
+        blueprint_type_id: int,
+        runs_per_bpc: int,
+        batch_runs: int,
+        max_production_limit: int,
+        adjusted_price_map: dict[int, dict[str, Any]],
+        decryptor: DecryptorOption,
+        invention_context: InventionContext,
+    ) -> tuple[int, str | None]:
+        """Whole attempts per invented BPC for the shopping list's later
+        batches (BPCs x this): at least one BPC's attempts, and at least the
+        parallel lanes' attempts for a full batch spread over its BPCs (fix
+        round 2: weaker lanes need more per BPC as a batch grows, so one BPC's
+        count alone could under-buy). (0, why) when the odds are unknown."""
+        one, unknown_reason, _chance = self._full_batch_invention_whole_attempts(
+            invention_job=invention_job, blueprint_type_id=blueprint_type_id, runs=runs_per_bpc,
+            max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
+            decryptor=decryptor, invention_context=invention_context,
+        )
+        if unknown_reason is not None or one <= 0:
+            return one, unknown_reason
+        bpcs = int(math.ceil(max(0, int(batch_runs)) / max(1, int(runs_per_bpc))))
+        if bpcs <= 1:
+            return one, None
+        batch, batch_unknown, _chance = self._full_batch_invention_whole_attempts(
+            invention_job=invention_job, blueprint_type_id=blueprint_type_id, runs=bpcs * int(runs_per_bpc),
+            max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
+            decryptor=decryptor, invention_context=invention_context,
+        )
+        if batch_unknown is not None:
+            return one, None
+        return max(one, int(math.ceil(batch / bpcs))), None
 
     def _full_batch_invention_whole_attempts(
         self,
@@ -9387,9 +9432,10 @@ class IndustryService:
         invention_bpc_plan: dict[str, Any] | None = None
         if top_level_extra_attempts > 0 and inv_costs is not None:
             runs_per_bpc = max(1, int(inv_costs.get("runs_per_invented_blueprint") or 1))
-            attempts_per_bpc, per_bpc_unknown, _chance = self._full_batch_invention_whole_attempts(
+            attempts_per_bpc, per_bpc_unknown = self._whole_attempts_per_blueprint(
                 invention_job=invention_job, blueprint_type_id=blueprint_type_id,
-                runs=runs_per_bpc, max_production_limit=max_production_limit,
+                runs_per_bpc=runs_per_bpc, batch_runs=int(effective_runs),
+                max_production_limit=max_production_limit,
                 adjusted_price_map=ctx.adjusted_market_price_map,
                 decryptor=decryptor, invention_context=ctx.invention_context,
             )

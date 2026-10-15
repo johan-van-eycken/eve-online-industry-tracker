@@ -113,6 +113,15 @@ def build_invention_source_index(
     return _lowest_blueprint_by_activity_product(blueprint_data, "invention")
 
 
+def _blueprint_runs(asset: Any) -> int:
+    """A BPC asset's runs (ORM row or dict); 0 when absent."""
+    value = asset.get("blueprint_runs") if isinstance(asset, dict) else getattr(asset, "blueprint_runs", 0)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class ChainPlanner:
     """Phase 5: resolve sub-component chain for each build decision.
 
@@ -686,6 +695,11 @@ class ChainPlanner:
             decision.overview_row["has_t1_bpo"] = True
             # Free corp BPOs of the source: one copy action each (Task 12).
             decision.overview_row["t1_bpo_count"] = len(bpo_assets_by_type_id.get(t1_bp_type_id) or [])
+            # T1 BPC runs on hand (free corp BPCs): one per invention attempt
+            # today; CharacterAssigner copies first for the rest (fix round 2).
+            decision.overview_row["t1_bpc_runs_on_hand"] = sum(
+                max(0, int(_blueprint_runs(a) or 0)) for a in (bpc_assets_by_type_id.get(t1_bp_type_id) or [])
+            )
             decision.overview_row["invention_materials"] = list(t1_invention.get("materials") or [])
         else:
             decision.pipeline_stage = "invention"
