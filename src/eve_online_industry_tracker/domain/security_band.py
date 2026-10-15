@@ -30,6 +30,14 @@ HIGHSEC_MIN_SECURITY = 0.45
 _J_SPACE_REGION_IDS = range(11_000_000, 12_000_000)
 
 
+# The smallest multiplier any engineering rig (not reactor) has per band, from
+# the SDE (test_the_smallest_engineering_rig_multiplier_per_band_is_the_sdes):
+# the Thukker rigs' 0.1 in highsec, nullsec and wormhole space, 1.9 in lowsec.
+# For a rig bonus whose rigs are unknown (the aggregate structure_rig_*_bonus).
+ENGINEERING_RIG_MIN_MULTIPLIER: dict[str, float] = {HIGH: 0.1, LOW: 1.9, NULL: 0.1, WORMHOLE: 0.1}
+ENGINEERING_RIG_MIN_MULTIPLIER_ANY_BAND: float = 0.1
+
+
 def _float(value: Any) -> float | None:
     try:
         return None if value is None else float(value)
@@ -73,8 +81,13 @@ def profile_security_band(profile: Any) -> tuple[str | None, str | None]:
     if explicit in BANDS:
         return explicit, None
     system = profile.get("industry_system") if isinstance(profile.get("industry_system"), dict) else {}
-    status = profile.get("system_security_status", system.get("security_status"))
-    region_id = profile.get("system_region_id", system.get("region_id"))
+
+    def read(key: str, system_key: str) -> Any:
+        value = profile.get(key)
+        return value if value is not None else system.get(system_key)
+
+    status = read("system_security_status", "security_status")
+    region_id = read("system_region_id", "region_id")
     band = security_band(status, region_id)
     if band is not None:
         return band, None
@@ -92,11 +105,13 @@ def rig_security_multiplier(rig: Any, band: str | None) -> tuple[float, str | No
       under-buy).
     - Unknown band (None): the smallest multiplier the rig can have in any
       band it fits, with a reason, so the bonus is never over-stated.
-    - A rig with no security_multipliers (a hand-built payload): 1.0."""
+    - A rig with no security_multipliers: 0.0 with a reason. Only a
+      security-scaled effect asks, so the multiplier is missing data, and no
+      bonus over-buys rather than under-buys."""
     multipliers = rig.get("security_multipliers") if isinstance(rig, dict) else None
-    if not isinstance(multipliers, dict) or not multipliers:
-        return 1.0, None
     type_id = rig.get("type_id") if isinstance(rig, dict) else None
+    if not isinstance(multipliers, dict) or not multipliers:
+        return 0.0, f"rig {type_id} has a security-scaled bonus but no security multiplier, so its bonus is not applied"
     if band is not None:
         value = _float(multipliers.get(band))
         if value is None:
@@ -106,3 +121,16 @@ def rig_security_multiplier(rig: Any, band: str | None) -> tuple[float, str | No
     if not fitted:
         return 0.0, f"rig {type_id} has no security multiplier in the SDE, so its bonus is not applied"
     return min(fitted), f"rig {type_id}: the system's security band is unknown, so the smallest multiplier {min(fitted):g} applies"
+
+
+def scaled_effect_value(rig: Any, effect: Any, band: str | None) -> float:
+    """An effect's value with its rig's multiplier for the band (the smallest
+    one when the band is unknown): what the producer applies, for display."""
+    try:
+        value = float((effect or {}).get("value") or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+    if not isinstance(effect, dict) or not effect.get("security_scaled"):
+        return value
+    multiplier, _ = rig_security_multiplier(rig, band)
+    return value * multiplier

@@ -527,7 +527,16 @@ def test_product_overview_excludes_expired_product_names() -> None:
 
 
 def test_t2_recursive_plan_adds_invention_and_reaction_chains() -> None:
+    # A lowsec Athanor: a Standup reactor fits it (the reaction gate reads the
+    # SDE fitting data from structure_service_fits).
+    from eve_online_industry_tracker.domain import industry_facility as fac
+
+    reactor_fit = {"structure_type_ids": [], "structure_group_ids": [1406], "disallow_in_high_sec": True,
+                   "disallow_in_empire_space": False, "requires_sov_upgrade": False}
     profile = {
+        "structure_type_id": 35835,
+        "location_type": "structure",
+        "structure_service_fits": fac.structure_service_fits(35835, 1406, {45537: reactor_fit}),
         "installation_cost_modifier": 0.10,
         "material_efficiency_bonus": 0.0,
         "time_efficiency_bonus": 0.0,

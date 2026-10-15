@@ -448,73 +448,112 @@ class IndustryService:
             return False
         return bool(skills.get("skill_requirements_met", False))
 
-    # (reason) of facility gate refusals already logged.
+    # Uncertain facility / reaction gate reasons already logged.
     _facility_gate_warned: set[str] = set()
+    _reaction_gate_warned: set[str] = set()
+
+    @staticmethod
+    def _profile_is_npc_station(profile_payload: dict[str, Any]) -> bool:
+        facility_type = str(profile_payload.get("facility_type") or "").strip().lower()
+        location_type = str(profile_payload.get("location_type") or "").strip().lower()
+        return location_type == "station" or facility_type == "npc_station"
+
+    @classmethod
+    def _profile_service_decision(cls, profile_payload: dict[str, Any], services: tuple[str, ...]) -> Any:
+        """domain.industry_facility.service_allowed for the profile's structure:
+        allowed when any of `services` can run there; else the first refusal."""
+        fits = profile_payload.get("structure_service_fits")
+        band, band_reason = _security_band.profile_security_band(profile_payload)
+        npc = _industry_facility.npc_space(profile_payload)
+        structure = profile_payload.get("structure_type_id")
+        decisions = []
+        for service in services:
+            fit = fits.get(service) if isinstance(fits, dict) else None
+            decision = _industry_facility.service_allowed(fit, band, npc=npc, service=service)
+            if fit is None:
+                decision = _industry_facility.Decision(False, (
+                    f"facility unknown (structure type {structure}, no SDE service-module data)" if structure
+                    else "facility unknown (the profile has no structure type)"
+                ) + f": {_industry_facility.SERVICE_LABELS[service]} cannot be checked", True)
+            elif decision.uncertain and band is None and band_reason:
+                decision = _industry_facility.Decision(decision.allowed, f"{decision.reason} ({band_reason})", True)
+            if decision.allowed:
+                return decision
+            decisions.append(decision)
+        return decisions[0]
 
     @classmethod
     def _facility_gate(
         cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None, group_id: Any = None,
-    ) -> tuple[bool, str | None]:
-        """(allowed, reason) for manufacturing a product in the profile's facility.
+    ) -> Any:
+        """domain.industry_facility.Decision for manufacturing a product in the
+        profile's facility.
 
-        Only capital and supercapital ships are gated: a capital hull (the
-        Capital Ships rig group, or domain.rig_groups.CAPITAL_FACILITY_GROUP_IDS:
-        Titan, Supercarrier, Freighter, Jump Freighter) needs Standup Capital
-        Shipyard I, a supercapital (SUPERCAPITAL_GROUP_IDS) Standup
-        Supercapital Shipyard I. Everything else, capital components
-        included, is built wherever the profile manufactures (an NPC station,
-        or any structure the Manufacturing Plant fits).
+        Only the shipyard hulls are gated, by CCP's assembly lines
+        (domain.industry_facility.required_shipyard): line 176 hulls
+        (Dreadnought, Carrier, ...) need Standup Capital Shipyard I (or the
+        Supercapital Shipyard, which also runs line 176), Titans and
+        Supercarriers (line 177) Standup Supercapital Shipyard I. Everything
+        else, Freighters, Jump Freighters and capital components included, is
+        built wherever the profile manufactures (an NPC station, or any
+        structure the Manufacturing Plant fits). A product without a group id
+        whose rig group is "Capital Ships" is read as a line-176 hull.
 
-        Whether the shipyard fits the structure, and may be onlined in the
-        system's band, comes from the SDE (domain.industry_facility, read into
-        the profile as structure_service_fits). An NPC station
-        (location_type "station" / facility_type "npc_station") has no
-        shipyard. With no profile there is no facility constraint. A profile
-        whose facility or band is unknown does not build capitals: reason
-        says why."""
+        Whether the shipyard fits the structure and may be onlined in the
+        system comes from the SDE (structure_service_fits; band, NPC space).
+        An NPC station has no shipyard. With no profile there is no facility
+        constraint. Unknown facility or band: refused, uncertain."""
         try:
             gid = int(group_id or 0)
         except (TypeError, ValueError):
             gid = 0
-        supercapital = gid in _rig_groups.SUPERCAPITAL_GROUP_IDS
-        capital = supercapital or gid in _rig_groups.CAPITAL_FACILITY_GROUP_IDS or manufacturing_group == "Capital Ships"
-        if not capital:
-            return True, None
-        if profile_payload is None:
-            return True, None  # No profile constraint.
-        facility_type = str(profile_payload.get("facility_type") or "").strip().lower()
-        location_type = str(profile_payload.get("location_type") or "").strip().lower()
-        if location_type == "station" or facility_type == "npc_station":
-            return False, None  # NPC stations have no capital shipyard.
-        service = _industry_facility.SUPERCAPITAL_SHIPYARD if supercapital else _industry_facility.CAPITAL_SHIPYARD
-        fits = profile_payload.get("structure_service_fits")
-        if not isinstance(fits, dict) or not isinstance(fits.get(service), dict):
-            structure = profile_payload.get("structure_type_id")
-            return False, (
-                f"facility unknown (structure type {structure}, no SDE service-module data): "
-                f"{'supercapital' if supercapital else 'capital'} ships are not planned there"
-                if structure else
-                f"facility unknown (the profile has no structure type): "
-                f"{'supercapital' if supercapital else 'capital'} ships are not planned there"
-            )
-        band, band_reason = _security_band.profile_security_band(profile_payload)
-        allowed, reason = _industry_facility.service_allowed(fits[service], band)
-        if reason is not None and band_reason is not None and band is None:
-            reason = f"{reason} ({band_reason})"
-        return allowed, reason
+        required = _industry_facility.required_shipyard(gid) if gid > 0 else (
+            _industry_facility.CAPITAL_SHIPYARD if manufacturing_group == "Capital Ships" else None)
+        if required is None or profile_payload is None:
+            return _industry_facility.Decision(True)
+        label = _industry_facility.SERVICE_LABELS[required]
+        if cls._profile_is_npc_station(profile_payload):
+            return _industry_facility.Decision(False, f"needs {label}: an NPC station has none")
+        decision = cls._profile_service_decision(profile_payload, _industry_facility.services_providing(required))
+        if not decision.allowed and label not in str(decision.reason):
+            decision = _industry_facility.Decision(False, f"needs {label}: {decision.reason}", decision.uncertain)
+        return decision
 
     @classmethod
     def _facility_can_manufacture_group(
         cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None, group_id: Any = None,
     ) -> bool:
-        """_facility_gate's answer; a refusal for an unknown facility or band
-        logs a WARNING once per reason."""
-        allowed, reason = cls._facility_gate(
+        """_facility_gate's answer; an uncertain one (unknown facility or band,
+        an assumed sovereignty upgrade) logs a WARNING once per reason."""
+        decision = cls._facility_gate(
             manufacturing_group=manufacturing_group, profile_payload=profile_payload, group_id=group_id)
-        if reason is not None and reason not in IndustryService._facility_gate_warned:
-            IndustryService._facility_gate_warned.add(reason)
-            logger.warning("Facility gate: %s", reason)
-        return allowed
+        cls._warn_gate_once(IndustryService._facility_gate_warned, "Facility gate", decision)
+        return decision.allowed
+
+    @staticmethod
+    def _warn_gate_once(warned: set[str], prefix: str, decision: Any) -> None:
+        if decision.uncertain and decision.reason and decision.reason not in warned:
+            warned.add(decision.reason)
+            logger.warning("%s: %s", prefix, decision.reason)
+
+    @classmethod
+    def _reaction_gate(cls, profile_payload: dict[str, Any] | None) -> Any:
+        """Whether the profile's facility runs reactions: a Standup reactor
+        (45537-45539) fits it and may be onlined in the band (SDE: Refineries
+        only, not in highsec). No profile, an unknown facility or an unknown
+        band: refused, uncertain (the take-or-buy path then buys the
+        material). An NPC station runs no reactions."""
+        if not isinstance(profile_payload, dict):
+            return _industry_facility.Decision(False, "no industry profile: reactions are not planned", True)
+        if cls._profile_is_npc_station(profile_payload):
+            return _industry_facility.Decision(False, "an NPC station runs no reactions")
+        return cls._profile_service_decision(profile_payload, (_industry_facility.REACTOR,))
+
+    @classmethod
+    def _reactions_allowed_for_profile(cls, profile_payload: dict[str, Any] | None) -> bool:
+        decision = cls._reaction_gate(profile_payload)
+        cls._warn_gate_once(IndustryService._reaction_gate_warned, "Reaction gate", decision)
+        return decision.allowed
 
     @classmethod
     def _filter_overview_rows_for_portfolio_candidates(
@@ -528,7 +567,10 @@ class IndustryService:
         min_isk_per_hour: float = 0.0,
         min_region_daily_volume: int = 0,
         industry_profile_payload: dict[str, Any] | None = None,
+        facility_gate_hidden: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        """`facility_gate_hidden`, when given, receives {type_id, type_name,
+        reason} for every row the facility gate hides."""
         enabled_meta_group_set = set(enabled_meta_groups) if enabled_meta_groups is not None else None
         filtered_rows: list[dict[str, Any]] = []
         for row in overview_rows:
@@ -536,11 +578,17 @@ class IndustryService:
                 continue
             if have_skills_only and not cls._overview_row_skill_requirements_met(row):
                 continue
-            if industry_profile_payload is not None and not cls._facility_can_manufacture_group(
-                manufacturing_group=row.get("manufacturing_group"),
-                profile_payload=industry_profile_payload, group_id=row.get("group_id"),
-            ):
-                continue
+            if industry_profile_payload is not None:
+                gate = cls._facility_gate(
+                    manufacturing_group=row.get("manufacturing_group"),
+                    profile_payload=industry_profile_payload, group_id=row.get("group_id"),
+                )
+                cls._warn_gate_once(IndustryService._facility_gate_warned, "Facility gate", gate)
+                if not gate.allowed:
+                    if facility_gate_hidden is not None:
+                        facility_gate_hidden.append(
+                            {"type_id": row.get("type_id"), "type_name": row.get("type_name"), "reason": gate.reason})
+                    continue
             if positive_profit_only and float(row.get("profit_amount") or 0.0) <= 0.0:
                 continue
             if float(row.get("profit_margin_fraction") or 0.0) < (float(min_margin_pct or 0.0) / 100.0):
@@ -1446,6 +1494,8 @@ class IndustryService:
             if isinstance(solar_system_payload, dict):
                 profile_payload["system_security_status"] = solar_system_payload.get("security_status")
                 profile_payload["system_region_id"] = solar_system_payload.get("region_id")
+                # The constellation's faction (SDE): set in NPC space.
+                profile_payload["system_faction_id"] = solar_system_payload.get("faction_id")
                 profile_payload["industry_system"] = {
                     **system_payload,
                     "security_status": solar_system_payload.get("security_status"),
@@ -3263,8 +3313,10 @@ class IndustryService:
                 )
             ),
         )
+        facility_gate_hidden: list[dict[str, Any]] = []
         rows = self._filter_overview_rows_for_portfolio_candidates(
             cast(list[dict[str, Any]], overview_payload.get("rows") or []),
+            facility_gate_hidden=facility_gate_hidden,
             enabled_meta_groups=enabled_meta_groups,
             have_skills_only=have_skills_only,
             positive_profit_only=positive_profit_only,
@@ -3304,7 +3356,11 @@ class IndustryService:
                 "candidate_count": len(candidates),
                 "portfolio_candidate_count": sum(1 for candidate in candidates if bool(candidate.get("is_portfolio_candidate"))),
                 "planning_horizon_hours": float(planning_horizon_hours or 0.0),
+                # Rows the facility gate hid, each with why (e.g. "needs
+                # Standup Capital Shipyard I: ...").
+                "facility_gate_hidden_count": len(facility_gate_hidden),
             },
+            "facility_gate_hidden": facility_gate_hidden,
         }
 
     @staticmethod
@@ -3531,7 +3587,8 @@ class IndustryService:
         planner (facility_bonus).
 
         The aggregate structure_rig_*_bonus is read only for a profile with
-        no per-effect rig entries at all."""
+        no per-effect rig entries at all, times the smallest engineering-rig
+        multiplier for the band, with a WARNING."""
         if not isinstance(profile_payload, dict):
             return 0.0
         valid_activities = set(cls._ACTIVITY_EFFECT_ALIASES.get(activity, (activity,)))
@@ -3591,12 +3648,30 @@ class IndustryService:
             "time": "structure_rig_time_bonus",
             "cost": "structure_rig_cost_bonus",
         }
-        if activity == "manufacturing":
-            return cls._normalize_fraction(profile_payload.get(aggregate_key_by_metric.get(metric, "")))
-        return 0.0
+        if activity != "manufacturing":
+            return 0.0
+        aggregate = cls._normalize_fraction(profile_payload.get(aggregate_key_by_metric.get(metric, "")))
+        if aggregate <= 0.0:
+            return 0.0
+        # The aggregate names no rig, so its security multiplier is unknown:
+        # the smallest any engineering rig has in the band (in any band when
+        # the band is unknown), so the bonus is never over-stated.
+        band, band_reason = _security_band.profile_security_band(profile_payload)
+        multiplier = (_security_band.ENGINEERING_RIG_MIN_MULTIPLIER[band] if band is not None
+                      else _security_band.ENGINEERING_RIG_MIN_MULTIPLIER_ANY_BAND)
+        reason = (
+            f"the profile has no per-rig data, only the aggregate structure_rig_{metric}_bonus; "
+            f"its rigs' security multiplier is unknown, so the smallest an engineering rig has "
+            f"{'in ' + band + ' space' if band else 'in any band (' + str(band_reason) + ')'} ({multiplier:g}) applies"
+        )
+        if reason not in IndustryService._aggregate_rig_warned:
+            IndustryService._aggregate_rig_warned.add(reason)
+            logger.warning("Rig bonus: %s", reason)
+        return min(aggregate * multiplier, 0.99)
 
-    # Rig security-multiplier reasons already logged.
+    # Rig security-multiplier / aggregate-fallback reasons already logged.
     _rig_security_warned: set[str] = set()
+    _aggregate_rig_warned: set[str] = set()
 
     @classmethod
     def _warn_rig_security_once(cls, reason: str) -> None:
@@ -4268,33 +4343,6 @@ class IndustryService:
         node["total_cost"] = (float(job_cost or 0.0) + float(material_cost or 0.0)) if (job_cost is not None or material_cost is not None) else None
 
         return material_cost
-
-    @staticmethod
-    def _profile_system_security_status(profile_payload: dict[str, Any] | None) -> float | None:
-        if not isinstance(profile_payload, dict):
-            return None
-        industry_system = profile_payload.get("industry_system") or {}
-        if isinstance(industry_system, dict):
-            try:
-                security_status = industry_system.get("security_status")
-                if security_status is not None:
-                    return float(security_status)
-            except Exception:
-                pass
-        try:
-            security_status = profile_payload.get("system_security_status")
-            if security_status is not None:
-                return float(security_status)
-        except Exception:
-            pass
-        return None
-
-    @classmethod
-    def _reactions_allowed_for_profile(cls, profile_payload: dict[str, Any] | None) -> bool:
-        security_status = cls._profile_system_security_status(profile_payload)
-        if security_status is None:
-            return True
-        return security_status < 0.5
 
     @staticmethod
     def _aggregate_material_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -186,6 +186,7 @@ def test_a_missed_name_is_warned_once(caplog):
 
 def test_an_unclassifiable_product_gets_all_rigs_only_and_is_logged(caplog):
     S = _producer()
+    S._unclassified_rig_group_warned.clear()
     with caplog.at_level("WARNING"):
         groups = S._manufacturing_rig_groups({"type_id": 4242, "type_name": "Mystery"})
     assert groups == frozenset()
@@ -271,14 +272,17 @@ def test_two_rigs_covering_the_product_both_apply():
 
 
 def test_the_aggregate_applies_only_to_a_profile_without_per_effect_rigs():
+    """The aggregate names no rig: it takes the smallest engineering-rig
+    security multiplier for the band (lowsec 1.9; 0.1 when the band is
+    unknown), tests/test_facility_gate_and_reactions.py."""
     S = _producer()
     groups = S._manufacturing_rig_groups(_entry(508, "Missile Launcher Heavy", 7, "Module"))
-    aggregate_only = {"structure_rig_material_bonus": 0.05}
+    aggregate_only = {"structure_rig_material_bonus": 0.05, "system_security_band": "low"}
     assert S._profile_rig_reduction(profile_payload=aggregate_only, activity="manufacturing", metric="material",
-                                    manufacturing_group=groups) == pytest.approx(0.05)
+                                    manufacturing_group=groups) == pytest.approx(0.05 * 1.9)
     no_effects = {"structure_rig_material_bonus": 0.05, "structure_rigs": [{"type_id": 1, "effects": []}]}
     assert S._profile_rig_reduction(profile_payload=no_effects, activity="manufacturing", metric="material",
-                                    manufacturing_group=groups) == pytest.approx(0.05)
+                                    manufacturing_group=groups) == pytest.approx(0.005)
 
 
 # --- the table against CCP's filters (Hoboleaks snapshot) -------------------------

@@ -6,6 +6,7 @@ from streamlit_ui.state.session_state import ensure_state_defaults
 from streamlit_ui.api.streamlit_client import cached_api_get
 from streamlit_ui.components.selectors import select_character_id
 from streamlit_ui.components.webpage_ui import render_aggrid_table, require_aggrid
+from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.application.industry.job_cost import (
     DEFAULT_RESEARCH_SCC_SURCHARGE,
     DEFAULT_SCC_SURCHARGE,
@@ -72,28 +73,37 @@ def _compute_combined_reduction(reductions: list[float]) -> float:
 def _compute_rig_bonuses(
     rig_type_ids: list[int],
     rig_bonus_map: dict[int, dict],
+    *,
+    security_band: str | None = None,
 ) -> tuple[float, float, float]:
-    rig_material_reductions = [
-        (rig_bonus_map.get(int(tid)) or {}).get("material_reduction", 0.0)
-        for tid in rig_type_ids
-        if int(tid) != 0
-    ]
-    rig_time_reductions = [
-        (rig_bonus_map.get(int(tid)) or {}).get("time_reduction", 0.0)
-        for tid in rig_type_ids
-        if int(tid) != 0
-    ]
-    rig_cost_reductions = [
-        (rig_bonus_map.get(int(tid)) or {}).get("cost_reduction", 0.0)
-        for tid in rig_type_ids
-        if int(tid) != 0
-    ]
+    """Combined rig ME / TE / cost for display and the saved aggregate: per
+    rig and metric its largest effect value, scaled by the rig's multiplier
+    for the system's band (domain.security_band; the smallest when unknown)."""
+    per_metric: dict[str, list[float]] = {"material": [], "time": [], "cost": []}
+    for tid in rig_type_ids:
+        if int(tid or 0) == 0:
+            continue
+        rig = rig_bonus_map.get(int(tid)) or {}
+        effects = [e for e in (rig.get("effects") or []) if isinstance(e, dict)]
+        for metric, values in per_metric.items():
+            if effects:
+                scaled = [_security_band.scaled_effect_value(rig, e, security_band)
+                          for e in effects if str(e.get("metric") or "") == metric]
+                values.append(max(scaled, default=0.0))
+            else:
+                values.append(float(rig.get(f"{'material' if metric == 'material' else metric}_reduction") or 0.0))
 
-    structure_rig_material_bonus = _compute_combined_reduction([float(x or 0.0) for x in rig_material_reductions])
-    structure_rig_time_bonus = _compute_combined_reduction([float(x or 0.0) for x in rig_time_reductions])
-    structure_rig_cost_bonus = _compute_combined_reduction([float(x or 0.0) for x in rig_cost_reductions])
+    return (
+        _compute_combined_reduction(per_metric["material"]),
+        _compute_combined_reduction(per_metric["time"]),
+        _compute_combined_reduction(per_metric["cost"]),
+    )
 
-    return structure_rig_material_bonus, structure_rig_time_bonus, structure_rig_cost_bonus
+
+def _security_band_of_system(system: dict | None) -> str | None:
+    if not isinstance(system, dict):
+        return None
+    return _security_band.security_band(system.get("security_status"), system.get("region_id"))
 
 
 # NPC station job fee components (fractions) — defaults; overridden by admin settings at runtime.
@@ -145,7 +155,10 @@ def _npc_create_fee_line(
     return _job_fee_rates_line({"facility_tax": npc_facility_tax}, scc_rates=scc_rates)
 
 
-def _rig_breakdown_lines(rig_type_ids: list[int], rig_options: dict[int, str], rig_bonus_map: dict[int, dict]) -> list[str]:
+def _rig_breakdown_lines(
+    rig_type_ids: list[int], rig_options: dict[int, str], rig_bonus_map: dict[int, dict],
+    *, security_band: str | None = None,
+) -> list[str]:
     lines: list[str] = []
     for tid in rig_type_ids:
         tid = int(tid or 0)
@@ -167,7 +180,7 @@ def _rig_breakdown_lines(rig_type_ids: list[int], rig_options: dict[int, str], r
             activity = str(e.get("activity") or "")
             group = str(e.get("group") or "")
             metric = str(e.get("metric") or "")
-            value = float(e.get("value") or 0.0)
+            value = _security_band.scaled_effect_value(bonus, e, security_band)
             if not activity or not metric or value <= 0:
                 continue
             key = (activity, group or "All")
@@ -200,6 +213,8 @@ def _rig_effects_table(
     rig_type_ids: list[int],
     rig_options: dict[int, str],
     rig_bonus_map: dict[int, dict],
+    *,
+    security_band: str | None = None,
 ) -> pd.DataFrame:
     """Rig effects table based on SDE dogma-derived `effects`.
 
@@ -218,7 +233,8 @@ def _rig_effects_table(
         bonus = rig_bonus_map.get(tid) or {}
         for e in bonus.get("effects") or []:
             if isinstance(e, dict):
-                effects.append(e)
+                # Scaled for the system's band, as the producer applies it.
+                effects.append({**e, "value": _security_band.scaled_effect_value(bonus, e, security_band)})
 
     # Rows as requested.
     rows = [
@@ -236,9 +252,9 @@ def _rig_effects_table(
         ("Capital Ships", "manufacturing"),
         ("Advanced Capital Components", "manufacturing"),
         ("Structures", "manufacturing"),
-        ("Biochemical Reactions", "manufacturing"),
-        ("Composite Reactions", "manufacturing"),
-        ("Hybrid Reactions", "manufacturing"),
+        ("Biochemical Reactions", "reaction"),
+        ("Composite Reactions", "reaction"),
+        ("Hybrid Reactions", "reaction"),
         ("Invention", "invention"),
         ("Copying", "copying"),
         ("Research ME", "research_me"),
@@ -260,8 +276,8 @@ def _rig_effects_table(
         if row_activity in {"invention", "copying"}:
             return act == row_activity
 
-        # manufacturing
-        return act == "manufacturing" and (group == row_group)
+        # manufacturing / reaction
+        return act == row_activity and (group == row_group)
 
     table = []
     for group, activity in rows:
@@ -365,9 +381,19 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
         "public_structure_type_id_by_id": {},
         "corp_structure_type_id_by_id": {},
         "facility_bonuses_by_type_id": {},
+        "solar_system_by_id": {},
     }
     try:
         system_ids = sorted({int(profile.get("system_id")) for profile in profiles if profile.get("system_id") is not None})
+        if system_ids:
+            # Security status and region of each profile's system: the rig
+            # totals are shown for the system's security band.
+            systems_resp = cached_api_get("/solar_systems")
+            if systems_resp and systems_resp.get("status") == "success":
+                wanted = set(system_ids)
+                for system in systems_resp.get("data") or []:
+                    if isinstance(system, dict) and system.get("id") in wanted:
+                        context["solar_system_by_id"][int(system["id"])] = system
         for system_id in system_ids:
             ci_resp = cached_api_get(f"/industry_system_cost_index/{system_id}")
             if ci_resp and ci_resp.get("status") == "success":
@@ -517,13 +543,19 @@ def _render_existing_profiles(
                         key=f"edit_rig2_{profile['id']}",
                     )
 
+                    profile_band = _security_band_of_system(
+                        profile_context.get("solar_system_by_id", {}).get(int(profile_system_id))
+                        if profile_system_id is not None else None
+                    )
                     computed_mat, computed_time, computed_cost = _compute_rig_bonuses(
                         [int(rig0), int(rig1), int(rig2)],
                         rig_bonus_map,
+                        security_band=profile_band,
                     )
                     st.caption(f"Total rig bonuses — ME: {computed_mat:.2%} | TE: {computed_time:.2%} | Cost: {computed_cost:.2%}")
 
-                    breakdown = _rig_breakdown_lines([int(rig0), int(rig1), int(rig2)], rig_options, rig_bonus_map)
+                    breakdown = _rig_breakdown_lines([int(rig0), int(rig1), int(rig2)], rig_options, rig_bonus_map,
+                                                     security_band=profile_band)
                     if breakdown:
                         with st.expander("Rig bonus details"):
                             st.markdown("\n".join(breakdown))
@@ -835,9 +867,11 @@ def _render_create_profile_section(
         with col5:
             rig_slot2_type_id = st.selectbox("Rig Slot 3", options=filtered_rig_option_ids, format_func=lambda x: rig_options.get(x, str(x)))
 
+        selected_band = _security_band_of_system(selected_system)
         structure_rig_material_bonus, structure_rig_time_bonus, structure_rig_cost_bonus = _compute_rig_bonuses(
             [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)],
             rig_bonus_map,
+            security_band=selected_band,
         )
 
         st.caption(
@@ -847,6 +881,7 @@ def _render_create_profile_section(
             [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)],
             rig_options,
             rig_bonus_map,
+            security_band=selected_band,
         )
         if breakdown:
             with st.expander("Rig bonus details"):
@@ -871,6 +906,7 @@ def _render_create_profile_section(
             [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)],
             rig_options,
             rig_bonus_map,
+            security_band=selected_band,
         )
         render_aggrid_table(
             effects_df,

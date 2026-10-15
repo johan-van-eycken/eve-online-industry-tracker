@@ -156,17 +156,6 @@ _CATEGORIES_WITH_GROUP_FILTERS = frozenset(category for category, _ in GROUPS.va
 ALL_LABELS: frozenset[str] = frozenset(f.label for f in RIG_TARGET_FILTERS)
 REACTION_LABELS: frozenset[str] = frozenset(f.label for f in REACTION_TARGET_FILTERS)
 
-# Hulls built only in a capital-capable facility (Azbel / Sotiyo) that the
-# Capital Ships rig filter does not name: Titan 30 and Supercarrier 659 (only
-# the XL "All Ships" rig covers them), Freighter 513 and Jump Freighter 902
-# (Large Ship rigs). The producer's facility gate reads these with the
-# Capital Ships / capital component groups.
-CAPITAL_FACILITY_GROUP_IDS: frozenset[int] = frozenset({30, 659, 513, 902})
-# Titan and Supercarrier: Standup Supercapital Shipyard I (35877) fits only
-# the Sotiyo, so these are Sotiyo-only.
-SUPERCAPITAL_GROUP_IDS: frozenset[int] = frozenset({30, 659})
-
-
 def _int(value: Any) -> int:
     try:
         return int(value or 0)

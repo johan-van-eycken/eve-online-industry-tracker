@@ -14,9 +14,12 @@ Citadel, Engineering Complex and Refinery; the Capital Shipyard fits the
 Sotiyo, Azbel, Fortizar, Keepstar, the Upwell Palatine Keepstar and the
 faction Fortizars, outside highsec; the Supercapital Shipyard fits only the
 Sotiyo, outside empire space, with a sovereignty hub upgrade.
+
+Which hulls need a shipyard is CCP's assembly-line data (below).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from eve_online_industry_tracker.domain import security_band as _security
@@ -73,28 +76,97 @@ def structure_service_fits(
     return out
 
 
-def service_allowed(fit: Any, band: str | None) -> tuple[bool, str | None]:
-    """(allowed, reason) for one service of a structure in a band.
+SERVICE_LABELS: dict[str, str] = {
+    MANUFACTURING_PLANT: "Standup Manufacturing Plant I",
+    CAPITAL_SHIPYARD: "Standup Capital Shipyard I",
+    SUPERCAPITAL_SHIPYARD: "Standup Supercapital Shipyard I",
+    REACTOR: "a Standup reactor",
+}
 
-    reason is set when the answer is not known for sure and the service is
-    therefore refused: no fitting data, or the band is unknown while the
-    module's onlining depends on it."""
+# CCP's assembly lines (Hoboleaks industryassemblylines /
+# industryinstallationtypes, revision 3619879; snapshot and diff in
+# tests/fixtures/hoboleaks/ and tests/test_facility_gate_and_reactions.py).
+# Line 175 "Structure Basic Manufacturing" (Manufacturing Plant) builds every
+# other manufacturable hull, Freighters and Jump Freighters included; the
+# NPC station line does the same.
+SERVICE_ASSEMBLY_LINES: dict[str, tuple[int, ...]] = {
+    MANUFACTURING_PLANT: (175,),
+    CAPITAL_SHIPYARD: (176,),
+    SUPERCAPITAL_SHIPYARD: (176, 177),
+}
+# Line 176 "Structure Capital Shipyard": Dreadnought, Carrier, Capital
+# Industrial Ship, Force Auxiliary, Lancer Dreadnought, Command Carrier.
+CAPITAL_SHIPYARD_GROUP_IDS: frozenset[int] = frozenset({485, 547, 883, 1538, 4594, 5120})
+# Line 177 "Structure Supercapital Shipyard": those plus Titan and Supercarrier.
+SUPERCAPITAL_SHIPYARD_GROUP_IDS: frozenset[int] = CAPITAL_SHIPYARD_GROUP_IDS | {30, 659}
+
+
+def required_shipyard(group_id: int | None) -> str | None:
+    """The shipyard a hull group needs (CAPITAL_SHIPYARD for a line-176 hull,
+    SUPERCAPITAL_SHIPYARD for one only line 177 builds), None when the basic
+    manufacturing line builds it."""
+    if group_id in CAPITAL_SHIPYARD_GROUP_IDS:
+        return CAPITAL_SHIPYARD
+    if group_id in SUPERCAPITAL_SHIPYARD_GROUP_IDS:
+        return SUPERCAPITAL_SHIPYARD
+    return None
+
+
+def services_providing(required: str) -> tuple[str, ...]:
+    """The services whose assembly lines include every line `required` runs
+    (a Supercapital Shipyard also runs the capital line 176)."""
+    lines = set(SERVICE_ASSEMBLY_LINES[required])
+    return tuple(s for s, own in SERVICE_ASSEMBLY_LINES.items() if lines <= set(own))
+
+
+@dataclass(frozen=True)
+class Decision:
+    """allowed, why (every refusal says why; an allowance only when it rests on
+    an assumption), and uncertain: the answer rests on unknown or assumed data
+    and is logged as a WARNING."""
+    allowed: bool
+    reason: str | None = None
+    uncertain: bool = False
+
+
+def npc_space(profile: Any) -> bool | None:
+    """True in NPC space (the system's constellation has a faction in the SDE),
+    False when the profile says it has none, None when it does not say."""
+    if not isinstance(profile, dict) or "system_faction_id" not in profile:
+        return None
+    return bool(profile.get("system_faction_id"))
+
+
+def service_allowed(fit: Any, band: str | None, *, npc: bool | None = None, service: str = "") -> Decision:
+    """Whether a structure's service (one entry of structure_service_fits) can
+    run in the system: it fits the structure and may be onlined in the band.
+
+    A service needing a sovereignty hub upgrade needs sovereign nullsec: not
+    NPC nullsec (npc True), and refused when that is unknown (npc None). Whether
+    the system's hub has the upgrade is not known here: it is assumed, and
+    the allowance says so."""
+    label = SERVICE_LABELS.get(service, "the service module")
     if not isinstance(fit, dict):
-        return False, "the SDE fitting data for the structure's service modules is unknown"
+        return Decision(False, f"facility unknown (no SDE service-module data): {label} cannot be checked", True)
     if not fit.get("fits"):
-        return False, None
+        return Decision(False, f"{label} cannot be fitted to this structure (SDE)")
     band_rules = fit.get("disallow_in_high_sec") or fit.get("disallow_in_empire_space") or fit.get("requires_sov_upgrade")
     if not band_rules:
-        return True, None
+        return Decision(True)
     if band is None:
-        return False, "the structure's security band is unknown and the service module cannot be onlined in every band"
+        return Decision(False, f"the structure's security band is unknown and {label} cannot be onlined in every band",
+                        True)
     if fit.get("disallow_in_high_sec") and band == _security.HIGH:
-        return False, None
+        return Decision(False, f"{label} cannot be onlined in highsec (SDE disallowInHighSec)")
     if fit.get("disallow_in_empire_space") and band in _security.EMPIRE_BANDS:
-        return False, None
-    if fit.get("requires_sov_upgrade") and band != _security.NULL:
-        # A sovereignty hub upgrade exists only in sovereign nullsec (not in
-        # wormhole space). Whether this system's hub has it is not known
-        # here; the band is the part the SDE can check.
-        return False, None
-    return True, None
+        return Decision(False, f"{label} cannot be onlined in empire space (SDE disallowInEmpireSpace)")
+    if fit.get("requires_sov_upgrade"):
+        if band != _security.NULL:
+            return Decision(False, f"{label} needs a sovereignty hub upgrade, which {band} space has not")
+        if npc is None:
+            return Decision(False, f"{label} needs a sovereignty hub upgrade and whether the system is NPC nullsec "
+                                   "is unknown", True)
+        if npc:
+            return Decision(False, f"{label} needs a sovereignty hub upgrade: NPC nullsec has no sovereignty")
+        return Decision(True, f"{label}: sovereignty hub upgrade assumed (not checkable from the SDE)", True)
+    return Decision(True)

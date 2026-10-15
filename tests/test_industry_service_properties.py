@@ -811,14 +811,15 @@ class TestProfileRigReduction:
         assert result_no_match == 0.0
 
     def test_fallback_to_aggregate_keys(self):
-        """When no rig effects array, should use aggregate bonus keys."""
+        """When no rig effects array, should use aggregate bonus keys, times the
+        smallest engineering-rig security multiplier (0.1 with no band known)."""
         profile = {"structure_rig_material_bonus": 0.044}
         result = IndustryService._profile_rig_reduction(
             profile_payload=profile,
             activity="manufacturing",
             metric="material",
         )
-        expected = IndustryService._normalize_fraction(0.044)
+        expected = IndustryService._normalize_fraction(0.044) * 0.1
         assert math.isclose(result, expected, abs_tol=1e-9)
 
     def test_none_profile_returns_zero(self):

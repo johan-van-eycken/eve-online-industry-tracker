@@ -4,8 +4,16 @@ Hoboleaks (https://sde.hoboleaks.space/tq/).
 
 industrytargetfilters.json    md5 692854c2f91c3fd36272d8ab15adcaec
 industrymodifiersources.json  md5 d1a43396db08ae8de19b2f151bf4b8ff
+industryassemblylines.json    md5 ab6581ea1c7ecfe349731378745a3132
+industryinstallationtypes.json md5 a8bc70aef19b1fb859bd2d84b79fcd14
 Hoboleaks revision 3619879 (2026-10-15T11:08:03), fetched 2026-10-15.
 
 Read by tests/test_rig_groups.py, which diffs domain/rig_groups.py's
 RIG_TARGET_FILTERS against them (offline), and against the live files when
-RIG_FILTERS_ONLINE=1.
+RIG_FILTERS_ONLINE=1; by tests/test_rig_values_and_security.py (every rig's
+effects against industrymodifiersources); and by
+tests/test_facility_gate_and_reactions.py, which diffs
+domain/industry_facility.py's shipyard hull groups against the assembly
+lines (175 Structure Basic Manufacturing, 176 Structure Capital Shipyard,
+177 Structure Supercapital Shipyard) and the service modules' installation
+types.
