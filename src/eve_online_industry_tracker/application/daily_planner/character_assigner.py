@@ -1067,13 +1067,23 @@ def _reword_unused_research_claims(decisions: list[ItemDecision], actions: list[
         if not isinstance(label, str) or not label:
             continue
         built = any(a.action_type == "manufacture" and int(a.type_id) == int(decision.type_id) for a in actions)
+        # Fix round 3: reworded per holder, so a reason naming several jobs
+        # ("used by copy for X (1), TE research for Thing (2) today") too.
         if built:
-            old, new = label, f"manufacture of {decision.type_name} ({decision.type_id})"
+            rewords = [(label, f"manufacture of {decision.type_name} ({decision.type_id})")]
         else:
-            old, new = f"used by {label} today", f"kept for {label}, which got no free slot today"
+            rewords = [
+                (f"used by {label} today", f"kept for {label}, which got no free slot today"),
+                (label, f"{label} (kept for it, but it got no free slot)"),
+            ]
 
         def _reword(text: str | None) -> str | None:
-            return text.replace(old, new) if text and old in text else text
+            if not text:
+                return text
+            for old, new in rewords:
+                if old in text:
+                    return text.replace(old, new)
+            return text
 
         for other in decisions:
             if other is not decision:

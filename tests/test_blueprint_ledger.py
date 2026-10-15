@@ -830,3 +830,82 @@ def test_a_row_whose_t1_bpcs_another_row_invents_from_is_not_told_to_buy_a_bpo()
         "test; not built: T1 BPCs (998) used by invention for Widget II (12345) today "
         "and no T1 BPO to copy: no invention in this plan"
     )
+
+
+# --- fix round 3 -------------------------------------------------------------------
+
+def _p4(bpos):
+    """Thing (T1) has a BPC-80 variant but no research; Widget II invents from
+    T1 source 999."""
+    bp = {**copy.deepcopy(R.BLUEPRINT_DATA), **copy.deepcopy(A.BLUEPRINTS)}
+    bp[999]["invention"] = copy.deepcopy(bp[998]["invention"])
+    del bp[998]
+    kept = R._row(segments=[R._segment(10, "owned_blueprint_original", 1000)])
+    variant = R._row(segments=[{**R._segment(10, "owned_blueprint_copy", 990), "blueprint_item_id": 80}],
+                     kind="owned_blueprint_copy", material_cost=500.0, profit_amount=7.0, overview_row_id="bpc-variant")
+    thing = _dec(kept, 12345, "Thing", 1.0, 1)
+    widget = _dec(_t2_row(22345), 22345, "Widget II", 2.0, 2, "invention")
+    prices = {**R.MARKET, **A.PRICES}
+    plan = _planner(10).plan_chain([thing, widget], {
+        "bpo_assets_by_type_id": {999: bpos}, "bpc_assets_by_type_id": {999: [_bpc(80, 999, 10)]},
+        "blueprint_data": bp, "market_depth_cache": prices, "variant_rows_by_type_id": {12345: [variant]},
+    })
+    actions = CharacterAssigner().assign(plan, [], A._Chars(_chars()), A._Admin(), price_map=prices)
+    return thing, widget, actions
+
+
+def test_p4_a_copy_claim_the_claimed_bpcs_make_unneeded_is_released():
+    """Phase B kept BPC 80 out (Thing's variant names it) and claimed BPO 11
+    to copy; Thing then built from BPO 13, so phase C got BPC 80, which
+    covers the 4 attempts. The copy claim is released: the row invents, its
+    stage and reason say so, and no BPO is booked for a copy that never runs."""
+    thing, widget, actions = _p4([_bpo(11, 999), _bpo(13, 999)])
+    assert widget.pipeline_stage == "invention"
+    assert widget.overview_row["t1_bpo_item_ids"] == [] and widget.overview_row["has_t1_bpo"] is False
+    assert widget.decision_reason == "test; no manufacture today: inventing from T1 BPCs; no T2 BPC yet"
+    assert sorted((a.action_type, a.type_id, a.blueprint_item_id) for a in actions) == [
+        ("invent", 22345, 80), ("manufacture", 12345, None),
+    ]
+
+
+def test_p4b_with_one_bpo_the_copy_stands_and_thing_builds_its_variant():
+    thing, widget, actions = _p4([_bpo(11, 999)])
+    assert widget.pipeline_stage == "copying" and widget.overview_row["t1_bpo_item_ids"] == [11]
+    assert sorted(a.action_type for a in actions) == ["copy", "manufacture"]
+    (build,) = [a for a in actions if a.action_type == "manufacture"]
+    assert build.materials == {54321: 990}  # the BPC-80 variant
+
+
+def test_m8_a_kept_row_component_reason_survives_when_the_fallback_buys_it():
+    """Thing researches its only BPO (TE 0) and plans the owned-BPC part (4
+    runs, 400 widgets); stock holds 500. Primary need 400 fits, but without
+    a research slot the kept row builds 1000: bought, so the reason stays."""
+    thing = _dec(R._row(**R.MIXED_ROW), 12345, "Thing", 2.0, 1)
+    widget = _dec(_widget_row(), 54321, "Widget", 1.0, 1)
+    plan = _planner().plan_chain([thing, widget], {
+        "bpo_assets_by_type_id": {999: [_bpo(1, 999, te=0)], 888: [_bpo(2, 888)]},
+        "blueprint_data": R.BLUEPRINT_DATA, "market_depth_cache": R.MARKET, "variant_rows_by_type_id": {},
+        "corp_material_stock": {54321: 500},
+    })
+    busy = [{"character_id": 1, "activity_id": 3, "status": "active"}] * 10
+    actions = CharacterAssigner().assign(plan, busy, R._Chars(R._pilot()), R._Admin())
+    (build,) = [a for a in actions if a.action_type == "manufacture" and a.type_id == 12345]
+    assert build.materials[54321] == 1000
+    assert "component Widget bought: its BPO is used by manufacture of Widget (54321) today" in thing.decision_reason
+
+
+def test_m10_a_multi_holder_reason_is_reworded_per_holder():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+        _reword_unused_research_claims,
+    )
+
+    thing = _dec({"research_claim_label": "TE research for Thing (12345)"}, 12345, "Thing", 1.0, 1)
+    other = _dec({}, 22345, "Widget II", 2.0, 2)
+    other.decision_reason = (
+        "test; not built: T1 BPO (999) used by copy for Gadget II (2), TE research for Thing (12345) today: no copy"
+    )
+    _reword_unused_research_claims([thing, other], [], {12345})
+    assert other.decision_reason == (
+        "test; not built: T1 BPO (999) used by copy for Gadget II (2), "
+        "TE research for Thing (12345) (kept for it, but it got no free slot) today: no copy"
+    )

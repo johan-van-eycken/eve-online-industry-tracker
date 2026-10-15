@@ -415,13 +415,17 @@ class ChainPlanner:
             # Which of this batch's materials the corp could build itself.
             # Collected across every parent first, so one material needed
             # by several builds becomes ONE sub-manufacture decision.
+            # M8: the bought need per component, the larger of the batch's
+            # and its research-first fallback's (fix round 3: either may run).
+            primary_need: dict[int, int] = {}
+            fallback_need: dict[int, int] = {}
             requests = self._collect_sub_manufacture_requests(
                 decision=decision,
                 bpo_assets_by_type_id=free_bpo_assets_by_type_id,
                 product_to_blueprint=product_to_blueprint,
                 ledger=ledger, top_level_build_types=top_level_build_types,
                 stock=phase1_data.get("corp_material_stock") or {},
-                need_sink=bought_need,
+                need_sink=primary_need,
             )
             requests_by_parent.append((int(decision.type_id), requests))
             kept_row = self._research_first_fallback_row(decision.overview_row)
@@ -432,6 +436,11 @@ class ChainPlanner:
                     product_to_blueprint=product_to_blueprint,
                     ledger=ledger, top_level_build_types=top_level_build_types,
                     stock=phase1_data.get("corp_material_stock") or {},
+                    need_sink=fallback_need,
+                )
+            for type_id in {*primary_need, *fallback_need}:
+                bought_need[type_id] = bought_need.get(type_id, 0) + max(
+                    primary_need.get(type_id, 0), fallback_need.get(type_id, 0),
                 )
 
         bought_need: dict[int, int] = {}
@@ -901,6 +910,15 @@ class ChainPlanner:
         # invention activity (with its datacores) lives on that T1 blueprint.
         t1_bp_type_id = invention_source.get(bp_type_id)
         bpcs = self._claim_invention_bpcs(ledger, decision, t1_bp_type_id) if t1_bp_type_id is not None else []
+        need = _whole_attempts(decision.overview_row)
+        if copies and need is not None and sum(runs for _k, _i, runs in bpcs) >= need:
+            # Fix round 3: phase B counted a BPC as used by a T1 row (its
+            # variant names it) that in the end built from something else;
+            # the BPCs claimed here cover the attempts, so the copy is not
+            # needed: release it, and the stage follows what happens.
+            for key, _asset in copies:
+                ledger.release(key, decision.type_id)
+            copies = []
         if not copies and not bpcs and t1_bp_type_id is not None:
             # Fix round 2: phase B planned no copy, yet no BPC was left in the
             # end: a free unclaimed T1 BPO copies instead.

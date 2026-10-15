@@ -123,6 +123,13 @@ class BlueprintLedger:
         self._claims[key] = (int(owner_type_id), label)
         return True
 
+    def release(self, key: Hashable, owner_type_id: int) -> None:
+        """Give back a claim the owner turned out not to need (a copy the
+        claimed BPCs make unnecessary)."""
+        held = self._claims.get(key)
+        if held is not None and held[0] == int(owner_type_id):
+            del self._claims[key]
+
     def claim_bpcs_of_row(self, type_id: int, item_ids: set[int] | None, owner_type_id: int, label: str) -> None:
         """Book the BPCs a manufacture builds on: the named items, or every
         free BPC of the type when the row does not name them (conservative:
