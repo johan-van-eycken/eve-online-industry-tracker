@@ -3838,3 +3838,18 @@ def test_three_invented_levels_buy_every_levels_datacores_for_every_batch(monkey
     # invented again per later batch (their BPC remainder is not carried), so
     # they are bought on the safe side: 3 x 4 and 2 x 4.
     assert needs == {204: 4, 205: 12, 206: 8}
+
+
+# --- round 5 Task 10 carry 10: the EIV's material count ------------------------
+
+
+def test_the_manufacturing_eiv_publishes_how_many_materials_it_covers(monkeypatch) -> None:
+    # Tritanium has no adjusted price: EIV unknown, 0 of its 1 material priced.
+    unpriced = _invention_overview(monkeypatch, prices={204: 100.0})[5002]["manufacturing_job"]
+    mfg = unpriced["activity_breakdown"]["manufacturing"]
+    assert mfg["estimated_item_value"] is None
+    assert (mfg["estimated_item_value_priced_material_count"], mfg["estimated_item_value_material_count"]) == (0, 1)
+
+    priced = _invention_overview(monkeypatch)[5002]["manufacturing_job"]["activity_breakdown"]["manufacturing"]
+    assert priced["estimated_item_value"] is not None
+    assert (priced["estimated_item_value_priced_material_count"], priced["estimated_item_value_material_count"]) == (1, 1)

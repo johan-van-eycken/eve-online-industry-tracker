@@ -210,6 +210,20 @@ def invention_summary_lines(row: dict[str, Any]) -> list[str]:
     return lines
 
 
+def estimated_item_value_cell(activity_payload: dict[str, Any]) -> str:
+    """The activity breakdown's EIV cell. The producer leaves the EIV None
+    when any material is unpriced, so a partial EIV reads "unknown (N of M
+    priced)" rather than a blank cell."""
+    value = activity_payload.get("estimated_item_value")
+    if value is not None:
+        return f"{float(value):,.0f}"
+    priced = activity_payload.get("estimated_item_value_priced_material_count")
+    total = activity_payload.get("estimated_item_value_material_count")
+    if isinstance(priced, int) and isinstance(total, int) and total > 0:
+        return f"unknown ({priced} of {total} priced)"
+    return "unknown"
+
+
 def pricing_confidence_cell(pricing_confidence: Any, manufacturing_job: dict[str, Any]) -> Any:
     """The grid's Pricing Confidence cell; flagged rows get a visible marker."""
     if pricing_confidence and manufacturing_job.get("assumes_owned_t2_bpo"):

@@ -827,6 +827,15 @@ def _render_page_about() -> None:
 # ---------------------------------------------------------------------------
 
 STALE_OVERVIEW_CAPTION = "Some lines came from an older overview \u2014 refresh for exact stock use"
+ALL_ROWS_REFUSED_INFO = (
+    "No quantities to show: every selected item comes from an older overview. "
+    "Refresh the overview, then select the items again."
+)
+
+
+def _shopping_row_name(row: dict[str, Any]) -> str:
+    """The name rows_built_by_an_older_version keys a row by."""
+    return str(row.get("type_name") or row.get("type_id") or "?")
 
 
 def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
@@ -892,7 +901,11 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
         )
 
     if not shopping_items:
-        st.info("No buy-sourced materials found for the selected items.")
+        if older_rows and all(_shopping_row_name(r) in older_rows for r in selected_rows):
+            # Every selected row was left out: "nothing to buy" would be wrong.
+            st.info(ALL_ROWS_REFUSED_INFO)
+        else:
+            st.info("No buy-sourced materials found for the selected items.")
         return
 
     # Build display DataFrame

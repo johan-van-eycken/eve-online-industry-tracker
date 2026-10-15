@@ -73,3 +73,20 @@ def test_the_drilldown_says_when_skills_were_unknown():
 
 def test_an_unknown_invention_node_is_labelled_unknown():
     assert ui.tree_node_activity_label({"activity": "invention", "recommendation_action": "unknown", "runs": 0}) == "unknown"
+
+
+# --- round 5 Task 10 carry 10: a partial EIV is named, not blank ---------------
+
+
+def test_a_known_eiv_is_shown_as_a_number():
+    assert ui.estimated_item_value_cell({"estimated_item_value": 1234.4}) == "1,234"
+
+
+def test_a_partial_eiv_shows_how_many_materials_were_priced():
+    payload = {"estimated_item_value": None, "estimated_item_value_priced_material_count": 2,
+               "estimated_item_value_material_count": 3}
+    assert ui.estimated_item_value_cell(payload) == "unknown (2 of 3 priced)"
+
+
+def test_an_unknown_eiv_without_counts_reads_unknown():
+    assert ui.estimated_item_value_cell({"estimated_item_value": None}) == "unknown"

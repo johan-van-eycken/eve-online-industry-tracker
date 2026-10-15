@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
+from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner, _sizing_bonus_wording
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
 
@@ -565,3 +565,25 @@ def test_the_service_collects_the_blueprints_of_active_jobs():
 
     jobs = [SimpleNamespace(blueprint_item_id=11), {"blueprint_item_id": 12}, SimpleNamespace(blueprint_item_id=None)]
     assert busy_blueprint_item_ids(jobs) == {11, 12}
+
+
+# --- round 5 Task 10 carry 15: the sizing note names only the bonuses applied ------
+
+@pytest.mark.parametrize("profile, wording", [
+    ({}, "with no structure or rig bonus"),
+    ({"material_efficiency_bonus": 0.01}, "with the row's structure bonus (no rig bonus)"),
+])
+def test_the_other_bpo_sizing_note_names_only_the_bonuses_applied(profile, wording):
+    build = _assign(_plan5(_bpc_then_bpo_row(profile), bpos=[A_PRICED, B_BUILDS]))["manufacture"]
+    assert wording in build.notes
+    assert "rig bonuses" not in build.notes
+
+
+@pytest.mark.parametrize("structure, rig, wording", [
+    (0.0, 0.0, "with no structure or rig bonus"),
+    (0.01, 0.0, "with the row's structure bonus (no rig bonus)"),
+    (0.0, 0.02, "with the row's rig bonus (no structure bonus)"),
+    (0.01, 0.02, "with the row's structure and rig bonuses"),
+])
+def test_the_sizing_bonus_wording(structure, rig, wording):
+    assert _sizing_bonus_wording(structure, rig) == wording

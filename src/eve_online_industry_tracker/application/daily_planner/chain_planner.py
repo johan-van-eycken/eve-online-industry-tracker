@@ -649,7 +649,7 @@ class ChainPlanner:
                 profit, reason = _variant_profit(other_variant, market_depth)
                 note = f"{cause}: built from another BPO at {build}"
             else:
-                new_row, sized_reason = self._size_on_other_bpo(
+                new_row, sized_reason, bonus_wording = self._size_on_other_bpo(
                     row, assets[other], bp_data or {}, market_depth_cache or {},
                 )
                 if new_row is None:
@@ -662,7 +662,7 @@ class ChainPlanner:
                 )
                 note = (
                     f"{cause}: built from another BPO at {build} (its BPO runs sized by the planner "
-                    "from the SDE at that ME, with the row's structure and rig bonuses)"
+                    f"from the SDE at that ME, {bonus_wording})"
                 )
             new_row["research_first"] = {
                 "mode": "variant", "note": note,
@@ -719,9 +719,10 @@ class ChainPlanner:
         asset: Any,
         bp_data: dict[str, Any],
         market_depth_cache: dict[int, Any],
-    ) -> tuple[dict[str, Any] | None, str | None]:
+    ) -> tuple[dict[str, Any] | None, str | None, str | None]:
         """The kept row rebuilt on another owned BPO that has no producer row
-        of its own (Task 8c fix round 5): (row, None), or (None, why).
+        of its own (Task 8c fix round 5): (row, None, which bonuses were
+        applied, for the note), or (None, why, None).
 
         The row's owned-BPC job segments keep their own materials; the runs
         it builds from (or copies from) the BPO are built from this BPO
@@ -740,29 +741,29 @@ class ChainPlanner:
 
         me, te = research_first.bpo_levels(asset)
         if me is None:
-            return None, "its ME is unknown"
+            return None, "its ME is unknown", None
         manufacturing = bp_data.get("manufacturing") if isinstance(bp_data, dict) else None
         if not isinstance(manufacturing, dict):
-            return None, "no SDE manufacturing data for the blueprint"
+            return None, "no SDE manufacturing data for the blueprint", None
         base_materials: dict[int, int] = {}
         for mat in manufacturing.get("materials") or []:
             if isinstance(mat, dict) and int(mat.get("type_id") or 0) > 0 and int(mat.get("quantity") or 0) > 0:
                 base_materials[int(mat["type_id"])] = base_materials.get(int(mat["type_id"]), 0) + int(mat["quantity"])
         if not base_materials:
-            return None, "no SDE manufacturing data for the blueprint (no materials)"
+            return None, "no SDE manufacturing data for the blueprint (no materials)", None
         max_runs = _max_runs_per_job(bp_data)
         if max_runs is None:
-            return None, "no SDE manufacturing data for the blueprint (no max runs per job)"
+            return None, "no SDE manufacturing data for the blueprint (no max runs per job)", None
         job = orow.get_manufacturing_job(row)
         profile = job.get("industry_profile")
         if not isinstance(profile, dict):
-            return None, "no industry profile on the row, so the structure bonus is unknown"
+            return None, "no industry profile on the row, so the structure bonus is unknown", None
 
         segments = research_first.job_segments(row)
         if segments is None:
             runs, reason = _batch_runs(job)
             if runs is None:
-                return None, reason
+                return None, reason, None
             segments = [{"runs": runs, "source": "owned_blueprint_original"}]
         kept_segments: list[dict[str, Any]] = []
         bpo_runs = 0
@@ -772,9 +773,9 @@ class ChainPlanner:
             elif isinstance(segment.get("materials"), dict):
                 kept_segments.append(segment)
             else:
-                return None, "a job segment's materials are unknown"
+                return None, "a job segment's materials are unknown", None
         if bpo_runs <= 0:
-            return None, "the batch has no BPO runs"
+            return None, "the batch has no BPO runs", None
 
         product_type_id = int(row.get("type_id") or 0)
         product_entry = next(
@@ -825,7 +826,9 @@ class ChainPlanner:
             "blueprint_original": {"item_id": research_first.item_id(asset)},
             "rig_applicability": bonuses["rig_applicability"],
         }
-        return {**row, "manufacturing_job": new_job}, None
+        return {**row, "manufacturing_job": new_job}, None, _sizing_bonus_wording(
+            bonuses["structure_material_reduction"], bonuses["rig_material_reduction"],
+        )
 
     @staticmethod
     def _research_first_variant_row(row: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
@@ -1453,6 +1456,19 @@ class ChainPlanner:
 class _NoMetaGroups:
     def meta_group_id(self, type_id: int) -> None:
         return None
+
+
+def _sizing_bonus_wording(structure_reduction: float, rig_reduction: float) -> str:
+    """Which facility bonuses a planner-sized batch got, for its note: only
+    the ones applied (> 0) are named."""
+    structure, rig = structure_reduction > 0.0, rig_reduction > 0.0
+    if structure and rig:
+        return "with the row's structure and rig bonuses"
+    if structure:
+        return "with the row's structure bonus (no rig bonus)"
+    if rig:
+        return "with the row's rig bonus (no structure bonus)"
+    return "with no structure or rig bonus"
 
 
 def _variant_profit(variant: dict[str, Any], market_depth: Any | None) -> tuple[float | None, str | None]:

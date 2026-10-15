@@ -3699,6 +3699,22 @@ class IndustryService:
             return None, priced_count
         return total, priced_count
 
+    @staticmethod
+    def _eiv_line_count(entries: list[dict[str, Any]]) -> int:
+        """How many lines _sum_estimated_item_value prices or counts as
+        unpriced: the M of its "N of M priced"."""
+        count = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                type_id = int(entry.get("type_id") or 0)
+            except Exception:
+                type_id = 0
+            if type_id > 0:
+                count += 1
+        return count
+
     @classmethod
     def _resolve_preferred_unit_value(
         cls,
@@ -5306,6 +5322,7 @@ class IndustryService:
             "priced_job_count": priced_job_count,
             "estimated_item_value": process_value,
             "estimated_item_value_priced_material_count": priced_material_count,
+            "estimated_item_value_material_count": self._eiv_line_count(base_material_entries),
             "estimated_material_cost": estimated_material_cost,
             "estimated_total_cost": (
                 float(total_job_cost or 0.0) + float(estimated_material_cost or 0.0)
@@ -8636,6 +8653,7 @@ class IndustryService:
                 "cost_reduction": manufacturing_cost_reduction, "cost_index": manufacturing_cost_index,
                 "estimated_item_value": base_material_eiv_total,
                 "estimated_item_value_priced_material_count": base_material_eiv_priced_count,
+                "estimated_item_value_material_count": self._eiv_line_count(base_material_entries),
                 **manufacturing_job_cost,
                 # The reductions above are runs-weighted over job_segments.
                 **({"reduction_basis": "runs_weighted_job_segments"} if sized_batch["reductions_differ"] else {}),

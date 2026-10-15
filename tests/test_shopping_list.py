@@ -604,6 +604,37 @@ def test_the_tab_warns_and_shows_no_numbers_for_an_unstamped_row(monkeypatch) ->
     assert any("Item T2" in w and OLDER_OVERVIEW_REASON in w for w in warnings)
 
 
+def _render_tab_output(monkeypatch, rows: list[dict]) -> dict[str, list]:
+    """Everything the tab writes, rendered to the end (no early stop)."""
+    from streamlit_ui.pages import portfolio_planner as page
+
+    out: dict[str, list] = {k: [] for k in ("info", "warning", "caption", "markdown", "dataframe", "code")}
+    for name in out:
+        monkeypatch.setattr(page.st, name, lambda obj, *a, _n=name, **k: out[_n].append(obj))
+    monkeypatch.setattr(page.st, "multiselect", lambda label, options, **k: list(options))
+    page._render_shopping_list_tab(rows)
+    return out
+
+
+def test_the_tab_shows_no_numbers_of_a_refused_row_beside_a_current_one(monkeypatch) -> None:
+    current = _make_row(1002, "Item Current", 2, {"35": _owned_line(10, 0, type_id=35, type_name="Pyerite")})
+    out = _render_tab_output(monkeypatch, [current, _round_four_row(3, name="Item Old")])
+    (df,) = out["dataframe"]
+    # Only the current row's Pyerite line (2 x 10); the refused row's 3 x 96 Tritanium is absent.
+    assert df.to_dict("records") == [
+        {"Item": "Pyerite", "Need": "20", "Owned (est.)": "0", "Buy": "20",
+         "Unit Price": "5", "Total ISK": "100"},
+    ]
+    assert not any("Tritanium" in str(c) for c in out["code"])
+
+
+def test_the_tab_asks_for_a_refresh_when_every_selected_row_is_refused(monkeypatch) -> None:
+    out = _render_tab_output(monkeypatch, [_round_four_row(3)])
+    assert out["dataframe"] == [] and out["code"] == []
+    assert not any("No buy-sourced materials" in str(i) for i in out["info"])
+    assert any("refresh" in str(i).lower() for i in out["info"])
+
+
 # --- round 5 Task 7: net against the published hangar stock (C8, C9) -----------
 # Every row of one overview is planned against the same hangar stock and
 # publishes it (manufacturing_job.owned_stock_by_type_id) for the types on its

@@ -127,9 +127,20 @@ def _get_job_scc_rates() -> tuple[float, float]:
     return DEFAULT_SCC_SURCHARGE, DEFAULT_RESEARCH_SCC_SURCHARGE
 
 
-def _job_fee_rates_line(profile: dict) -> str:
-    scc, research_scc = _get_job_scc_rates()
+def _job_fee_rates_line(profile: dict, *, scc_rates: tuple[float, float]) -> str:
+    """`scc_rates` is _get_job_scc_rates(), fetched once per page render."""
+    scc, research_scc = scc_rates
     return job_fee_rates_summary(profile, scc=scc, research_scc=research_scc)
+
+
+def _npc_create_fee_line(
+    selected_facility_id: int | None, npc_facility_tax: float | None, *, scc_rates: tuple[float, float],
+) -> str:
+    """The NPC create form's fee line. Before a station is picked the tax is
+    not loaded yet, which is not a profile to re-save."""
+    if selected_facility_id is None:
+        return "pick a station first"
+    return _job_fee_rates_line({"facility_tax": npc_facility_tax}, scc_rates=scc_rates)
 
 
 def _rig_breakdown_lines(rig_type_ids: list[int], rig_options: dict[int, str], rig_bonus_map: dict[int, dict]) -> list[str]:
@@ -400,6 +411,7 @@ def _render_existing_profiles(
     rig_bonus_map: dict[int, dict],
     rig_option_ids: list[int],
     profile_context: dict[str, dict],
+    scc_rates: tuple[float, float],
 ) -> None:
     for profile in profiles:
         with st.expander(f"{'⭐ ' if profile['is_default'] else ''}{profile['profile_name']}"):
@@ -471,7 +483,7 @@ def _render_existing_profiles(
                 # The producer's own rates: the profile's facility tax plus
                 # the admin SCC rates (research has its own).
                 fee_label = "**NPC job fees:**" if is_profile_npc_station else "**Job fees:**"
-                st.write(f"{fee_label} {_job_fee_rates_line(profile)}")
+                st.write(f"{fee_label} {_job_fee_rates_line(profile, scc_rates=scc_rates)}")
 
                 if not is_profile_npc_station:
                     st.write(f"**Rig Material Bonus:** {profile['structure_rig_material_bonus']:.2%}")
@@ -549,6 +561,7 @@ def _render_create_profile_section(
     rig_bonus_map: dict[int, dict],
     rig_option_ids: list[int],
     runtime,
+    scc_rates: tuple[float, float],
 ) -> None:
     st.markdown("### Create New Profile")
 
@@ -763,12 +776,13 @@ def _render_create_profile_section(
         st.write(f"**System Index Cost (live):** {float(system_mfg_cost_index):.2%}")
     with col2:
         if is_npc_station:
-            st.caption(
-                f"NPC station job fees — Facility tax: {float(npc_facility_tax or 0.0):.2%} | "
-                f"SCC surcharge: {float(npc_scc_surcharge or 0.0):.2%}"
-            )
+            if selected_facility_id is not None:
+                st.caption(
+                    f"NPC station job fees — Facility tax: {float(npc_facility_tax or 0.0):.2%} | "
+                    f"SCC surcharge: {float(npc_scc_surcharge or 0.0):.2%}"
+                )
             total_npc_rate = float(npc_facility_tax or 0.0) + float(npc_scc_surcharge or 0.0)
-            st.write(f"**NPC job fees:** {_job_fee_rates_line({'facility_tax': npc_facility_tax})}")
+            st.write(f"**NPC job fees:** {_npc_create_fee_line(selected_facility_id, npc_facility_tax, scc_rates=scc_rates)}")
             installation_cost_modifier = total_npc_rate * 100.0
         else:
             installation_cost_modifier = st.number_input(
@@ -781,7 +795,7 @@ def _render_create_profile_section(
             upwell_facility_tax_pct = float(installation_cost_modifier)
             upwell_scc_surcharge = _get_industry_admin_defaults()[1]  # SCC surcharge
             st.caption(f"SCC surcharge (admin setting): {float(upwell_scc_surcharge):.2%}")
-            st.write(f"**Job fees:** {_job_fee_rates_line({'facility_tax': upwell_facility_tax_pct / 100.0})}")
+            st.write(f"**Job fees:** {_job_fee_rates_line({'facility_tax': upwell_facility_tax_pct / 100.0}, scc_rates=scc_rates)}")
 
     rig_slot0_type_id = 0
     rig_slot1_type_id = 0
@@ -959,6 +973,8 @@ def render():
 
     profiles = response.get("data", [])
     profile_context = _load_profile_context(int(selected_character_id), profiles)
+    # One /admin_settings read per render, not one per rendered profile.
+    scc_rates = _get_job_scc_rates()
 
     st.markdown("### Existing Profiles")
     if profiles:
@@ -968,6 +984,7 @@ def render():
             rig_bonus_map=rig_bonus_map,
             rig_option_ids=rig_option_ids,
             profile_context=profile_context,
+            scc_rates=scc_rates,
         )
     else:
         st.info("No profiles found. Create one below.")
@@ -986,4 +1003,5 @@ def render():
         rig_bonus_map=rig_bonus_map,
         rig_option_ids=rig_option_ids,
         runtime=runtime,
+        scc_rates=scc_rates,
     )

@@ -13,7 +13,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     prepare_shared_industry_snapshot_page,
     render_pricing_batch_panel,
 )
-from streamlit_ui.state.industry_builder_ui import invention_summary_lines, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name
+from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, invention_summary_lines, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name
 from streamlit_ui.components.webpage_ui import require_aggrid
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
@@ -189,7 +189,7 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                     "Per-job duration (s)": activity_payload.get("job_duration_seconds"),
                     "Elapsed, whole jobs (s)": activity_payload.get("elapsed_duration_seconds"),
                     "Job Cost": activity_payload.get("total_job_cost") or activity_payload.get("job_cost"),
-                    "Estimated Item Value": activity_payload.get("estimated_item_value"),
+                    "Estimated Item Value": estimated_item_value_cell(activity_payload),
                 }
                 for activity_name, activity_payload in activity_breakdown.items()
                 if isinstance(activity_payload, dict)
