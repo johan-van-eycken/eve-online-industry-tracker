@@ -1294,8 +1294,11 @@ def test_rig_groups_follow_the_category_not_name_tokens():
     assert group({"group_name": "Advanced Hybrid Charge", "category_name": "Charge"}) == {"Ammo & Charges"}
     assert group({"group_name": "Construction Components", "category_name": "Commodity"}) == (
         {"Advanced Components"})
-    # A real non-Commodity group whose name contains "component" (SDE group 1676).
-    assert group({"group_name": "Named Components", "category_name": "Material"}) == frozenset()
+    # A real non-Commodity group whose name contains "component" (SDE group 1676):
+    # no rig covers it; by name alone it is unclassified (not in the table).
+    assert group({"group_id": 1676, "group_name": "Named Components",
+                  "category_id": 4, "category_name": "Material"}) == frozenset()
+    assert group({"group_name": "Named Components", "category_name": "Material"}) is None
     assert group({"group_name": "Capital Construction Components", "category_name": "Commodity"}) == (
         {"Capital Components"})
 

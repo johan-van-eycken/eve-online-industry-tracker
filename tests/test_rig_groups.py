@@ -125,19 +125,34 @@ def test_a_titan_gets_only_the_xl_ship_rig():
         pytest.approx(0.02))
 
 
-@pytest.mark.parametrize("group_id, group_name", [(30, "Titan"), (659, "Supercarrier"), (513, "Freighter"),
-                                                  (902, "Jump Freighter"), (485, "Dreadnought")])
+_RAITARU, _AZBEL, _SOTIYO = {"structure_type_id": 35825}, {"structure_type_id": 35826}, {"structure_type_id": 35827}
+
+
+@pytest.mark.parametrize("group_id, group_name", [(513, "Freighter"), (902, "Jump Freighter"), (485, "Dreadnought")])
 def test_capital_hulls_stay_out_of_a_raitaru(group_id, group_name):
     """The facility gate is not a rig group: a Freighter's rig group is Basic
     Large Ships, but it is still built in an Azbel or Sotiyo only."""
     S = _producer()
-    entry = _entry(group_id, group_name, 6, "Ship")
-    label = S._infer_manufacturing_group(entry)
-    raitaru, azbel = {"structure_type_id": 35825}, {"structure_type_id": 35826}
-    assert not S._facility_can_manufacture_group(manufacturing_group=label, profile_payload=raitaru, group_id=group_id)
-    assert S._facility_can_manufacture_group(manufacturing_group=label, profile_payload=azbel, group_id=group_id)
+    label = S._infer_manufacturing_group(_entry(group_id, group_name, 6, "Ship"))
+    can = S._facility_can_manufacture_group
+    assert not can(manufacturing_group=label, profile_payload=_RAITARU, group_id=group_id)
+    assert can(manufacturing_group=label, profile_payload=_AZBEL, group_id=group_id)
+    assert can(manufacturing_group=label, profile_payload=_SOTIYO, group_id=group_id)
     # A Battleship is not capital.
-    assert S._facility_can_manufacture_group(manufacturing_group="Basic Large Ships", profile_payload=raitaru, group_id=27)
+    assert can(manufacturing_group="Basic Large Ships", profile_payload=_RAITARU, group_id=27)
+
+
+@pytest.mark.parametrize("group_id, group_name", [(30, "Titan"), (659, "Supercarrier")])
+def test_supercapitals_are_built_in_a_sotiyo_only(group_id, group_name):
+    """Standup Supercapital Shipyard I (35877) fits only the Sotiyo (35827)."""
+    S = _producer()
+    label = S._infer_manufacturing_group(_entry(group_id, group_name, 6, "Ship"))
+    can = S._facility_can_manufacture_group
+    assert not can(manufacturing_group=label, profile_payload=_RAITARU, group_id=group_id)
+    assert not can(manufacturing_group=label, profile_payload=_AZBEL, group_id=group_id)
+    assert not can(manufacturing_group=label, profile_payload={"structure_type_id": 1, "structure_type_name": "Azbel"}, group_id=group_id)
+    assert can(manufacturing_group=label, profile_payload=_SOTIYO, group_id=group_id)
+    assert can(manufacturing_group=label, profile_payload={"structure_type_id": 1, "structure_type_name": "Sotiyo"}, group_id=group_id)
 
 
 @pytest.mark.parametrize("entry, expected", [
@@ -154,6 +169,7 @@ def test_capital_hulls_stay_out_of_a_raitaru(group_id, group_name):
     (_entry(4768, "Sovereignty Hub Site Detection Upgrades", 39, "Infrastructure Upgrades"), {"Structures"}),
     (_entry(1964, "Mutaplasmids", 17, "Commodity"), frozenset()),
     (_entry(1676, "Named Components", 4, "Material"), frozenset()),
+    (_entry(1194, "Special Edition Commodities", 63, "Special Edition Assets"), frozenset()),
 ])
 def test_components_and_structures(entry, expected):
     assert rg.rig_groups_for_entry(entry) == expected
@@ -163,13 +179,35 @@ def test_names_alone_classify_when_they_say_enough():
     group = rg.rig_groups_for_entry
     assert group({"group_name": "Smart Bomb", "category_name": "Module"}) == {"Modules"}
     assert group({"group_name": "Frigate"}) == {"Basic Small Ships", "All Ships"}
-    assert group({"group_name": "Mutaplasmids", "category_name": "Commodity"}) == frozenset()
+    assert group({"category_name": "Module"}) == {"Modules"}
     # Not enough: no group or category at all, a group name alone outside the
     # filters, or a Commodity whose group is unknown.
     assert group({"type_id": 1}) is None
     assert group({"group_name": "Smart Bomb"}) is None
     assert group({"category_name": "Commodity"}) is None
-    assert group({"category_name": "Module"}) == {"Modules"}
+
+
+@pytest.mark.parametrize("entry", [
+    {"group_name": "Fregatte", "category_name": "Schiff"},           # localized (de)
+    {"group_name": "Smart Bomb", "category_name": "Modul"},
+    {"group_name": "Mutaplasmids", "category_name": "Commodity"},    # a group the table does not list
+    {"group_name": "Spezialausgabe", "category_name": "Special Edition Assets"},
+])
+def test_a_name_the_table_cannot_place_is_unclassified_with_a_warning(entry, caplog):
+    """The SDE is localized: an English-only lookup can miss. A miss is never
+    read as "outside every filter"; the entry is unclassified (All rigs only)."""
+    rg._warned_names.clear()
+    with caplog.at_level("WARNING"):
+        assert rg.rig_groups_for_entry(entry) is None
+    assert any("name" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
+
+def test_a_missed_name_is_warned_once(caplog):
+    rg._warned_names.clear()
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            rg.rig_groups_for_entry({"group_name": "Fregatte", "category_name": "Schiff"})
+    assert len([r for r in caplog.records if "Schiff" in r.getMessage()]) == 1
 
 
 def test_an_unclassifiable_product_gets_all_rigs_only_and_is_logged(caplog):
@@ -202,19 +240,119 @@ _AGREEMENT_ENTRIES = [
 ]
 
 
+def _multi_rig_profile(*groups, value=0.02):
+    """Rigs as the UI saves them: per-effect entries plus the aggregate
+    structure_rig_*_bonus keys (industry_profiles.py)."""
+    profile = {"material_efficiency_bonus": 0.01, "structure_rig_material_bonus": 0.05,
+               "structure_rig_time_bonus": 0.2, "structure_rig_cost_bonus": 0.0, "structure_rigs": [
+                   {"type_id": i + 1, "effects": [
+                       {"activity": "manufacturing", "metric": "material", "group": g, "value": value}]}
+                   for i, g in enumerate(groups)]}
+    return profile
+
+
+_PARITY_PROFILES = (
+    [(label,) for label in sorted(rg.ALL_LABELS | {"All"})]
+    + [("All", "Modules"), ("All", "Ammo & Charges"), ("Ammo & Charges", "Drones"),
+       ("Modules", "Basic Small Ships"), ("Basic Medium Ships", "Advanced Medium Ships"),
+       ("Capital Ships", "All Ships")]
+)
+
+
 @pytest.mark.parametrize("entry", _AGREEMENT_ENTRIES)
-@pytest.mark.parametrize("rig_group", sorted(rg.ALL_LABELS | {"All"}))
-def test_the_producer_and_the_planner_give_the_same_rig_reduction(entry, rig_group):
+@pytest.mark.parametrize("rig_groups", _PARITY_PROFILES, ids=" + ".join)
+def test_the_producer_and_the_planner_give_the_same_rig_reduction(entry, rig_groups):
     from eve_online_industry_tracker.application.daily_planner import facility_bonus
 
     S = _producer()
-    profile = _profile(rig_group)
+    profile = _multi_rig_profile(*rig_groups)
     producer = S._profile_rig_reduction(profile_payload=profile, activity="manufacturing", metric="material",
                                         manufacturing_group=S._manufacturing_rig_groups(entry))
     planner = facility_bonus.sub_job_facility_reductions(profile, entry)
     assert planner["rig_material_reduction"] == producer
     assert planner["structure_material_reduction"] == S._profile_base_reduction(
         profile_payload=profile, activity="manufacturing", metric="material")
+
+
+def test_a_launcher_with_only_an_ammo_rig_gets_no_rig_bonus_despite_the_aggregate():
+    """The UI saves the combined rig bonus as structure_rig_material_bonus; it
+    is not a fallback for a product no per-effect rig covers (an under-buy)."""
+    from eve_online_industry_tracker.application.daily_planner import facility_bonus
+
+    S = _producer()
+    launcher = _entry(508, "Missile Launcher Heavy", 7, "Module")
+    profile = _multi_rig_profile("Ammo & Charges")
+    for metric in ("material", "time", "cost"):
+        assert S._profile_rig_reduction(profile_payload=profile, activity="manufacturing", metric=metric,
+                                        manufacturing_group=S._manufacturing_rig_groups(launcher)) == 0.0
+    assert facility_bonus.sub_job_facility_reductions(profile, launcher)["rig_material_reduction"] == 0.0
+
+
+def test_two_rigs_covering_the_product_both_apply():
+    S = _producer()
+    frigate = S._manufacturing_rig_groups(_entry(25, "Frigate", 6, "Ship"))
+    profile = _multi_rig_profile("Basic Small Ships", "All Ships", "Modules")
+    assert S._profile_rig_reduction(profile_payload=profile, activity="manufacturing", metric="material",
+                                    manufacturing_group=frigate) == pytest.approx(1 - 0.98 * 0.98)
+
+
+def test_the_aggregate_applies_only_to_a_profile_without_per_effect_rigs():
+    S = _producer()
+    groups = S._manufacturing_rig_groups(_entry(508, "Missile Launcher Heavy", 7, "Module"))
+    aggregate_only = {"structure_rig_material_bonus": 0.05}
+    assert S._profile_rig_reduction(profile_payload=aggregate_only, activity="manufacturing", metric="material",
+                                    manufacturing_group=groups) == pytest.approx(0.05)
+    no_effects = {"structure_rig_material_bonus": 0.05, "structure_rigs": [{"type_id": 1, "effects": []}]}
+    assert S._profile_rig_reduction(profile_payload=no_effects, activity="manufacturing", metric="material",
+                                    manufacturing_group=groups) == pytest.approx(0.05)
+
+
+# --- the table against CCP's filters (Hoboleaks snapshot) -------------------------
+
+_HOBOLEAKS = os.path.join(os.path.dirname(__file__), "fixtures", "hoboleaks")
+_HOBOLEAKS_URL = "https://sde.hoboleaks.space/tq/"
+
+
+def _filters_from(target_filters, modifier_sources):
+    """{filter id: (categories, groups, {(metric, attribute)})} for every
+    manufacturing binding in CCP's industry modifier sources."""
+    bindings = {}
+    for source in modifier_sources.values():
+        for metric, entries in (source.get("manufacturing") or {}).items():
+            for e in entries:
+                if "filterID" in e:
+                    bindings.setdefault(int(e["filterID"]), set()).add((metric, int(e["dogmaAttributeID"])))
+    return {fid: (frozenset(target_filters[str(fid)]["categoryIDs"]), frozenset(target_filters[str(fid)]["groupIDs"]),
+                  frozenset(attrs))
+            for fid, attrs in bindings.items()}
+
+
+def _ours():
+    return {f.filter_id: (f.category_ids, f.group_ids,
+                          frozenset({("material", f.material_attribute_id), ("time", f.time_attribute_id)}))
+            for f in rg.RIG_TARGET_FILTERS}
+
+
+def test_the_table_matches_the_committed_hoboleaks_snapshot():
+    with open(os.path.join(_HOBOLEAKS, "industrytargetfilters.json"), encoding="utf-8") as fh:
+        target_filters = json.load(fh)
+    with open(os.path.join(_HOBOLEAKS, "industrymodifiersources.json"), encoding="utf-8") as fh:
+        modifier_sources = json.load(fh)
+    assert _filters_from(target_filters, modifier_sources) == _ours()
+
+
+@pytest.mark.skipif(os.environ.get("RIG_FILTERS_ONLINE") != "1",
+                    reason="opt-in network check: RIG_FILTERS_ONLINE=1")
+def test_the_table_matches_the_live_hoboleaks_files():
+    """Staleness check against CCP's current TQ data. A new ship group CCP adds
+    to a filter shows up here, not in the SDE coverage test."""
+    import urllib.request
+
+    def fetch(name):
+        with urllib.request.urlopen(_HOBOLEAKS_URL + name, timeout=30) as response:
+            return json.load(response)
+
+    assert _filters_from(fetch("industrytargetfilters.json"), fetch("industrymodifiersources.json")) == _ours()
 
 
 # --- the table against the SDE ---------------------------------------------------
@@ -320,9 +458,9 @@ def test_every_manufacturable_product_in_the_sde_classifies():
             entry = _entry(group_id, group_name, category_id, categories[category_id])
             total += 1
             covered = rg.rig_groups_for_entry(entry)
-            # Names alone give the same answer as ids.
+            # Names alone give the same answer as ids, or none at all.
             assert rg.rig_groups_for_entry(
-                {"group_name": group_name, "category_name": categories[category_id]}) == covered
+                {"group_name": group_name, "category_name": categories[category_id]}) in (covered, None)
             if covered is None:
                 unclassified.append(product["typeID"])
             elif not covered:

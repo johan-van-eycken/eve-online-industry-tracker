@@ -11,8 +11,10 @@ The local SDE (database/eve_sde.db) has the attributes, whose descriptions
 list the targets in words, but not the filters themselves. The ids below are
 CCP's filters as published from the TQ client
 (sde.hoboleaks.space/tq/industrytargetfilters.json and
-industrymodifiersources.json, fetched 2026-10-15); every id is checked
-against the local SDE by tests/test_rig_groups.py.
+industrymodifiersources.json, revision 3619879, fetched 2026-10-15; CCP
+game data). tests/test_rig_groups.py diffs this table against the snapshot
+in tests/fixtures/hoboleaks/ and, with RIG_FILTERS_ONLINE=1, against the
+live files (the staleness check), and checks every id against the local SDE.
 
 Keys are the group labels the producer's rig effects carry
 (infrastructure/sde/rig_effects._RIG_GROUP_TOKEN_LABELS). A product can be
@@ -22,8 +24,11 @@ T3 subsystem is in "Advanced Medium Ships" and "All Ships", and group 4902
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,9 @@ ALL_LABELS: frozenset[str] = frozenset(f.label for f in RIG_TARGET_FILTERS)
 # (Large Ship rigs). The producer's facility gate reads these with the
 # Capital Ships / capital component groups.
 CAPITAL_FACILITY_GROUP_IDS: frozenset[int] = frozenset({30, 659, 513, 902})
+# Titan and Supercarrier: Standup Supercapital Shipyard I (35877) fits only
+# the Sotiyo, so these are Sotiyo-only.
+SUPERCAPITAL_GROUP_IDS: frozenset[int] = frozenset({30, 659})
 
 
 def _int(value: Any) -> int:
@@ -123,24 +131,48 @@ def _name(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+# (kind, name) pairs already warned about by _name_miss.
+_warned_names: set[tuple[str, str]] = set()
+
+
+def _name_miss(kind: str, name: str) -> None:
+    key = (kind, name)
+    if key not in _warned_names:
+        _warned_names.add(key)
+        logger.warning(
+            "Rig group: SDE %s name %r is not in the rig target filter table (a localized or unlisted "
+            "name); without its id the item is unclassified and only \"All\" rigs apply", kind, name,
+        )
+
+
 def resolve_ids(entry: dict[str, Any]) -> tuple[int, int] | None:
     """(group_id, category_id) of a type entry, from its ids or SDE names.
 
-    A name the filters do not mention still tells that the item is outside
-    them: its id then reads 0 (group) or -1 (category). None when the entry
-    does not say enough to classify it: no group and no category, an
-    unknown category, or no group in a category where some groups have a
-    filter of their own (Ship, Commodity, ...)."""
-    group_id = _int(entry.get("group_id")) or _GROUP_ID_BY_NAME.get(_name(entry.get("group_name")), 0)
-    category_id = (_int(entry.get("category_id"))
-                   or _CATEGORY_ID_BY_NAME.get(_name(entry.get("category_name")), 0)
-                   or (GROUPS[group_id][0] if group_id in GROUPS else 0))
+    Ids are used when present. Names are looked up in the English table
+    above; the SDE is localized, so a name the table lacks is never read as
+    "outside every filter": the entry is unclassified (None) and a WARNING
+    is logged once per name. None too when the entry says too little: no
+    category, or no group in a category where some groups have a filter of
+    their own (Ship, Commodity, ...). A group the filters do not name reads
+    0, which only matters in a category with no group filters."""
+    group_id = _int(entry.get("group_id"))
+    group_name = str(entry.get("group_name") or "").strip()
+    if group_id <= 0 and group_name:
+        group_id = _GROUP_ID_BY_NAME.get(group_name.casefold(), 0)
+    category_id = _int(entry.get("category_id"))
+    category_name = str(entry.get("category_name") or "").strip()
+    if category_id <= 0 and category_name:
+        category_id = _CATEGORY_ID_BY_NAME.get(category_name.casefold(), 0)
+        if category_id <= 0:
+            _name_miss("category", category_name)
+            return None
+    if category_id <= 0 and group_id in GROUPS:
+        category_id = GROUPS[group_id][0]
     if category_id <= 0:
-        if not _name(entry.get("category_name")):
-            return None  # e.g. a group name alone: its category is unknown
-        category_id = -1  # a real category no filter names
-    group_known = group_id > 0 or bool(_name(entry.get("group_name")))
-    if not group_known and category_id in _CATEGORIES_WITH_GROUP_FILTERS:
+        return None  # e.g. a group name alone: its category is unknown
+    if group_id <= 0 and category_id in _CATEGORIES_WITH_GROUP_FILTERS:
+        if group_name:
+            _name_miss("group", group_name)
         return None
     return group_id, category_id
 

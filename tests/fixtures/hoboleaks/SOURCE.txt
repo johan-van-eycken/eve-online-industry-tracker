@@ -1,0 +1,11 @@
+EVE Online game data (c) CCP hf. (CCP Games), used under the EVE Online
+Developer License / EULA. Extracted from the TQ client and published by
+Hoboleaks (https://sde.hoboleaks.space/tq/).
+
+industrytargetfilters.json    md5 692854c2f91c3fd36272d8ab15adcaec
+industrymodifiersources.json  md5 d1a43396db08ae8de19b2f151bf4b8ff
+Hoboleaks revision 3619879 (2026-10-15T11:08:03), fetched 2026-10-15.
+
+Read by tests/test_rig_groups.py, which diffs domain/rig_groups.py's
+RIG_TARGET_FILTERS against them (offline), and against the live files when
+RIG_FILTERS_ONLINE=1.

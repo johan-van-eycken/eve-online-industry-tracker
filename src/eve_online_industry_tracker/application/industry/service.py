@@ -503,11 +503,13 @@ class IndustryService:
 
         `group_id`: the product's SDE group; a capital hull outside the Capital
         Ships rig group (Titan, Supercarrier, Freighter, Jump Freighter,
-        domain.rig_groups.CAPITAL_FACILITY_GROUP_IDS) is capital too."""
+        domain.rig_groups.CAPITAL_FACILITY_GROUP_IDS) is capital too, and a
+        supercapital (domain.rig_groups.SUPERCAPITAL_GROUP_IDS) is Sotiyo-only."""
         try:
             capital_hull = int(group_id or 0) in _rig_groups.CAPITAL_FACILITY_GROUP_IDS
+            supercapital = int(group_id or 0) in _rig_groups.SUPERCAPITAL_GROUP_IDS
         except (TypeError, ValueError):
-            capital_hull = False
+            capital_hull = supercapital = False
         if not capital_hull and (manufacturing_group is None or manufacturing_group not in cls._CAPITAL_MANUFACTURING_GROUPS):
             return True
         if profile_payload is None:
@@ -530,7 +532,8 @@ class IndustryService:
             if structure_type_id_int in _NON_CAPITAL_STRUCTURES:
                 return False
             if structure_type_id_int in _CAPITAL_ENGINEERING_COMPLEXES:
-                return True
+                # Standup Supercapital Shipyard I (35877) fits only the Sotiyo.
+                return not supercapital or structure_type_id_int == 35827
             # Fallback: infer from structure type name stored on profile.
             structure_type_name = str(profile_payload.get("structure_type_name") or "").lower()
             if not structure_type_name:
@@ -540,7 +543,10 @@ class IndustryService:
             # Non-capital structures by name (citadels, refineries, medium ECs).
             if any(x in structure_type_name for x in ("raitaru", "athanor", "astra", "fortizar", "keepstar", "tatara")):
                 return False
-            # Only Azbel and Sotiyo (engineering complexes) can manufacture capitals.
+            # Only Azbel and Sotiyo (engineering complexes) can manufacture
+            # capitals, and only the Sotiyo supercapitals.
+            if supercapital and "azbel" in structure_type_name:
+                return False
             if any(x in structure_type_name for x in ("azbel", "sotiyo")):
                 return True
         # Unknown facility — conservatively allow.
@@ -3522,7 +3528,9 @@ class IndustryService:
         `manufacturing_group`: the rig groups that cover the product
         (_manufacturing_rig_groups), or one group label. A manufacturing rig
         effect applies when its group is "All" or one of them. None applies
-        every rig effect (no product given)."""
+        every rig effect (no product given). The aggregate
+        structure_rig_*_bonus is read only for a profile with no per-effect
+        rig entries at all."""
         if not isinstance(profile_payload, dict):
             return 0.0
         valid_activities = set(cls._ACTIVITY_EFFECT_ALIASES.get(activity, (activity,)))
@@ -3551,6 +3559,15 @@ class IndustryService:
 
         if reductions:
             return cls._combine_reductions(reductions)
+        has_per_effect_rigs = any(
+            isinstance(rig, dict) and any(isinstance(effect, dict) for effect in (rig.get("effects") or []))
+            for rig in profile_payload.get("structure_rigs") or []
+        )
+        if has_per_effect_rigs:
+            # The per-effect rigs say which groups they cover and none covers
+            # this product. The aggregate structure_rig_*_bonus the UI saves
+            # combines those same rigs, so it is no fallback (an under-buy).
+            return 0.0
 
         aggregate_key_by_metric = {
             "material": "structure_rig_material_bonus",

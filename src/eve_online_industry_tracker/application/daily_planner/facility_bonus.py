@@ -9,8 +9,9 @@ than re-implemented, and rig coverage is the classification the producer
 uses (domain.rig_groups: EVE's industry target filters by SDE category and
 group).
 
-Where the producer would over-apply a rig bonus to a sub-component (its
-aggregate structure_rig_material_bonus fallback), this module is stricter.
+Where the producer would over-apply a rig bonus to a sub-component (the
+aggregate structure_rig_material_bonus of a profile with no per-effect rig
+entries, which names no group), this module is stricter.
 When the component cannot be classified, only "All" rigs apply: an over-buy
 is recoverable, an under-buy stalls the job.
 """
@@ -84,8 +85,8 @@ def sub_job_facility_reductions(profile: Any, component_entry: Any) -> dict[str,
     - rig: the producer's _profile_rig_reduction for the component's rig
       groups, called only when a per-effect rig entry covers one of them or "All".
       The producer's helper alone would over-apply: with no group it accepts
-      every rig, and with no matching effect it falls back to the aggregate
-      structure_rig_material_bonus, which names no group.
+      every rig, and a profile with no per-effect entries falls back to the
+      aggregate structure_rig_material_bonus, which names no group.
 
     rig_applicability: "applies", "not_covered" (rigs exist, none for this
     group), "no_rigs", "no_profile", or "unknown" (the component's group is
