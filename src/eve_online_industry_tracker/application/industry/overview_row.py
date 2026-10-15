@@ -223,6 +223,24 @@ def get_blueprint_type_id(row: dict[str, Any]) -> int | None:
     return value if value > 0 else None
 
 
+def get_invention_required_skill_levels(row: dict[str, Any]) -> dict[int, int] | None:
+    """{skill type_id: required level} of the row's invention skills
+    (manufacturing_job.invention_chance.required_skill_levels, Task 12), or
+    None when the producer published none: a row from before Task 12 fix
+    round 1 (callers then require level 1 of every skill in the set)."""
+    chance = get_manufacturing_job(row).get("invention_chance")
+    levels = chance.get("required_skill_levels") if isinstance(chance, dict) else None
+    if not isinstance(levels, dict) or not levels:
+        return None
+    out: dict[int, int] = {}
+    for raw_id, raw_level in levels.items():
+        type_id, level = _as_int(raw_id), _as_int(raw_level)
+        if type_id <= 0 or level <= 0:
+            return None
+        out[type_id] = level
+    return out
+
+
 def get_invention_skill_set(row: dict[str, Any]) -> tuple[tuple[int, int], int | None] | None:
     """((science skill ids), encryption skill id) the producer's invention
     chance read for this row (manufacturing_job.invention_chance), or None

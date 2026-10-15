@@ -484,3 +484,80 @@ def test_the_invent_fee_is_paid_per_attempt_the_assigned_pilot_launches():
     weak = _invent(_row(), [_best_inventor(), _weaker_pilot(skills=[])], jobs=[_busy(BEST_ID)])
     assert (best.runs, best.estimated_job_fee_isk) == (4, pytest.approx(16.0))
     assert (weak.runs, weak.estimated_job_fee_isk) == (6, pytest.approx(24.0))
+
+
+# --- Task 12 fix round 1: invention split over the free qualifying inventors -----
+# A second qualifying inventor at 3/3/3: 0.30 x (1 + 6/30 + 3/40) x 1.2 = 0.459.
+# 2 BPCs over the lanes (0.525, 0.459), sum 0.984: ceil(2 / 0.984) = 3 rounds.
+# The best lane runs 3 (1.575 expected BPCs), the second ceil(0.425 / 0.459) = 1.
+# One pilot alone would run 4 in sequence: the same 4 attempts are bought.
+SECOND_ID, COPIER_ID = 3, 4
+P_SECOND = 0.30 * (1 + 6 / 30 + 3 / 40) * 1.2
+COVERED = 3 * 0.525 + 1 * P_SECOND
+
+
+def _second_inventor():
+    return {"character_id": SECOND_ID, "character_name": "Second", "skills": {"skills": [
+        _skill("Science A", 3, SCIENCE_A), _skill("Science B", 3, SCIENCE_B), _skill("Encryption", 3, ENCRYPTION),
+    ]}}
+
+
+def _copier():
+    """No invention skills, two research slots: the copy actions' pilot."""
+    return {"character_id": COPIER_ID, "character_name": "Copier", "skills": {"skills": [
+        _skill("Laboratory Operation", 1, 3406),
+    ]}}
+
+
+def _invents(row, chars, jobs=()):
+    return [a for a in _assign(row, chars, jobs) if a.action_type == "invent"]
+
+
+def test_two_free_inventors_get_one_invent_action_each_at_their_own_chance():
+    best, second = _invents(_row(), [_best_inventor(), _second_inventor()])
+    assert (best.character_id, second.character_id) == (BEST_ID, SECOND_ID)
+    assert best.invention_probability == pytest.approx(0.525)
+    assert second.invention_probability == pytest.approx(P_SECOND)
+    assert (best.runs, second.runs) == (3, 1)
+    assert "lane 1 of 2" in best.notes and "lane 2 of 2" in second.notes
+    # Each lane's share of the 2 expected BPCs over its own chance.
+    assert best.invention_expected_attempts == pytest.approx(2 * 3 / COVERED)
+    assert second.invention_expected_attempts == pytest.approx(2 * 1 / COVERED)
+    assert best.estimated_cost_isk == pytest.approx(_cost(2 * 3 / COVERED))
+    assert second.estimated_cost_isk == pytest.approx(_cost(2 * 1 / COVERED))
+    # Capital Reserved: the fee of the attempts each lane launches.
+    assert (best.estimated_job_fee_isk, second.estimated_job_fee_isk) == (pytest.approx(12.0), pytest.approx(4.0))
+
+
+def test_the_shopping_list_buys_the_lanes_attempts_summed():
+    invents = _invents(_row(), [_best_inventor(), _second_inventor()])
+    items = ShoppingListBuilder().build(
+        assigned_actions=invents, corp_assets=[], market_depth_cache=PRICES, admin_settings=_Admin(),
+        blueprint_data=BLUEPRINTS, meta_resolver=_NoBlueprints(),
+    )
+    bought = {i.type_id: i.quantity for i in items}
+    # (3 + 1) attempts x 2 datacores, one decryptor each: never fewer than the
+    # best inventor alone (4 attempts).
+    assert bought == {DATACORE_A: 8, DATACORE_B: 8, DECRYPTOR: 4}
+
+
+def test_a_pilot_without_the_encryption_skill_gets_no_lane():
+    (invent,) = _invents(_row(), [_best_inventor(), _weaker_pilot()])
+    assert invent.character_id == BEST_ID and invent.runs == 4
+
+
+def test_copies_go_one_per_free_corp_bpo_with_the_runs_spread():
+    row = _row(t1_bpo=True)
+    row["t1_bpo_count"] = 2
+    actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
+    copies = [a for a in actions if a.action_type == "copy"]
+    assert [c.runs for c in copies] == [2, 2]  # 4 attempts over 2 BPOs
+    assert all(c.character_id == COPIER_ID for c in copies)
+    assert [c.estimated_job_fee_isk for c in copies] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert "BPO 1 of 2" in copies[0].notes
+
+
+def test_one_corp_bpo_keeps_one_copy_action():
+    actions = _assign(_row(t1_bpo=True), [_best_inventor(), _second_inventor(), _copier()])
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    assert copy.runs == 4

@@ -2399,6 +2399,40 @@ def test_two_parallel_inventors_halve_the_invention_elapsed_time(monkeypatch) ->
     assert f"Build time: {note}." in mj["pricing_confidence_reasons"]
 
 
+def test_the_daily_plan_schedules_the_lanes_the_producers_elapsed_assumes(monkeypatch) -> None:
+    """Task 12 fix round 1: with every qualifying slot free, the planner's
+    invent actions are the producer's lanes: same pilots, same attempts per
+    lane, so the longest lane is the producer's rounds."""
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
+    from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
+
+    characters = [
+        {"character_id": 1, "character_name": "Pilot A", "skills": _LEVEL_ONE_INVENTOR},
+        {"character_id": 2, "character_name": "Pilot B", "skills": _LEVEL_ONE_INVENTOR},
+    ]
+    service = _invention_service(monkeypatch, blueprint_rows=_invented_t2_blueprint_rows())
+    del service._get_inventor_skill_levels  # back to the class method
+    service._state.char_manager = SimpleNamespace(get_characters=lambda: characters)  # type: ignore[attr-defined]
+    rows = {r["type_id"]: r for r in service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=True, character_id=1,
+    )}
+    row = {**rows[5002], "needs_invention": True}
+    parallel = row["manufacturing_job"]["activity_breakdown"]["invention"]["elapsed_parallel"]
+    plan = ChainPlan(decisions=[ItemDecision(
+        type_id=5002, type_name="T2 Module", decision="build", decision_reason="test",
+        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
+        days_of_supply_current=1.0, effective_velocity=1.0, meta_group_id=2,
+        pipeline_stage="invention", overview_row=row,
+    )])
+    chars = SimpleNamespace(list_characters=lambda: characters)
+    admin = SimpleNamespace(get=lambda section, key, default=None: default)
+    invents = [a for a in CharacterAssigner().assign(plan, [], chars, admin, price_map={}) if a.action_type == "invent"]
+    assert [a.character_id for a in invents] == [1, 2]
+    assert len(invents) == parallel["lanes_used"]
+    assert max(a.runs for a in invents) == parallel["rounds"]
+    assert sum(a.runs for a in invents) == parallel["lane_whole_jobs"]
+
+
 def test_no_qualifying_inventor_is_a_build_time_note(monkeypatch) -> None:
     untrained = {"skills": [{"skill_id": 11433, "skill_name": "High Energy Physics", "trained_skill_level": 5}]}
     mj = _overview_with_real_skill_loader(monkeypatch, [{"character_id": 1, "skills": untrained}])

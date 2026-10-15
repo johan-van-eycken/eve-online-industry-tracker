@@ -40,8 +40,9 @@ producer's floored chance is kept (exact) and named in the note.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import price_map_unit_price
@@ -53,6 +54,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     invention_attempts,
     invention_probability,
     invention_skill_factor,
+    split_invention_attempts,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,66 +192,28 @@ def _input_cost(
     return total, None
 
 
-def assigned_invention(
-    row: dict[str, Any],
-    *,
-    character_id: int,
-    skill_levels_by_id: Mapping[int, int] | None,
-    probability_floor: float,
-    price_map: Mapping[int, Any],
-) -> AssignedInvention:
-    """Chance, attempts and cost of `row`'s invention for pilot `character_id`.
-    `skill_levels_by_id` None: the pilot's skills are not loaded."""
+@dataclass(frozen=True)
+class _PilotChance:
+    """One pilot's chance for the row. keep_producer: the producer's
+    figures are exact for this pilot (the best inventor, or an SDE base
+    chance of 0)."""
+
+    probability: float
+    note: str
+    reason: str | None = None
+    keep_producer: bool = False
+
+
+def _pilot_chance(
+    row: dict[str, Any], chance: Mapping[str, Any], best_probability: float, *,
+    character_id: int, skill_levels_by_id: Mapping[int, int] | None, probability_floor: float,
+) -> _PilotChance:
+    """The A4 rule for one pilot (the single copy: the single invent action
+    and every parallel lane, Task 12, use it)."""
     type_id = row.get("type_id")
-    chance = orow.get_invention_chance(row) or {}
-    costs = orow.get_invention_costs(row) or {}
-    best_probability = _positive_float(chance.get("effective_probability")) or _positive_float(
-        costs.get("success_probability")
-    )
-    sizing, unknown_why = _sizing(row, best_probability)
-    if sizing is None or best_probability is None:
-        reason = f"{DATACORE_NEED_UNKNOWN}: {unknown_why}"
-        logger.warning(
-            "Invent action for type_id=%s (pilot %s): %s; no invention inputs are bought for it",
-            type_id, character_id, reason,
-        )
-        return AssignedInvention(None, best_probability, None, None, None, reason, reason)
-
-    def cost(expected: float) -> tuple[float | None, str | None]:
-        if sizing.fee is None:
-            return None, LATER_BATCH_NO_FEE
-        ratio = expected / sizing.best_expected
-        inputs, why = _input_cost(row, ratio, price_map)
-        return (None, why) if inputs is None else (sizing.fee * ratio + inputs, None)
-
-    def finish(
-        probability: float, expected: float, whole: int, note: str, chance_reason: str | None,
-    ) -> AssignedInvention:
-        """The action's figures; an unknown cost and the later-batch sizing
-        are named in the note, and an unknown cost in the reason too."""
-        value, cost_why = cost(expected)
-        notes, reasons = [note], ([chance_reason] if chance_reason else [])
-        if sizing.later_batch:
-            notes.append(LATER_BATCH_OVER_BUY_NOTE)
-        if cost_why is not None:
-            cost_reason = f"{INVENTION_COST_UNKNOWN}: {cost_why}"
-            logger.warning(
-                "Invent action for type_id=%s (pilot %s): %s; its estimated cost is left unknown",
-                type_id, character_id, cost_reason,
-            )
-            notes.append(cost_reason)
-            reasons.append(cost_reason)
-        return AssignedInvention(
-            probability, best_probability, expected, whole, value, "; ".join(notes), "; ".join(reasons) or None,
-        )
-
-    def keep_producer(note: str, chance_reason: str | None = None) -> AssignedInvention:
-        return finish(best_probability, sizing.best_expected, sizing.best_whole, note, chance_reason)
-
     inventor = chance.get("inventor_character_id")
     if inventor is not None and int(inventor) == int(character_id):
-        return keep_producer(f"chance {_pct(best_probability)} (best inventor)")
-
+        return _PilotChance(best_probability, f"chance {_pct(best_probability)} (best inventor)", keep_producer=True)
     raw_base = chance.get("base_probability")
     multiplier = _positive_float(chance.get("decryptor_multiplier"))
     if isinstance(raw_base, (int, float)) and not isinstance(raw_base, bool) and raw_base <= 0 and multiplier:
@@ -259,7 +223,9 @@ def assigned_invention(
             "Invent action for type_id=%s (pilot %s): %s (%s)",
             type_id, character_id, ZERO_BASE_CHANCE_NOTE, _pct(best_probability),
         )
-        return keep_producer(f"chance {_pct(best_probability)} ({ZERO_BASE_CHANCE_NOTE})")
+        return _PilotChance(
+            best_probability, f"chance {_pct(best_probability)} ({ZERO_BASE_CHANCE_NOTE})", keep_producer=True,
+        )
     base = _positive_float(raw_base)
     if base is None or multiplier is None:
         # No chance breakdown at all: nothing to recompute from.
@@ -268,7 +234,9 @@ def assigned_invention(
             "Invent action for type_id=%s (pilot %s): %s; keeping the producer's chance %s",
             type_id, character_id, reason, _pct(best_probability),
         )
-        return keep_producer(f"chance {_pct(best_probability)} (producer; {reason})", reason)
+        return _PilotChance(
+            best_probability, f"chance {_pct(best_probability)} (producer; {reason})", reason, keep_producer=True,
+        )
     skills = orow.get_invention_skill_set(row)
     reason: str | None = None
     factor: float | None = None
@@ -284,7 +252,6 @@ def assigned_invention(
     probability = effective_invention_probability(
         invention_probability(base, factor, multiplier), probability_floor,
     )
-    expected, whole = invention_attempts(sizing.invented_runs, sizing.runs_per_bpc, probability)
     if reason is not None:
         logger.warning(
             "Invent action for type_id=%s (pilot %s): %s; buying at the SDE base chance %s "
@@ -294,4 +261,148 @@ def assigned_invention(
         note = f"chance {_pct(probability)} (SDE base: {reason}), best inventor {_pct(best_probability)}"
     else:
         note = f"chance {_pct(probability)} (assigned pilot), best inventor {_pct(best_probability)}"
-    return finish(probability, expected, whole, note, reason)
+    return _PilotChance(probability, note, reason)
+
+
+class _Sized:
+    """The row's sizing and the per-pilot figures shared by the single
+    invent action and the parallel lanes."""
+
+    def __init__(self, row: dict[str, Any], price_map: Mapping[int, Any]):
+        self.row = row
+        self.type_id = row.get("type_id")
+        self.chance = orow.get_invention_chance(row) or {}
+        costs = orow.get_invention_costs(row) or {}
+        self.best_probability = _positive_float(self.chance.get("effective_probability")) or _positive_float(
+            costs.get("success_probability")
+        )
+        self.sizing, self.unknown_why = _sizing(row, self.best_probability)
+        self.price_map = price_map
+
+    def unknown(self, character_id: int) -> AssignedInvention | None:
+        if self.sizing is not None and self.best_probability is not None:
+            return None
+        reason = f"{DATACORE_NEED_UNKNOWN}: {self.unknown_why}"
+        logger.warning(
+            "Invent action for type_id=%s (pilot %s): %s; no invention inputs are bought for it",
+            self.type_id, character_id, reason,
+        )
+        return AssignedInvention(None, self.best_probability, None, None, None, reason, reason)
+
+    def cost(self, expected: float) -> tuple[float | None, str | None]:
+        sizing = self.sizing
+        assert sizing is not None
+        if sizing.fee is None:
+            return None, LATER_BATCH_NO_FEE
+        ratio = expected / sizing.best_expected
+        inputs, why = _input_cost(self.row, ratio, self.price_map)
+        return (None, why) if inputs is None else (sizing.fee * ratio + inputs, None)
+
+    def finish(
+        self, character_id: int, probability: float, expected: float, whole: int, note: str,
+        chance_reason: str | None,
+    ) -> AssignedInvention:
+        """The action's figures; an unknown cost and the later-batch sizing
+        are named in the note, and an unknown cost in the reason too."""
+        sizing = self.sizing
+        assert sizing is not None
+        value, cost_why = self.cost(expected)
+        notes, reasons = [note], ([chance_reason] if chance_reason else [])
+        if sizing.later_batch:
+            notes.append(LATER_BATCH_OVER_BUY_NOTE)
+        if cost_why is not None:
+            cost_reason = f"{INVENTION_COST_UNKNOWN}: {cost_why}"
+            logger.warning(
+                "Invent action for type_id=%s (pilot %s): %s; its estimated cost is left unknown",
+                self.type_id, character_id, cost_reason,
+            )
+            notes.append(cost_reason)
+            reasons.append(cost_reason)
+        return AssignedInvention(
+            probability, self.best_probability, expected, whole, value, "; ".join(notes),
+            "; ".join(reasons) or None,
+        )
+
+
+def assigned_invention(
+    row: dict[str, Any],
+    *,
+    character_id: int,
+    skill_levels_by_id: Mapping[int, int] | None,
+    probability_floor: float,
+    price_map: Mapping[int, Any],
+) -> AssignedInvention:
+    """Chance, attempts and cost of `row`'s invention for pilot `character_id`.
+    `skill_levels_by_id` None: the pilot's skills are not loaded."""
+    sized = _Sized(row, price_map)
+    unknown = sized.unknown(character_id)
+    if unknown is not None:
+        return unknown
+    sizing, best_probability = sized.sizing, sized.best_probability
+    assert sizing is not None and best_probability is not None
+    pilot = _pilot_chance(
+        row, sized.chance, best_probability, character_id=character_id,
+        skill_levels_by_id=skill_levels_by_id, probability_floor=probability_floor,
+    )
+    if pilot.keep_producer:
+        return sized.finish(character_id, best_probability, sizing.best_expected, sizing.best_whole, pilot.note, pilot.reason)
+    expected, whole = invention_attempts(sizing.invented_runs, sizing.runs_per_bpc, pilot.probability)
+    return sized.finish(character_id, pilot.probability, expected, whole, pilot.note, pilot.reason)
+
+
+def assigned_invention_lanes(
+    row: dict[str, Any],
+    *,
+    lanes: Sequence[tuple[int, Mapping[int, int] | None]],
+    probability_floor: float,
+    price_map: Mapping[int, Any],
+) -> list[tuple[int, AssignedInvention]]:
+    """The row's invention split over parallel lanes (Task 12 fix round 1):
+    `lanes` holds one (character_id, skill levels by id) per free research
+    slot of a qualifying pilot. Each lane runs at its OWN pilot's chance
+    (_pilot_chance, the A4 rule), best chance first, and the attempts per lane
+    come from invention_model.split_invention_attempts, the formula the
+    producer's elapsed time uses. Returns (character_id, figures) for every
+    lane that runs at least one attempt.
+
+    Each lane's expected attempts are its share of the expected BPCs over its
+    chance: E x a_i / sum(a_j x p_j), so the costs add up over the lanes;
+    the whole attempts (what is bought) add up to at least what one pilot
+    would buy. One lane: exactly assigned_invention. Unknown odds: one
+    action, as assigned_invention."""
+    if not lanes:
+        return []
+    if len(lanes) == 1:
+        character_id, levels = lanes[0]
+        return [(character_id, assigned_invention(
+            row, character_id=character_id, skill_levels_by_id=levels,
+            probability_floor=probability_floor, price_map=price_map,
+        ))]
+    sized = _Sized(row, price_map)
+    first_id = lanes[0][0]
+    unknown = sized.unknown(first_id)
+    if unknown is not None:
+        return [(first_id, unknown)]
+    sizing, best_probability = sized.sizing, sized.best_probability
+    assert sizing is not None and best_probability is not None
+    chances: dict[int, _PilotChance] = {}
+    for character_id, levels in lanes:
+        if character_id not in chances:
+            chances[character_id] = _pilot_chance(
+                row, sized.chance, best_probability, character_id=character_id,
+                skill_levels_by_id=levels, probability_floor=probability_floor,
+            )
+    ordered = sorted((cid for cid, _ in lanes), key=lambda cid: (-chances[cid].probability, cid))
+    probabilities = [chances[cid].probability for cid in ordered]
+    whole_blueprints = int(math.ceil(sizing.invented_runs / sizing.runs_per_bpc))
+    attempts = split_invention_attempts(whole_blueprints, probabilities)
+    covered = sum(a * p for a, p in zip(attempts, probabilities))
+    expected_blueprints = float(sizing.invented_runs) / float(sizing.runs_per_bpc)
+    used = [(cid, a) for cid, a in zip(ordered, attempts) if a > 0]
+    out: list[tuple[int, AssignedInvention]] = []
+    for index, (cid, whole) in enumerate(used, start=1):
+        pilot = chances[cid]
+        expected = expected_blueprints * whole / covered
+        note = f"{pilot.note}; lane {index} of {len(used)}"
+        out.append((cid, sized.finish(cid, pilot.probability, expected, whole, note, pilot.reason)))
+    return out

@@ -102,6 +102,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     QuietWarningsFilter,
     SourceOriginals,
     elapsed_lane_note,
+    required_invention_skill_levels,
     split_invention_attempts,
     decryptor_choice_payload,
     decryptor_options_from_rows,
@@ -7711,6 +7712,14 @@ class IndustryService:
         costs["success_probability"] = effective_probability
         if chance is not None:
             costs["invention_chance"] = invention_chance_payload(chance, effective_probability)
+            if chance.skill_set is not None:
+                # The levels a lane pilot needs (Task 12 fix round 1): the
+                # daily planner counts the same qualifying inventors.
+                costs["invention_chance"]["required_skill_levels"] = {
+                    str(type_id): level for type_id, level in required_invention_skill_levels(
+                        chance.skill_set, invention_job.get("skill_entries") or [],
+                    ).items()
+                }
         costs["runs_per_invented_blueprint"] = runs_per_invented_blueprint
         costs["invented_runs"] = invented_runs
         costs["expected_successful_blueprints"] = successful_jobs

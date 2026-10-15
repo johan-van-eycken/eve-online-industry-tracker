@@ -684,6 +684,8 @@ class ChainPlanner:
             decision.overview_row["needs_invention"] = True
             # "We own the T1 BPO, so copy it" — the gate CharacterAssigner reads.
             decision.overview_row["has_t1_bpo"] = True
+            # Free corp BPOs of the source: one copy action each (Task 12).
+            decision.overview_row["t1_bpo_count"] = len(bpo_assets_by_type_id.get(t1_bp_type_id) or [])
             decision.overview_row["invention_materials"] = list(t1_invention.get("materials") or [])
         else:
             decision.pipeline_stage = "invention"

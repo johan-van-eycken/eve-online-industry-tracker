@@ -17,6 +17,7 @@ from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.assigned_invention import (
     assigned_invention,
+    assigned_invention_lanes,
     invention_probability_floor,
 )
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
@@ -35,7 +36,9 @@ from eve_online_industry_tracker.application.industry.character_slots import (
 )
 from eve_online_industry_tracker.application.industry.invention_model import (
     InventionSkillSet,
+    can_run_invention,
     invention_skill_factor,
+    required_invention_skill_levels,
 )
 
 logger = logging.getLogger(__name__)
@@ -249,58 +252,41 @@ class CharacterAssigner:
                 if not me_scheduled:
                     self._take_slot(char_slots, char_id, "te_research")
 
-        # Invention
+        # Invention. Over parallel lanes (Task 12 fix round 1): one invent
+        # action per free research slot of every qualifying pilot that runs at
+        # least one attempt, each at its own chance, sized by the formula the
+        # producer's elapsed time uses. One lane or none qualifying: the
+        # single best free pilot, as before (A4).
         invent_whole_attempts: int | None = None
         if row.get("needs_invention"):
-            char_id, char_name = self._best_invention_char(char_slots, characters, row)
-            if char_id is not None:
-                # The producer's choice: bought one per attempt by the shopping list.
-                decryptor = orow.get_invention_decryptor(row)
-                # A4: the assigned pilot's chance, whole attempts and cost (the
-                # best inventor's when this pilot is the best inventor or its
-                # skills are unknown). runs = whole attempts, read by the
-                # shopping list; None (unknown) buys one attempt.
-                invention = assigned_invention(
+            lanes = self._invention_lanes(char_slots, row)
+            if len(lanes) > 1:
+                results = assigned_invention_lanes(
+                    row, lanes=[(cid, char_slots[cid].get("skills_by_id")) for cid in lanes],
+                    probability_floor=probability_floor, price_map=price_map,
+                )
+            else:
+                char_id, _name = self._best_invention_char(char_slots, characters, row)
+                results = [] if char_id is None else [(char_id, assigned_invention(
                     row, character_id=char_id,
                     # None: this pilot's skills are not loaded (not level 0).
                     skill_levels_by_id=char_slots[char_id].get("skills_by_id"),
                     probability_floor=probability_floor, price_map=price_map,
-                )
-                invent_whole_attempts = invention.whole_attempts
-                actions.append(AssignedAction(
-                    type_id=type_id,
-                    type_name=type_name,
-                    action_type="invent",
-                    character_id=char_id,
-                    character_name=char_name,
-                    quantity=None,
-                    runs=invention.whole_attempts,
-                    estimated_cost_isk=invention.cost_isk,
-                    estimated_profit_isk=None,
-                    estimated_completion=None,
-                    notes="; ".join([
-                        "Invention: BPC stock below pipeline threshold",
-                        *([f"use {decryptor[1]}"] if decryptor else []),
-                        *([invention.note] if invention.note else []),
-                    ]),
-                    decryptor_type_id=decryptor[0] if decryptor else None,
-                    decryptor_type_name=decryptor[1] if decryptor else None,
-                    invention_probability=invention.probability,
-                    invention_best_probability=invention.best_probability,
-                    invention_expected_attempts=invention.expected_attempts,
-                    invention_chance_reason=invention.reason,
-                    # The cash for the jobs really launched: the fee of one
-                    # attempt x the whole attempts (runs), not the expected.
-                    **_job_fee(
-                        _times_runs(orow.get_invention_fee_per_attempt(row), invention.whole_attempts),
-                        _rate_fee_reason(
-                            row, "job_cost_per_attempt", invention.whole_attempts,
-                            "the invention attempts are unknown",
-                        ),
-                        "invent", type_id,
-                    ),
+                ))]
+            # The producer's choice: bought one per attempt by the shopping list.
+            decryptor = orow.get_invention_decryptor(row)
+            for char_id, invention in results:
+                actions.append(self._invent_action(
+                    row, type_id, type_name, char_id, str(char_slots[char_id].get("character_name") or ""),
+                    invention, decryptor,
                 ))
                 self._take_slot(char_slots, char_id, "invent")
+            if results:
+                # One T1 BPC run per attempt over every lane; unknown when any is.
+                lane_attempts = [invention.whole_attempts for _, invention in results]
+                invent_whole_attempts = (
+                    None if any(a is None for a in lane_attempts) else sum(int(a or 0) for a in lane_attempts)
+                )
 
         # Copy (T1 BPO copy for invention feed). What is copied is the T1
         # source blueprint, never the T2 product or the T2 blueprint.
@@ -313,8 +299,24 @@ class CharacterAssigner:
                 type_id,
             )
         elif wants_copy:
-            char_id, char_name = self._best_research_char(char_slots, characters)
-            if char_id is not None:
+            # One copy action per free corp BPO of the T1 source (a BPO is in
+            # one job at a time; a corp BPO is installed by any pilot), with
+            # the attempts' runs spread evenly; one when the runs are unknown
+            # or the row names one BPO (Task 12 fix round 1).
+            bpo_count = max(1, int(row.get("t1_bpo_count") or 1))
+            copies = 1 if invent_whole_attempts is None else max(1, min(bpo_count, invent_whole_attempts))
+            pilots: list[tuple[int, str | None]] = []
+            for _ in range(copies):
+                char_id, char_name = self._best_research_char(char_slots, characters)
+                if char_id is None:
+                    break
+                pilots.append((char_id, char_name))
+                self._take_slot(char_slots, char_id, "copy")
+            for index, (char_id, char_name) in enumerate(pilots):
+                runs = (
+                    None if invent_whole_attempts is None
+                    else len(range(index, invent_whole_attempts, len(pilots)))
+                )
                 actions.append(AssignedAction(
                     type_id=t1_blueprint_type_id,
                     type_name=type_name + " (copy)",
@@ -323,22 +325,23 @@ class CharacterAssigner:
                     character_name=char_name,
                     quantity=None,
                     # One T1 BPC run per invention attempt; None when the
-                    # invent action's attempts are unknown (or it has no slot).
-                    runs=invent_whole_attempts,
+                    # invent actions' attempts are unknown (or none has a slot).
+                    runs=runs,
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
                     estimated_completion=None,
-                    notes="Copy T1 BPO to feed invention pipeline",
+                    notes="Copy T1 BPO to feed invention pipeline" + (
+                        f"; BPO {index + 1} of {len(pilots)}" if len(pilots) > 1 else ""
+                    ),
                     **_job_fee(
-                        _times_runs(orow.get_source_copy_fee_per_run(row), invent_whole_attempts),
+                        _times_runs(orow.get_source_copy_fee_per_run(row), runs),
                         _rate_fee_reason(
-                            row, "source_copy_job_cost_per_run", invent_whole_attempts,
+                            row, "source_copy_job_cost_per_run", runs,
                             "the copy runs are unknown (no invent action, or its attempts are unknown)",
                         ),
                         "copy", type_id,
                     ),
                 ))
-                self._take_slot(char_slots, char_id, "copy")
 
         # Sub-manufacture: one action, and one manufacturing slot, per job.
         # A job left without a slot gets no action, so the shopping list
@@ -660,6 +663,71 @@ class CharacterAssigner:
         candidates.sort(key=lambda x: (-x[0], x[1]))
         best = candidates[0]
         return best[2], best[3]
+
+    @staticmethod
+    def _invention_lanes(char_slots: dict[int, dict], row: dict[str, Any]) -> list[int]:
+        """One entry (the pilot's id) per FREE research slot of every pilot
+        that can run this invention: its loaded skills reach every required
+        level (the producer's required_skill_levels, else level 1 of each
+        skill in the set). The producer counts the same pilots' total slots
+        (invention_model.invention_lanes). A row without a skill set: none."""
+        skills = orow.get_invention_skill_set(row)
+        if skills is None:
+            return []
+        required = orow.get_invention_required_skill_levels(row) or required_invention_skill_levels(
+            InventionSkillSet(skills[0], skills[1]), [],
+        )
+        lanes: list[int] = []
+        for cid in sorted(char_slots):
+            slot = char_slots[cid]
+            levels = slot.get("skills_by_id")
+            if levels is None or int(slot.get("free_research", 0)) <= 0:
+                continue
+            if can_run_invention(required, levels):
+                lanes.extend([cid] * int(slot["free_research"]))
+        return lanes
+
+    @staticmethod
+    def _invent_action(
+        row: dict[str, Any], type_id: int, type_name: str, char_id: int, char_name: str | None,
+        invention: Any, decryptor: tuple[int, str] | None,
+    ) -> AssignedAction:
+        """One invent action: its pilot's chance, whole attempts (runs, read
+        by the shopping list; None buys nothing) and cost (A4), and the fee of
+        the attempts it launches (Capital Reserved)."""
+        return AssignedAction(
+            type_id=type_id,
+            type_name=type_name,
+            action_type="invent",
+            character_id=char_id,
+            character_name=char_name,
+            quantity=None,
+            runs=invention.whole_attempts,
+            estimated_cost_isk=invention.cost_isk,
+            estimated_profit_isk=None,
+            estimated_completion=None,
+            notes="; ".join([
+                "Invention: BPC stock below pipeline threshold",
+                *([f"use {decryptor[1]}"] if decryptor else []),
+                *([invention.note] if invention.note else []),
+            ]),
+            decryptor_type_id=decryptor[0] if decryptor else None,
+            decryptor_type_name=decryptor[1] if decryptor else None,
+            invention_probability=invention.probability,
+            invention_best_probability=invention.best_probability,
+            invention_expected_attempts=invention.expected_attempts,
+            invention_chance_reason=invention.reason,
+            # The cash for the jobs really launched: the fee of one
+            # attempt x the whole attempts (runs), not the expected.
+            **_job_fee(
+                _times_runs(orow.get_invention_fee_per_attempt(row), invention.whole_attempts),
+                _rate_fee_reason(
+                    row, "job_cost_per_attempt", invention.whole_attempts,
+                    "the invention attempts are unknown",
+                ),
+                "invent", type_id,
+            ),
+        )
 
     def _best_invention_char(
         self, char_slots: dict[int, dict], characters: list[dict], row: dict[str, Any] | None = None,
