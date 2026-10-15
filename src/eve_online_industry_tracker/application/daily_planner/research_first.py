@@ -62,9 +62,16 @@ def batch_uses_bpo(row: dict[str, Any]) -> bool:
 
 
 def owned_bpc_part(row: dict[str, Any], *, exclude_item_ids: Any = frozenset()) -> dict[str, Any] | None:
-    """The part of the batch on owned BPCs: {runs, quantity, materials}, or
-    None when there is none or its materials are unknown. Jobs on a BPC in
-    `exclude_item_ids` (one in an active job) are left out."""
+    """The part of the batch on owned BPCs: {runs, quantity, rest_quantity,
+    materials, item_ids}, or None when there is none or its materials are
+    unknown. Jobs on a BPC in `exclude_item_ids` (one in an active job, or
+    claimed by another job today) are left out.
+
+    quantity is rounded UP (Task 14 minor 5): ceil(units x runs / total
+    runs), and rest_quantity = units - quantity is the batch's other part,
+    so the two add up to the batch exactly. item_ids are the BPCs the part
+    runs on; None when a segment does not name its BPC (then any of the
+    blueprint's BPCs may be the one)."""
     segments = [
         s for s in (job_segments(row) or [])
         if str(s.get("source")) == OWNED_BPC_SOURCE and segment_bpc_item_id(s) not in exclude_item_ids
@@ -84,8 +91,14 @@ def owned_bpc_part(row: dict[str, Any], *, exclude_item_ids: Any = frozenset()) 
                 return None
     total_runs = int(orow.get_manufacturing_job(row).get("runs") or 0)
     units = orow.get_product_quantity(row)
-    quantity = units * runs // total_runs if total_runs > 0 and units > 0 else None
-    return {"runs": runs, "quantity": quantity, "materials": materials}
+    quantity = -(-(units * runs) // total_runs) if total_runs > 0 and units > 0 else None
+    named = [segment_bpc_item_id(s) for s in segments]
+    return {
+        "runs": runs, "quantity": quantity,
+        "rest_quantity": units - quantity if quantity is not None else None,
+        "materials": materials,
+        "item_ids": None if any(i is None for i in named) else sorted(set(named)),
+    }
 
 
 def segment_bpc_item_id(segment: dict[str, Any]) -> int | None:

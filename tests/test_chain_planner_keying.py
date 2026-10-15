@@ -39,9 +39,25 @@ class _AdminStub:
         raise KeyError(key)  # forces ChainPlanner's own fallbacks
 
 
-def _planner(*, optimal_me=10):
+def _planner(*, optimal_me=10, own_parent_blueprints=True):
+    """`own_parent_blueprints`: a parent whose blueprint the fixture owns no
+    BPO or BPC of gets a fully researched BPO (Task 14 I3: a row with no
+    owned blueprint is not built, so these sub-build tests need one)."""
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
     planner._compute_optimal_me = lambda bp_type_id, runs=1: optimal_me
+    if own_parent_blueprints:
+        plan_chain = planner.plan_chain
+
+        def _with_parent_bpos(decisions, phase1):
+            bpos = dict(phase1.get("bpo_assets_by_type_id") or {})
+            bpcs = phase1.get("bpc_assets_by_type_id") or {}
+            for decision in decisions:
+                bp = int(decision.overview_row["manufacturing_job"]["blueprint_sde"]["blueprint_type_id"])
+                if decision.meta_group_id == 1 and not bpos.get(bp) and not bpcs.get(bp):
+                    bpos[bp] = [_bpo(bp, me=10, te=20)]
+            return plan_chain(decisions, {**phase1, "bpo_assets_by_type_id": bpos})
+
+        planner.plan_chain = _with_parent_bpos
     return planner
 
 
@@ -230,7 +246,8 @@ def test_sub_manufacture_quantity_is_the_parents_batch_quantity_not_one_sde_run(
 
 def test_sub_manufacture_requests_for_one_material_are_merged_across_parents():
     a = _row(type_id=12345, materials=_batch_materials(**{"54321": 300}))
-    b = _row(type_id=22222, materials=_batch_materials(**{"54321": 200}))
+    # Its own blueprint: two rows on one BPO would book it twice (Task 14).
+    b = _row(type_id=22222, blueprint_type_id=1000, materials=_batch_materials(**{"54321": 200}))
 
     plan = _planner().plan_chain([_decision(a), _decision(b)], _SUB_PHASE1)
 
@@ -418,7 +435,7 @@ def _analyse(row, bp_data, *, velocity=2.0, bpo_price=20_000.0, bpc_owned=True):
         "blueprint_data": bp_data,
         "market_depth_cache": {999: {"spot_sell_price": bpo_price}},
     }
-    plan = _planner().plan_chain([decision], phase1)
+    plan = _planner(own_parent_blueprints=False).plan_chain([decision], phase1)
     return decision, plan.bpo_opportunities
 
 
@@ -769,10 +786,14 @@ def test_a_sub_component_has_no_own_sell_velocity_and_persists_it_as_null(
     assert item.effective_velocity is None
 
 
-def _limited_sub_phase1(limit):
+def _limited_sub_phase1(limit, *, component_bpos=3):
+    """Three BPOs of the component by default, so a split build's jobs run in
+    parallel (Task 14 minor 4: one job per free BPO at a time)."""
     blueprint_data = {**SUB_BLUEPRINT_DATA, 888: {**SUB_BLUEPRINT_DATA[888],
                                                    "max_production_limit": limit}}
-    return _sub_phase1(blueprint_data=blueprint_data)
+    phase1 = _sub_phase1(blueprint_data=blueprint_data)
+    phase1["bpo_assets_by_type_id"] = {888: [_bpo(888, me=10, te=20) for _ in range(component_bpos)]}
+    return phase1
 
 
 def _subs_for(qty, phase1):
@@ -827,7 +848,7 @@ def test_a_sub_batch_over_the_max_runs_records_each_job():
     (sub,) = _subs_for(200, _limited_sub_phase1(7))
     # No overview row of the component and no parent figure: its install fee
     # is unknown (D4), with no recorded cause (an old overview: refresh).
-    unknown = {"fee": None, "fee_unknown_reason": None}
+    unknown = {"fee": None, "fee_unknown_reason": None, "after_job": None}
     assert sub.overview_row["sub_job_batches"] == [
         {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, **unknown},
         {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, **unknown},
@@ -1071,7 +1092,7 @@ def _structure_subs(profile, *, entry=_COMPONENT_ENTRY, parents=1):
     rows = []
     for i in range(parents):
         p = profile[i] if isinstance(profile, list) else profile
-        rows.append(_row(type_id=12345 + i, runs=10, industry_profile=p,
+        rows.append(_row(type_id=12345 + i, blueprint_type_id=999 + i, runs=10, industry_profile=p,
                          materials={"54321": dict(entry)}))
     plan = _planner().plan_chain([_decision(r) for r in rows], _sub_phase1())
     return [d for d in plan.decisions if d.is_sub_component]

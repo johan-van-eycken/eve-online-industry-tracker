@@ -420,7 +420,9 @@ def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_
                                  "products": [{"type_id": 7778, "quantity": 1}]}},
     }
     svc._index_blueprint_assets = lambda assets: (
-        {7777: [SimpleNamespace(type_id=7777, blueprint_material_efficiency=10, blueprint_time_efficiency=20)]}, {},
+        # The parent's own BPO too: a row with no owned blueprint is not built (Task 14 I3).
+        {7777: [SimpleNamespace(type_id=7777, blueprint_material_efficiency=10, blueprint_time_efficiency=20)],
+         999: [SimpleNamespace(type_id=999, blueprint_material_efficiency=10, blueprint_time_efficiency=20)]}, {},
     )
     if depth_extra:
         svc._repo = _DepthOverlayRepo(planner_repo, depth_extra)

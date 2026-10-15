@@ -116,8 +116,12 @@ def test_phase_5_sub_manufacture_lets_a_contract_violation_through():
     }}
     bpo = SimpleNamespace(type_id=888, is_blueprint_copy=False,
                           blueprint_material_efficiency=10, blueprint_time_efficiency=20)
+    parent_bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
+                                 blueprint_material_efficiency=10, blueprint_time_efficiency=20)
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
     phase1 = {
-        "bpo_assets_by_type_id": {888: [bpo]},
+        # The parent is built from an owned BPO (Task 14 I3).
+        "bpo_assets_by_type_id": {888: [bpo], 999: [parent_bpo]},
         "blueprint_data": {888: {"manufacturing": {
             "products": [{"type_id": 54321, "quantity": 10}],
             "materials": [{"type_id": 34, "quantity": 2}],

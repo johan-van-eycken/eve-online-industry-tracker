@@ -570,16 +570,21 @@ def test_copies_go_one_per_free_corp_bpo_with_the_runs_spread():
     actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
     copies = [a for a in actions if a.action_type == "copy"]
     assert [a for a in actions if a.action_type == "invent"] == []  # no T1 BPC on hand yet
-    assert [c.runs for c in copies] == [2, 2]  # 4 attempts over 2 BPOs
+    # Task 14: one copy per invent lane (3 + 1 attempts), one copy job per BPO:
+    # each lane later gets its own BPC of enough runs.
+    assert [(c.quantity, c.runs) for c in copies] == [(1, 3), (1, 1)]
     assert copies[0].character_id == COPIER_ID  # the most free research slots
-    assert [c.estimated_job_fee_isk for c in copies] == [pytest.approx(1.0), pytest.approx(1.0)]
+    assert [c.estimated_job_fee_isk for c in copies] == [pytest.approx(1.5), pytest.approx(0.5)]
     assert "BPO 1 of 2" in copies[0].notes
+    assert "make 1 copy × 3 runs" in copies[0].notes
 
 
 def test_one_corp_bpo_keeps_one_copy_action():
     actions = _assign(_row(t1_bpo=True), [_best_inventor(), _second_inventor(), _copier()])
     (copy,) = [a for a in actions if a.action_type == "copy"]
-    assert copy.runs == 4
+    # Task 14: lanes of 3 + 1 on one BPO: one job of 2 copies x 3 runs (one
+    # job's copies share their runs, so sized at the larger lane).
+    assert (copy.quantity, copy.runs) == (2, 6)
 
 
 def _alt(character_id):
@@ -719,7 +724,8 @@ def test_a_dropped_lane_renumbers_the_lane_wording():
     actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
     (invent,) = [a for a in actions if a.action_type == "invent"]
     assert invent.runs == 1
-    assert "lane 1 of 1" in invent.notes and "of 2" not in invent.notes
+    # Task 14: one BPC, so one lane from the start: no lane wording left over.
+    assert "of 2" not in invent.notes
 
 
 def test_an_unknown_lane_is_capped_too():
@@ -768,13 +774,16 @@ def test_the_copy_is_re_sized_after_a_released_slot():
     free the weakest qualifying pilot alone needs 5: 1 copy run beyond the 4
     on hand, so one reserved slot (the best inventor's) is given back.
     Re-sized with that lane free, the best inventor's 4 attempts are covered
-    by the 4 runs on hand: no copy is needed and the other slot returns too,
-    so both lanes invent (3 + 1)."""
+    by the 4 runs on hand: no copy is needed and the other slot returns too.
+
+    Corrected in Task 14 (I2): the 4 runs are ONE BPC, and an invention job
+    uses one BPC, so one lane invents: the best inventor's 4 attempts, not
+    3 + 1 from the same BPC."""
     row = _row(t1_bpo=True)
     row["t1_bpo_count"], row["t1_bpc_runs_on_hand"] = 2, 4
     actions = _assign(row, [_best_inventor(), _second_inventor()])
     assert [a for a in actions if a.action_type == "copy"] == []
-    assert sorted(a.runs for a in actions if a.action_type == "invent") == [1, 3]
+    assert [(a.character_id, a.runs) for a in actions if a.action_type == "invent"] == [(BEST_ID, 4)]
 
 
 def test_the_fewer_lanes_note_counts_the_lanes_kept_after_the_cap():

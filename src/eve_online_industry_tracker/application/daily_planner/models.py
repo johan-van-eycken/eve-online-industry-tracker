@@ -134,6 +134,9 @@ class AssignedAction:
     # te_research only (Task 8c fix round 4): queued behind the ME research
     # on the same BPO (one job per blueprint), so it cannot start today.
     queued_after_me: bool = False
+    # invent only (Task 14): the T1 BPC this invention job runs on (one job
+    # per BPC, at most its runs); None when the row does not name it.
+    blueprint_item_id: int | None = None
 
 
 @dataclass
@@ -161,3 +164,6 @@ class ChainPlan:
     #: called with those parents' type_ids, returns the new sub-component
     #: decisions. None for a hand-built plan (the plan's sizes then stand).
     resize_sub_components: Any = field(default=None, repr=False, compare=False)
+    #: The plan's decisions for a new set of sub-component decisions, one
+    #: ItemDecision per type_id (Task 14). None: top-level + subs as they are.
+    rebuild_decisions: Any = field(default=None, repr=False, compare=False)
