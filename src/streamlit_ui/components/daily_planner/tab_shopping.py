@@ -1,12 +1,65 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import streamlit as st
 
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.aggrid_import import import_aggrid
-from streamlit_ui.components.daily_planner.status_bar import _fmt_isk, wallet_snapshot
+from streamlit_ui.components.daily_planner.status_bar import (
+    _JOB_ACTION_TYPES,
+    _fmt_isk,
+    wallet_snapshot,
+)
+
+
+@dataclass(frozen=True)
+class ShoppingBudget:
+    """What the Shopping tab compares the wallet with (Task 14 minor 1): the
+    pending purchase lines plus the pending jobs' install fees, the same
+    total Capital Reserved counts for them. unpriced_lines / unknown_fee_jobs
+    are not in the sums, so with either the total is a lower bound."""
+
+    purchases: float
+    install_fees: float
+    unpriced_lines: int
+    unknown_fee_jobs: int
+
+    @property
+    def total(self) -> float:
+        return self.purchases + self.install_fees
+
+    @property
+    def unknown_lines(self) -> int:
+        return self.unpriced_lines + self.unknown_fee_jobs
+
+
+def _pending(action: dict[str, Any]) -> bool:
+    return str(action.get("status") or "pending") == "pending"
+
+
+def shopping_budget(actions: list[dict[str, Any]]) -> ShoppingBudget:
+    """The pending buy_materials lines and the pending jobs' install fees.
+    A done or skipped line is no longer to be paid, so it is not counted."""
+    purchases, fees, unpriced, unknown_fees = 0.0, 0.0, 0, 0
+    for action in actions:
+        if not _pending(action):
+            continue
+        action_type = str(action.get("action_type") or "")
+        if action_type == "buy_materials":
+            cost = action.get("estimated_cost_isk")
+            if cost is None:
+                unpriced += 1
+            else:
+                purchases += float(cost)
+        elif action_type in _JOB_ACTION_TYPES:
+            fee = action.get("estimated_job_fee_isk")
+            if fee is None:
+                unknown_fees += 1
+            else:
+                fees += float(fee)
+    return ShoppingBudget(purchases, fees, unpriced, unknown_fees)
 
 
 def budget_fit(corp_wallet: float | None, total_isk: float, cumul_isk: float) -> str:
@@ -257,16 +310,14 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     future_rows = _build_shopping_rows(actions, "future_stock")
     invention_rows = _build_shopping_rows(actions, "invention_input")
 
-    total_isk = (
-        sum(r["Est. Total"] or 0.0 for r in current_rows)
-        + sum(r["Est. Total"] or 0.0 for r in future_rows)
-        + sum(r["Est. Total"] or 0.0 for r in invention_rows)
-    )
-
-    all_rows = [*current_rows, *future_rows, *invention_rows]
-    unpriced_lines = sum(1 for r in all_rows if r.get("Est. Total") is None)
-    # None = unknown (unpriced lines, priced total within the wallet).
-    wallet_short = wallet_is_short(corp_wallet, total_isk, unpriced_lines=unpriced_lines)
+    # Pending lines only, plus the pending jobs' install fees (Task 14 minor
+    # 1): the same total Capital Reserved counts for them.
+    budget = shopping_budget(actions)
+    total_isk = budget.purchases
+    all_rows = [r for r in (*current_rows, *future_rows, *invention_rows) if r["_status"] == "pending"]
+    unpriced_lines = budget.unknown_lines
+    # None = unknown (unpriced lines or fees, priced total within the wallet).
+    wallet_short = wallet_is_short(corp_wallet, budget.total, unpriced_lines=unpriced_lines)
 
     # Current job materials (highest priority)
     _render_materials_section("Current Job Materials", current_rows, deemphasise=False, ag_imports=ag)
@@ -284,17 +335,23 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     st.markdown("---")
 
     # Budget summary
-    budget_label, budget_value, budget_caption = budget_metric(corp_wallet, total_isk, unpriced_lines)
-    remaining = remaining_after_shopping(corp_wallet, total_isk, unpriced_lines=unpriced_lines)
-    budget_cols = st.columns(3)
+    budget_label, budget_value, budget_caption = budget_metric(corp_wallet, budget.total, unpriced_lines)
+    remaining = remaining_after_shopping(corp_wallet, budget.total, unpriced_lines=unpriced_lines)
+    budget_cols = st.columns(4)
     with budget_cols[0]:
         st.metric("Total to Spend", _fmt_isk(total_isk))
+        st.caption("Pending lines only.")
         unpriced_caption = unpriced_total_caption(all_rows)
         if unpriced_caption:
             st.caption(unpriced_caption)
     with budget_cols[1]:
-        st.metric("Corp Wallet", _fmt_isk(corp_wallet))
+        st.metric("Install Fees", _fmt_isk(budget.install_fees))
+        if budget.unknown_fee_jobs:
+            st.caption(f"{budget.unknown_fee_jobs} job(s) have an unknown fee: not counted.")
     with budget_cols[2]:
+        st.metric("Corp Wallet", _fmt_isk(corp_wallet))
+    with budget_cols[3]:
+        st.caption("Wallet less purchases, incl. install fees (as Capital Reserved).")
         if remaining is not None and remaining < 0:
             # Exact deficit (every line priced).
             st.metric("Deficit", budget_value, delta=f"-{_fmt_isk(abs(remaining))}", delta_color="inverse")

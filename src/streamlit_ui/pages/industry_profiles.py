@@ -146,27 +146,39 @@ def _security_band_of_system(system: dict | None) -> str | None:
     return _security_band.security_band(system.get("security_status"), system.get("region_id"))
 
 
-# NPC station job fee components (fractions) — defaults; overridden by admin settings at runtime.
+# NPC station facility tax (fraction) — default; overridden by admin settings
+# at runtime. The SCC default is the producer's one DEFAULT_SCC_SURCHARGE.
 _NPC_STATION_FACILITY_TAX = 0.0025
-_NPC_STATION_SCC_SURCHARGE = 0.04
-_UPWELL_SCC_SURCHARGE = 0.04
+
+#: Shown when /admin_settings cannot be read (Task 14 minor 3): the rates
+#: on the page are then the defaults, not the stored settings.
+ADMIN_SETTINGS_UNAVAILABLE_CAPTION = (
+    "Admin settings could not be read: the fee rates shown are the default rates, "
+    "not the stored settings."
+)
 
 
-def _admin_industry_values() -> dict:
-    """The admin settings' industry section, read once per page render
-    (empty when the API does not answer: every rate then uses its default)."""
+def _admin_industry_values() -> tuple[dict, str | None]:
+    """(the admin settings' industry section, a caption when the read
+    failed), read once per page render. A failed read gives {} (every rate
+    then uses its default) and ADMIN_SETTINGS_UNAVAILABLE_CAPTION, with a
+    WARNING, so the defaults are never shown as the stored settings."""
     resp = api_get("/admin_settings")
     if resp and resp.get("status") == "success":
         vals = (resp.get("data") or {}).get("values", {}).get("industry", {})
-        return vals if isinstance(vals, dict) else {}
-    return {}
+        return (vals if isinstance(vals, dict) else {}), None
+    logger.warning(
+        "Industry profiles: /admin_settings read failed (%s); showing the default fee rates",
+        (resp or {}).get("message") if isinstance(resp, dict) else "no response",
+    )
+    return {}, ADMIN_SETTINGS_UNAVAILABLE_CAPTION
 
 
 def _npc_admin_defaults(industry_values: dict) -> tuple[float, float]:
     """NPC facility tax and SCC surcharge (falls back to module defaults)."""
     return (
         float(industry_values.get("npc_station_facility_tax", _NPC_STATION_FACILITY_TAX)),
-        float(industry_values.get("scc_surcharge", _NPC_STATION_SCC_SURCHARGE)),
+        float(industry_values.get("scc_surcharge", DEFAULT_SCC_SURCHARGE)),
     )
 
 
@@ -1059,8 +1071,10 @@ def render():
     profiles = response.get("data", [])
     profile_context = _load_profile_context(int(selected_character_id), profiles)
     # One /admin_settings read per render, not one per rendered profile.
-    admin_industry = _admin_industry_values()
+    admin_industry, admin_unavailable = _admin_industry_values()
     scc_rates = _job_scc_rates(admin_industry)
+    if admin_unavailable:
+        st.caption(admin_unavailable)
 
     st.markdown("### Existing Profiles")
     if profiles:
