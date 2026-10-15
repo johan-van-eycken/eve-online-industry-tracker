@@ -8,6 +8,7 @@ import pytest
 from eve_online_industry_tracker.application.industry.invention_model import NO_DECRYPTOR, DecryptorOption
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
+from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
 
 # Public SDE ids: High Energy Physics, Caldari Starship Engineering, Caldari Encryption Methods.
 _HARNESS_INVENTION_SKILLS = (
@@ -3245,7 +3246,7 @@ def test_an_overview_cached_before_the_later_batch_plans_is_rebuilt(monkeypatch)
 
     rows = service.industry_manufacturing_product_overview(**kwargs)
     assert all("stale" not in r for r in rows)
-    assert all(r["manufacturing_job"]["later_batch_plan_version"] == 1 for r in rows)
+    assert all(r["manufacturing_job"]["later_batch_plan_version"] == LATER_BATCH_PLAN_VERSION for r in rows)
     # The rebuilt overview is cached and served again.
     service._state._overview_result_cache["rows"][0]["cache_marker"] = True
     assert any(r.get("cache_marker") for r in service.industry_manufacturing_product_overview(**kwargs))
@@ -3892,7 +3893,7 @@ def test_owned_nested_spare_runs_are_not_credited_when_another_row_may_use_them(
     # Another selected row that builds from blueprint 9202 may spend the same
     # 9 runs left: they are not credited (no under-buy).
     other = {"type_id": 5202, "type_name": "Other", "max_batches_total": 1, "manufacturing_job": {
-        "later_batch_plan_version": 1, "blueprint_sde": {"blueprint_type_id": 9202},
+        "later_batch_plan_version": LATER_BATCH_PLAN_VERSION, "blueprint_sde": {"blueprint_type_id": 9202},
         "nested_invention_bpc_plans": [], "nested_blueprint_runs_left": {},
         "procurement_materials": {}, "blueprint_source_kind": "owned_blueprint_copy",
     }}
@@ -4039,3 +4040,91 @@ def test_a_refused_older_row_on_the_same_blueprint_also_stops_the_spare_run_cred
     }}
     line = next(m for m in aggregate_shopping_list([row, older]) if m["type_id"] == 206)
     assert line["need"] == 4
+
+
+# --- Task 10 fix round 3: shared BPC runs netted exactly across rows and batches --
+
+
+def _parents_sharing_rows(parents: int) -> list[dict]:
+    import copy
+
+    rows = _nested_invention_blueprint_rows()
+    base = rows[-1]
+    for i in range(1, parents):
+        extra = copy.deepcopy(base)
+        extra["blueprint_type_id"] = 9100 + 100 * i
+        extra["blueprint"] = {**extra["blueprint"], "type_id": extra["blueprint_type_id"]}
+        extra["manufacturing_job"]["products"][0] = {
+            **extra["manufacturing_job"]["products"][0], "type_id": 7100 + 100 * i, "type_name": f"Parent {i + 1}",
+        }
+        rows.append(extra)
+    return rows
+
+
+def _datacore_need(rows: list[dict]) -> int | None:
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+
+    return next((m["need"] for m in aggregate_shopping_list(rows) if m["type_id"] == 204), None)
+
+
+def test_a_top_level_user_of_a_shared_bpc_is_netted(monkeypatch) -> None:
+    # Probe E: the component row 5002 builds top-level on the owned 1-run BPC
+    # 81, and the parent 7100 builds its nested 5002 on the same run. One of
+    # the two runs is invented: 1 BPC, 2 whole attempts x 2 = 4 datacores.
+    rows = _invention_overview(
+        monkeypatch, blueprint_rows=_parents_sharing_rows(1), prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=1)], [], {}, {}, {}),
+    )
+    component, parent = rows[5002], rows[7100]
+    assert component["manufacturing_job"]["nested_blueprint_runs_used"] == {"9002": 1}
+    assert component["manufacturing_job"]["nested_blueprint_runs_owned"] == {"9002": 1}
+    assert _datacore_need([component]) is None and _datacore_need([parent]) is None
+    assert _datacore_need([component, parent]) == 4
+
+
+@pytest.mark.parametrize("batches_a, batches_b, owned_runs, expected", [
+    # Runs needed over both rows and all batches - owned, ceil(/ 10) BPCs x 4.
+    (1, 1, 1, 4),     # 2 - 1 = 1 run: 1 BPC
+    (2, 1, 1, 4),     # 3 - 1 = 2 (was 8)
+    (2, 2, 1, 4),     # 4 - 1 = 3 (was 12)
+    (6, 6, 1, 8),     # 12 - 1 = 11: 2 BPCs
+    (11, 1, 1, 8),    # 12 - 1 = 11
+    (1, 1, 2, None),  # 2 - 2 = 0
+    (6, 6, 2, 4),     # 12 - 2 = 10: 1 BPC
+])
+def test_shared_nested_bpc_runs_are_netted_once_over_rows_and_batches(
+    monkeypatch, batches_a, batches_b, owned_runs, expected,
+) -> None:
+    rows = _invention_overview(
+        monkeypatch, blueprint_rows=_parents_sharing_rows(2), prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=owned_runs)], [], {}, {}, {}),
+    )
+    a, b = rows[7100], rows[7200]
+    a["max_batches_total"], b["max_batches_total"] = batches_a, batches_b
+    assert _datacore_need([a, b]) == expected
+
+
+def test_the_same_row_selected_twice_counts_once(monkeypatch) -> None:
+    rows = _invention_overview(
+        monkeypatch, blueprint_rows=_parents_sharing_rows(1), prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=1)], [], {}, {}, {}),
+    )
+    parent = rows[7100]
+    assert _datacore_need([parent, parent]) == _datacore_need([parent])
+
+
+def test_a_null_job_status_counts_as_busy(session_provider) -> None:
+    from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
+
+    session = session_provider.app_session()
+    try:
+        for job_id, item_id, status in ((1, 501, "active"), (2, 502, None), (3, 503, "delivered")):
+            session.add(CorporationIndustryJobsModel(
+                corporation_id=1, job_id=job_id, blueprint_item_id=item_id, status=status,
+            ))
+        session.commit()
+    finally:
+        session.close()
+    service = object.__new__(IndustryService)
+    service._sessions = session_provider  # type: ignore[attr-defined]
+    assert service._active_job_blueprint_item_ids() == {501, 502}

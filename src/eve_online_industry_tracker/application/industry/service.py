@@ -5961,15 +5961,17 @@ class IndustryService:
 
     def _active_job_blueprint_item_ids(self) -> set[int]:
         """The blueprint item_ids installed in active (not delivered,
-        cancelled or reverted) character and corporation industry jobs. No
-        error handler: an empty set would plan with busy BPCs' runs."""
+        cancelled or reverted) character and corporation industry jobs; a
+        NULL status counts as active, as in the daily planner's job read
+        (NOT IN alone drops NULL rows). No error handler: an empty set would
+        plan with busy BPCs' runs."""
         session: Any = self._sessions.app_session()
         try:
             out: set[int] = set()
             for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
                 for (item_id,) in (
                     session.query(model.blueprint_item_id)
-                    .filter(model.status.notin_(self._TERMINAL_JOB_STATUSES))
+                    .filter(model.status.notin_(self._TERMINAL_JOB_STATUSES) | model.status.is_(None))
                     .filter(model.blueprint_item_id.isnot(None))
                     .all()
                 ):
@@ -7809,6 +7811,8 @@ class IndustryService:
             "invented_blueprint_type_id": int(blueprint_type_id),
             "invented_blueprint_name": blueprint_display_name,
             "invented_runs": invented_runs,
+            # The whole attempts batch 1 buys for it (fix round 3 netting).
+            "whole_attempts": int(invention_costs.get("whole_attempts") or 0),
             "runs_per_invented_blueprint": runs_per_bpc,
             "whole_attempts_per_blueprint": int(attempts_per_bpc),
             "per_attempt_requirements": self._invention_whole_attempt_requirements(invention_job, 1, decryptor=decryptor),
@@ -9040,6 +9044,10 @@ class IndustryService:
                     "batch_one_invented_blueprints": (
                         int(math.ceil(missing_top_level_copy_runs / runs_per_bpc)) if batch_one_invents else 0
                     ),
+                    # The whole attempts batch 1's own invention buys (fix round 3).
+                    "batch_one_whole_attempts": (
+                        int(inv_costs.get("whole_attempts") or 0) if requires_invention_chain else 0
+                    ),
                     "per_attempt_materials": self._overview_keyed_entries(per_attempt_lines, compactor=lambda e: e),
                     # Install fees per attempt and per source-copy run (D4):
                     # the planner's invent / copy actions when batch 1 does
@@ -9368,12 +9376,20 @@ class IndustryService:
                 if int(t) > 0 and int(t) != int(blueprint_type_id)
                 and float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) < float(r or 0)
             }
+            owned_runs_before = {
+                t: max(0, int(math.floor(float(copy_runs_before_batch_one.get(t, 0) or 0) + 1e-9)))
+                for t in used_nested_runs
+            }
+            if owned_target_copy_runs_used > 0:
+                # Fix round 3: the row's own top-level BPC runs too, so a
+                # top-level user of a BPC another row nests counts as well.
+                used_nested_runs[int(blueprint_type_id)] = int(owned_target_copy_runs_used)
+                owned_runs_before[int(blueprint_type_id)] = max(0, int(available_target_copy_runs))
             row_out["manufacturing_job"]["nested_blueprint_runs_used"] = {
                 str(t): used for t, used in sorted(used_nested_runs.items()) if used > 0
             }
             row_out["manufacturing_job"]["nested_blueprint_runs_owned"] = {
-                str(t): max(0, int(math.floor(float(copy_runs_before_batch_one.get(t, 0) or 0) + 1e-9)))
-                for t in sorted(used_nested_runs) if used_nested_runs[t] > 0
+                str(t): owned_runs_before[t] for t in sorted(used_nested_runs) if used_nested_runs[t] > 0
             }
             row_out["manufacturing_job"]["nested_blueprint_runs_left"] = {
                 str(t): max(0, int(math.floor(float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) + 1e-9)))

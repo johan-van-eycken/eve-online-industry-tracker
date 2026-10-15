@@ -10,6 +10,7 @@ from streamlit_ui.shopping_list import aggregate_shopping_list, aggregate_shoppi
 from eve_online_industry_tracker.application.industry.shopping_list import (
     OLDER_OVERVIEW_REASON,
     rows_built_by_an_older_version,
+    LATER_BATCH_PLAN_VERSION,
 )
 
 
@@ -24,7 +25,7 @@ def _make_row(
         "type_name": type_name,
         "max_batches_total": max_batches,
         # A current overview row (see the fix round 2 tests for older ones).
-        "manufacturing_job": {"procurement_materials": materials, "later_batch_plan_version": 1},
+        "manufacturing_job": {"procurement_materials": materials, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION},
     }
 
 
@@ -247,7 +248,7 @@ def test_invention_datacore_line_follows_the_same_rule() -> None:
         "manufacturing_job": {
             "procurement_materials": {},
             "invention_procurement_materials": {"204": _owned_line(4, 3, type_id=204, type_name="Datacore")},
-            "later_batch_plan_version": 1,
+            "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
         },
     }
     assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
@@ -296,7 +297,7 @@ def test_lines_with_a_split_log_no_warning(caplog) -> None:
 
 
 def _invention_row(batches: int, *, batch_one: dict | None, extra: dict | None) -> dict:
-    mj: dict = {"procurement_materials": {}, "later_batch_plan_version": 1}
+    mj: dict = {"procurement_materials": {}, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION}
     if batch_one is not None:
         mj["invention_procurement_materials"] = {"204": batch_one}
     if extra is not None:
@@ -836,9 +837,9 @@ def test_the_buy_list_keys_cover_every_line_the_list_reads() -> None:
     plan["job_segments"] = []
     base = {key: {str(200 + i): line(200 + i)} for i, key in enumerate(sl.ROW_BUY_LIST_KEYS)}
     for mj in (
-        {**base, "later_batch_plan_version": 1},
+        {**base, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION},
         {
-            **base, "later_batch_plan_version": 1,
+            **base, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
             sl.BPC_PLAN_KEY: {
                 "batch_runs": 10, "runs_per_invented_blueprint": 10, "whole_attempts_per_blueprint": 1,
                 "owned_blueprint_runs": 0, "batch_one_invented_blueprints": 1,
@@ -877,3 +878,13 @@ def test_a_shared_nested_bpc_shortfall_without_an_invention_model_is_named() -> 
 def test_the_tab_warns_about_a_shared_nested_bpc_shortfall_it_cannot_size(monkeypatch) -> None:
     out = _render_tab_output(monkeypatch, [_sharing_row(1, "Item A", 2, 3), _sharing_row(2, "Item B", 2, 3)])
     assert any("Item A" in str(w) and "Item B" in str(w) and "short" in str(w) for w in out["warning"])
+
+
+def test_a_row_from_before_this_plan_version_is_refused() -> None:
+    # Fix round 3: the shared-BPC netting needs keys a version-1 row lacks.
+    row = _make_row(1001, "Item Old", 2, {"34": _owned_line(10, 0)})
+    row["manufacturing_job"]["later_batch_plan_version"] = LATER_BATCH_PLAN_VERSION - 1
+    row["manufacturing_job"]["blueprint_source_kind"] = "owned_blueprint_copy"
+    assert rows_built_by_an_older_version([row]) == {"Item Old": OLDER_OVERVIEW_REASON}
+    assert aggregate_shopping_list([row]) == []
+    assert LATER_BATCH_PLAN_VERSION >= 2

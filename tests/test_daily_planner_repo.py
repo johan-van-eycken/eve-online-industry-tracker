@@ -988,3 +988,18 @@ def test_the_copy_flag_of_busy_blueprints_comes_from_the_asset_history(app_sessi
     app_session.commit()
     flags = _service(session_provider)._blueprint_copy_flags({501, 502, 503, 504})
     assert flags == {501: False, 502: True}
+
+
+def test_a_job_with_a_null_status_holds_its_slot_and_blueprint(session_provider):
+    """Fix round 3, item 3: NOT IN drops NULL rows; a NULL status is active."""
+    from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
+
+    session = session_provider.app_session()
+    try:
+        session.add(CorporationIndustryJobsModel(corporation_id=1, job_id=11, blueprint_item_id=601, status=None))
+        session.add(CorporationIndustryJobsModel(corporation_id=1, job_id=12, blueprint_item_id=602, status="delivered"))
+        session.commit()
+    finally:
+        session.close()
+    jobs = _service(session_provider)._get_industry_jobs()
+    assert sorted(int(j.blueprint_item_id) for j in jobs) == [601]
