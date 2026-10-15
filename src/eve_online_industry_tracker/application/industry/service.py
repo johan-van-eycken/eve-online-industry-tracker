@@ -10,6 +10,7 @@ import threading
 import time
 import dataclasses
 from dataclasses import dataclass
+from collections.abc import Collection
 from typing import Any, Callable, cast
 import uuid
 
@@ -108,6 +109,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     select_best_decryptor,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
+from eve_online_industry_tracker.domain import rig_groups as _rig_groups
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
@@ -494,9 +496,19 @@ class IndustryService:
     })
 
     @classmethod
-    def _facility_can_manufacture_group(cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None) -> bool:
-        """Return True if the industry profile's facility can manufacture items of the given manufacturing group."""
-        if manufacturing_group is None or manufacturing_group not in cls._CAPITAL_MANUFACTURING_GROUPS:
+    def _facility_can_manufacture_group(
+        cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None, group_id: Any = None,
+    ) -> bool:
+        """Return True if the industry profile's facility can manufacture items of the given manufacturing group.
+
+        `group_id`: the product's SDE group; a capital hull outside the Capital
+        Ships rig group (Titan, Supercarrier, Freighter, Jump Freighter,
+        domain.rig_groups.CAPITAL_FACILITY_GROUP_IDS) is capital too."""
+        try:
+            capital_hull = int(group_id or 0) in _rig_groups.CAPITAL_FACILITY_GROUP_IDS
+        except (TypeError, ValueError):
+            capital_hull = False
+        if not capital_hull and (manufacturing_group is None or manufacturing_group not in cls._CAPITAL_MANUFACTURING_GROUPS):
             return True
         if profile_payload is None:
             return True  # No profile constraint — assume capable.
@@ -556,7 +568,7 @@ class IndustryService:
                 continue
             if industry_profile_payload is not None and not cls._facility_can_manufacture_group(
                 manufacturing_group=row.get("manufacturing_group"),
-                profile_payload=industry_profile_payload,
+                profile_payload=industry_profile_payload, group_id=row.get("group_id"),
             ):
                 continue
             if positive_profit_only and float(row.get("profit_amount") or 0.0) <= 0.0:
@@ -3464,89 +3476,37 @@ class IndustryService:
                 logger.warning("Job install fees unknown: %s", reason)
         return JobSurchargeRates(facility_tax=facility_tax, scc=scc, research_scc=research_scc, unknown_reason=reason)
 
-    _manufacturing_group_cache: dict[tuple[int, int, int], str | None] = {}
+    # (type_id, group, category) of products already logged as unclassifiable.
+    _unclassified_rig_group_warned: set[tuple[Any, ...]] = set()
 
     @staticmethod
     def _infer_manufacturing_group(product_entry: dict[str, Any]) -> str | None:
-        group_id = int(product_entry.get("group_id") or 0)
-        category_id = int(product_entry.get("category_id") or 0)
-        meta_group_id = int(product_entry.get("meta_group_id") or product_entry.get("type_meta_group_id") or 0)
-        cache_key = (group_id, category_id, meta_group_id)
-        cached = IndustryService._manufacturing_group_cache.get(cache_key)
-        if cached is not None:
-            return cached if cached != "" else None
-
-        result = IndustryService._infer_manufacturing_group_uncached(product_entry)
-        IndustryService._manufacturing_group_cache[cache_key] = result if result is not None else ""
-        return result
+        """The product's manufacturing group label (domain.rig_groups.primary_group):
+        its most specific engineering-rig group by SDE category/group, used for
+        the facility gate and shown on the row. Rig coverage itself is
+        _manufacturing_rig_groups (a product can be in several groups)."""
+        return _rig_groups.primary_group(product_entry)
 
     @staticmethod
-    def _infer_manufacturing_group_uncached(product_entry: dict[str, Any]) -> str | None:
-        group_name = str(product_entry.get("group_name") or "").lower()
-        category_name = str(product_entry.get("category_name") or "").lower()
-        meta_group_name = str(product_entry.get("meta_group_name") or "").lower()
-
-        if "structure" in category_name or "structure" in group_name:
-            return "Structures"
-        if "drone" in category_name or "drone" in group_name:
-            return "Drones"
-        if any(token in group_name for token in ["ammo", "charge", "crystal", "missile", "bomb"]) or "charge" in category_name:
-            return "Ammo & Charges"
-        if "component" in group_name:
-            if "capital" in group_name:
-                if "advanced" in group_name or meta_group_name == "tech ii":
-                    return "Advanced Capital Components"
-                return "Capital Components"
-            if "advanced" in group_name or meta_group_name == "tech ii":
-                return "Advanced Components"
-            return "Advanced Components"
-
-        ship_tokens = [
-            "frigate",
-            "destroyer",
-            "cruiser",
-            "battlecruiser",
-            "battleship",
-            "industrial",
-            "shuttle",
-            "freighter",
-            "carrier",
-            "dreadnought",
-            "capital",
-            "jump freighter",
-            "titan",
-            "supercarrier",
-        ]
-        if category_name == "ship" or any(token in group_name for token in ship_tokens):
-            advanced = meta_group_name in {"tech ii", "tech iii"} or any(
-                token in group_name
-                for token in [
-                    "assault",
-                    "command",
-                    "interdictor",
-                    "interceptor",
-                    "logistics",
-                    "marauder",
-                    "recon",
-                    "strategic",
-                    "transport",
-                    "covert",
-                    "black ops",
-                    "expedition",
-                    "exhumer",
-                ]
+    def _manufacturing_rig_groups(product_entry: Any) -> frozenset[str]:
+        """Every engineering-rig group that covers the product, EVE's rule
+        (domain.rig_groups: the industry target filters by SDE category and
+        group). A product whose entry has too little to classify gets no
+        group (only "All" rigs apply, an over-buy rather than an under-buy)
+        and a WARNING, once per product."""
+        groups = _rig_groups.rig_groups_for_entry(product_entry)
+        if groups is not None:
+            return groups
+        entry = product_entry if isinstance(product_entry, dict) else {}
+        key = (entry.get("type_id"), entry.get("group_id"), entry.get("group_name"),
+               entry.get("category_id"), entry.get("category_name"))
+        if key not in IndustryService._unclassified_rig_group_warned:
+            IndustryService._unclassified_rig_group_warned.add(key)
+            logger.warning(
+                "No rig group for type %s (%s): its SDE group/category is unknown; only \"All\" rigs apply",
+                entry.get("type_id"), entry.get("type_name") or "unnamed",
             )
-            if any(token in group_name for token in ["freighter", "carrier", "dreadnought", "capital", "jump freighter", "titan", "supercarrier"]):
-                return "Capital Ships"
-            if any(token in group_name for token in ["battleship", "battlecruiser", "orca"]):
-                return "Advanced Large Ships" if advanced else "Basic Large Ships"
-            if any(token in group_name for token in ["cruiser", "industrial", "barge", "hauler"]):
-                return "Advanced Medium Ships" if advanced else "Basic Medium Ships"
-            return "Advanced Small Ships" if advanced else "Basic Small Ships"
-
-        if category_name in {"module", "subsystem"} or group_name:
-            return "Modules"
-        return None
+        return frozenset()
 
     @classmethod
     def _profile_rig_reduction(
@@ -3555,11 +3515,22 @@ class IndustryService:
         profile_payload: dict[str, Any] | None,
         activity: str,
         metric: str,
-        manufacturing_group: str | None = None,
+        manufacturing_group: str | Collection[str] | None = None,
     ) -> float:
+        """Combined rig reduction for one activity and metric.
+
+        `manufacturing_group`: the rig groups that cover the product
+        (_manufacturing_rig_groups), or one group label. A manufacturing rig
+        effect applies when its group is "All" or one of them. None applies
+        every rig effect (no product given)."""
         if not isinstance(profile_payload, dict):
             return 0.0
         valid_activities = set(cls._ACTIVITY_EFFECT_ALIASES.get(activity, (activity,)))
+        covered_groups: frozenset[str] | None = (
+            None if manufacturing_group is None
+            else frozenset({manufacturing_group}) if isinstance(manufacturing_group, str)
+            else frozenset(manufacturing_group)
+        )
         reductions: list[float] = []
         for rig in profile_payload.get("structure_rigs") or []:
             if not isinstance(rig, dict):
@@ -3572,7 +3543,7 @@ class IndustryService:
                 if str(effect.get("activity") or "") not in valid_activities:
                     continue
                 effect_group = str(effect.get("group") or "All")
-                if activity == "manufacturing" and manufacturing_group is not None and effect_group not in {"All", manufacturing_group}:
+                if activity == "manufacturing" and covered_groups is not None and effect_group != "All" and effect_group not in covered_groups:
                     continue
                 if activity != "manufacturing" and effect_group not in {"All", ""}:
                     continue
@@ -4570,7 +4541,7 @@ class IndustryService:
             for skill in (job.get("skill_entries") or [])
             if isinstance(skill, dict)
         ]
-        manufacturing_group = self._infer_manufacturing_group(selected_product) if activity == "manufacturing" else None
+        manufacturing_group = self._manufacturing_rig_groups(selected_product) if activity == "manufacturing" else None
 
         # The plan's jobs (see _BatchRunLayout), like the top-level row's
         # manufacturing_job.job_segments: one per owned BPC (D3), then the
@@ -6819,7 +6790,7 @@ class IndustryService:
         selected_industry_profile: dict[str, Any] | None,
         selected_character_modifiers: dict[str, Any] | None,
         character_skill_levels_by_name: dict[str, int],
-        manufacturing_group: str | None = None,
+        manufacturing_group: str | Collection[str] | None = None,
         required_skill_entries: list[dict[str, Any]] | None = None,
         blueprint_material_efficiency: int = 0,
         blueprint_time_efficiency: int = 0,
@@ -6955,7 +6926,7 @@ class IndustryService:
         *,
         manufacturing_job: dict[str, Any],
         job_segments: list[dict[str, Any]],
-        manufacturing_group: str | None,
+        manufacturing_group: str | Collection[str] | None,
         required_skill_entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Size one batch's manufacturing jobs, each at its own ME/TE, with one
@@ -7038,7 +7009,7 @@ class IndustryService:
         base_time_seconds: int,
         runs: int,
         process_value: float | None,
-        manufacturing_group: str | None = None,
+        manufacturing_group: str | Collection[str] | None = None,
         required_skill_entries: list[dict[str, Any]] | None = None,
         blueprint_material_efficiency: int = 0,
         blueprint_time_efficiency: int = 0,
@@ -7973,7 +7944,7 @@ class IndustryService:
         manufacturing_job: dict[str, Any],
         blueprint_type_id: int,
         job_segments: list[dict[str, Any]],
-        manufacturing_group: str | None,
+        manufacturing_group: str | Collection[str] | None,
         required_skill_entries: list[dict[str, Any]],
         own_invention_source: str | None,
         invention_job: dict[str, Any],
@@ -8312,7 +8283,7 @@ class IndustryService:
         )
         fee = self._plan_activity_costs(
             ctx, activity="manufacturing", base_time_seconds=base_time, runs=1, process_value=process_value,
-            manufacturing_group=self._infer_manufacturing_group(product),
+            manufacturing_group=self._manufacturing_rig_groups(product),
         )
         total = fee.get("total_job_cost")
         return total, (None if total is not None else (fee.get("fee_unknown_reason") or "the component fee could not be priced"))
@@ -8748,6 +8719,7 @@ class IndustryService:
 
         # Manufacturing costs via unified calculator (Step 2)
         manufacturing_group = self._infer_manufacturing_group(compact_product)
+        rig_groups = self._manufacturing_rig_groups(compact_product)
         # Where each run comes from (see _BatchRunLayout): one job per owned
         # BPC (D3), then the next source, one job per BPC when invented.
         batch_run_layout = self._top_level_batch_run_layout(
@@ -8760,7 +8732,7 @@ class IndustryService:
         job_segments = batch_run_layout.segments(0, effective_runs)
         sized_batch = self._size_manufacturing_job_segments(
             ctx, manufacturing_job=manufacturing_job, job_segments=job_segments,
-            manufacturing_group=manufacturing_group, required_skill_entries=manufacturing_skill_entry_list,
+            manufacturing_group=rig_groups, required_skill_entries=manufacturing_skill_entry_list,
         )
         mfg_costs = sized_batch["costs"]
         # Row-level reductions: runs-weighted over the jobs when they differ
@@ -9075,7 +9047,7 @@ class IndustryService:
                     nested_copy_runs_spent=nested_copy_runs_spent,
                     plan_for=lambda segments: self._plan_extra_batch(
                         ctx, manufacturing_job=manufacturing_job, blueprint_type_id=blueprint_type_id,
-                        job_segments=segments, manufacturing_group=manufacturing_group,
+                        job_segments=segments, manufacturing_group=rig_groups,
                         required_skill_entries=manufacturing_skill_entry_list,
                         # The row's own invention for that batch alone (the
                         # shopping list's list without an invention_bpc_plan).

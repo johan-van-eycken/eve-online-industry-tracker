@@ -4,41 +4,21 @@
 The one place the daily planner reaches into IndustryService's private
 statics. A sub-component is built in its parent's structure (ruling F-Q2),
 so its inputs must be reduced exactly as the producer reduces the parent's:
-the producer's own combination, profile readers and group inference are
-reused here rather than re-implemented. The producer is not modified.
+the producer's own combination and profile readers are reused here rather
+than re-implemented, and rig coverage is the classification the producer
+uses (domain.rig_groups: EVE's industry target filters by SDE category and
+group).
 
-Where the producer would over-apply a rig bonus to a sub-component, this
-module is stricter. When unsure, no rig bonus is applied: an over-buy is
-recoverable, an under-buy stalls the job.
+Where the producer would over-apply a rig bonus to a sub-component (its
+aggregate structure_rig_material_bonus fallback), this module is stricter.
+When the component cannot be classified, only "All" rigs apply: an over-buy
+is recoverable, an under-buy stalls the job.
 """
 from __future__ import annotations
 
 from typing import Any
 
-def _category_is(*names: str) -> Any:
-    allowed = frozenset(names)
-    return lambda category: category in allowed
-
-
-# The category each inferred manufacturing group requires before it is
-# trusted. The producer infers most groups from name tokens ("missile",
-# "drone", "structure", "component", ship words) and files anything else
-# under "Modules", so e.g. "Missile Launcher Heavy" (a Module) reads as Ammo &
-# Charges and "Infrastructure Upgrades" as Structures. A group whose category
-# does not match is a guess and counts as unknown (only "All" rigs apply).
-_EXPECTED_CATEGORY: dict[str, Any] = {
-    "Ammo & Charges": _category_is("charge"),
-    "Drones": _category_is("drone"),
-    "Structures": lambda category: category.startswith("structure"),
-    "Advanced Components": _category_is("commodity"),
-    "Capital Components": _category_is("commodity"),
-    "Advanced Capital Components": _category_is("commodity"),
-    "Modules": _category_is("module", "subsystem"),
-    **{ship_group: _category_is("ship") for ship_group in (
-        "Basic Small Ships", "Advanced Small Ships", "Basic Medium Ships",
-        "Advanced Medium Ships", "Basic Large Ships", "Advanced Large Ships", "Capital Ships",
-    )},
-}
+from eve_online_industry_tracker.domain import rig_groups as _rig_groups
 
 FACILITY_KEYS = ("structure_material_reduction", "rig_material_reduction", "rig_applicability")
 
@@ -62,28 +42,10 @@ def structure_material_reduction(profile: Any) -> float:
     )
 
 
-def component_manufacturing_group(entry: Any) -> str | None:
-    """The producer's manufacturing group for a component, or None when unsure.
-
-    IndustryService._infer_manufacturing_group_uncached, minus its guesses:
-    an inferred group is accepted only when the component's category is the
-    one that group requires (_EXPECTED_CATEGORY). "Modules" is the
-    producer's catch-all for any group name it cannot classify (R.A.M.s,
-    Fuel Blocks, ...); the other groups come from name tokens that also hit
-    modules ("Missile Launcher Heavy", "Drone Damage Modules", "Smart Bomb")
-    or unrelated groups ("Infrastructure Upgrades"). A group not in the
-    table is not trusted either.
-    The uncached variant is used because the producer's cache is keyed by
-    group/category/meta-group ids, which a material entry may lack.
-    """
-    if not isinstance(entry, dict):
-        return None
-    group = _producer()._infer_manufacturing_group_uncached(entry)
-    category = str(entry.get("category_name") or "").strip().lower()
-    accepts = _EXPECTED_CATEGORY.get(group) if group is not None else None
-    if accepts is None or not accepts(category):
-        return None
-    return group
+def component_rig_groups(entry: Any) -> frozenset[str] | None:
+    """The rig groups that cover a component (IndustryService._manufacturing_rig_groups's
+    classification), or None when its entry lacks the SDE group/category to tell."""
+    return _rig_groups.rig_groups_for_entry(entry)
 
 
 def _material_rig_effects(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -104,10 +66,10 @@ def _material_rig_effects(profile: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _rig_material_reduction(profile: dict[str, Any], group: str) -> float:
+def _rig_material_reduction(profile: dict[str, Any], groups: frozenset[str]) -> float:
     return _producer()._profile_rig_reduction(
         profile_payload=profile, activity="manufacturing", metric="material",
-        manufacturing_group=group,
+        manufacturing_group=groups,
     )
 
 
@@ -119,8 +81,8 @@ def sub_job_facility_reductions(profile: Any, component_entry: Any) -> dict[str,
     the component (it carries the component's SDE group/category names).
 
     - structure: the producer's _profile_base_reduction.
-    - rig: the producer's _profile_rig_reduction for the component's group,
-      called only when a per-effect rig entry covers that group or "All".
+    - rig: the producer's _profile_rig_reduction for the component's rig
+      groups, called only when a per-effect rig entry covers one of them or "All".
       The producer's helper alone would over-apply: with no group it accepts
       every rig, and with no matching effect it falls back to the aggregate
       structure_rig_material_bonus, which names no group.
@@ -142,17 +104,17 @@ def sub_job_facility_reductions(profile: Any, component_entry: Any) -> dict[str,
         out["rig_applicability"] = "unknown" if aggregate > 0.0 else "no_rigs"
         return out
 
-    group = component_manufacturing_group(component_entry)
-    if group is None:
+    groups = component_rig_groups(component_entry)
+    if groups is None:
         out["rig_applicability"] = "unknown"
         if any(str(e.get("group") or "All") == "All" for e in effects):
-            # "" as the group makes the producer skip every group-specific effect.
-            out["rig_material_reduction"] = _rig_material_reduction(profile, "")
+            # No groups: the producer skips every group-specific effect.
+            out["rig_material_reduction"] = _rig_material_reduction(profile, frozenset())
         return out
-    if not any(str(e.get("group") or "All") in {"All", group} for e in effects):
+    if not any(str(e.get("group") or "All") in {"All", *groups} for e in effects):
         out["rig_applicability"] = "not_covered"
         return out
-    out["rig_material_reduction"] = _rig_material_reduction(profile, group)
+    out["rig_material_reduction"] = _rig_material_reduction(profile, groups)
     out["rig_applicability"] = "applies"
     return out
 

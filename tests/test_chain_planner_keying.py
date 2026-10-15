@@ -1064,7 +1064,7 @@ def _producer_batch(profile, entry, *, base=200, runs=100, me=10):
     """What IndustryService would compute for this job in this structure."""
     from eve_online_industry_tracker.application.industry.service import IndustryService as S
 
-    group = S._infer_manufacturing_group_uncached(entry)
+    group = S._manufacturing_rig_groups(entry)
     reduction = S._combine_reductions([
         me / 100.0,
         S._profile_base_reduction(profile_payload=profile, activity="manufacturing",
@@ -1175,20 +1175,26 @@ def test_an_all_group_rig_still_applies_when_the_component_group_is_unknown():
 
 # --- fix round 1 ---------------------------------------------------------------
 
-# SDE group 1136 "Fuel Block" (category 4 "Material"): the producer's inference
-# files any unclassified group under "Modules", which an Equipment rig covers.
+# SDE group 1136 "Fuel Block" (category 4 "Material"): EVE's Structures rig
+# target filter names it (Task 11); before, the producer filed it under "Modules".
 _FUEL_BLOCK_ENTRY = {"type_id": 54321, "type_name": "Widget", "quantity": 1000,
                      "group_id": 1136, "group_name": "Fuel Block",
                      "category_id": 4, "category_name": "Material"}
 
 
-def test_an_equipment_rig_does_not_reduce_an_unclassified_component(caplog):
+def test_an_equipment_rig_does_not_reduce_a_fuel_block():
     """A Fuel Block is not a module: an Equipment ("Modules") rig is not
     applied, only the 1% structure bonus. 200 x 0.9 x 0.99 = 178.2 -> 179."""
-    with caplog.at_level("WARNING"):
-        (sub,) = _structure_subs(_profile(rig_group="Modules"), entry=_FUEL_BLOCK_ENTRY)
+    (sub,) = _structure_subs(_profile(rig_group="Modules"), entry=_FUEL_BLOCK_ENTRY)
     assert sub.overview_row["sub_batch_materials"] == {34: 179}
-    assert sub.overview_row["rig_applicability"] == "unknown"
+    assert sub.overview_row["rig_applicability"] == "not_covered"
+
+
+def test_a_structure_rig_reduces_a_fuel_block():
+    (sub,) = _structure_subs(_profile(rig_group="Structures"), entry=_FUEL_BLOCK_ENTRY)
+    assert sub.overview_row["sub_batch_materials"] == {34: 174}
+    assert _producer_batch(_profile(rig_group="Structures"), _FUEL_BLOCK_ENTRY) == 174
+    assert sub.overview_row["rig_applicability"] == "applies"
 
 
 def test_an_equipment_rig_reduces_a_real_module():
@@ -1201,14 +1207,14 @@ def test_an_equipment_rig_reduces_a_real_module():
 
 
 def test_a_ship_token_in_a_non_ship_category_is_not_a_ship_group():
-    """The producer matches ship groups by token ("industrial"); outside the
-    Ship category that is a guess, so a ship rig is not applied."""
+    """Rig coverage follows the SDE category/group, not name tokens
+    ("industrial"): a Module is Equipment."""
     from eve_online_industry_tracker.application.daily_planner import facility_bonus
 
-    assert facility_bonus.component_manufacturing_group(
-        {"group_name": "Industrial Reconfiguration", "category_name": "Module"}) is None
-    assert facility_bonus.component_manufacturing_group(
-        {"group_name": "Frigate", "category_name": "Ship"}) == "Basic Small Ships"
+    assert facility_bonus.component_rig_groups(
+        {"group_name": "Industrial Reconfiguration", "category_name": "Module"}) == {"Modules"}
+    assert facility_bonus.component_rig_groups(
+        {"group_name": "Frigate", "category_name": "Ship"}) == {"Basic Small Ships", "All Ships"}
 
 
 def test_several_owned_bpos_use_the_lowest_known_me():
@@ -1240,8 +1246,8 @@ def test_the_adapter_matches_the_producer_statics():
         assert facility_bonus.structure_material_reduction(profile) == (
             S._profile_base_reduction(profile_payload=profile, activity="manufacturing",
                                       metric="material"))
-    assert facility_bonus.component_manufacturing_group(_COMPONENT_ENTRY) == (
-        S._infer_manufacturing_group_uncached(_COMPONENT_ENTRY))
+    assert facility_bonus.component_rig_groups(_COMPONENT_ENTRY) == (
+        S._manufacturing_rig_groups(_COMPONENT_ENTRY))
 
 
 # --- fix round 2 ---------------------------------------------------------------
@@ -1252,12 +1258,12 @@ def _entry(group_id, group_name, category_id, category_name):
 
 
 def test_an_ammo_rig_does_not_reduce_a_missile_launcher_module():
-    """SDE group 508 "Missile Launcher Heavy" is a Module (category 7); the
-    producer's "missile" token files it under Ammo & Charges."""
+    """SDE group 508 "Missile Launcher Heavy" is a Module (category 7), so
+    Equipment; the old "missile" name token filed it under Ammo & Charges."""
     (sub,) = _structure_subs(_profile(rig_group="Ammo & Charges"),
                              entry=_entry(508, "Missile Launcher Heavy", 7, "Module"))
     assert sub.overview_row["sub_batch_materials"] == {34: 179}
-    assert sub.overview_row["rig_applicability"] == "unknown"
+    assert sub.overview_row["rig_applicability"] == "not_covered"
 
 
 def test_a_drone_rig_reduces_a_real_drone():
@@ -1275,21 +1281,23 @@ def test_a_drone_rig_does_not_reduce_a_drone_upgrade_module():
     assert sub.overview_row["sub_batch_materials"] == {34: 179}
 
 
-def test_name_token_groups_need_their_category():
+def test_rig_groups_follow_the_category_not_name_tokens():
     from eve_online_industry_tracker.application.daily_planner import facility_bonus as fb
 
-    group = fb.component_manufacturing_group
-    assert group({"group_name": "Smart Bomb", "category_name": "Module"}) is None
-    assert group({"group_name": "Infrastructure Upgrades", "category_name": "Infrastructure Upgrades"}) is None
-    assert group({"group_name": "Citadel", "category_name": "Structure"}) == "Structures"
-    assert group({"group_name": "Missile Guidance Enhancer", "category_name": "Module"}) is None
-    assert group({"group_name": "Advanced Hybrid Charge", "category_name": "Charge"}) == "Ammo & Charges"
+    group = fb.component_rig_groups
+    assert group({"group_name": "Smart Bomb", "category_name": "Module"}) == {"Modules"}
+    # Category 39 is in EVE's Structures filter.
+    assert group({"group_name": "Sovereignty Hub Site Detection Upgrades",
+                  "category_name": "Infrastructure Upgrades"}) == {"Structures"}
+    assert group({"group_name": "Citadel", "category_name": "Structure"}) == {"Structures"}
+    assert group({"group_name": "Missile Guidance Enhancer", "category_name": "Module"}) == {"Modules"}
+    assert group({"group_name": "Advanced Hybrid Charge", "category_name": "Charge"}) == {"Ammo & Charges"}
     assert group({"group_name": "Construction Components", "category_name": "Commodity"}) == (
-        "Advanced Components")
+        {"Advanced Components"})
     # A real non-Commodity group whose name contains "component" (SDE group 1676).
-    assert group({"group_name": "Named Components", "category_name": "Material"}) is None
+    assert group({"group_name": "Named Components", "category_name": "Material"}) == frozenset()
     assert group({"group_name": "Capital Construction Components", "category_name": "Commodity"}) == (
-        "Capital Components")
+        {"Capital Components"})
 
 
 def test_an_unknown_me_bpo_beside_a_researched_one_means_buy(caplog):
