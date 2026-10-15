@@ -90,6 +90,15 @@ class BlueprintLedger:
                 labels.append(claim[1])
         return labels
 
+    def bpc_claim_labels(self, type_id: int) -> list[str]:
+        """Who holds this type's BPCs, first claim first (for reasons)."""
+        labels: list[str] = []
+        for key, _asset in self._bpcs.get(int(type_id)) or []:
+            claim = self._claims.get(key)
+            if claim is not None and claim[1] not in labels:
+                labels.append(claim[1])
+        return labels
+
     def free_bpcs(self, type_id: int) -> list[tuple[Hashable, int | None, int]]:
         """This type's unclaimed BPCs as (key, item_id or None, runs), most runs first."""
         out = [

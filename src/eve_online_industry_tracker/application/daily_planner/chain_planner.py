@@ -333,18 +333,18 @@ class ChainPlanner:
             t1_bp_type_id = invention_source.get(bp_type_id)
             if t1_bp_type_id is None or bp_type_id in busy_bpo_type_ids:
                 return
-            # Fix round 1, I2: copy only when the free T1 BPC runs left for
-            # this row (net of the T1 rows' own BPC segments and of the
-            # higher rows' invention) do not cover its attempts.
+            # Fix rounds 1-2, I2: copy only when the BPCs this row will get in
+            # phase C do not cover its attempts. Phase C claims WHOLE BPCs
+            # (best fit, _pick_bpcs), so the same picks are simulated here
+            # over the free BPCs no T1 row builds on and no higher row picked.
             need = _whole_attempts(decision.overview_row)
-            left = max(0, sum(
-                runs for _key, item, runs in ledger.free_bpcs(t1_bp_type_id)
-                if not _bpc_used_by_t1_rows(t1_bpc_use, t1_bp_type_id, item)
-            ) - promised_bpc_runs.get(t1_bp_type_id, 0))
-            if need is not None and left >= need:
-                promised_bpc_runs[t1_bp_type_id] = promised_bpc_runs.get(t1_bp_type_id, 0) + need
+            picks = _pick_bpcs([
+                e for e in ledger.free_bpcs(t1_bp_type_id)
+                if not _bpc_used_by_t1_rows(t1_bpc_use, t1_bp_type_id, e[1]) and e[0] not in promised_bpcs
+            ], need)
+            promised_bpcs.update(e[0] for e in picks)
+            if need is not None and sum(e[2] for e in picks) >= need:
                 return
-            promised_bpc_runs[t1_bp_type_id] = promised_bpc_runs.get(t1_bp_type_id, 0) + left
             free = ledger.free_bpos(t1_bp_type_id)
             if free:
                 key, asset = free[0]
@@ -394,7 +394,7 @@ class ChainPlanner:
         # The T1 BPCs the T1 rows' own batches (and research-first variants)
         # build on: not counted as free for a T2 row's copy decision.
         t1_bpc_use: dict[int, set[int] | None] = {}
-        promised_bpc_runs: dict[int, int] = {}
+        promised_bpcs: set[Any] = set()
         for step in (_phase_a, _phase_b, _phase_b2, _phase_c):
             if step is _phase_b:
                 for decision in ordered:
@@ -421,6 +421,7 @@ class ChainPlanner:
                 product_to_blueprint=product_to_blueprint,
                 ledger=ledger, top_level_build_types=top_level_build_types,
                 stock=phase1_data.get("corp_material_stock") or {},
+                need_sink=bought_need,
             )
             requests_by_parent.append((int(decision.type_id), requests))
             kept_row = self._research_first_fallback_row(decision.overview_row)
@@ -433,8 +434,15 @@ class ChainPlanner:
                     stock=phase1_data.get("corp_material_stock") or {},
                 )
 
+        bought_need: dict[int, int] = {}
         for decision in build_decisions:
             _isolated(decision, _phase_d)
+        stock = phase1_data.get("corp_material_stock") or {}
+        for decision in build_decisions:
+            reasons = decision.overview_row.get("component_buy_reasons")
+            if isinstance(reasons, dict):
+                for type_id in [t for t in reasons if bought_need.get(t, 0) <= max(0, int(stock.get(t, 0)))]:
+                    del reasons[type_id]
 
         def _sub_decisions(fallen: set[int]) -> list[ItemDecision]:
             per_parent = [
@@ -893,6 +901,14 @@ class ChainPlanner:
         # invention activity (with its datacores) lives on that T1 blueprint.
         t1_bp_type_id = invention_source.get(bp_type_id)
         bpcs = self._claim_invention_bpcs(ledger, decision, t1_bp_type_id) if t1_bp_type_id is not None else []
+        if not copies and not bpcs and t1_bp_type_id is not None:
+            # Fix round 2: phase B planned no copy, yet no BPC was left in the
+            # end: a free unclaimed T1 BPO copies instead.
+            free = ledger.free_bpos(t1_bp_type_id)
+            if free:
+                key, asset = free[0]
+                ledger.claim(key, decision.type_id, f"copy for {decision.type_name} ({decision.type_id})")
+                copies = [(key, asset)]
         if t1_bp_type_id is not None:
             decision.overview_row["t1_blueprint_type_id"] = t1_bp_type_id
         else:
@@ -928,7 +944,7 @@ class ChainPlanner:
                 )
         elif t1_bp_type_id is not None and ledger.owns_bpos(t1_bp_type_id):
             # Owned and free of active jobs, but every one is claimed today.
-            holders = ", ".join(ledger.bpo_claim_labels(t1_bp_type_id))
+            holders = _holders(ledger.bpo_claim_labels(t1_bp_type_id))
             decision.pipeline_stage = "copying"
             self._skip_bpo_analysis(
                 decision,
@@ -936,6 +952,15 @@ class ChainPlanner:
                 "it is owned, so not a purchase",
             )
             self._mark_not_built(decision, f"T1 BPO ({t1_bp_type_id}) used by {holders} today: no copy in this plan")
+        elif t1_bp_type_id is not None and ledger.bpc_claim_labels(t1_bp_type_id):
+            # Owned T1 BPCs, all taken by other jobs today, and no BPO: not
+            # a purchase either (fix round 2).
+            holders = _holders(ledger.bpc_claim_labels(t1_bp_type_id))
+            self._skip_bpo_analysis(decision, f"the T1 BPCs ({t1_bp_type_id}) are used by {holders} today: owned")
+            self._mark_not_built(
+                decision,
+                f"T1 BPCs ({t1_bp_type_id}) used by {holders} today and no T1 BPO to copy: no invention in this plan",
+            )
         elif t1_bp_type_id is not None and t1_bp_type_id in busy_bpo_type_ids:
             decision.pipeline_stage = "copying"
             self._skip_bpo_analysis(
@@ -976,23 +1001,8 @@ class ChainPlanner:
         """Claim free T1 BPCs for this row's invention, most runs first, until
         their runs reach the producer's whole attempts (all of them when that
         is unknown), so a lower row can still use the rest."""
-        costs = orow.get_invention_costs(decision.overview_row) or {}
-        need = costs.get("whole_attempts")
-        need = int(need) if isinstance(need, (int, float)) and not isinstance(need, bool) and need > 0 else None
-        free = [e for e in ledger.free_bpcs(t1_bp_type_id) if e[2] > 0]
-        picked: list[tuple[Any, int | None, int]] = []
-        if need is None:
-            picked = free
-        else:
-            # Best fit (M7): the smallest BPC that covers what is still
-            # needed, else the largest, until the need is covered.
-            left = need
-            while left > 0 and free:
-                fits = [e for e in free if e[2] >= left]
-                pick = min(fits, key=lambda e: (e[2], str(e[0]))) if fits else free[0]
-                free.remove(pick)
-                picked.append(pick)
-                left -= pick[2]
+        need = _whole_attempts(decision.overview_row)
+        picked = _pick_bpcs(ledger.free_bpcs(t1_bp_type_id), need)
         label = f"invention for {decision.type_name} ({decision.type_id})"
         claimed = [e for e in picked if ledger.claim(e[0], decision.type_id, label)]
         return sorted(claimed, key=lambda e: (-e[2], str(e[0])))
@@ -1336,6 +1346,7 @@ class ChainPlanner:
         ledger: BlueprintLedger | None = None,
         top_level_build_types: set[int] | frozenset[int] = frozenset(),
         stock: dict[int, int] | None = None,
+        need_sink: dict[int, int] | None = None,
     ) -> list[dict[str, Any]]:
         """This batch's materials that the corp owns a BPO for, with the
         quantity the batch actually consumes. `row` is the parent row to
@@ -1414,19 +1425,22 @@ class ChainPlanner:
                 unclaimed = [a for _k, a in ledger.free_bpos(mat_blueprint_type_id)]
             else:
                 unclaimed = list(bpo_assets_by_type_id[mat_blueprint_type_id])
-            bought = int(quantity) > max(0, int((stock or {}).get(int(mat_type_id), 0)))
+            # Whether the plan buys it is judged on the need pooled across
+            # every parent (fix round 2, M8): plan_chain drops the reasons
+            # of the components the pooled corp stock covers.
             reasons = decision.overview_row.setdefault("component_buy_reasons", {})
+            if not unclaimed or int(mat_type_id) in top_level_build_types:
+                if need_sink is not None:
+                    need_sink[int(mat_type_id)] = need_sink.get(int(mat_type_id), 0) + int(quantity)
             if not unclaimed:
-                holders = ", ".join(ledger.bpo_claim_labels(mat_blueprint_type_id)) if ledger else "another job"
-                if bought:
-                    reasons.setdefault(int(mat_type_id), f"component {name} bought: its BPO is used by {holders} today")
+                holders = _holders(ledger.bpo_claim_labels(mat_blueprint_type_id) if ledger else [])
+                reasons.setdefault(int(mat_type_id), f"component {name} bought: its BPO is used by {holders} today")
                 continue
             if int(mat_type_id) in top_level_build_types:
-                if bought:
-                    reasons.setdefault(
-                        int(mat_type_id),
-                        f"component {name} bought: it is a top-level build row of this plan (one decision per type)",
-                    )
+                reasons.setdefault(
+                    int(mat_type_id),
+                    f"component {name} bought: it is a top-level build row of this plan (one decision per type)",
+                )
                 continue
             requests.append({
                 "type_id": mat_type_id,
@@ -1988,11 +2002,39 @@ class _NoMetaGroups:
 
 
 def _whole_attempts(row: dict[str, Any]) -> int | None:
-    """The producer's whole invention attempts for the row, or None."""
-    value = (orow.get_invention_costs(row) or {}).get("whole_attempts")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        return None
-    return int(value)
+    """The producer's whole invention attempts for the row: its parallel
+    lanes' total (lane_whole_attempts) when it published one, else
+    whole_attempts (the best inventor's on an older row); None unknown."""
+    costs = orow.get_invention_costs(row) or {}
+    for key in ("lane_whole_attempts", "whole_attempts"):
+        value = costs.get(key)
+        if not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return None
+
+
+def _pick_bpcs(free: list[tuple[Any, int | None, int]], need: int | None) -> list[tuple[Any, int | None, int]]:
+    """The whole BPCs an invention claims, best fit (M7): while attempts are
+    still needed, the smallest BPC that covers the rest, else the largest.
+    All of them when the need is unknown. One function for phase B's copy
+    decision and phase C's claim (fix round 2), so both pick the same."""
+    left_bpcs = sorted((e for e in free if e[2] > 0), key=lambda e: (-e[2], str(e[0])))
+    if need is None:
+        return left_bpcs
+    picked: list[tuple[Any, int | None, int]] = []
+    left = need
+    while left > 0 and left_bpcs:
+        fits = [e for e in left_bpcs if e[2] >= left]
+        pick = min(fits, key=lambda e: (e[2], str(e[0]))) if fits else left_bpcs[0]
+        left_bpcs.remove(pick)
+        picked.append(pick)
+        left -= pick[2]
+    return picked
+
+
+def _holders(labels: list[str]) -> str:
+    """The jobs holding a blueprint, for a "used by ..." reason; never empty."""
+    return ", ".join(labels) if labels else "another job"
 
 
 def _invention_lanes(row: dict[str, Any]) -> int:

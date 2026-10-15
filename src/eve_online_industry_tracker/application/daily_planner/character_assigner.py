@@ -1054,23 +1054,32 @@ def _component_buy_reasons(decision: ItemDecision, action: AssignedAction) -> No
 
 
 def _reword_unused_research_claims(decisions: list[ItemDecision], actions: list[AssignedAction], fell_back: set[int]) -> None:
-    """M10: a research claim whose research got no slot did not happen; its
-    row built from the BPO instead. Reasons and notes that name the
-    research claim (e.g. "used by TE research for Thing (12345) today")
-    name that manufacture instead."""
+    """M10: a research claim whose research got no slot did not happen.
+    When its row's fallback manufacture was emitted, reasons and notes that
+    name the research claim (e.g. "used by TE research for Thing (12345)
+    today") name that manufacture instead; when nothing was emitted (no
+    manufacturing slot either, fix round 2), they say the BPO was kept for
+    a research that got no slot."""
     for decision in decisions:
         if int(decision.type_id) not in fell_back or decision.is_sub_component:
             continue
         label = decision.overview_row.get("research_claim_label")
         if not isinstance(label, str) or not label:
             continue
-        built = f"manufacture of {decision.type_name} ({decision.type_id})"
+        built = any(a.action_type == "manufacture" and int(a.type_id) == int(decision.type_id) for a in actions)
+        if built:
+            old, new = label, f"manufacture of {decision.type_name} ({decision.type_id})"
+        else:
+            old, new = f"used by {label} today", f"kept for {label}, which got no free slot today"
+
+        def _reword(text: str | None) -> str | None:
+            return text.replace(old, new) if text and old in text else text
+
         for other in decisions:
-            if other is not decision and label in (other.decision_reason or ""):
-                other.decision_reason = other.decision_reason.replace(label, built)
+            if other is not decision:
+                other.decision_reason = _reword(other.decision_reason)
         for action in actions:
-            if action.notes and label in action.notes:
-                action.notes = action.notes.replace(label, built)
+            action.notes = _reword(action.notes)
 
 
 def _count(n: int, one: str, many: str) -> str:
