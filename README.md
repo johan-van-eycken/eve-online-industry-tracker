@@ -219,4 +219,4 @@ A character is already registered in the OAuth database. Safe to ignore on start
 ## Credits
 
 - **CCP Games**: EVE Online and all EVE-related materials, including the Static Data Export and the game data in `tests/fixtures/hoboleaks/`, are the intellectual property of CCP hf. and are used under the [EVE Online Developer License Agreement](https://developers.eveonline.com/license-agreement). EVE Online and the EVE logo are trademarks of CCP hf. This project is not affiliated with or endorsed by CCP hf.
-- **[Hoboleaks](https://sde.hoboleaks.space/)**: the source of the engineering-rig industry target filters and modifier sources (`industrytargetfilters.json`, `industrymodifiersources.json`) behind `domain/rig_groups.py`.
+- **[Hoboleaks](https://sde.hoboleaks.space/)**: the source of the rig filter data: the engineering- and reactor-rig industry target filters and modifier sources (`industrytargetfilters.json`, `industrymodifiersources.json`, extracted from the TQ client) behind `domain/rig_groups.py`, and the cross-check for every rig's effects and values read from the SDE.

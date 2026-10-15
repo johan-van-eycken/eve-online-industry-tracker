@@ -125,34 +125,8 @@ def test_a_titan_gets_only_the_xl_ship_rig():
         pytest.approx(0.02))
 
 
-_RAITARU, _AZBEL, _SOTIYO = {"structure_type_id": 35825}, {"structure_type_id": 35826}, {"structure_type_id": 35827}
-
-
-@pytest.mark.parametrize("group_id, group_name", [(513, "Freighter"), (902, "Jump Freighter"), (485, "Dreadnought")])
-def test_capital_hulls_stay_out_of_a_raitaru(group_id, group_name):
-    """The facility gate is not a rig group: a Freighter's rig group is Basic
-    Large Ships, but it is still built in an Azbel or Sotiyo only."""
-    S = _producer()
-    label = S._infer_manufacturing_group(_entry(group_id, group_name, 6, "Ship"))
-    can = S._facility_can_manufacture_group
-    assert not can(manufacturing_group=label, profile_payload=_RAITARU, group_id=group_id)
-    assert can(manufacturing_group=label, profile_payload=_AZBEL, group_id=group_id)
-    assert can(manufacturing_group=label, profile_payload=_SOTIYO, group_id=group_id)
-    # A Battleship is not capital.
-    assert can(manufacturing_group="Basic Large Ships", profile_payload=_RAITARU, group_id=27)
-
-
-@pytest.mark.parametrize("group_id, group_name", [(30, "Titan"), (659, "Supercarrier")])
-def test_supercapitals_are_built_in_a_sotiyo_only(group_id, group_name):
-    """Standup Supercapital Shipyard I (35877) fits only the Sotiyo (35827)."""
-    S = _producer()
-    label = S._infer_manufacturing_group(_entry(group_id, group_name, 6, "Ship"))
-    can = S._facility_can_manufacture_group
-    assert not can(manufacturing_group=label, profile_payload=_RAITARU, group_id=group_id)
-    assert not can(manufacturing_group=label, profile_payload=_AZBEL, group_id=group_id)
-    assert not can(manufacturing_group=label, profile_payload={"structure_type_id": 1, "structure_type_name": "Azbel"}, group_id=group_id)
-    assert can(manufacturing_group=label, profile_payload=_SOTIYO, group_id=group_id)
-    assert can(manufacturing_group=label, profile_payload={"structure_type_id": 1, "structure_type_name": "Sotiyo"}, group_id=group_id)
+# The facility gate (capital and supercapital hulls by the SDE's service-module
+# fitting data) is tested in tests/test_rig_values_and_security.py.
 
 
 @pytest.mark.parametrize("entry, expected", [
@@ -384,31 +358,28 @@ def test_every_filter_id_and_name_is_the_sdes():
 
 @_needs_sde
 def test_each_rig_effects_label_names_the_filter_of_the_attribute_it_modifies():
-    """The producer labels a rig effect from its name (rig_effects); EVE binds
-    the structure attribute the effect modifies to a target filter. They agree
-    for every manufacturing rig effect in the SDE."""
-    from eve_online_industry_tracker.infrastructure.sde.rig_effects import (
-        _RIG_GROUP_TOKEN_LABELS, _parse_rig_effect)
-
-    by_attribute = {}
-    for f in rg.RIG_TARGET_FILTERS:
-        by_attribute[f.material_attribute_id] = f.label
-        by_attribute[f.time_attribute_id] = f.label
+    """The producer labels a rig effect by the structure attribute it
+    modifies (rg.ATTRIBUTE_BINDINGS, read in rig_effects from the effect's
+    modifierInfo). Every manufacturing and reaction rig effect in the SDE
+    modifies a bound attribute whose SDE description names its targets."""
     checked = 0
     with _sde() as conn:
-        rows = conn.execute("SELECT name, modifierInfo FROM dogmaEffects WHERE name LIKE 'rig%Manufacture%'").fetchall()
+        rows = conn.execute(
+            "SELECT name, modifierInfo FROM dogmaEffects WHERE name LIKE 'rig%Manufacture%' "
+            "OR name LIKE 'rigReaction%'").fetchall()
         descriptions = {r[0]: r[1] or "" for r in conn.execute("SELECT id, description FROM dogmaAttributes")}
     for name, modifier_info in rows:
-        activity, token, metric = _parse_rig_effect(name)
-        if activity != "manufacturing" or metric not in ("material", "time"):
-            continue
-        label = _RIG_GROUP_TOKEN_LABELS.get(token)
         attribute_ids = {m["modifiedAttributeID"] for m in json.loads(modifier_info)}
-        assert {by_attribute.get(a) for a in attribute_ids} == {label}, name
-        assert all("manufacturing the following" in descriptions[a] or "all ships" in descriptions[a].lower()
-                   for a in attribute_ids), name
+        bindings = {rg.ATTRIBUTE_BINDINGS[a] for a in attribute_ids}
+        assert len(bindings) == 1, name
+        (binding,) = bindings
+        assert binding.activity == ("reaction" if name.startswith("rigReaction") else "manufacturing"), name
+        assert binding.metric == ("material" if ("Material" in name or "Mat" in name) else "time"), name
+        for a in attribute_ids:
+            text = descriptions[a].lower()
+            assert ("manufacturing the following" in text or "all ships" in text or "reaction" in text), name
         checked += 1
-    assert checked >= 30
+    assert checked >= 36
 
 
 @_needs_sde

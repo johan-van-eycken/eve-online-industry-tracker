@@ -7,7 +7,9 @@ so its inputs must be reduced exactly as the producer reduces the parent's:
 the producer's own combination and profile readers are reused here rather
 than re-implemented, and rig coverage is the classification the producer
 uses (domain.rig_groups: EVE's industry target filters by SDE category and
-group).
+group). The rig's security multiplier for the profile's band
+(domain.security_band) is applied inside the producer's
+_profile_rig_reduction, so the planner gets it with no code of its own.
 
 Where the producer would over-apply a rig bonus to a sub-component (the
 aggregate structure_rig_material_bonus of a profile with no per-effect rig

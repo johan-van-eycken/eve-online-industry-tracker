@@ -16,8 +16,10 @@ game data). tests/test_rig_groups.py diffs this table against the snapshot
 in tests/fixtures/hoboleaks/ and, with RIG_FILTERS_ONLINE=1, against the
 live files (the staleness check), and checks every id against the local SDE.
 
-Keys are the group labels the producer's rig effects carry
-(infrastructure/sde/rig_effects._RIG_GROUP_TOKEN_LABELS). A product can be
+Keys are the group labels the producer's rig effects carry: a rig effect
+gets the label of the structure attribute it modifies (ATTRIBUTE_BINDINGS,
+read by infrastructure/sde/rig_effects from each effect's SDE modifierInfo).
+The reactor rigs bind to the reaction filters 16-18 the same way. A product can be
 in more than one: every ship is also in "All Ships" (the XL ship rig), a
 T3 subsystem is in "Advanced Medium Ships" and "All Ships", and group 4902
 (Expedition Command Ship) is in both medium ship filters.
@@ -69,6 +71,48 @@ RIG_TARGET_FILTERS: tuple[RigTargetFilter, ...] = (
     _f("All Ships", 3, (6, 32), (), 2592, 2591),
 )
 
+# The reaction filters: a reactor rig applies to a reaction job by the
+# reaction product's group, the same way (filters 16-18).
+REACTION_TARGET_FILTERS: tuple[RigTargetFilter, ...] = (
+    _f("Hybrid Reactions", 16, (), (974,), 2716, 2715),
+    _f("Biochemical Reactions", 17, (), (712, 4096), 2720, 2719),
+    _f("Composite Reactions", 18, (), (428, 429, 4932), 2718, 2717),
+)
+
+# Structure attributes a rig effect can modify that no target filter
+# restricts: the science activities (SDE descriptions "... Invention",
+# "Material Efficiency Blueprint Research", ...). Activity names are the
+# rig effects' (research_me / research_te), metric as above.
+UNFILTERED_ATTRIBUTE_BINDINGS: dict[int, tuple[str, str]] = {
+    2563: ("invention", "cost"), 2564: ("invention", "time"),
+    2565: ("research_me", "cost"), 2566: ("research_me", "time"),
+    2567: ("research_te", "cost"), 2568: ("research_te", "time"),
+    2569: ("copying", "cost"), 2570: ("copying", "time"),
+}
+
+
+@dataclass(frozen=True)
+class AttributeBinding:
+    activity: str  # manufacturing / reaction / invention / copying / research_me / research_te
+    metric: str  # material / time / cost
+    label: str  # the rig group ("All" when no filter restricts it)
+    filter_id: int | None
+
+
+def _attribute_bindings() -> dict[int, AttributeBinding]:
+    out: dict[int, AttributeBinding] = {}
+    for activity, filters in (("manufacturing", RIG_TARGET_FILTERS), ("reaction", REACTION_TARGET_FILTERS)):
+        for f in filters:
+            out[f.material_attribute_id] = AttributeBinding(activity, "material", f.label, f.filter_id)
+            out[f.time_attribute_id] = AttributeBinding(activity, "time", f.label, f.filter_id)
+    for attribute_id, (activity, metric) in UNFILTERED_ATTRIBUTE_BINDINGS.items():
+        out[attribute_id] = AttributeBinding(activity, metric, "All", None)
+    return out
+
+
+# Structure attribute id -> what a rig effect that modifies it reduces.
+ATTRIBUTE_BINDINGS: dict[int, AttributeBinding] = _attribute_bindings()
+
 # SDE (English) names of every category the filters name or that holds a
 # group they name, and of every group they name with its category, for
 # entries that carry names but no ids.
@@ -100,6 +144,8 @@ GROUPS: dict[int, tuple[int, str]] = {
     873: (17, "Capital Construction Components"), 332: (17, "Tool"),
     334: (17, "Construction Components"), 716: (17, "Data Interfaces"),
     964: (17, "Hybrid Tech Components"), 913: (17, "Advanced Capital Construction Components"),
+    974: (4, "Hybrid Polymers"), 712: (4, "Biochemical Material"), 4096: (4, "Molecular-Forged Materials"),
+    428: (4, "Intermediate Materials"), 429: (4, "Composite"), 4932: (4, "Unrefined Mineral"),
 }
 
 _CATEGORY_ID_BY_NAME = {name.casefold(): cid for cid, name in CATEGORY_NAMES.items()}
@@ -108,6 +154,7 @@ _GROUP_ID_BY_NAME = {name.casefold(): gid for gid, (_, name) in GROUPS.items()}
 _CATEGORIES_WITH_GROUP_FILTERS = frozenset(category for category, _ in GROUPS.values())
 
 ALL_LABELS: frozenset[str] = frozenset(f.label for f in RIG_TARGET_FILTERS)
+REACTION_LABELS: frozenset[str] = frozenset(f.label for f in REACTION_TARGET_FILTERS)
 
 # Hulls built only in a capital-capable facility (Azbel / Sotiyo) that the
 # Capital Ships rig filter does not name: Titan 30 and Supercarrier 659 (only
@@ -177,16 +224,21 @@ def resolve_ids(entry: dict[str, Any]) -> tuple[int, int] | None:
     return group_id, category_id
 
 
-def rig_groups(group_id: int, category_id: int) -> frozenset[str]:
-    """The labels of every rig target filter that covers this group/category."""
+def rig_groups(group_id: int, category_id: int, activity: str = "manufacturing") -> frozenset[str]:
+    """The labels of every rig target filter that covers this group/category:
+    the engineering-rig filters for manufacturing, the reactor-rig filters
+    for a reaction, none for any other activity."""
+    filters = (RIG_TARGET_FILTERS if activity == "manufacturing"
+               else REACTION_TARGET_FILTERS if activity == "reaction" else ())
     return frozenset(
-        f.label for f in RIG_TARGET_FILTERS
+        f.label for f in filters
         if group_id in f.group_ids or category_id in f.category_ids
     )
 
 
-def rig_groups_for_entry(entry: Any) -> frozenset[str] | None:
-    """The rig groups covering a type entry; None when it cannot be classified.
+def rig_groups_for_entry(entry: Any, activity: str = "manufacturing") -> frozenset[str] | None:
+    """The rig groups covering a type entry for a manufacturing (default) or
+    reaction job; None when it cannot be classified.
 
     An empty set is an exact answer: no group-specific rig covers the item
     (e.g. a Mutaplasmid). None means the entry lacks the group/category ids
@@ -196,7 +248,7 @@ def rig_groups_for_entry(entry: Any) -> frozenset[str] | None:
     ids = resolve_ids(entry)
     if ids is None:
         return None
-    return rig_groups(*ids)
+    return rig_groups(*ids, activity=activity)
 
 
 def primary_group(entry: Any) -> str | None:

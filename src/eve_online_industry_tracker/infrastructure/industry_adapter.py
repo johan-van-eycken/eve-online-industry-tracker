@@ -8,6 +8,7 @@ from eve_online_industry_tracker.infrastructure.persistence import corporation_s
 from eve_online_industry_tracker.infrastructure.persistence import industry_profiles_repo
 from eve_online_industry_tracker.infrastructure.sde.locations import get_npc_stations, get_solar_systems
 from eve_online_industry_tracker.infrastructure.sde.rig_effects import get_rig_effects_for_type_ids
+from eve_online_industry_tracker.infrastructure.sde.structure_services import get_service_module_fits, get_type_group_id
 from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
 

@@ -53,8 +53,10 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
     get_cached_public_structures,
     get_npc_stations,
     get_rig_effects_for_type_ids,
+    get_service_module_fits,
     get_solar_systems,
     get_type_data,
+    get_type_group_id,
     industry_profile_create,
     industry_profile_delete,
     industry_profile_get_by_id,
@@ -110,6 +112,8 @@ from eve_online_industry_tracker.application.industry.invention_model import (
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
 from eve_online_industry_tracker.domain import rig_groups as _rig_groups
+from eve_online_industry_tracker.domain import security_band as _security_band
+from eve_online_industry_tracker.domain import industry_facility as _industry_facility
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
@@ -119,21 +123,6 @@ logger = logging.getLogger(__name__)
 logger.addFilter(QuietWarningsFilter())
 
 ProgressCallback = Callable[[float, str, dict[str, Any] | None], None]
-
-
-def _camel_to_words(s: str) -> str:
-    """Convert camelCase to space-separated words (e.g. 'rigLargeShip' → 'rig Large Ship')."""
-    out: list[str] = []
-    buf = ""
-    for ch in s:
-        if buf and ch.isupper() and (not buf[-1].isupper()):
-            out.append(buf)
-            buf = ch
-        else:
-            buf += ch
-    if buf:
-        out.append(buf)
-    return " ".join(out).strip()
 
 
 @dataclass(frozen=True)
@@ -297,37 +286,8 @@ class IndustryService:
     _SKILL_ID_ACCOUNTING = 16622
     _SKILL_ID_BROKER_RELATIONS = 3446
     _STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS = 24 * 3600
-    _STRUCTURE_RIGS_CACHE_VERSION = 3
-    _RIG_ATTR_TIME_REDUCTION = 2593
-    _RIG_ATTR_MATERIAL_REDUCTION = 2594
-    _RIG_ATTR_COST_REDUCTION = 2595
+    _STRUCTURE_RIGS_CACHE_VERSION = 4
 
-    _RIG_GROUP_TOKEN_LABELS: dict[str, str] = {
-        # Manufacturing
-        "Equipment": "Modules",
-        "Ammo": "Ammo & Charges",
-        "Drone": "Drones",
-        "Smallship": "Basic Small Ships",
-        "Mediumship": "Basic Medium Ships",
-        "Mediumships": "Basic Medium Ships",
-        "Largeship": "Basic Large Ships",
-        "AdvComponent": "Advanced Components",
-        "AdvSmship": "Advanced Small Ships",
-        "AdvMedShip": "Advanced Medium Ships",
-        "AdvLarShip": "Advanced Large Ships",
-        "BasCapComp": "Capital Components",
-        "CapShip": "Capital Ships",
-        "AdvCapComponent": "Advanced Capital Components",
-        "Structure": "Structures",
-        # Reactions
-        "ReactionBio": "Biochemical Reactions",
-        "ReactionComp": "Composite Reactions",
-        "ReactionHyb": "Hybrid Reactions",
-        # Some variants that may show up in SDE
-        "ThukkerAdvCapComp": "Advanced Capital Components",
-        "ThukkerBasCapComp": "Capital Components",
-        "AllShip": "All Ships",
-    }
     _INDUSTRY_CHARACTER_MODIFIER_SKILL_NAMES: tuple[str, ...] = (
         "Industry",
         "Advanced Industry",
@@ -361,7 +321,7 @@ class IndustryService:
     }
     _ACTIVITY_EFFECT_ALIASES: dict[str, tuple[str, ...]] = {
         "manufacturing": ("manufacturing",),
-        "reaction": ("manufacturing",),
+        "reaction": ("reaction",),
         "copying": ("copying",),
         "research_material": ("research_me", "research"),
         "research_time": ("research_te", "research"),
@@ -488,69 +448,73 @@ class IndustryService:
             return False
         return bool(skills.get("skill_requirements_met", False))
 
-    # Manufacturing groups that require a capital-capable facility (Azbel / Sotiyo).
-    _CAPITAL_MANUFACTURING_GROUPS: frozenset[str] = frozenset({
-        "Capital Ships",
-        "Capital Components",
-        "Advanced Capital Components",
-    })
+    # (reason) of facility gate refusals already logged.
+    _facility_gate_warned: set[str] = set()
+
+    @classmethod
+    def _facility_gate(
+        cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None, group_id: Any = None,
+    ) -> tuple[bool, str | None]:
+        """(allowed, reason) for manufacturing a product in the profile's facility.
+
+        Only capital and supercapital ships are gated: a capital hull (the
+        Capital Ships rig group, or domain.rig_groups.CAPITAL_FACILITY_GROUP_IDS:
+        Titan, Supercarrier, Freighter, Jump Freighter) needs Standup Capital
+        Shipyard I, a supercapital (SUPERCAPITAL_GROUP_IDS) Standup
+        Supercapital Shipyard I. Everything else, capital components
+        included, is built wherever the profile manufactures (an NPC station,
+        or any structure the Manufacturing Plant fits).
+
+        Whether the shipyard fits the structure, and may be onlined in the
+        system's band, comes from the SDE (domain.industry_facility, read into
+        the profile as structure_service_fits). An NPC station
+        (location_type "station" / facility_type "npc_station") has no
+        shipyard. With no profile there is no facility constraint. A profile
+        whose facility or band is unknown does not build capitals: reason
+        says why."""
+        try:
+            gid = int(group_id or 0)
+        except (TypeError, ValueError):
+            gid = 0
+        supercapital = gid in _rig_groups.SUPERCAPITAL_GROUP_IDS
+        capital = supercapital or gid in _rig_groups.CAPITAL_FACILITY_GROUP_IDS or manufacturing_group == "Capital Ships"
+        if not capital:
+            return True, None
+        if profile_payload is None:
+            return True, None  # No profile constraint.
+        facility_type = str(profile_payload.get("facility_type") or "").strip().lower()
+        location_type = str(profile_payload.get("location_type") or "").strip().lower()
+        if location_type == "station" or facility_type == "npc_station":
+            return False, None  # NPC stations have no capital shipyard.
+        service = _industry_facility.SUPERCAPITAL_SHIPYARD if supercapital else _industry_facility.CAPITAL_SHIPYARD
+        fits = profile_payload.get("structure_service_fits")
+        if not isinstance(fits, dict) or not isinstance(fits.get(service), dict):
+            structure = profile_payload.get("structure_type_id")
+            return False, (
+                f"facility unknown (structure type {structure}, no SDE service-module data): "
+                f"{'supercapital' if supercapital else 'capital'} ships are not planned there"
+                if structure else
+                f"facility unknown (the profile has no structure type): "
+                f"{'supercapital' if supercapital else 'capital'} ships are not planned there"
+            )
+        band, band_reason = _security_band.profile_security_band(profile_payload)
+        allowed, reason = _industry_facility.service_allowed(fits[service], band)
+        if reason is not None and band_reason is not None and band is None:
+            reason = f"{reason} ({band_reason})"
+        return allowed, reason
 
     @classmethod
     def _facility_can_manufacture_group(
         cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None, group_id: Any = None,
     ) -> bool:
-        """Return True if the industry profile's facility can manufacture items of the given manufacturing group.
-
-        `group_id`: the product's SDE group; a capital hull outside the Capital
-        Ships rig group (Titan, Supercarrier, Freighter, Jump Freighter,
-        domain.rig_groups.CAPITAL_FACILITY_GROUP_IDS) is capital too, and a
-        supercapital (domain.rig_groups.SUPERCAPITAL_GROUP_IDS) is Sotiyo-only."""
-        try:
-            capital_hull = int(group_id or 0) in _rig_groups.CAPITAL_FACILITY_GROUP_IDS
-            supercapital = int(group_id or 0) in _rig_groups.SUPERCAPITAL_GROUP_IDS
-        except (TypeError, ValueError):
-            capital_hull = supercapital = False
-        if not capital_hull and (manufacturing_group is None or manufacturing_group not in cls._CAPITAL_MANUFACTURING_GROUPS):
-            return True
-        if profile_payload is None:
-            return True  # No profile constraint — assume capable.
-        structure_type_id = profile_payload.get("structure_type_id")
-        facility_type = str(profile_payload.get("facility_type") or "").strip().lower()
-        location_type = str(profile_payload.get("location_type") or "").strip().lower()
-        # NPC stations cannot build capitals.
-        if location_type == "station" or facility_type == "npc_station":
-            return False
-        # Player structures: determine by structure size via type name or known type IDs.
-        if structure_type_id is not None:
-            structure_type_id_int = int(structure_type_id)
-            # Structures that cannot build capital ships.
-            # Includes: Raitaru (35825), Astrahus (35832), Fortizar (35833),
-            #           Keepstar (35834), Athanor (35835), Tatara (35836).
-            _NON_CAPITAL_STRUCTURES = {35825, 35832, 35833, 35834, 35835, 35836}
-            # Engineering complexes that can build capital ships: Azbel (35826), Sotiyo (35827).
-            _CAPITAL_ENGINEERING_COMPLEXES = {35826, 35827}
-            if structure_type_id_int in _NON_CAPITAL_STRUCTURES:
-                return False
-            if structure_type_id_int in _CAPITAL_ENGINEERING_COMPLEXES:
-                # Standup Supercapital Shipyard I (35877) fits only the Sotiyo.
-                return not supercapital or structure_type_id_int == 35827
-            # Fallback: infer from structure type name stored on profile.
-            structure_type_name = str(profile_payload.get("structure_type_name") or "").lower()
-            if not structure_type_name:
-                # Try bonuses payload for type name lookup.
-                bonuses = profile_payload.get("structure_type_bonuses") or {}
-                structure_type_name = str(bonuses.get("type_name") or "").lower()
-            # Non-capital structures by name (citadels, refineries, medium ECs).
-            if any(x in structure_type_name for x in ("raitaru", "athanor", "astra", "fortizar", "keepstar", "tatara")):
-                return False
-            # Only Azbel and Sotiyo (engineering complexes) can manufacture
-            # capitals, and only the Sotiyo supercapitals.
-            if supercapital and "azbel" in structure_type_name:
-                return False
-            if any(x in structure_type_name for x in ("azbel", "sotiyo")):
-                return True
-        # Unknown facility — conservatively allow.
-        return True
+        """_facility_gate's answer; a refusal for an unknown facility or band
+        logs a WARNING once per reason."""
+        allowed, reason = cls._facility_gate(
+            manufacturing_group=manufacturing_group, profile_payload=profile_payload, group_id=group_id)
+        if reason is not None and reason not in IndustryService._facility_gate_warned:
+            IndustryService._facility_gate_warned.add(reason)
+            logger.warning("Facility gate: %s", reason)
+        return allowed
 
     @classmethod
     def _filter_overview_rows_for_portfolio_candidates(
@@ -1481,10 +1445,15 @@ class IndustryService:
             profile_payload["system_cost_indices"] = system_payload.get("cost_indices") or []
             if isinstance(solar_system_payload, dict):
                 profile_payload["system_security_status"] = solar_system_payload.get("security_status")
+                profile_payload["system_region_id"] = solar_system_payload.get("region_id")
                 profile_payload["industry_system"] = {
                     **system_payload,
                     "security_status": solar_system_payload.get("security_status"),
+                    "region_id": solar_system_payload.get("region_id"),
                 }
+            band, _ = _security_band.profile_security_band(profile_payload)
+            if band is not None:
+                profile_payload["system_security_band"] = band
 
         if profile.facility_id is not None:
             try:
@@ -1498,6 +1467,13 @@ class IndustryService:
             except Exception:
                 structure_bonus_payload = {"type_id": int(profile.structure_type_id), "bonuses": {}}
             profile_payload["structure_type_bonuses"] = structure_bonus_payload.get("bonuses") or {}
+            try:
+                profile_payload["structure_service_fits"] = self._structure_service_fits(int(profile.structure_type_id))
+            except Exception:
+                logger.warning(
+                    "Facility gate: no SDE service-module data for structure type %s; capitals are not planned there",
+                    profile.structure_type_id, exc_info=True,
+                )
 
         rig_slot_type_ids = [
             profile.rig_slot0_type_id,
@@ -1531,12 +1507,28 @@ class IndustryService:
                         "material_reduction": rig_effect_payload.get("material_reduction"),
                         "time_reduction": rig_effect_payload.get("time_reduction"),
                         "cost_reduction": rig_effect_payload.get("cost_reduction"),
+                        "security_multipliers": rig_effect_payload.get("security_multipliers"),
                         "effects": rig_effect_payload.get("effects") or [],
                     }
                 )
             profile_payload["structure_rigs"] = structure_rigs
 
         return profile_payload
+
+    def _structure_service_fits(self, structure_type_id: int) -> dict[str, dict[str, Any]]:
+        """domain.industry_facility.structure_service_fits for one structure
+        type, from the SDE; cached per type."""
+        cache = self.__dict__.setdefault("_structure_service_fits_cache", {})
+        if structure_type_id in cache:
+            return cache[structure_type_id]
+        session: Any = self._sessions.sde_session()
+        module_ids = [t for ids in _industry_facility.SERVICE_MODULE_TYPE_IDS.values() for t in ids]
+        fits = _industry_facility.structure_service_fits(
+            structure_type_id, get_type_group_id(session, structure_type_id),
+            get_service_module_fits(session, module_ids),
+        )
+        cache[structure_type_id] = fits
+        return fits
 
     def _load_decryptor_options(self) -> tuple[DecryptorOption, ...]:
         """(NO_DECRYPTOR, every T2 invention decryptor in the SDE).
@@ -3494,17 +3486,18 @@ class IndustryService:
         return _rig_groups.primary_group(product_entry)
 
     @staticmethod
-    def _manufacturing_rig_groups(product_entry: Any) -> frozenset[str]:
-        """Every engineering-rig group that covers the product, EVE's rule
+    def _manufacturing_rig_groups(product_entry: Any, activity: str = "manufacturing") -> frozenset[str]:
+        """Every rig group that covers the product, EVE's rule
         (domain.rig_groups: the industry target filters by SDE category and
-        group). A product whose entry has too little to classify gets no
-        group (only "All" rigs apply, an over-buy rather than an under-buy)
-        and a WARNING, once per product."""
-        groups = _rig_groups.rig_groups_for_entry(product_entry)
+        group): the engineering-rig groups for manufacturing, the reactor-rig
+        groups for a reaction (activity="reaction"). A product whose entry
+        has too little to classify gets no group (only "All" rigs apply, an
+        over-buy rather than an under-buy) and a WARNING, once per product."""
+        groups = _rig_groups.rig_groups_for_entry(product_entry, activity=activity)
         if groups is not None:
             return groups
         entry = product_entry if isinstance(product_entry, dict) else {}
-        key = (entry.get("type_id"), entry.get("group_id"), entry.get("group_name"),
+        key = (activity, entry.get("type_id"), entry.get("group_id"), entry.get("group_name"),
                entry.get("category_id"), entry.get("category_name"))
         if key not in IndustryService._unclassified_rig_group_warned:
             IndustryService._unclassified_rig_group_warned.add(key)
@@ -3526,11 +3519,19 @@ class IndustryService:
         """Combined rig reduction for one activity and metric.
 
         `manufacturing_group`: the rig groups that cover the product
-        (_manufacturing_rig_groups), or one group label. A manufacturing rig
-        effect applies when its group is "All" or one of them. None applies
-        every rig effect (no product given). The aggregate
-        structure_rig_*_bonus is read only for a profile with no per-effect
-        rig entries at all."""
+        (_manufacturing_rig_groups, with activity="reaction" for a reaction),
+        or one group label. A manufacturing or reaction rig effect applies
+        when its group is "All" or one of them. None applies every rig
+        effect (no product given). Other activities apply "All" effects only.
+
+        Each effect marked security_scaled is multiplied by its rig's
+        multiplier for the profile's security band (domain.security_band);
+        with the band unknown, by the smallest multiplier the rig can have,
+        and a WARNING. The one reduction path of the producer and the daily
+        planner (facility_bonus).
+
+        The aggregate structure_rig_*_bonus is read only for a profile with
+        no per-effect rig entries at all."""
         if not isinstance(profile_payload, dict):
             return 0.0
         valid_activities = set(cls._ACTIVITY_EFFECT_ALIASES.get(activity, (activity,)))
@@ -3539,10 +3540,14 @@ class IndustryService:
             else frozenset({manufacturing_group}) if isinstance(manufacturing_group, str)
             else frozenset(manufacturing_group)
         )
+        band: str | None = None
+        band_reason: str | None = None
+        band_read = False
         reductions: list[float] = []
         for rig in profile_payload.get("structure_rigs") or []:
             if not isinstance(rig, dict):
                 continue
+            multiplier: float | None = None
             for effect in rig.get("effects") or []:
                 if not isinstance(effect, dict):
                     continue
@@ -3551,11 +3556,23 @@ class IndustryService:
                 if str(effect.get("activity") or "") not in valid_activities:
                     continue
                 effect_group = str(effect.get("group") or "All")
-                if activity == "manufacturing" and covered_groups is not None and effect_group != "All" and effect_group not in covered_groups:
+                if activity in {"manufacturing", "reaction"}:
+                    if covered_groups is not None and effect_group != "All" and effect_group not in covered_groups:
+                        continue
+                elif effect_group not in {"All", ""}:
                     continue
-                if activity != "manufacturing" and effect_group not in {"All", ""}:
-                    continue
-                reductions.append(effect.get("value"))
+                value = cls._normalize_fraction(effect.get("value"))
+                if effect.get("security_scaled"):
+                    if multiplier is None:
+                        if not band_read:
+                            band, band_reason = _security_band.profile_security_band(profile_payload)
+                            band_read = True
+                        multiplier, reason = _security_band.rig_security_multiplier(rig, band)
+                        if reason is not None:
+                            cls._warn_rig_security_once(
+                                reason if band_reason is None or band is not None else f"{reason} ({band_reason})")
+                    value *= multiplier
+                reductions.append(value)
 
         if reductions:
             return cls._combine_reductions(reductions)
@@ -3577,6 +3594,15 @@ class IndustryService:
         if activity == "manufacturing":
             return cls._normalize_fraction(profile_payload.get(aggregate_key_by_metric.get(metric, "")))
         return 0.0
+
+    # Rig security-multiplier reasons already logged.
+    _rig_security_warned: set[str] = set()
+
+    @classmethod
+    def _warn_rig_security_once(cls, reason: str) -> None:
+        if reason not in IndustryService._rig_security_warned:
+            IndustryService._rig_security_warned.add(reason)
+            logger.warning("Rig bonus security multiplier: %s", reason)
 
     @classmethod
     def _system_cost_index(cls, *, profile_payload: dict[str, Any] | None, activity: str) -> float:
@@ -4558,7 +4584,10 @@ class IndustryService:
             for skill in (job.get("skill_entries") or [])
             if isinstance(skill, dict)
         ]
-        manufacturing_group = self._manufacturing_rig_groups(selected_product) if activity == "manufacturing" else None
+        manufacturing_group = (
+            self._manufacturing_rig_groups(selected_product, activity=activity)
+            if activity in {"manufacturing", "reaction"} else None
+        )
 
         # The plan's jobs (see _BatchRunLayout), like the top-level row's
         # manufacturing_job.job_segments: one per owned BPC (D3), then the
@@ -9836,56 +9865,6 @@ class IndustryService:
             out["tax"] = None
         return out
 
-    @classmethod
-    def _parse_rig_effect(cls, effect_name: str) -> tuple[str | None, str | None, str | None]:
-        if not effect_name or not effect_name.startswith("rig"):
-            return None, None, None
-
-        metric: str | None
-        if ("Material" in effect_name) or ("MatBonus" in effect_name):
-            metric = "material"
-        elif "Time" in effect_name:
-            metric = "time"
-        elif "Cost" in effect_name:
-            metric = "cost"
-        else:
-            metric = None
-
-        activity: str | None = None
-        group_token: str | None = None
-
-        rest = effect_name[3:]
-
-        if rest.startswith("ME") and "Research" in rest:
-            return "research_me", None, metric
-        if rest.startswith("TE") and "Research" in rest:
-            return "research_te", None, metric
-
-        if rest.startswith("Reaction"):
-            group_part = rest
-            for suffix in ["MatBonus", "TimeBonus", "CostBonus", "MaterialBonus", "TimeBonus", "CostBonus"]:
-                if suffix in group_part:
-                    group_part = group_part.split(suffix, 1)[0]
-                    break
-            return "manufacturing", group_part or None, metric
-
-        for token, activity_key in [
-            ("Manufacture", "manufacturing"),
-            ("Invention", "invention"),
-            ("Research", "research"),
-            ("Copying", "copying"),
-            ("Copy", "copying"),
-            ("Reaction", "manufacturing"),
-        ]:
-            idx = rest.find(token)
-            if idx >= 0:
-                activity = activity_key
-                if idx > 0:
-                    group_token = rest[:idx]
-                break
-
-        return activity, group_token, metric
-
     def structure_rigs(self) -> list[dict]:
         cache = getattr(self._state, "_structure_rigs_cache", None)
         now = time.time()
@@ -9901,145 +9880,37 @@ class IndustryService:
         session: Any = self._sessions.sde_session()
         language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
 
+        # Every published engineering and reactor rig, by SDE group (category
+        # 66 Structure Module): the industry rigs a profile can fit.
         rows = session.execute(
             text(
                 """
-                SELECT id, name
-                FROM types
-                WHERE published = 1
-                  AND name LIKE '%Standup%'
+                SELECT t.id, t.name
+                FROM types t JOIN groups g ON g.id = t.groupID
+                WHERE t.published = 1
+                  AND g.categoryID = 66
                   AND (
-                        name LIKE '%Manufacturing%'
-                     OR name LIKE '%Research%'
-                     OR name LIKE '%Invention%'
+                        json_extract(g.name, '$.en') LIKE 'Structure Engineering Rig%'
+                     OR json_extract(g.name, '$.en') LIKE 'Structure %Reactor Rig%'
                   )
-                  AND name NOT LIKE '%Blueprint%'
-                ORDER BY id ASC
+                ORDER BY t.id ASC
                 """
             )
         ).fetchall()
 
-        type_ids = [int(r[0]) for r in rows]
-
-        dogma_by_type_id: dict[int, dict] = {}
-        if type_ids:
-            dogma_rows = session.execute(
-                text("SELECT id, dogmaAttributes, dogmaEffects FROM typeDogma WHERE id IN :ids").bindparams(
-                    bindparam("ids", expanding=True)
-                ),
-                {"ids": type_ids},
-            ).fetchall()
-
-            for tid, attrs_raw, effects_raw in dogma_rows:
-                attr_map: dict[int, float] = {}
-                effect_ids: list[int] = []
-                try:
-                    attrs = json.loads(attrs_raw) if isinstance(attrs_raw, str) else (attrs_raw or [])
-                    for a in attrs or []:
-                        if not isinstance(a, dict):
-                            continue
-                        aid = a.get("attributeID")
-                        val = a.get("value")
-                        if aid is None or val is None:
-                            continue
-                        attr_map[int(aid)] = float(val)
-                except Exception:
-                    attr_map = {}
-
-                try:
-                    effs = json.loads(effects_raw) if isinstance(effects_raw, str) else (effects_raw or [])
-                    for e in effs or []:
-                        if not isinstance(e, dict):
-                            continue
-                        eid = e.get("effectID")
-                        if eid is None:
-                            continue
-                        effect_ids.append(int(eid))
-                except Exception:
-                    effect_ids = []
-
-                dogma_by_type_id[int(tid)] = {"attr_map": attr_map, "effect_ids": effect_ids}
-
-        all_effect_ids = sorted(
-            {eid for d in dogma_by_type_id.values() for eid in (d.get("effect_ids") or []) if eid is not None}
-        )
-        effect_name_by_id: dict[int, str] = {}
-        if all_effect_ids:
-            eff_rows = session.execute(
-                text("SELECT id, name FROM dogmaEffects WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
-                {"ids": all_effect_ids},
-            ).fetchall()
-            effect_name_by_id = {int(r[0]): (r[1] or "") for r in eff_rows}
-
-        rigs_out: list[dict] = []
+        name_by_type_id: dict[int, str] = {}
         for type_id, name_json in rows:
             try:
                 name_obj = json.loads(name_json) if isinstance(name_json, str) else {}
-                rig_name = name_obj.get(language) or name_obj.get("en") or str(type_id)
+                name_by_type_id[int(type_id)] = name_obj.get(language) or name_obj.get("en") or str(type_id)
             except Exception:
-                rig_name = str(type_id)
+                name_by_type_id[int(type_id)] = str(type_id)
 
-            d = dogma_by_type_id.get(int(type_id)) or {}
-            attr_map = d.get("attr_map") or {}
-
-            time_val = attr_map.get(self._RIG_ATTR_TIME_REDUCTION, 0.0)
-            mat_val = attr_map.get(self._RIG_ATTR_MATERIAL_REDUCTION, 0.0)
-            cost_val = attr_map.get(self._RIG_ATTR_COST_REDUCTION, 0.0)
-
-            time_reduction = max(0.0, (-float(time_val)) / 100.0)
-            material_reduction = max(0.0, (-float(mat_val)) / 100.0)
-            cost_reduction = max(0.0, (-float(cost_val)) / 100.0)
-
-            effects_out: list[dict] = []
-            for eid in d.get("effect_ids") or []:
-                ename = effect_name_by_id.get(int(eid)) or ""
-                if ename in {"rigSlot"}:
-                    continue
-                if not ename.startswith("rig"):
-                    continue
-                if "Bonus" not in ename:
-                    continue
-
-                activity, group_token, metric = self._parse_rig_effect(ename)
-                if activity is None or metric is None:
-                    continue
-
-                if metric == "material":
-                    val = material_reduction
-                elif metric == "time":
-                    val = time_reduction
-                else:
-                    val = cost_reduction
-
-                if val <= 0:
-                    continue
-
-                if not group_token:
-                    group = "All"
-                else:
-                    group = self._RIG_GROUP_TOKEN_LABELS.get(group_token) or _camel_to_words(group_token)
-
-                effects_out.append(
-                    {
-                        "effect_id": int(eid),
-                        "effect_name": ename,
-                        "activity": activity,
-                        "group": group,
-                        "metric": metric,
-                        "value": float(val),
-                    }
-                )
-
-            rigs_out.append(
-                {
-                    "type_id": int(type_id),
-                    "name": str(rig_name),
-                    "time_reduction": time_reduction,
-                    "material_reduction": material_reduction,
-                    "cost_reduction": cost_reduction,
-                    "effects": effects_out,
-                }
-            )
+        rigs_out: list[dict] = [
+            {**rig, "name": name_by_type_id.get(int(rig["type_id"]), str(rig["type_id"]))}
+            for rig in get_rig_effects_for_type_ids(session, list(name_by_type_id))
+            if rig.get("effects")
+        ]
 
         rigs_out.sort(key=lambda r: r["name"])
         self._state._structure_rigs_cache = (now, self._STRUCTURE_RIGS_CACHE_VERSION, rigs_out)
