@@ -7,6 +7,16 @@ from streamlit_ui.api.daily_planner import get_analytics
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 
 
+def analytics_unavailable_caption(analytics: dict | None) -> str | None:
+    """Caption naming the analytics reads that failed (RM-35), or None.
+
+    Without it a DB error reads as the sections' "no data yet" messages."""
+    unavailable = (analytics or {}).get("unavailable") or {}
+    if not isinstance(unavailable, dict) or not unavailable:
+        return None
+    return "Some analytics could not be read: " + "; ".join(str(r) for r in unavailable.values())
+
+
 def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
     """Render the Analytics tab — self-learning stats, competition, correlation, invention."""
     try:
@@ -17,6 +27,10 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
 
     items: list[dict] = analytics.get("items") or []
     plan_history: list[dict] = analytics.get("plan_history") or []
+
+    unavailable_caption = analytics_unavailable_caption(analytics)
+    if unavailable_caption:
+        st.caption(unavailable_caption)
 
     # ------------------------------------------------------------------
     # Section 1: Self-Learning Accuracy

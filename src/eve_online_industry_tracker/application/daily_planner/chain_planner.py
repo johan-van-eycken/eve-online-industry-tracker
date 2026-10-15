@@ -899,6 +899,13 @@ class ChainPlanner:
                 if priced_busy:
                     # A fact of this plan, not a research slot's outcome.
                     decision.pipeline_stage = NOT_BUILT_STAGE
+                    # The same persisted suffix as _mark_not_built (Task 13
+                    # carry 2); its note is f"{reason}: not built from it in
+                    # this plan". Not routed through _mark_not_built, which
+                    # would drop the unsized note and the shopping-list note.
+                    decision.decision_reason = (
+                        f"{decision.decision_reason}; not built: {cause}{unsized_note}"
+                    )
             note = row["research_first"]["note"]
         _log(note)
 

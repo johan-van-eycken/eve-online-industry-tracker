@@ -129,6 +129,17 @@ def _rig_bonus_save_fields(rig_type_ids: list[int], rig_bonus_map: dict[int, dic
     }
 
 
+def _stored_rig_bonus_lines(profile: dict) -> list[str]:
+    """The profile's stored rig ME/TE lines, labelled as unscaled: they are the
+    rigs' raw bonuses (_rig_bonus_save_fields), while the "Total rig bonuses"
+    caption beside them is scaled by the system's security band."""
+    label = "(stored, unscaled, before security band)"
+    return [
+        f"**Rig Material Bonus {label}:** {profile['structure_rig_material_bonus']:.2%}",
+        f"**Rig Time Bonus {label}:** {profile['structure_rig_time_bonus']:.2%}",
+    ]
+
+
 def _security_band_of_system(system: dict | None) -> str | None:
     if not isinstance(system, dict):
         return None
@@ -551,8 +562,8 @@ def _render_existing_profiles(
                 st.write(f"{fee_label} {_job_fee_rates_line(profile, scc_rates=scc_rates)}")
 
                 if not is_profile_npc_station:
-                    st.write(f"**Rig Material Bonus:** {profile['structure_rig_material_bonus']:.2%}")
-                    st.write(f"**Rig Time Bonus:** {profile['structure_rig_time_bonus']:.2%}")
+                    for line in _stored_rig_bonus_lines(profile):
+                        st.write(line)
                     st.markdown("**Rigs**")
 
                     def _default_index(saved_id: int) -> int:

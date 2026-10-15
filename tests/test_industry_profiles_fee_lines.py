@@ -47,3 +47,18 @@ def test_the_rates_fall_back_to_the_defaults_without_admin_settings(monkeypatch)
     values = page._admin_industry_values()
     assert page._npc_admin_defaults(values) == (page._NPC_STATION_FACILITY_TAX, page._NPC_STATION_SCC_SURCHARGE)
     assert page._job_scc_rates(values) == (page.DEFAULT_SCC_SURCHARGE, page.DEFAULT_RESEARCH_SCC_SURCHARGE)
+
+
+# --- round 5 Task 13 carry 1: the stored rig bonuses are labelled unscaled -------
+
+def test_the_stored_rig_bonuses_are_labelled_unscaled_before_the_security_band():
+    """The stored structure_rig_*_bonus are the rigs' raw values
+    (_rig_bonus_save_fields); the "Total rig bonuses" caption beside them is
+    band-scaled. The label must say which is which; the numbers are unchanged."""
+    lines = page._stored_rig_bonus_lines(
+        {"structure_rig_material_bonus": 0.02, "structure_rig_time_bonus": 0.2}
+    )
+    assert lines == [
+        "**Rig Material Bonus (stored, unscaled, before security band):** 2.00%",
+        "**Rig Time Bonus (stored, unscaled, before security band):** 20.00%",
+    ]

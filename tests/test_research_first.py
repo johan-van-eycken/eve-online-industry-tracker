@@ -567,6 +567,22 @@ def test_a_bpo_in_an_active_job_is_neither_researched_nor_built_from():
     assert top.pipeline_stage == "blocked"
 
 
+def test_a_blocked_busy_bpo_row_says_not_built_in_its_decision_reason():
+    """Task 13 carry 2: the research-first "none" branch with a busy priced
+    BPO sets the stage to "blocked", so its persisted decision_reason must
+    carry the same "; not built: <reason>" text every other blocked row has."""
+    plan = _plan5(_priced_row(), bpos=[A_PRICED], busy={1})
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert top.pipeline_stage == "blocked"
+    assert top.decision_reason == "test; not built: BPO in an active industry job"
+
+
+def test_a_bpo_in_research_without_a_bpc_has_no_not_built_reason():
+    plan = _plan(_row(**BPO_ROW))
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert "not built:" not in top.decision_reason
+
+
 def test_a_bpo_in_research_without_a_bpc_keeps_its_stage():
     # Conditional on a research slot: it may still build from the BPO.
     plan = _plan(_row(**BPO_ROW))

@@ -336,6 +336,18 @@ def freshness_summary(plan_data: dict[str, Any] | None) -> tuple[str, float | No
     return (f"{label} · {counts}" if counts else label), score
 
 
+def unavailable_inputs_caption(plan_data: dict[str, Any] | None) -> str | None:
+    """Caption naming the scoring inputs whose read failed in the last compute
+    (RM-35), or None when every read succeeded. The plan was still scored;
+    each reason says it was scored without that input."""
+    unavailable = (plan_data or {}).get("unavailable_inputs") or {}
+    if not isinstance(unavailable, dict) or not unavailable:
+        return None
+    return "Some scoring inputs could not be read: " + "; ".join(
+        str(reason) for reason in unavailable.values()
+    )
+
+
 def compute_failure_banner(status_data: dict[str, Any], *, has_plan: bool) -> str | None:
     """Text for the red banner shown while the last compute is failed, else None.
 
@@ -562,6 +574,10 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
                 else:
                     market_label = f"{age_text} 🔴"
             st.metric("Market Data", market_label)
+
+    unavailable_caption = unavailable_inputs_caption(page_state.plan)
+    if unavailable_caption:
+        st.caption(unavailable_caption)
 
     # Freshness warning
     if page_state.plan and freshness_score is not None and freshness_score < 0.75:

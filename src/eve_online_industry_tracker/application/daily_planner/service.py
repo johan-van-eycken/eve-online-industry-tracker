@@ -51,6 +51,63 @@ def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
+#: The effect of a failed modifier read on the score, in its reason text.
+_SCORED_WITHOUT_IT = "scored without it"
+
+
+def _db_read_unavailable(label: str, exc: BaseException, effect: str) -> str:
+    """The reason a read that failed with a DB error records (RM-35), e.g.
+    "margin correlation unavailable (DB error: OperationalError): scored
+    without it". A read that succeeded with no rows records nothing."""
+    return f"{label} unavailable (DB error: {type(exc).__name__}): {effect}"
+
+
+def _warn_read_failed(reader: str, exc: BaseException) -> None:
+    logger.warning(
+        "DailyPlannerService: %s read failed (%s); marked unavailable",
+        reader, type(exc).__name__, exc_info=True,
+    )
+
+
+def _unavailable_input_notes(
+    type_id: int, unavailable: dict[str, str], margin_correlations: dict[int, Any],
+) -> list[str]:
+    """The unavailable-input reasons that apply to one scored row.
+
+    A failed margin-correlation read affects every row (no row's squeeze
+    sensitivity is known, so the Tritanium trend is unknown to all of them
+    too). A failed trend read with the correlations read affects only the
+    squeeze-sensitive rows: no other row reads the trend.
+    """
+    notes: list[str] = []
+    margin = unavailable.get("margin_correlation")
+    trend = unavailable.get("tritanium_trend")
+    if margin:
+        notes.append(margin)
+    if trend and (
+        margin or getattr(margin_correlations.get(type_id), "is_squeeze_sensitive", False)
+    ):
+        notes.append(trend)
+    return notes
+
+
+def _plan_unavailable_inputs(plan: Any) -> dict[str, str]:
+    """The unavailable inputs Phase 9 recorded in plan_summary_json, {} when none."""
+    raw = getattr(plan, "plan_summary_json", None)
+    if not raw:
+        return {}
+    try:
+        summary = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "DailyPlannerService: plan %s has an unreadable plan_summary_json",
+            getattr(plan, "id", "?"), exc_info=True,
+        )
+        return {"plan_summary": "plan summary unreadable: its unavailable inputs are unknown"}
+    found = summary.get("unavailable_inputs") if isinstance(summary, dict) else None
+    return dict(found) if isinstance(found, dict) else {}
+
+
 def _spot_sell_price(entry: Any) -> float | None:
     """Extract the spot sell price from a market-depth entry, or None."""
     if entry is None:
@@ -313,7 +370,7 @@ class DailyPlannerService:
         """
         plan = self._repo.get_active_plan()
         if plan is None:
-            return {"plan": None, "items": [], "actions": []}
+            return {"plan": None, "items": [], "actions": [], "unavailable_inputs": {}}
 
         items = self._repo.get_plan_items(int(plan.id))
         actions = self._repo.get_actions(int(plan.id))
@@ -331,6 +388,9 @@ class DailyPlannerService:
             # that visible in the response instead of only in a log line.
             "freshness_comparable_items": comparable_items,
             "freshness_total_items": total_items,
+            # RM-35: scoring inputs whose read failed this compute, {input:
+            # reason}. Empty when every read succeeded (even with no rows).
+            "unavailable_inputs": _plan_unavailable_inputs(plan),
         }
 
     def mark_action_done(self, action_id: int) -> None:
@@ -347,19 +407,26 @@ class DailyPlannerService:
         """Fetch self-learning accuracy stats for all tracked type_ids."""
         plan = self._repo.get_active_plan()
         if plan is None:
-            return {"items": [], "plan_history": []}
+            return {"items": [], "plan_history": [], "unavailable": {}}
 
         items = self._repo.get_plan_items(int(plan.id))
         type_ids = [int(i.type_id) for i in items]
         weights = self._repo.get_weights(type_ids)
         invention_rates = self._repo.get_invention_success_rates(type_ids)
 
+        # A read that fails is named here (RM-35), so the tab does not show
+        # "no data yet" for a DB error. An empty successful read adds nothing.
+        unavailable: dict[str, str] = {}
+
         # Competition data
         try:
             hub = str(_adm(self._admin, "planner_market_hub", "jita"))
             market_depth = self._repo.get_market_depth(type_ids, hub)
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: analytics market depth unavailable", exc_info=True)
+        except SQLAlchemyError as exc:
+            _warn_read_failed("get_analytics/market_depth", exc)
+            unavailable["market_depth"] = _db_read_unavailable(
+                "market depth", exc, "competition data not shown",
+            )
             market_depth = {}
 
         # Margin correlation data
@@ -373,8 +440,11 @@ class DailyPlannerService:
                 margin_by_type = {int(r.type_id): r for r in margin_rows}
             finally:
                 mc_session.close()
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: analytics margin correlations unavailable", exc_info=True)
+        except SQLAlchemyError as exc:
+            _warn_read_failed("get_analytics/margin_correlation", exc)
+            unavailable["margin_correlation"] = _db_read_unavailable(
+                "margin correlation", exc, "correlation data not shown",
+            )
             margin_by_type: dict[int, Any] = {}
 
         # Invention details from raw SQL
@@ -401,8 +471,11 @@ class DailyPlannerService:
                 }
                 for r in inv_rows
             }
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: analytics invention details unavailable", exc_info=True)
+        except SQLAlchemyError as exc:
+            _warn_read_failed("get_analytics/invention_details", exc)
+            unavailable["invention_details"] = _db_read_unavailable(
+                "invention details", exc, "invention data not shown",
+            )
             inv_details: dict[int, Any] = {}
 
         result = []
@@ -471,7 +544,7 @@ class DailyPlannerService:
             for p in plan_history_rows
         ]
 
-        return {"items": result, "plan_history": plan_history}
+        return {"items": result, "plan_history": plan_history, "unavailable": unavailable}
 
     # ──────────────────────────────────────────────────────────────────────────
     # Private: computation phases
@@ -601,7 +674,7 @@ class DailyPlannerService:
         with _ComputeStep(self, "reading market depth"):
             market_depth = self._repo.get_market_depth(type_ids, hub) if type_ids else {}
 
-        margin_correlations = self._get_margin_correlations(type_ids)
+        margin_correlations, margin_unavailable = self._get_margin_correlations(type_ids)
 
         min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
         with _ComputeStep(self, "reading invention success rates"):
@@ -610,7 +683,17 @@ class DailyPlannerService:
             )
 
         # Tritanium 7d price trend (for squeeze penalty gate)
-        trit_trend_7d = self._get_trit_trend_7d()
+        trit_trend_7d, trend_unavailable = self._get_trit_trend_7d()
+        # RM-35: scoring modifiers whose read failed. Recorded on the plan
+        # (Phase 9) and on the affected rows' reason (Phase 4).
+        unavailable_inputs = {
+            name: reason
+            for name, reason in (
+                ("margin_correlation", margin_unavailable),
+                ("tritanium_trend", trend_unavailable),
+            )
+            if reason
+        }
 
         with _ComputeStep(self, "indexing corp blueprints"):
             bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
@@ -675,6 +758,7 @@ class DailyPlannerService:
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
             "trit_trend_7d": trit_trend_7d,
+            "unavailable_inputs": unavailable_inputs,
             "blueprint_data": blueprint_data,
             "bpo_assets_by_type_id": bpo_assets_by_type_id,
             "bpc_assets_by_type_id": bpc_assets_by_type_id,
@@ -757,6 +841,8 @@ class DailyPlannerService:
         pipeline_by_type = {ps.type_id: ps for ps in pipeline_states}
         overview_by_type = {int(r["type_id"]): r for r in phase1["overview_rows"] if r.get("type_id")}
         input_by_type = {r.type_id: r for r in phase1["input_rows"]}
+        unavailable: dict[str, str] = phase1.get("unavailable_inputs") or {}
+        margin_correlations: dict[int, Any] = phase1.get("margin_correlations") or {}
         decisions = []
         for scored in scored_items:
             ps = pipeline_by_type.get(scored.type_id)
@@ -775,6 +861,9 @@ class DailyPlannerService:
                     # the validated input row instead.
                     meta_group_id=input_row.meta_group_id if input_row is not None else None,
                 )
+                notes = _unavailable_input_notes(scored.type_id, unavailable, margin_correlations)
+                if notes:
+                    decision.decision_reason = "; ".join([decision.decision_reason, *notes])
                 decisions.append(decision)
             except (TypeError, ValueError):
                 # float() of a malformed setting; per-item isolation.
@@ -872,6 +961,7 @@ class DailyPlannerService:
         _raw_corp_wallet = phase1_data.get("corp_wallet")
         corp_wallet = None if _raw_corp_wallet is None else float(_raw_corp_wallet)
 
+        unavailable_inputs = phase1_data.get("unavailable_inputs") or {}
         now = _now()
         plan = BuildPlanModel(
             created_at=now,
@@ -880,7 +970,11 @@ class DailyPlannerService:
             corp_wallet_snapshot=corp_wallet,
             market_snapshot_hash=snapshot_hash,
             freshness_score=1.0,
-            plan_summary_json=None,
+            # RM-35: the scoring inputs whose read failed, NULL when none did.
+            plan_summary_json=(
+                json.dumps({"unavailable_inputs": unavailable_inputs}, sort_keys=True)
+                if unavailable_inputs else None
+            ),
         )
         plan_id = self._repo.insert_plan(plan)
 
@@ -1095,10 +1189,15 @@ class DailyPlannerService:
         raw = corp.get("corporation_id") if isinstance(corp, dict) else getattr(corp, "corporation_id", None)
         return int(raw or 0)
 
-    def _get_margin_correlations(self, type_ids: list[int]) -> dict[int, Any]:
-        """Get margin correlation cache entries."""
+    def _get_margin_correlations(self, type_ids: list[int]) -> tuple[dict[int, Any], str | None]:
+        """(margin correlation cache entries by type_id, unavailable reason).
+
+        The reason is None when the read succeeded, also with no rows. A DB
+        error returns ({}, reason): the plan scores without the mineral-squeeze
+        penalty and says so (RM-35).
+        """
         if not type_ids:
-            return {}
+            return {}, None
         try:
             session = self._session_provider.app_session()
             try:
@@ -1106,15 +1205,20 @@ class DailyPlannerService:
                 rows = session.query(MarginCorrelationCacheModel).filter(
                     MarginCorrelationCacheModel.type_id.in_(type_ids)
                 ).all()
-                return {int(r.type_id): r for r in rows}
+                return {int(r.type_id): r for r in rows}, None
             finally:
                 session.close()
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: margin correlations unavailable", exc_info=True)
-            return {}
+        except SQLAlchemyError as exc:
+            _warn_read_failed("_get_margin_correlations", exc)
+            return {}, _db_read_unavailable("margin correlation", exc, _SCORED_WITHOUT_IT)
 
-    def _get_trit_trend_7d(self) -> float | None:
-        """Compute Tritanium 7-day price trend % from market history (type_id=34, Jita region)."""
+    def _get_trit_trend_7d(self) -> tuple[float | None, str | None]:
+        """(Tritanium 7-day price trend %, unavailable reason), from market
+        history (type_id=34, Jita region).
+
+        Too little history is a successful read: (None, None), as before. A
+        DB error is (None, reason) (RM-35).
+        """
         try:
             from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
             session = self._session_provider.app_session()
@@ -1129,15 +1233,15 @@ class DailyPlannerService:
                 session.close()
             prices = [float(r.close) for r in rows if r.close and float(r.close) > 0]
             if len(prices) < 8:
-                return None
+                return None, None
             recent_avg = sum(prices[:7]) / 7.0
             older_avg = sum(prices[7:]) / len(prices[7:])
             if older_avg <= 0:
-                return None
-            return (recent_avg - older_avg) / older_avg * 100.0
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: Tritanium price trend unavailable", exc_info=True)
-            return None
+                return None, None
+            return (recent_avg - older_avg) / older_avg * 100.0, None
+        except SQLAlchemyError as exc:
+            _warn_read_failed("_get_trit_trend_7d", exc)
+            return None, _db_read_unavailable("Tritanium 7-day price trend", exc, _SCORED_WITHOUT_IT)
 
     def _get_blueprint_data(
         self,
