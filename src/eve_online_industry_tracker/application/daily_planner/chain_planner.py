@@ -199,7 +199,7 @@ class ChainPlanner:
 
             try:
                 if meta_group_id == META_GROUP_T1:
-                    self._plan_t1_chain(
+                    bpo_plan = self._plan_t1_chain(
                         decision=decision,
                         bp_type_id=bp_type_id,
                         bp_data=bp_data,
@@ -212,7 +212,7 @@ class ChainPlanner:
                         bpo_consider_days=bpo_consider_days,
                     )
                     self._apply_research_first(
-                        decision, bp_type_id, len(bpo_assets_by_type_id.get(bp_type_id) or []),
+                        decision, bp_type_id, bpo_plan,
                         variant_rows_by_type_id.get(int(decision.type_id)) or [],
                         raw_market_depth.get(int(decision.type_id)),
                     )
@@ -305,8 +305,11 @@ class ChainPlanner:
         te_research_target: int,
         bpo_strong_buy_days: float,
         bpo_consider_days: float,
-    ) -> None:
-        """Plan T1 chain: BPO path, ME/TE research, or BPC/shopping fallback."""
+    ) -> dict[str, Any] | None:
+        """Plan T1 chain: BPO path, ME/TE research, or BPC/shopping fallback.
+
+        Returns the owned-BPO plan ({assets (producer order), priced, research
+        (index or None)}) for research first, or None without an owned BPO."""
         bpo_owned = bp_type_id in bpo_assets_by_type_id and bool(bpo_assets_by_type_id[bp_type_id])
 
         if bpo_owned:
@@ -327,12 +330,31 @@ class ChainPlanner:
                 optimal_me = self._compute_optimal_me(bp_type_id, runs=batch_runs)
             optimal_te = te_research_target
 
-            bpo_assets = bpo_assets_by_type_id[bp_type_id]
+            # The producer's BPO order, so the choice is deterministic. The
+            # BPO researched (Task 8c fix round 4): the one the row is priced
+            # from when it needs research, else the first other BPO that
+            # does; the row then builds from the priced BPO as usual.
+            bpo_assets = research_first.producer_bpo_order(bpo_assets_by_type_id[bp_type_id])
+            priced = research_first.priced_bpo_index(decision.overview_row, bpo_assets)
+
+            def _needs_research(asset: Any) -> bool:
+                me = _blueprint_efficiency(asset, "material")
+                te = _blueprint_efficiency(asset, "time")
+                return (me is not None and optimal_me is not None and me < optimal_me) or (
+                    te is not None and te < optimal_te
+                )
+
+            research_index = next(
+                (i for i in [priced, *(j for j in range(len(bpo_assets)) if j != priced)]
+                 if _needs_research(bpo_assets[i])),
+                None,
+            )
+            subject = bpo_assets[research_index if research_index is not None else priced]
             # Corp asset columns are blueprint_*-prefixed. None means unknown,
             # not ME0: an unknown level schedules no research rather than a
             # job on a blueprint that may already be fully researched.
-            current_me = _blueprint_efficiency(bpo_assets[0], "material")
-            current_te = _blueprint_efficiency(bpo_assets[0], "time")
+            current_me = _blueprint_efficiency(subject, "material")
+            current_te = _blueprint_efficiency(subject, "time")
             if current_me is None or current_te is None:
                 logger.warning(
                     "ChainPlanner: owned BPO %s has unknown ME/TE (me=%s, te=%s); "
@@ -367,6 +389,7 @@ class ChainPlanner:
                 decision.overview_row["te_current"] = current_te
 
             decision.pipeline_stage = "manufacturing"
+            return {"assets": bpo_assets, "priced": priced, "research": research_index}
 
         elif bp_type_id in bpc_assets_by_type_id and bpc_assets_by_type_id[bp_type_id]:
             # BPC available — plan manufacturing from BPC + run BPO investment analysis
@@ -468,7 +491,7 @@ class ChainPlanner:
         self,
         decision: ItemDecision,
         bp_type_id: int,
-        bpo_count: int,
+        bpo_plan: dict[str, Any] | None,
         variants: list[dict[str, Any]],
         market_depth: Any | None,
     ) -> None:
@@ -482,23 +505,57 @@ class ChainPlanner:
         It is a plan, not a fact: CharacterAssigner applies it only when a
         research action is actually emitted for the BPO, and otherwise builds
         from the kept BPO row (`kept_row` for a variant; the row itself
-        otherwise). With several BPOs of the type one researches and the
-        others build as usual (mode other_bpo)."""
+        otherwise).
+
+        Several BPOs of the type (Task 8c fix round 4): when the researched
+        BPO is not the one the row is priced from, the row builds as usual
+        (mode other_bpo). When it is, the batch builds from another BPO: at
+        the same ME/TE from the row itself, else from that BPO's own variant
+        row (its materials, cost and profit), never at the priced BPO's ME."""
         row = decision.overview_row
         if not (row.get("needs_me_research") or row.get("needs_te_research")):
             return
-        if not research_first.batch_uses_bpo(row):
+        if not research_first.batch_uses_bpo(row) or not bpo_plan or bpo_plan.get("research") is None:
             return
-        if bpo_count > 1:
+        assets, priced, research = bpo_plan["assets"], bpo_plan["priced"], bpo_plan["research"]
+        if research != priced:
+            build = research_first.describe_bpo(assets[priced])
             row["research_first"] = {
                 "mode": "other_bpo",
-                "note": f"researching one of {bpo_count} BPOs; the batch builds from another",
+                "note": f"researching another BPO ({research_first.describe_bpo(assets[research])}); "
+                        f"the batch builds from the BPO at {build}",
+                "build_note": f"built from the BPO at {build}",
             }
-            logger.info(
-                "ChainPlanner: type_id=%s: research planned on one of %d BPOs %s; the others build",
-                decision.type_id, bpo_count, bp_type_id,
-            )
+            logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, row["research_first"]["note"])
             return
+        for other in (i for i in range(len(assets)) if i != priced):
+            build = research_first.describe_bpo(assets[other])
+            if research_first.bpo_levels(assets[other]) == research_first.bpo_levels(assets[priced]):
+                row["research_first"] = {
+                    "mode": "other_bpo",
+                    "note": f"researching one of {len(assets)} BPOs; the batch builds from another at {build}",
+                    "build_note": f"built from another BPO at {build}",
+                }
+                logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, row["research_first"]["note"])
+                return
+            other_variant = research_first.variant_for_bpo(variants, bp_type_id, assets[other])
+            if other_variant is not None:
+                new_row = self._research_first_variant_row(row, other_variant)
+                profit, reason = _variant_profit(other_variant, market_depth)
+                new_row["research_first"] = {
+                    "mode": "variant",
+                    "note": f"BPO in research: built from another BPO at {build}",
+                    "profit": profit, "profit_unknown_reason": reason,
+                    "kept_row": row,
+                    "sized_note": f"its components were sized for the BPO at {build}; "
+                                  "the shopping list buys any difference",
+                }
+                decision.overview_row = new_row
+                logger.info(
+                    "ChainPlanner: type_id=%s: research planned on BPO %s; if its research gets a slot: %s",
+                    decision.type_id, bp_type_id, new_row["research_first"]["note"],
+                )
+                return
         variant = research_first.best_bpc_variant(variants, bp_type_id)
         total_runs = orow.get_manufacturing_job(row).get("runs")
         if variant is not None:

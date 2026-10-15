@@ -292,6 +292,7 @@ class CharacterAssigner:
                         *_research_fee(row, "research_time", "te_current", "te_research_target"),
                         "te_research", type_id,
                     ),
+                    queued_after_me=me_scheduled,
                 ))
                 if not me_scheduled:
                     self._take_slot(char_slots, char_id, "te_research")
@@ -487,6 +488,8 @@ class CharacterAssigner:
             notes = f"Build: {decision.decision_reason}"
             if build_note:
                 notes += f"; {build_note}"
+            if first is not None and first.get("build_note"):
+                notes += f"; {first['build_note']}"
             if first is not None and first["mode"] == "variant":
                 # The owned-BPC variant's own profit, scored like the kept row's.
                 estimated_profit = first.get("profit")

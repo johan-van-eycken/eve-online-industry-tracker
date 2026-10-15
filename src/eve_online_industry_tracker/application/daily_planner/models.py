@@ -131,6 +131,9 @@ class AssignedAction:
     # unknown facility tax ...). None with an unknown fee = no recorded
     # cause: an old product overview, which a refresh fixes.
     estimated_job_fee_unknown_reason: str | None = None
+    # te_research only (Task 8c fix round 4): queued behind the ME research
+    # on the same BPO (one job per blueprint), so it cannot start today.
+    queued_after_me: bool = False
 
 
 @dataclass

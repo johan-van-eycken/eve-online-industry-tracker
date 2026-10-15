@@ -1126,6 +1126,9 @@ class DailyActionLogModel(BaseApp):
     # Why an unknown fee is unknown; NULL with a NULL fee = no recorded cause
     # (an old plan or overview: a refresh / recompute fixes it).
     estimated_job_fee_unknown_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # te_research only (Task 8c fix round 4): queued behind the ME research
+    # on the same BPO; the actions tab shows it as queued, not startable today.
+    queued_after_me: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class PlanItemOutcomeModel(BaseApp):

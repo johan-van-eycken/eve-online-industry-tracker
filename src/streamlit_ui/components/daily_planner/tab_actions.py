@@ -93,6 +93,18 @@ def _character_level_actions(actions: list[dict[str, Any]]) -> list[dict[str, An
     return [a for a in actions if str(a.get("action_type") or "") in rendered]
 
 
+def _is_queued(action: dict[str, Any]) -> bool:
+    """A TE research queued behind the ME research on the same BPO (Task 8c
+    fix round 4): EVE runs one job per blueprint, so it cannot start today
+    and does not count as today's work."""
+    return bool(action.get("queued_after_me"))
+
+
+def _todays(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The actions that can be done today: every action but a queued one."""
+    return [a for a in actions if not _is_queued(a)]
+
+
 def _has_pending_buys(plan: dict[str, Any]) -> bool:
     """True if any current_job buy_materials actions are still pending."""
     actions = plan.get("actions") or []
@@ -151,6 +163,13 @@ def _render_action_row(
         return
     if status == "skipped":
         st.markdown(f"~~{type_name} {qty_label}~~ *(skipped)*")
+        return
+
+    if _is_queued(action):
+        # Not startable today: no done/skip buttons.
+        st.markdown(f"⏳ {type_name} — *queued: start when the ME research on this BPO ends*")
+        if completion_label:
+            st.caption(completion_label)
         return
 
     # Pending action
@@ -216,7 +235,7 @@ def _render_workflow_header(actions: list[dict[str, Any]]) -> None:
 
     start_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
-        for a in actions
+        for a in _todays(actions)
         if str(a.get("action_type") or "") in _START_ACTIONS
     ) and any(str(a.get("action_type") or "") in _START_ACTIONS for a in actions)
 
@@ -247,7 +266,7 @@ def _render_character_section(
         by_type.setdefault(at, []).append(a)
 
     pending_count = sum(
-        1 for a in char_actions
+        1 for a in _todays(char_actions)
         if str(a.get("status") or "pending") == "pending"
     )
     label = f"{char_name} — {pending_count} pending"
@@ -329,7 +348,7 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
     # Check if day is complete
     all_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
-        for a in char_actions
+        for a in _todays(char_actions)
     )
     if all_done:
         # Day complete banner

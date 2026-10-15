@@ -100,3 +100,59 @@ def best_part(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The owned-BPC part with the most runs over these rows, or None."""
     parts = [p for p in (owned_bpc_part(r) for r in rows) if p is not None]
     return max(parts, key=lambda p: p["runs"]) if parts else None
+
+
+def _level(asset: Any, attr: str) -> int | None:
+    value = asset.get(attr) if isinstance(asset, dict) else getattr(asset, attr, None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def bpo_levels(asset: Any) -> tuple[int | None, int | None]:
+    """(ME, TE) of an owned BPO asset; None = unknown."""
+    return _level(asset, "blueprint_material_efficiency"), _level(asset, "blueprint_time_efficiency")
+
+
+def describe_bpo(asset: Any) -> str:
+    me, te = bpo_levels(asset)
+    return f"ME {me if me is not None else '?'} / TE {te if te is not None else '?'}"
+
+
+def producer_bpo_order(assets: list[Any]) -> list[Any]:
+    """The owned BPOs in the producer's order (IndustryService sorts
+    blueprint originals by ME, then TE, highest first, then item_id), so the
+    planner's choice does not depend on the asset order."""
+    return sorted(assets, key=lambda a: (
+        -(bpo_levels(a)[0] or 0), -(bpo_levels(a)[1] or 0), _level(a, "item_id") or 0,
+    ))
+
+
+def _row_bpo_item_id(row: dict[str, Any]) -> int | None:
+    original = orow.get_manufacturing_job(row).get("blueprint_original")
+    return _level(original, "item_id") if isinstance(original, dict) else None
+
+
+def priced_bpo_index(row: dict[str, Any], assets: list[Any]) -> int:
+    """Index (in producer order) of the BPO the row is priced from: the
+    row's blueprint_original item, else the producer's first BPO."""
+    item_id = _row_bpo_item_id(row)
+    if item_id is not None:
+        for index, asset in enumerate(assets):
+            if _level(asset, "item_id") == item_id:
+                return index
+    return 0
+
+
+def variant_for_bpo(variants: list[dict[str, Any]], blueprint_type_id: int, asset: Any) -> dict[str, Any] | None:
+    """The producer's variant row priced from this BPO (its
+    blueprint_original item), or None."""
+    item_id = _level(asset, "item_id")
+    if item_id is None:
+        return None
+    for variant in variants or []:
+        if (isinstance(variant, dict) and orow.get_blueprint_type_id(variant) == blueprint_type_id
+                and _row_bpo_item_id(variant) == item_id):
+            return variant
+    return None

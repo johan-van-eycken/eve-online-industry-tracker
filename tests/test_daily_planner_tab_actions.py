@@ -61,3 +61,13 @@ def test_a_missing_action_type_is_logged_as_missing_not_as_an_empty_string(monke
     (message,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert "<missing>, relist_order" in message
     assert "(, " not in message and ", ," not in message
+
+
+def test_a_te_queued_after_me_is_not_todays_work():
+    """Task 8c fix round 4: a TE research queued behind its BPO's ME job
+    cannot start today: it neither counts as pending nor blocks day complete."""
+    actions = [{"action_type": "me_research", "status": "done"},
+               {"action_type": "te_research", "status": "pending", "queued_after_me": True}]
+    assert pending_character_action_count(actions) == 0
+    assert tab_actions._todays(actions) == actions[:1]
+    assert tab_actions._is_queued(actions[1]) and not tab_actions._is_queued(actions[0])

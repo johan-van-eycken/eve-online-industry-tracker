@@ -722,7 +722,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "decryptor_type_id INTEGER NULL,"
             "decryptor_type_name TEXT NULL,"
             "estimated_job_fee_isk REAL NULL,"
-            "estimated_job_fee_unknown_reason TEXT NULL"
+            "estimated_job_fee_unknown_reason TEXT NULL,"
+            "queued_after_me INTEGER NOT NULL DEFAULT 0"
             ")"
         ),
     )
@@ -891,6 +892,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     # D4 / A2: the job action's estimated install fee (Capital Reserved).
     _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_isk", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_unknown_reason", ddl_type="TEXT")
+    # Task 8c fix round 4: a TE research queued behind the ME job on its BPO.
+    _ensure_column(db_app, table="daily_action_log", column="queued_after_me", ddl_type="INTEGER NOT NULL DEFAULT 0")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
 

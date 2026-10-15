@@ -131,6 +131,8 @@ def pending_character_action_count(actions: list[dict[str, Any]]) -> int:
         1 for a in actions
         if str(a.get("status") or "pending") == "pending"
         and str(a.get("action_type") or "") in CHARACTER_ACTION_TYPES
+        # A TE research queued behind its BPO's ME job cannot be done today.
+        and not a.get("queued_after_me")
     )
 
 

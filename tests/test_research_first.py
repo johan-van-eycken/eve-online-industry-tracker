@@ -66,7 +66,7 @@ def _segment(runs, source, widgets):
 
 
 def _row(*, segments, kind="owned_blueprint_original", material_cost=1000.0, profit_amount=10.0,
-         overview_row_id="bpo-variant"):
+         overview_row_id="bpo-variant", bpo_item_id=None):
     widgets = sum(s["materials"]["54321"] for s in segments)
     return {
         "type_id": 12345, "type_name": "Thing", "quantity": 10, "overview_row_id": overview_row_id,
@@ -77,6 +77,7 @@ def _row(*, segments, kind="owned_blueprint_original", material_cost=1000.0, pro
             "materials": {"54321": {"type_id": 54321, "quantity": widgets, "type_name": "Widget"}},
             "blueprint_sde": {"blueprint_type_id": 999},
             "blueprint_source_kind": kind,
+            "blueprint_original": {"item_id": bpo_item_id} if bpo_item_id is not None else {},
             "job_segments": segments,
             "research_job_cost_by_level": {"research_material": [0.0] * 11, "research_time": [0.0] * 11},
             "research_duration_seconds_by_level": {
@@ -101,7 +102,7 @@ def _decision(row) -> ItemDecision:
     )
 
 
-def _plan(row, *, te=0, me=10, variants=None, bpo_count=1):
+def _plan(row, *, te=0, me=10, variants=None, bpo_count=1, bpos=None):
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
     planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
@@ -109,7 +110,7 @@ def _plan(row, *, te=0, me=10, variants=None, bpo_count=1):
     component_bpo = SimpleNamespace(type_id=888, is_blueprint_copy=False,
                                     blueprint_material_efficiency=10, blueprint_time_efficiency=20)
     return planner.plan_chain([_decision(row)], {
-        "bpo_assets_by_type_id": {999: [bpo] * bpo_count, 888: [component_bpo]},
+        "bpo_assets_by_type_id": {999: bpos if bpos is not None else [bpo] * bpo_count, 888: [component_bpo]},
         "blueprint_data": BLUEPRINT_DATA,
         "market_depth_cache": MARKET,
         "variant_rows_by_type_id": {12345: variants or []},
@@ -331,3 +332,87 @@ def test_te_queued_after_me_takes_no_research_slot_of_its_own():
 def test_the_duration_note_names_the_producers_structure_and_implants():
     te = _assign(_plan(_row(**BPO_ROW)))["te_research"]
     assert "(structure and implants: the producer's)" in te.notes
+
+
+# --- fix round 4: several BPOs at different levels ----------------------------------
+
+def _bpo(item_id, me, te):
+    return SimpleNamespace(type_id=999, item_id=item_id, is_blueprint_copy=False,
+                           blueprint_material_efficiency=me, blueprint_time_efficiency=te)
+
+
+A_PRICED = _bpo(1, 10, 0)   # the highest ME: the producer prices the kept row at it
+B_BUILDS = _bpo(2, 5, 20)
+
+
+def _priced_row():
+    """The kept row, priced at BPO 1 (ME 10): 900 widgets for 10 runs."""
+    return _row(segments=[_segment(10, "owned_blueprint_original", 900)], material_cost=900.0,
+                overview_row_id="bpo-1", bpo_item_id=1)
+
+
+def _variant_of_bpo_2():
+    """The producer's variant row for BPO 2 (ME 5): 950 widgets, its own cost."""
+    return _row(segments=[_segment(10, "owned_blueprint_original", 950)], material_cost=950.0,
+                profit_amount=5.0, overview_row_id="bpo-2", bpo_item_id=2)
+
+
+def test_the_building_bpo_sizes_the_batch_when_the_priced_bpo_researches():
+    """The probe: BPO 1 (ME 10 / TE 0) researches TE, BPO 2 (ME 5 / TE 20)
+    builds; its materials are at ME 5 (950), not the kept row's ME 10 (900)."""
+    plan = _plan(_priced_row(), bpos=[A_PRICED, B_BUILDS], variants=[_variant_of_bpo_2()])
+    (sub,) = _subs(plan)
+    assert sub.overview_row["quantity_needed"] == 950
+    actions = _assign(plan)
+    build = actions["manufacture"]
+    assert build.materials == {54321: 950}
+    assert build.estimated_cost_isk == 950.0
+    assert "ME 5 / TE 20" in build.notes
+    te = actions["te_research"]
+    assert te.notes.startswith("TE research: 0% → 20%")
+
+
+def test_a_priced_bpo_that_needs_no_research_builds_and_another_researches():
+    priced_done = _bpo(1, 10, 20)
+    other = _bpo(2, 10, 0)
+    row = _priced_row()
+    plan = _plan(row, bpos=[other, priced_done])
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert top.overview_row["overview_row_id"] == "bpo-1"
+    assert top.overview_row["te_current"] == 0  # the other BPO's TE
+    actions = _assign(plan)
+    assert actions["manufacture"].materials == {54321: 900}
+    assert "ME 10 / TE 20" in actions["manufacture"].notes
+    assert "te_research" in actions
+
+
+@pytest.mark.parametrize("order", [(A_PRICED, B_BUILDS), (B_BUILDS, A_PRICED)])
+def test_the_choice_does_not_depend_on_the_asset_order(order):
+    plan = _plan(_priced_row(), bpos=list(order), variants=[_variant_of_bpo_2()])
+    actions = _assign(plan)
+    assert actions["manufacture"].materials == {54321: 950}
+    assert actions["te_research"].notes.startswith("TE research: 0% → 20%")
+
+
+def test_another_bpo_without_its_variant_row_is_not_built_from_at_the_wrong_me():
+    plan = _plan(_priced_row(), bpos=[A_PRICED, B_BUILDS])
+    actions = _assign(plan)
+    assert "manufacture" not in actions  # 900 widgets would under-buy BPO 2 (ME 5)
+
+
+# --- the queued TE is flagged -------------------------------------------------------
+
+def test_a_te_queued_after_me_is_flagged():
+    actions = _assign(_plan(_row(**BPO_ROW), me=4))
+    assert actions["te_research"].queued_after_me is True
+    assert actions["me_research"].queued_after_me is False
+
+
+def test_a_te_without_me_is_not_queued():
+    assert _assign(_plan(_row(**BPO_ROW)))["te_research"].queued_after_me is False
+
+
+def test_the_queued_flag_is_persisted_on_the_action_log_row():
+    from eve_online_industry_tracker.infrastructure.models import DailyActionLogModel
+
+    assert "queued_after_me" in DailyActionLogModel.__table__.columns
