@@ -277,6 +277,16 @@ class InventionContext:
     encryption_skill_type_ids: frozenset[int] = frozenset()
     #: Why inventor_skill_levels_by_character_id is empty, when it is.
     no_inventor_reason: str = NO_CHARACTER_SKILLS
+    #: {character_id: total research slots and skill levels by name} for every
+    #: industry-enabled corp character (Task 12, the daily planner's slot
+    #: model). None: no slot data was supplied, so elapsed times stay sequential.
+    slot_capacity_by_character_id: Mapping[int, "CharacterSlotCapacity"] | None = None
+    #: The producer's selected character: its lane uses the producer's own
+    #: implants; every other pilot's lane is timed without implants.
+    selected_character_id: int | None = None
+    #: {blueprint type_id: owned originals}. A BPO is in one job at a time, so
+    #: it caps the parallel source copies. None: unknown (copies sequential).
+    blueprint_original_count_by_type_id: Mapping[int, int] | None = None
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
@@ -349,6 +359,143 @@ def invention_chance_payload(chance: InventionChance, effective_probability: flo
         "skills_unknown_reason": chance.skills_unknown_reason,
         "note": chance.note,
     }
+
+
+# --- parallel lanes (Task 12) ----------------------------------------------
+
+#: Shown with every parallel elapsed time.
+PARALLEL_CAPACITY_NOTE = (
+    "parallel lanes count each qualifying character's total research slots: "
+    "steady-state capacity, not today's free slots"
+)
+NO_SLOT_DATA_REASON = "no corp slot data was supplied"
+NO_QUALIFYING_INVENTOR_REASON = (
+    "no industry-enabled corp character has every required invention skill trained"
+)
+NO_SLOTS_FOR_INVENTORS_REASON = "no qualifying inventor has slot data"
+NO_BPO_COUNT_REASON = "the owned source BPOs are not counted"
+ONE_SOURCE_BPO_REASON = "one owned source BPO at most: a BPO is in one copy job at a time"
+NO_COPY_SLOTS_REASON = "no industry-enabled corp character has slot data"
+
+
+@dataclass(frozen=True)
+class CharacterSlotCapacity:
+    """One corp character's research slots (character_slots.research_slot_capacity,
+    the planner's count) and skill levels by name (for its lane's duration)."""
+
+    research_slots: int
+    skill_levels_by_name: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ParallelLanes:
+    """How many jobs of one kind run side by side. sequential_reason set: the
+    slot data or skills are unknown, so the caller keeps the sequential
+    (one-slot) elapsed time and records the reason."""
+
+    lanes: int
+    character_ids: tuple[int, ...] = ()
+    sequential_reason: str | None = None
+
+    def rounds(self, whole_jobs: int) -> int:
+        """ceil(whole_jobs / lanes): jobs one lane runs back to back."""
+        if whole_jobs <= 0:
+            return 0
+        return int(math.ceil(int(whole_jobs) / max(1, int(self.lanes))))
+
+    def payload(self, *, whole_jobs: int, lane_duration_seconds: float | None) -> dict[str, Any]:
+        return {
+            "lanes": int(self.lanes),
+            "lane_character_count": len(self.character_ids),
+            "whole_jobs": int(whole_jobs),
+            "rounds": self.rounds(whole_jobs) if self.sequential_reason is None else int(whole_jobs),
+            "lane_duration_seconds": lane_duration_seconds,
+            "sequential_reason": self.sequential_reason,
+            "note": PARALLEL_CAPACITY_NOTE if self.sequential_reason is None else None,
+        }
+
+
+def _sequential(reason: str) -> ParallelLanes:
+    return ParallelLanes(1, (), reason)
+
+
+def required_invention_skill_levels(
+    skill_set: InventionSkillSet, skill_entries: Iterable[Mapping[str, Any]],
+) -> dict[int, int]:
+    """{skill type_id: required level} for the set's science and encryption
+    skills: the SDE entry's level, at least 1 (a skill must be trained to
+    run the invention at all)."""
+    wanted = [*skill_set.science_skill_type_ids]
+    if skill_set.encryption_skill_type_id is not None:
+        wanted.append(skill_set.encryption_skill_type_id)
+    levels = {int(type_id): 1 for type_id in wanted}
+    for entry in skill_entries or []:
+        if not isinstance(entry, Mapping):
+            continue
+        try:
+            type_id = int(entry.get("type_id") or 0)
+            level = int(entry.get("level") or 1)
+        except (TypeError, ValueError):
+            continue
+        if type_id in levels:
+            levels[type_id] = max(levels[type_id], level, 1)
+    return levels
+
+
+def can_run_invention(required_levels: Mapping[int, int], levels_by_skill_type_id: Mapping[int, int]) -> bool:
+    """Whether one character has every required invention skill trained."""
+    return all(
+        int(levels_by_skill_type_id.get(type_id, 0) or 0) >= int(level)
+        for type_id, level in required_levels.items()
+    )
+
+
+def invention_lanes(
+    context: InventionContext, chance: InventionChance | None, skill_entries: Iterable[Mapping[str, Any]],
+) -> ParallelLanes:
+    """Parallel invention lanes: the total research slots of every corp
+    character that can run this invention (every required science and
+    encryption skill trained; industry_enabled=False characters are never in
+    the context). Total slots, not free ones: steady-state capacity. Unknown
+    slot data or skills: one sequential lane with the reason."""
+    if context.slot_capacity_by_character_id is None:
+        return _sequential(NO_SLOT_DATA_REASON)
+    if chance is None or chance.skill_set is None or chance.skills_unknown_reason is not None:
+        why = (chance.skills_unknown_reason if chance is not None else None) or "the invention skills are unknown"
+        return _sequential(f"invention skills unknown ({why})")
+    required = required_invention_skill_levels(chance.skill_set, skill_entries)
+    qualifying = sorted(
+        int(character_id) for character_id, levels in context.inventor_skill_levels_by_character_id.items()
+        if can_run_invention(required, levels)
+    )
+    if not qualifying:
+        return _sequential(NO_QUALIFYING_INVENTOR_REASON)
+    slots = context.slot_capacity_by_character_id
+    with_slots = [cid for cid in qualifying if cid in slots and int(slots[cid].research_slots) > 0]
+    if not with_slots:
+        return _sequential(NO_SLOTS_FOR_INVENTORS_REASON)
+    return ParallelLanes(sum(int(slots[cid].research_slots) for cid in with_slots), tuple(with_slots))
+
+
+def source_copy_lanes(context: InventionContext, source_blueprint_type_id: int) -> ParallelLanes:
+    """Parallel copy lanes for an invention's T1 source: min(owned source
+    BPOs, total research slots of the industry-enabled corp characters). A
+    BPO runs one copy job at a time, so one BPO (or an unknown count) keeps
+    the copies sequential, with the reason. Copying needs no skill."""
+    slots = context.slot_capacity_by_character_id
+    if slots is None:
+        return _sequential(NO_SLOT_DATA_REASON)
+    counts = context.blueprint_original_count_by_type_id
+    if counts is None:
+        return _sequential(NO_BPO_COUNT_REASON)
+    originals = int(counts.get(int(source_blueprint_type_id), 0) or 0)
+    if originals <= 1:
+        return _sequential(ONE_SOURCE_BPO_REASON)
+    copiers = sorted(int(cid) for cid, cap in slots.items() if int(cap.research_slots) > 0)
+    if not copiers:
+        return _sequential(NO_COPY_SLOTS_REASON)
+    lanes = min(originals, sum(int(slots[cid].research_slots) for cid in copiers))
+    return ParallelLanes(lanes, tuple(copiers))
 
 
 # --- decryptor selection (amendment A1) -----------------------------------

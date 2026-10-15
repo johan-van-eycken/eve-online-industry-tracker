@@ -10,7 +10,7 @@ import threading
 import time
 import dataclasses
 from dataclasses import dataclass
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from typing import Any, Callable, cast
 import uuid
 
@@ -95,7 +95,9 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     DecryptorChoice,
     DecryptorEvaluation,
     DecryptorOption,
+    CharacterSlotCapacity,
     InventionContext,
+    ParallelLanes,
     QuietWarningsFilter,
     decryptor_choice_payload,
     decryptor_options_from_rows,
@@ -103,12 +105,18 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     invented_blueprint_efficiency,
     invented_runs_per_blueprint,
     invention_chance_payload,
+    invention_lanes,
     invention_probability,
     quiet_warnings,
     resolve_invention_chance,
     # Aliased: _expected_invention_costs has a local named invention_attempts.
     invention_attempts as expected_and_whole_invention_attempts,
     select_best_decryptor,
+    source_copy_lanes,
+)
+from eve_online_industry_tracker.application.industry.character_slots import (
+    research_slot_capacity,
+    skill_levels_by_name as _character_skill_levels_by_name,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
 from eve_online_industry_tracker.domain import rig_groups as _rig_groups
@@ -1644,6 +1652,27 @@ class IndustryService:
             loaded = self._loaded_skill_levels(char)
             if loaded is not None:
                 out[loaded[0]] = loaded[1]
+        return out
+
+    def _get_corp_slot_capacity(self) -> dict[int, CharacterSlotCapacity]:
+        """{character_id: total research slots + skill levels by name} for
+        every industry-enabled corp character: the daily planner's slot count
+        (character_slots.research_slot_capacity, as in
+        CharacterAssigner._compute_available_slots) before it deducts active
+        jobs. Total slots, not free ones: the parallel invention lanes are
+        steady-state capacity (Task 12)."""
+        out: dict[int, CharacterSlotCapacity] = {}
+        for char in self._corp_characters():
+            if not char.get("industry_enabled", True):
+                continue
+            try:
+                character_id = int(char.get("character_id") or char.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if character_id <= 0:
+                continue
+            levels = _character_skill_levels_by_name(char)
+            out[character_id] = CharacterSlotCapacity(research_slot_capacity(levels), levels)
         return out
 
     def _no_inventor_reason(self) -> str:
@@ -7103,15 +7132,24 @@ class IndustryService:
         required_skill_entries: list[dict[str, Any]] | None = None,
         blueprint_material_efficiency: int = 0,
         blueprint_time_efficiency: int = 0,
+        other_pilot_skill_levels_by_name: Mapping[str, int] | None = None,
     ) -> dict[str, Any]:
-        """Unified activity cost calculator — delegates to _compute_activity_job with per-refresh caching."""
+        """Unified activity cost calculator — delegates to _compute_activity_job with per-refresh caching.
+
+        `other_pilot_skill_levels_by_name`: time the job for another corp pilot
+        (a parallel invention or copy lane, Task 12): that pilot's skills and
+        no implants (only the selected character's implants are known)."""
         # The required skills' trained levels change the time reduction
         # (_manufacturing_required_skill_time_reduction), so they are part of the key.
         skill_fingerprint = tuple(sorted(
             (int(entry.get("type_id") or 0), str(entry.get("type_name") or ""), str(entry.get("trained_skill_level") or 0))
             for entry in (required_skill_entries or []) if isinstance(entry, dict)
         ))
-        cache_key = (activity, base_time_seconds, runs, process_value, manufacturing_group, blueprint_material_efficiency, blueprint_time_efficiency, skill_fingerprint)
+        pilot_fingerprint = (
+            tuple(sorted((str(k), int(v or 0)) for k, v in other_pilot_skill_levels_by_name.items()))
+            if other_pilot_skill_levels_by_name is not None else None
+        )
+        cache_key = (activity, base_time_seconds, runs, process_value, manufacturing_group, blueprint_material_efficiency, blueprint_time_efficiency, skill_fingerprint, pilot_fingerprint)
         cached = ctx.activity_job_cache.get(cache_key)
         if cached is not None:
             return dict(cached)
@@ -7121,8 +7159,13 @@ class IndustryService:
             runs=runs,
             process_value=process_value,
             selected_industry_profile=ctx.selected_industry_profile,
-            selected_character_modifiers=ctx.selected_character_modifiers,
-            character_skill_levels_by_name=ctx.character_skill_levels_by_name,
+            selected_character_modifiers=(
+                ctx.selected_character_modifiers if other_pilot_skill_levels_by_name is None else None
+            ),
+            character_skill_levels_by_name=(
+                ctx.character_skill_levels_by_name if other_pilot_skill_levels_by_name is None
+                else dict(other_pilot_skill_levels_by_name)
+            ),
             manufacturing_group=manufacturing_group,
             required_skill_entries=required_skill_entries,
             blueprint_material_efficiency=blueprint_material_efficiency,
@@ -7294,6 +7337,12 @@ class IndustryService:
                 inventor_skill_levels_by_character_id=inventor_skill_levels,
                 encryption_skill_type_ids=self._load_encryption_skill_type_ids(),
                 no_inventor_reason=NO_CHARACTER_SKILLS if inventor_skill_levels else self._no_inventor_reason(),
+                # Parallel invention and copy lanes (Task 12).
+                slot_capacity_by_character_id=self._get_corp_slot_capacity(),
+                selected_character_id=int(character_id) if character_id else None,
+                blueprint_original_count_by_type_id={
+                    int(bp_type_id): len(assets) for bp_type_id, assets in blueprint_original_assets_by_type_id.items()
+                },
             ),
             blueprint_row_by_type_id={
                 int(row.get("blueprint_type_id") or 0): row
@@ -7573,15 +7622,23 @@ class IndustryService:
             if costs["job_cost_per_attempt"] is None else None
         )
         costs["whole_attempts"] = whole_attempts
-        costs["elapsed_duration_seconds"] = (
-            compute_activity(activity="invention", base_time_seconds=invention_base_time, runs=whole_attempts, process_value=None)["duration_seconds"]
-            if whole_attempts > 0 else 0
+        # Whole attempts over the parallel invention lanes (Task 12): every
+        # qualifying corp inventor's total research slots. Unknown slots or
+        # skills: one slot in sequence, as before, with the reason.
+        lanes = (
+            invention_lanes(invention_context, chance, invention_job.get("skill_entries") or [])
+            if whole_attempts > 0 else None
+        )
+        costs["elapsed_duration_seconds"], costs["elapsed_parallel"] = self._lane_elapsed_seconds(
+            compute_activity=compute_activity, invention_context=invention_context, lanes=lanes,
+            activity="invention", base_time_seconds=invention_base_time, whole_jobs=whole_attempts,
         )
         costs["duration_is_amortized"] = invention_attempts > 0
         if cost_unknown_reason is not None:
             costs["cost_unknown_reason"] = cost_unknown_reason
             costs["total_job_cost"] = None
             costs["elapsed_duration_seconds"] = None
+            costs["elapsed_parallel"] = None
         if invention_attempts <= 0:
             costs["duration_seconds"] = 0
         return costs, invention_materials
@@ -7595,13 +7652,18 @@ class IndustryService:
         available_blueprint_copy_runs_by_type_id: dict[int, Any],
         adjusted_price_map: dict[int, dict[str, Any]],
         enabled: bool,
+        invention_context: InventionContext | None = None,
     ) -> tuple[dict[str, Any] | None, float]:
         """Copying the T1 source blueprint for the invention attempts in
         `invention_costs` (from _expected_invention_costs): owned source-copy
         runs first, then fractional copy runs for the remaining expected
         attempts, plus a whole-run elapsed time. Consumes the owned runs from
         `available_blueprint_copy_runs_by_type_id`. Returns (costs or None when
-        not `enabled` or the source has no copy time, missing source runs)."""
+        not `enabled` or the source has no copy time, missing source runs).
+
+        The whole copy runs spread over the parallel copy lanes of
+        `invention_context` (Task 12: min(owned source BPOs, corp research
+        slots)); without it, or with one BPO, they run in sequence."""
         attempts = float(invention_costs.get("runs") or 0.0)
         whole_attempts = int(invention_costs.get("whole_attempts") or 0)
         cost_unknown = invention_costs.get("cost_unknown_reason") is not None
@@ -7644,10 +7706,16 @@ class IndustryService:
             compute_activity=compute_activity, invention_source_row=invention_source_row,
             adjusted_price_map=adjusted_price_map,
         )
-        source_copy_costs["elapsed_duration_seconds"] = (
-            compute_activity(activity="copying", base_time_seconds=source_base_time, runs=whole_missing_source_runs, process_value=None)["duration_seconds"]
-            if whole_missing_source_runs > 0 else 0
-        ) if not cost_unknown else None
+        copy_lanes = (
+            source_copy_lanes(invention_context, source_bp_type_id)
+            if invention_context is not None else ParallelLanes(1, (), "no invention context")
+        ) if whole_missing_source_runs > 0 else None
+        copy_elapsed, copy_parallel = self._lane_elapsed_seconds(
+            compute_activity=compute_activity, invention_context=invention_context, lanes=copy_lanes,
+            activity="copying", base_time_seconds=source_base_time, whole_jobs=whole_missing_source_runs,
+        )
+        source_copy_costs["elapsed_duration_seconds"] = copy_elapsed if not cost_unknown else None
+        source_copy_costs["elapsed_parallel"] = copy_parallel if not cost_unknown else None
         source_copy_costs["duration_is_amortized"] = missing_source_runs > 0
         return source_copy_costs, missing_source_runs
 
@@ -7683,6 +7751,49 @@ class IndustryService:
         """The BPC-run map key of a T1 source's whole-run budget (see
         _invention_source_copy_costs): the negated type id, never a real one."""
         return -int(source_bp_type_id)
+
+    @staticmethod
+    def _lane_elapsed_seconds(
+        *,
+        compute_activity: Callable[..., dict[str, Any]],
+        invention_context: InventionContext | None,
+        lanes: ParallelLanes | None,
+        activity: str,
+        base_time_seconds: int,
+        whole_jobs: int,
+    ) -> tuple[int, dict[str, Any] | None]:
+        """(elapsed seconds, lanes payload) for `whole_jobs` jobs of `activity`
+        over `lanes` (Task 12).
+
+        Parallel: ceil(whole_jobs / lanes) x one job's duration of the SLOWEST
+        lane pilot (the conservative choice: never understated, whichever
+        pilot gets the last round). The selected character is timed with the
+        producer's own skills and implants; every other pilot with its own
+        skills and no implants. Sequential (lanes None, or a
+        sequential_reason): whole_jobs in one slot, as before."""
+        if whole_jobs <= 0:
+            return 0, None
+        if lanes is None or lanes.sequential_reason is not None or invention_context is None:
+            elapsed = int(compute_activity(
+                activity=activity, base_time_seconds=base_time_seconds, runs=whole_jobs, process_value=None,
+            )["duration_seconds"])
+            payload = (lanes or ParallelLanes(1, (), "sequential")).payload(
+                whole_jobs=whole_jobs, lane_duration_seconds=None,
+            )
+            return elapsed, payload
+        slots = invention_context.slot_capacity_by_character_id or {}
+        durations: list[float] = []
+        for character_id in lanes.character_ids:
+            kw: dict[str, Any] = {}
+            if character_id != invention_context.selected_character_id:
+                capacity = slots.get(character_id)
+                kw["other_pilot_skill_levels_by_name"] = dict(capacity.skill_levels_by_name) if capacity is not None else {}
+            durations.append(float(compute_activity(
+                activity=activity, base_time_seconds=base_time_seconds, runs=1, process_value=None, **kw,
+            )["duration_seconds"]))
+        lane_duration = max(durations) if durations else 0.0
+        elapsed = int(round(lanes.rounds(whole_jobs) * lane_duration))
+        return elapsed, lanes.payload(whole_jobs=whole_jobs, lane_duration_seconds=lane_duration)
 
     @staticmethod
     def _invention_elapsed_adjustment(
@@ -7733,11 +7844,15 @@ class IndustryService:
         expected attempts for fees, slot time and the (amortized) inputs, whole
         attempts for the elapsed time, and no division by a zero probability."""
         def compute_activity(**kw: Any) -> dict[str, Any]:
+            # A parallel lane of another pilot (Task 12): its skills, no implants.
+            other_pilot = kw.pop("other_pilot_skill_levels_by_name", None)
             return self._compute_activity_job(
                 **kw,
                 selected_industry_profile=selected_industry_profile,
-                selected_character_modifiers=selected_character_modifiers,
-                character_skill_levels_by_name=character_skill_levels_by_name,
+                selected_character_modifiers=selected_character_modifiers if other_pilot is None else None,
+                character_skill_levels_by_name=(
+                    character_skill_levels_by_name if other_pilot is None else dict(other_pilot)
+                ),
                 surcharge_rates=surcharge_rates,
             )
 
@@ -7783,6 +7898,7 @@ class IndustryService:
             invention_costs=invention_costs,
             available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
             adjusted_price_map=adjusted_market_price_map, enabled=source_copy_enabled,
+            invention_context=invention_context,
         )
         cost_unknown_reason = invention_costs.get("cost_unknown_reason")
         breakdown: dict[str, Any] = {
@@ -7796,6 +7912,7 @@ class IndustryService:
             "invented_runs": invention_costs["invented_runs"],
             "time_seconds": invention_costs["duration_seconds"],
             "elapsed_time_seconds": invention_costs["elapsed_duration_seconds"],
+            "elapsed_parallel": invention_costs.get("elapsed_parallel"),
             "duration_is_amortized": invention_costs["duration_is_amortized"],
             "job_cost": invention_costs.get("total_job_cost"),
         }
@@ -7820,6 +7937,7 @@ class IndustryService:
                 "attempts": missing_source_runs,
                 "time_seconds": source_copy_costs["duration_seconds"],
                 "elapsed_time_seconds": source_copy_costs["elapsed_duration_seconds"],
+                "elapsed_parallel": source_copy_costs.get("elapsed_parallel"),
                 "duration_is_amortized": source_copy_costs["duration_is_amortized"],
                 "job_cost": source_copy_costs.get("total_job_cost"),
             }
@@ -8279,6 +8397,7 @@ class IndustryService:
             available_blueprint_copy_runs_by_type_id=available_blueprint_copy_runs_by_type_id,
             adjusted_price_map=ctx.adjusted_market_price_map,
             enabled=requires_invention_chain,
+            invention_context=ctx.invention_context,
         )
         # The planner's copy action copies one source run per attempt (D4).
         # Computed even when batch 1 copies nothing (an owned T2 BPC covers it):

@@ -2362,6 +2362,56 @@ def test_an_empty_inventor_list_names_why(monkeypatch, caplog, characters, reaso
     assert sum(reason in r.getMessage() for r in caplog.records if r.levelname == "WARNING") == 1
 
 
+# --- round 5 Task 12: invention elapsed time over parallel inventors ----------
+# Every pilot at 1/1/1: p = 0.5 x (1 + 2/30 + 1/40) = 0.546, so 1 BPC needs
+# ceil(1 / 0.546) = 2 whole attempts of 40 s (no profile, no time skills).
+
+_LEVEL_ONE_INVENTOR = {"skills": [
+    {"skill_id": 11433, "skill_name": "High Energy Physics", "trained_skill_level": 1},
+    {"skill_id": 11454, "skill_name": "Caldari Starship Engineering", "trained_skill_level": 1},
+    {"skill_id": 21790, "skill_name": "Caldari Encryption Methods", "trained_skill_level": 1},
+]}
+
+
+def test_two_parallel_inventors_halve_the_invention_elapsed_time(monkeypatch) -> None:
+    mj = _overview_with_real_skill_loader(monkeypatch, [
+        {"character_id": 1, "skills": _LEVEL_ONE_INVENTOR},
+        {"character_id": 2, "skills": _LEVEL_ONE_INVENTOR},
+        {"character_id": 3, "industry_enabled": False, "skills": _LEVEL_ONE_INVENTOR},  # excluded
+    ])
+    invention = mj["activity_breakdown"]["invention"]
+    assert invention["whole_attempts"] == 2
+    assert invention["elapsed_parallel"]["lanes"] == 2  # one base slot each, pilot 3 excluded
+    assert invention["elapsed_duration_seconds"] == 40  # was 2 x 40 in sequence
+    # No owned source BPO counted: the 2 copy runs stay in sequence, with the reason.
+    copying = mj["activity_breakdown"]["invention_source_copying"]
+    assert copying["elapsed_duration_seconds"] == 40
+    assert copying["elapsed_parallel"]["sequential_reason"] == "one owned source BPO at most: a BPO is in one copy job at a time"
+    assert mj["elapsed_time_seconds"] == 96 + 40 + 40
+
+
+def test_a_nested_invention_runs_over_the_parallel_inventors_too(monkeypatch) -> None:
+    service = _invention_service(
+        monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(),
+        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE,
+    )
+    del service._get_inventor_skill_levels  # back to the class method
+    service._state.char_manager = SimpleNamespace(get_characters=lambda: [  # type: ignore[attr-defined]
+        {"character_id": 1, "skills": _LEVEL_ONE_INVENTOR},
+        {"character_id": 2, "skills": _LEVEL_ONE_INVENTOR},
+    ])
+    rows = {row["type_id"]: row for row in service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+    )}
+    mj = rows[7100]["manufacturing_job"]
+    invention = mj["recursive_activity_breakdown"]["manufacturing:5002"]["nested"]["invention:9002"]
+    assert invention["whole_attempts"] == 2
+    assert invention["elapsed_parallel"]["lanes"] == 2
+    assert invention["elapsed_time_seconds"] == 40
+    # Parent 200 + component 96 + invention 40 (1 round) + copy 2 x 20.
+    assert mj["elapsed_time_seconds"] == 200 + 96 + 40 + 40
+
+
 # --- round 5 Task 3: the best decryptor per invented item (amendment A1) ------
 # Highest profit per invention cycle: the expected attempts for one successful
 # BPC plus the runs that BPC yields. Fixture: p 0.5 (no skills loaded: base
