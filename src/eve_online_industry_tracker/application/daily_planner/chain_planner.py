@@ -212,7 +212,7 @@ class ChainPlanner:
                         bpo_consider_days=bpo_consider_days,
                     )
                     self._apply_research_first(
-                        decision, bp_type_id,
+                        decision, bp_type_id, len(bpo_assets_by_type_id.get(bp_type_id) or []),
                         variant_rows_by_type_id.get(int(decision.type_id)) or [],
                         raw_market_depth.get(int(decision.type_id)),
                     )
@@ -468,6 +468,7 @@ class ChainPlanner:
         self,
         decision: ItemDecision,
         bp_type_id: int,
+        bpo_count: int,
         variants: list[dict[str, Any]],
         market_depth: Any | None,
     ) -> None:
@@ -476,13 +477,30 @@ class ChainPlanner:
         variant row, else the owned-BPC runs only, else nothing. Recorded on
         the row as `research_first` ({mode: variant | part | none, note,
         ...}); decided here, before the sub-components are sized, so they
-        and the manufacture action follow the same decision."""
+        and the manufacture action follow the same decision.
+
+        It is a plan, not a fact: CharacterAssigner applies it only when a
+        research action is actually emitted for the BPO, and otherwise builds
+        from the kept BPO row (`kept_row` for a variant; the row itself
+        otherwise). With several BPOs of the type one researches and the
+        others build as usual (mode other_bpo)."""
         row = decision.overview_row
         if not (row.get("needs_me_research") or row.get("needs_te_research")):
             return
         if not research_first.batch_uses_bpo(row):
             return
+        if bpo_count > 1:
+            row["research_first"] = {
+                "mode": "other_bpo",
+                "note": f"researching one of {bpo_count} BPOs; the batch builds from another",
+            }
+            logger.info(
+                "ChainPlanner: type_id=%s: research planned on one of %d BPOs %s; the others build",
+                decision.type_id, bpo_count, bp_type_id,
+            )
+            return
         variant = research_first.best_bpc_variant(variants, bp_type_id)
+        total_runs = orow.get_manufacturing_job(row).get("runs")
         if variant is not None:
             new_row = self._research_first_variant_row(row, variant)
             profit, reason = _variant_profit(variant, market_depth)
@@ -490,24 +508,33 @@ class ChainPlanner:
                 "mode": "variant",
                 "note": "BPO in research: built from the owned-BPC variant",
                 "profit": profit, "profit_unknown_reason": reason,
+                "kept_row": row,
+                "sized_note": "its components were sized for the owned-BPC variant's batch; "
+                              "the shopping list buys any difference",
             }
             decision.overview_row = new_row
-            logger.info(
-                "ChainPlanner: type_id=%s: BPO %s in research, building from its owned-BPC variant",
-                decision.type_id, bp_type_id,
-            )
-            return
-        part = research_first.best_part([row, *variants])
-        if part is not None:
-            row["research_first"] = {
-                "mode": "part", **part,
-                "note": f"BPO in research: built from the owned BPC runs only ({part['runs']} of "
-                        f"{orow.get_manufacturing_job(row).get('runs')} runs)",
-                "cost_unknown_reason": research_first.PART_COST_UNKNOWN_REASON,
-            }
+            note = new_row["research_first"]["note"]
         else:
-            row["research_first"] = {"mode": "none", "note": "BPO in research: not built from it in this plan"}
-        logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, row["research_first"]["note"])
+            part = research_first.best_part([row, *variants])
+            if part is not None:
+                row["research_first"] = {
+                    "mode": "part", **part,
+                    "note": f"BPO in research: built from the owned BPC runs only ({part['runs']} of "
+                            f"{total_runs} runs)",
+                    "cost_unknown_reason": research_first.PART_COST_UNKNOWN_REASON,
+                    "sized_note": f"its components were sized for {part['runs']} of {total_runs} runs; "
+                                  f"the shopping list buys the rest",
+                }
+            else:
+                row["research_first"] = {
+                    "mode": "none", "note": "BPO in research: not built from it in this plan",
+                    "sized_note": "its components were not sub-built in this plan; the shopping list buys them",
+                }
+            note = row["research_first"]["note"]
+        logger.info(
+            "ChainPlanner: type_id=%s: research planned on BPO %s; if its research gets a slot: %s",
+            decision.type_id, bp_type_id, note,
+        )
 
     @staticmethod
     def _research_first_variant_row(row: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:

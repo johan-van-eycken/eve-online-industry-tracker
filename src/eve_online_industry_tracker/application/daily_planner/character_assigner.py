@@ -223,6 +223,7 @@ class CharacterAssigner:
 
         # ME/TE research
         me_scheduled, lab_free_at = False, now
+        me_pilot: tuple[int | None, str | None] = (None, None)
         if row.get("needs_me_research"):
             bp_type_id = self._research_blueprint_type_id(row, type_id, "ME")
             char_id, char_name = (
@@ -238,6 +239,7 @@ class CharacterAssigner:
                 # EVE runs one job per blueprint: a TE job on the same BPO starts after this one.
                 lab_free_at: datetime | None = me_timing["estimated_completion"]
                 me_scheduled = True
+                me_pilot = (char_id, char_name)
                 actions.append(AssignedAction(
                     type_id=bp_type_id,
                     type_name=type_name + " BPO",
@@ -260,10 +262,16 @@ class CharacterAssigner:
 
         if row.get("needs_te_research"):
             bp_type_id = self._research_blueprint_type_id(row, type_id, "TE")
-            char_id, char_name = (
-                (None, None) if bp_type_id is None
-                else self._best_research_char(char_slots, characters)
-            )
+            if me_scheduled:
+                # Queued behind the ME job on the same BPO (one job per
+                # blueprint): it cannot start in this plan, so it goes to the
+                # ME pilot and takes no research slot now.
+                char_id, char_name = me_pilot
+            else:
+                char_id, char_name = (
+                    (None, None) if bp_type_id is None
+                    else self._best_research_char(char_slots, characters)
+                )
             if char_id is not None:
                 actions.append(AssignedAction(
                     type_id=bp_type_id,
@@ -285,7 +293,8 @@ class CharacterAssigner:
                         "te_research", type_id,
                     ),
                 ))
-                self._take_slot(char_slots, char_id, "te_research")
+                if not me_scheduled:
+                    self._take_slot(char_slots, char_id, "te_research")
 
         # Invention
         invent_whole_attempts: int | None = None
@@ -412,17 +421,32 @@ class CharacterAssigner:
                 self._take_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action
 
-        # Research first (research_first.py): ChainPlanner decided, before
+        # Research first (research_first.py): ChainPlanner planned, before
         # sizing the sub-components, how this item builds while its BPO is
         # in the lab: from an owned-BPC variant (the row is that variant),
-        # from the owned-BPC runs only, or not at all.
+        # from the owned-BPC runs only, or not at all. It applies only when a
+        # research action was emitted; without a free research slot the BPO
+        # is not in the lab and builds from the kept row as usual.
         first = row.get("research_first") if isinstance(row.get("research_first"), dict) else None
+        build_note: str | None = None
         if first is not None:
-            for action in actions:
-                if action.action_type in ("me_research", "te_research"):
+            research = [a for a in actions if a.action_type in ("me_research", "te_research")]
+            if not research and first["mode"] != "other_bpo":
+                build_note = "BPO research planned but no free research slot: built from the BPO"
+                if first.get("sized_note"):
+                    build_note += f"; {first['sized_note']}"
+                logger.warning(
+                    "CharacterAssigner: type_id=%s: no free research slot for the planned research "
+                    "on its BPO; building from the BPO instead (%s)",
+                    type_id, first.get("sized_note") or "no sub-component change",
+                )
+                row = first.get("kept_row") or row
+                first = None
+            else:
+                for action in research:
                     action.notes = f"{action.notes}; {first['note']}"
-            if first["mode"] == "none":
-                return actions
+                if first["mode"] == "none":
+                    return actions
 
         # Manufacturing
         char_id, char_name = self._best_mfg_char(char_slots, characters)
@@ -461,6 +485,8 @@ class CharacterAssigner:
             estimated_cost = orow.get_material_cost_total(row)
             estimated_profit = decision.absolute_profit_per_batch
             notes = f"Build: {decision.decision_reason}"
+            if build_note:
+                notes += f"; {build_note}"
             if first is not None and first["mode"] == "variant":
                 # The owned-BPC variant's own profit, scored like the kept row's.
                 estimated_profit = first.get("profit")
@@ -794,16 +820,17 @@ def _research_timing(
     the note, with no completion."""
     levels = _research_levels(row, activity, current_key, target_key)
     seconds, basis = _research_seconds(row, activity, levels, pilot_skills) if levels is not None else (None, None)
+    queued = "; starts after the ME research on this BPO" if after_me else ""
+    no_slot = "; no research slot taken in this plan" if after_me else ""
     if seconds is None:
-        return {"estimated_completion": None, "notes": f"{note}; duration unknown"}
+        return {"estimated_completion": None, "notes": f"{note}; duration unknown{queued}{no_slot}"}
     note = f"{note}; duration {_format_duration(seconds)}"
     if basis:
         note += f" ({basis})"
-    if after_me:
-        note += "; starts after the ME research on this BPO"
+    note += f" (structure and implants: the producer's){queued}"
     if start is None:
-        return {"estimated_completion": None, "notes": f"{note}, whose duration is unknown"}
-    return {"estimated_completion": start + timedelta(seconds=seconds), "notes": note}
+        return {"estimated_completion": None, "notes": f"{note}, whose duration is unknown{no_slot}"}
+    return {"estimated_completion": start + timedelta(seconds=seconds), "notes": note + no_slot}
 
 
 def _te_research_levels(current_pct: int, target_pct: int) -> tuple[int, int]:

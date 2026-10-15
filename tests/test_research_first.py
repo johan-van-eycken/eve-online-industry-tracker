@@ -101,7 +101,7 @@ def _decision(row) -> ItemDecision:
     )
 
 
-def _plan(row, *, te=0, me=10, variants=None):
+def _plan(row, *, te=0, me=10, variants=None, bpo_count=1):
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
     planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
@@ -109,15 +109,16 @@ def _plan(row, *, te=0, me=10, variants=None):
     component_bpo = SimpleNamespace(type_id=888, is_blueprint_copy=False,
                                     blueprint_material_efficiency=10, blueprint_time_efficiency=20)
     return planner.plan_chain([_decision(row)], {
-        "bpo_assets_by_type_id": {999: [bpo], 888: [component_bpo]},
+        "bpo_assets_by_type_id": {999: [bpo] * bpo_count, 888: [component_bpo]},
         "blueprint_data": BLUEPRINT_DATA,
         "market_depth_cache": MARKET,
         "variant_rows_by_type_id": {12345: variants or []},
     })
 
 
-def _assign(plan, pilot=None):
-    actions = CharacterAssigner().assign(plan, [], _Chars(pilot or _pilot()), _Admin())
+def _assign(plan, pilot=None, *, busy_research_slots=0):
+    jobs = [{"character_id": 1, "activity_id": 3, "status": "active"}] * busy_research_slots
+    actions = CharacterAssigner().assign(plan, jobs, _Chars(pilot or _pilot()), _Admin())
     return {a.action_type: a for a in actions}
 
 
@@ -258,3 +259,75 @@ def test_the_service_hands_chain_planning_the_dropped_variants():
 
     kept, bpc, other_kept, orphan = {"type_id": 1}, {"type_id": 1}, {"type_id": 2}, {"type_id": 3}
     assert _dropped_variants([kept, bpc, other_kept, orphan, "junk"], [kept, other_kept]) == {1: [bpc]}
+
+
+# --- fix round 3: research first only when the research is actually assigned -------
+
+ALL_SIX_SLOTS = 6  # Laboratory Operation 5: 1 + 5 research slots
+
+
+def test_a_te_0_bpo_without_a_free_research_slot_is_built_from_in_full(caplog):
+    caplog.set_level(logging.INFO)
+    actions = _assign(_plan(_row(**BPO_ROW)), busy_research_slots=ALL_SIX_SLOTS)
+    assert "te_research" not in actions
+    build = actions["manufacture"]
+    assert (build.runs, build.materials, build.estimated_cost_isk) == (10, {54321: 1000}, 1000.0)
+    assert "no free research slot" in build.notes
+    assert any("no free research slot" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
+    # The plan's components were sized for the research-first batch (none):
+    # the note says the shopping list buys them.
+    assert "the shopping list buys them" in build.notes
+
+
+def test_a_partial_case_without_a_free_research_slot_is_built_in_full():
+    actions = _assign(_plan(_row(**MIXED_ROW)), busy_research_slots=ALL_SIX_SLOTS)
+    build = actions["manufacture"]
+    assert build.runs == 10 and build.materials == {54321: 1000}
+    assert build.estimated_cost_isk == 1000.0
+    assert "components were sized for 4 of 10 runs" in build.notes
+
+
+def test_a_variant_case_without_a_free_research_slot_builds_from_the_kept_bpo_row():
+    actions = _assign(_plan(_row(**BPO_ROW), variants=[_bpc_variant()]), busy_research_slots=ALL_SIX_SLOTS)
+    build = actions["manufacture"]
+    assert build.materials == {54321: 1000}
+    assert build.estimated_cost_isk == 1000.0
+    assert "no free research slot" in build.notes
+
+
+def test_the_chain_planner_log_does_not_claim_the_bpo_is_in_research(caplog):
+    caplog.set_level(logging.INFO)
+    _plan(_row(**BPO_ROW))
+    messages = [r.getMessage() for r in caplog.records if "ChainPlanner" in r.getMessage()]
+    assert messages and all("if its research gets a slot" in m for m in messages if "BPO" in m)
+
+
+# --- several BPOs of the type ----------------------------------------------------
+
+def test_with_two_bpos_one_researches_and_the_other_builds():
+    plan = _plan(_row(**BPO_ROW), bpo_count=2)
+    (sub,) = _subs(plan)
+    assert sub.overview_row["quantity_needed"] == 1000  # the full batch
+    actions = _assign(plan)
+    assert "te_research" in actions
+    assert actions["manufacture"].runs == 10
+    assert "one of 2 BPOs" in actions["te_research"].notes
+
+
+# --- the TE job queued behind the ME job ------------------------------------------
+
+def test_te_queued_after_me_takes_no_research_slot_of_its_own():
+    # Laboratory Operation 0: one research slot, taken by the ME job.
+    pilot = {"character_id": 1, "character_name": "Pilot", "skills": {"skills": [
+        {"skill_id": 3387, "skill_name": "Mass Production", "trained_skill_level": 5},
+    ]}}
+    actions = _assign(_plan(_row(**BPO_ROW), me=4), pilot=pilot)
+    me, te = actions["me_research"], actions["te_research"]
+    assert te.character_id == me.character_id
+    assert "no research slot taken in this plan" in te.notes
+
+
+def test_the_duration_note_names_the_producers_structure_and_implants():
+    te = _assign(_plan(_row(**BPO_ROW)))["te_research"]
+    assert "(structure and implants: the producer's)" in te.notes

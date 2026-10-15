@@ -141,15 +141,21 @@ def test_me_and_te_research_take_two_separate_slots():
     assert kinds == ["me_research", "te_research"]
 
 
-def test_a_single_research_slot_yields_only_one_research_action():
+def test_a_single_research_slot_yields_only_one_running_research_job():
+    """One research slot: the ME job takes it. The TE job on the same BPO is
+    queued behind the ME job (one job per blueprint, Task 8c fix round 3),
+    so it takes no slot in this plan; a second item's research gets none."""
     chars = [_char(1, "Pilot", [])]  # 1 + 0 = 1 research slot only
-    plan = ChainPlan(decisions=[_decision(
-        overview_row={"type_id": 12345, "needs_me_research": True,
-                      "needs_te_research": True, "blueprint_type_id": 999},
-    )])
+    plan = ChainPlan(decisions=[
+        _decision(overview_row={"type_id": 12345, "needs_me_research": True,
+                                "needs_te_research": True, "blueprint_type_id": 999}),
+        _decision(type_id=22222, overview_row={"type_id": 22222, "needs_me_research": True,
+                                               "blueprint_type_id": 888}),
+    ])
     actions = CharacterAssigner().assign(plan, [], _Chars(chars), _AdminStub())
     research = [a for a in actions if a.action_type.endswith("_research")]
-    assert len(research) == 1
+    assert [(a.action_type, a.type_id) for a in research] == [("me_research", 999), ("te_research", 999)]
+    assert "no research slot taken in this plan" in research[1].notes
 
 
 def test_invention_prefers_the_higher_science_skilled_pilot():
