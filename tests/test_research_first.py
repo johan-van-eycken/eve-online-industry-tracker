@@ -633,3 +633,32 @@ def test_a_busy_priced_bpo_with_unknown_levels_does_not_warn_about_them(caplog):
 def test_a_free_bpo_with_unknown_levels_still_warns(caplog):
     _plan5(_priced_row(), bpos=[_bpo(1, None, None)])
     assert len(_unknown_levels_warnings(caplog)) == 1
+
+
+# --- Task 10 fix round 1, minor 3: jobs whose copy flag is NULL ------------------
+
+def _job(item_id, activity_id, is_copy=None, bp_type_id=999):
+    return {"blueprint_item_id": item_id, "blueprint_type_id": bp_type_id,
+            "activity_id": activity_id, "blueprint_is_blueprint_copy": is_copy}
+
+
+def test_a_null_copy_flag_is_resolved_through_the_item_index():
+    from eve_online_industry_tracker.application.daily_planner.research_first import busy_blueprint_type_ids
+
+    jobs = [_job(1, 1)]  # a manufacturing job, flag NULL
+    assert busy_blueprint_type_ids(jobs, copies=False, is_copy_by_item_id={1: False}) == {999}
+    assert busy_blueprint_type_ids(jobs, copies=True, is_copy_by_item_id={1: False}) == set()
+    assert busy_blueprint_type_ids(jobs, copies=True, is_copy_by_item_id={1: True}) == {999}
+
+
+def test_an_unresolved_null_copy_flag_counts_as_both_so_no_busy_bpo_is_missed():
+    from eve_online_industry_tracker.application.daily_planner.research_first import busy_blueprint_type_ids
+
+    jobs = [_job(1, 1)]
+    assert busy_blueprint_type_ids(jobs, copies=False) == {999}
+    assert busy_blueprint_type_ids(jobs, copies=True) == {999}
+    # Research and copying need a BPO; invention needs a BPC.
+    assert busy_blueprint_type_ids([_job(2, 5)], copies=True) == set()
+    assert busy_blueprint_type_ids([_job(3, 8)], copies=False) == set()
+    # A flag the job does give wins.
+    assert busy_blueprint_type_ids([_job(4, 1, is_copy=True)], copies=False, is_copy_by_item_id={4: False}) == set()

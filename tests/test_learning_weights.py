@@ -58,18 +58,29 @@ def _corrupt_warnings(caplog) -> list[str]:
             if r.levelno == logging.WARNING and "not a finite number" in r.getMessage()]
 
 
-def test_a_corrupt_weight_warns_once_per_compute_however_many_readers(caplog):
+def test_a_corrupt_row_warns_once_per_compute_naming_every_corrupt_field(caplog):
     """FU-04: the scorer, the pipeline analyzer and the feedback processor each
-    read the same row; inside one compute its corrupt weight warns once."""
-    w = SimpleNamespace(type_id=7, cost_multiplier=float("nan"), accuracy_ema="abc")
+    read the same row; inside one compute the row warns once, naming each
+    corrupt field (fix round 1: per row, not per field)."""
+    w = SimpleNamespace(type_id=7, cost_multiplier=float("nan"), accuracy_ema="abc", velocity_multiplier=1.5)
     with caplog.at_level(logging.WARNING):
         with weight_warnings_once_per_compute():
             for _ in range(3):
                 assert read_weight(w, "cost_multiplier") == 1.0
                 assert read_weight(w, "accuracy_ema") == 1.0
-    messages = _corrupt_warnings(caplog)
-    assert len(messages) == 2
-    assert any("cost_multiplier" in m for m in messages) and any("accuracy_ema" in m for m in messages)
+                assert read_weight(w, "velocity_multiplier") == 1.5
+    (message,) = _corrupt_warnings(caplog)
+    assert "cost_multiplier=nan" in message and "accuracy_ema='abc'" in message
+    assert "velocity_multiplier" not in message and "type_id=7" in message
+
+
+def test_two_corrupt_rows_warn_once_each_per_compute(caplog):
+    rows = [SimpleNamespace(type_id=t, cost_multiplier=None) for t in (7, 8)]
+    with caplog.at_level(logging.WARNING):
+        with weight_warnings_once_per_compute():
+            for w in rows * 2:
+                read_weight(w, "cost_multiplier")
+    assert len(_corrupt_warnings(caplog)) == 2
 
 
 def test_each_compute_warns_again_and_outside_a_compute_every_read_warns(caplog):

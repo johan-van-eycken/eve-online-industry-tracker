@@ -25,17 +25,21 @@ LEARNING_WEIGHT_MAX = 4.0
 NEUTRAL_WEIGHT = 1.0
 
 
-#: The (type_id, weight name) pairs already warned about in this compute, or
-#: None outside a compute (then every corrupt read warns).
-_WARNED_THIS_COMPUTE: contextvars.ContextVar[set[tuple[Any, str]] | None] = contextvars.ContextVar(
+#: The stored weights of a plan_learning_weights row.
+WEIGHT_NAMES = ("accuracy_ema", "velocity_multiplier", "cost_multiplier")
+
+#: The type_ids of the rows already warned about in this compute, or None
+#: outside a compute (then every corrupt read warns).
+_WARNED_THIS_COMPUTE: contextvars.ContextVar[set[Any] | None] = contextvars.ContextVar(
     "learning_weights_warned_this_compute", default=None,
 )
 
 
 @contextmanager
 def weight_warnings_once_per_compute() -> Iterator[None]:
-    """Within this block a corrupt stored weight warns once, however many
-    readers (scorer, pipeline analyzer, feedback processor) read it (FU-04)."""
+    """Within this block a row with corrupt stored weights warns once, naming
+    every corrupt field, however many readers (scorer, pipeline analyzer,
+    feedback processor) read it (FU-04)."""
     token = _WARNED_THIS_COMPUTE.set(set())
     try:
         yield
@@ -55,23 +59,34 @@ def read_weight(weights: Any | None, name: str) -> float:
     is NEUTRAL_WEIGHT, not a fallback. A row whose value is not a finite real
     number (NaN, +/-inf, text kept by SQLite's REAL affinity, None, a bool) is corrupt.
     It reads as neutral with a WARNING, so the item is still scored instead
-    of being dropped by float() raising inside a per-item handler. Inside
-    weight_warnings_once_per_compute() each (type_id, weight) warns once.
+    of being dropped by float() raising inside a per-item handler. The
+    WARNING names every corrupt weight of the row; inside
+    weight_warnings_once_per_compute() it is logged once per row (type_id).
     """
     if weights is None:
         return NEUTRAL_WEIGHT
     raw = getattr(weights, name, None)
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
-        warned = _WARNED_THIS_COMPUTE.get()
-        key = (getattr(weights, "type_id", None), name)
-        if warned is not None:
-            if key in warned:
-                return NEUTRAL_WEIGHT
-            warned.add(key)
-        logger.warning(
-            "Daily planner: learned weight %s=%r for type_id=%s is not a finite number; "
-            "reading it as neutral %.1f",
-            name, raw, getattr(weights, "type_id", "?"), NEUTRAL_WEIGHT,
-        )
-        return NEUTRAL_WEIGHT
-    return clamp_weight(float(raw))
+    if not _is_corrupt(raw):
+        return clamp_weight(float(raw))
+    warned = _WARNED_THIS_COMPUTE.get()
+    type_id = getattr(weights, "type_id", None)
+    if warned is not None:
+        if type_id in warned:
+            return NEUTRAL_WEIGHT
+        warned.add(type_id)
+    corrupt = {
+        field: getattr(weights, field)
+        for field in dict.fromkeys((*WEIGHT_NAMES, name))
+        if hasattr(weights, field) and _is_corrupt(getattr(weights, field))
+    }
+    logger.warning(
+        "Daily planner: learned weight(s) %s for type_id=%s not a finite number; "
+        "reading them as neutral %.1f",
+        ", ".join(f"{field}={value!r}" for field, value in corrupt.items()),
+        type_id if type_id is not None else "?", NEUTRAL_WEIGHT,
+    )
+    return NEUTRAL_WEIGHT
+
+
+def _is_corrupt(raw: Any) -> bool:
+    return isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw)

@@ -15,7 +15,8 @@ from streamlit_ui.components.daily_planner.status_bar import (
     _fmt_isk,
     _parse_dt,
     is_waiting,
-    queued_te_startable,
+    load_active_jobs,
+    queued_te_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,11 +114,14 @@ def _is_queued(action: dict[str, Any]) -> bool:
     return bool(action.get("queued_after_me"))
 
 
-def _todays(actions: list[dict[str, Any]], now: datetime | None = None) -> list[dict[str, Any]]:
+def _todays(
+    actions: list[dict[str, Any]], now: datetime | None = None, *, jobs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """The actions that can be done today: every action but a queued one
     whose ME research has not ended yet (fix round 5: once it has, the
-    queued TE is today's work, with a "Mark started" button)."""
-    return [a for a in actions if not is_waiting(a, actions, now)]
+    queued TE is today's work, with a "Mark started" button). `jobs`: the
+    active industry jobs, whose ME job end_date decides (status_bar.queued_te_status)."""
+    return [a for a in actions if not is_waiting(a, actions, now, jobs=jobs)]
 
 
 def _has_pending_buys(plan: dict[str, Any]) -> bool:
@@ -151,6 +155,8 @@ def _render_action_row(
     page_state: DailyPlannerPageState,
     readiness_ok: bool,
     siblings: list[dict[str, Any]] | None = None,
+    *,
+    jobs: list[dict[str, Any]] | None = None,
 ) -> None:
     action_id = int(action.get("id") or 0)
     status = str(action.get("status") or "pending")
@@ -182,11 +188,14 @@ def _render_action_row(
         return
 
     if _is_queued(action):
-        if not queued_te_startable(action, siblings or [action]):
+        startable, queue_note = queued_te_status(action, siblings or [action], jobs=jobs)
+        if not startable:
             # Not startable yet: no done/skip buttons.
             st.markdown(f"⏳ {type_name} — *queued: start when the ME research on this BPO ends*")
             if completion_label:
                 st.caption(completion_label)
+            if queue_note:
+                st.caption(f"  ↳ {queue_note}")
             return
         # The ME research has ended: start it in EVE, then record it.
         cols = st.columns([1.2, 0.6, 5])
@@ -211,6 +220,8 @@ def _render_action_row(
             st.markdown(f"{type_name} — *the ME research on this BPO has ended: start it now*")
             if completion_label:
                 st.caption(completion_label)
+            if queue_note:
+                st.caption(f"  ↳ {queue_note}")
         if notes:
             st.caption(f"  ↳ {notes}")
         return
@@ -269,7 +280,7 @@ def _render_action_row(
 # Workflow progress header
 # ---------------------------------------------------------------------------
 
-def _render_workflow_header(actions: list[dict[str, Any]]) -> None:
+def _render_workflow_header(actions: list[dict[str, Any]], *, jobs: list[dict[str, Any]] | None = None) -> None:
     deliver_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
         for a in actions
@@ -278,7 +289,7 @@ def _render_workflow_header(actions: list[dict[str, Any]]) -> None:
 
     start_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
-        for a in _todays(actions)
+        for a in _todays(actions, jobs=jobs)
         if str(a.get("action_type") or "") in _START_ACTIONS
     ) and any(str(a.get("action_type") or "") in _START_ACTIONS for a in actions)
 
@@ -301,6 +312,8 @@ def _render_character_section(
     char_actions: list[dict[str, Any]],
     page_state: DailyPlannerPageState,
     readiness_ok: bool,
+    *,
+    jobs: list[dict[str, Any]] | None = None,
 ) -> None:
     # Group by action type
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -309,7 +322,7 @@ def _render_character_section(
         by_type.setdefault(at, []).append(a)
 
     pending_count = sum(
-        1 for a in _todays(char_actions)
+        1 for a in _todays(char_actions, jobs=jobs)
         if str(a.get("status") or "pending") == "pending"
     )
     label = f"{char_name} — {pending_count} pending"
@@ -345,7 +358,7 @@ def _render_character_section(
                         st.rerun()
 
             for action in section_actions:
-                _render_action_row(action, page_state, readiness_ok, char_actions)
+                _render_action_row(action, page_state, readiness_ok, char_actions, jobs=jobs)
 
             st.markdown("")  # spacer between sections
 
@@ -387,11 +400,13 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
     if not char_actions:
         st.info("No actions for today. The plan has no pending character-level tasks.")
         return
+    # Read once per render: a queued TE starts on its ME job's real end.
+    jobs = load_active_jobs()
 
     # Check if day is complete
     all_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
-        for a in _todays(char_actions)
+        for a in _todays(char_actions, jobs=jobs)
     )
     if all_done:
         # Day complete banner
@@ -422,7 +437,7 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
         return
 
     # Workflow progress header
-    _render_workflow_header(char_actions)
+    _render_workflow_header(char_actions, jobs=jobs)
 
     # Determine readiness: if any current_job buy_materials actions are pending, not ready
     readiness_ok = not _has_pending_buys(page_state.plan)
@@ -442,4 +457,4 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
         char_groups.setdefault(name, []).append(action)
 
     for char_name, actions in sorted(char_groups.items()):
-        _render_character_section(char_name, actions, page_state, readiness_ok)
+        _render_character_section(char_name, actions, page_state, readiness_ok, jobs=jobs)

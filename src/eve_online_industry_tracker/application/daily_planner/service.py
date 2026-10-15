@@ -660,6 +660,9 @@ class DailyPlannerService:
             "variant_rows_by_type_id": variant_rows_by_type_id,
             "industry_jobs": industry_jobs,
             "busy_blueprint_item_ids": busy_item_ids,
+            # BPO or BPC, per busy item, from the asset history (a job's own
+            # flag is often NULL; chain planning adds the current snapshot).
+            "blueprint_copy_flags": self._blueprint_copy_flags(busy_item_ids) if busy_item_ids else {},
             "corp_assets": corp_assets,
             "corp_material_stock": corp_material_stock,
             "corp_orders": corp_orders,
@@ -1227,6 +1230,31 @@ class DailyPlannerService:
             unit_price = (prices.get(type_id) or {}).get("unit_price")
             if isinstance(unit_price, (int, float)) and unit_price > 0:
                 out[type_id] = {"spot_sell_price": float(unit_price)}
+        return out
+
+    def _blueprint_copy_flags(self, item_ids: set[int]) -> dict[int, bool]:
+        """{item_id: is_blueprint_copy} from the character and corporation
+        asset history, for the items whose flag is known. No error handler:
+        a failed read fails the compute (fail loud)."""
+        from eve_online_industry_tracker.infrastructure.models import (  # noqa: PLC0415
+            CharacterAssetHistoryModel,
+            CorporationAssetHistoryModel,
+        )
+
+        ids = sorted({int(i) for i in item_ids})
+        out: dict[int, bool] = {}
+        session = self._session_provider.app_session()
+        try:
+            for model in (CorporationAssetHistoryModel, CharacterAssetHistoryModel):
+                rows = (
+                    session.query(model.item_id, model.is_blueprint_copy)
+                    .filter(model.item_id.in_(ids), model.is_blueprint_copy.isnot(None))
+                    .all()
+                )
+                for item, is_copy in rows:
+                    out.setdefault(int(item), bool(is_copy))
+        finally:
+            session.close()
         return out
 
     def _index_blueprint_assets(

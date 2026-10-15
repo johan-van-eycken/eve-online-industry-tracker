@@ -3672,8 +3672,24 @@ class IndustryService:
         """(EIV, priced line count). The EIV is None when no line, or ANY line,
         lacks a price (fix round 1): a partial sum would price a job fee low
         and pass as exact, so the fee reads unknown instead."""
+        total, priced_count, _line_count = cls._sum_estimated_item_value_counted(
+            entries, quantity_key=quantity_key, adjusted_price_map=adjusted_price_map,
+        )
+        return total, priced_count
+
+    @classmethod
+    def _sum_estimated_item_value_counted(
+        cls,
+        entries: list[dict[str, Any]],
+        *,
+        quantity_key: str,
+        adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> tuple[float | None, int, int]:
+        """_sum_estimated_item_value plus the number of lines it counted
+        (priced or not): the M of "N of M priced"."""
         total = 0.0
         priced_count = 0
+        line_count = 0
         unpriced = False
         for entry in entries:
             if not isinstance(entry, dict):
@@ -3684,6 +3700,7 @@ class IndustryService:
                 type_id = 0
             if type_id <= 0:
                 continue
+            line_count += 1
             unit_value, _ = cls._resolve_eiv_pricing(
                 type_id=type_id,
                 type_payload=entry,
@@ -3699,26 +3716,10 @@ class IndustryService:
             total += float(unit_value) * quantity
             priced_count += 1
         if priced_count == 0:
-            return None, 0
+            return None, 0, line_count
         if unpriced:
-            return None, priced_count
-        return total, priced_count
-
-    @staticmethod
-    def _eiv_line_count(entries: list[dict[str, Any]]) -> int:
-        """How many lines _sum_estimated_item_value prices or counts as
-        unpriced: the M of its "N of M priced"."""
-        count = 0
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                type_id = int(entry.get("type_id") or 0)
-            except Exception:
-                type_id = 0
-            if type_id > 0:
-                count += 1
-        return count
+            return None, priced_count, line_count
+        return total, priced_count, line_count
 
     @classmethod
     def _resolve_preferred_unit_value(
@@ -4658,7 +4659,7 @@ class IndustryService:
             adjusted_material_entries.append(material)
             base_material_entries.append({**material, "quantity": base_total_quantity})
 
-        process_value, priced_material_count = self._sum_estimated_item_value(
+        process_value, priced_material_count, eiv_material_count = self._sum_estimated_item_value_counted(
             base_material_entries,
             quantity_key="quantity",
             adjusted_price_map=adjusted_market_price_map,
@@ -5335,7 +5336,7 @@ class IndustryService:
             "priced_job_count": priced_job_count,
             "estimated_item_value": process_value,
             "estimated_item_value_priced_material_count": priced_material_count,
-            "estimated_item_value_material_count": self._eiv_line_count(base_material_entries),
+            "estimated_item_value_material_count": eiv_material_count,
             "estimated_material_cost": estimated_material_cost,
             "estimated_total_cost": (
                 float(total_job_cost or 0.0) + float(estimated_material_cost or 0.0)
@@ -8730,7 +8731,7 @@ class IndustryService:
         base_material_entries = cast(list[dict[str, Any]], sized_batch["base_material_entries"])
 
         # EIV calculations
-        base_material_eiv_total, base_material_eiv_priced_count = self._sum_estimated_item_value(base_material_entries, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+        base_material_eiv_total, base_material_eiv_priced_count, base_material_eiv_line_count = self._sum_estimated_item_value_counted(base_material_entries, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
         per_run_material_eiv, _ = self._sum_estimated_item_value(adjusted_material_entries, quantity_key="quantity_per_run", adjusted_price_map=ctx.adjusted_market_price_map)
         product_eiv_unit, product_eiv_source = self._resolve_eiv_pricing(type_id=product_type_id, type_payload=compact_product, adjusted_price_map=ctx.adjusted_market_price_map)
         product_eiv_total = float(product_eiv_unit) * int(compact_product.get("quantity") or 0) if product_eiv_unit is not None else None
@@ -8749,7 +8750,7 @@ class IndustryService:
                 "cost_reduction": manufacturing_cost_reduction, "cost_index": manufacturing_cost_index,
                 "estimated_item_value": base_material_eiv_total,
                 "estimated_item_value_priced_material_count": base_material_eiv_priced_count,
-                "estimated_item_value_material_count": self._eiv_line_count(base_material_entries),
+                "estimated_item_value_material_count": base_material_eiv_line_count,
                 **manufacturing_job_cost,
                 # The reductions above are runs-weighted over job_segments.
                 **({"reduction_basis": "runs_weighted_job_segments"} if sized_batch["reductions_differ"] else {}),

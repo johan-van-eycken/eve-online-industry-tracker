@@ -102,33 +102,35 @@ _NPC_STATION_SCC_SURCHARGE = 0.04
 _UPWELL_SCC_SURCHARGE = 0.04
 
 
-def _get_industry_admin_defaults() -> tuple[float, float]:
-    """Fetch NPC facility tax and SCC surcharge from admin settings (falls back to module defaults)."""
+def _admin_industry_values() -> dict:
+    """The admin settings' industry section, read once per page render
+    (empty when the API does not answer: every rate then uses its default)."""
     resp = api_get("/admin_settings")
     if resp and resp.get("status") == "success":
         vals = (resp.get("data") or {}).get("values", {}).get("industry", {})
-        return (
-            float(vals.get("npc_station_facility_tax", _NPC_STATION_FACILITY_TAX)),
-            float(vals.get("scc_surcharge", _NPC_STATION_SCC_SURCHARGE)),
-        )
-    return _NPC_STATION_FACILITY_TAX, _NPC_STATION_SCC_SURCHARGE
+        return vals if isinstance(vals, dict) else {}
+    return {}
 
 
-def _get_job_scc_rates() -> tuple[float, float]:
+def _npc_admin_defaults(industry_values: dict) -> tuple[float, float]:
+    """NPC facility tax and SCC surcharge (falls back to module defaults)."""
+    return (
+        float(industry_values.get("npc_station_facility_tax", _NPC_STATION_FACILITY_TAX)),
+        float(industry_values.get("scc_surcharge", _NPC_STATION_SCC_SURCHARGE)),
+    )
+
+
+def _job_scc_rates(industry_values: dict) -> tuple[float, float]:
     """(SCC, ME/TE research SCC): the admin settings the producer charges
     (falls back to the producer's defaults)."""
-    resp = api_get("/admin_settings")
-    if resp and resp.get("status") == "success":
-        vals = (resp.get("data") or {}).get("values", {}).get("industry", {})
-        return (
-            float(vals.get("scc_surcharge", DEFAULT_SCC_SURCHARGE)),
-            float(vals.get("research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)),
-        )
-    return DEFAULT_SCC_SURCHARGE, DEFAULT_RESEARCH_SCC_SURCHARGE
+    return (
+        float(industry_values.get("scc_surcharge", DEFAULT_SCC_SURCHARGE)),
+        float(industry_values.get("research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)),
+    )
 
 
 def _job_fee_rates_line(profile: dict, *, scc_rates: tuple[float, float]) -> str:
-    """`scc_rates` is _get_job_scc_rates(), fetched once per page render."""
+    """`scc_rates` is _job_scc_rates() of the one admin settings read per render."""
     scc, research_scc = scc_rates
     return job_fee_rates_summary(profile, scc=scc, research_scc=research_scc)
 
@@ -562,6 +564,7 @@ def _render_create_profile_section(
     rig_option_ids: list[int],
     runtime,
     scc_rates: tuple[float, float],
+    admin_industry: dict,
 ) -> None:
     st.markdown("### Create New Profile")
 
@@ -769,7 +772,7 @@ def _render_create_profile_section(
             selected_facility_id = None
 
     if is_npc_station and selected_facility_id is not None:
-        npc_facility_tax, npc_scc_surcharge = _get_industry_admin_defaults()
+        npc_facility_tax, npc_scc_surcharge = _npc_admin_defaults(admin_industry)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -793,7 +796,7 @@ def _render_create_profile_section(
                 step=0.1,
             )
             upwell_facility_tax_pct = float(installation_cost_modifier)
-            upwell_scc_surcharge = _get_industry_admin_defaults()[1]  # SCC surcharge
+            upwell_scc_surcharge = _npc_admin_defaults(admin_industry)[1]  # SCC surcharge
             st.caption(f"SCC surcharge (admin setting): {float(upwell_scc_surcharge):.2%}")
             st.write(f"**Job fees:** {_job_fee_rates_line({'facility_tax': upwell_facility_tax_pct / 100.0}, scc_rates=scc_rates)}")
 
@@ -974,7 +977,8 @@ def render():
     profiles = response.get("data", [])
     profile_context = _load_profile_context(int(selected_character_id), profiles)
     # One /admin_settings read per render, not one per rendered profile.
-    scc_rates = _get_job_scc_rates()
+    admin_industry = _admin_industry_values()
+    scc_rates = _job_scc_rates(admin_industry)
 
     st.markdown("### Existing Profiles")
     if profiles:
@@ -1004,4 +1008,5 @@ def render():
         rig_option_ids=rig_option_ids,
         runtime=runtime,
         scc_rates=scc_rates,
+        admin_industry=admin_industry,
     )

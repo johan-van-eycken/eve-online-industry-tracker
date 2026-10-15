@@ -194,11 +194,23 @@ class ChainPlanner:
             for type_id, assets in bpc_assets_by_type_id.items()
         } if busy_item_ids else bpc_assets_by_type_id
         industry_jobs = phase1_data.get("industry_jobs") or []
-        busy_bpo_type_ids = research_first.busy_blueprint_type_ids(industry_jobs, copies=False) | {
+        # A job's NULL copy flag is resolved through the assets (minor 3).
+        is_copy_by_item_id: dict[int, bool] = {
+            **{int(k): bool(v) for k, v in (phase1_data.get("blueprint_copy_flags") or {}).items()},
+            **{research_first.item_id(a): False for assets in bpo_assets_by_type_id.values() for a in assets
+               if research_first.item_id(a) is not None},
+            **{research_first.item_id(a): True for assets in bpc_assets_by_type_id.values() for a in assets
+               if research_first.item_id(a) is not None},
+        }
+        busy_bpo_type_ids = research_first.busy_blueprint_type_ids(
+            industry_jobs, copies=False, is_copy_by_item_id=is_copy_by_item_id,
+        ) | {
             t for t, assets in bpo_assets_by_type_id.items()
             if any(research_first.item_id(a) in busy_item_ids for a in assets)
         }
-        busy_bpc_type_ids = research_first.busy_blueprint_type_ids(industry_jobs, copies=True) | {
+        busy_bpc_type_ids = research_first.busy_blueprint_type_ids(
+            industry_jobs, copies=True, is_copy_by_item_id=is_copy_by_item_id,
+        ) | {
             t for t, assets in bpc_assets_by_type_id.items()
             if any(research_first.item_id(a) in busy_item_ids for a in assets)
         }

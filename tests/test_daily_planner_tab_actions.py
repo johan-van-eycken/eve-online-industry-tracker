@@ -137,3 +137,50 @@ def test_a_queued_te_waits_while_its_me_research_was_never_started():
     me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="pending")
     assert queued_te_startable(te, [me, te], now) is False
     assert pending_character_action_count([me, te], now) == 1   # the ME itself
+
+
+# --- Task 10 fix round 1, minor 2: the ME job's real end, from the industry jobs ---
+
+def _me_job(end_date, type_id=7):
+    return {"activity_id": 4, "blueprint_type_id": type_id, "character_id": 1, "end_date": end_date}
+
+
+def test_a_queued_te_follows_the_active_me_jobs_end_date_over_the_estimate():
+    from datetime import datetime, timezone
+
+    from streamlit_ui.components.daily_planner.status_bar import queued_te_status
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    # The estimate has passed, but the real ME job (started late) runs until tomorrow.
+    me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
+    startable, note = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-03T00:00:00Z")])
+    assert startable is False and "from the industry jobs" in note
+    # The real job ended before the estimate would have.
+    me, te = _queued_pair("2026-01-05T00:00:00Z", me_status="done")
+    startable, note = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-01T06:00:00Z")])
+    assert startable is True
+    # Another blueprint's ME job does not count.
+    startable, _ = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-01T06:00:00Z", type_id=8)])
+    assert startable is False
+
+
+def test_without_an_active_me_job_the_estimate_is_used_and_the_note_says_so():
+    from datetime import datetime, timezone
+
+    from streamlit_ui.components.daily_planner.status_bar import queued_te_status
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
+    startable, note = queued_te_status(te, [me, te], now, jobs=[])
+    assert startable is True and "no active ME job" in note and "estimate" in note
+    startable, note = queued_te_status(te, [me, te], now, jobs=None)
+    assert startable is True and "estimate" in note and "not loaded" in note
+
+
+def test_the_pending_count_uses_the_jobs_too():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
+    assert pending_character_action_count([me, te], now) == 1
+    assert pending_character_action_count([me, te], now, jobs=[_me_job("2026-01-03T00:00:00Z")]) == 0

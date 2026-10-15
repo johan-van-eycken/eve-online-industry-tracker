@@ -131,25 +131,40 @@ def _job_field(job: Any, name: str) -> Any:
 
 #: Activities that only a BPO can run: ME and TE research, copying.
 _BPO_ONLY_ACTIVITY_IDS = frozenset({3, 4, 5})
+#: Activities that only a BPC can run: invention.
+_BPC_ONLY_ACTIVITY_IDS = frozenset({8})
 
 
-def busy_blueprint_type_ids(industry_jobs: list[Any], *, copies: bool) -> set[int]:
+def busy_blueprint_type_ids(
+    industry_jobs: list[Any], *, copies: bool, is_copy_by_item_id: dict[int, bool] | None = None,
+) -> set[int]:
     """Blueprint type ids with a BPO (copies=False) or a BPC (copies=True)
-    installed in one of these active jobs. A job that does not say whether
-    its blueprint is a copy counts as a BPO job when its activity needs a
-    BPO (research, copying), and as a BPC job otherwise."""
+    installed in one of these active jobs.
+
+    Whether a job's blueprint is a copy: the job's own flag; when that is
+    NULL (as on many live rows), the item's flag from the asset snapshot or
+    history (`is_copy_by_item_id`); else the activity (research and copying
+    need a BPO, invention a BPC). A job none of these resolves (e.g.
+    manufacturing) counts as both, so a busy BPO is never missed."""
     out: set[int] = set()
     for job in industry_jobs or []:
         try:
             bp_type_id = int(_job_field(job, "blueprint_type_id") or 0)
             activity_id = int(_job_field(job, "activity_id") or 0)
+            item = int(_job_field(job, "blueprint_item_id") or 0)
         except (TypeError, ValueError):
             continue
         if bp_type_id <= 0:
             continue
         is_copy = _job_field(job, "blueprint_is_blueprint_copy")
-        job_is_copy = bool(is_copy) if is_copy is not None else activity_id not in _BPO_ONLY_ACTIVITY_IDS
-        if job_is_copy == copies:
+        if is_copy is None and item > 0:
+            is_copy = (is_copy_by_item_id or {}).get(item)
+        if is_copy is None:
+            if activity_id in _BPO_ONLY_ACTIVITY_IDS:
+                is_copy = False
+            elif activity_id in _BPC_ONLY_ACTIVITY_IDS:
+                is_copy = True
+        if is_copy is None or bool(is_copy) == copies:
             out.add(bp_type_id)
     return out
 

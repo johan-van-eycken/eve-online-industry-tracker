@@ -3917,3 +3917,15 @@ def test_each_owned_bpc_job_names_its_bpc(monkeypatch) -> None:
     owned = [s for s in mj["job_segments"] if s["source"] == "owned_blueprint_copy"]
     assert [(s["runs"], s["blueprint_item_id"]) for s in owned] == [(4, 81)]
     assert all("blueprint_item_id" not in s for s in mj["job_segments"] if s["source"] != "owned_blueprint_copy")
+
+
+def test_the_eiv_line_count_uses_the_sums_own_filter() -> None:
+    # Fix round 1, minor 4: one definition of which lines the EIV covers.
+    entries = [{"type_id": 34, "quantity": 2}, {"type_id": 35, "quantity": 1}, {"type_id": 0}, "x"]
+    total, priced, lines = IndustryService._sum_estimated_item_value_counted(
+        cast(Any, entries), quantity_key="quantity", adjusted_price_map={34: {"adjusted_price": 5.0}},
+    )
+    assert (total, priced, lines) == (None, 1, 2)
+    assert IndustryService._sum_estimated_item_value(
+        cast(Any, entries), quantity_key="quantity", adjusted_price_map={34: {"adjusted_price": 5.0}},
+    ) == (None, 1)

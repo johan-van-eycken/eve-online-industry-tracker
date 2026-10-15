@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ import streamlit as st
 
 from streamlit_ui.api.daily_planner import compute_plan, get_market_intel_status, get_plan, get_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
+
+logger = logging.getLogger(__name__)
 
 # Default from spec: plan expires after 36 hours
 PLANNER_MAX_PLAN_AGE_HOURS: float = 36.0
@@ -141,19 +144,28 @@ def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None
     return (_fmt_isk(reserved.total) if reserved.total else "—"), queued
 
 
-def queued_te_startable(
+#: ESI activity id of ME research.
+ME_RESEARCH_ACTIVITY_ID = 4
+
+
+def queued_te_status(
     action: dict[str, Any], actions: list[dict[str, Any]], now: datetime | None = None,
-) -> bool:
-    """Whether a TE research queued behind the ME research on its BPO
-    (queued_after_me) can be started now: the ME action on the same BPO
-    (type_id) for the same pilot was marked started (done) and has ended
-    (its estimated completion has passed), or was skipped. A pending ME was
-    never started, so its estimate proves nothing and the TE waits (carry
-    14). An unknown ME end keeps it waiting (the next plan schedules it
-    from the jobs); with no such ME action nothing says it must wait.
-    False for an action that is not queued."""
+    *, jobs: list[dict[str, Any]] | None = None,
+) -> tuple[bool, str | None]:
+    """(startable, note) for a TE research queued behind the ME research on
+    its BPO (queued_after_me).
+
+    Startable when the ME action on the same BPO (type_id) for the same
+    pilot was skipped, or was marked started (done) and its job has ended.
+    A pending ME was never started, so the TE waits (carry 14). The end is
+    the active ME-research job's end_date on that blueprint, from `jobs`
+    (the active industry jobs; the latest end when several run, since the
+    action rows do not name the BPO's item). Only without such a job is the
+    planner's estimate used, and the note says so. With no such ME action
+    nothing says it must wait. (False, None) for an action that is not
+    queued."""
     if not action.get("queued_after_me"):
-        return False
+        return False, None
     now = now or datetime.now(tz=timezone.utc)
     me = next((
         a for a in actions
@@ -163,19 +175,44 @@ def queued_te_startable(
     ), None)
     me_status = str(me.get("status") or "pending") if me is not None else None
     if me is None or me_status == "skipped":
-        return True
+        return True, None
     if me_status != "done":
-        return False
+        return False, "the ME research on this BPO is not marked started yet"
+    me_jobs = [
+        j for j in jobs or []
+        if isinstance(j, dict) and j.get("activity_id") == ME_RESEARCH_ACTIVITY_ID
+        and j.get("blueprint_type_id") == action.get("type_id")
+    ]
+    if me_jobs:
+        ends = [_parse_dt(j.get("end_date")) for j in me_jobs]
+        if any(end is None for end in ends):
+            return False, "the active ME job's end time is unknown"
+        end = max(e for e in ends if e is not None)
+        return end <= now, f"ME job ends {end.strftime('%a %d %b %H:%M')} EVE (from the industry jobs)"
     me_end = _parse_dt(me.get("estimated_completion"))
-    return me_end is not None and me_end <= now
+    why = "industry jobs not loaded" if jobs is None else "no active ME job found for this BPO"
+    return me_end is not None and me_end <= now, f"{why}: using the planner's estimate of the ME end"
 
 
-def is_waiting(action: dict[str, Any], actions: list[dict[str, Any]], now: datetime | None = None) -> bool:
+def queued_te_startable(
+    action: dict[str, Any], actions: list[dict[str, Any]], now: datetime | None = None,
+    *, jobs: list[dict[str, Any]] | None = None,
+) -> bool:
+    """queued_te_status's startable flag."""
+    return queued_te_status(action, actions, now, jobs=jobs)[0]
+
+
+def is_waiting(
+    action: dict[str, Any], actions: list[dict[str, Any]], now: datetime | None = None,
+    *, jobs: list[dict[str, Any]] | None = None,
+) -> bool:
     """A queued action that cannot be started yet: not today's work."""
-    return bool(action.get("queued_after_me")) and not queued_te_startable(action, actions, now)
+    return bool(action.get("queued_after_me")) and not queued_te_startable(action, actions, now, jobs=jobs)
 
 
-def pending_character_action_count(actions: list[dict[str, Any]], now: datetime | None = None) -> int:
+def pending_character_action_count(
+    actions: list[dict[str, Any]], now: datetime | None = None, *, jobs: list[dict[str, Any]] | None = None,
+) -> int:
     """Pending actions a pilot still has to do. Rows of a type this planner
     no longer produces (e.g. a legacy relist_order) do not count."""
     return sum(
@@ -184,8 +221,21 @@ def pending_character_action_count(actions: list[dict[str, Any]], now: datetime 
         and str(a.get("action_type") or "") in CHARACTER_ACTION_TYPES
         # A TE research queued behind its BPO's ME job cannot be done
         # until that job ends.
-        and not is_waiting(a, actions, now)
+        and not is_waiting(a, actions, now, jobs=jobs)
     )
+
+
+def load_active_jobs() -> list[dict[str, Any]] | None:
+    """The active industry jobs for the queued-TE check, or None when they
+    cannot be loaded (the check then uses the planner's estimate and says so)."""
+    from streamlit_ui.api.industry_jobs import fetch_active_industry_jobs  # noqa: PLC0415
+
+    try:
+        jobs = fetch_active_industry_jobs().get("jobs")
+    except Exception:  # noqa: BLE001 - UI read; the note names the fallback
+        logger.warning("Daily planner: active industry jobs not loaded; queued TE uses the estimate", exc_info=True)
+        return None
+    return [j for j in jobs if isinstance(j, dict)] if isinstance(jobs, list) else None
 
 
 # ---------------------------------------------------------------------------
@@ -195,13 +245,19 @@ def pending_character_action_count(actions: list[dict[str, Any]], now: datetime 
 def _parse_dt(s: Any) -> datetime | None:
     if not s:
         return None
+    if isinstance(s, datetime):
+        return s if s.tzinfo is not None else s.replace(tzinfo=timezone.utc)
     try:
         ts = str(s).rstrip("Z")
         if "." in ts:
             return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
     except Exception:
-        return None
+        try:
+            parsed = datetime.fromisoformat(str(s))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _fmt_isk(v: float | None) -> str:
@@ -511,7 +567,9 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     # 8. Recompute button (with confirmation when pending actions exist)
     # ------------------------------------------------------------------
     actions = (page_state.plan or {}).get("actions") or []
-    pending_char_actions = pending_character_action_count(actions)
+    pending_char_actions = pending_character_action_count(
+        actions, jobs=load_active_jobs() if actions else None,
+    )
 
     stale = freshness_score is not None and freshness_score < 0.75
     button_type = "primary" if (plan_expired or stale or page_state.plan is None) else "secondary"

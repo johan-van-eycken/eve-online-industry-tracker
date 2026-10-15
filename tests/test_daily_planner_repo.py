@@ -966,3 +966,25 @@ def test_a_compute_warns_once_for_a_corrupt_weight_row(session_provider, caplog)
     with caplog.at_level(logging.WARNING):
         svc._run_compute()
     assert sum("not a finite number" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_the_copy_flag_of_busy_blueprints_comes_from_the_asset_history(app_session, session_provider):
+    """Fix round 1, minor 3: many live job rows have a NULL
+    blueprint_is_blueprint_copy; the asset history says what the item is."""
+    from eve_online_industry_tracker.infrastructure.models import (
+        CharacterAssetHistoryModel,
+        CorporationAssetHistoryModel,
+    )
+
+    app_session.add(CorporationAssetHistoryModel(
+        corporation_id=1, item_id=501, observed_at="2026-01-01T00:00:00Z", type_id=999, is_blueprint_copy=False,
+    ))
+    app_session.add(CharacterAssetHistoryModel(
+        character_id=2, item_id=502, observed_at="2026-01-01T00:00:00Z", type_id=999, is_blueprint_copy=True,
+    ))
+    app_session.add(CorporationAssetHistoryModel(
+        corporation_id=1, item_id=503, observed_at="2026-01-01T00:00:00Z", type_id=999, is_blueprint_copy=None,
+    ))
+    app_session.commit()
+    flags = _service(session_provider)._blueprint_copy_flags({501, 502, 503, 504})
+    assert flags == {501: False, 502: True}
