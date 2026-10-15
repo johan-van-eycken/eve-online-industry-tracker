@@ -69,3 +69,7 @@ def test_the_drilldown_says_when_skills_were_unknown():
         "Invention chance 34.0%: SDE base 34.0% × decryptor 1 (skills unknown: no corp character has its skills loaded)"
     ]
     assert ui.invention_summary_lines({"manufacturing_job": {}}) == []
+
+
+def test_an_unknown_invention_node_is_labelled_unknown():
+    assert ui.tree_node_activity_label({"activity": "invention", "recommendation_action": "unknown", "runs": 0}) == "unknown"

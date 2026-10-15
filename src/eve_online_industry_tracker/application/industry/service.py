@@ -8035,7 +8035,11 @@ class IndustryService:
                 job_cost=costs.get("total_job_cost"), total_job_cost=costs.get("total_job_cost"),
                 category_name=str(compact_product.get("category_name") or "") or None,
                 meta_group_name=str(compact_product.get("meta_group_name") or "") or None,
-                recommendation_action=("invent" if invention_attempts > 0 else "take"),
+                recommendation_action=(
+                    "invent" if invention_attempts > 0
+                    else ("unknown" if costs.get("cost_unknown_reason") else "take")
+                ),
+                **({"cost_unknown_reason": costs["cost_unknown_reason"]} if costs.get("cost_unknown_reason") else {}),
                 children=([self._job_tree_node(label=self._ACTIVITY_LABELS["materials"], node_type="materials", activity="materials", children=inv_material_nodes)] if invention_attempts > 0 and inv_material_nodes else []),
             ))
 
@@ -8704,8 +8708,13 @@ class IndustryService:
             else:
                 activity_breakdown.pop("invention", None)
         prerequisite_tree_nodes.extend(inv_tree)
-        if source_copy_costs is not None and requires_invention_chain and source_copy_costs.get("duration_seconds", 0) > 0:
-            # Listed so activity_breakdown's fees add up to total_job_cost.
+        if source_copy_costs is not None and requires_invention_chain and (
+            source_copy_costs.get("duration_seconds", 0) > 0
+            or (source_copy_costs.get("elapsed_duration_seconds") or 0) > 0
+        ):
+            # Listed so activity_breakdown's fees add up to total_job_cost, and
+            # so a copy that only the whole attempts need (owned runs cover the
+            # expected attempts: 0 slot time, no fee) still shows its elapsed time.
             activity_breakdown["invention_source_copying"] = source_copy_costs
             total_time_seconds += source_copy_costs["duration_seconds"]
             if source_copy_costs.get("total_job_cost") is not None:

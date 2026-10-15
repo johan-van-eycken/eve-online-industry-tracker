@@ -50,24 +50,22 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
     return admin_setting(admin_settings, "daily_planner", key, fallback)
 
 
-def build_product_to_blueprint_index(
-    blueprint_data: dict[int, dict[str, Any]]
+def _lowest_blueprint_by_activity_product(
+    blueprint_data: dict[int, dict[str, Any]], activity: str
 ) -> dict[int, int]:
-    """{product type_id: blueprint type_id} from SDE blueprint manufacturing data.
+    """{product type_id of `activity`: lowest blueprint type_id with that product}.
 
-    blueprint_data is keyed by *blueprint* type_id. Anything that starts from a
-    product — a material requirement, an overview row — has to cross over
-    through this index. When two blueprints make the same product the first
-    one seen wins (same tie-break as a linear scan over blueprint_data).
+    The lowest id wins whatever the dict order, matching
+    blueprints.get_invention_source_blueprint_ids (ORDER BY blueprintTypeID).
     """
     index: dict[int, int] = {}
     for blueprint_type_id, entry in (blueprint_data or {}).items():
         if not isinstance(entry, dict):
             continue
-        manufacturing = entry.get("manufacturing")
-        if not isinstance(manufacturing, dict):
+        job = entry.get(activity)
+        if not isinstance(job, dict):
             continue
-        products = manufacturing.get("products")
+        products = job.get("products")
         if not isinstance(products, list):
             continue
         for product in products:
@@ -78,8 +76,22 @@ def build_product_to_blueprint_index(
             except (TypeError, ValueError):
                 continue
             if product_type_id > 0:
-                index.setdefault(product_type_id, int(blueprint_type_id))
+                current = index.get(product_type_id)
+                if current is None or int(blueprint_type_id) < current:
+                    index[product_type_id] = int(blueprint_type_id)
     return index
+
+
+def build_product_to_blueprint_index(
+    blueprint_data: dict[int, dict[str, Any]]
+) -> dict[int, int]:
+    """{product type_id: blueprint type_id} from SDE blueprint manufacturing data.
+
+    blueprint_data is keyed by *blueprint* type_id. Anything that starts from a
+    product (a material requirement, an overview row) crosses over through
+    this index. When two blueprints make the same product the lowest id wins.
+    """
+    return _lowest_blueprint_by_activity_product(blueprint_data, "manufacturing")
 
 
 def build_invention_source_index(
@@ -91,32 +103,9 @@ def build_invention_source_index(
     products are the blueprints it invents into. A T2 overview row only knows
     its own (T2) blueprint, so finding the T1 BPO to copy means walking this
     index backwards. When several sources invent into one blueprint the lowest
-    source id wins, matching blueprints.get_invention_source_blueprint_ids
-    (ORDER BY blueprintTypeID).
+    source id wins.
     """
-    index: dict[int, int] = {}
-    for source_type_id, entry in (blueprint_data or {}).items():
-        if not isinstance(entry, dict):
-            continue
-        invention = entry.get("invention")
-        if not isinstance(invention, dict):
-            continue
-        products = invention.get("products")
-        if not isinstance(products, list):
-            continue
-        for product in products:
-            if not isinstance(product, dict):
-                continue
-            try:
-                invented_type_id = int(product.get("type_id") or 0)
-            except (TypeError, ValueError):
-                continue
-            if invented_type_id > 0:
-                source = int(source_type_id)
-                current = index.get(invented_type_id)
-                if current is None or source < current:
-                    index[invented_type_id] = source
-    return index
+    return _lowest_blueprint_by_activity_product(blueprint_data, "invention")
 
 
 class ChainPlanner:
@@ -436,7 +425,8 @@ class ChainPlanner:
             # _compute_optimal_me): schedule no ME research rather than
             # treating the optimum as 0, which silently reads as "already
             # optimal". The TE target is the setting and always known.
-            if optimal_me is None:
+            # (Missing runs were already logged above and explain it.)
+            if optimal_me is None and runs_reason is None:
                 logger.warning(
                     "ChainPlanner: optimal ME unknown for owned BPO %s; "
                     "not scheduling ME research",

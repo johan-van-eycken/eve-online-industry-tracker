@@ -3716,3 +3716,30 @@ def test_a_partly_priced_component_has_no_fee_and_says_why() -> None:
     mj = row["manufacturing_job"]
     assert mj["manufacturing_job_cost"] is None
     assert "EIV" in mj["manufacturing_job_cost_unknown_reason"]
+
+
+# --- round 5 Task 9: visibility --------------------------------------------------
+
+
+def test_an_invention_node_with_unknown_odds_says_unknown_not_take(monkeypatch) -> None:
+    rows = _rows_with(probability_pct=0.0, bpc_runs=10, t2_limit=10)
+    mj = _invention_overview(
+        monkeypatch, blueprint_rows=rows, adm_overrides={"invention_probability_floor": 0.0},
+    )[5002]["manufacturing_job"]
+    node = _find_first_activity_node(mj["job_tree"], "invention")
+    assert node is not None
+    assert node["recommendation_action"] == "unknown"
+    assert "no invention success probability" in node["cost_unknown_reason"]
+
+
+def test_a_source_copy_covered_by_owned_runs_is_still_listed_for_its_elapsed_time(monkeypatch) -> None:
+    source_bpc = SimpleNamespace(
+        type_id=1001, item_id=98, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=1,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    mj = _invention_overview(monkeypatch, owned_assets=([source_bpc], [], {}, {}, {}))[5002]["manufacturing_job"]
+    copying = mj["activity_breakdown"]["invention_source_copying"]
+    assert copying["duration_seconds"] == 0
+    assert copying["elapsed_duration_seconds"] > 0

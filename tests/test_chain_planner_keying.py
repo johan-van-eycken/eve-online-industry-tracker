@@ -1445,3 +1445,32 @@ def test_the_components_own_row_reason_wins_over_the_parents():
     plan = _planner().plan_chain([_decision(_row(materials=materials))], phase1)
     (sub,) = [d for d in plan.decisions if d.is_sub_component]
     assert sub.overview_row["sub_install_fee_unknown_reason"] == "own row: no priced EIV"
+
+
+# --- round 5 Task 9: one lowest-id builder, one warning ---------------------------
+
+def test_two_blueprints_for_one_product_resolve_to_the_lowest_id():
+    data = {
+        200: {"manufacturing": {"products": [{"type_id": 5, "quantity": 1}], "materials": []}},
+        100: {"manufacturing": {"products": [{"type_id": 5, "quantity": 1}], "materials": []}},
+    }
+    assert build_product_to_blueprint_index(data) == {5: 100}
+
+
+def _plan_owned_bpo(planner, row, caplog):
+    phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=0, te=0)]}, "blueprint_data": BLUEPRINT_DATA}
+    with caplog.at_level("WARNING"):
+        planner.plan_chain([_decision(row)], phase1)
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_missing_runs_log_one_warning_not_two(caplog):
+    row = _row()
+    del row["manufacturing_job"]["runs"]
+    warnings = [w for w in _plan_owned_bpo(_planner(), row, caplog) if "run count" in w or "optimal ME" in w]
+    assert len(warnings) == 1 and "unusable batch run count" in warnings[0]
+
+
+def test_an_unknown_optimal_me_still_warns_when_runs_are_present(caplog):
+    warnings = _plan_owned_bpo(_planner(optimal_me=None), _row(), caplog)
+    assert any("optimal ME unknown" in w for w in warnings)
