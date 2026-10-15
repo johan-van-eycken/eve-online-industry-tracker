@@ -354,7 +354,9 @@ def test_the_t1_bpc_runs_on_hand_and_the_bpo_count_reach_the_assigner():
               "bpc_assets_by_type_id": {999: bpcs},
               "blueprint_data": INVENTION_BLUEPRINT_DATA}
     _planner().plan_chain([_decision(row, meta_group_id=2)], phase1)
-    assert (row["t1_bpo_count"], row["t1_bpc_runs_on_hand"]) == (2, 5)
+    # Task 14 fix round 1: extra copy BPOs only up to the producer's invention
+    # lanes; this row names none, so one BPO copies.
+    assert (row["t1_bpo_count"], row["t1_bpc_runs_on_hand"]) == (1, 5)
 
 
 def test_unowned_t1_bpo_means_one_must_be_acquired():

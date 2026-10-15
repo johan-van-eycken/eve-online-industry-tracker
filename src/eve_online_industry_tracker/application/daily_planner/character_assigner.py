@@ -147,6 +147,8 @@ class CharacterAssigner:
                 # created -- two research actions on one item must not share a slot.
                 assigned_actions.extend(actions)
 
+        if fell_back:
+            _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
         return assigned_actions
 
     def _take_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
@@ -371,7 +373,7 @@ class CharacterAssigner:
                     )
                     if bpc is not None and bpc[1] is not None:
                         action.blueprint_item_id = bpc[1]
-                        action.notes = f"{action.notes}; from T1 BPC item {bpc[1]} ({bpc[2]} run(s))"
+                        action.notes = f"{action.notes}; from T1 BPC item {bpc[1]} ({_count(bpc[2], 'run', 'runs')})"
                     if notes:
                         action.notes = f"{action.notes}; {notes}"
                     actions.append(action)
@@ -500,6 +502,7 @@ class CharacterAssigner:
                     "manufacture", type_id,
                 ),
             ))
+            _component_buy_reasons(decision, actions[-1])
             self._take_slot(char_slots, char_id, "manufacture")
         elif char_id is not None:
             # Both live under manufacturing_job. A top-level runs_per_batch /
@@ -549,6 +552,7 @@ class CharacterAssigner:
                     "manufacture", type_id,
                 ),
             ))
+            _component_buy_reasons(decision, actions[-1])
             self._take_slot(char_slots, char_id, "manufacture")
         else:
             logger.debug("CharacterAssigner: no free mfg slot for type_id=%s", type_id)
@@ -893,7 +897,7 @@ class CharacterAssigner:
             shape: list[str] = []
             if job is not None:
                 copies = job["copies"]
-                shape.append(f"make {copies} {'copy' if copies == 1 else 'copies'} × {job['runs_per_copy']} runs")
+                shape.append(f"make {_count(copies, 'copy', 'copies')} × {_count(job['runs_per_copy'], 'run', 'runs')}")
                 if lane_sizes and len(lane_sizes) > 1:
                     shape.append(f"for invent lanes of {' + '.join(str(n) for n in lane_sizes)} attempts")
                 if job.get("short"):
@@ -1033,43 +1037,45 @@ class CharacterAssigner:
 _LANE_WORDING = re.compile(r"lane \d+ of \d+")
 
 
-def _cap_invention_attempts(results: list[tuple[int, Any]], cap: int) -> list[tuple[int, Any]]:
-    """Today's invent actions limited to `cap` attempts in all, one per T1
-    BPC run on hand (best lane first). A capped lane keeps its share of the
-    expected attempts and cost. A lane of unknown size takes what is left
-    (it is said in its note) and ends the list. Kept lanes are renumbered
-    "lane k of n"."""
-    kept: list[tuple[int, Any]] = []
-    left = int(cap)
-    for char_id, invention in results:
-        if left <= 0:
-            break
-        whole = invention.whole_attempts
-        if whole is None:
-            kept.append((char_id, dataclasses.replace(
-                invention, note="; ".join(n for n in (
-                    invention.note, f"at most {left} attempt(s): the T1 BPC run(s) on hand",
-                ) if n),
-            )))
-            left = 0
-            break
-        if whole > left:
-            share = left / whole
-            invention = dataclasses.replace(
-                invention, whole_attempts=left,
-                expected_attempts=None if invention.expected_attempts is None else invention.expected_attempts * share,
-                cost_isk=None if invention.cost_isk is None else invention.cost_isk * share,
-                note="; ".join(n for n in (invention.note, f"capped at the {cap} T1 BPC run(s) on hand") if n),
-            )
-        kept.append((char_id, invention))
-        left -= int(invention.whole_attempts)
-    if len(kept) < len(results):
-        kept = [
-            (cid, dataclasses.replace(inv, note=_LANE_WORDING.sub(f"lane {index} of {len(kept)}", inv.note)))
-            if inv.note else (cid, inv)
-            for index, (cid, inv) in enumerate(kept, start=1)
-        ]
-    return kept
+def _component_buy_reasons(decision: ItemDecision, action: AssignedAction) -> None:
+    """M8: ChainPlanner's "component X bought: ..." reasons, added to the
+    persisted reason and the action's note only for a component this
+    manufacture actually buys (it is in the action's materials)."""
+    reasons = decision.overview_row.get("component_buy_reasons")
+    if not isinstance(reasons, dict):
+        return
+    for type_id, reason in reasons.items():
+        if not (action.materials or {}).get(int(type_id)):
+            continue
+        if reason not in (decision.decision_reason or ""):
+            decision.decision_reason = f"{decision.decision_reason}; {reason}"
+        if reason not in (action.notes or ""):
+            action.notes = f"{action.notes}; {reason}"
+
+
+def _reword_unused_research_claims(decisions: list[ItemDecision], actions: list[AssignedAction], fell_back: set[int]) -> None:
+    """M10: a research claim whose research got no slot did not happen; its
+    row built from the BPO instead. Reasons and notes that name the
+    research claim (e.g. "used by TE research for Thing (12345) today")
+    name that manufacture instead."""
+    for decision in decisions:
+        if int(decision.type_id) not in fell_back or decision.is_sub_component:
+            continue
+        label = decision.overview_row.get("research_claim_label")
+        if not isinstance(label, str) or not label:
+            continue
+        built = f"manufacture of {decision.type_name} ({decision.type_id})"
+        for other in decisions:
+            if other is not decision and label in (other.decision_reason or ""):
+                other.decision_reason = other.decision_reason.replace(label, built)
+        for action in actions:
+            if action.notes and label in action.notes:
+                action.notes = action.notes.replace(label, built)
+
+
+def _count(n: int, one: str, many: str) -> str:
+    """'1 copy', '2 copies'."""
+    return f"{n} {one if n == 1 else many}"
 
 
 def _no_manufacture_today(decision: ItemDecision, reason: str) -> None:
@@ -1200,12 +1206,21 @@ def _lanes_on_bpcs(
     results: list[tuple[int, Any]], bpcs: list[tuple[Any, int | None, int]],
 ) -> list[tuple[int, Any, tuple[Any, int | None, int]]]:
     """Today's invent lanes, each on its own T1 BPC (I2): one invention job
-    per BPC, of at most its runs. The largest lane takes the BPC with the
-    most runs; lanes beyond the BPCs are dropped. Kept lanes are renumbered
+    per BPC, of at most its runs. Largest lane first, each takes the
+    smallest free BPC with enough runs (best fit, M7), else the largest
+    left (and is capped at its runs); a lane of unknown size takes the
+    largest. Lanes beyond the BPCs are dropped. Kept lanes are renumbered
     "lane k of n" when some were dropped."""
     ordered = sorted(results, key=lambda r: (r[1].whole_attempts is None, -(r[1].whole_attempts or 0)))
+    left = sorted(bpcs, key=lambda e: (-e[2], str(e[0])))
     out: list[tuple[int, Any, tuple[Any, int | None, int]]] = []
-    for (char_id, invention), bpc in zip(ordered, bpcs):
+    for char_id, invention in ordered:
+        if not left:
+            break
+        whole = invention.whole_attempts
+        fits = [e for e in left if whole is not None and e[2] >= whole]
+        bpc = min(fits, key=lambda e: (e[2], str(e[0]))) if fits else left[0]
+        left.remove(bpc)
         _key, item, runs = bpc
         wording = f"the {runs} run(s) of T1 BPC item {item}" if item is not None else f"the {runs} T1 BPC run(s) on hand"
         out.append((char_id, _cap_lane(invention, runs, wording), bpc))

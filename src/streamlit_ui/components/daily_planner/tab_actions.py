@@ -150,6 +150,24 @@ def _reload_plan(page_state: DailyPlannerPageState) -> None:
 # Action row renderer
 # ---------------------------------------------------------------------------
 
+def action_quantity_label(action: dict[str, Any]) -> str:
+    """The row's quantity label. A copy (Task 14 M6) is one job of
+    `quantity` copies whose `runs` are the copied runs in all, so it reads
+    "N copies × M runs" (M runs per copy)."""
+    quantity = action.get("quantity")
+    runs = action.get("runs")
+    if str(action.get("action_type") or "") == "copy" and isinstance(quantity, int) and quantity > 0 \
+            and isinstance(runs, int) and runs > 0:
+        per_copy = runs // quantity
+        return (f"{quantity} {'copy' if quantity == 1 else 'copies'} × "
+                f"{per_copy} {'run' if per_copy == 1 else 'runs'}")
+    if runs is not None:
+        return f"×{runs} runs"
+    if quantity is not None:
+        return f"×{quantity:,}" if isinstance(quantity, int) else f"×{quantity}"
+    return ""
+
+
 def _render_action_row(
     action: dict[str, Any],
     page_state: DailyPlannerPageState,
@@ -162,19 +180,12 @@ def _render_action_row(
     status = str(action.get("status") or "pending")
     action_type = str(action.get("action_type") or "")
     type_name = str(action.get("type_name") or "Unknown")
-    quantity = action.get("quantity")
-    runs = action.get("runs")
     cost = action.get("estimated_cost_isk")
     completion = action.get("estimated_completion")
     notes = str(action.get("notes") or "")
     is_override = bool(action.get("is_force_override"))
 
-    # Build label
-    qty_label = ""
-    if runs is not None:
-        qty_label = f"×{runs} runs"
-    elif quantity is not None:
-        qty_label = f"×{quantity:,}" if isinstance(quantity, int) else f"×{quantity}"
+    qty_label = action_quantity_label(action)
 
     cost_label = _fmt_isk(float(cost)) if cost is not None else ""
     completion_label = _fmt_completion(completion)

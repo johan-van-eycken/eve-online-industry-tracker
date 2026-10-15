@@ -255,17 +255,36 @@ def test_one_bpc_gives_one_invent_lane_of_at_most_its_runs():
 
 
 def test_two_bpcs_give_at_most_two_lanes_each_within_its_bpc_and_named():
+    """BPCs of 1 and 3 runs, three free inventors: two lanes (one per BPC),
+    the two best pilots, split 3 + 1. Best fit (M7): the 3-attempt lane
+    takes the 3-run BPC, the 1-attempt lane the 1-run BPC."""
     row = A._row(t1_bpo=True)
     row["t1_bpo_count"] = 1
     row["t1_bpc_runs_by_item"] = [[81, 1], [82, 3]]
     row["t1_bpc_runs_on_hand"] = 4
     chars = [A._best_inventor(), A._second_inventor(), A._alt(5), A._copier()]
     invents = [a for a in A._assign(row, chars) if a.action_type == "invent"]
-    assert 1 <= len(invents) <= 2
-    runs_by_bpc = {a.blueprint_item_id: a.runs for a in invents}
-    assert set(runs_by_bpc) <= {81, 82}
-    assert all(runs <= {81: 1, 82: 3}[bpc] for bpc, runs in runs_by_bpc.items())
-    assert all(f"T1 BPC item {a.blueprint_item_id}" in a.notes for a in invents)
+    assert sorted((a.blueprint_item_id, a.character_id, a.runs) for a in invents) == [
+        (81, A.SECOND_ID, 1), (82, A.BEST_ID, 3),
+    ]
+    assert all(f"from T1 BPC item {a.blueprint_item_id} ({a.runs} run{'s' if a.runs != 1 else ''})" in a.notes
+               for a in invents)
+
+
+def test_the_smallest_bpc_with_enough_runs_is_used():
+    """M7: one lane of 4 attempts and BPCs of 10 and 4 runs: the 4-run BPC
+    fits, so the 10-run one stays for later."""
+    row = A._row(t1_bpo=True)
+    row["t1_bpo_count"] = 1
+    row["t1_bpc_runs_by_item"] = [[81, 10], [82, 4]]
+    (invent,) = [a for a in A._assign(row, [A._best_inventor(), A._copier()]) if a.action_type == "invent"]
+    assert (invent.blueprint_item_id, invent.runs) == (82, 4)
+
+
+def test_the_chain_planner_claims_the_best_fitting_bpc():
+    t2 = _dec(_t2_row(), 12345, "Widget II", 2.0, 2, "invention")
+    _run([t2], {}, {998: [_bpc(78, 998, 10), _bpc(79, 998, 4)]}, chars=[A._best_inventor()])
+    assert t2.overview_row["t1_bpc_runs_by_item"] == [[79, 4]]
 
 
 # --- probe e: T1 BPCs without a T1 BPO are invented from ---------------------------
@@ -313,8 +332,11 @@ def test_probe_g_two_hand_built_rows_do_not_both_copy_the_one_bpo():
     chars = [A._best_inventor(), A._second_inventor(), A._copier(), {**A._copier(), "character_id": 9, "character_name": "C2"}]
     actions = CharacterAssigner().assign(plan, [], A._Chars(chars), A._Admin(), price_map=A.PRICES)
     copies = [a for a in actions if a.action_type == "copy"]
-    assert len(copies) == 1
-    assert "BPO" in plan.decisions[1].decision_reason and "no copy" in plan.decisions[1].decision_reason
+    assert [c.type_id for c in copies] == [998] and copies[0].notes.startswith("Copy T1 BPO")
+    assert [a for a in actions if a.type_id == 12346] == []
+    assert plan.decisions[1].decision_reason == (
+        "test; no manufacture today: no free T1 BPO (998) to copy: another row copies it today, no copy"
+    )
 
 
 def test_probe_g_the_chain_planner_gives_the_one_bpo_to_the_higher_scored_row():
@@ -450,18 +472,28 @@ def test_a_bpo_in_research_with_no_other_source_says_no_manufacture_today():
 # --- minor 4: a sub-build split over jobs runs in parallel only on free BPOs --------
 
 def test_a_sub_build_of_several_jobs_on_one_bpo_queues_the_rest():
+    """One component BPO, jobs of 40, 40 and 20 runs. The pilot has two
+    manufacturing slots: the parent takes one, job 1 the other. Jobs 2 and
+    3 wait on the same BPO: same pilot, no slot of their own (else they
+    would have found none)."""
     bp = copy.deepcopy(R.BLUEPRINT_DATA)
     bp[888]["max_production_limit"] = 40  # 100 runs -> jobs of 40, 40, 20
     plan = _planner().plan_chain([_dec(R._row(**R.BPO_ROW), 12345, "Thing", 1.0, 1)], {
         "bpo_assets_by_type_id": {999: [_bpo(1, 999)], 888: [_bpo(2, 888)]},
         "blueprint_data": bp, "market_depth_cache": R.MARKET, "variant_rows_by_type_id": {},
     })
-    pilot = R._pilot(("Advanced Mass Production", 24625, 4))  # many manufacturing slots
+    pilot = {"character_id": 1, "character_name": "Pilot", "skills": {"skills": [
+        {"skill_id": 3387, "skill_name": "Mass Production", "trained_skill_level": 1},
+    ]}}
     actions = CharacterAssigner().assign(plan, [], R._Chars(pilot), R._Admin())
     subs = [a for a in actions if a.action_type == "sub_manufacture"]
     assert [a.runs for a in subs] == [40, 40, 20]
+    assert {a.character_id for a in subs} == {1}
     assert "sequential" not in subs[0].notes
-    assert all("sequential on the same BPO (later)" in a.notes for a in subs[1:])
+    assert [a.notes.split("; ")[-1] for a in subs[1:]] == [
+        "sequential on the same BPO (later): starts after job 1",
+        "sequential on the same BPO (later): starts after job 2",
+    ]
 
 
 # --- minor 5: the owned-BPC part's units add up -------------------------------------
@@ -472,6 +504,222 @@ def test_the_owned_bpc_part_rounds_up_and_the_rest_adds_up_to_the_total():
     row = R._row(segments=[R._segment(1, "owned_blueprint_copy", 100), R._segment(2, "owned_blueprint_original", 200)])
     row["manufacturing_job"]["runs"] = 3
     part = research_first.owned_bpc_part(row)
-    # 10 units over 3 runs, 1 on the BPC: ceil(10 / 3) = 4, the rest 6.
-    assert (part["quantity"], part["rest_quantity"]) == (4, 6)
-    assert part["quantity"] + part["rest_quantity"] == 10
+    # 10 units over 3 runs, 1 on the BPC: ceil(10 / 3) = 4; the BPO part is the
+    # rest, 10 - 4 = 6, so the two add up to the batch exactly.
+    assert part["quantity"] == 4
+    assert "rest_quantity" not in part
+
+
+# --- fix round 1 -------------------------------------------------------------------
+
+def _thing_and_widget_ii(*, research_busy=False):
+    """s4: Thing (T1, score 1) is priced on BPC 78 (4 runs) + BPO 11 (TE 0,
+    researched); its owned-BPC variant builds on BPC 80. Blueprint 999 is
+    also the T1 source Widget II (score 2) invents from."""
+    bp = {**copy.deepcopy(R.BLUEPRINT_DATA), **copy.deepcopy(A.BLUEPRINTS)}
+    bp[999]["invention"] = copy.deepcopy(bp[998]["invention"])
+    del bp[998]
+    seg78 = {**R._segment(4, "owned_blueprint_copy", 400), "blueprint_item_id": 78}
+    kept = R._row(segments=[seg78, R._segment(6, "owned_blueprint_original", 600)], kind="owned_blueprint_copy")
+    variant = R._row(segments=[{**R._segment(10, "owned_blueprint_copy", 990), "blueprint_item_id": 80}],
+                     kind="owned_blueprint_copy", material_cost=500.0, profit_amount=7.0, overview_row_id="bpc-variant")
+    thing = _dec(kept, 12345, "Thing", 1.0, 1)
+    widget = _dec(_t2_row(22345), 22345, "Widget II", 2.0, 2, "invention")
+    prices = {**R.MARKET, **A.PRICES}
+    plan = _planner(10).plan_chain([thing, widget], {
+        "bpo_assets_by_type_id": {999: [_bpo(11, 999, te=0)]},
+        "bpc_assets_by_type_id": {999: [_bpc(78, 999, 4), _bpc(80, 999, 10)]},
+        "blueprint_data": bp, "market_depth_cache": prices, "variant_rows_by_type_id": {12345: [variant]},
+    })
+    # research_busy: both pilots' only research slot is in a job, so Thing's
+    # research gets no slot and it builds from its kept row.
+    jobs = [A._busy(A.BEST_ID), A._busy(A.COPIER_ID)] if research_busy else []
+    chars = [A._best_inventor(), {**A._copier(), "skills": {"skills": []}}]
+    actions = CharacterAssigner().assign(plan, jobs, A._Chars(chars), A._Admin(), price_map=prices)
+    return thing, widget, actions
+
+
+def test_s4_the_kept_rows_bpc_is_claimed_too_so_invention_cannot_double_book_it():
+    """Fix round 1, I1: research first plans the variant (BPC 80), but without
+    a research slot Thing builds from its kept row (BPC 78 + BPO 11). The
+    union is claimed, so Widget II has no BPC and no BPO left today."""
+    thing, widget, actions = _thing_and_widget_ii(research_busy=True)
+    assert "invent" not in [a.action_type for a in actions]
+    assert widget.pipeline_stage == "blocked"
+    (build,) = [a for a in actions if a.action_type == "manufacture"]
+    assert build.materials == {54321: 1000}  # the kept row: BPC 78 + BPO 11
+
+
+def test_m10_a_research_claim_that_got_no_slot_is_reworded():
+    """The BPO's research got no slot, so Thing builds from it: Widget II's
+    reason names that manufacture, not a research that does not happen."""
+    _thing, widget, _actions = _thing_and_widget_ii(research_busy=True)
+    assert "TE research for Thing" not in widget.decision_reason
+    assert "T1 BPO (999) used by manufacture of Thing (12345) today" in widget.decision_reason
+
+
+def test_m10_a_research_that_gets_its_slot_keeps_the_research_reason():
+    _thing, widget, actions = _thing_and_widget_ii()
+    assert "te_research" in [a.action_type for a in actions]
+    assert "T1 BPO (999) used by TE research for Thing (12345) today" in widget.decision_reason
+
+
+def test_s1_bpc_runs_on_hand_that_cover_the_attempts_claim_no_copy_bpo():
+    """Fix round 1, I2: a 4-run T1 BPC covers the 4 attempts, so the T2 row
+    (score 2) claims no copy BPO and the T1 row (score 1) builds from it."""
+    t2 = _dec(_t2_row(), 12345, "Widget II", 2.0, 2, "invention")
+    t1 = _dec(_t1_row(20), 12344, "Widget I", 1.0, 1)
+    _plan, actions = _run([t2, t1], {998: [_bpo(77, 998)]}, {998: [_bpc(78, 998, 4)]})
+    assert sorted((a.action_type, a.runs) for a in actions) == [("invent", 4), ("manufacture", 10)]
+    assert t2.pipeline_stage == "invention"
+    assert t2.decision_reason == "test; no manufacture today: inventing from T1 BPCs; no T2 BPC yet"
+    assert t1.decision_reason == "test"
+
+
+def test_s1_bpc_runs_a_t1_row_builds_on_do_not_count_for_the_copy_decision():
+    """The 4-run BPC is the T1 row's own segment: net of it there are no
+    runs, so the T2 row (score 2) does claim the BPO to copy."""
+    t1_row = _t1_row(20)
+    t1_row["manufacturing_job"]["job_segments"] = [
+        {"runs": 4, "source": "owned_blueprint_copy", "blueprint_item_id": 78, "materials": {"34": 20}},
+        {"runs": 6, "source": "owned_blueprint_original", "materials": {"34": 30}},
+    ]
+    t2 = _dec(_t2_row(), 12345, "Widget II", 2.0, 2, "invention")
+    t1 = _dec(t1_row, 12344, "Widget I", 1.0, 1)
+    _run([t2, t1], {998: [_bpo(77, 998)]}, {998: [_bpc(78, 998, 4)]})
+    assert t2.pipeline_stage == "copying"
+
+
+def test_extra_copy_bpos_are_claimed_only_up_to_the_lane_count():
+    row = _t2_row()
+    row["manufacturing_job"]["activity_breakdown"]["invention"]["elapsed_parallel"] = {
+        "lanes": 2, "lanes_used": 2, "pilots_used": 2, "sequential_reason": None,
+    }
+    t2 = _dec(row, 12345, "Widget II", 2.0, 2, "invention")
+    _run([t2], {998: [_bpo(77, 998), _bpo(78, 998), _bpo(79, 998)]}, {})
+    assert t2.overview_row["t1_bpo_item_ids"] == [77, 78]
+
+
+def test_without_a_lane_count_one_copy_bpo_is_claimed():
+    t2 = _dec(_t2_row(), 12345, "Widget II", 2.0, 2, "invention")
+    _run([t2], {998: [_bpo(77, 998), _bpo(78, 998)]}, {})
+    assert t2.overview_row["t1_bpo_item_ids"] == [77]
+
+
+def test_s3_a_bpo_in_an_active_job_is_owned_not_a_purchase():
+    """Fix round 1, I3: the one BPO is installed in a job and the snapshot
+    dropped it. It is owned and busy: no BPO analysis, no buy advice."""
+    job = {"blueprint_item_id": 77, "blueprint_type_id": 998, "activity_id": 1, "blueprint_is_blueprint_copy": False}
+    t1 = _dec(_t1_row(20), 12344, "Widget I", 1.0, 1)
+    plan = _planner(0).plan_chain([t1], {
+        "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {}, "industry_jobs": [job],
+        "busy_blueprint_item_ids": {77}, "blueprint_data": BP_B,
+        "market_depth_cache": {**A.PRICES, 998: {"spot_sell_price": 1000.0}}, "variant_rows_by_type_id": {},
+    })
+    assert t1.decision_reason == "test; not built: owned blueprint in an active industry job"
+    assert plan.bpo_opportunities == [] and t1.bpo_market_price is None
+    assert t1.pipeline_stage == "blocked"
+
+
+def test_s2_a_busy_bpc_row_gets_one_not_built_reason():
+    row = _t1_row(20)
+    mj = row["manufacturing_job"]
+    mj["blueprint_source_kind"] = "owned_blueprint_copy"
+    mj["job_segments"] = [{"runs": 10, "source": "owned_blueprint_copy", "blueprint_item_id": 78, "materials": {"34": 50}}]
+    t1 = _dec(row, 12344, "Widget I", 1.0, 1)
+    plan = _planner(0).plan_chain([t1], {
+        "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {998: [_bpc(78, 998, 10)]},
+        "industry_jobs": [], "busy_blueprint_item_ids": {78}, "blueprint_data": BP_B,
+        "market_depth_cache": A.PRICES, "variant_rows_by_type_id": {},
+    })
+    assert t1.decision_reason == "test; not built: BPC in an active industry job (item 78)"
+    assert plan.bpo_opportunities == []
+
+
+def test_a_blueprint_outside_the_corp_hangar_is_not_planned_and_not_a_purchase():
+    """The producer priced the row from an owned BPO the corp hangar does not
+    hold (e.g. character-owned): not built, no buy advice."""
+    t1 = _dec(_t1_row(20), 12344, "Widget I", 1.0, 1)
+    plan = _planner(0).plan_chain([t1], {
+        "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {}, "blueprint_data": BP_B,
+        "market_depth_cache": {**A.PRICES, 998: {"spot_sell_price": 1000.0}}, "variant_rows_by_type_id": {},
+    })
+    assert t1.decision_reason == (
+        "test; not built: blueprint outside the corp hangar (e.g. character-owned): not planned"
+    )
+    assert plan.bpo_opportunities == []
+
+
+@pytest.mark.parametrize("kind", ["blueprint_sde_fallback", None])
+def test_buy_the_bpo_first_only_for_an_assumed_or_unowned_blueprint(kind):
+    row = _t1_row(20)
+    row["manufacturing_job"]["blueprint_source_kind"] = kind
+    row["manufacturing_job"]["job_segments"] = [{"runs": 10, "source": kind or "blueprint_sde_fallback", "materials": {"34": 50}}]
+    t1 = _dec(row, 12344, "Widget I", 1.0, 1)
+    _run([t1], {}, {})
+    assert t1.decision_reason == "test; not built: no owned BPO or BPC: buy the BPO first"
+
+
+@pytest.mark.parametrize("decision", ["watch", "skip", "pause"])
+def test_m4_the_merged_item_keeps_the_top_level_rows_product_fields(decision):
+    plan, _parent, actions = _probe_a(20, widget_decision=decision)
+    (widget,) = [d for d in plan.decisions if d.type_id == 54321]
+    assert widget.is_sub_component and widget.decision == "build"
+    assert widget.decision_reason.endswith(f"; as a product: {decision} (test)")
+    assert (widget.adjusted_score, widget.isk_per_hour, widget.margin_pct, widget.days_of_supply_current,
+            widget.effective_velocity, widget.velocity_unknown_reason) == (1.0, 1.0, 1.0, 1.0, 1.0, None)
+    assert [a.quantity for a in actions if a.action_type == "sub_manufacture"] == [1000]
+
+
+def test_m8_no_component_reason_when_the_stock_covers_it():
+    parent = _dec(R._row(**R.BPO_ROW), 12345, "Thing", 2.0, 1)
+    widget = _dec(_widget_row(), 54321, "Widget", 1.0, 1)
+    plan = _planner().plan_chain([parent, widget], {
+        "bpo_assets_by_type_id": {999: [_bpo(1, 999)], 888: [_bpo(2, 888)]},
+        "blueprint_data": R.BLUEPRINT_DATA, "market_depth_cache": R.MARKET, "variant_rows_by_type_id": {},
+        "corp_material_stock": {54321: 1000},
+    })
+    CharacterAssigner().assign(plan, [], R._Chars(R._pilot()), R._Admin())
+    assert parent.decision_reason == "test"
+
+
+def test_m8_no_component_reason_when_the_parent_gets_no_manufacture():
+    parent = _dec(R._row(**R.BPO_ROW), 12345, "Thing", 2.0, 1)
+    widget = _dec(_widget_row(), 54321, "Widget", 1.0, 1)
+    plan = _planner().plan_chain([parent, widget], {
+        "bpo_assets_by_type_id": {999: [_bpo(1, 999)], 888: [_bpo(2, 888)]},
+        "blueprint_data": R.BLUEPRINT_DATA, "market_depth_cache": R.MARKET, "variant_rows_by_type_id": {},
+    })
+    no_slots = {"character_id": 1, "character_name": "Pilot", "skills": {"skills": []}}
+    busy = [{"character_id": 1, "activity_id": 1, "status": "active"}]
+    CharacterAssigner().assign(plan, busy, R._Chars(no_slots), R._Admin())
+    assert "component Widget bought" not in parent.decision_reason
+
+
+def test_m6_one_copy_of_one_run_is_worded_singular():
+    row = A._row(t1_bpo=True)
+    row["t1_bpc_runs_on_hand"] = 3  # 4 attempts, 1 copied run
+    row["t1_max_runs_per_copy"] = 30
+    (copy_action,) = [a for a in A._assign(row, [A._best_inventor(), A._copier()]) if a.action_type == "copy"]
+    assert (copy_action.quantity, copy_action.runs) == (1, 1)
+    assert "make 1 copy × 1 run;" in copy_action.notes
+
+
+def test_more_copies_than_one_job_makes_are_capped_and_said():
+    """Max 1 run per copy and 1 copy per job (the SDE limit): 4 attempts need
+    4 copies of 1 run; one job makes 1, the other 3 wait for a later plan."""
+    row = A._row(t1_bpo=True)
+    row["t1_max_runs_per_copy"] = 1
+    (copy_action,) = [a for a in A._assign(row, [A._best_inventor(), A._copier()]) if a.action_type == "copy"]
+    assert (copy_action.quantity, copy_action.runs) == (1, 1)
+    assert "more copies are needed than one job makes: 3 more in a later plan" in copy_action.notes
+
+
+def test_an_unknown_lane_is_capped_by_its_bpc():
+    from eve_online_industry_tracker.application.daily_planner.assigned_invention import AssignedInvention
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import _cap_lane
+
+    unknown = AssignedInvention(None, 0.5, None, None, None, "datacore need unknown: x", "datacore need unknown: x")
+    capped = _cap_lane(unknown, 3, "the 3 run(s) of T1 BPC item 81")
+    assert capped.whole_attempts is None
+    assert "at most 3 attempt(s): the 3 run(s) of T1 BPC item 81" in capped.note

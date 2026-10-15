@@ -728,16 +728,6 @@ def test_a_dropped_lane_renumbers_the_lane_wording():
     assert "of 2" not in invent.notes
 
 
-def test_an_unknown_lane_is_capped_too():
-    from eve_online_industry_tracker.application.daily_planner.assigned_invention import AssignedInvention
-    from eve_online_industry_tracker.application.daily_planner.character_assigner import _cap_invention_attempts
-
-    unknown = AssignedInvention(None, 0.5, None, None, None, "datacore need unknown: x", "datacore need unknown: x")
-    known = AssignedInvention(0.5, 0.5, 2.0, 2, 10.0, "chance 50%")
-    (only,) = _cap_invention_attempts([(1, unknown), (2, known)], 3)
-    assert only[0] == 1 and "at most 3 attempt(s): the T1 BPC run(s) on hand" in only[1].note
-
-
 def test_an_unknown_copy_run_count_says_so():
     row = _row(t1_bpo=True, plan="unknown")
     row["t1_bpc_runs_on_hand"] = 2

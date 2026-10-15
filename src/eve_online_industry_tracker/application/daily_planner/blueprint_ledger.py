@@ -15,14 +15,14 @@ blueprint). ChainPlanner claims in this order:
 2. top-level manufacture and the T2 rows' copies, in score order;
 3. further copy BPOs for parallel copies, in score order;
 4. invention, on the BPCs no one else claimed, in score order;
-5. sub-builds, on the component BPOs left (re-read for every re-size).
+5. sub-builds, on the component BPOs left: a component type has one
+   decision and its own blueprint, so sub-builds claim nothing more.
 
 An asset without an item_id (a hand-built fixture) is keyed by its type
 and position, so two such assets of one type stay two blueprints.
 """
 from __future__ import annotations
 
-import copy
 from typing import Any, Hashable
 
 from eve_online_industry_tracker.application.daily_planner import research_first
@@ -55,13 +55,6 @@ class BlueprintLedger:
     def _key(asset: Any, kind: str, type_id: int, index: int) -> Hashable:
         item = research_first.item_id(asset)
         return int(item) if item is not None else (kind, int(type_id), index)
-
-    def snapshot(self) -> "BlueprintLedger":
-        """A copy whose claims do not reach this ledger (the sub-builds are
-        claimed on a fresh snapshot each time they are sized)."""
-        other = copy.copy(self)
-        other._claims = dict(self._claims)
-        return other
 
     # --- lookups ---------------------------------------------------------------
 

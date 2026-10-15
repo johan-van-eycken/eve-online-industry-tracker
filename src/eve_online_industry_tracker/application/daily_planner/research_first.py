@@ -36,6 +36,8 @@ OWNED_BPC_SOURCE = "owned_blueprint_copy"
 RESEARCH_KEYS = (
     "needs_me_research", "me_research_target", "me_current",
     "needs_te_research", "te_research_target", "te_current",
+    # The plan ledger's label for the research claim (Task 14 M10).
+    "research_claim_label",
 )
 
 PART_COST_UNKNOWN_REASON = (
@@ -62,14 +64,13 @@ def batch_uses_bpo(row: dict[str, Any]) -> bool:
 
 
 def owned_bpc_part(row: dict[str, Any], *, exclude_item_ids: Any = frozenset()) -> dict[str, Any] | None:
-    """The part of the batch on owned BPCs: {runs, quantity, rest_quantity,
-    materials, item_ids}, or None when there is none or its materials are
-    unknown. Jobs on a BPC in `exclude_item_ids` (one in an active job, or
+    """The part of the batch on owned BPCs: {runs, quantity, materials,
+    item_ids}, or None when there is none or its materials are unknown. Jobs on a BPC in `exclude_item_ids` (one in an active job, or
     claimed by another job today) are left out.
 
     quantity is rounded UP (Task 14 minor 5): ceil(units x runs / total
-    runs), and rest_quantity = units - quantity is the batch's other part,
-    so the two add up to the batch exactly. item_ids are the BPCs the part
+    runs). The batch's other part is units - quantity, so the two add up
+    to the batch exactly. item_ids are the BPCs the part
     runs on; None when a segment does not name its BPC (then any of the
     blueprint's BPCs may be the one)."""
     segments = [
@@ -95,7 +96,6 @@ def owned_bpc_part(row: dict[str, Any], *, exclude_item_ids: Any = frozenset()) 
     named = [segment_bpc_item_id(s) for s in segments]
     return {
         "runs": runs, "quantity": quantity,
-        "rest_quantity": units - quantity if quantity is not None else None,
         "materials": materials,
         "item_ids": None if any(i is None for i in named) else sorted(set(named)),
     }
