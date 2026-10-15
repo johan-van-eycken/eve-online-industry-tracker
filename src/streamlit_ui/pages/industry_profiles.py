@@ -1,3 +1,5 @@
+import logging
+
 import streamlit as st
 import pandas as pd
 
@@ -12,6 +14,8 @@ from eve_online_industry_tracker.application.industry.job_cost import (
     DEFAULT_SCC_SURCHARGE,
     job_fee_rates_summary,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @st.cache_data(ttl=300)
@@ -91,13 +95,38 @@ def _compute_rig_bonuses(
                           for e in effects if str(e.get("metric") or "") == metric]
                 values.append(max(scaled, default=0.0))
             else:
-                values.append(float(rig.get(f"{'material' if metric == 'material' else metric}_reduction") or 0.0))
+                values.append(float(rig.get(f"{metric}_reduction") or 0.0))
 
     return (
         _compute_combined_reduction(per_metric["material"]),
         _compute_combined_reduction(per_metric["time"]),
         _compute_combined_reduction(per_metric["cost"]),
     )
+
+
+def _rig_bonus_save_fields(rig_type_ids: list[int], rig_bonus_map: dict[int, dict]) -> dict[str, float]:
+    """The structure_rig_*_bonus a profile saves: the rigs' raw, unscaled
+    bonuses. The producer reads them only for a profile without rig ids and
+    then applies the smallest security multiplier for the band itself
+    (IndustryService._profile_rig_reduction), so scaling them here as well
+    would count the band twice. Only the displayed totals are band-scaled."""
+    per_metric: dict[str, list[float]] = {"material": [], "time": [], "cost": []}
+    for tid in rig_type_ids:
+        if int(tid or 0) == 0:
+            continue
+        rig = rig_bonus_map.get(int(tid)) or {}
+        effects = [e for e in (rig.get("effects") or []) if isinstance(e, dict)]
+        for metric, values in per_metric.items():
+            if effects:
+                values.append(max((float(e.get("value") or 0.0) for e in effects
+                                   if str(e.get("metric") or "") == metric), default=0.0))
+            else:
+                values.append(float(rig.get(f"{metric}_reduction") or 0.0))
+    return {
+        "structure_rig_material_bonus": _compute_combined_reduction(per_metric["material"]),
+        "structure_rig_time_bonus": _compute_combined_reduction(per_metric["time"]),
+        "structure_rig_cost_bonus": _compute_combined_reduction(per_metric["cost"]),
+    }
 
 
 def _security_band_of_system(system: dict | None) -> str | None:
@@ -385,15 +414,6 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
     }
     try:
         system_ids = sorted({int(profile.get("system_id")) for profile in profiles if profile.get("system_id") is not None})
-        if system_ids:
-            # Security status and region of each profile's system: the rig
-            # totals are shown for the system's security band.
-            systems_resp = cached_api_get("/solar_systems")
-            if systems_resp and systems_resp.get("status") == "success":
-                wanted = set(system_ids)
-                for system in systems_resp.get("data") or []:
-                    if isinstance(system, dict) and system.get("id") in wanted:
-                        context["solar_system_by_id"][int(system["id"])] = system
         for system_id in system_ids:
             ci_resp = cached_api_get(f"/industry_system_cost_index/{system_id}")
             if ci_resp and ci_resp.get("status") == "success":
@@ -429,6 +449,23 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
                         pass
     except Exception:
         pass
+    # Security status and region of each profile's system, in a try of its
+    # own: the rig totals are shown for the system's band, and a failure here
+    # must not cost the cost indices above.
+    try:
+        wanted = {int(profile.get("system_id")) for profile in profiles if profile.get("system_id") is not None}
+        if wanted:
+            systems_resp = cached_api_get("/solar_systems")
+            if systems_resp and systems_resp.get("status") == "success":
+                for system in systems_resp.get("data") or []:
+                    if isinstance(system, dict) and system.get("id") in wanted:
+                        context["solar_system_by_id"][int(system["id"])] = system
+            else:
+                logger.warning("Industry profiles: the solar systems did not load; rig totals use the smallest "
+                               "security multiplier")
+    except Exception:
+        logger.warning("Industry profiles: loading the solar systems failed; rig totals use the smallest "
+                       "security multiplier", exc_info=True)
     return context
 
 
@@ -566,9 +603,7 @@ def _render_existing_profiles(
                         "rig_slot0_type_id": None if int(rig0) == 0 else int(rig0),
                         "rig_slot1_type_id": None if int(rig1) == 0 else int(rig1),
                         "rig_slot2_type_id": None if int(rig2) == 0 else int(rig2),
-                        "structure_rig_material_bonus": computed_mat,
-                        "structure_rig_time_bonus": computed_time,
-                        "structure_rig_cost_bonus": computed_cost,
+                        **_rig_bonus_save_fields([int(rig0), int(rig1), int(rig2)], rig_bonus_map),
                     }
                     update_response = api_put(f"/industry_profiles/{profile['id']}", payload)
                     if update_response and update_response.get("status") == "success":
@@ -968,9 +1003,9 @@ def _render_create_profile_section(
                 if is_npc_station
                 else ((float(upwell_facility_tax_pct or 0.0) / 100.0) + float(upwell_scc_surcharge or 0.0))
             ),
-            "structure_rig_material_bonus": structure_rig_material_bonus,
-            "structure_rig_time_bonus": structure_rig_time_bonus,
-            "structure_rig_cost_bonus": structure_rig_cost_bonus,
+            # Raw rig bonuses (the displayed totals above are band-scaled).
+            **_rig_bonus_save_fields(
+                [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)], rig_bonus_map),
             "rig_slot0_type_id": None if int(rig_slot0_type_id) == 0 else int(rig_slot0_type_id),
             "rig_slot1_type_id": None if int(rig_slot1_type_id) == 0 else int(rig_slot1_type_id),
             "rig_slot2_type_id": None if int(rig_slot2_type_id) == 0 else int(rig_slot2_type_id),

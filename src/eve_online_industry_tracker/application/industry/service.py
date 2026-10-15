@@ -519,17 +519,6 @@ class IndustryService:
             decision = _industry_facility.Decision(False, f"needs {label}: {decision.reason}", decision.uncertain)
         return decision
 
-    @classmethod
-    def _facility_can_manufacture_group(
-        cls, *, manufacturing_group: str | None, profile_payload: dict[str, Any] | None, group_id: Any = None,
-    ) -> bool:
-        """_facility_gate's answer; an uncertain one (unknown facility or band,
-        an assumed sovereignty upgrade) logs a WARNING once per reason."""
-        decision = cls._facility_gate(
-            manufacturing_group=manufacturing_group, profile_payload=profile_payload, group_id=group_id)
-        cls._warn_gate_once(IndustryService._facility_gate_warned, "Facility gate", decision)
-        return decision.allowed
-
     @staticmethod
     def _warn_gate_once(warned: set[str], prefix: str, decision: Any) -> None:
         if decision.uncertain and decision.reason and decision.reason not in warned:
@@ -3314,6 +3303,10 @@ class IndustryService:
             ),
         )
         facility_gate_hidden: list[dict[str, Any]] = []
+        industry_profile_payload = self._resolve_industry_profile_context(
+            character_id=character_id,
+            industry_profile_id=industry_profile_id,
+        )
         rows = self._filter_overview_rows_for_portfolio_candidates(
             cast(list[dict[str, Any]], overview_payload.get("rows") or []),
             facility_gate_hidden=facility_gate_hidden,
@@ -3323,10 +3316,7 @@ class IndustryService:
             min_margin_pct=min_margin_pct,
             min_isk_per_hour=min_isk_per_hour,
             min_region_daily_volume=min_region_daily_volume,
-            industry_profile_payload=self._resolve_industry_profile_context(
-                character_id=character_id,
-                industry_profile_id=industry_profile_id,
-            ),
+            industry_profile_payload=industry_profile_payload,
         )
         if progress_callback is not None:
             progress_callback(
@@ -3359,6 +3349,12 @@ class IndustryService:
                 # Rows the facility gate hid, each with why (e.g. "needs
                 # Standup Capital Shipyard I: ...").
                 "facility_gate_hidden_count": len(facility_gate_hidden),
+                **({"facility_gate_applied": True} if industry_profile_payload is not None else {
+                    # No profile: the overview is facility-agnostic and
+                    # nothing is hidden, capitals included.
+                    "facility_gate_applied": False,
+                    "facility_gate_not_applied_reason": "no industry profile",
+                }),
             },
             "facility_gate_hidden": facility_gate_hidden,
         }

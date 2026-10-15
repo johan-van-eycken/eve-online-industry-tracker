@@ -91,12 +91,17 @@ _TITAN = (30, "Titan")
 _SUPERCARRIER = (659, "Supercarrier")
 
 
-def _can(hull, profile):
+def _can(hull, profile, category=(6, "Ship")):
+    """Whether the production path (the portfolio candidate filter) keeps a
+    row of this hull for the profile."""
     S = _producer()
     group_id, name = hull
-    label = S._infer_manufacturing_group({"group_id": group_id, "group_name": name, "category_id": 6,
-                                         "category_name": "Ship"})
-    return S._facility_can_manufacture_group(manufacturing_group=label, profile_payload=profile, group_id=group_id)
+    label = S._infer_manufacturing_group({"group_id": group_id, "group_name": name, "category_id": category[0],
+                                         "category_name": category[1]})
+    row = {"type_id": 1, "type_name": name, "group_id": group_id, "manufacturing_group": label}
+    if profile is None:
+        return S._facility_gate(manufacturing_group=label, profile_payload=None, group_id=group_id).allowed
+    return bool(S._filter_overview_rows_for_portfolio_candidates([row], industry_profile_payload=profile))
 
 
 # --- I1: the hull groups come from CCP's assembly lines ------------------------------
@@ -106,7 +111,7 @@ def test_the_shipyard_hull_groups_are_ccps_assembly_lines():
     installations = _hobo("industryinstallationtypes.json")
 
     def groups(line_id):
-        return {d["groupID"] for d in lines[str(line_id)].get("details_per_group") or []}
+        return set(lines[str(line_id)]["group_ids"])
 
     def line_ids(type_id):
         return {entry["assemblyLine"] for entry in installations[str(type_id)]["assembly_lines"]}
@@ -127,6 +132,29 @@ def test_the_shipyard_hull_groups_are_ccps_assembly_lines():
     station = groups(35)
     assert lines["35"]["name"] == "STATION 0.5+ Manufacturing"
     assert {513, 902} <= station and not station & (groups(176) | groups(177))
+
+
+def test_no_installation_type_uses_line_35_so_the_npc_station_assumption_is_checked():
+    """Which line NPC stations use is in neither the SDE nor the installation
+    types: line 35 "STATION 0.5+ Manufacturing" is the one manufacturing
+    station line no installation (outpost, array, Upwell module) claims, so
+    it is the NPC stations'. Line 6 "STATION manufacturing" lists capital
+    hulls, but only the old outposts use it."""
+    lines = _hobo("industryassemblylines.json")
+    installations = _hobo("industryinstallationtypes.json")
+    used = {entry["assemblyLine"] for v in installations.values() for entry in v["assembly_lines"]}
+    assert 35 not in used
+    assert {int(t) for t, v in installations.items() if any(e["assemblyLine"] == 6 for e in v["assembly_lines"])} == {
+        21642, 21645, 21646}
+    assert lines["35"]["activity"] == 1 and lines["6"]["activity"] == 1
+
+
+def test_the_trimmed_assembly_line_snapshot_keeps_every_line():
+    lines = _hobo("industryassemblylines.json")
+    assert len(lines) == 146
+    for key, line in lines.items():
+        assert set(line) == {"id", "name", "activity", "group_ids", "category_ids"}
+        assert line["id"] == int(key)
 
 
 @pytest.mark.parametrize("group_id, required", [
@@ -158,10 +186,7 @@ def test_freighters_are_built_in_an_npc_station(hull):
     {"location_type": "station", "facility_type": "npc_station"}, {"facility_type": "upwell_structure"},
 ])
 def test_capital_components_are_built_wherever_the_profile_manufactures(group_id, name, profile):
-    S = _producer()
-    label = S._infer_manufacturing_group({"group_id": group_id, "group_name": name, "category_id": 17,
-                                         "category_name": "Commodity"})
-    assert S._facility_can_manufacture_group(manufacturing_group=label, profile_payload=profile, group_id=group_id)
+    assert _can((group_id, name), profile, category=(17, "Commodity"))
 
 
 @pytest.mark.parametrize("structure", ["Azbel", "Sotiyo", "Fortizar", "Keepstar", "Palatine Keepstar",
@@ -211,6 +236,41 @@ def test_an_unknown_band_does_not_build_capitals_and_says_why(caplog):
 
 def test_no_profile_is_no_facility_constraint():
     assert _can(_TITAN, None)
+
+
+def test_the_wrapper_without_a_production_caller_is_gone():
+    assert not hasattr(_producer(), "_facility_can_manufacture_group")
+
+
+def _portfolio_service(profile):
+    S = _producer()
+    service = S(state=SimpleNamespace(esi_service=None, admin_settings=None, db_sde=None))
+    rows = [{"type_id": 671, "type_name": "Erebus", "group_id": 30, "manufacturing_group": "All Ships"},
+            {"type_id": 19720, "type_name": "Revelation", "group_id": 485, "manufacturing_group": "Capital Ships"}]
+    service.industry_manufacturing_product_overview_payload = lambda **kw: {"rows": rows}
+    service._resolve_industry_profile_context = lambda **kw: profile
+    service._build_portfolio_candidates = lambda rows, **kw: []
+    return service
+
+
+def test_with_no_profile_the_response_says_the_gate_was_not_applied():
+    payload = _portfolio_service(None).industry_manufacturing_portfolio_candidates_payload()
+    summary = payload["summary"]
+    assert summary["facility_gate_applied"] is False
+    assert summary["facility_gate_not_applied_reason"] == "no industry profile"
+    # Facility-agnostic: the capitals stay.
+    assert [r["type_id"] for r in payload["rows"]] == [671, 19720]
+    assert payload["facility_gate_hidden"] == []
+
+
+def test_with_a_profile_the_response_says_the_gate_was_applied_and_what_it_hid():
+    payload = _portfolio_service(structure_profile("Azbel", "low")).industry_manufacturing_portfolio_candidates_payload()
+    summary = payload["summary"]
+    assert summary["facility_gate_applied"] is True
+    assert "facility_gate_not_applied_reason" not in summary
+    assert [r["type_id"] for r in payload["rows"]] == [19720]
+    assert [h["type_id"] for h in payload["facility_gate_hidden"]] == [671]
+    assert summary["facility_gate_hidden_count"] == 1
 
 
 # --- M1: supercapitals: NPC nullsec refused, the sovereignty upgrade is assumed -------
@@ -375,6 +435,49 @@ def test_the_ui_rig_totals_are_scaled_for_the_band():
     assert "ME 7%" in lines[0]  # 7.03 %
 
 
+def test_the_ui_saves_the_raw_aggregate_and_the_producer_scales_it_once():
+    """The saved structure_rig_*_bonus is unscaled (the convention the producer's
+    aggregate fallback expects); only the displayed totals are band-scaled."""
+    from streamlit_ui.pages import industry_profiles as page
+
+    rig_bonus_map = {45544: {"type_id": 45544, "material_reduction": 0.037, "time_reduction": 0.0,
+                             "cost_reduction": 0.0,
+                             "security_multipliers": {"high": 0.1, "low": 1.9, "null": 0.1, "wormhole": 0.1},
+                             "effects": [{"activity": "manufacturing", "group": "Capital Components",
+                                          "metric": "material", "value": 0.037, "security_scaled": True}]}}
+    saved = page._rig_bonus_save_fields([45544, 0, 0], rig_bonus_map)
+    assert saved == {"structure_rig_material_bonus": pytest.approx(0.037), "structure_rig_time_bonus": 0.0,
+                     "structure_rig_cost_bonus": 0.0}
+    # Displayed in lowsec: 3.7 % x 1.9.
+    assert page._compute_rig_bonuses([45544], rig_bonus_map, security_band="low")[0] == pytest.approx(0.0703)
+    # The producer reads the raw aggregate and applies the band minimum once.
+    S = _producer()
+    for band, expected in (("low", 0.037 * 1.9), ("high", 0.0037), (None, 0.0037)):
+        profile = {**saved}
+        if band:
+            profile["system_security_band"] = band
+        assert S._profile_rig_reduction(profile_payload=profile, activity="manufacturing", metric="material") == (
+            pytest.approx(expected))
+
+
+def test_the_ui_profile_context_keeps_cost_indices_when_solar_systems_fail(monkeypatch, caplog):
+    from streamlit_ui.pages import industry_profiles as page
+
+    def fake_get(path, *a, **k):
+        if path == "/solar_systems":
+            raise RuntimeError("API down")
+        if path.startswith("/industry_system_cost_index/"):
+            return {"status": "success", "data": {"cost_indices": [{"activity": "manufacturing", "cost_index": 0.05}]}}
+        return None
+
+    monkeypatch.setattr(page, "cached_api_get", fake_get)
+    with caplog.at_level(logging.WARNING):
+        context = page._load_profile_context(90000001, [{"system_id": 31000200}])
+    assert context["system_cost_index_map"] == {31000200: 0.05}
+    assert context["solar_system_by_id"] == {}
+    assert any("solar systems" in r.getMessage() for r in caplog.records)
+
+
 def test_the_ui_effects_table_lists_reactor_rigs_under_reactions():
     from streamlit_ui.pages import industry_profiles as page
 
@@ -499,10 +602,8 @@ def test_the_profile_context_marks_npc_nullsec(app_session, sde_session):
     payload = service._resolve_industry_profile_context(character_id=None, industry_profile_id=profile_id)
     assert payload["system_security_band"] == "null"
     assert payload["system_faction_id"]
-    assert not service._facility_can_manufacture_group(manufacturing_group="All Ships", profile_payload=payload,
-                                                       group_id=30)
-    assert service._facility_can_manufacture_group(manufacturing_group="Capital Ships", profile_payload=payload,
-                                                   group_id=485)
+    assert not service._facility_gate(manufacturing_group="All Ships", profile_payload=payload, group_id=30).allowed
+    assert service._facility_gate(manufacturing_group="Capital Ships", profile_payload=payload, group_id=485).allowed
 
 
 @_needs_sde
