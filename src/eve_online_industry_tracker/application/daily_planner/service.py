@@ -27,7 +27,10 @@ from eve_online_industry_tracker.application.daily_planner.input_row import (
     dedupe_by_type_id,
 )
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
-from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
+from eve_online_industry_tracker.application.daily_planner.learning_weights import (
+    read_weight,
+    weight_warnings_once_per_compute,
+)
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
 from eve_online_industry_tracker.application.daily_planner.profitability_scorer import ProfitabilityScorer
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
@@ -475,7 +478,12 @@ class DailyPlannerService:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _run_compute(self) -> None:
-        """Main compute pipeline — runs in background thread."""
+        """Main compute pipeline — runs in background thread. One compute is
+        one scope for the learned-weight warnings (FU-04)."""
+        with weight_warnings_once_per_compute():
+            self._run_compute_pipeline()
+
+    def _run_compute_pipeline(self) -> None:
         logger.info("DailyPlannerService: starting plan computation")
         self._failed_step = None
         try:

@@ -28,16 +28,27 @@ _WARNED_UNKNOWN_ACTION_TYPES: set[str] = set()
 # Action type ordering and display config
 # ---------------------------------------------------------------------------
 
+# Section label and marker per action type. The order and the set of types
+# come from status_bar.CHARACTER_ACTION_TYPES, the single source.
+_SECTION_DISPLAY: dict[str, tuple[str, str]] = {
+    "deliver":         ("DELIVER",         "🔴"),
+    "invent":          ("INVENT",          "🟡"),
+    "copy":            ("COPY",            "🟣"),
+    "me_research":     ("ME RESEARCH",     "🔧"),
+    "te_research":     ("TE RESEARCH",     "🔧"),
+    "sub_manufacture": ("SUB-MANUFACTURE", "🔧"),
+    "manufacture":     ("MANUFACTURE",     "🟢"),
+}
+
+
+def _action_sections(action_types: tuple[str, ...]) -> list[tuple[str, str, str]]:
+    """(action type, label, marker) per type, in the given order. A type with
+    no display entry raises KeyError at import, not a silently missing section."""
+    return [(t, *_SECTION_DISPLAY[t]) for t in action_types]
+
+
 # Ordered sections for Tab 1
-_ACTION_ORDER: list[tuple[str, str, str]] = [
-    ("deliver",          "DELIVER",          "🔴"),
-    ("invent",           "INVENT",           "🟡"),
-    ("copy",             "COPY",             "🟣"),
-    ("me_research",      "ME RESEARCH",      "🔧"),
-    ("te_research",      "TE RESEARCH",      "🔧"),
-    ("sub_manufacture",  "SUB-MANUFACTURE",  "🔧"),
-    ("manufacture",      "MANUFACTURE",      "🟢"),
-]
+_ACTION_ORDER: list[tuple[str, str, str]] = _action_sections(CHARACTER_ACTION_TYPES)
 
 # Which action types are "START" actions (require materials to be ready)
 _START_ACTIONS = frozenset({

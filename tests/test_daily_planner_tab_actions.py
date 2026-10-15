@@ -43,6 +43,16 @@ def test_the_tab_renders_exactly_the_character_action_types():
     assert tuple(t for t, _, _ in tab_actions._ACTION_ORDER) == CHARACTER_ACTION_TYPES
 
 
+def test_the_sections_follow_the_given_action_types_order():
+    """FU-32: _ACTION_ORDER is derived from CHARACTER_ACTION_TYPES, so the
+    order and the set live in one place; only the labels are local."""
+    assert tab_actions._action_sections(("manufacture", "deliver")) == [
+        ("manufacture", "MANUFACTURE", "🟢"),
+        ("deliver", "DELIVER", "🔴"),
+    ]
+    assert tab_actions._ACTION_ORDER == tab_actions._action_sections(CHARACTER_ACTION_TYPES)
+
+
 def test_the_pending_count_ignores_legacy_and_corp_level_rows():
     actions = [{"action_type": "manufacture", "status": "pending"},
                {"action_type": "relist_order", "status": "pending"},

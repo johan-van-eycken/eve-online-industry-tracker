@@ -1263,7 +1263,8 @@ class ChainPlanner:
         bpo_market_price: float | None = None
         if bpo_cache_entry is not None:
             spot = _get_attr(bpo_cache_entry, "spot_sell_price")
-            bpo_market_price = float(spot) if spot is not None else None
+            # 0 or negative is no price (as service._has_depth_price), never a free BPO.
+            bpo_market_price = float(spot) if spot is not None and float(spot) > 0 else None
         if bpo_market_price is None:
             self._skip_bpo_analysis(decision, f"no BPO market price for bp_type_id={bp_type_id}")
             return

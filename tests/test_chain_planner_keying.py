@@ -1467,3 +1467,15 @@ def test_missing_runs_log_one_warning_not_two(caplog):
 def test_an_unknown_optimal_me_still_warns_when_runs_are_present(caplog):
     warnings = _plan_owned_bpo(_planner(optimal_me=None), _row(), caplog)
     assert any("optimal ME unknown" in w for w in warnings)
+
+
+@pytest.mark.parametrize("spot", [0.0, -5.0])
+def test_a_zero_or_negative_bpo_spot_price_is_no_price(spot):
+    """A spot of 0 or less is no price (as _has_depth_price), never a free BPO."""
+    decision = _decision(_row())
+    _planner()._analyze_bpo_investment(
+        decision=decision, bp_type_id=999,
+        market_depth_cache={999: SimpleNamespace(spot_sell_price=spot)},
+        bpo_opportunities=[], bpo_strong_buy_days=30.0, bpo_consider_days=90.0,
+    )
+    assert decision.bpo_analysis_skip_reason == "no BPO market price for bp_type_id=999"

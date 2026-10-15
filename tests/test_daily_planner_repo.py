@@ -944,3 +944,25 @@ def test_get_analytics_reads_out_of_band_weights_through_the_band(app_session, s
     assert item["accuracy_ema"] == 4.0       # LEARNING_WEIGHT_MAX
     assert item["cost_multiplier"] == 0.25   # LEARNING_WEIGHT_MIN
     assert item["velocity_multiplier"] == 1.0
+
+
+def test_a_compute_warns_once_for_a_corrupt_weight_row(session_provider, caplog):
+    """FU-04: _run_compute is one compute for the learned-weight warnings, so
+    two readers of the same corrupt row produce one WARNING."""
+    import logging
+    from types import SimpleNamespace
+
+    from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
+
+    corrupt = SimpleNamespace(type_id=4242, velocity_multiplier=float("nan"))
+    svc = _service(session_provider)
+
+    def phase_1():
+        read_weight(corrupt, "velocity_multiplier")   # e.g. the pipeline analyzer
+        read_weight(corrupt, "velocity_multiplier")   # e.g. the scorer
+        return {"overview_rows": []}
+
+    svc._phase_1_collect = phase_1
+    with caplog.at_level(logging.WARNING):
+        svc._run_compute()
+    assert sum("not a finite number" in r.getMessage() for r in caplog.records) == 1
