@@ -311,6 +311,67 @@ def get_invention_decryptor(row: dict[str, Any]) -> tuple[int, str] | None:
     return type_id, str(choice.get("type_name") or type_id)
 
 
+def _non_negative_float(value: Any) -> float | None:
+    """A fee: a finite number >= 0, else None (unknown, never 0)."""
+    if isinstance(value, bool):
+        return None
+    number = _as_optional_float(value)
+    if number is None or number != number or number < 0 or number == float("inf"):
+        return None
+    return number
+
+
+def get_manufacturing_fee(row: dict[str, Any]) -> float | None:
+    """The batch's manufacturing install fee (manufacturing_job_cost: EIV x
+    cost index x structure/rig reductions + surcharge), or None when the
+    producer could not price it (no cost index or no EIV)."""
+    return _non_negative_float(get_manufacturing_job(row).get("manufacturing_job_cost"))
+
+
+def get_manufacturing_fee_per_run(row: dict[str, Any]) -> float | None:
+    """The manufacturing fee of one run. The fee is EIV-based (ME 0
+    materials), so it is linear in runs and independent of ME. None when the
+    fee or the runs are unknown."""
+    fee = get_manufacturing_fee(row)
+    runs = _as_int(get_manufacturing_job(row).get("runs"))
+    return fee / runs if fee is not None and runs > 0 else None
+
+
+def _invention_fee_rate(row: dict[str, Any], key: str) -> float | None:
+    """A per-attempt / per-run invention fee rate from the row's own
+    invention plan (activity_breakdown.invention), else from the later-batch
+    invention_bpc_plan (batch 1 covered by an owned T2 BPC)."""
+    for plan in (get_invention_costs(row), get_invention_bpc_plan(row)):
+        if plan is not None and plan.get(key) is not None:
+            return _non_negative_float(plan.get(key))
+    return None
+
+
+def get_invention_fee_per_attempt(row: dict[str, Any]) -> float | None:
+    """The install fee of one invention attempt (job_cost_per_attempt), or None."""
+    return _invention_fee_rate(row, "job_cost_per_attempt")
+
+
+def get_source_copy_fee_per_run(row: dict[str, Any]) -> float | None:
+    """The install fee of one copy run of the T1 source blueprint
+    (source_copy_job_cost_per_run), or None."""
+    return _invention_fee_rate(row, "source_copy_job_cost_per_run")
+
+
+def get_research_fee(row: dict[str, Any], activity: str, from_level: int, to_level: int) -> float | None:
+    """The install fee of researching the row's owned BPO from `from_level`
+    to `to_level` (activity 'research_material' or 'research_time', levels
+    0..10): the producer's cumulative fee to `to_level` minus that to
+    `from_level` (manufacturing_job.research_job_cost_by_level, A2). None
+    when the table is absent or unpriced, or the levels are out of range."""
+    tables = get_manufacturing_job(row).get("research_job_cost_by_level")
+    table = tables.get(activity) if isinstance(tables, dict) else None
+    if not isinstance(table, list) or not (0 <= from_level <= to_level < len(table)):
+        return None
+    high, low = _non_negative_float(table[to_level]), _non_negative_float(table[from_level])
+    return high - low if high is not None and low is not None else None
+
+
 def get_meta_group_name(row: dict[str, Any]) -> str:
     """Meta group as a normalised display name.
 

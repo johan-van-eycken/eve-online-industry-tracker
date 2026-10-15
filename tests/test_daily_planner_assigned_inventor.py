@@ -109,6 +109,8 @@ def _row(*, multiplier=1.2, base=0.30, decryptor=True, skills_unknown_reason=Non
     expected = 2 / best_p
     mj = {
         "runs": 20,
+        # The install fees (D4): a priced row warns about no unknown fee.
+        "manufacturing_job_cost": 2_000.0,
         "invention_chance": {
             "base_probability": base, "skill_factor": best_factor, "decryptor_multiplier": multiplier,
             "probability": best_p, "effective_probability": best_p,
@@ -122,6 +124,7 @@ def _row(*, multiplier=1.2, base=0.30, decryptor=True, skills_unknown_reason=Non
             "runs": expected, "whole_attempts": math.ceil(2 / best_p - 1e-9),
             "invented_runs": 20, "runs_per_invented_blueprint": 10,
             "success_probability": best_p, "total_job_cost": 1000.0,
+            "job_cost_per_attempt": 4.0, "source_copy_job_cost_per_run": 0.5,
         }}
         lines = {
             # Held in stock: priced at its FIFO cost 50, below the market 100.
@@ -143,6 +146,7 @@ def _row(*, multiplier=1.2, base=0.30, decryptor=True, skills_unknown_reason=Non
             "batch_runs": 20, "runs_per_invented_blueprint": 10,
             "whole_attempts_per_blueprint": math.ceil(1 / best_p - 1e-9),
             "owned_blueprint_runs": 20, "batch_one_invented_blueprints": 0, "per_attempt_materials": {},
+            "job_cost_per_attempt": 4.0, "source_copy_job_cost_per_run": 0.5,
         }
     elif plan == "unknown":
         mj["activity_breakdown"] = {"invention": {
@@ -471,3 +475,12 @@ def test_invention_attempts_never_divides_by_zero():
     assert invention_attempts(0, 10, 0.5) == (0.0, 0)
     assert invention_attempts(20, 10, 0.0) == (0.0, 0)
     assert invention_attempts(20, 10, 0.5) == (4.0, 4)
+
+
+def test_the_invent_fee_is_paid_per_attempt_the_assigned_pilot_launches():
+    """D4: a weaker pilot launches 6 whole attempts (best inventor: 4), so
+    the invent action's install fee is 6 x 4.0, not the best inventor's 4 x 4.0."""
+    best = _invent(_row(), [_best_inventor(), _weaker_pilot(skills=[])])
+    weak = _invent(_row(), [_best_inventor(), _weaker_pilot(skills=[])], jobs=[_busy(BEST_ID)])
+    assert (best.runs, best.estimated_job_fee_isk) == (4, pytest.approx(16.0))
+    assert (weak.runs, weak.estimated_job_fee_isk) == (6, pytest.approx(24.0))

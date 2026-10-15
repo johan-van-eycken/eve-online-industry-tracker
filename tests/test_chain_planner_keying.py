@@ -814,11 +814,22 @@ def test_a_sub_batch_over_the_max_runs_records_each_job():
     """Jobs of 7, 7 and 6 runs at 10 units per run: 70 + 70 + 60 = 200 units,
     13 + 13 + 11 = 37 Tritanium, priced at 1 ISK each."""
     (sub,) = _subs_for(200, _limited_sub_phase1(7))
+    # No overview row of the component: its install fee is unknown (D4).
     assert sub.overview_row["sub_job_batches"] == [
-        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
-        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0},
-        {"runs": 6, "output": 60, "quantity": 60, "materials": {34: 11}, "cost": 11.0},
+        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, "fee": None},
+        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, "fee": None},
+        {"runs": 6, "output": 60, "quantity": 60, "materials": {34: 11}, "cost": 11.0, "fee": None},
     ]
+
+
+def test_each_sub_job_carries_the_components_fee_per_run_times_its_runs():
+    """D4: the component's own overview row prices one run at 40 / 4 = 10
+    ISK, so the 7, 7 and 6-run jobs pay 70, 70 and 60."""
+    phase1 = {**_limited_sub_phase1(7), "overview_rows": [
+        {"type_id": 54321, "manufacturing_job": {"runs": 4, "manufacturing_job_cost": 40.0}},
+    ]}
+    (sub,) = _subs_for(200, phase1)
+    assert [job["fee"] for job in sub.overview_row["sub_job_batches"]] == [70.0, 70.0, 60.0]
 
 
 def test_the_last_sub_job_outputs_only_the_units_still_needed():

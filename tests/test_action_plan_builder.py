@@ -288,3 +288,16 @@ def test_a_job_action_persists_its_build_cost():
     )
     (row,) = ActionPlanBuilder()._build_job_actions(0, [action], datetime(2026, 1, 1))
     assert row.estimated_build_cost_isk == 55_000_000.0
+
+
+def test_a_job_action_persists_its_install_fee():
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+    action = AssignedAction(
+        type_id=12345, type_name="Thing", action_type="manufacture", character_id=1,
+        character_name="Pilot", quantity=200, runs=20, estimated_cost_isk=50_000_000.0,
+        estimated_profit_isk=None, estimated_completion=None, notes=None,
+        estimated_job_fee_isk=25_000.0,
+    )
+    (row,) = ActionPlanBuilder()._build_job_actions(0, [action], datetime(2026, 1, 1))
+    assert row.estimated_job_fee_isk == 25_000.0

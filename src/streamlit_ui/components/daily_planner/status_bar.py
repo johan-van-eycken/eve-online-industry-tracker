@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,28 +28,73 @@ CORP_LEVEL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"}
 
 #: Action types that spend ISK on the market: the shopping list.
 _CAPITAL_ACTION_TYPES: frozenset[str] = frozenset({"buy_materials", "buy_bpo"})
-
-
-CAPITAL_RESERVED_HELP = (
-    "Shopping-list total of pending purchases (materials and BPO purchases). "
-    "Excludes job install fees. Purchases without a price count as 0."
+#: Action types that install a job and so pay an install fee (D4, A2).
+_JOB_ACTION_TYPES: frozenset[str] = frozenset(
+    {"manufacture", "sub_manufacture", "invent", "copy", "me_research", "te_research"}
 )
 
 
-def compute_capital_reserved(actions: list[dict[str, Any]]) -> float:
-    """ISK needed to execute the plan: the pending shopping list.
+CAPITAL_RESERVED_HELP = (
+    "ISK the plan needs: pending purchases (materials and BPO purchases) plus the "
+    "estimated install fee of every pending job (manufacturing, invention, copying, "
+    "ME/TE research). Shown as unknown while a purchase has no price or a job's "
+    "install fee could not be estimated."
+)
 
-    manufacture / sub_manufacture actions carry the material cost of the same
-    materials the buy_materials rows purchase, so adding them would count
-    every material twice. Job install fees are not on the actions (their
-    estimated_cost_isk is materials only), so they are not included.
+
+@dataclass(frozen=True)
+class CapitalReserved:
+    """The plan's capital need. `total` is exact only when both counts are 0."""
+
+    total: float
+    unpriced_purchases: int
+    unknown_fee_jobs: int
+
+
+def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
+    """ISK needed to execute the plan (D4): the pending shopping list plus the
+    pending jobs' estimated install fees.
+
+    manufacture / sub_manufacture / invent actions also carry the cost of the
+    inputs the buy_materials rows purchase, so only their install fee is
+    added; adding estimated_cost_isk would count every input twice. An
+    unpriced purchase or an unknown fee is counted, never read as 0. A row
+    without the fee field (a plan from before the column) counts as unknown.
     """
-    return sum(
-        float(a.get("estimated_cost_isk") or 0.0)
-        for a in actions
-        if str(a.get("status") or "pending") == "pending"
-        and str(a.get("action_type") or "") in _CAPITAL_ACTION_TYPES
-    )
+    total = 0.0
+    unpriced_purchases = 0
+    unknown_fee_jobs = 0
+    for action in actions:
+        if str(action.get("status") or "pending") != "pending":
+            continue
+        action_type = str(action.get("action_type") or "")
+        if action_type in _CAPITAL_ACTION_TYPES:
+            cost = action.get("estimated_cost_isk")
+            if cost is None:
+                unpriced_purchases += 1
+            else:
+                total += float(cost)
+        elif action_type in _JOB_ACTION_TYPES:
+            fee = action.get("estimated_job_fee_isk")
+            if fee is None:
+                unknown_fee_jobs += 1
+            else:
+                total += float(fee)
+    return CapitalReserved(total, unpriced_purchases, unknown_fee_jobs)
+
+
+def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None]:
+    """(metric value, caption or None) for the Capital Reserved metric. A2:
+    one exact amount, or "unknown" with what is missing -- never a partial
+    sum or a lower bound."""
+    missing: list[str] = []
+    if reserved.unpriced_purchases:
+        missing.append(f"{reserved.unpriced_purchases} purchase(s) have no price")
+    if reserved.unknown_fee_jobs:
+        missing.append(f"install fee unknown for {reserved.unknown_fee_jobs} job(s)")
+    if missing:
+        return "unknown", "; ".join(missing)
+    return (_fmt_isk(reserved.total) if reserved.total else "—"), None
 
 
 def pending_character_action_count(actions: list[dict[str, Any]]) -> int:
@@ -349,12 +395,10 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
             st.metric("Corp Wallet", _fmt_isk(corp_wallet))
         with c4:
             actions = (page_state.plan or {}).get("actions") or []
-            capital_reserved = compute_capital_reserved(actions)
-            st.metric(
-                "Capital Reserved",
-                _fmt_isk(capital_reserved) if capital_reserved else "—",
-                help=CAPITAL_RESERVED_HELP,
-            )
+            value, caption = capital_reserved_display(compute_capital_reserved(actions))
+            st.metric("Capital Reserved", value, help=CAPITAL_RESERVED_HELP)
+            if caption:
+                st.caption(caption)
         with c5:
             try:
                 market_status = get_market_intel_status() or {}

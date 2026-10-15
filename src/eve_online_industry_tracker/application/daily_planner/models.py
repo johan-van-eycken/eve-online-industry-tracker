@@ -123,6 +123,10 @@ class AssignedAction:
     invention_best_probability: float | None = None
     invention_expected_attempts: float | None = None
     invention_chance_reason: str | None = None
+    # Every job action (D4, A2, Capital Reserved): the estimated install fee
+    # of the job(s) this action launches, from the producer's fee estimates.
+    # None = unknown (the producer could not price it), never 0.
+    estimated_job_fee_isk: float | None = None
 
 
 @dataclass

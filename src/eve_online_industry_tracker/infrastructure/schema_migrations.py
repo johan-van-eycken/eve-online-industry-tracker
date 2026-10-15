@@ -720,7 +720,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "invention_best_probability REAL NULL,"
             "invention_expected_attempts REAL NULL,"
             "decryptor_type_id INTEGER NULL,"
-            "decryptor_type_name TEXT NULL"
+            "decryptor_type_name TEXT NULL,"
+            "estimated_job_fee_isk REAL NULL"
             ")"
         ),
     )
@@ -886,6 +887,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="daily_action_log", column="invention_expected_attempts", ddl_type="REAL")
     _ensure_column(db_app, table="daily_action_log", column="decryptor_type_id", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="decryptor_type_name", ddl_type="TEXT")
+    # D4 / A2: the job action's estimated install fee (Capital Reserved).
+    _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_isk", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
 

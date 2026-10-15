@@ -3434,3 +3434,108 @@ def test_every_row_of_one_overview_publishes_one_stock_pool_id(monkeypatch) -> N
     assert len(pool_ids) == 1 and all(isinstance(p, str) and p for p in pool_ids)
     other = _invention_overview(monkeypatch, owned_item_inventory=({34: 11, 204: 3}, {34: 1.0, 204: 60.0}))
     assert other[5002]["manufacturing_job"]["owned_stock_pool_id"] not in pool_ids
+
+
+# --- round 5 Task 8: fees per attempt, per copy run and per research level (D4, A2) ---
+
+
+_FEE_PROFILE = {
+    "installation_cost_modifier": 0.1, "material_efficiency_bonus": 0.0,
+    "time_efficiency_bonus": 0.0, "facility_cost_bonus": 0.0,
+    "system_cost_indices": [
+        {"activity": "manufacturing", "cost_index": 0.05},
+        {"activity": "copying", "cost_index": 0.03},
+        {"activity": "invention", "cost_index": 0.02},
+        {"activity": "researching_material_efficiency", "cost_index": 0.02},
+        {"activity": "researching_time_efficiency", "cost_index": 0.04},
+    ],
+    "structure_rigs": [],
+}
+
+
+def test_the_invention_publishes_its_fee_per_attempt_and_per_source_copy_run(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, profile=_FEE_PROFILE)[5002]["manufacturing_job"]
+    invention = mj["activity_breakdown"]["invention"]
+    # One attempt: EIV 2 datacores x 100 = 200 x 0.02 = 4.0, + 10 % surcharge.
+    assert invention["job_cost_per_attempt"] == pytest.approx(4.4)
+    # One source-copy run: source EIV 3 x 5 = 15 x 0.02 = 0.3 x 0.03 = 0.009, + 10 %.
+    assert invention["source_copy_job_cost_per_run"] == pytest.approx(0.0099)
+    # The expected-value fee is the per-attempt fee x the expected attempts.
+    assert invention["total_job_cost"] == pytest.approx(4.4 * invention["runs"])
+
+
+def test_an_owned_bpo_row_publishes_its_cumulative_research_fee_per_level() -> None:
+    original_asset = SimpleNamespace(
+        type_id=9001, item_id=42, is_blueprint_copy=False,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
+    )
+    service = _build_service(
+        blueprint_rows=[_blueprint_row()], profile=_FEE_PROFILE,
+        character_modifiers={"modifier_skills": [], "implants": []}, trained_skill_levels={},
+        owned_assets=([], [original_asset], {}, {}, {}),
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
+    )
+    (row,) = service.industry_manufacturing_product_overview(
+        build_from_bpc=False, have_blueprint_source_only=True, maximize_bp_runs=False, character_id=1,
+    )
+    mj = row["manufacturing_job"]
+    assert mj["blueprint_source_kind"] == "owned_blueprint_original"
+    table = mj["research_job_cost_by_level"]
+    # Per-run EIV 10 x 5 = 50; rank 1 (105 s level 1). The producer's research
+    # fee: EIV x 0.02105 x rank-1 target seconds x index, + 10 % surcharge.
+    me = table["research_material"]
+    assert len(me) == 11 and me[0] == 0.0
+    assert me[1] == pytest.approx(50 * 0.02105 * 105 * 0.02 * 1.1)
+    assert me[5] == pytest.approx(50 * 0.02105 * 3360 * 0.02 * 1.1)
+    assert me[10] == pytest.approx(50 * 0.02105 * 256000 * 0.02 * 1.1)
+    te = table["research_time"]
+    assert te[5] == pytest.approx(50 * 0.02105 * 3360 * 0.04 * 1.1)
+
+
+def test_a_row_without_an_owned_bpo_publishes_no_research_fee_table(monkeypatch) -> None:
+    mj = _invention_overview(monkeypatch, profile=_FEE_PROFILE)[5002]["manufacturing_job"]
+    assert "research_job_cost_by_level" not in mj
+
+
+def test_a_bpc_variant_of_an_owned_bpo_publishes_the_research_fee_table_too() -> None:
+    """The planner schedules ME/TE research whenever the corp owns the BPO,
+    also when the kept row builds from an owned BPC of it: that row carries
+    the table as well (else the research fee would read unknown)."""
+    original_asset = SimpleNamespace(
+        type_id=9001, item_id=42, is_blueprint_copy=False,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
+    )
+    copy_asset = SimpleNamespace(
+        type_id=9001, item_id=43, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=10,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    service = _build_service(
+        blueprint_rows=[_blueprint_row()], profile=_FEE_PROFILE,
+        character_modifiers={"modifier_skills": [], "implants": []}, trained_skill_levels={},
+        owned_assets=([copy_asset], [original_asset], {}, {}, {}),
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
+    )
+    (row,) = service.industry_manufacturing_product_overview(
+        build_from_bpc=True, have_blueprint_source_only=True, maximize_bp_runs=False, character_id=1,
+    )
+    mj = row["manufacturing_job"]
+    assert mj["blueprint_source_kind"] != "owned_blueprint_original"
+    me = mj["research_job_cost_by_level"]["research_material"]
+    assert me[5] == pytest.approx(50 * 0.02105 * 3360 * 0.02 * 1.1)
+
+
+def test_an_owned_t2_bpc_covering_batch_one_still_publishes_the_invention_fees(monkeypatch) -> None:
+    """Batch 1 invents nothing, but the planner's invent / copy actions for
+    the later batches still need the fee rates (D4)."""
+    from eve_online_industry_tracker.application.industry import overview_row as orow
+
+    row = _invention_overview(
+        monkeypatch, profile=_FEE_PROFILE, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
+    )[5002]
+    plan = row["manufacturing_job"]["invention_bpc_plan"]
+    assert plan["job_cost_per_attempt"] == pytest.approx(4.4)
+    assert plan["source_copy_job_cost_per_run"] == pytest.approx(0.0099)
+    assert orow.get_invention_fee_per_attempt(row) == pytest.approx(4.4)
+    assert orow.get_source_copy_fee_per_run(row) == pytest.approx(0.0099)

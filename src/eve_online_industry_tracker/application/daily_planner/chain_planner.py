@@ -559,9 +559,15 @@ class ChainPlanner:
             return None  # Can't compare -> default to buy
         if sub_cost >= market_cost:
             return None
-        # Linear pricing, so the per-job costs sum to sub_cost exactly.
+        # Linear pricing, so the per-job costs sum to sub_cost exactly. The
+        # install fee is per run from the component's own overview row (D4).
+        fee_per_run = self._component_fee_per_run(mat_type_id, phase1_data)
         job_batches = [
-            {**job, "cost": self._price_materials(job["materials"], market_depth_cache)}
+            {
+                **job,
+                "cost": self._price_materials(job["materials"], market_depth_cache),
+                "fee": fee_per_run * job["runs"] if fee_per_run is not None else None,
+            }
             for job in jobs
         ]
 
@@ -607,6 +613,20 @@ class ChainPlanner:
                 "market_buy_cost": market_cost,
             },
         )
+
+    @staticmethod
+    def _component_fee_per_run(type_id: int, phase1_data: dict[str, Any]) -> float | None:
+        """The manufacturing install fee of one run of the component, from its
+        own overview row: the same refresh and industry profile, which is the
+        parent's structure (F-Q2). The fee is EIV-based, so linear in runs and
+        independent of ME. None when no kept row of it has a priced fee:
+        unknown, not free (CharacterAssigner logs it)."""
+        for row in phase1_data.get("overview_rows") or []:
+            if isinstance(row, dict) and int(row.get("type_id") or 0) == int(type_id):
+                fee = orow.get_manufacturing_fee_per_run(row)
+                if fee is not None:
+                    return fee
+        return None
 
     def _sub_batch(
         self,

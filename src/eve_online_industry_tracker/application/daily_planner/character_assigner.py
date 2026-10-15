@@ -239,6 +239,10 @@ class CharacterAssigner:
                     estimated_profit_isk=None,
                     estimated_completion=None,
                     notes=f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
+                    estimated_job_fee_isk=_known_fee(
+                        _research_fee(row, "research_material", "me_current", "me_research_target"),
+                        "me_research", type_id,
+                    ),
                 ))
                 self._take_slot(char_slots, char_id, "me_research")
             elif bp_type_id is not None:
@@ -263,6 +267,10 @@ class CharacterAssigner:
                     estimated_profit_isk=None,
                     estimated_completion=None,
                     notes=f"TE research: {row.get('te_current', '?')} → {row.get('te_research_target', '?')}",
+                    estimated_job_fee_isk=_known_fee(
+                        _research_fee(row, "research_time", "te_current", "te_research_target"),
+                        "te_research", type_id,
+                    ),
                 ))
                 self._take_slot(char_slots, char_id, "te_research")
 
@@ -306,6 +314,12 @@ class CharacterAssigner:
                     invention_best_probability=invention.best_probability,
                     invention_expected_attempts=invention.expected_attempts,
                     invention_chance_reason=invention.reason,
+                    # The cash for the jobs really launched: the fee of one
+                    # attempt x the whole attempts (runs), not the expected.
+                    estimated_job_fee_isk=_known_fee(
+                        _times_runs(orow.get_invention_fee_per_attempt(row), invention.whole_attempts),
+                        "invent", type_id,
+                    ),
                 ))
                 self._take_slot(char_slots, char_id, "invent")
 
@@ -336,6 +350,10 @@ class CharacterAssigner:
                     estimated_profit_isk=None,
                     estimated_completion=None,
                     notes="Copy T1 BPO to feed invention pipeline",
+                    estimated_job_fee_isk=_known_fee(
+                        _times_runs(orow.get_source_copy_fee_per_run(row), invent_whole_attempts),
+                        "copy", type_id,
+                    ),
                 ))
                 self._take_slot(char_slots, char_id, "copy")
 
@@ -367,6 +385,8 @@ class CharacterAssigner:
                     estimated_completion=None,
                     notes=_sub_manufacture_notes(row, job, index, len(jobs)),
                     materials=job["materials"],
+                    # The component's fee per run x this job's runs (ChainPlanner).
+                    estimated_job_fee_isk=_known_fee(job.get("fee"), "sub_manufacture", type_id),
                 ))
                 self._take_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action
@@ -405,6 +425,7 @@ class CharacterAssigner:
                 estimated_completion=None,
                 notes=f"Build: {decision.decision_reason}",
                 materials=orow.get_batch_materials(row),
+                estimated_job_fee_isk=_known_fee(orow.get_manufacturing_fee(row), "manufacture", type_id),
             ))
             self._take_slot(char_slots, char_id, "manufacture")
         else:
@@ -613,6 +634,40 @@ class CharacterAssigner:
             return None, None
         candidates.sort()
         return candidates[0][2], candidates[0][3]
+
+
+def _known_fee(fee: float | None, action_type: str, type_id: int) -> float | None:
+    """The action's install fee, logging a WARNING when it is unknown
+    (Capital Reserved then reads "unknown", never a partial sum)."""
+    if fee is None:
+        logger.warning(
+            "CharacterAssigner: install fee unknown for the %s action of type_id=%s "
+            "(the producer published no priced fee for it); Capital Reserved shows unknown",
+            action_type, type_id,
+        )
+    return fee
+
+
+def _times_runs(fee_per_run: float | None, runs: int | None) -> float | None:
+    """A per-run (per-attempt) fee x the runs, or None when either is unknown."""
+    if fee_per_run is None or runs is None or runs <= 0:
+        return None
+    return fee_per_run * runs
+
+
+def _research_fee(row: dict[str, Any], activity: str, current_key: str, target_key: str) -> float | None:
+    """The research job's fee from the row's current level to its target
+    (A2), via the producer's cumulative fee table. ME is stored as the level
+    (0..10). TE is stored as EVE's percentage (2 % per level, 0..20): the
+    current level is the one held (te // 2), the target the lowest level that
+    reaches the target percentage (ceil(te / 2))."""
+    try:
+        current, target = int(row[current_key]), int(row[target_key])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if activity == "research_time":
+        current, target = current // 2, -(-target // 2)
+    return orow.get_research_fee(row, activity, current, target)
 
 
 def _job_attr(job: Any, attr: str) -> Any:

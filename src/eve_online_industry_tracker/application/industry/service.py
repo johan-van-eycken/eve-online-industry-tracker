@@ -4767,11 +4767,7 @@ class IndustryService:
                 )
                 if target_duration_seconds <= 0:
                     continue
-                research_process_value = (
-                    float(per_run_material_eiv or 0.0) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * float(target_duration_seconds)
-                    if per_run_material_eiv is not None
-                    else None
-                )
+                research_process_value = self._research_process_value(per_run_material_eiv, target_duration_seconds)
                 _res_act = self._compute_activity_job(
                     activity=activity_name,
                     base_time_seconds=target_duration_seconds,
@@ -7386,6 +7382,13 @@ class IndustryService:
         costs["expected_successful_blueprints"] = successful_jobs
         # One attempt's duration (per-job), and the whole-job elapsed time.
         costs["job_duration_seconds"] = compute_activity(activity="invention", base_time_seconds=invention_base_time, runs=1, process_value=None)["duration_seconds"]
+        # The install fee of ONE attempt (the same EIV x index x reductions +
+        # surcharge as above, at one attempt): the daily planner pays it per
+        # whole attempt it launches (D4, Capital Reserved). None = unpriced.
+        costs["job_cost_per_attempt"] = compute_activity(
+            activity="invention", base_time_seconds=invention_base_time, runs=1,
+            process_value=per_attempt_process_value,
+        ).get("total_job_cost")
         costs["whole_attempts"] = whole_attempts
         costs["elapsed_duration_seconds"] = (
             compute_activity(activity="invention", base_time_seconds=invention_base_time, runs=whole_attempts, process_value=None)["duration_seconds"]
@@ -7452,12 +7455,42 @@ class IndustryService:
             process_value=(float(source_pv) * float(max(0, missing_source_runs)) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)) if source_pv is not None else None),
         )
         source_copy_costs["job_duration_seconds"] = compute_activity(activity="copying", base_time_seconds=source_base_time, runs=1, process_value=None)["duration_seconds"]
+        # The install fee of ONE source-copy run (D4): the planner's copy
+        # action copies one run per whole invention attempt.
+        source_copy_costs["job_cost_per_run"] = self._source_copy_fee_per_run(
+            compute_activity=compute_activity, invention_source_row=invention_source_row,
+            adjusted_price_map=adjusted_price_map,
+        )
         source_copy_costs["elapsed_duration_seconds"] = (
             compute_activity(activity="copying", base_time_seconds=source_base_time, runs=whole_missing_source_runs, process_value=None)["duration_seconds"]
             if whole_missing_source_runs > 0 else 0
         ) if not cost_unknown else None
         source_copy_costs["duration_is_amortized"] = missing_source_runs > 0
         return source_copy_costs, missing_source_runs
+
+    def _source_copy_fee_per_run(
+        self,
+        *,
+        compute_activity: Callable[..., dict[str, Any]],
+        invention_source_row: dict[str, Any],
+        adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> float | None:
+        """The install fee of one copy run of the T1 source blueprint: the
+        same process value as _invention_source_copy_costs (source EIV x
+        copy_cost_eiv_multiplier) at one run. None when the source has no
+        copy time or no priced EIV (unknown, not free)."""
+        source_copying_job = invention_source_row.get("copying_job") or {}
+        source_base_time = int((source_copying_job if isinstance(source_copying_job, dict) else {}).get("time_seconds") or 0)
+        if source_base_time <= 0:
+            return None
+        source_mfg_materials = [dict(e) for e in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or []) if isinstance(e, dict)]
+        source_pv, _ = self._sum_estimated_item_value(source_mfg_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map)
+        if source_pv is None:
+            return None
+        return compute_activity(
+            activity="copying", base_time_seconds=source_base_time, runs=1,
+            process_value=float(source_pv) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)),
+        ).get("total_job_cost")
 
     @staticmethod
     def _whole_source_runs_key(source_bp_type_id: int) -> int:
@@ -7971,6 +8004,16 @@ class IndustryService:
             adjusted_price_map=ctx.adjusted_market_price_map,
             enabled=requires_invention_chain,
         )
+        # The planner's copy action copies one source run per attempt (D4).
+        # Computed even when batch 1 copies nothing (an owned T2 BPC covers it):
+        # the later batches' plan carries it too.
+        costs["source_copy_job_cost_per_run"] = (
+            source_copy_costs.get("job_cost_per_run") if source_copy_costs is not None
+            else self._source_copy_fee_per_run(
+                compute_activity=lambda **kw: self._plan_activity_costs(ctx, **kw),
+                invention_source_row=invention_source_row, adjusted_price_map=ctx.adjusted_market_price_map,
+            )
+        )
         if source_copy_costs is not None:
             tree_nodes.append(self._job_tree_node(
                 label=self._ACTIVITY_LABELS["copying"], node_type="activity", activity="copying",
@@ -8002,7 +8045,7 @@ class IndustryService:
             target_duration = self._research_target_duration_seconds(level_one_duration_seconds=base_level_one, target_level=self._MAX_RESEARCH_LEVEL)
             if target_duration <= 0:
                 continue
-            process_value = float(per_run_material_eiv or 0.0) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * float(target_duration) if per_run_material_eiv is not None else None
+            process_value = self._research_process_value(per_run_material_eiv, target_duration)
             costs = self._plan_activity_costs(ctx, activity=activity_name, base_time_seconds=target_duration, runs=1, process_value=process_value)
             costs["estimated_item_value"] = per_run_material_eiv
             tree_node = self._job_tree_node(
@@ -8013,6 +8056,50 @@ class IndustryService:
             )
             results.append((activity_name, costs, tree_node))
         return results
+
+    def _research_process_value(self, per_run_material_eiv: float | None, target_duration_seconds: int) -> float | None:
+        """The process value of a research job from level 0 to the level whose
+        rank-scaled duration is `target_duration_seconds`: per-run material
+        EIV x research_cost_eiv_multiplier x that duration. The one formula
+        for every research fee (the SDE research chains and the daily
+        planner's ME/TE research actions). None when the EIV is unknown."""
+        if per_run_material_eiv is None:
+            return None
+        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * float(target_duration_seconds)
+
+    def _research_job_cost_by_level(
+        self,
+        ctx: _ProductPlanningContext,
+        *,
+        row: dict[str, Any],
+        per_run_material_eiv: float | None,
+    ) -> dict[str, list[float] | None]:
+        """The install fee of researching this blueprint from level 0 to each
+        level 0..max (A2), per research activity: a list indexed by level,
+        [0] = 0.0. Priced exactly like _plan_research_chain_for_variant (the
+        same process value, cost index, structure/rig/implant reductions and
+        surcharge). The fee is linear in the process value, so a job from
+        level a to b costs [b] - [a]. None for an activity whose fee is
+        unknown at any level (no research time, no EIV or no cost index)."""
+        tables: dict[str, list[float] | None] = {}
+        for activity_name, source_field in [("research_material", "research_material_job"), ("research_time", "research_time_job")]:
+            base_level_one = int(((row.get(source_field) or {}).get("time_seconds") or 0))
+            fees: list[float] | None = [0.0]
+            for level in range(1, self._MAX_RESEARCH_LEVEL + 1):
+                duration = self._research_target_duration_seconds(level_one_duration_seconds=base_level_one, target_level=level)
+                fee = (
+                    self._plan_activity_costs(
+                        ctx, activity=activity_name, base_time_seconds=duration, runs=1,
+                        process_value=self._research_process_value(per_run_material_eiv, duration),
+                    ).get("total_job_cost")
+                    if duration > 0 else None
+                )
+                if fee is None:
+                    fees = None
+                    break
+                fees.append(float(fee))
+            tables[activity_name] = fees
+        return tables
 
     @staticmethod
     def _row_invents(ctx: _ProductPlanningContext, blueprint_type_id: int) -> bool:
@@ -8643,6 +8730,11 @@ class IndustryService:
                         int(math.ceil(missing_top_level_copy_runs / runs_per_bpc)) if batch_one_invents else 0
                     ),
                     "per_attempt_materials": self._overview_keyed_entries(per_attempt_lines, compactor=lambda e: e),
+                    # Install fees per attempt and per source-copy run (D4):
+                    # the planner's invent / copy actions when batch 1 does
+                    # not invent (activity_breakdown.invention is then absent).
+                    "job_cost_per_attempt": inv_costs.get("job_cost_per_attempt"),
+                    "source_copy_job_cost_per_run": inv_costs.get("source_copy_job_cost_per_run"),
                 }
         # Batches 2..N (shopping list only). A later batch differs from batch
         # 1 when batch 1 spent owned BPC runs (top level or in a sub-build)
@@ -8864,6 +8956,15 @@ class IndustryService:
         }
         if invention_cost_unknown_reason is not None:
             row_out["manufacturing_job"]["invention_cost_unknown_reason"] = invention_cost_unknown_reason
+        if matched_blueprint_originals:
+            # An owned BPO, the only blueprint the daily planner researches:
+            # its ME/TE research fee per level (A2, Capital Reserved). Also on
+            # a row that builds from an owned BPC of it: the planner schedules
+            # the research whenever the BPO is owned, and the fee depends on
+            # the blueprint, not on the variant.
+            row_out["manufacturing_job"]["research_job_cost_by_level"] = self._research_job_cost_by_level(
+                ctx, row=row, per_run_material_eiv=per_run_material_eiv,
+            )
         top_level_chance = (
             inv_costs.get("invention_chance") if requires_invention_chain and inv_costs is not None else None
         ) or extra_chance

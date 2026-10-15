@@ -1120,6 +1120,9 @@ class DailyActionLogModel(BaseApp):
     invention_expected_attempts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     decryptor_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     decryptor_type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Every job action (D4, A2): the job's estimated install fee, summed into
+    # Capital Reserved. NULL = unknown (or a row from before the column).
+    estimated_job_fee_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class PlanItemOutcomeModel(BaseApp):

@@ -855,3 +855,53 @@ def test_an_invent_actions_chance_and_decryptor_survive_a_reload_on_a_legacy_tab
     assert (row.invention_probability, row.invention_best_probability, row.invention_expected_attempts) == (
         0.408, 0.525, 4.902,
     )
+
+
+def test_a_job_actions_install_fee_survives_a_reload_on_a_legacy_table() -> None:
+    """D4 (Task 8): estimated_job_fee_isk is persisted; ensure_app_schema adds
+    the column to a pre-existing daily_action_log (idempotent: run twice).
+    A legacy row reads back NULL (unknown), never 0."""
+    from sqlalchemy import text
+
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    repo, engine = _make_repo()
+    legacy_cols = [c for c in DailyActionLogModel.__table__.columns if c.name != "estimated_job_fee_isk"]
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE daily_action_log"))
+        conn.execute(text(
+            "CREATE TABLE daily_action_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            + ", ".join(f"{c.name} {c.type.compile(engine.dialect)}" for c in legacy_cols if c.name != "id")
+            + ")"
+        ))
+        conn.execute(text(
+            "INSERT INTO daily_action_log (plan_id, generated_at, action_type, type_id, status, processed_for_feedback) "
+            "VALUES (0, '2026-01-01 00:00:00', 'manufacture', 1, 'pending', 0)"
+        ))
+
+    class _EngineDb:
+        def execute(self, query, params=None):
+            with engine.begin() as conn:
+                conn.execute(text(query), params or {})
+
+        def query(self, query, params=None):
+            with engine.begin() as conn:
+                return conn.execute(text(query), params or {}).fetchall()
+
+    ensure_app_schema(_EngineDb())
+    ensure_app_schema(_EngineDb())
+
+    (legacy,) = repo.get_actions(0)
+    assert legacy.estimated_job_fee_isk is None
+
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    action = AssignedAction(
+        type_id=12345, type_name="Widget", action_type="manufacture", character_id=1, character_name="Pilot",
+        quantity=10, runs=10, estimated_cost_isk=500.0, estimated_profit_isk=None, estimated_completion=None,
+        notes=None, estimated_job_fee_isk=25.5,
+    )
+    repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [action], now))
+    (row,) = repo.get_actions(plan_id)
+    assert row.estimated_job_fee_isk == 25.5
