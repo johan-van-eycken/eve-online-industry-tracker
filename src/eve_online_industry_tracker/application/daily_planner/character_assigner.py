@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -43,6 +44,9 @@ from eve_online_industry_tracker.application.industry.invention_model import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: On the copy / invent actions of a row that cannot manufacture yet.
+NO_MANUFACTURE_NOTE = "no manufacture until a T2 BPC exists"
 
 # EVE activity IDs
 ACTIVITY_MANUFACTURING = 1
@@ -104,6 +108,9 @@ class CharacterAssigner:
         # Research-first parents that got no research slot and build from
         # their kept BPO row instead (filled by _assign_decision).
         fell_back: set[int] = set()
+        # T1 BPC runs on hand per T1 source, pooled once across rows (fix
+        # round 3): rows sharing a source spend one pool, in assignment order.
+        bpc_pool: dict[int, int] = {}
         for pass_decisions in (top_level, None):
             if pass_decisions is None:
                 if fell_back and callable(resize):
@@ -130,6 +137,7 @@ class CharacterAssigner:
                     price_map=price_map or {},
                     fell_back=fell_back,
                     can_resize=callable(resize),
+                    bpc_pool=bpc_pool,
                 )
                 # Slots are consumed inside _assign_decision, as each action is
                 # created -- two research actions on one item must not share a slot.
@@ -159,6 +167,7 @@ class CharacterAssigner:
         price_map: dict[int, Any],
         fell_back: set[int] | None = None,
         can_resize: bool = False,
+        bpc_pool: dict[int, int] | None = None,
     ) -> list[AssignedAction]:
         """Return AssignedAction(s) for a single ItemDecision. A research-first
         parent that builds from its kept BPO row is added to `fell_back`;
@@ -276,21 +285,47 @@ class CharacterAssigner:
             wants_copy = False
         if row.get("needs_invention"):
             bpc_runs_cap: int | None = None
+            results: list[tuple[int, Any]] | None = None
+            free_lanes = 0
             if wants_copy:
-                # Absent (a row not from ChainPlanner): none on hand.
-                on_hand = max(0, int(row.get("t1_bpc_runs_on_hand") or 0))
-                costs = orow.get_invention_costs(row) or {}
-                needed = costs.get("whole_attempts")
-                needed = int(needed) if isinstance(needed, (int, float)) and not isinstance(needed, bool) and needed > 0 else None
+                # The pool of this T1 source's free BPC runs (fix round 3):
+                # seeded once from the row's full free count. Absent (a row not
+                # from ChainPlanner): none on hand.
+                pool = bpc_pool if bpc_pool is not None else {}
+                if t1_blueprint_type_id not in pool:
+                    pool[t1_blueprint_type_id] = max(0, int(row.get("t1_bpc_runs_on_hand") or 0))
+                on_hand = pool[t1_blueprint_type_id]
+                # 1. The copy's slots first, steered away from the inventors
+                #    (non-inventors, then the weakest inventor first).
+                bpo_count = max(1, int(row.get("t1_bpo_count") or 1))
+                reserved = self._reserve_copy_pilots(char_slots, row, bpo_count)
+                # 2. Sized for the invent lanes actually free after the copy
+                #    took its slots (fix round 3); none free: the weakest
+                #    qualifying pilot alone (the most attempts).
+                results, free_lanes = self._invention_results(
+                    char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
+                )
+                needed = self._copy_need(results, char_slots, row, probability_floor=probability_floor, price_map=price_map)
                 copy_runs = None if needed is None else max(0, needed - on_hand)
-                if copy_runs is None or copy_runs > 0:
-                    note = (
-                        "no T1 BPC on hand: no invention today; it starts once these copies are delivered"
-                        if on_hand == 0 else
-                        f"{on_hand} T1 BPC run(s) on hand cover part of the attempts; these copies cover the rest"
+                # 3. Give back the slots no copy needs.
+                keep = len(reserved) if copy_runs is None else min(len(reserved), copy_runs)
+                for char_id, _name in reserved[keep:]:
+                    self._release_slot(char_slots, char_id, "copy")
+                if keep < len(reserved) and on_hand > 0:
+                    results, free_lanes = self._invention_results(
+                        char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
                     )
+                if keep == 0 and reserved and (copy_runs is None or copy_runs > 0):
+                    logger.info("CharacterAssigner: type_id=%s: no free research slot for its copy", type_id)
+                if copy_runs is None:
+                    note = f"the copy runs are unknown (the invention attempts are unknown); {on_hand} T1 BPC run(s) on hand"
+                elif on_hand == 0:
+                    note = "no T1 BPC on hand: no invention today; it starts once these copies are delivered"
+                else:
+                    note = f"{on_hand} T1 BPC run(s) on hand cover part of the attempts; these copies cover the rest"
+                if copy_runs is None or copy_runs > 0:
                     actions.extend(self._copy_actions(
-                        row, type_id, type_name, t1_blueprint_type_id, char_slots, characters, copy_runs, note,
+                        row, type_id, type_name, t1_blueprint_type_id, reserved[:keep], copy_runs, note,
                     ))
                 if on_hand <= 0:
                     logger.info(
@@ -299,11 +334,17 @@ class CharacterAssigner:
                     )
                 bpc_runs_cap = on_hand
             if bpc_runs_cap is None or bpc_runs_cap > 0:
-                results, free_lanes = self._invention_results(
-                    char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
-                )
+                if results is None:
+                    results, free_lanes = self._invention_results(
+                        char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
+                    )
                 if bpc_runs_cap is not None:
                     results = _cap_invention_attempts(results, bpc_runs_cap)
+                    if bpc_pool is not None:
+                        bpc_pool[t1_blueprint_type_id] = max(0, bpc_runs_cap - sum(
+                            int(inv.whole_attempts) if inv.whole_attempts is not None else bpc_runs_cap
+                            for _cid, inv in results
+                        ))
                 notes = _fewer_lanes_note(row, free_lanes)
                 # The producer's choice: bought one per attempt by the shopping list.
                 decryptor = orow.get_invention_decryptor(row)
@@ -385,6 +426,20 @@ class CharacterAssigner:
                 if first["mode"] == "none":
                     logger.info("CharacterAssigner: type_id=%s: no manufacture: %s", type_id, first["note"])
                     return actions
+
+        # No T2 BPC yet (fix round 3): a row still copying or inventing gets
+        # no manufacture, so its batch materials are not bought and its fee
+        # not reserved before invented BPCs exist. Gated on the stage: an
+        # invention-stage row carries no needs_invention.
+        if decision.pipeline_stage in ("copying", "invention"):
+            for action in actions:
+                if action.action_type in ("copy", "invent"):
+                    action.notes = f"{action.notes}; {NO_MANUFACTURE_NOTE}"
+            logger.info(
+                "CharacterAssigner: type_id=%s: stage %s, no manufacture until a T2 BPC exists",
+                type_id, decision.pipeline_stage,
+            )
+            return actions
 
         # Manufacturing
         char_id, char_name = self._best_mfg_char(char_slots, characters)
@@ -661,26 +716,98 @@ class CharacterAssigner:
             probability_floor=probability_floor, price_map=price_map,
         ))], 1
 
+    def _release_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
+        """Give back one slot taken by _take_slot (a reserved copy not needed)."""
+        slot = char_slots.get(char_id)
+        if slot is None:
+            return
+        if action_type in self._MFG_ACTIONS:
+            slot["free_mfg"] = slot.get("free_mfg", 0) + 1
+        elif action_type in self._RESEARCH_ACTIONS:
+            slot["free_research"] = slot.get("free_research", 0) + 1
+
+    def _reserve_copy_pilots(
+        self, char_slots: dict[int, dict], row: dict[str, Any], count: int,
+    ) -> list[tuple[int, str | None]]:
+        """Take up to `count` research slots for copy jobs, steered away from
+        the inventors (fix round 3): pilots who cannot run this invention
+        first (most free slots first), then the inventors weakest first, so
+        the best inventor copies only when nobody else can."""
+        skills = orow.get_invention_skill_set(row)
+        skill_set = InventionSkillSet(skills[0], skills[1]) if skills is not None else None
+        required = self._required_levels(row)
+        reserved: list[tuple[int, str | None]] = []
+        for _ in range(max(0, int(count))):
+            candidates = []
+            for cid, slot in char_slots.items():
+                if int(slot.get("free_research", 0)) <= 0:
+                    continue
+                levels = slot.get("skills_by_id")
+                inventor = (
+                    skill_set is not None and required is not None and levels is not None
+                    and can_run_invention(required, levels)
+                )
+                factor = invention_skill_factor(skill_set, levels) if inventor and skill_set is not None else 0.0
+                candidates.append((
+                    1 if inventor else 0, factor, -int(slot.get("free_research", 0)),
+                    int(slot.get("total_active_jobs", 0)), cid,
+                ))
+            if not candidates:
+                break
+            cid = min(candidates)[-1]
+            reserved.append((cid, char_slots[cid].get("character_name")))
+            self._take_slot(char_slots, cid, "copy")
+        return reserved
+
+    def _copy_need(
+        self, results: list[tuple[int, Any]], char_slots: dict[int, dict], row: dict[str, Any], *,
+        probability_floor: float, price_map: dict[int, Any],
+    ) -> int | None:
+        """The T1 BPC runs the invention needs (one per attempt): today's
+        free invent lanes' total; with none free, the weakest qualifying
+        pilot alone (the most attempts: never short); nobody qualifying, the
+        producer's whole attempts. None when unknown."""
+        if results:
+            wholes = [inv.whole_attempts for _cid, inv in results]
+            return None if any(w is None for w in wholes) else sum(int(w) for w in wholes)
+        required = self._required_levels(row)
+        qualifying = [
+            cid for cid, slot in sorted(char_slots.items())
+            if required is not None and slot.get("skills_by_id") is not None
+            and can_run_invention(required, slot["skills_by_id"])
+        ]
+        if qualifying:
+            wholes = [
+                assigned_invention(
+                    row, character_id=cid, skill_levels_by_id=char_slots[cid]["skills_by_id"],
+                    probability_floor=probability_floor, price_map=price_map,
+                ).whole_attempts
+                for cid in qualifying
+            ]
+            return None if any(w is None for w in wholes) else max(int(w) for w in wholes)
+        needed = (orow.get_invention_costs(row) or {}).get("whole_attempts")
+        if isinstance(needed, (int, float)) and not isinstance(needed, bool) and needed > 0:
+            return int(needed)
+        return None
+
+    @staticmethod
+    def _required_levels(row: dict[str, Any]) -> dict[int, int] | None:
+        """The row's required invention skill levels (the producer's, else
+        level 1 of each skill in its set); None without a skill set."""
+        skills = orow.get_invention_skill_set(row)
+        if skills is None:
+            return None
+        return orow.get_invention_required_skill_levels(row) or required_invention_skill_levels(
+            InventionSkillSet(skills[0], skills[1]), [],
+        )
+
     def _copy_actions(
         self, row: dict[str, Any], type_id: int, type_name: str, t1_blueprint_type_id: int,
-        char_slots: dict[int, dict], characters: list[dict], runs_total: int | None, note: str,
+        pilots: list[tuple[int, str | None]], runs_total: int | None, note: str,
     ) -> list[AssignedAction]:
-        """One copy action per free corp BPO of the T1 source (a BPO is in one
-        job at a time; a corp BPO is installed by any pilot), `runs_total`
-        spread evenly; one when the runs are unknown. Takes the slots."""
-        bpo_count = max(1, int(row.get("t1_bpo_count") or 1))
-        copies = 1 if runs_total is None else max(1, min(bpo_count, runs_total))
-        pilots: list[tuple[int, str | None]] = []
-        for _ in range(copies):
-            char_id, char_name = self._best_research_char(char_slots, characters)
-            if char_id is None:
-                logger.info(
-                    "CharacterAssigner: no free research slot for %d of %d copy job(s) of type_id=%s",
-                    copies - len(pilots), copies, type_id,
-                )
-                break
-            pilots.append((char_id, char_name))
-            self._take_slot(char_slots, char_id, "copy")
+        """One copy action per reserved pilot (one per free corp BPO of the
+        T1 source: a BPO is in one job at a time, a corp BPO is installed by
+        any pilot), `runs_total` spread evenly. The slots are already taken."""
         actions: list[AssignedAction] = []
         for index, (char_id, char_name) in enumerate(pilots):
             runs = None if runs_total is None else len(range(index, runs_total, len(pilots)))
@@ -720,12 +847,9 @@ class CharacterAssigner:
         level (the producer's required_skill_levels, else level 1 of each
         skill in the set). The producer counts the same pilots' total slots
         (invention_model.invention_lanes). A row without a skill set: none."""
-        skills = orow.get_invention_skill_set(row)
-        if skills is None:
+        required = CharacterAssigner._required_levels(row)
+        if required is None:
             return []
-        required = orow.get_invention_required_skill_levels(row) or required_invention_skill_levels(
-            InventionSkillSet(skills[0], skills[1]), [],
-        )
         lanes: list[int] = []
         for cid in sorted(char_slots):
             slot = char_slots[cid]
@@ -814,18 +938,28 @@ class CharacterAssigner:
         return candidates[0][2], candidates[0][3]
 
 
+_LANE_WORDING = re.compile(r"lane \d+ of \d+")
+
+
 def _cap_invention_attempts(results: list[tuple[int, Any]], cap: int) -> list[tuple[int, Any]]:
     """Today's invent actions limited to `cap` attempts in all, one per T1
     BPC run on hand (best lane first). A capped lane keeps its share of the
-    expected attempts and cost; an unknown sizing is kept as it is."""
-    out: list[tuple[int, Any]] = []
+    expected attempts and cost. A lane of unknown size takes what is left
+    (it is said in its note) and ends the list. Kept lanes are renumbered
+    "lane k of n"."""
+    kept: list[tuple[int, Any]] = []
     left = int(cap)
     for char_id, invention in results:
+        if left <= 0:
+            break
         whole = invention.whole_attempts
         if whole is None:
-            out.append((char_id, invention))
-            continue
-        if left <= 0:
+            kept.append((char_id, dataclasses.replace(
+                invention, note="; ".join(n for n in (
+                    invention.note, f"at most {left} attempt(s): the T1 BPC run(s) on hand",
+                ) if n),
+            )))
+            left = 0
             break
         if whole > left:
             share = left / whole
@@ -835,9 +969,15 @@ def _cap_invention_attempts(results: list[tuple[int, Any]], cap: int) -> list[tu
                 cost_isk=None if invention.cost_isk is None else invention.cost_isk * share,
                 note="; ".join(n for n in (invention.note, f"capped at the {cap} T1 BPC run(s) on hand") if n),
             )
-        out.append((char_id, invention))
+        kept.append((char_id, invention))
         left -= int(invention.whole_attempts)
-    return out
+    if len(kept) < len(results):
+        kept = [
+            (cid, dataclasses.replace(inv, note=_LANE_WORDING.sub(f"lane {index} of {len(kept)}", inv.note)))
+            if inv.note else (cid, inv)
+            for index, (cid, inv) in enumerate(kept, start=1)
+        ]
+    return kept
 
 
 def _fewer_lanes_note(row: dict[str, Any], free_lanes: int) -> str | None:

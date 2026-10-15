@@ -165,18 +165,22 @@ def _row(*, multiplier=1.2, base=0.30, decryptor=True, skills_unknown_reason=Non
     return row
 
 
-def _plan(row):
-    return ChainPlan(decisions=[ItemDecision(
-        type_id=12345, type_name="Widget II", decision="build", decision_reason="test",
-        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
+def _decision(row, *, stage="invention", type_id=12345, score=1.0):
+    return ItemDecision(
+        type_id=type_id, type_name="Widget II", decision="build", decision_reason="test",
+        adjusted_score=score, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
         days_of_supply_current=1.0, effective_velocity=1.0, meta_group_id=2,
-        pipeline_stage="invention", overview_row=row,
-    )])
+        pipeline_stage=stage, overview_row=row,
+    )
 
 
-def _assign(row, chars, jobs=(), admin=None):
+def _plan(row, *, stage="invention"):
+    return ChainPlan(decisions=[_decision(row, stage=stage)])
+
+
+def _assign(row, chars, jobs=(), admin=None, *, stage="invention"):
     return CharacterAssigner().assign(
-        _plan(row), list(jobs), _Chars(chars), admin or _Admin(), price_map=PRICES,
+        _plan(row, stage=stage), list(jobs), _Chars(chars), admin or _Admin(), price_map=PRICES,
     )
 
 
@@ -273,19 +277,21 @@ def test_without_a_decryptor_only_the_datacores_scale():
 
 
 def test_the_copy_action_makes_one_t1_bpc_run_per_invention_attempt():
-    """Minor 6, Task 12 fix round 2: the copy covers the attempts the T1 BPC
-    runs on hand do not (the row's 4); with none on hand it is the only
+    """Minor 6, Task 12 fix rounds 2-3: the copy covers the attempts the T1
+    BPC runs on hand do not, for the pilot free to invent today (the best
+    inventor is busy: the weaker pilot's 5); with none on hand it is the only
     action, and with them on hand today's attempts are capped by them."""
     actions = _assign(_row(t1_bpo=True), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
     assert [a for a in actions if a.action_type == "invent"] == []
     (copy,) = [a for a in actions if a.action_type == "copy"]
-    assert copy.runs == 4
+    assert copy.runs == 5
     assert "no T1 BPC on hand: no invention today" in copy.notes
     row = _row(t1_bpo=True)
     row["t1_bpc_runs_on_hand"] = 4
     actions = _assign(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
     (invent,) = [a for a in actions if a.action_type == "invent"]
-    assert [a for a in actions if a.action_type == "copy"] == []
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    assert copy.runs == 1  # 5 needed, 4 on hand
     assert invent.runs == 4  # the weaker pilot's 5, capped at the 4 runs on hand
     assert "capped at the 4 T1 BPC run(s) on hand" in invent.notes
 
@@ -641,3 +647,114 @@ def test_fewer_free_lanes_than_the_build_time_assumes_are_said_on_the_invent_act
     assert "1 of 3 lanes free today" in alone.notes
     full = _invents(_row(), [_best_inventor(), _second_inventor()])
     assert all("lanes free today" not in a.notes for a in full)
+
+
+# --- fix round 3 ------------------------------------------------------------------
+
+NO_MANUFACTURE_NOTE = "no manufacture until a T2 BPC exists"
+
+
+def _buy_all(actions):
+    items = ShoppingListBuilder().build(
+        assigned_actions=actions, corp_assets=[], market_depth_cache=PRICES, admin_settings=_Admin(),
+        blueprint_data=BLUEPRINTS, meta_resolver=_NoBlueprints(),
+    )
+    return {i.type_id: i.quantity for i in items}
+
+
+@pytest.mark.parametrize("stage", ["copying", "invention"])
+def test_no_manufacture_before_a_t2_bpc_exists(stage):
+    """Review probe: a copying / invention-stage row got a full manufacture
+    action, its batch materials bought and its fee reserved, though it can
+    only start once invented BPCs are delivered."""
+    row = _row(t1_bpo=stage == "copying")
+    row["t1_bpc_runs_on_hand"] = 0
+    row["manufacturing_job"]["materials"] = {"34": {"type_id": 34, "type_name": "Tritanium", "quantity": 5000}}
+    actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()], stage=stage)
+    assert "manufacture" not in [a.action_type for a in actions]
+    assert 34 not in _buy_all(actions)
+    feeders = [a for a in actions if a.action_type in ("copy", "invent")]
+    assert feeders and all(NO_MANUFACTURE_NOTE in a.notes for a in feeders)
+
+
+def test_the_manufacturing_stage_still_manufactures():
+    row = _row()
+    row["needs_invention"] = False
+    actions = _assign(row, [_best_inventor()], stage="manufacturing")
+    (manufacture,) = [a for a in actions if a.action_type == "manufacture"]
+    assert NO_MANUFACTURE_NOTE not in manufacture.notes
+
+
+def test_copies_cover_the_weaker_free_pilot_when_the_best_inventor_is_busy():
+    """The best inventor's slot is busy: the free 3/3/3 pilot alone needs
+    ceil(2 / 0.459) = 5 attempts, more than the row's 4, so 5 are copied."""
+    actions = _assign(_row(t1_bpo=True), [_best_inventor(), _second_inventor(), _copier()], jobs=[_busy(BEST_ID)])
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    assert copy.runs == 5
+    assert copy.character_id == COPIER_ID
+
+
+def test_the_copy_goes_to_a_non_inventor_when_one_can_copy():
+    many_slots = _second_inventor()
+    many_slots["skills"]["skills"].append(_skill("Laboratory Operation", 4, 3406))  # 5 slots
+    single = _copier()
+    single["skills"]["skills"] = []  # 1 slot, no invention skills
+    actions = _assign(_row(t1_bpo=True), [_best_inventor(), many_slots, single])
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    assert copy.character_id == COPIER_ID
+
+
+def test_without_a_free_inventor_after_the_copy_it_covers_the_weakest_qualifying_pilot():
+    """The best inventor's only slot goes to the copy (nobody else can copy)
+    and the 3/3/3 pilot is busy: nothing is free to size today's lanes, so
+    the copy covers the weakest qualifying pilot alone: 5."""
+    actions = _assign(_row(t1_bpo=True), [_best_inventor(), _second_inventor()], jobs=[_busy(SECOND_ID)])
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    assert copy.runs == 5
+
+
+def test_a_dropped_lane_renumbers_the_lane_wording():
+    row = _row(t1_bpo=True)
+    row["t1_bpc_runs_on_hand"] = 1
+    actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
+    (invent,) = [a for a in actions if a.action_type == "invent"]
+    assert invent.runs == 1
+    assert "lane 1 of 1" in invent.notes and "of 2" not in invent.notes
+
+
+def test_an_unknown_lane_is_capped_too():
+    from eve_online_industry_tracker.application.daily_planner.assigned_invention import AssignedInvention
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import _cap_invention_attempts
+
+    unknown = AssignedInvention(None, 0.5, None, None, None, "datacore need unknown: x", "datacore need unknown: x")
+    known = AssignedInvention(0.5, 0.5, 2.0, 2, 10.0, "chance 50%")
+    (only,) = _cap_invention_attempts([(1, unknown), (2, known)], 3)
+    assert only[0] == 1 and "at most 3 attempt(s): the T1 BPC run(s) on hand" in only[1].note
+
+
+def test_an_unknown_copy_run_count_says_so():
+    row = _row(t1_bpo=True, plan="unknown")
+    row["t1_bpc_runs_on_hand"] = 2
+    actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
+    (copy,) = [a for a in actions if a.action_type == "copy"]
+    assert copy.runs is None
+    assert "cover part" not in copy.notes
+    assert "the copy runs are unknown" in copy.notes
+
+
+def test_two_rows_share_the_t1_bpc_runs_on_hand_once():
+    """Both rows invent from T1 source 998 and each carries the full free
+    count (4). The first row (higher score) spends them; the second sees none
+    left, so it copies first and does not invent."""
+    first, second = _row(t1_bpo=True), _row(t1_bpo=True)
+    second["type_id"] = 12346
+    first["t1_bpc_runs_on_hand"] = second["t1_bpc_runs_on_hand"] = 4
+    plan = ChainPlan(decisions=[_decision(first, stage="copying", score=2.0),
+                                _decision(second, stage="copying", type_id=12346, score=1.0)])
+    chars = [_best_inventor(), _second_inventor(), _copier(), {**_copier(), "character_id": 9, "character_name": "C2"}]
+    actions = CharacterAssigner().assign(plan, [], _Chars(chars), _Admin(), price_map=PRICES)
+    invents_first = [a for a in actions if a.action_type == "invent" and a.type_id == 12345]
+    invents_second = [a for a in actions if a.action_type == "invent" and a.type_id == 12346]
+    assert sum(a.runs for a in invents_first) == 4
+    assert invents_second == []
+    assert [a for a in actions if a.action_type == "copy" and a.type_id == 998]
