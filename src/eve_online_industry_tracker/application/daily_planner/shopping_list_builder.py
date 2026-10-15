@@ -106,23 +106,9 @@ class ShoppingListBuilder:
                 if net_required <= 0:
                     continue
 
-                estimated_unit_price, is_vwap = self._get_price(mat_type_id, market_depth_cache)
-                if estimated_unit_price is None or estimated_unit_price <= 0:
-                    logger.warning(
-                        "ShoppingListBuilder: skipping material type_id=%s for %s type_id=%s: "
-                        "no price in market depth cache",
-                        mat_type_id, action.action_type, action.type_id,
-                    )
-                    continue
-
-                shopping.append(ShoppingItem(
-                    type_id=mat_type_id,
-                    type_name=mat_name,
-                    quantity=net_required,
-                    shopping_category="current_job",
-                    estimated_unit_price=estimated_unit_price,
-                    estimated_total=estimated_unit_price * net_required,
-                    notes=None if is_vwap else "price: spot (no VWAP data)",
+                shopping.append(_priced_line(
+                    mat_type_id, mat_name, net_required, "current_job", market_depth_cache, self._get_price,
+                    context=f"{action.action_type} type_id={action.type_id}",
                 ))
 
         # Invention inputs: the datacores, plus the decryptor the producer chose
@@ -169,23 +155,10 @@ class ShoppingListBuilder:
                 if net_required <= 0:
                     continue
 
-                unit_price, is_vwap = self._get_price(mat_type_id, market_depth_cache)
-                if unit_price is None or unit_price <= 0:
-                    logger.warning(
-                        "ShoppingListBuilder: skipping invention input type_id=%s for "
-                        "invent type_id=%s: no price in market depth cache",
-                        mat_type_id, action.type_id,
-                    )
-                    continue
-
-                shopping.append(ShoppingItem(
-                    type_id=mat_type_id,
-                    type_name=str(mat.get("type_name") or f"type_{mat_type_id}"),
-                    quantity=net_required,
-                    shopping_category="invention_input",
-                    estimated_unit_price=unit_price,
-                    estimated_total=unit_price * net_required,
-                    notes=None if is_vwap else "price: spot (no VWAP data)",
+                shopping.append(_priced_line(
+                    mat_type_id, str(mat.get("type_name") or f"type_{mat_type_id}"), net_required,
+                    "invention_input", market_depth_cache, self._get_price,
+                    context=f"invent type_id={action.type_id}",
                 ))
 
         return _merge_lines(shopping)
@@ -394,6 +367,36 @@ def price_map_unit_price(entry: Any) -> tuple[float | None, bool]:
     return None, False
 
 
+#: The note on a line bought without a price.
+UNPRICED_LINE_NOTE = "no price: buy at market, cost unknown"
+
+
+def _priced_line(
+    type_id: int, type_name: str, quantity: int, category: str,
+    market_depth_cache: dict[int, Any], get_price: Any, *, context: str,
+) -> ShoppingItem:
+    """A shopping line, priced from the market depth cache. Without a price
+    the line is still emitted with its quantity and an unknown (None) cost:
+    dropping it under-bought the material and made Capital Reserved look
+    exact (Task 8 fix round 1)."""
+    unit_price, is_vwap = get_price(type_id, market_depth_cache)
+    if unit_price is None or unit_price <= 0:
+        logger.warning(
+            "ShoppingListBuilder: material type_id=%s for %s has no price in market depth cache; "
+            "bought at an unknown cost",
+            type_id, context,
+        )
+        return ShoppingItem(
+            type_id=type_id, type_name=type_name, quantity=quantity, shopping_category=category,
+            estimated_unit_price=None, estimated_total=None, notes=UNPRICED_LINE_NOTE,
+        )
+    return ShoppingItem(
+        type_id=type_id, type_name=type_name, quantity=quantity, shopping_category=category,
+        estimated_unit_price=unit_price, estimated_total=unit_price * quantity,
+        notes=None if is_vwap else "price: spot (no VWAP data)",
+    )
+
+
 def _merge_lines(shopping: list[ShoppingItem]) -> list[ShoppingItem]:
     """One line per (category, material): quantities and totals summed.
 
@@ -410,7 +413,11 @@ def _merge_lines(shopping: list[ShoppingItem]) -> list[ShoppingItem]:
             merged[key] = ShoppingItem(**vars(item))
             continue
         line.quantity += item.quantity
-        line.estimated_total += item.estimated_total
+        # One unpriced part makes the merged total unknown, never a partial sum.
+        line.estimated_total = (
+            None if line.estimated_total is None or item.estimated_total is None
+            else line.estimated_total + item.estimated_total
+        )
         if item.notes and item.notes not in (line.notes or "").split("; "):
             line.notes = f"{line.notes}; {item.notes}" if line.notes else item.notes
     return list(merged.values())

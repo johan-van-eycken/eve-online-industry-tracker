@@ -264,9 +264,10 @@ def test_an_unpriced_invention_input_still_warns(session_provider, planner_repo,
     with caplog.at_level(logging.WARNING):
         items = {i.type_id: i for i in svc._phase_7_shopping([invent], phase1)}
 
-    assert 204 in items and 34201 not in items
+    # Task 8 fix round 1: still bought, at an unknown cost.
+    assert 204 in items and items[34201].estimated_total is None and items[34201].quantity > 0
     assert any(
-        "skipping invention input type_id=34201" in r.getMessage() for r in caplog.records
+        "type_id=34201" in r.getMessage() and "unknown cost" in r.getMessage() for r in caplog.records
     )
 
 
@@ -355,8 +356,9 @@ def test_a_material_with_no_hub_price_still_warns(session_provider, planner_repo
     with caplog.at_level(logging.WARNING):
         items = {i.type_id: i for i in svc._phase_7_shopping(actions, phase1)}
 
-    assert 34 in items and 25624 not in items
-    assert any("skipping material type_id=25624" in r.getMessage() for r in caplog.records)
+    # Task 8 fix round 1: still bought, at an unknown cost.
+    assert 34 in items and items[25624].estimated_total is None and items[25624].quantity > 0
+    assert any("type_id=25624" in r.getMessage() and "unknown cost" in r.getMessage() for r in caplog.records)
 
 
 # --- round 5 Task 3 fix round 3: one merged price map for phases 5 and 7 -----

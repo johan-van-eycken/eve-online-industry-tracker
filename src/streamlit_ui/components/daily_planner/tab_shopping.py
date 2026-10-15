@@ -65,6 +65,15 @@ def _build_shopping_rows(
     return rows
 
 
+def unpriced_total_caption(rows: list[dict[str, Any]]) -> str | None:
+    """A caption for a total over `rows` when some lines have no price: they
+    are still bought, but the total cannot include them (Task 8 fix round 1)."""
+    unpriced = sum(1 for r in rows if r.get("Est. Total") is None)
+    if not unpriced:
+        return None
+    return f"{unpriced} line(s) have no price: the total excludes them, so the real cost is higher."
+
+
 def _build_bpo_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for item in items:
@@ -247,6 +256,9 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     budget_cols = st.columns(3)
     with budget_cols[0]:
         st.metric("Total to Spend", _fmt_isk(total_isk))
+        unpriced_caption = unpriced_total_caption([*current_rows, *future_rows, *invention_rows])
+        if unpriced_caption:
+            st.caption(unpriced_caption)
     with budget_cols[1]:
         st.metric("Corp Wallet", _fmt_isk(corp_wallet))
     with budget_cols[2]:

@@ -55,3 +55,21 @@ def test_a_non_finite_wallet_snapshot_is_unknown_not_a_number():
     for raw in (float("nan"), float("inf"), float("-inf"), "nan", "inf"):
         assert wallet_snapshot({"corp_wallet_snapshot": raw}) is None, raw
     assert _fmt_isk(wallet_snapshot({"corp_wallet_snapshot": float("nan")})) == "—"
+
+
+def test_the_shopping_total_names_its_unpriced_lines():
+    """Task 8 fix round 1: unpriced lines are bought; the total says it
+    excludes them instead of passing as exact."""
+    from streamlit_ui.components.daily_planner import tab_shopping
+
+    actions = [
+        {"action_type": "buy_materials", "shopping_category": "current_job", "type_name": "A",
+         "quantity": 10, "estimated_cost_isk": 50.0},
+        {"action_type": "buy_materials", "shopping_category": "current_job", "type_name": "B",
+         "quantity": 3, "estimated_cost_isk": None},
+    ]
+    rows = tab_shopping._build_shopping_rows(actions, "current_job")
+    assert tab_shopping.unpriced_total_caption(rows) == (
+        "1 line(s) have no price: the total excludes them, so the real cost is higher."
+    )
+    assert tab_shopping.unpriced_total_caption(rows[:1]) is None

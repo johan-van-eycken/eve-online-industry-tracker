@@ -83,6 +83,14 @@ def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
     return CapitalReserved(total, unpriced_purchases, unknown_fee_jobs)
 
 
+#: Appended to the caption when a job's fee is unknown: a plan or product
+#: overview from before the fee estimates carries no fees at all.
+STALE_FEE_HINT = (
+    " (if the plan or the product overview predates the fee estimates, "
+    "refresh the product overview and recompute the plan)"
+)
+
+
 def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None]:
     """(metric value, caption or None) for the Capital Reserved metric. A2:
     one exact amount, or "unknown" with what is missing -- never a partial
@@ -93,7 +101,8 @@ def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None
     if reserved.unknown_fee_jobs:
         missing.append(f"install fee unknown for {reserved.unknown_fee_jobs} job(s)")
     if missing:
-        return "unknown", "; ".join(missing)
+        caption = "; ".join(missing)
+        return "unknown", caption + (STALE_FEE_HINT if reserved.unknown_fee_jobs else "")
     return (_fmt_isk(reserved.total) if reserved.total else "—"), None
 
 

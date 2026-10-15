@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
     ShoppingListBuilder,
 )
@@ -179,16 +179,17 @@ SUB_MFG_BLUEPRINTS_ZERO_OUTPUT = {
 }
 
 
-def test_material_with_no_market_price_is_skipped_not_priced_at_zero():
+def test_material_with_no_market_price_is_bought_with_an_unknown_price_not_zero():
     """A material absent from market_depth_cache (no vwap_5d, no spot price)
-    must be skipped from the shopping list entirely -- not appended with a
-    price of 0.0, which would silently make it look free."""
+    is never priced at 0.0, which would make it look free; nor dropped, which
+    under-buys it (Task 8 fix round 1): its price is None."""
     items = ShoppingListBuilder().build(
         assigned_actions=[_action(runs=20)], corp_assets=[], market_depth_cache={},
         admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
         meta_resolver=_NoBlueprints(),
     )
-    assert items == []
+    assert items and all(i.estimated_unit_price is None and i.estimated_total is None for i in items)
+    assert all(i.quantity > 0 for i in items)
 
 
 def test_sub_manufacture_with_no_usable_per_run_output_falls_back_to_one_run():
@@ -315,10 +316,15 @@ def test_invent_action_whose_source_has_no_invention_materials_is_skipped_with_a
     )
 
 
-def test_invention_input_without_a_price_is_skipped_with_a_warning(caplog):
+def test_invention_input_without_a_price_is_still_bought_at_an_unknown_cost(caplog):
+    """Fix round 1: dropping the line under-bought the input and made
+    Capital Reserved look exact. The line stays, with its quantity."""
     with caplog.at_level(logging.WARNING):
         items = _build_invention([_invent_action()], depth={})
-    assert items == []
+    datacore = next(i for i in items if i.type_id == DATACORE_ID)
+    assert datacore.quantity > 0
+    assert (datacore.estimated_unit_price, datacore.estimated_total) == (None, None)
+    assert "no price" in (datacore.notes or "")
     assert any(
         str(DATACORE_ID) in r.getMessage() and "no price" in r.getMessage()
         for r in caplog.records if r.levelno == logging.WARNING
@@ -404,16 +410,53 @@ def test_build_corp_stock_map_is_shared_and_skips_blueprints():
     assert build_corp_stock_map(assets, _BlueprintsAre(999)) == {34: 12}
 
 
-def test_an_unpriced_manufacturing_material_is_skipped_with_a_warning(caplog):
+def test_an_unpriced_manufacturing_material_is_still_bought_at_an_unknown_cost(caplog):
     with caplog.at_level("WARNING"):
         items = ShoppingListBuilder().build(
             assigned_actions=[_action(runs=1, materials={35: 10})], corp_assets=[],
             market_depth_cache={}, admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
             meta_resolver=_NoBlueprints(),
         )
-    assert items == []
+    assert [(i.type_id, i.quantity, i.estimated_unit_price, i.estimated_total) for i in items] == [
+        (35, 10, None, None)]
     assert any("type_id=35" in r.getMessage() and r.levelno == logging.WARNING
                for r in caplog.records)
+
+
+def test_a_merged_line_with_one_unpriced_part_has_an_unknown_total():
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import _merge_lines
+
+    priced = ShoppingItem(type_id=35, type_name="X", quantity=4, shopping_category="current_job",
+                          estimated_unit_price=2.0, estimated_total=8.0)
+    unpriced = ShoppingItem(type_id=35, type_name="X", quantity=6, shopping_category="current_job",
+                            estimated_unit_price=None, estimated_total=None, notes="no price")
+    (line,) = _merge_lines([priced, unpriced])
+    assert (line.quantity, line.estimated_total) == (10, None)
+
+
+def test_an_unpriced_material_makes_capital_reserved_unknown():
+    """End to end: the unpriced line becomes a buy_materials row with no
+    cost, and Capital Reserved reads unknown with a count."""
+    import os
+    import sys
+    from datetime import datetime
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+    from streamlit_ui.components.daily_planner import status_bar
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+
+    items = ShoppingListBuilder().build(
+        assigned_actions=[_action(runs=1, materials={35: 10})], corp_assets=[],
+        market_depth_cache={}, admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
+        meta_resolver=_NoBlueprints(),
+    )
+    rows = ActionPlanBuilder()._build_buy_material_actions(0, items, datetime(2026, 1, 1))
+    actions = [{"action_type": r.action_type, "status": r.status, "quantity": r.quantity,
+                "estimated_cost_isk": r.estimated_cost_isk} for r in rows]
+    assert actions[0]["quantity"] == 10
+    reserved = status_bar.compute_capital_reserved(actions)
+    assert reserved.unpriced_purchases == 1
+    assert status_bar.capital_reserved_display(reserved)[0] == "unknown"
 
 
 def test_split_sub_jobs_buy_one_merged_line_per_material():

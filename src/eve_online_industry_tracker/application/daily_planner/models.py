@@ -136,8 +136,10 @@ class ShoppingItem:
     type_name: str
     quantity: int
     shopping_category: str   # 'current_job' | 'future_stock' | 'invention_input'
-    estimated_unit_price: float
-    estimated_total: float
+    # None = no price (unknown, never 0): the line is still bought, and
+    # Capital Reserved reads "unknown" (Task 8 fix round 1).
+    estimated_unit_price: float | None
+    estimated_total: float | None
     notes: str | None = None
 
 

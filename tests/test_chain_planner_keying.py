@@ -823,13 +823,13 @@ def test_a_sub_batch_over_the_max_runs_records_each_job():
 
 
 def test_each_sub_job_carries_the_components_fee_per_run_times_its_runs():
-    """D4: the component's own overview row prices one run at 40 / 4 = 10
-    ISK, so the 7, 7 and 6-run jobs pay 70, 70 and 60."""
+    """D4: the component's own overview row prices one run at 4 / 4 = 1
+    ISK, so the 7, 7 and 6-run jobs pay 7, 7 and 6."""
     phase1 = {**_limited_sub_phase1(7), "overview_rows": [
-        {"type_id": 54321, "manufacturing_job": {"runs": 4, "manufacturing_job_cost": 40.0}},
+        {"type_id": 54321, "manufacturing_job": {"runs": 4, "manufacturing_job_cost": 4.0}},
     ]}
     (sub,) = _subs_for(200, phase1)
-    assert [job["fee"] for job in sub.overview_row["sub_job_batches"]] == [70.0, 70.0, 60.0]
+    assert [job["fee"] for job in sub.overview_row["sub_job_batches"]] == [7.0, 7.0, 6.0]
 
 
 def test_the_last_sub_job_outputs_only_the_units_still_needed():
@@ -1376,3 +1376,36 @@ def test_consecutive_invented_jobs_are_one_researched_bpo_job():
                                                {"type_id": 35, "quantity": 1000}]}}
 
     assert _planner()._me_saving_isk_per_batch(row=row, bp_data=bp_data) == (5_400.0, None)
+
+
+# --- round 5 Task 8 fix round 1: the parent's published component fee --------
+
+
+def _subs_with_parent_fee(qty, fee_per_run, phase1):
+    materials = _batch_materials(**{"54321": qty})
+    materials["54321"]["component_job_fee_per_run"] = fee_per_run
+    plan = _planner().plan_chain([_decision(_row(materials=materials))], phase1)
+    return [d for d in plan.decisions if d.is_sub_component]
+
+
+def test_without_its_own_row_a_sub_job_uses_the_fee_its_parent_published():
+    """No overview row of 54321 (owned_blueprints_scope excluded it): the
+    parent's materials entry prices one run at 1 ISK, so 7, 7 and 6."""
+    (sub,) = _subs_with_parent_fee(200, 1.0, _limited_sub_phase1(7))
+    assert [job["fee"] for job in sub.overview_row["sub_job_batches"]] == [7.0, 7.0, 6.0]
+
+
+def test_the_components_own_row_wins_over_the_parents_figure():
+    phase1 = {**_limited_sub_phase1(7), "overview_rows": [
+        {"type_id": 54321, "manufacturing_job": {"runs": 4, "manufacturing_job_cost": 8.0}},
+    ]}
+    (sub,) = _subs_with_parent_fee(200, 1.0, phase1)
+    assert [job["fee"] for job in sub.overview_row["sub_job_batches"]] == [14.0, 14.0, 12.0]
+
+
+def test_build_vs_buy_counts_the_install_fee():
+    """Materials 37 ISK < market 200 ISK, but 20 runs x 10 ISK fee = 200 more:
+    237 > 200, so the component is bought."""
+    assert _subs_with_parent_fee(200, 10.0, _limited_sub_phase1(7)) == []
+    (sub,) = _subs_with_parent_fee(200, 1.0, _limited_sub_phase1(7))
+    assert sub.overview_row["sub_install_fee"] == 20.0

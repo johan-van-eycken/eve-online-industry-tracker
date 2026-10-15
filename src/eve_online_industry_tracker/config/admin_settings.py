@@ -288,7 +288,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "step": 0.005,
                 "format": "%.5f",
                 "label": "Research cost EIV multiplier",
-                "help": "Fraction of material EIV × duration used for research job cost.",
+                "help": "Research job process value = material EIV × this × EVE's level multiplier (1 at level 1 … 2438.1 at level 10, the same for every blueprint rank) (2.105%).",
             },
             "max_blueprint_material_efficiency": {
                 "type": "int",

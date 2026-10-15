@@ -500,6 +500,10 @@ class ChainPlanner:
                 # Lowest known ME of the owned BPOs; None = none known, so resolution buys.
                 "blueprint_me": _lowest_known_me(bpo_assets_by_type_id[mat_blueprint_type_id]),
                 "quantity": quantity,
+                # The component's fee per run as the parent's producer row
+                # priced it (fix round 1): used when the component has no
+                # overview row of its own.
+                "parent_fee_per_run": _non_negative((entries.get(mat_type_id) or {}).get("component_job_fee_per_run")),
                 **facility_bonus.sub_job_facility_reductions(profile, entries.get(mat_type_id)),
             })
         return requests
@@ -557,11 +561,23 @@ class ChainPlanner:
         market_cost = self._estimate_market_cost(mat_type_id, qty_to_build, market_depth_cache)
         if sub_cost is None or market_cost is None:
             return None  # Can't compare -> default to buy
-        if sub_cost >= market_cost:
-            return None
-        # Linear pricing, so the per-job costs sum to sub_cost exactly. The
-        # install fee is per run from the component's own overview row (D4).
+        # The install fee per run: the component's own overview row, else the
+        # figure its parent published (D4, fix round 1). Building pays it, so
+        # build-vs-buy counts it. Unknown: compared on materials alone, as
+        # before, and the fee shows unknown in Capital Reserved.
         fee_per_run = self._component_fee_per_run(mat_type_id, phase1_data)
+        if fee_per_run is None:
+            fee_per_run = request.get("parent_fee_per_run")
+        install_fee = fee_per_run * runs if fee_per_run is not None else None
+        if install_fee is None:
+            logger.info(
+                "ChainPlanner: install fee unknown for sub-manufacturing type_id=%s; "
+                "build vs buy compares materials only",
+                mat_type_id,
+            )
+        if sub_cost + (install_fee or 0.0) >= market_cost:
+            return None
+        # Linear pricing, so the per-job costs sum to sub_cost exactly.
         job_batches = [
             {
                 **job,
@@ -610,6 +626,8 @@ class ChainPlanner:
                 "rig_applicability": request.get("rig_applicability", "no_profile"),
                 "requested_by_type_ids": list(request["requested_by_type_ids"]),
                 "sub_manufacture_cost": sub_cost,
+                # The jobs' install fees (None = unknown), in build vs buy.
+                "sub_install_fee": install_fee,
                 "market_buy_cost": market_cost,
             },
         )
@@ -1085,6 +1103,15 @@ def _lowest_known_me(bpo_assets: list[Any]) -> int | None:
     if len(known) < len(levels):
         return None
     return lowest
+
+
+def _non_negative(value: Any) -> float | None:
+    """A finite fee >= 0, else None (unknown, never 0)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def _blueprint_efficiency(asset: Any, kind: str) -> int | None:

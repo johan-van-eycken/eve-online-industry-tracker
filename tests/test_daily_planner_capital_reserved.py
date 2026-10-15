@@ -65,13 +65,15 @@ def test_an_unpriced_purchase_makes_the_total_unknown():
 def test_an_unknown_fee_makes_the_total_unknown_too_never_a_partial_sum():
     reserved = status_bar.compute_capital_reserved([_a("buy_materials", 2_500_000.0), _a("me_research", None)])
     assert reserved == status_bar.CapitalReserved(2_500_000.0, 0, 1)
-    assert status_bar.capital_reserved_display(reserved) == ("unknown", "install fee unknown for 1 job(s)")
+    assert status_bar.capital_reserved_display(reserved) == (
+        "unknown", "install fee unknown for 1 job(s)" + status_bar.STALE_FEE_HINT,
+    )
 
 
 def test_both_unknowns_are_named():
     reserved = status_bar.CapitalReserved(total=5.0, unpriced_purchases=1, unknown_fee_jobs=3)
     assert status_bar.capital_reserved_display(reserved) == (
-        "unknown", "1 purchase(s) have no price; install fee unknown for 3 job(s)",
+        "unknown", "1 purchase(s) have no price; install fee unknown for 3 job(s)" + status_bar.STALE_FEE_HINT,
     )
 
 
@@ -84,3 +86,16 @@ def test_capital_reserved_help_states_scope():
     h = status_bar.CAPITAL_RESERVED_HELP
     assert "install fee" in h and "unknown" in h and "research" in h
     assert "≥" not in h and "count as 0" not in h
+
+
+def test_an_unknown_fee_caption_says_how_to_fix_an_old_cache_or_plan():
+    """Fix round 1: a plan or overview from before the fee estimates has no
+    fees at all; the caption names the fix."""
+    assert "recompute the plan" in status_bar.STALE_FEE_HINT
+    assert "refresh the product overview" in status_bar.STALE_FEE_HINT
+    caption = status_bar.capital_reserved_display(status_bar.CapitalReserved(0.0, 0, 2))[1]
+    assert caption.endswith(status_bar.STALE_FEE_HINT)
+    # An unpriced purchase alone does not get the fee hint.
+    assert status_bar.capital_reserved_display(status_bar.CapitalReserved(0.0, 1, 0))[1] == (
+        "1 purchase(s) have no price"
+    )

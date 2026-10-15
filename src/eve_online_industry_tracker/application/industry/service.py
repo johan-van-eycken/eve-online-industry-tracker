@@ -4767,7 +4767,7 @@ class IndustryService:
                 )
                 if target_duration_seconds <= 0:
                     continue
-                research_process_value = self._research_process_value(per_run_material_eiv, target_duration_seconds)
+                research_process_value = self._research_process_value(per_run_material_eiv, self._MAX_RESEARCH_LEVEL)
                 _res_act = self._compute_activity_job(
                     activity=activity_name,
                     base_time_seconds=target_duration_seconds,
@@ -8045,7 +8045,7 @@ class IndustryService:
             target_duration = self._research_target_duration_seconds(level_one_duration_seconds=base_level_one, target_level=self._MAX_RESEARCH_LEVEL)
             if target_duration <= 0:
                 continue
-            process_value = self._research_process_value(per_run_material_eiv, target_duration)
+            process_value = self._research_process_value(per_run_material_eiv, self._MAX_RESEARCH_LEVEL)
             costs = self._plan_activity_costs(ctx, activity=activity_name, base_time_seconds=target_duration, runs=1, process_value=process_value)
             costs["estimated_item_value"] = per_run_material_eiv
             tree_node = self._job_tree_node(
@@ -8057,15 +8057,60 @@ class IndustryService:
             results.append((activity_name, costs, tree_node))
         return results
 
-    def _research_process_value(self, per_run_material_eiv: float | None, target_duration_seconds: int) -> float | None:
-        """The process value of a research job from level 0 to the level whose
-        rank-scaled duration is `target_duration_seconds`: per-run material
-        EIV x research_cost_eiv_multiplier x that duration. The one formula
+    def _with_component_job_fee(self, ctx: _ProductPlanningContext, entry: dict[str, Any]) -> dict[str, Any]:
+        """A parent's material entry, plus `component_job_fee_per_run` when the
+        material is itself manufactured (Task 8 fix round 1): the daily
+        planner's sub_manufacture fee when the component has no overview row
+        of its own (e.g. owned_blueprints_scope excludes corp assets)."""
+        fee = self._component_job_fee_per_run(ctx, int(entry.get("type_id") or 0))
+        return {**entry, "component_job_fee_per_run": fee} if fee is not None else entry
+
+    def _component_job_fee_per_run(self, ctx: _ProductPlanningContext, component_type_id: int) -> float | None:
+        """The install fee of ONE manufacturing run of a component in this
+        refresh's industry profile (the parent's structure, F-Q2): the SDE
+        base (ME 0) materials x adjusted prices as the EIV, priced by
+        _plan_activity_costs -- the same formula as a row's own
+        manufacturing_job_cost. None when the component has no manufacturing
+        blueprint, no time, or no priced EIV (unknown, not free)."""
+        component_row = ctx.manufacturing_row_by_product_type_id.get(int(component_type_id))
+        job = (component_row or {}).get("manufacturing_job")
+        if not isinstance(job, dict):
+            return None
+        base_time = int(job.get("time_seconds") or 0)
+        if base_time <= 0:
+            return None
+        materials = [dict(e) for e in (job.get("materials") or []) if isinstance(e, dict)]
+        process_value, _ = self._sum_estimated_item_value(
+            materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map,
+        )
+        if process_value is None:
+            return None
+        product = next(
+            (p for p in (job.get("products") or []) if isinstance(p, dict) and int(p.get("type_id") or 0) == int(component_type_id)),
+            {},
+        )
+        return self._plan_activity_costs(
+            ctx, activity="manufacturing", base_time_seconds=base_time, runs=1, process_value=process_value,
+            manufacturing_group=self._infer_manufacturing_group(product),
+        ).get("total_job_cost")
+
+    def _research_process_value(self, per_run_material_eiv: float | None, target_level: int) -> float | None:
+        """The process value of a research job from level 0 to `target_level`:
+        per-run material EIV x research_cost_eiv_multiplier x EVE's
+        dimensionless level multiplier (the rank-1 cumulative table seconds
+        / 105: 1, 2.38, ..., 2438.1 at level 10). The rank scales the job's
+        DURATION, not its cost: real ESI jobs of rank 20 and rank 40 cost the
+        same per ISK of EIV (Task 8 fix round 1; multiplying by the
+        rank-scaled seconds overstated a rank-20 fee 2100x). The one formula
         for every research fee (the SDE research chains and the daily
         planner's ME/TE research actions). None when the EIV is unknown."""
         if per_run_material_eiv is None:
             return None
-        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * float(target_duration_seconds)
+        table = self._RESEARCH_RANK1_TARGET_DURATION_SECONDS
+        level_multiplier = float(table.get(int(target_level), 0)) / float(table[1])
+        if level_multiplier <= 0:
+            return None
+        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * level_multiplier
 
     def _research_job_cost_by_level(
         self,
@@ -8090,7 +8135,7 @@ class IndustryService:
                 fee = (
                     self._plan_activity_costs(
                         ctx, activity=activity_name, base_time_seconds=duration, runs=1,
-                        process_value=self._research_process_value(per_run_material_eiv, duration),
+                        process_value=self._research_process_value(per_run_material_eiv, level),
                     ).get("total_job_cost")
                     if duration > 0 else None
                 )
@@ -8890,7 +8935,9 @@ class IndustryService:
             "overview_row_id": f"product:{row_index}:{product_index}:bpc:{bp_copy_variant_key}:bpo:{bp_original_item_id or 'none'}",
             "manufacturing_group": manufacturing_group,
             "manufacturing_job": {
-                "materials": self._overview_keyed_entries(adjusted_material_entries, compactor=lambda e: e),
+                "materials": self._overview_keyed_entries(
+                    adjusted_material_entries, compactor=lambda e: self._with_component_job_fee(ctx, e),
+                ),
                 "skills": manufacturing_skills,
                 "character_modifiers": ctx.selected_character_modifiers,
                 "time_seconds": total_time_seconds,

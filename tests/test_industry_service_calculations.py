@@ -3464,13 +3464,16 @@ def test_the_invention_publishes_its_fee_per_attempt_and_per_source_copy_run(mon
     assert invention["total_job_cost"] == pytest.approx(4.4 * invention["runs"])
 
 
-def test_an_owned_bpo_row_publishes_its_cumulative_research_fee_per_level() -> None:
+def _owned_bpo_research_table(*, level_one_seconds: int = 105) -> dict:
     original_asset = SimpleNamespace(
         type_id=9001, item_id=42, is_blueprint_copy=False,
         blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
     )
+    blueprint_row = _blueprint_row()
+    blueprint_row["research_material_job"] = {"time_seconds": level_one_seconds}
+    blueprint_row["research_time_job"] = {"time_seconds": level_one_seconds}
     service = _build_service(
-        blueprint_rows=[_blueprint_row()], profile=_FEE_PROFILE,
+        blueprint_rows=[blueprint_row], profile=_FEE_PROFILE,
         character_modifiers={"modifier_skills": [], "implants": []}, trained_skill_levels={},
         owned_assets=([], [original_asset], {}, {}, {}),
         adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
@@ -3480,16 +3483,36 @@ def test_an_owned_bpo_row_publishes_its_cumulative_research_fee_per_level() -> N
     )
     mj = row["manufacturing_job"]
     assert mj["blueprint_source_kind"] == "owned_blueprint_original"
-    table = mj["research_job_cost_by_level"]
-    # Per-run EIV 10 x 5 = 50; rank 1 (105 s level 1). The producer's research
-    # fee: EIV x 0.02105 x rank-1 target seconds x index, + 10 % surcharge.
+    return mj["research_job_cost_by_level"]
+
+
+def test_an_owned_bpo_row_publishes_its_cumulative_research_fee_per_level() -> None:
+    table = _owned_bpo_research_table()
+    # Per-run EIV 10 x 5 = 50. EVE's research fee: EIV x 0.02105 x the
+    # dimensionless level multiplier (rank-1 table seconds / 105) x index,
+    # + 10 % surcharge.
     me = table["research_material"]
     assert len(me) == 11 and me[0] == 0.0
-    assert me[1] == pytest.approx(50 * 0.02105 * 105 * 0.02 * 1.1)
-    assert me[5] == pytest.approx(50 * 0.02105 * 3360 * 0.02 * 1.1)
-    assert me[10] == pytest.approx(50 * 0.02105 * 256000 * 0.02 * 1.1)
+    assert me[1] == pytest.approx(50 * 0.02105 * (105 / 105) * 0.02 * 1.1)
+    assert me[5] == pytest.approx(50 * 0.02105 * (3360 / 105) * 0.02 * 1.1)
+    assert me[10] == pytest.approx(50 * 0.02105 * (256000 / 105) * 0.02 * 1.1)
     te = table["research_time"]
-    assert te[5] == pytest.approx(50 * 0.02105 * 3360 * 0.04 * 1.1)
+    assert te[5] == pytest.approx(50 * 0.02105 * (3360 / 105) * 0.04 * 1.1)
+
+
+def test_the_research_fee_uses_the_level_multiplier_not_the_rank_scaled_seconds() -> None:
+    """Fix round 1: the old formula multiplied by the rank-scaled duration in
+    SECONDS, so a rank-20 blueprint's ME 0 -> 10 fee was 20 x 105 = 2100x
+    the real one. Real ESI jobs (same facility and activity, a week apart)
+    cost the same per ISK of EIV at rank 20 and rank 40: the fee does not
+    scale with rank, only the duration does. Fake EIV 50, fake index 0.02."""
+    rank_one = _owned_bpo_research_table(level_one_seconds=105)
+    rank_twenty = _owned_bpo_research_table(level_one_seconds=20 * 105)
+    expected = 50 * 0.02105 * (256000 / 105) * 0.02 * 1.1  # ~5.64 ISK
+    assert rank_one["research_material"][10] == pytest.approx(expected)
+    assert rank_twenty["research_material"][10] == pytest.approx(expected)
+    old_formula = 50 * 0.02105 * (20 * 256000) * 0.02 * 1.1
+    assert old_formula / rank_twenty["research_material"][10] == pytest.approx(20 * 105)
 
 
 def test_a_row_without_an_owned_bpo_publishes_no_research_fee_table(monkeypatch) -> None:
@@ -3523,7 +3546,7 @@ def test_a_bpc_variant_of_an_owned_bpo_publishes_the_research_fee_table_too() ->
     mj = row["manufacturing_job"]
     assert mj["blueprint_source_kind"] != "owned_blueprint_original"
     me = mj["research_job_cost_by_level"]["research_material"]
-    assert me[5] == pytest.approx(50 * 0.02105 * 3360 * 0.02 * 1.1)
+    assert me[5] == pytest.approx(50 * 0.02105 * (3360 / 105) * 0.02 * 1.1)
 
 
 def test_an_owned_t2_bpc_covering_batch_one_still_publishes_the_invention_fees(monkeypatch) -> None:
@@ -3539,3 +3562,44 @@ def test_an_owned_t2_bpc_covering_batch_one_still_publishes_the_invention_fees(m
     assert plan["source_copy_job_cost_per_run"] == pytest.approx(0.0099)
     assert orow.get_invention_fee_per_attempt(row) == pytest.approx(4.4)
     assert orow.get_source_copy_fee_per_run(row) == pytest.approx(0.0099)
+
+
+# --- round 5 Task 8 fix round 1: a component's per-run job fee on its parent ---
+
+
+def _parent_of_component_row() -> dict:
+    """Blueprint 9100 builds 6001 from 2 x the component 5001 per run (fake)."""
+    parent = _blueprint_row()
+    parent["blueprint_type_id"] = 9100
+    parent["blueprint"] = {"type_id": 9100, "type_name": "Parent Blueprint", "base_price": 1000.0}
+    parent["manufacturing_job"] = {
+        **parent["manufacturing_job"],
+        "materials": [{"type_id": 5001, "type_name": "Test Module", "quantity": 2, "base_price": 100.0,
+                       "group_name": "Shield Boosters", "category_name": "Module"}],
+        "products": [{"type_id": 6001, "type_name": "Parent Thing", "quantity": 1, "base_price": 500.0,
+                      "group_name": "Shield Boosters", "category_name": "Module", "meta_group_name": "Tech I"}],
+    }
+    return parent
+
+
+def test_a_parent_publishes_its_components_job_fee_per_run() -> None:
+    """The component 5001: per-run EIV 10 Tritanium x 5 = 50, manufacturing
+    index 0.05, + 10 % surcharge = 2.75 per run, the same figure as the
+    component's own row (one formula, _plan_activity_costs)."""
+    service = _build_service(
+        blueprint_rows=[_blueprint_row(), _parent_of_component_row()], profile=_FEE_PROFILE,
+        character_modifiers={"modifier_skills": [], "implants": []}, trained_skill_levels={},
+        owned_assets=([], [], {}, {}, {}),
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}, 6001: {"adjusted_price": 500.0}},
+    )
+    rows = {
+        int(r["type_id"]): r for r in service.industry_manufacturing_product_overview(
+            build_from_bpc=False, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+        )
+    }
+    entry = rows[6001]["manufacturing_job"]["materials"]["5001"]
+    assert entry["component_job_fee_per_run"] == pytest.approx(50 * 0.05 * 1.1)
+    own = rows[5001]["manufacturing_job"]
+    assert entry["component_job_fee_per_run"] == pytest.approx(own["manufacturing_job_cost"] / own["runs"])
+    # A raw material has no blueprint: no fee key.
+    assert "component_job_fee_per_run" not in rows[5001]["manufacturing_job"]["materials"]["34"]
