@@ -64,6 +64,16 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
     trigger_refresh_public_structures_for_system,
 )
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
+from eve_online_industry_tracker.application.industry.job_cost import (
+    DEFAULT_COPY_COST_EIV_MULTIPLIER,
+    DEFAULT_INVENTION_COST_EIV_MULTIPLIER,
+    DEFAULT_RESEARCH_COST_EIV_MULTIPLIER,
+    DEFAULT_RESEARCH_SCC_SURCHARGE,
+    DEFAULT_SCC_SURCHARGE,
+    JobSurchargeRates,
+    job_install_cost,
+    research_level_multiplier,
+)
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry import shopping_list as _shopping_list
 from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
@@ -243,7 +253,7 @@ class _ProductPlanningContext:
     maximize_bp_runs: bool
     group_identical_bpcs: bool
     have_blueprint_source_only: bool
-    installation_surcharge: float
+    surcharge_rates: JobSurchargeRates
     blueprint_rows: list
     character_id: Any = None
     # Per-refresh memoization cache for _compute_activity_job results.
@@ -3432,14 +3442,28 @@ class IndustryService:
             return cls._normalize_fraction(profile_payload.get("facility_cost_bonus"))
         return 0.0
 
-    @staticmethod
-    def _profile_installation_surcharge(profile_payload: dict[str, Any] | None) -> float:
-        if not isinstance(profile_payload, dict):
-            return 0.0
-        try:
-            return max(0.0, float(profile_payload.get("installation_cost_modifier") or 0.0))
-        except Exception:
-            return 0.0
+    def _profile_job_surcharge_rates(self, profile_payload: dict[str, Any] | None) -> JobSurchargeRates:
+        """The surcharges charged on every job's value (job_cost.py): the SCC
+        rates from the admin settings, and the profile's facility tax. A
+        profile without `facility_tax` falls back to its
+        installation_cost_modifier (facility tax + SCC) minus its SCC.
+        No profile = no facility tax."""
+        scc = max(0.0, float(self._adm("industry", "scc_surcharge", DEFAULT_SCC_SURCHARGE)))
+        research_scc = max(0.0, float(self._adm("industry", "research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)))
+        facility_tax = 0.0
+        if isinstance(profile_payload, dict):
+            try:
+                if profile_payload.get("facility_tax") is not None:
+                    facility_tax = float(profile_payload["facility_tax"])
+                else:
+                    profile_scc = profile_payload.get("scc_surcharge")
+                    facility_tax = float(profile_payload.get("installation_cost_modifier") or 0.0) - (
+                        float(profile_scc) if profile_scc is not None else scc
+                    )
+            except (TypeError, ValueError):
+                logger.warning("Industry profile has a non-numeric facility tax; using none")
+                facility_tax = 0.0
+        return JobSurchargeRates(facility_tax=max(0.0, facility_tax), scc=scc, research_scc=research_scc)
 
     _manufacturing_group_cache: dict[tuple[int, int, int], str | None] = {}
 
@@ -4040,34 +4064,22 @@ class IndustryService:
         normalized_tree_node["children"] = [*normalized_take_nodes, *preserved_children]
         return normalized_tree_node
 
-    @classmethod
-    def _job_cost_total(
-        cls,
+    @staticmethod
+    def _job_install_cost(
         *,
+        activity: str,
         process_value: float | None,
-        cost_index: float,
-        cost_reduction: float,
-        installation_surcharge: float,
+        system_index: float,
+        structure_cost_reduction: float,
+        surcharge_rates: JobSurchargeRates,
     ) -> dict[str, Any]:
-        if process_value is None or process_value <= 0 or cost_index <= 0:
-            return {
-                "process_value": process_value,
-                "base_job_cost": None,
-                "job_cost_before_surcharge": None,
-                "installation_surcharge": None,
-                "total_job_cost": None,
-            }
-
-        base_job_cost = float(process_value) * float(cost_index)
-        discounted_job_cost = base_job_cost * max(0.0, 1.0 - float(cost_reduction))
-        surcharge_cost = discounted_job_cost * max(0.0, float(installation_surcharge))
-        return {
-            "process_value": process_value,
-            "base_job_cost": base_job_cost,
-            "job_cost_before_surcharge": discounted_job_cost,
-            "installation_surcharge": surcharge_cost,
-            "total_job_cost": discounted_job_cost + surcharge_cost,
-        }
+        """The one install-cost model of every activity (job_cost.py): job
+        value x index x (1 - reduction) + job value x the activity's
+        surcharge rate. `process_value` is the activity's job value."""
+        return job_install_cost(
+            activity=activity, process_value=process_value, system_index=system_index,
+            structure_cost_reduction=structure_cost_reduction, surcharge_rates=surcharge_rates,
+        )
 
     @classmethod
     def _research_target_duration_seconds(cls, *, level_one_duration_seconds: int, target_level: int) -> int:
@@ -4577,7 +4589,7 @@ class IndustryService:
                     character_skill_levels_by_name=character_skill_levels_by_name,
                     manufacturing_group=manufacturing_group, required_skill_entries=required_skill_entries,
                     blueprint_material_efficiency=efficiency[0], blueprint_time_efficiency=efficiency[1],
-                    installation_surcharge=None,
+                    surcharge_rates=None,
                 )
             job_activity = activity_by_efficiency[efficiency]
             job_segment["material_reduction"] = float(job_activity.get("material_reduction", 0.0))
@@ -4622,12 +4634,13 @@ class IndustryService:
             adjusted_price_map=adjusted_market_price_map,
         )
         cost_index = self._system_cost_index(profile_payload=selected_industry_profile, activity=activity)
-        installation_surcharge = self._profile_installation_surcharge(selected_industry_profile)
-        job_cost = self._job_cost_total(
+        surcharge_rates = self._profile_job_surcharge_rates(selected_industry_profile)
+        job_cost = self._job_install_cost(
+            activity=activity,
             process_value=process_value,
-            cost_index=cost_index,
-            cost_reduction=cost_reduction,
-            installation_surcharge=installation_surcharge,
+            system_index=cost_index,
+            structure_cost_reduction=cost_reduction,
+            surcharge_rates=surcharge_rates,
         )
         direct_duration_seconds = sum(int(job_segment["duration_seconds"]) for job_segment in job_segments)
 
@@ -4710,7 +4723,7 @@ class IndustryService:
         if include_copying_job and missing_blueprint_copy_runs > 0:
             base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0))
             copy_process_value = (
-                float(per_run_material_eiv or 0.0) * missing_blueprint_copy_runs * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02))
+                float(per_run_material_eiv or 0.0) * missing_blueprint_copy_runs * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER))
                 if per_run_material_eiv is not None
                 else None
             )
@@ -4722,7 +4735,7 @@ class IndustryService:
                 selected_industry_profile=selected_industry_profile,
                 selected_character_modifiers=selected_character_modifiers,
                 character_skill_levels_by_name=character_skill_levels_by_name,
-                installation_surcharge=installation_surcharge,
+                surcharge_rates=surcharge_rates,
             )
             copying_job_cost = _copy_act
             copying_duration_seconds = _copy_act["duration_seconds"]
@@ -4776,7 +4789,7 @@ class IndustryService:
                     selected_industry_profile=selected_industry_profile,
                     selected_character_modifiers=selected_character_modifiers,
                     character_skill_levels_by_name=character_skill_levels_by_name,
-                    installation_surcharge=installation_surcharge,
+                    surcharge_rates=surcharge_rates,
                 )
                 research_job_cost = _res_act
                 research_duration_seconds = _res_act["duration_seconds"]
@@ -5131,7 +5144,7 @@ class IndustryService:
                     selected_industry_profile=selected_industry_profile,
                     selected_character_modifiers=selected_character_modifiers,
                     character_skill_levels_by_name=character_skill_levels_by_name,
-                    installation_surcharge=installation_surcharge,
+                    surcharge_rates=surcharge_rates,
                     adjusted_market_price_map=adjusted_market_price_map,
                     sell_price_map=sell_price_map,
                     available_blueprint_copy_runs_by_type_id=available_copy_runs,
@@ -5141,6 +5154,8 @@ class IndustryService:
                     source_copy_enabled=True,
                     decryptor=invention_context.decryptor_for_blueprint(blueprint_type_id),
                     invention_context=invention_context,
+                    # This plan's own blueprint is the invented one.
+                    invented_blueprint_eiv=per_run_material_eiv,
                 )
                 invention_job_cost = nested_invention["invention_costs"]
                 source_copy_job_cost = nested_invention["source_copy_costs"]
@@ -6737,11 +6752,11 @@ class IndustryService:
         required_skill_entries: list[dict[str, Any]] | None = None,
         blueprint_material_efficiency: int = 0,
         blueprint_time_efficiency: int = 0,
-        installation_surcharge: float | None = None,
+        surcharge_rates: JobSurchargeRates | None = None,
     ) -> dict[str, Any]:
         """Unified activity cost calculator (context-free version)."""
-        if installation_surcharge is None:
-            installation_surcharge = self._profile_installation_surcharge(selected_industry_profile)
+        if surcharge_rates is None:
+            surcharge_rates = self._profile_job_surcharge_rates(selected_industry_profile)
         material_reduction = None
         if activity in ("manufacturing", "reaction"):
             material_reduction = self._combine_reductions([
@@ -6766,7 +6781,7 @@ class IndustryService:
             self._implant_reduction(character_modifier_payload=selected_character_modifiers, activity=activity, metric="cost"),
         ])
         cost_index = self._system_cost_index(profile_payload=selected_industry_profile, activity=activity)
-        job_cost = self._job_cost_total(process_value=process_value, cost_index=cost_index, cost_reduction=cost_reduction, installation_surcharge=installation_surcharge)
+        job_cost = self._job_install_cost(activity=activity, process_value=process_value, system_index=cost_index, structure_cost_reduction=cost_reduction, surcharge_rates=surcharge_rates)
         duration_seconds = self._round_duration_seconds(base_time_seconds * runs * max(0.0, 1.0 - time_reduction))
         result: dict[str, Any] = {
             "activity": activity, "duration_seconds": duration_seconds,
@@ -6979,7 +6994,7 @@ class IndustryService:
             required_skill_entries=required_skill_entries,
             blueprint_material_efficiency=blueprint_material_efficiency,
             blueprint_time_efficiency=blueprint_time_efficiency,
-            installation_surcharge=ctx.installation_surcharge,
+            surcharge_rates=ctx.surcharge_rates,
         )
         ctx.activity_job_cache[cache_key] = result
         return dict(result)
@@ -7147,7 +7162,7 @@ class IndustryService:
             maximize_bp_runs=maximize_bp_runs,
             group_identical_bpcs=group_identical_bpcs,
             have_blueprint_source_only=have_blueprint_source_only,
-            installation_surcharge=self._profile_installation_surcharge(selected_industry_profile),
+            surcharge_rates=self._profile_job_surcharge_rates(selected_industry_profile),
             blueprint_rows=blueprint_rows,
             character_id=character_id,
         )
@@ -7226,7 +7241,7 @@ class IndustryService:
         if base_copy_time <= 0 or (has_invention_path and not matched_blueprint_originals):
             return None, []
 
-        costs = self._plan_activity_costs(ctx, activity="copying", base_time_seconds=base_copy_time, runs=max(0, missing_copy_runs), process_value=(float(per_run_material_eiv or 0.0) * max(0, missing_copy_runs) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)) if per_run_material_eiv is not None else None))
+        costs = self._plan_activity_costs(ctx, activity="copying", base_time_seconds=base_copy_time, runs=max(0, missing_copy_runs), process_value=(float(per_run_material_eiv or 0.0) * max(0, missing_copy_runs) * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER)) if per_run_material_eiv is not None else None))
         bp_name = str(((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("type_name") or ((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("name") or blueprint_type_id or "Blueprint")
         costs["runs"] = max(0, missing_copy_runs)
         costs["estimated_item_value"] = per_run_material_eiv
@@ -7271,6 +7286,7 @@ class IndustryService:
         adjusted_price_map: dict[int, dict[str, Any]],
         decryptor: DecryptorOption,
         invention_context: InventionContext,
+        invented_blueprint_eiv: float | None,
         log_unknown_cost: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Invention fees, time and inputs for `invented_runs` runs of an invented
@@ -7292,6 +7308,11 @@ class IndustryService:
 
         `compute_activity(activity=, base_time_seconds=, runs=, process_value=)`
         prices one activity (the cached ctx calculator or the context-free one).
+
+        `invented_blueprint_eiv` is the per-run EIV of the INVENTED blueprint's
+        manufacturing materials (base quantities): EVE prices an attempt at
+        invention_cost_eiv_multiplier (0.02) x that EIV (job_cost.py, Task 8b
+        fit), not at the datacores' EIV. None = the fee is unknown.
 
         The success chance is EVE's: the SDE base chance x the corp's best
         inventor's skill factor x the decryptor multiplier, capped at 1, then
@@ -7362,12 +7383,16 @@ class IndustryService:
 
         per_attempt_materials = [dict(e) for e in (invention_job.get("materials") or []) if isinstance(e, dict)]
         # The decryptor is consumed like a datacore, one per attempt, and priced
-        # like one (take-or-buy against the hub price). The fee's EIV below stays
-        # the datacores' (the fee model is unchanged).
+        # like one (take-or-buy against the hub price). It is not part of the
+        # fee's job value.
         per_attempt_inputs = [*per_attempt_materials, *self._decryptor_input_entries(decryptor)]
         invention_materials = [{**e, "quantity_per_attempt": int(e.get("quantity") or 0), "quantity": float(int(e.get("quantity") or 0)) * invention_attempts} for e in per_attempt_inputs]
-        # Fee per attempt (EIV of one attempt's inputs), times the attempts.
-        per_attempt_process_value, _ = self._sum_estimated_item_value(per_attempt_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map)
+        # Job value per attempt: 0.02 x the invented blueprint's per-run
+        # manufacturing EIV (EVE), times the attempts.
+        per_attempt_process_value = (
+            float(invented_blueprint_eiv) * float(self._adm("industry", "invention_cost_eiv_multiplier", DEFAULT_INVENTION_COST_EIV_MULTIPLIER))
+            if invented_blueprint_eiv is not None else None
+        )
         invention_process_value = float(per_attempt_process_value) * invention_attempts if per_attempt_process_value is not None else None
 
         invention_base_time = int(invention_job.get("time_seconds") or 0)
@@ -7452,7 +7477,7 @@ class IndustryService:
         source_copy_costs = compute_activity(
             activity="copying", base_time_seconds=source_base_time,
             runs=max(0, missing_source_runs),
-            process_value=(float(source_pv) * float(max(0, missing_source_runs)) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)) if source_pv is not None else None),
+            process_value=(float(source_pv) * float(max(0, missing_source_runs)) * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER)) if source_pv is not None else None),
         )
         source_copy_costs["job_duration_seconds"] = compute_activity(activity="copying", base_time_seconds=source_base_time, runs=1, process_value=None)["duration_seconds"]
         # The install fee of ONE source-copy run (D4): the planner's copy
@@ -7489,7 +7514,7 @@ class IndustryService:
             return None
         return compute_activity(
             activity="copying", base_time_seconds=source_base_time, runs=1,
-            process_value=float(source_pv) * float(self._adm("industry", "copy_cost_eiv_multiplier", 0.02)),
+            process_value=float(source_pv) * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER)),
         ).get("total_job_cost")
 
     @staticmethod
@@ -7530,7 +7555,7 @@ class IndustryService:
         selected_industry_profile: dict[str, Any] | None,
         selected_character_modifiers: dict[str, Any] | None,
         character_skill_levels_by_name: dict[str, int],
-        installation_surcharge: float | None,
+        surcharge_rates: JobSurchargeRates | None,
         adjusted_market_price_map: dict[int, dict[str, Any]],
         sell_price_map: dict[int, dict[str, Any]] | None,
         available_blueprint_copy_runs_by_type_id: dict[int, Any],
@@ -7540,6 +7565,7 @@ class IndustryService:
         source_copy_enabled: bool,
         decryptor: DecryptorOption,
         invention_context: InventionContext,
+        invented_blueprint_eiv: float | None,
     ) -> dict[str, Any]:
         """Invention of a T2 blueprint inside the recursive (sub-build) plan, on
         the same expected-value model as the top-level T2 row: fractional
@@ -7551,7 +7577,7 @@ class IndustryService:
                 selected_industry_profile=selected_industry_profile,
                 selected_character_modifiers=selected_character_modifiers,
                 character_skill_levels_by_name=character_skill_levels_by_name,
-                installation_surcharge=installation_surcharge,
+                surcharge_rates=surcharge_rates,
             )
 
         invention_costs, invention_materials = self._expected_invention_costs(
@@ -7560,6 +7586,7 @@ class IndustryService:
             invented_runs=invented_runs, max_production_limit=max_production_limit,
             adjusted_price_map=adjusted_market_price_map,
             decryptor=decryptor, invention_context=invention_context,
+            invented_blueprint_eiv=invented_blueprint_eiv,
         )
         # Valued against the row's one invention valuation stock (FU-63): the
         # top-level invention spends it first, then each nested invention in
@@ -7735,6 +7762,8 @@ class IndustryService:
             blueprint_type_id=int(blueprint_type_id), invented_runs=max(0, int(runs)),
             max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
             decryptor=decryptor, invention_context=invention_context,
+            # Only the attempt count is used: the fee is not priced.
+            invented_blueprint_eiv=None,
             # The row logs one "datacore need unknown" WARNING for this instead.
             log_unknown_cost=False,
         )
@@ -7939,8 +7968,11 @@ class IndustryService:
         available_owned_item_quantity_by_type_id: dict[int, int],
         invention_valuation_stock: dict[int, Any],
         decryptor: DecryptorOption,
+        per_run_material_eiv: float | None,
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
-        """Plan the invention chain for a variant (Step 4). Returns (invention_costs, tree_nodes, procurement_materials, source_copy_costs)."""
+        """Plan the invention chain for a variant (Step 4). Returns (invention_costs, tree_nodes, procurement_materials, source_copy_costs).
+        `per_run_material_eiv` is this (invented) blueprint's per-run
+        manufacturing EIV: the invention fee's basis."""
         invention_source_row = ctx.invention_row_by_blueprint_type_id.get(int(blueprint_type_id))
         invention_job = (invention_source_row or {}).get("invention_job")
         # The shared invention predicate: the source row really has an
@@ -7964,6 +7996,7 @@ class IndustryService:
             max_production_limit=max_production_limit,
             adjusted_price_map=ctx.adjusted_market_price_map,
             decryptor=decryptor, invention_context=ctx.invention_context,
+            invented_blueprint_eiv=per_run_material_eiv,
         )
         invention_attempts = float(costs["runs"])
 
@@ -8095,22 +8128,19 @@ class IndustryService:
         ).get("total_job_cost")
 
     def _research_process_value(self, per_run_material_eiv: float | None, target_level: int) -> float | None:
-        """The process value of a research job from level 0 to `target_level`:
-        per-run material EIV x research_cost_eiv_multiplier x EVE's
-        dimensionless level multiplier (the rank-1 cumulative table seconds
-        / 105: 1, 2.38, ..., 2438.1 at level 10). The rank scales the job's
-        DURATION, not its cost: real ESI jobs of rank 20 and rank 40 cost the
-        same per ISK of EIV (Task 8 fix round 1; multiplying by the
-        rank-scaled seconds overstated a rank-20 fee 2100x). The one formula
-        for every research fee (the SDE research chains and the daily
-        planner's ME/TE research actions). None when the EIV is unknown."""
+        """The job value of a research job from level 0 to `target_level`:
+        per-run material EIV x research_cost_eiv_multiplier (0.02) x EVE's
+        level multiplier (job_cost.research_level_multiplier: 1 at level 1 ...
+        2438.1 at level 10). Rank-independent: real ESI jobs of rank 1 to 40
+        cost the same per ISK of EIV x level multiplier (Task 8b fit). The
+        one formula for every research fee (the SDE research chains and the
+        daily planner's ME/TE research actions). None when the EIV is unknown."""
         if per_run_material_eiv is None:
             return None
-        table = self._RESEARCH_RANK1_TARGET_DURATION_SECONDS
-        level_multiplier = float(table.get(int(target_level), 0)) / float(table[1])
+        level_multiplier = research_level_multiplier(0, int(target_level))
         if level_multiplier <= 0:
             return None
-        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier", 0.02105)) * level_multiplier
+        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier", DEFAULT_RESEARCH_COST_EIV_MULTIPLIER)) * level_multiplier
 
     def _research_job_cost_by_level(
         self,
@@ -8516,7 +8546,7 @@ class IndustryService:
 
         # Recompute manufacturing job cost with actual process value
         manufacturing_cost_index = self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="manufacturing")
-        manufacturing_job_cost = self._job_cost_total(process_value=base_material_eiv_total, cost_index=manufacturing_cost_index, cost_reduction=manufacturing_cost_reduction, installation_surcharge=ctx.installation_surcharge)
+        manufacturing_job_cost = self._job_install_cost(activity="manufacturing", process_value=base_material_eiv_total, system_index=manufacturing_cost_index, structure_cost_reduction=manufacturing_cost_reduction, surcharge_rates=ctx.surcharge_rates)
         direct_manufacturing_time_seconds = sum(int(segment["duration_seconds"]) for segment in job_segments)
 
         # Activity breakdown
@@ -8590,6 +8620,7 @@ class IndustryService:
             available_owned_item_quantity_by_type_id=available_owned_item_quantity_by_type_id,
             invention_valuation_stock=invention_valuation_stock,
             decryptor=decryptor,
+            per_run_material_eiv=per_run_material_eiv,
         )
         expected_invention_inputs: list[dict[str, Any]] = []
         # elapsed_time_seconds = time_seconds with the amortized invention and

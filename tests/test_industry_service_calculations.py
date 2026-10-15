@@ -1096,9 +1096,12 @@ def test_shopping_list_buys_datacores_once_for_an_invented_t2_row(monkeypatch) -
 
 # --- fix round 1: fees on the same expected-attempt model, pricing gaps -------
 
-# Only invention has a cost index (2%), no surcharge or reductions, so the
-# row's total_job_cost is exactly the invention fee: per-attempt EIV of the
-# inputs (2 datacores x adjusted 100 = 200) x 0.02 x expected attempts.
+# Only invention has a cost index (2%), no facility tax or reductions, so the
+# row's total_job_cost is exactly the invention fee (job_cost.py): job value
+# per attempt = 0.02 x the invented T2 blueprint's per-run EIV (10 Tritanium x
+# adjusted 5 = 50) = 1.0, times (index 0.02 + SCC 0.04), times the attempts.
+_SCC = 0.04
+_T2_INVENTION_FEE_PER_ATTEMPT = 0.02 * 50 * (0.02 + _SCC)  # 0.06
 _INVENTION_ONLY_PROFILE = {
     "installation_cost_modifier": 0.0,
     "material_efficiency_bonus": 0.0,
@@ -1124,9 +1127,9 @@ def test_one_run_invention_fee_is_amortized_not_a_whole_attempt(monkeypatch) -> 
     # attempts = 1 run / (0.5 x 10) = 0.2 (was ceil(1/0.5) = 2 whole attempts -> 8.0).
     invention = mj["activity_breakdown"]["invention"]
     assert invention["runs"] == pytest.approx(0.2)
-    assert invention["total_job_cost"] == pytest.approx(200 * 0.02 * 0.2)  # 0.8
-    assert mj["total_job_cost"] == pytest.approx(0.8)
-    assert mj["total_cost"] == pytest.approx(0.8 + 90.0)
+    assert invention["total_job_cost"] == pytest.approx(_T2_INVENTION_FEE_PER_ATTEMPT * 0.2)  # 0.012
+    assert mj["total_job_cost"] == pytest.approx(0.012)
+    assert mj["total_cost"] == pytest.approx(0.012 + 90.0)
 
 
 def test_fees_and_inputs_use_sde_runs_per_bpc_not_the_t2_limit(monkeypatch) -> None:
@@ -1142,7 +1145,7 @@ def test_fees_and_inputs_use_sde_runs_per_bpc_not_the_t2_limit(monkeypatch) -> N
     assert mj["runs"] == 300
     assert invention["runs_per_invented_blueprint"] == 10
     assert invention["runs"] == pytest.approx(attempts)
-    assert invention["total_job_cost"] == pytest.approx(200 * 0.02 * attempts)
+    assert invention["total_job_cost"] == pytest.approx(_T2_INVENTION_FEE_PER_ATTEMPT * attempts)
     assert mj["invention_material_cost"] == pytest.approx(2 * 100 * attempts)
     # Tritanium at ME 2: 300 runs x 10 x 0.98 = 2940 units x 5.
     assert mj["material_cost"] == pytest.approx(2940 * 5 + 2 * 100 * attempts)
@@ -1224,9 +1227,9 @@ def test_owned_t2_bpo_row_has_no_invention_cost(monkeypatch) -> None:
     assert "invention" not in mj["activity_breakdown"]
     assert "invention_material_cost" not in mj
     assert mj["material_cost"] == pytest.approx(50.0)
-    # Manufacturing only: 50 EIV x 0.05 = 2.5 (the fixture T2 blueprint has no
-    # copy time, and the 2% invention index must add nothing).
-    assert mj["total_job_cost"] == pytest.approx(2.5)
+    # Manufacturing only: 50 EIV x (0.05 + SCC 0.04) = 4.5 (the fixture T2
+    # blueprint has no copy time, and the 2% invention index must add nothing).
+    assert mj["total_job_cost"] == pytest.approx(4.5)
     assert mj["elapsed_time_seconds"] == mj["time_seconds"]
 
 
@@ -1470,7 +1473,7 @@ def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> No
     invention = nested["nested"]["invention:9002"]
     assert invention["attempts"] == pytest.approx(0.2)
     assert invention["whole_attempts"] == 2
-    assert invention["job_cost"] == pytest.approx(200 * 0.02 * 0.2)  # 0.8
+    assert invention["job_cost"] == pytest.approx(_T2_INVENTION_FEE_PER_ATTEMPT * 0.2)  # 0.012
 
     inputs = [m for m in mj["expected_invention_materials"].values() if m["type_id"] == 204]
     assert len(inputs) == 1
@@ -1485,8 +1488,8 @@ def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> No
     # Tritanium 10 x 5 from the component, plus 40 of amortized datacores.
     assert mj["invention_material_cost"] == pytest.approx(40.0)
     assert mj["material_cost"] == pytest.approx(90.0)
-    assert mj["total_job_cost"] == pytest.approx(0.8)
-    assert mj["total_cost"] == pytest.approx(90.8)
+    assert mj["total_job_cost"] == pytest.approx(0.012)
+    assert mj["total_cost"] == pytest.approx(90.012)
 
     # Slot time: parent 200 + component 96 (1 run x 100 s, TE 4) + invention
     # 40 x 0.2 + copy 20 x 0.2.
@@ -1497,7 +1500,7 @@ def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> No
     # The top-level T2 row in the same refresh is unchanged.
     t2 = rows[5002]["manufacturing_job"]
     assert t2["material_cost"] == pytest.approx(90.0)
-    assert t2["total_job_cost"] == pytest.approx(0.8)
+    assert t2["total_job_cost"] == pytest.approx(0.012)
     assert t2["elapsed_time_seconds"] == 96 + 80 + 40  # manufacturing 96 (TE 4)
 
 
@@ -2427,8 +2430,9 @@ def test_the_chosen_decryptor_sets_me_te_runs_and_buys_one_per_attempt(monkeypat
     # the same whole attempts on its own.
     extra = _later_plan(mj, 12)["invention_procurement_materials"]
     assert (extra["204"]["quantity"], extra["34201"]["quantity"]) == (4, 2)
-    # The fee basis stays the datacores' EIV only.
-    assert invention["estimated_item_value"] == pytest.approx(2 * 100 * attempts)
+    # The fee's job value is 0.02 x the invented blueprint's per-run EIV (50)
+    # per attempt: neither the datacores nor the decryptor are part of it.
+    assert invention["estimated_item_value"] == pytest.approx(0.02 * 50 * attempts)
 
 
 def test_a_run_modifier_that_crosses_a_bpc_boundary_halves_the_whole_attempts(monkeypatch) -> None:
@@ -3439,8 +3443,10 @@ def test_every_row_of_one_overview_publishes_one_stock_pool_id(monkeypatch) -> N
 # --- round 5 Task 8: fees per attempt, per copy run and per research level (D4, A2) ---
 
 
+# Fake rates: facility tax 6% + SCC 4% = 10% on manufacturing, copy and
+# invention job values; 6% + research SCC 2% = 8% on research job values.
 _FEE_PROFILE = {
-    "installation_cost_modifier": 0.1, "material_efficiency_bonus": 0.0,
+    "installation_cost_modifier": 0.1, "facility_tax": 0.06, "material_efficiency_bonus": 0.0,
     "time_efficiency_bonus": 0.0, "facility_cost_bonus": 0.0,
     "system_cost_indices": [
         {"activity": "manufacturing", "cost_index": 0.05},
@@ -3456,12 +3462,13 @@ _FEE_PROFILE = {
 def test_the_invention_publishes_its_fee_per_attempt_and_per_source_copy_run(monkeypatch) -> None:
     mj = _invention_overview(monkeypatch, profile=_FEE_PROFILE)[5002]["manufacturing_job"]
     invention = mj["activity_breakdown"]["invention"]
-    # One attempt: EIV 2 datacores x 100 = 200 x 0.02 = 4.0, + 10 % surcharge.
-    assert invention["job_cost_per_attempt"] == pytest.approx(4.4)
-    # One source-copy run: source EIV 3 x 5 = 15 x 0.02 = 0.3 x 0.03 = 0.009, + 10 %.
-    assert invention["source_copy_job_cost_per_run"] == pytest.approx(0.0099)
+    # One attempt: job value 0.02 x the T2 blueprint's EIV 50 = 1.0, x (index
+    # 0.02 + surcharge 0.10) = 0.12.
+    assert invention["job_cost_per_attempt"] == pytest.approx(0.12)
+    # One source-copy run: job value 0.02 x source EIV 3 x 5 = 0.3, x (0.03 + 0.10).
+    assert invention["source_copy_job_cost_per_run"] == pytest.approx(0.039)
     # The expected-value fee is the per-attempt fee x the expected attempts.
-    assert invention["total_job_cost"] == pytest.approx(4.4 * invention["runs"])
+    assert invention["total_job_cost"] == pytest.approx(0.12 * invention["runs"])
 
 
 def _owned_bpo_research_table(*, level_one_seconds: int = 105) -> dict:
@@ -3488,16 +3495,16 @@ def _owned_bpo_research_table(*, level_one_seconds: int = 105) -> dict:
 
 def test_an_owned_bpo_row_publishes_its_cumulative_research_fee_per_level() -> None:
     table = _owned_bpo_research_table()
-    # Per-run EIV 10 x 5 = 50. EVE's research fee: EIV x 0.02105 x the
-    # dimensionless level multiplier (rank-1 table seconds / 105) x index,
-    # + 10 % surcharge.
+    # Per-run EIV 10 x 5 = 50. EVE's research job value: EIV x 0.02 x the
+    # dimensionless level multiplier (rank-1 table seconds / 105); fee = job
+    # value x (index + the 8 % research surcharge).
     me = table["research_material"]
     assert len(me) == 11 and me[0] == 0.0
-    assert me[1] == pytest.approx(50 * 0.02105 * (105 / 105) * 0.02 * 1.1)
-    assert me[5] == pytest.approx(50 * 0.02105 * (3360 / 105) * 0.02 * 1.1)
-    assert me[10] == pytest.approx(50 * 0.02105 * (256000 / 105) * 0.02 * 1.1)
+    assert me[1] == pytest.approx(50 * 0.02 * (105 / 105) * (0.02 + 0.08))
+    assert me[5] == pytest.approx(50 * 0.02 * (3360 / 105) * (0.02 + 0.08))
+    assert me[10] == pytest.approx(50 * 0.02 * (256000 / 105) * (0.02 + 0.08))
     te = table["research_time"]
-    assert te[5] == pytest.approx(50 * 0.02105 * (3360 / 105) * 0.04 * 1.1)
+    assert te[5] == pytest.approx(50 * 0.02 * (3360 / 105) * (0.04 + 0.08))
 
 
 def test_the_research_fee_uses_the_level_multiplier_not_the_rank_scaled_seconds() -> None:
@@ -3508,11 +3515,9 @@ def test_the_research_fee_uses_the_level_multiplier_not_the_rank_scaled_seconds(
     scale with rank, only the duration does. Fake EIV 50, fake index 0.02."""
     rank_one = _owned_bpo_research_table(level_one_seconds=105)
     rank_twenty = _owned_bpo_research_table(level_one_seconds=20 * 105)
-    expected = 50 * 0.02105 * (256000 / 105) * 0.02 * 1.1  # ~5.64 ISK
+    expected = 50 * 0.02 * (256000 / 105) * (0.02 + 0.08)
     assert rank_one["research_material"][10] == pytest.approx(expected)
     assert rank_twenty["research_material"][10] == pytest.approx(expected)
-    old_formula = 50 * 0.02105 * (20 * 256000) * 0.02 * 1.1
-    assert old_formula / rank_twenty["research_material"][10] == pytest.approx(20 * 105)
 
 
 def test_a_row_without_an_owned_bpo_publishes_no_research_fee_table(monkeypatch) -> None:
@@ -3546,7 +3551,7 @@ def test_a_bpc_variant_of_an_owned_bpo_publishes_the_research_fee_table_too() ->
     mj = row["manufacturing_job"]
     assert mj["blueprint_source_kind"] != "owned_blueprint_original"
     me = mj["research_job_cost_by_level"]["research_material"]
-    assert me[5] == pytest.approx(50 * 0.02105 * (3360 / 105) * 0.02 * 1.1)
+    assert me[5] == pytest.approx(50 * 0.02 * (3360 / 105) * (0.02 + 0.08))
 
 
 def test_an_owned_t2_bpc_covering_batch_one_still_publishes_the_invention_fees(monkeypatch) -> None:
@@ -3558,10 +3563,10 @@ def test_an_owned_t2_bpc_covering_batch_one_still_publishes_the_invention_fees(m
         monkeypatch, profile=_FEE_PROFILE, owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
     )[5002]
     plan = row["manufacturing_job"]["invention_bpc_plan"]
-    assert plan["job_cost_per_attempt"] == pytest.approx(4.4)
-    assert plan["source_copy_job_cost_per_run"] == pytest.approx(0.0099)
-    assert orow.get_invention_fee_per_attempt(row) == pytest.approx(4.4)
-    assert orow.get_source_copy_fee_per_run(row) == pytest.approx(0.0099)
+    assert plan["job_cost_per_attempt"] == pytest.approx(0.12)
+    assert plan["source_copy_job_cost_per_run"] == pytest.approx(0.039)
+    assert orow.get_invention_fee_per_attempt(row) == pytest.approx(0.12)
+    assert orow.get_source_copy_fee_per_run(row) == pytest.approx(0.039)
 
 
 # --- round 5 Task 8 fix round 1: a component's per-run job fee on its parent ---
@@ -3584,7 +3589,7 @@ def _parent_of_component_row() -> dict:
 
 def test_a_parent_publishes_its_components_job_fee_per_run() -> None:
     """The component 5001: per-run EIV 10 Tritanium x 5 = 50, manufacturing
-    index 0.05, + 10 % surcharge = 2.75 per run, the same figure as the
+    index 0.05, + the 10 % surcharge on the job value = 7.5 per run, the same figure as the
     component's own row (one formula, _plan_activity_costs)."""
     service = _build_service(
         blueprint_rows=[_blueprint_row(), _parent_of_component_row()], profile=_FEE_PROFILE,
@@ -3598,7 +3603,7 @@ def test_a_parent_publishes_its_components_job_fee_per_run() -> None:
         )
     }
     entry = rows[6001]["manufacturing_job"]["materials"]["5001"]
-    assert entry["component_job_fee_per_run"] == pytest.approx(50 * 0.05 * 1.1)
+    assert entry["component_job_fee_per_run"] == pytest.approx(50 * (0.05 + 0.10))
     own = rows[5001]["manufacturing_job"]
     assert entry["component_job_fee_per_run"] == pytest.approx(own["manufacturing_job_cost"] / own["runs"])
     # A raw material has no blueprint: no fee key.
