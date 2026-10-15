@@ -155,11 +155,18 @@ def test_a_queued_te_follows_the_active_me_jobs_end_date_over_the_estimate():
     me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
     startable, note = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-03T00:00:00Z")])
     assert startable is False and "from the industry jobs" in note
-    # The real job ended before the estimate would have.
+    # Fix round 2, item 3: an ME job of the type that ends before the estimate
+    # may be a sibling BPO's: the TE waits for the later of the two.
     me, te = _queued_pair("2026-01-05T00:00:00Z", me_status="done")
     startable, note = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-01T06:00:00Z")])
-    assert startable is True
-    # Another blueprint's ME job does not count.
+    assert startable is False and "estimate" in note
+    later = datetime(2026, 1, 6, tzinfo=timezone.utc)
+    assert queued_te_status(te, [me, te], later, jobs=[_me_job("2026-01-01T06:00:00Z")])[0] is True
+    # Both passed: startable.
+    me, te = _queued_pair("2026-01-01T00:00:00Z", me_status="done")
+    assert queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-01T06:00:00Z")])[0] is True
+    # Another blueprint's ME job does not count: the (future) estimate decides.
+    me, te = _queued_pair("2026-01-05T00:00:00Z", me_status="done")
     startable, _ = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-01T06:00:00Z", type_id=8)])
     assert startable is False
 

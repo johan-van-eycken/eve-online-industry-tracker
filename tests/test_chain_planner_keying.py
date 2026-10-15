@@ -1695,3 +1695,40 @@ def test_a_busy_owned_t2_bpo_does_not_count_as_a_source():
     plan = _planner().plan_chain([decision], phase1)
     assert decision.pipeline_stage == "blocked"
     assert [a.action_type for a in _t2_actions(plan)] == []
+
+
+# --- Task 10 fix round 2, item 2: a T1 row that is not built stays "blocked" -----
+
+def _t1_bpc(item_id):
+    return SimpleNamespace(type_id=999, item_id=item_id, is_blueprint_copy=True,
+                           blueprint_material_efficiency=2, blueprint_time_efficiency=4, blueprint_runs=10)
+
+
+@pytest.mark.parametrize("assets", [[55], [55, 56]])
+def test_a_t1_row_on_a_busy_bpc_keeps_the_blocked_stage(assets):
+    row = _row(type_id=12344, blueprint_type_id=999, runs=2, blueprint_source_kind="owned_blueprint_copy",
+               blueprint_copy={"item_id": 55}, job_segments=[_bpc_segment(55, 2, 20)],
+               materials={"34": {"type_id": 34, "quantity": 20}})
+    row["quantity"] = 2
+    decision = _decision(row, meta_group_id=1)
+    plan = _planner().plan_chain([decision], {
+        "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {999: [_t1_bpc(i) for i in assets]},
+        "blueprint_data": INVENTION_BLUEPRINT_DATA, "busy_blueprint_item_ids": {55},
+    })
+    assert row["research_first"]["mode"] == "none"
+    assert decision.pipeline_stage == "blocked"
+    assert _t2_actions(plan) == []
+
+
+def test_a_t1_row_building_its_free_bpc_jobs_is_manufacturing():
+    row = _row(type_id=12344, blueprint_type_id=999, runs=5, blueprint_source_kind="owned_blueprint_copy",
+               blueprint_copy={"item_ids": [56, 55]}, job_segments=[_bpc_segment(56, 3, 30), _bpc_segment(55, 2, 20)],
+               materials={"34": {"type_id": 34, "quantity": 50}})
+    row["quantity"] = 5
+    decision = _decision(row, meta_group_id=1)
+    _planner().plan_chain([decision], {
+        "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {999: [_t1_bpc(55), _t1_bpc(56)]},
+        "blueprint_data": INVENTION_BLUEPRINT_DATA, "busy_blueprint_item_ids": {55},
+    })
+    assert row["research_first"]["mode"] == "part"
+    assert decision.pipeline_stage == "manufacturing"

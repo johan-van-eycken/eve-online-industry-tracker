@@ -27,6 +27,7 @@ from streamlit_ui.shopping_list import (
     invention_need_unknown_rows,
     rows_built_by_an_older_version,
     rows_from_different_stock_pools,
+    shared_nested_bpc_shortfall_rows,
 )
 from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
@@ -892,6 +893,12 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
     shopping_items, stale_types = aggregate_shopping_list_with_stale(selected_rows)
     if stale_types:
         st.caption(STALE_OVERVIEW_CAPTION)
+    shared_shortfall = shared_nested_bpc_shortfall_rows(selected_rows)
+    if shared_shortfall:
+        st.warning(
+            "Not fully in this list: " + ", ".join(sorted(shared_shortfall))
+            + f" \u2014 {next(iter(shared_shortfall.values()))}."
+        )
     unknown_need = invention_need_unknown_rows(selected_rows)
     if unknown_need:
         st.warning(

@@ -849,3 +849,31 @@ def test_the_buy_list_keys_cover_every_line_the_list_reads() -> None:
     ):
         read = {int(mat["type_id"]) for mat, _n in sl._row_lines_with_batch_counts(mj, 5)}
         assert read and read <= set(IndustryService._buy_line_type_ids(mj))
+
+
+# --- Task 10 fix round 2, item 4: shared nested BPC runs without an invention model --
+
+def _sharing_row(type_id, name, used, owned):
+    row = _make_row(type_id, name, 1, {})
+    row["manufacturing_job"].update({
+        "blueprint_source_kind": "owned_blueprint_original",
+        "nested_invention_bpc_plans": [], "nested_blueprint_runs_left": {"8888": owned - used},
+        "nested_blueprint_runs_used": {"8888": used}, "nested_blueprint_runs_owned": {"8888": owned},
+    })
+    return row
+
+
+def test_a_shared_nested_bpc_shortfall_without_an_invention_model_is_named() -> None:
+    from eve_online_industry_tracker.application.industry.shopping_list import shared_nested_bpc_shortfall_rows
+
+    rows = [_sharing_row(1, "Item A", 2, 3), _sharing_row(2, "Item B", 2, 3)]
+    named = shared_nested_bpc_shortfall_rows(rows)
+    assert set(named) == {"Item A", "Item B"}
+    assert "1 run" in named["Item A"]
+    assert shared_nested_bpc_shortfall_rows(rows[:1]) == {}
+    assert shared_nested_bpc_shortfall_rows([_sharing_row(1, "A", 1, 3), _sharing_row(2, "B", 2, 3)]) == {}
+
+
+def test_the_tab_warns_about_a_shared_nested_bpc_shortfall_it_cannot_size(monkeypatch) -> None:
+    out = _render_tab_output(monkeypatch, [_sharing_row(1, "Item A", 2, 3), _sharing_row(2, "Item B", 2, 3)])
+    assert any("Item A" in str(w) and "Item B" in str(w) and "short" in str(w) for w in out["warning"])

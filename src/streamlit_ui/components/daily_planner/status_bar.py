@@ -158,10 +158,11 @@ def queued_te_status(
     Startable when the ME action on the same BPO (type_id) for the same
     pilot was skipped, or was marked started (done) and its job has ended.
     A pending ME was never started, so the TE waits (carry 14). The end is
-    the active ME-research job's end_date on that blueprint, from `jobs`
-    (the active industry jobs; the latest end when several run, since the
-    action rows do not name the BPO's item). Only without such a job is the
-    planner's estimate used, and the note says so. With no such ME action
+    the later of the planner's estimate and the latest active ME-research
+    job's end_date on that blueprint type, from `jobs` (the action rows do
+    not name the BPO's item, so an earlier job may be a sibling BPO's and
+    must not start it early; fix round 2). Without such a job only the
+    estimate is used, and the note says so. With no such ME action
     nothing says it must wait. (False, None) for an action that is not
     queued."""
     if not action.get("queued_after_me"):
@@ -183,13 +184,18 @@ def queued_te_status(
         if isinstance(j, dict) and j.get("activity_id") == ME_RESEARCH_ACTIVITY_ID
         and j.get("blueprint_type_id") == action.get("type_id")
     ]
+    me_end = _parse_dt(me.get("estimated_completion"))
     if me_jobs:
         ends = [_parse_dt(j.get("end_date")) for j in me_jobs]
         if any(end is None for end in ends):
             return False, "the active ME job's end time is unknown"
-        end = max(e for e in ends if e is not None)
-        return end <= now, f"ME job ends {end.strftime('%a %d %b %H:%M')} EVE (from the industry jobs)"
-    me_end = _parse_dt(me.get("estimated_completion"))
+        job_end = max(e for e in ends if e is not None)
+        if me_end is not None and me_end > job_end:
+            return me_end <= now, (
+                f"waits for the planner's estimate of the ME end ({me_end.strftime('%a %d %b %H:%M')} EVE): "
+                "the ME job found on this blueprint type ends earlier and may be another BPO's"
+            )
+        return job_end <= now, f"ME job ends {job_end.strftime('%a %d %b %H:%M')} EVE (from the industry jobs)"
     why = "industry jobs not loaded" if jobs is None else "no active ME job found for this BPO"
     return me_end is not None and me_end <= now, f"{why}: using the planner's estimate of the ME end"
 

@@ -26,10 +26,15 @@ def _build_service(
     owned_assets: tuple[list[object], list[object], dict[int, str], dict[int, str], dict[int, str]],
     owned_item_inventory: tuple[dict[int, int], dict[int, float]] | None = None,
     adjusted_price_map: dict[int, dict],
+    busy_blueprint_item_ids: set[int] | None = None,
 ) -> IndustryService:
     service = object.__new__(IndustryService)
     service._state = SimpleNamespace(esi_service=None)  # type: ignore[attr-defined]
     service._sessions = None  # type: ignore[attr-defined]
+    # Blueprints in active industry jobs (none unless a test says so).
+    service._active_job_blueprint_item_ids = MethodType(  # type: ignore[attr-defined]
+        lambda self: set(busy_blueprint_item_ids or ()), service,
+    )
 
     class DummyManager:
         def get_blueprint_overview(self, *, force_refresh: bool = False) -> list[dict]:
@@ -913,7 +918,7 @@ _INVENTION_FAKE_PRICES = {34: 5.0, 204: 100.0}
 def _invention_service(
     monkeypatch, *, owned_assets=([], [], {}, {}, {}), owned_item_inventory=None,
     prices=None, profile=None, blueprint_rows=None, real_confidence=False, adm_overrides=None,
-    fee_context=None,
+    fee_context=None, busy_blueprint_item_ids=None,
 ):
     prices = dict(_INVENTION_FAKE_PRICES if prices is None else prices)
     monkeypatch.setattr(
@@ -932,6 +937,7 @@ def _invention_service(
         owned_assets=owned_assets,
         owned_item_inventory=owned_item_inventory,
         adjusted_price_map={t: {"adjusted_price": p} for t, p in prices.items()},
+        busy_blueprint_item_ids=busy_blueprint_item_ids,
     )
     if fee_context is not None:
         service._resolve_npc_market_fee_context = MethodType(  # type: ignore[attr-defined]
@@ -3929,3 +3935,107 @@ def test_the_eiv_line_count_uses_the_sums_own_filter() -> None:
     assert IndustryService._sum_estimated_item_value(
         cast(Any, entries), quantity_key="quantity", adjusted_price_map={34: {"adjusted_price": 5.0}},
     ) == (None, 1)
+
+
+# --- Task 10 fix round 2, item 1: BPCs in active jobs are not owned runs --------
+
+
+def test_a_busy_best_me_bpc_leaves_batch_one_to_the_free_bpc(monkeypatch) -> None:
+    # BPC 55 (ME 4, sorted first) is in a job; the free BPC 56 (ME 2) builds.
+    mj = _invention_overview(
+        monkeypatch, maximize_bp_runs=True,
+        owned_assets=([_owned_t2_bpc_me(runs=10, me=4, item_id=55), _owned_t2_bpc_me(runs=10, me=2, item_id=56)],
+                      [], {}, {}, {}),
+        busy_blueprint_item_ids={55},
+    )[5002]["manufacturing_job"]
+    owned = [s for s in mj["job_segments"] if s["source"] == "owned_blueprint_copy"]
+    assert [(s["blueprint_item_id"], s["runs"], s["blueprint_material_efficiency"]) for s in owned] == [(56, 10, 2)]
+    assert mj["materials"]["34"]["quantity"] == 98   # ceil(100 x 0.98) at BPC 56's ME 2
+
+
+def test_a_busy_nested_bpc_gives_no_spare_run_credit(monkeypatch) -> None:
+    deep_bpc = SimpleNamespace(
+        type_id=9202, item_id=99, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=10,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_three_level_invention_rows(), prices=_THREE_LEVEL_PRICES,
+        owned_assets=([deep_bpc], [], {}, {}, {}), busy_blueprint_item_ids={99},
+    )[5002]
+    mj = row["manufacturing_job"]
+    assert int(mj["nested_blueprint_runs_left"].get("9202", 0)) == 0
+    assert mj["invention_procurement_materials"]["206"]["quantity"] == 4   # batch 1 invents 9202
+    # As without the BPC: 1 invented BPC per 10 runs at every level.
+    for batches, per_level in ((3, 4), (11, 8)):
+        row["max_batches_total"] = batches
+        assert (_shopping_line(row, 206) or {}).get("need") == per_level, batches
+
+
+# --- Task 10 fix round 2, item 4: a nested BPC shared by two selected rows -------
+
+
+def _two_parents_sharing_a_component_rows() -> list[dict]:
+    import copy
+
+    rows = _nested_invention_blueprint_rows()
+    second = copy.deepcopy(rows[-1])
+    second["blueprint_type_id"] = 9200
+    second["blueprint"] = {**second["blueprint"], "type_id": 9200}
+    second["manufacturing_job"]["products"][0] = {
+        **second["manufacturing_job"]["products"][0], "type_id": 7200, "type_name": "Parent 2",
+    }
+    rows.append(second)
+    return rows
+
+
+def test_two_rows_spending_the_last_run_of_one_nested_bpc_buy_the_shortfall(monkeypatch) -> None:
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+
+    # One owned 1-run 9002 BPC: each parent's batch 1 is planned on it, so
+    # neither row buys datacores. Selected together they need 2 runs: the
+    # second is invented (1 BPC, 2 whole attempts x 2 datacores = 4).
+    rows = _invention_overview(
+        monkeypatch, blueprint_rows=_two_parents_sharing_a_component_rows(), prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=1)], [], {}, {}, {}),
+    )
+    a, b = rows[7100], rows[7200]
+    for row in (a, b):
+        assert row["manufacturing_job"]["nested_blueprint_runs_used"] == {"9002": 1}
+        assert row["manufacturing_job"]["nested_blueprint_runs_owned"] == {"9002": 1}
+    assert not any(m["type_id"] == 204 for m in aggregate_shopping_list([a]))
+    both = {m["type_id"]: m["need"] for m in aggregate_shopping_list([a, b])}
+    assert both[204] == 4
+
+
+def test_a_nested_bpc_with_runs_for_both_rows_buys_nothing_extra(monkeypatch) -> None:
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+
+    rows = _invention_overview(
+        monkeypatch, blueprint_rows=_two_parents_sharing_a_component_rows(), prices=_NESTED_FAKE_PRICES,
+        owned_assets=([_owned_t2_bpc(runs=2)], [], {}, {}, {}),
+    )
+    assert not any(m["type_id"] == 204 for m in aggregate_shopping_list([rows[7100], rows[7200]]))
+
+
+def test_a_refused_older_row_on_the_same_blueprint_also_stops_the_spare_run_credit(monkeypatch) -> None:
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+
+    deep_bpc = SimpleNamespace(
+        type_id=9202, item_id=99, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=10,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_three_level_invention_rows(), prices=_THREE_LEVEL_PRICES,
+        owned_assets=([deep_bpc], [], {}, {}, {}),
+    )[5002]
+    row["max_batches_total"] = 3
+    older = {"type_id": 8, "type_name": "Old", "max_batches_total": 1, "manufacturing_job": {
+        "blueprint_sde": {"blueprint_type_id": 9202}, "procurement_materials": {},
+        "blueprint_source_kind": "owned_blueprint_copy",
+    }}
+    line = next(m for m in aggregate_shopping_list([row, older]) if m["type_id"] == 206)
+    assert line["need"] == 4

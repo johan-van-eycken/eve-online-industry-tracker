@@ -5956,6 +5956,29 @@ class IndustryService:
         payload["corporation_id"] = int(getattr(row, "corporation_id", 0) or 0)
         return CorporationAssetsModel(**payload)
 
+    #: Industry job statuses that no longer hold a blueprint.
+    _TERMINAL_JOB_STATUSES = ("delivered", "cancelled", "reverted")
+
+    def _active_job_blueprint_item_ids(self) -> set[int]:
+        """The blueprint item_ids installed in active (not delivered,
+        cancelled or reverted) character and corporation industry jobs. No
+        error handler: an empty set would plan with busy BPCs' runs."""
+        session: Any = self._sessions.app_session()
+        try:
+            out: set[int] = set()
+            for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
+                for (item_id,) in (
+                    session.query(model.blueprint_item_id)
+                    .filter(model.status.notin_(self._TERMINAL_JOB_STATUSES))
+                    .filter(model.blueprint_item_id.isnot(None))
+                    .all()
+                ):
+                    if int(item_id or 0) > 0:
+                        out.add(int(item_id))
+            return out
+        finally:
+            session.close()
+
     def _load_historical_blueprint_assets(
         self,
         *,
@@ -7149,6 +7172,12 @@ class IndustryService:
                 "character_assets": len(character_blueprint_assets),
                 "corporation_assets": len(corporation_blueprint_assets),
             })
+        # A BPC installed in an active job (the snapshot can still list it,
+        # and the history adds job-locked blueprints back in) has no runs to
+        # plan with: it is left out of every owned-BPC allocation and BPC
+        # run pool, top level and nested (Task 10 fix round 2).
+        busy_blueprint_item_ids = self._active_job_blueprint_item_ids() if bool(build_from_bpc) else set()
+        busy_copies_left_out: list[int] = []
         for asset in [*character_blueprint_assets, *corporation_blueprint_assets]:
             try:
                 bp_type_id = int(asset.type_id)
@@ -7159,9 +7188,17 @@ class IndustryService:
             if bool(getattr(asset, "is_blueprint_copy", False)):
                 if not bool(build_from_bpc):
                     continue
+                if int(getattr(asset, "item_id", 0) or 0) in busy_blueprint_item_ids:
+                    busy_copies_left_out.append(int(asset.item_id))
+                    continue
                 blueprint_copy_assets_by_type_id.setdefault(bp_type_id, []).append(asset)
             else:
                 blueprint_original_assets_by_type_id.setdefault(bp_type_id, []).append(asset)
+        if busy_copies_left_out:
+            logger.info(
+                "Product overview: %d owned BPC(s) in active industry jobs not planned with (item_ids %s)",
+                len(busy_copies_left_out), sorted(busy_copies_left_out),
+            )
         for assets in blueprint_copy_assets_by_type_id.values():
             assets.sort(key=lambda a: (-int(a.blueprint_material_efficiency or 0), -int(a.blueprint_time_efficiency or 0), -int(a.blueprint_runs or 0), int(a.item_id or 0)))
         for assets in blueprint_original_assets_by_type_id.values():
@@ -9322,6 +9359,22 @@ class IndustryService:
             }
             nested_blueprint_ids.discard(int(blueprint_type_id))
             row_out["manufacturing_job"]["nested_invention_bpc_plans"] = batch_one_nested_bpc_plans
+            # Fix round 2, item 4: each row is planned on its own copy of the
+            # owned BPC runs, so the shopping list nets the nested BPC runs
+            # batch 1 spent once across the selected rows.
+            used_nested_runs = {
+                int(t): int(math.ceil(float(r or 0) - float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) - 1e-9))
+                for t, r in copy_runs_before_batch_one.items()
+                if int(t) > 0 and int(t) != int(blueprint_type_id)
+                and float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) < float(r or 0)
+            }
+            row_out["manufacturing_job"]["nested_blueprint_runs_used"] = {
+                str(t): used for t, used in sorted(used_nested_runs.items()) if used > 0
+            }
+            row_out["manufacturing_job"]["nested_blueprint_runs_owned"] = {
+                str(t): max(0, int(math.floor(float(copy_runs_before_batch_one.get(t, 0) or 0) + 1e-9)))
+                for t in sorted(used_nested_runs) if used_nested_runs[t] > 0
+            }
             row_out["manufacturing_job"]["nested_blueprint_runs_left"] = {
                 str(t): max(0, int(math.floor(float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) + 1e-9)))
                 for t in sorted(nested_blueprint_ids)

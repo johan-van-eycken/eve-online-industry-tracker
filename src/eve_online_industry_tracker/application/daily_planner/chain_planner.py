@@ -287,6 +287,13 @@ class ChainPlanner:
                         bpo_consider_days=bpo_consider_days,
                     )
 
+                # The chains set the stage from the blueprints owned; a row
+                # this plan does not build at all (unconditionally) is
+                # "blocked" whatever they set (fix round 2, item 2).
+                first = decision.overview_row.get("research_first")
+                if isinstance(first, dict) and first.get("unconditional") and first.get("mode") == "none":
+                    decision.pipeline_stage = NOT_BUILT_STAGE
+
                 # Which of this batch's materials the corp could build itself.
                 # Collected across every parent first, so one material needed
                 # by several builds becomes ONE sub-manufacture decision.
