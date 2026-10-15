@@ -4682,6 +4682,10 @@ class IndustryService:
         # up through every parent plan into the product row.
         expected_invention_materials: list[dict[str, Any]] = []
         invention_requirements: list[dict[str, Any]] = []
+        # One per nested invention (Task 10 fix round 1, I3): what the
+        # shopping list needs to carry an invented BPC's spare runs across
+        # batches (_plan_nested_invention's "bpc_plan").
+        nested_invention_bpc_plans: list[dict[str, Any]] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
         # Nested inventions' chance fallbacks and notes (row reasons, not unknown costs).
@@ -4981,6 +4985,7 @@ class IndustryService:
                     elapsed_time_adjustment = self._absorb_nested_invention(
                         child_plan, expected_invention_materials=expected_invention_materials,
                         invention_requirements=invention_requirements,
+                        nested_invention_bpc_plans=nested_invention_bpc_plans,
                         invention_cost_unknown_reasons=invention_cost_unknown_reasons,
                         invention_chance_notes=invention_chance_notes,
                         elapsed_time_adjustment=elapsed_time_adjustment,
@@ -5191,6 +5196,8 @@ class IndustryService:
                 recursive_activity_breakdown[f"invention:{blueprint_type_id}"] = nested_invention["breakdown"]
                 expected_invention_materials.extend(nested_invention["expected_invention_materials"])
                 invention_requirements.extend(nested_invention["invention_requirements"])
+                if nested_invention["bpc_plan"] is not None:
+                    nested_invention_bpc_plans.append(nested_invention["bpc_plan"])
                 if nested_invention["cost_unknown_reason"] is not None:
                     invention_cost_unknown_reasons.append(nested_invention["cost_unknown_reason"])
                 invention_chance_notes.extend(nested_invention["invention_chance_notes"])
@@ -5300,6 +5307,7 @@ class IndustryService:
         return {
             "expected_invention_materials": expected_invention_materials,
             "invention_requirements": invention_requirements,
+            "nested_invention_bpc_plans": nested_invention_bpc_plans,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
             "invention_chance_notes": invention_chance_notes,
@@ -5373,6 +5381,10 @@ class IndustryService:
         # Nested invention results (see _plan_blueprint_chain_for_quantity).
         expected_invention_materials: list[dict[str, Any]] = []
         invention_requirements: list[dict[str, Any]] = []
+        # One per nested invention (Task 10 fix round 1, I3): what the
+        # shopping list needs to carry an invented BPC's spare runs across
+        # batches (_plan_nested_invention's "bpc_plan").
+        nested_invention_bpc_plans: list[dict[str, Any]] = []
         elapsed_time_adjustment: float | None = 0.0
         invention_cost_unknown_reasons: list[str] = []
         # Nested inventions' chance fallbacks and notes (row reasons, not unknown costs).
@@ -5610,6 +5622,7 @@ class IndustryService:
                 elapsed_time_adjustment = self._absorb_nested_invention(
                     child_plan, expected_invention_materials=expected_invention_materials,
                     invention_requirements=invention_requirements,
+                    nested_invention_bpc_plans=nested_invention_bpc_plans,
                     invention_cost_unknown_reasons=invention_cost_unknown_reasons,
                     invention_chance_notes=invention_chance_notes,
                     elapsed_time_adjustment=elapsed_time_adjustment,
@@ -5732,6 +5745,7 @@ class IndustryService:
         return {
             "expected_invention_materials": expected_invention_materials,
             "invention_requirements": invention_requirements,
+            "nested_invention_bpc_plans": nested_invention_bpc_plans,
             "elapsed_time_adjustment": elapsed_time_adjustment,
             "invention_cost_unknown_reasons": invention_cost_unknown_reasons,
             "invention_chance_notes": invention_chance_notes,
@@ -7651,6 +7665,12 @@ class IndustryService:
                 invention_job, int(invention_costs["whole_attempts"]), decryptor=decryptor,
             )
         ]
+        bpc_plan = self._nested_invention_bpc_plan(
+            invention_job=invention_job, invention_costs=invention_costs,
+            blueprint_type_id=blueprint_type_id, blueprint_display_name=blueprint_display_name,
+            max_production_limit=max_production_limit, adjusted_price_map=adjusted_market_price_map,
+            decryptor=decryptor, invention_context=invention_context,
+        )
         source_copy_costs, missing_source_runs = self._invention_source_copy_costs(
             compute_activity=compute_activity, invention_source_row=invention_source_row,
             invention_costs=invention_costs,
@@ -7702,6 +7722,7 @@ class IndustryService:
             "missing_source_runs": missing_source_runs,
             "expected_invention_materials": expected_inputs,
             "invention_requirements": invention_requirements,
+            "bpc_plan": bpc_plan,
             "material_nodes": material_nodes,
             "breakdown": breakdown,
             "source_copy_breakdown": source_copy_breakdown,
@@ -7710,6 +7731,43 @@ class IndustryService:
             ),
             "elapsed_time_adjustment": self._invention_elapsed_adjustment(invention_costs, source_copy_costs),
             "invention_chance_notes": invention_chance_notes,
+        }
+
+    def _nested_invention_bpc_plan(
+        self,
+        *,
+        invention_job: dict[str, Any],
+        invention_costs: dict[str, Any],
+        blueprint_type_id: int,
+        blueprint_display_name: str,
+        max_production_limit: int,
+        adjusted_price_map: dict[int, dict[str, Any]],
+        decryptor: DecryptorOption,
+        invention_context: InventionContext,
+    ) -> dict[str, Any] | None:
+        """One nested invention as the shopping list carries it across
+        batches (I3), on the top-level invention_bpc_plan's model: the runs
+        invented, runs per invented BPC, whole attempts per BPC and the
+        inputs of one attempt. None when nothing is invented or the odds are
+        unknown (the row flags that need as unknown)."""
+        invented_runs = int(invention_costs.get("invented_runs") or 0)
+        if invented_runs <= 0 or int(invention_costs.get("whole_attempts") or 0) <= 0:
+            return None
+        runs_per_bpc = max(1, int(invention_costs.get("runs_per_invented_blueprint") or 1))
+        attempts_per_bpc, unknown_reason, _chance = self._full_batch_invention_whole_attempts(
+            invention_job=invention_job, blueprint_type_id=blueprint_type_id, runs=runs_per_bpc,
+            max_production_limit=max_production_limit, adjusted_price_map=adjusted_price_map,
+            decryptor=decryptor, invention_context=invention_context,
+        )
+        if unknown_reason is not None or attempts_per_bpc <= 0:
+            return None
+        return {
+            "invented_blueprint_type_id": int(blueprint_type_id),
+            "invented_blueprint_name": blueprint_display_name,
+            "invented_runs": invented_runs,
+            "runs_per_invented_blueprint": runs_per_bpc,
+            "whole_attempts_per_blueprint": int(attempts_per_bpc),
+            "per_attempt_requirements": self._invention_whole_attempt_requirements(invention_job, 1, decryptor=decryptor),
         }
 
     @staticmethod
@@ -7963,8 +8021,35 @@ class IndustryService:
             ),
             "invention_procurement_materials": keyed_requirements([*own_requirements, *nested_requirements]),
             "invention_procurement_materials_nested": keyed_requirements(nested_requirements),
+            # I3: the nested inventions, carried across batches by the shopping list.
+            "nested_invention_bpc_plans": self._compact_nested_invention_bpc_plans(
+                ctx, plan.get("nested_invention_bpc_plans"),
+            ),
             "unknown_reasons": unknown_reasons,
         }
+
+    def _compact_nested_invention_bpc_plans(
+        self, ctx: _ProductPlanningContext, plans: Any,
+    ) -> list[dict[str, Any]]:
+        """The nested inventions' BPC plans as published on the row (I3):
+        each one's inputs of one attempt priced like the top-level
+        invention_bpc_plan's per_attempt_materials (take nothing)."""
+        out: list[dict[str, Any]] = []
+        for plan in plans or []:
+            if not isinstance(plan, dict):
+                continue
+            lines, _ = self._plan_take_or_buy_material_nodes(
+                [dict(e) for e in plan.get("per_attempt_requirements") or [] if isinstance(e, dict)],
+                available_owned_item_quantity_by_type_id={},
+                owned_item_unit_cost_by_type_id=ctx.owned_item_unit_cost_by_type_id,
+                sell_price_map=ctx.material_price_map,
+                adjusted_price_map=ctx.adjusted_market_price_map,
+            )
+            out.append({
+                **{k: v for k, v in plan.items() if k != "per_attempt_requirements"},
+                "per_attempt_materials": self._overview_keyed_entries(lines, compactor=lambda e: e),
+            })
+        return out
 
     @staticmethod
     def _absorb_nested_invention(
@@ -7975,6 +8060,7 @@ class IndustryService:
         invention_cost_unknown_reasons: list[str],
         invention_chance_notes: list[str],
         elapsed_time_adjustment: float | None,
+        nested_invention_bpc_plans: list[dict[str, Any]] | None = None,
     ) -> float | None:
         """Carry a built child plan's nested-invention results into its parent:
         extends the lists in place and returns the combined elapsed-time
@@ -7986,6 +8072,10 @@ class IndustryService:
         invention_requirements.extend(
             dict(e) for e in (child_plan.get("invention_requirements") or []) if isinstance(e, dict)
         )
+        if nested_invention_bpc_plans is not None:
+            nested_invention_bpc_plans.extend(
+                dict(e) for e in (child_plan.get("nested_invention_bpc_plans") or []) if isinstance(e, dict)
+            )
         invention_cost_unknown_reasons.extend(str(r) for r in (child_plan.get("invention_cost_unknown_reasons") or []))
         invention_chance_notes.extend(str(r) for r in (child_plan.get("invention_chance_notes") or []))
         child_adjustment = child_plan.get("elapsed_time_adjustment", 0.0)
@@ -8958,7 +9048,8 @@ class IndustryService:
                 spare_name = str((spare_blueprint if isinstance(spare_blueprint, dict) else {}).get("type_name") or spare_type_id)
                 later_batch_notes.append(
                     f"later batches assume nested BPC runs are spent: {spare_name} has {int(spare_runs)} runs "
-                    f"left after batch 1, so batches 2+ may over-buy its sub-build"
+                    f"left after batch 1; the shopping list counts them for its invention unless another "
+                    f"selected row may use them, else batches 2+ may over-buy its sub-build"
                 )
         invention_procurement_materials_per_extra_batch: list[dict[str, Any]] = []
         nested_extra_batch_lines: list[dict[str, Any]] = []
@@ -8975,7 +9066,7 @@ class IndustryService:
                 sell_price_map=ctx.material_price_map,
                 adjusted_price_map=ctx.adjusted_market_price_map,
             )
-            if invention_bpc_plan is not None:
+            if invention_bpc_plan is not None or batch_one_nested_requirements:
                 nested_extra_batch_lines, _ = self._plan_take_or_buy_material_nodes(
                     self._merge_invention_requirements(batch_one_nested_requirements),
                     available_owned_item_quantity_by_type_id={},
@@ -9194,12 +9285,12 @@ class IndustryService:
             # Shopping list (industry/shopping_list.py): the row's own invention
             # over all batches.
             row_out["manufacturing_job"]["invention_bpc_plan"] = invention_bpc_plan
-            if extra_batch_schedule is None:
-                # Plus the nested sub-builds' per-batch lines (the extra-batch
-                # list above minus this row's own invention).
-                row_out["manufacturing_job"]["invention_procurement_materials_per_extra_batch_nested"] = (
-                    self._overview_keyed_entries(nested_extra_batch_lines, compactor=lambda e: e)
-                )
+        if extra_batch_schedule is None and (invention_bpc_plan is not None or nested_extra_batch_lines):
+            # The nested sub-builds' per-batch lines (the extra-batch list
+            # above minus this row's own invention).
+            row_out["manufacturing_job"]["invention_procurement_materials_per_extra_batch_nested"] = (
+                self._overview_keyed_entries(nested_extra_batch_lines, compactor=lambda e: e)
+            )
         if extra_batch_schedule is not None:
             # Shopping list only: batches 2..N, each from its own plan.
             row_out["manufacturing_job"]["extra_batch_schedule"] = extra_batch_schedule
@@ -9207,6 +9298,27 @@ class IndustryService:
             # Read by the shopping list: a row without it is from an older
             # overview whose later batches repeat batch 1.
             row_out["manufacturing_job"]["later_batch_plan_version"] = LATER_BATCH_PLAN_VERSION
+            # I3: batch 1's nested inventions and the owned BPC runs left of
+            # every nested blueprint after batch 1, so the shopping list
+            # carries invented and owned spare runs across batches.
+            batch_one_nested_bpc_plans = self._compact_nested_invention_bpc_plans(
+                ctx, recursive_prerequisite_plan.get("nested_invention_bpc_plans"),
+            )
+            nested_blueprint_ids = {int(p["invented_blueprint_type_id"]) for p in batch_one_nested_bpc_plans}
+            for later_plan in (extra_batch_schedule or {}).get("plans") or []:
+                nested_blueprint_ids |= {
+                    int(p["invented_blueprint_type_id"]) for p in later_plan.get("nested_invention_bpc_plans") or []
+                }
+            nested_blueprint_ids |= {
+                int(t) for t, r in copy_runs_before_batch_one.items()
+                if int(t) > 0 and float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) < float(r or 0)
+            }
+            nested_blueprint_ids.discard(int(blueprint_type_id))
+            row_out["manufacturing_job"]["nested_invention_bpc_plans"] = batch_one_nested_bpc_plans
+            row_out["manufacturing_job"]["nested_blueprint_runs_left"] = {
+                str(t): max(0, int(math.floor(float(available_blueprint_copy_runs_by_type_id.get(t, 0) or 0) + 1e-9)))
+                for t in sorted(nested_blueprint_ids)
+            }
         if later_batch_notes:
             # Informational (pricing-confidence reasons): over-buy only.
             row_out["manufacturing_job"]["later_batch_notes"] = later_batch_notes

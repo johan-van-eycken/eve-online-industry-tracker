@@ -1772,9 +1772,14 @@ def test_nested_invention_is_in_the_extra_batch_list(monkeypatch) -> None:
     )[7100]
     assert row["manufacturing_job"]["invention_procurement_materials_per_extra_batch"]["204"]["quantity"] == 4
 
+    # I3: one nested 10-run BPC invented in batch 1 covers 3 one-run batches
+    # (was 3 x 4 = 12); 11 batches need a second BPC.
     row["max_batches_total"] = 3
     line = _shopping_line(row, 204)
-    assert line is not None and (line["need"], line["buy"]) == (12, 12)
+    assert line is not None and (line["need"], line["buy"]) == (4, 4)
+    row["max_batches_total"] = 11
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (8, 8)
 
 
 def test_build_from_bpc_off_writes_no_invention_buy_lists(monkeypatch) -> None:
@@ -1800,9 +1805,10 @@ def test_extra_batch_list_does_not_repeat_the_unknown_odds_warning(monkeypatch, 
 
 def test_nested_owned_bpc_in_batch_one_still_buys_nested_datacores_for_later_batches(monkeypatch) -> None:
     # The parent 7100 builds 1 T2 component (5002) per run. A 10-run owned 9002
-    # BPC covers batch 1's component run, so batch 1 invents nothing. Every
-    # later batch builds that run again without the BPC and invents it:
-    # 1 run / 10 per BPC -> 1 BPC, p 0.5 -> 2 whole attempts x 2 = 4 datacores.
+    # BPC covers batch 1's component run, so batch 1 invents nothing. A later
+    # batch's own plan assumes the BPC spent and invents that run: 1 run / 10
+    # per BPC -> 1 BPC, p 0.5 -> 2 whole attempts x 2 = 4 datacores. Over all
+    # batches (I3) the BPC's 9 runs left cover batches 2-10 first.
     row = _invention_overview(
         monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
         owned_assets=([_owned_t2_bpc(runs=10)], [], {}, {}, {}),
@@ -1818,13 +1824,15 @@ def test_nested_owned_bpc_in_batch_one_still_buys_nested_datacores_for_later_bat
     assert later["procurement_materials"]["34"]["quantity"] == 10
 
     row["max_batches_total"] = 5
+    assert _shopping_line(row, 204) is None   # 4 later runs <= 9 left (was 4 x 4 = 16)
+    row["max_batches_total"] = 15
     line = _shopping_line(row, 204)
-    assert line is not None and (line["need"], line["buy"]) == (16, 16)  # 4 x (5 - 1)
+    assert line is not None and (line["need"], line["buy"]) == (4, 4)   # 14 - 9 = 5 runs: 1 BPC
 
 
 def test_nested_without_owned_bpc_extra_batch_datacores_are_unchanged(monkeypatch) -> None:
-    # No owned BPC: batch 1 already invents the run (4 datacores), and so does
-    # every later batch: 4 + 4 x 4 = 20.
+    # No owned BPC: batch 1 invents the run (4 datacores) on a 10-run BPC,
+    # whose 9 spare runs cover batches 2-5 (I3; was 4 + 4 x 4 = 20).
     row = _invention_overview(
         monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(), prices=_NESTED_FAKE_PRICES,
     )[7100]
@@ -1834,7 +1842,10 @@ def test_nested_without_owned_bpc_extra_batch_datacores_are_unchanged(monkeypatc
 
     row["max_batches_total"] = 5
     line = _shopping_line(row, 204)
-    assert line is not None and (line["need"], line["buy"]) == (20, 20)
+    assert line is not None and (line["need"], line["buy"]) == (4, 4)
+    row["max_batches_total"] = 21
+    line = _shopping_line(row, 204)
+    assert line is not None and (line["need"], line["buy"]) == (12, 12)   # 21 runs: 3 BPCs
 
 
 def test_nested_sub_build_bought_in_batch_one_adds_no_extra_batch_datacores(monkeypatch) -> None:
@@ -3831,13 +3842,56 @@ def test_three_invented_levels_buy_every_levels_datacores_for_every_batch(monkey
     extra = _later_plan(mj, 2)["invention_procurement_materials"]
     assert (extra["204"]["quantity"], extra["205"]["quantity"], extra["206"]["quantity"]) == (4, 4, 4)
 
+    # Every level carries its spare BPC runs across batches (I3): BPCs over
+    # all batches = ceil(runs past what is owned or left / 10 runs per BPC),
+    # 2 whole attempts x 2 datacores = 4 per BPC.
+    def needs(batches: int) -> dict[int, int | None]:
+        row["max_batches_total"] = batches
+        return {t: (_shopping_line(row, t) or {}).get("need") for t in (204, 205, 206)}
+
+    # 3 batches: one invented 10-run BPC each covers all 3 runs of 204 and
+    # 205; 206: batch 1 runs on the owned BPC, whose 9 runs left cover 2-3.
+    assert needs(3) == {204: 4, 205: 4, 206: None}
+    # 11 batches: 2 BPCs each for 204/205; 206: 10 later runs - 9 owned = 1.
+    assert needs(11) == {204: 8, 205: 8, 206: 4}
+    # 21 batches: 3 BPCs each; 206: 20 - 9 = 11 runs, 2 BPCs.
+    assert needs(21) == {204: 12, 205: 12, 206: 8}
+
+
+def test_three_invented_levels_without_owned_bpcs_carry_every_levels_spare_runs(monkeypatch) -> None:
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_three_level_invention_rows(), prices=_THREE_LEVEL_PRICES,
+    )[5002]
+    for batches, per_level in ((1, 4), (3, 4), (10, 4), (11, 8), (21, 12)):
+        row["max_batches_total"] = batches
+        assert {t: (_shopping_line(row, t) or {}).get("need") for t in (204, 205, 206)} == (
+            {204: per_level, 205: per_level, 206: per_level}
+        ), batches
+
+
+def test_owned_nested_spare_runs_are_not_credited_when_another_row_may_use_them(monkeypatch) -> None:
+    from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+
+    deep_bpc = SimpleNamespace(
+        type_id=9202, item_id=99, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=10,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_three_level_invention_rows(), prices=_THREE_LEVEL_PRICES,
+        owned_assets=([deep_bpc], [], {}, {}, {}),
+    )[5002]
     row["max_batches_total"] = 3
-    needs = {t: (_shopping_line(row, t) or {}).get("need") for t in (204, 205, 206)}
-    # 204: the top-level invented BPC's runs are shared across batches, so one
-    # 10-run BPC covers all three 1-run batches. 205/206: nested levels are
-    # invented again per later batch (their BPC remainder is not carried), so
-    # they are bought on the safe side: 3 x 4 and 2 x 4.
-    assert needs == {204: 4, 205: 12, 206: 8}
+    # Another selected row that builds from blueprint 9202 may spend the same
+    # 9 runs left: they are not credited (no under-buy).
+    other = {"type_id": 5202, "type_name": "Other", "max_batches_total": 1, "manufacturing_job": {
+        "later_batch_plan_version": 1, "blueprint_sde": {"blueprint_type_id": 9202},
+        "nested_invention_bpc_plans": [], "nested_blueprint_runs_left": {},
+        "procurement_materials": {}, "blueprint_source_kind": "owned_blueprint_copy",
+    }}
+    line = next(m for m in aggregate_shopping_list([row, other]) if m["type_id"] == 206)
+    assert line["need"] == 4   # batches 2-3: 2 runs, one invented BPC
 
 
 # --- round 5 Task 10 carry 10: the EIV's material count ------------------------

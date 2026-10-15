@@ -27,6 +27,10 @@ LATER_BATCH_PLAN_BUY_LIST_KEYS = (PROCUREMENT_KEY, INVENTION_KEY, PLAN_NESTED_IN
 BPC_PLAN_KEY = "invention_bpc_plan"
 BPC_PLAN_LINES_KEY = "per_attempt_materials"
 EXTRA_BATCH_SCHEDULE_KEY = "extra_batch_schedule"
+#: I3: the nested inventions of batch 1 (row) and of each later plan, and the
+#: owned BPC runs each nested blueprint has left after batch 1.
+NESTED_BPC_PLANS_KEY = "nested_invention_bpc_plans"
+NESTED_RUNS_LEFT_KEY = "nested_blueprint_runs_left"
 #: manufacturing_job.owned_stock_by_type_id: {str(type_id): quantity}, the
 #: hangar stock the producer planned the row against, for its buy-line types,
 #: and owned_stock_pool_id: one id per compute (a hash of that stock).
@@ -102,6 +106,12 @@ def aggregate_shopping_list_with_stale(
     # Keyless rows' types whose take may understate the stock (see above).
     take_bound_type_names: dict[int, str] = {}
 
+    counted_jobs = [
+        mj for mj in (row.get("manufacturing_job") if isinstance(row, dict) else None for row in selected_rows)
+        if isinstance(mj, dict) and not _row_predates_later_batch_plans(mj)
+    ]
+    blueprint_users = [_blueprints_whose_bpc_runs_it_may_use(mj) for mj in counted_jobs]
+
     for row in selected_rows:
         if not isinstance(row, dict):
             continue
@@ -112,7 +122,15 @@ def aggregate_shopping_list_with_stale(
             # Possibly short: never counted (rows_built_by_an_older_version).
             continue
         batches = max(1, int(row.get("max_batches_total") or 1))
-        lines = _row_lines_with_batch_counts(mj, batches)
+        others = [used for job, used in zip(counted_jobs, blueprint_users) if job is not mj]
+        lines = _row_lines_with_batch_counts(
+            mj, batches,
+            # Owned spare runs are this row's alone only when no other
+            # selected row may build from that blueprint's BPCs.
+            exclusive_blueprint=lambda bp, _others=others: all(
+                used is not None and bp not in used for used in _others
+            ),
+        )
         if not lines:
             continue
 
@@ -272,7 +290,9 @@ _UNKNOWN_DATACORE_NEED_KEY = "invention_datacore_need_unknown"
 
 
 
-def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple[Any, int]]:
+def _row_lines_with_batch_counts(
+    mj: dict[str, Any], batches: int, *, exclusive_blueprint: Any = None,
+) -> list[tuple[Any, int]]:
     """Each material line of a row with the number of batches it is needed for.
 
     procurement_materials: batch 1's manufacturing buy list.
@@ -296,6 +316,12 @@ def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple
     row's invention_procurement_materials_per_extra_batch). An overview cached
     before that list existed lacks the key, and batch 1's invention list then
     counts for every batch. Every later-batch line takes nothing from stock.
+
+    Nested inventions (I3), on a row that publishes ``nested_invention_bpc_plans``:
+    their later-batch inputs are not taken per batch but sized over all
+    batches (``_later_batch_nested_invention_lines``), like the row's own.
+    `exclusive_blueprint(bp)` says whether the row may count blueprint bp's
+    owned BPC runs left after batch 1 as its own.
     """
     def lines(source: dict[str, Any], key: str) -> list[Any]:
         value = source.get(key)
@@ -303,6 +329,9 @@ def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple
 
     plan = mj.get(BPC_PLAN_KEY)
     has_bpc_plan = isinstance(plan, dict)
+    nested_model = isinstance(mj.get(NESTED_BPC_PLANS_KEY), list)
+    # Later batches' nested inventions (count, plan list) for the I3 sizing.
+    later_nested: list[tuple[int, Any]] = []
     schedule = mj.get(EXTRA_BATCH_SCHEDULE_KEY)
     if schedule is not None:
         out: list[tuple[Any, int]] = [(mat, 1) for mat in lines(mj, PROCUREMENT_KEY)]
@@ -312,23 +341,140 @@ def _row_lines_with_batch_counts(mj: dict[str, Any], batches: int) -> list[tuple
         for plan_index, count in _later_batch_plan_counts(schedule, batches - 1).items():
             later_plan = cast(list[dict[str, Any]], plans)[plan_index]
             out.extend((mat, count) for mat in lines(later_plan, PROCUREMENT_KEY))
-            out.extend((mat, count) for mat in lines(later_plan, invention_key))
+            if not nested_model:
+                out.extend((mat, count) for mat in lines(later_plan, invention_key))
+                continue
+            if not has_bpc_plan:
+                # The row's own invention for this batch alone: the plan's
+                # list minus its nested part.
+                out.extend((mat, count) for mat in _minus(
+                    lines(later_plan, INVENTION_KEY), lines(later_plan, PLAN_NESTED_INVENTION_KEY),
+                ))
+            later_nested.append((count, later_plan.get(NESTED_BPC_PLANS_KEY)))
         if has_bpc_plan and batches > 1:
             out.extend((mat, 1) for mat in _later_batch_invention_lines(cast(dict[str, Any], plan), batches))
-        return out
-
-    out = [(mat, batches) for mat in lines(mj, PROCUREMENT_KEY)]
-    if has_bpc_plan:
-        out.extend((mat, 1) for mat in lines(mj, INVENTION_KEY))
-        if batches > 1:
-            out.extend((mat, 1) for mat in _later_batch_invention_lines(cast(dict[str, Any], plan), batches))
-            out.extend((mat, batches - 1) for mat in lines(mj, NESTED_EXTRA_BATCH_INVENTION_KEY))
-    elif isinstance(mj.get(EXTRA_BATCH_INVENTION_KEY), dict):
-        out.extend((mat, 1) for mat in lines(mj, INVENTION_KEY))
-        if batches > 1:
-            out.extend((mat, batches - 1) for mat in lines(mj, EXTRA_BATCH_INVENTION_KEY))
     else:
-        out.extend((mat, batches) for mat in lines(mj, INVENTION_KEY))
+        out = [(mat, batches) for mat in lines(mj, PROCUREMENT_KEY)]
+        if has_bpc_plan:
+            out.extend((mat, 1) for mat in lines(mj, INVENTION_KEY))
+            if batches > 1:
+                out.extend((mat, 1) for mat in _later_batch_invention_lines(cast(dict[str, Any], plan), batches))
+                if not nested_model:
+                    out.extend((mat, batches - 1) for mat in lines(mj, NESTED_EXTRA_BATCH_INVENTION_KEY))
+        elif isinstance(mj.get(EXTRA_BATCH_INVENTION_KEY), dict):
+            out.extend((mat, 1) for mat in lines(mj, INVENTION_KEY))
+            if batches > 1:
+                extra = lines(mj, EXTRA_BATCH_INVENTION_KEY)
+                if nested_model:
+                    extra = _minus(extra, lines(mj, NESTED_EXTRA_BATCH_INVENTION_KEY))
+                out.extend((mat, batches - 1) for mat in extra)
+        else:
+            out.extend((mat, batches) for mat in lines(mj, INVENTION_KEY))
+        if batches > 1:
+            # Every later batch repeats batch 1, nested inventions included.
+            later_nested.append((batches - 1, mj.get(NESTED_BPC_PLANS_KEY)))
+    if nested_model and batches > 1:
+        out.extend((mat, 1) for mat in _later_batch_nested_invention_lines(
+            mj, later_nested, exclusive_blueprint or (lambda bp: False),
+        ))
+    return out
+
+
+def _minus(total: list[Any], part: list[Any]) -> list[dict[str, Any]]:
+    """`total` lines less `part`'s quantity of the same type, per line."""
+    part_by_type: dict[int, int] = {}
+    for mat in part:
+        if isinstance(mat, dict) and mat.get("type_id") is not None:
+            part_by_type[int(mat["type_id"])] = part_by_type.get(int(mat["type_id"]), 0) + int(mat.get("quantity") or 0)
+    out: list[dict[str, Any]] = []
+    for mat in total:
+        if not isinstance(mat, dict) or mat.get("type_id") is None:
+            continue
+        quantity = max(0, int(mat.get("quantity") or 0) - part_by_type.pop(int(mat["type_id"]), 0))
+        if quantity > 0:
+            out.append({**mat, "quantity": quantity, "take_quantity": 0, "buy_quantity": quantity})
+    return out
+
+
+def _blueprints_whose_bpc_runs_it_may_use(mj: dict[str, Any]) -> set[int] | None:
+    """The blueprint types whose owned BPC runs a counted row may spend: its
+    own and its nested blueprints. None when the row does not say (an
+    overview from before I3 planned with BPCs): it may use any."""
+    own = (mj.get("blueprint_sde") or {}).get("blueprint_type_id") if isinstance(mj.get("blueprint_sde"), dict) else None
+    out = {int(own)} if own else set()
+    left = mj.get(NESTED_RUNS_LEFT_KEY)
+    if isinstance(left, dict):
+        return out | {int(t) for t in left}
+    if mj.get("blueprint_source_kind") in _NON_BPC_SOURCE_KINDS:
+        return out
+    return None
+
+
+def _later_batch_nested_invention_lines(
+    mj: dict[str, Any], later_nested: list[tuple[int, Any]], exclusive_blueprint: Any,
+) -> list[dict[str, Any]]:
+    """The nested inventions' inputs for batches 2..N, sized over all batches (I3).
+
+    Per nested blueprint: the runs batches 2..N invent (each later plan
+    assumes no owned BPC run of it is left), less what is already there:
+    the spare runs of the BPCs batch 1 invented (ceil(n / R) x R - n), and
+    the owned BPC runs left after batch 1 when no other selected row may use
+    them. BPCs = ceil(runs / R), each bought as whole attempts, as the row's
+    own invention_bpc_plan does. So BPCs over all batches = ceil(B x n / R),
+    not B x ceil(n / R); never less than the runs needed.
+    """
+    def plans(value: Any) -> list[dict[str, Any]]:
+        return [p for p in (value or []) if isinstance(p, dict) and p.get("invented_blueprint_type_id") is not None]
+
+    later_runs: dict[int, int] = {}
+    model: dict[int, dict[str, Any]] = {}
+    for count, value in later_nested:
+        for entry in plans(value):
+            bp = int(entry["invented_blueprint_type_id"])
+            later_runs[bp] = later_runs.get(bp, 0) + int(count) * max(0, int(entry.get("invented_runs") or 0))
+            model.setdefault(bp, entry)
+            # The fewest runs per BPC and the most attempts per BPC: never short.
+            model[bp] = {
+                **model[bp],
+                "runs_per_invented_blueprint": min(
+                    max(1, int(model[bp].get("runs_per_invented_blueprint") or 1)),
+                    max(1, int(entry.get("runs_per_invented_blueprint") or 1)),
+                ),
+                "whole_attempts_per_blueprint": max(
+                    int(model[bp].get("whole_attempts_per_blueprint") or 0),
+                    int(entry.get("whole_attempts_per_blueprint") or 0),
+                ),
+            }
+    spare: dict[int, int] = {}
+    for entry in plans(mj.get(NESTED_BPC_PLANS_KEY)):
+        bp = int(entry["invented_blueprint_type_id"])
+        n = max(0, int(entry.get("invented_runs") or 0))
+        per_bpc = max(1, int(entry.get("runs_per_invented_blueprint") or 1))
+        spare[bp] = spare.get(bp, 0) + (-(-n // per_bpc)) * per_bpc - n
+    left = mj.get(NESTED_RUNS_LEFT_KEY)
+    for type_key, runs in (left.items() if isinstance(left, dict) else []):
+        try:
+            bp, owned_left = int(type_key), max(0, int(runs or 0))
+        except (TypeError, ValueError):
+            continue
+        if owned_left and exclusive_blueprint(bp):
+            spare[bp] = spare.get(bp, 0) + owned_left
+
+    out: list[dict[str, Any]] = []
+    for bp, runs in later_runs.items():
+        entry = model[bp]
+        to_invent = max(0, runs - spare.get(bp, 0))
+        bpcs = -(-to_invent // int(entry["runs_per_invented_blueprint"]))
+        attempts = bpcs * int(entry["whole_attempts_per_blueprint"])
+        if attempts <= 0:
+            continue
+        per_attempt = entry.get(BPC_PLAN_LINES_KEY)
+        for mat in (per_attempt.values() if isinstance(per_attempt, dict) else []):
+            if not isinstance(mat, dict):
+                continue
+            quantity = int(mat.get("quantity") or 0) * attempts
+            if quantity > 0:
+                out.append({**mat, "quantity": quantity, "take_quantity": 0, "buy_quantity": quantity})
     return out
 
 
