@@ -562,8 +562,13 @@ class DailyPlannerService:
         # on overview_rows holds only the kept rows, so every later phase and
         # every per-type query sees the same single row per type_id.
         with _ComputeStep(self, "reading the product overview"):
-            input_rows = self._build_input_rows(self._get_overview_rows())
+            all_overview_rows = self._get_overview_rows()
+            input_rows = self._build_input_rows(all_overview_rows)
         overview_rows = [r.raw for r in input_rows]
+        # The variants dedupe_by_type_id dropped, by type_id: research first
+        # (ChainPlanner) builds from an owned-BPC variant while the BPO is in
+        # the lab. Raw rows, read only for that.
+        variant_rows_by_type_id = _dropped_variants(all_overview_rows, overview_rows)
 
         with _ComputeStep(self, "reading industry jobs"):
             industry_jobs = self._get_industry_jobs()
@@ -627,6 +632,7 @@ class DailyPlannerService:
             "corp_wallet": corp_wallet,
             "overview_rows": overview_rows,
             "input_rows": input_rows,
+            "variant_rows_by_type_id": variant_rows_by_type_id,
             "industry_jobs": industry_jobs,
             "corp_assets": corp_assets,
             "corp_material_stock": corp_material_stock,
@@ -1467,3 +1473,23 @@ def _parse_isk(raw: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def _dropped_variants(
+    all_rows: list[Any], kept_rows: list[dict[str, Any]],
+) -> dict[int, list[dict[str, Any]]]:
+    """{type_id: [overview rows of that product dedupe_by_type_id dropped]}:
+    every dict row of a kept product that is not the kept row itself."""
+    kept = {id(r) for r in kept_rows}
+    kept_types = {int(r.get("type_id") or 0) for r in kept_rows if isinstance(r, dict)}
+    out: dict[int, list[dict[str, Any]]] = {}
+    for row in all_rows or []:
+        if not isinstance(row, dict) or id(row) in kept:
+            continue
+        try:
+            type_id = int(row.get("type_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if type_id in kept_types:
+            out.setdefault(type_id, []).append(row)
+    return out

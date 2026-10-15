@@ -75,6 +75,9 @@ from eve_online_industry_tracker.application.industry.job_cost import (
     profile_facility_tax,
     research_level_multiplier,
 )
+from eve_online_industry_tracker.application.industry.research_time import (
+    research_skill_reductions,
+)
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry import shopping_list as _shopping_list
 from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
@@ -3387,12 +3390,9 @@ class IndustryService:
         elif activity == "copying":
             reductions.append(0.05 * int(skill_levels_by_name.get("Science", 0) or 0))
             reductions.append(0.03 * int(skill_levels_by_name.get("Advanced Industry", 0) or 0))
-        elif activity == "research_material":
-            reductions.append(0.05 * int(skill_levels_by_name.get("Metallurgy", 0) or 0))
-            reductions.append(0.03 * int(skill_levels_by_name.get("Advanced Industry", 0) or 0))
-        elif activity == "research_time":
-            reductions.append(0.05 * int(skill_levels_by_name.get("Research", 0) or 0))
-            reductions.append(0.03 * int(skill_levels_by_name.get("Advanced Industry", 0) or 0))
+        elif activity in ("research_material", "research_time"):
+            # The one research-skill table, shared with the daily planner.
+            reductions.extend(research_skill_reductions(activity, skill_levels_by_name))
         elif activity == "invention":
             reductions.append(0.03 * int(skill_levels_by_name.get("Advanced Industry", 0) or 0))
         return cls._combine_reductions(reductions)
@@ -8200,7 +8200,7 @@ class IndustryService:
         return tables, reasons
 
     def _research_duration_by_level(
-        self, ctx: _ProductPlanningContext, *, row: dict[str, Any],
+        self, ctx: _ProductPlanningContext, *, row: dict[str, Any], skilled: bool = True,
     ) -> dict[str, list[int] | None]:
         """The duration in seconds of researching this blueprint from level 0
         to each level 0..max, per research activity: a list indexed by level,
@@ -8208,7 +8208,11 @@ class IndustryService:
         (level-1 time / 105 s) x EVE's rank-1 level table, then the skill,
         structure, rig and implant time reductions of _plan_activity_costs.
         A job from level a to b takes [b] - [a] (EVE's table is cumulative).
-        None for an activity without a research time in the SDE."""
+        None for an activity without a research time in the SDE.
+
+        skilled=False leaves the research skills out (structure, rig and
+        implant reductions stay): the daily planner applies the ASSIGNED
+        pilot's skills to it (research_time.research_skill_time_multiplier)."""
         tables: dict[str, list[int] | None] = {}
         for activity_name, source_field in [("research_material", "research_material_job"), ("research_time", "research_time_job")]:
             base_level_one = int(((row.get(source_field) or {}).get("time_seconds") or 0))
@@ -8218,7 +8222,15 @@ class IndustryService:
             durations = [0]
             for level in range(1, self._MAX_RESEARCH_LEVEL + 1):
                 target = self._research_target_duration_seconds(level_one_duration_seconds=base_level_one, target_level=level)
-                priced = self._plan_activity_costs(ctx, activity=activity_name, base_time_seconds=target, runs=1, process_value=None)
+                if skilled:
+                    priced = self._plan_activity_costs(ctx, activity=activity_name, base_time_seconds=target, runs=1, process_value=None)
+                else:
+                    priced = self._compute_activity_job(
+                        activity=activity_name, base_time_seconds=target, runs=1, process_value=None,
+                        selected_industry_profile=ctx.selected_industry_profile,
+                        selected_character_modifiers=ctx.selected_character_modifiers,
+                        character_skill_levels_by_name={}, surcharge_rates=ctx.surcharge_rates,
+                    )
                 durations.append(int(priced["duration_seconds"]))
             tables[activity_name] = durations
         return tables
@@ -9095,6 +9107,9 @@ class IndustryService:
                 row_out["manufacturing_job"]["research_job_cost_by_level_unknown_reason"],
             ) = self._research_job_cost_by_level(ctx, row=row, per_run_material_eiv=per_run_material_eiv)
             row_out["manufacturing_job"]["research_duration_seconds_by_level"] = self._research_duration_by_level(ctx, row=row)
+            row_out["manufacturing_job"]["research_duration_seconds_by_level_unskilled"] = self._research_duration_by_level(
+                ctx, row=row, skilled=False,
+            )
         top_level_chance = (
             inv_costs.get("invention_chance") if requires_invention_chain and inv_costs is not None else None
         ) or extra_chance

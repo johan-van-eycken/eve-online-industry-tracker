@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.daily_planner import research_first
 from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.application.industry.invention_model import MAX_BLUEPRINT_TE as DEFAULT_MAX_BLUEPRINT_TE
 from eve_online_industry_tracker.application.industry import overview_row as orow
@@ -174,6 +175,10 @@ class ChainPlanner:
             "price_map", phase1_data.get("market_depth_cache", {}),
         )
         invention_success_rates: dict[int, float] = phase1_data.get("invention_success_rates", {})
+        # Research first: the owned-BPC variants dedupe_by_type_id dropped,
+        # and the raw market depth their profit is scored on.
+        variant_rows_by_type_id: dict[int, list] = phase1_data.get("variant_rows_by_type_id", {})
+        raw_market_depth: dict[int, Any] = phase1_data.get("market_depth_cache", {})
         # Built once per plan: material requirements are product type_ids, but
         # BPO ownership and blueprint_data are keyed by blueprint type_id.
         product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
@@ -205,6 +210,11 @@ class ChainPlanner:
                         te_research_target=te_research_target,
                         bpo_strong_buy_days=bpo_strong_buy_days,
                         bpo_consider_days=bpo_consider_days,
+                    )
+                    self._apply_research_first(
+                        decision, bp_type_id,
+                        variant_rows_by_type_id.get(int(decision.type_id)) or [],
+                        raw_market_depth.get(int(decision.type_id)),
                     )
                 else:
                     # T2+ — invention chain only
@@ -454,6 +464,66 @@ class ChainPlanner:
             return None
         return blueprint_type_id
 
+    def _apply_research_first(
+        self,
+        decision: ItemDecision,
+        bp_type_id: int,
+        variants: list[dict[str, Any]],
+        market_depth: Any | None,
+    ) -> None:
+        """Research first (see research_first.py): when research is scheduled
+        on the BPO this batch builds from or copies, build from an owned-BPC
+        variant row, else the owned-BPC runs only, else nothing. Recorded on
+        the row as `research_first` ({mode: variant | part | none, note,
+        ...}); decided here, before the sub-components are sized, so they
+        and the manufacture action follow the same decision."""
+        row = decision.overview_row
+        if not (row.get("needs_me_research") or row.get("needs_te_research")):
+            return
+        if not research_first.batch_uses_bpo(row):
+            return
+        variant = research_first.best_bpc_variant(variants, bp_type_id)
+        if variant is not None:
+            new_row = self._research_first_variant_row(row, variant)
+            profit, reason = _variant_profit(variant, market_depth)
+            new_row["research_first"] = {
+                "mode": "variant",
+                "note": "BPO in research: built from the owned-BPC variant",
+                "profit": profit, "profit_unknown_reason": reason,
+            }
+            decision.overview_row = new_row
+            logger.info(
+                "ChainPlanner: type_id=%s: BPO %s in research, building from its owned-BPC variant",
+                decision.type_id, bp_type_id,
+            )
+            return
+        part = research_first.best_part([row, *variants])
+        if part is not None:
+            row["research_first"] = {
+                "mode": "part", **part,
+                "note": f"BPO in research: built from the owned BPC runs only ({part['runs']} of "
+                        f"{orow.get_manufacturing_job(row).get('runs')} runs)",
+                "cost_unknown_reason": research_first.PART_COST_UNKNOWN_REASON,
+            }
+        else:
+            row["research_first"] = {"mode": "none", "note": "BPO in research: not built from it in this plan"}
+        logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, row["research_first"]["note"])
+
+    @staticmethod
+    def _research_first_variant_row(row: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
+        """The owned-BPC variant, carrying the kept row's research scheduling
+        and, where the variant lacks them, its research fee/duration tables
+        (the same BPO's)."""
+        kept_job = orow.get_manufacturing_job(row)
+        job = dict(orow.get_manufacturing_job(variant))
+        for key in ("research_job_cost_by_level", "research_job_cost_by_level_unknown_reason",
+                    "research_duration_seconds_by_level", "research_duration_seconds_by_level_unskilled"):
+            if key not in job and key in kept_job:
+                job[key] = kept_job[key]
+        new_row = {**variant, "manufacturing_job": job}
+        new_row.update({k: row[k] for k in research_first.RESEARCH_KEYS if k in row})
+        return new_row
+
     def _collect_sub_manufacture_requests(
         self,
         *,
@@ -475,7 +545,15 @@ class ChainPlanner:
         the sub job gets in this parent's structure
         (facility_bonus.sub_job_facility_reductions).
         """
-        batch_materials = orow.get_batch_materials(decision.overview_row)
+        first = decision.overview_row.get("research_first")
+        mode = first.get("mode") if isinstance(first, dict) else None
+        if mode == "none":
+            # Research first: the parent is not built, so neither are its components.
+            return []
+        batch_materials = (
+            dict(first["materials"]) if mode == "part"
+            else orow.get_batch_materials(decision.overview_row)
+        )
         if batch_materials is None:
             logger.warning(
                 "ChainPlanner: type_id=%s has no producer batch materials "
@@ -1048,6 +1126,28 @@ class ChainPlanner:
                 blueprint_type_id, exc_info=True,
             )
             return None
+
+
+class _NoMetaGroups:
+    def meta_group_id(self, type_id: int) -> None:
+        return None
+
+
+def _variant_profit(variant: dict[str, Any], market_depth: Any | None) -> tuple[float | None, str | None]:
+    """The variant's batch profit, scored exactly like the kept row's
+    (ProfitabilityScorer's absolute profit), or (None, why)."""
+    from eve_online_industry_tracker.application.daily_planner.input_row import (
+        PlannerInputError,
+        PlannerInputRow,
+    )
+    from eve_online_industry_tracker.application.daily_planner.profitability_scorer import _compute_absolute_profit
+
+    try:
+        input_row = PlannerInputRow.from_overview(variant, meta_groups=_NoMetaGroups())
+    except PlannerInputError as exc:
+        return None, f"the owned-BPC variant row is malformed ({exc})"
+    profit, reason = _compute_absolute_profit(input_row, market_depth)
+    return (None, reason) if reason is not None else (profit, None)
 
 
 def _batch_runs(manufacturing_job: dict[str, Any]) -> tuple[int | None, str | None]:

@@ -11,6 +11,7 @@ Priority rules:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,6 +22,7 @@ from eve_online_industry_tracker.application.daily_planner.assigned_invention im
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
+from eve_online_industry_tracker.application.industry.research_time import research_skill_time_multiplier
 from eve_online_industry_tracker.application.industry.invention_model import (
     InventionSkillSet,
     invention_skill_factor,
@@ -220,6 +222,7 @@ class CharacterAssigner:
             return actions
 
         # ME/TE research
+        me_scheduled, lab_free_at = False, now
         if row.get("needs_me_research"):
             bp_type_id = self._research_blueprint_type_id(row, type_id, "ME")
             char_id, char_name = (
@@ -227,6 +230,14 @@ class CharacterAssigner:
                 else self._best_research_char(char_slots, characters)
             )
             if char_id is not None:
+                me_timing = _research_timing(
+                    row, "research_material", "me_current", "me_research_target", now,
+                    f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
+                    _pilot_skills(char_slots, char_id),
+                )
+                # EVE runs one job per blueprint: a TE job on the same BPO starts after this one.
+                lab_free_at: datetime | None = me_timing["estimated_completion"]
+                me_scheduled = True
                 actions.append(AssignedAction(
                     type_id=bp_type_id,
                     type_name=type_name + " BPO",
@@ -237,10 +248,7 @@ class CharacterAssigner:
                     runs=None,
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
-                    **_research_timing(
-                        row, "research_material", "me_current", "me_research_target", now,
-                        f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
-                    ),
+                    **me_timing,
                     **_job_fee(
                         *_research_fee(row, "research_material", "me_current", "me_research_target"),
                         "me_research", type_id,
@@ -268,7 +276,9 @@ class CharacterAssigner:
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
                     **_research_timing(
-                        row, "research_time", "te_current", "te_research_target", now, _te_research_note(row),
+                        row, "research_time", "te_current", "te_research_target", lab_free_at,
+                        _te_research_note(row), _pilot_skills(char_slots, char_id),
+                        after_me=me_scheduled,
                     ),
                     **_job_fee(
                         *_research_fee(row, "research_time", "te_current", "te_research_target"),
@@ -402,48 +412,39 @@ class CharacterAssigner:
                 self._take_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action
 
-        # Research first (the user's decision, Task 8c fix round 1): a BPO
-        # with a research action in this plan is in the lab, so it neither
-        # builds nor copies for this item; the batch falls back to its owned
-        # BPC runs, or is not built.
-        research = [a for a in actions if a.action_type in ("me_research", "te_research")]
-        bpc_only = None
-        if research and _batch_uses_bpo(row):
-            bpc_only = _owned_bpc_part(row)
-            note = (
-                f"BPO in research: built from the owned BPC runs only ({bpc_only['runs']} of "
-                f"{_batch_runs(type_id, row)} runs)"
-                if bpc_only is not None
-                else "BPO in research: not built from it in this plan"
-            )
-            for action in research:
-                action.notes = f"{action.notes}; {note}"
-            logger.info("CharacterAssigner: type_id=%s: %s", type_id, note)
-            if bpc_only is None:
+        # Research first (research_first.py): ChainPlanner decided, before
+        # sizing the sub-components, how this item builds while its BPO is
+        # in the lab: from an owned-BPC variant (the row is that variant),
+        # from the owned-BPC runs only, or not at all.
+        first = row.get("research_first") if isinstance(row.get("research_first"), dict) else None
+        if first is not None:
+            for action in actions:
+                if action.action_type in ("me_research", "te_research"):
+                    action.notes = f"{action.notes}; {first['note']}"
+            if first["mode"] == "none":
                 return actions
-            bpc_only["notes"] = note
 
         # Manufacturing
         char_id, char_name = self._best_mfg_char(char_slots, characters)
-        if char_id is not None and bpc_only is not None:
+        if char_id is not None and first is not None and first["mode"] == "part":
             actions.append(AssignedAction(
                 type_id=type_id,
                 type_name=type_name,
                 action_type="manufacture",
                 character_id=char_id,
                 character_name=char_name,
-                quantity=bpc_only["quantity"],
-                runs=bpc_only["runs"],
-                # The batch's material cost and profit are for the whole
-                # batch, not this part of it: unknown, not a wrong figure.
+                quantity=first["quantity"],
+                runs=first["runs"],
+                # The producer priced the whole batch, not this part of it:
+                # unknown, with the reason in the note, not a wrong figure.
                 estimated_cost_isk=None,
                 estimated_build_cost_isk=None,
                 estimated_profit_isk=None,
                 estimated_completion=None,
-                notes=f"Build: {decision.decision_reason}; {bpc_only['notes']}",
-                materials=bpc_only["materials"],
+                notes=f"Build: {decision.decision_reason}; {first['note']}; {first['cost_unknown_reason']}",
+                materials=dict(first["materials"]),
                 **_job_fee(
-                    _times_runs(orow.get_manufacturing_fee_per_run(row), bpc_only["runs"]),
+                    _times_runs(orow.get_manufacturing_fee_per_run(row), first["runs"]),
                     orow.get_manufacturing_fee_unknown_reason(row),
                     "manufacture", type_id,
                 ),
@@ -459,6 +460,13 @@ class CharacterAssigner:
             # price it -- unknown, not free.
             estimated_cost = orow.get_material_cost_total(row)
             estimated_profit = decision.absolute_profit_per_batch
+            notes = f"Build: {decision.decision_reason}"
+            if first is not None and first["mode"] == "variant":
+                # The owned-BPC variant's own profit, scored like the kept row's.
+                estimated_profit = first.get("profit")
+                notes += f"; {first['note']}"
+                if first.get("profit_unknown_reason"):
+                    notes += f"; profit unknown: {first['profit_unknown_reason']}"
             # The batch's unit total, so feedback can turn the batch cost into
             # a per-unit cost (FeedbackProcessor compares per unit). None when
             # the row carries none -- feedback then skips the cost update.
@@ -479,7 +487,7 @@ class CharacterAssigner:
                 estimated_build_cost_isk=orow.get_total_cost(row),
                 estimated_profit_isk=estimated_profit,
                 estimated_completion=None,
-                notes=f"Build: {decision.decision_reason}",
+                notes=notes,
                 materials=orow.get_batch_materials(row),
                 **_job_fee(
                     orow.get_manufacturing_fee(row), orow.get_manufacturing_fee_unknown_reason(row),
@@ -726,53 +734,6 @@ def _times_runs(fee_per_run: float | None, runs: int | None) -> float | None:
     return fee_per_run * runs
 
 
-#: Batch sources that need the owned BPO itself: building from it, or
-#: copying it. A BPO in research can do neither.
-_BPO_SOURCES = frozenset({"owned_blueprint_original", "copied_from_owned_blueprint_original"})
-
-
-def _job_segments(row: dict[str, Any]) -> list[dict[str, Any]] | None:
-    segments = orow.get_manufacturing_job(row).get("job_segments")
-    if not isinstance(segments, list) or not all(isinstance(s, dict) for s in segments):
-        return None
-    return segments
-
-
-def _batch_uses_bpo(row: dict[str, Any]) -> bool:
-    """Whether the batch builds from, or copies, the owned BPO. Without job
-    segments the batch's source kind decides; with neither the BPO is
-    assumed in use (the chain planner chose the BPO path)."""
-    segments = _job_segments(row)
-    if segments:
-        return any(str(s.get("source")) in _BPO_SOURCES for s in segments)
-    kind = orow.get_manufacturing_job(row).get("blueprint_source_kind")
-    return kind is None or str(kind) in _BPO_SOURCES
-
-
-def _owned_bpc_part(row: dict[str, Any]) -> dict[str, Any] | None:
-    """The part of the batch on owned BPCs (the producer's
-    owned_blueprint_copy job segments): {runs, quantity, materials}, or None
-    when there is none or its materials are unknown."""
-    segments = [s for s in (_job_segments(row) or []) if str(s.get("source")) == "owned_blueprint_copy"]
-    runs = sum(int(s.get("runs") or 0) for s in segments)
-    if runs <= 0:
-        return None
-    materials: dict[int, int] = {}
-    for segment in segments:
-        per_job = segment.get("materials")
-        if not isinstance(per_job, dict):
-            return None
-        for type_id, quantity in per_job.items():
-            try:
-                materials[int(type_id)] = materials.get(int(type_id), 0) + int(quantity)
-            except (TypeError, ValueError):
-                return None
-    total_runs = int(orow.get_manufacturing_job(row).get("runs") or 0)
-    units = orow.get_product_quantity(row)
-    quantity = units * runs // total_runs if total_runs > 0 and units > 0 else None
-    return {"runs": runs, "quantity": quantity, "materials": materials}
-
-
 def _research_levels(row: dict[str, Any], activity: str, current_key: str, target_key: str) -> tuple[int, int] | None:
     """(from, to) research level of the row's research job, or None when a
     level is unknown. ME is stored as the level (0..10), TE as EVE's
@@ -798,21 +759,51 @@ def _format_duration(seconds: int) -> str:
     return " ".join(parts)
 
 
+def _pilot_skills(char_slots: dict[int, dict[str, Any]], char_id: int) -> dict[str, int] | None:
+    """The assigned pilot's skill levels by name, or None when its skill
+    list is not loaded (unknown, not level 0)."""
+    slot = char_slots.get(char_id) or {}
+    return slot.get("skills") if slot.get("skills_by_id") is not None else None
+
+
+def _research_seconds(
+    row: dict[str, Any], activity: str, levels: tuple[int, int], pilot_skills: dict[str, int] | None,
+) -> tuple[int | None, str | None]:
+    """(seconds, basis note) of the research job over `levels`: the
+    producer's unskilled duration x the assigned pilot's research-skill
+    multiplier; else the producer's figure (its own character's skills),
+    said in the note; (None, None) when neither is published."""
+    unskilled = orow.get_research_duration_seconds(row, activity, *levels, unskilled=True)
+    if pilot_skills is not None and unskilled is not None:
+        return math.ceil(unskilled * research_skill_time_multiplier(activity, pilot_skills)), None
+    producer = orow.get_research_duration_seconds(row, activity, *levels)
+    if producer is None:
+        return None, None
+    why = "the pilot's are unknown" if pilot_skills is None else "no unskilled duration published"
+    return producer, f"at the producer character's skills: {why}"
+
+
 def _research_timing(
-    row: dict[str, Any], activity: str, current_key: str, target_key: str, now: datetime, note: str,
+    row: dict[str, Any], activity: str, current_key: str, target_key: str, start: datetime | None,
+    note: str, pilot_skills: dict[str, int] | None, *, after_me: bool = False,
 ) -> dict[str, Any]:
     """The research action's estimated_completion and notes: the duration of
-    exactly the levels from the current to the target, from the producer's
-    research-time model (manufacturing_job.research_duration_seconds_by_level).
-    Unknown is said in the note, with no completion."""
+    exactly the levels from the current to the target, at the assigned
+    pilot's skills (_research_seconds), from `start` (now, or the end of
+    the ME job on the same BPO: one job per blueprint). Unknown is said in
+    the note, with no completion."""
     levels = _research_levels(row, activity, current_key, target_key)
-    seconds = orow.get_research_duration_seconds(row, activity, *levels) if levels is not None else None
+    seconds, basis = _research_seconds(row, activity, levels, pilot_skills) if levels is not None else (None, None)
     if seconds is None:
         return {"estimated_completion": None, "notes": f"{note}; duration unknown"}
-    return {
-        "estimated_completion": now + timedelta(seconds=seconds),
-        "notes": f"{note}; duration {_format_duration(seconds)}",
-    }
+    note = f"{note}; duration {_format_duration(seconds)}"
+    if basis:
+        note += f" ({basis})"
+    if after_me:
+        note += "; starts after the ME research on this BPO"
+    if start is None:
+        return {"estimated_completion": None, "notes": f"{note}, whose duration is unknown"}
+    return {"estimated_completion": start + timedelta(seconds=seconds), "notes": note}
 
 
 def _te_research_levels(current_pct: int, target_pct: int) -> tuple[int, int]:

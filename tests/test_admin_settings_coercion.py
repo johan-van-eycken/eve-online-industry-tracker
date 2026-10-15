@@ -101,3 +101,40 @@ def test_every_schema_number_setting_gets_valid_number_input_args():
                     assert args["value"] >= args["min_value"]
                 if args["max_value"] is not None:
                     assert args["value"] <= args["max_value"]
+
+
+# --- fix round 2: step and bool strings ----------------------------------------------
+
+def test_an_odd_stored_te_snaps_to_the_2_percent_step_with_a_warning(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    mgr = _manager(tmp_path, {"industry": {"max_blueprint_time_efficiency": 15}})
+    assert mgr.get("industry", "max_blueprint_time_efficiency") == 16
+    warning = next(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    assert "max_blueprint_time_efficiency" in warning and "15" in warning and "16" in warning
+
+
+def test_every_int_default_is_on_its_step_grid():
+    for category in ADMIN_SETTINGS_SCHEMA.values():
+        for key, spec in category["settings"].items():
+            if spec["type"] == "int" and "step" in spec:
+                assert (spec["default"] - spec.get("min", 0)) % spec["step"] == 0, key
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("false", False), ("0", False), ("no", False), ("off", False), ("False", False),
+    ("true", True), ("1", True), ("yes", True), (0, False), (1, True), (True, True),
+])
+def test_bool_strings_parse(raw, expected):
+    spec = {"type": "bool", "default": True}
+    assert AdminSettingsManager._coerce(raw, spec) is expected
+
+
+def test_an_unparseable_bool_string_falls_back_to_the_default(tmp_path, caplog):
+    key = next(
+        (c, k) for c, cat in ADMIN_SETTINGS_SCHEMA.items()
+        for k, spec in cat["settings"].items() if spec["type"] == "bool"
+    )
+    caplog.set_level(logging.WARNING)
+    mgr = _manager(tmp_path, {key[0]: {key[1]: "maybe"}})
+    assert mgr.get(*key) == ADMIN_SETTINGS_SCHEMA[key[0]]["settings"][key[1]]["default"]
+    assert any("maybe" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)

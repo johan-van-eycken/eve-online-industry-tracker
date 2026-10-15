@@ -652,6 +652,10 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
 # AdminSettingsManager
 # ---------------------------------------------------------------------------
 
+_FALSE_STRINGS = frozenset({"false", "0", "no", "off", "n", ""})
+_TRUE_STRINGS = frozenset({"true", "1", "yes", "on", "y"})
+
+
 class AdminSettingsManager:
     """Loads, validates and persists admin settings from/to a JSON file."""
 
@@ -720,7 +724,13 @@ class AdminSettingsManager:
     def _coerce(value: Any, spec: dict[str, Any]) -> Any:
         typ = spec["type"]
         if typ == "int":
+            if isinstance(value, str):
+                value = value.strip()
             coerced = int(value)
+            if "step" in spec:
+                # Snap to the nearest value on the step grid from min (TE 15 -> 16).
+                origin, step = int(spec.get("min", 0)), int(spec["step"])
+                coerced = origin + ((coerced - origin) * 2 + step) // (2 * step) * step
             if "min" in spec:
                 coerced = max(spec["min"], coerced)
             if "max" in spec:
@@ -734,6 +744,13 @@ class AdminSettingsManager:
                 coerced = min(spec["max"], coerced)
             return coerced
         if typ == "bool":
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in _FALSE_STRINGS:
+                    return False
+                if text in _TRUE_STRINGS:
+                    return True
+                raise ValueError(f"not a boolean: {value!r}")
             return bool(value)
         if typ == "str":
             return str(value)

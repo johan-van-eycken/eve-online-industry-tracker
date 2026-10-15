@@ -3471,7 +3471,7 @@ def test_the_invention_publishes_its_fee_per_attempt_and_per_source_copy_run(mon
     assert invention["total_job_cost"] == pytest.approx(0.12 * invention["runs"])
 
 
-def _owned_bpo_manufacturing_job(*, level_one_seconds: int = 105) -> dict:
+def _owned_bpo_manufacturing_job(*, level_one_seconds: int = 105, modifier_skills: list | None = None) -> dict:
     original_asset = SimpleNamespace(
         type_id=9001, item_id=42, is_blueprint_copy=False,
         blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
@@ -3481,7 +3481,7 @@ def _owned_bpo_manufacturing_job(*, level_one_seconds: int = 105) -> dict:
     blueprint_row["research_time_job"] = {"time_seconds": level_one_seconds}
     service = _build_service(
         blueprint_rows=[blueprint_row], profile=_FEE_PROFILE,
-        character_modifiers={"modifier_skills": [], "implants": []}, trained_skill_levels={},
+        character_modifiers={"modifier_skills": modifier_skills or [], "implants": []}, trained_skill_levels={},
         owned_assets=([], [original_asset], {}, {}, {}),
         adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
     )
@@ -3536,6 +3536,23 @@ def test_an_owned_bpo_row_publishes_its_cumulative_research_duration_per_level()
     # TE 0 -> 20 is levels 0 -> 10.
     assert te[10] - te[0] == 20 * 256000
     assert durations["research_material"][10] == 20 * 256000
+
+
+def test_the_unskilled_research_duration_leaves_the_research_skills_out() -> None:
+    """Fix round 2: the planner applies the ASSIGNED pilot's skills to the
+    unskilled table. The producer character here has Research 5 (-25% TE
+    research time); the unskilled table leaves that out. Fake rank 20."""
+    mj = _owned_bpo_manufacturing_job(level_one_seconds=20 * 105, modifier_skills=[
+        {"type_name": "Research", "trained_skill_level": 5},
+    ])
+    skilled = mj["research_duration_seconds_by_level"]["research_time"]
+    unskilled = mj["research_duration_seconds_by_level_unskilled"]["research_time"]
+    assert unskilled[10] == 20 * 256000
+    assert skilled[10] == 20 * 256000 * 3 // 4
+    # ME research has no Research bonus: both tables agree.
+    assert mj["research_duration_seconds_by_level"]["research_material"] == (
+        mj["research_duration_seconds_by_level_unskilled"]["research_material"]
+    )
 
 
 def test_a_blueprint_without_research_time_publishes_an_unknown_duration() -> None:
