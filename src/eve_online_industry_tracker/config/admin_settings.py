@@ -198,7 +198,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "step": 0.005,
                 "format": "%.4f",
                 "label": "SCC surcharge",
-                "help": "CONCORD surcharge on the job value of manufacturing, reaction, copying and invention jobs (4%).",
+                "help": "CONCORD surcharge on the job value of manufacturing, reaction, copying and invention jobs (4%). Manufacturing, copying and invention are fitted on real ESI jobs; reactions use EVE's documented formula and are not validated (no reaction jobs to fit).",
             },
             "research_scc_surcharge": {
                 "type": "float",

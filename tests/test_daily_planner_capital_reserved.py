@@ -99,3 +99,35 @@ def test_an_unknown_fee_caption_says_how_to_fix_an_old_cache_or_plan():
     assert status_bar.capital_reserved_display(status_bar.CapitalReserved(0.0, 1, 0))[1] == (
         "1 purchase(s) have no price"
     )
+
+
+# --- Task 8b fix round 1: name the cause; the refresh hint only for stale fees ---
+
+def _r(action_type, fee=None, reason=None):
+    return {**_a(action_type, None, fee=fee), "estimated_job_fee_unknown_reason": reason}
+
+
+def test_an_unknown_fee_with_a_reason_names_the_cause_without_the_refresh_hint():
+    reserved = status_bar.compute_capital_reserved([
+        _r("manufacture", reason="the industry profile has no manufacturing cost index"),
+        _r("copy", reason="the industry profile has no manufacturing cost index"),
+        _r("invent", reason="the facility tax is unknown"),
+    ])
+    assert reserved.unknown_fee_jobs == 3
+    value, caption = status_bar.capital_reserved_display(reserved)
+    assert value == "unknown"
+    assert caption == (
+        "install fee unknown for 3 job(s): the facility tax is unknown (1 job(s)); "
+        "the industry profile has no manufacturing cost index (2 job(s))"
+    )
+    assert status_bar.STALE_FEE_HINT not in caption
+
+
+def test_the_refresh_hint_shows_only_for_the_unknowns_without_a_reason():
+    reserved = status_bar.compute_capital_reserved([
+        _r("manufacture", reason="no cost index"),
+        _r("te_research"),  # an old plan / overview: no reason recorded
+    ])
+    caption = status_bar.capital_reserved_display(reserved)[1]
+    assert "no cost index (1 job(s))" in caption
+    assert caption.endswith(status_bar.STALE_FEE_HINT)

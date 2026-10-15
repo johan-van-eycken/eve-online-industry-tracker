@@ -1103,7 +1103,7 @@ def test_shopping_list_buys_datacores_once_for_an_invented_t2_row(monkeypatch) -
 _SCC = 0.04
 _T2_INVENTION_FEE_PER_ATTEMPT = 0.02 * 50 * (0.02 + _SCC)  # 0.06
 _INVENTION_ONLY_PROFILE = {
-    "installation_cost_modifier": 0.0,
+    "installation_cost_modifier": 0.0, "facility_tax": 0.0,
     "material_efficiency_bonus": 0.0,
     "time_efficiency_bonus": 0.0,
     "facility_cost_bonus": 0.0,
@@ -1212,7 +1212,7 @@ def test_owned_t2_bpo_row_has_no_invention_cost(monkeypatch) -> None:
         container_name=None, ship_name=None, is_singleton=True, quantity=1,
     )
     profile = {
-        "installation_cost_modifier": 0.0, "material_efficiency_bonus": 0.0,
+        "installation_cost_modifier": 0.0, "facility_tax": 0.0, "material_efficiency_bonus": 0.0,
         "time_efficiency_bonus": 0.0, "facility_cost_bonus": 0.0,
         "system_cost_indices": [
             {"activity": "manufacturing", "cost_index": 0.05},
@@ -3608,3 +3608,71 @@ def test_a_parent_publishes_its_components_job_fee_per_run() -> None:
     assert entry["component_job_fee_per_run"] == pytest.approx(own["manufacturing_job_cost"] / own["runs"])
     # A raw material has no blueprint: no fee key.
     assert "component_job_fee_per_run" not in rows[5001]["manufacturing_job"]["materials"]["34"]
+
+
+# --- Task 8b fix round 1: an unknown fee input is unknown with its reason ---
+
+
+def test_a_profile_without_a_facility_tax_leaves_every_fee_unknown_with_the_reason(monkeypatch, caplog) -> None:
+    import logging
+
+    profile = {k: v for k, v in _FEE_PROFILE.items() if k not in ("facility_tax", "installation_cost_modifier")}
+    with caplog.at_level(logging.WARNING):
+        mj = _invention_overview(monkeypatch, profile=profile)[5002]["manufacturing_job"]
+    assert mj["manufacturing_job_cost"] is None
+    assert "facility tax" in mj["manufacturing_job_cost_unknown_reason"]
+    invention = mj["activity_breakdown"]["invention"]
+    assert invention["job_cost_per_attempt"] is None
+    assert "facility tax" in invention["job_cost_per_attempt_unknown_reason"]
+    assert invention["source_copy_job_cost_per_run"] is None
+    assert "facility tax" in invention["source_copy_job_cost_per_run_unknown_reason"]
+    assert any("facility tax" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_a_missing_research_index_is_the_published_reason() -> None:
+    profile = {**_FEE_PROFILE, "system_cost_indices": [
+        e for e in _FEE_PROFILE["system_cost_indices"] if e["activity"] != "researching_material_efficiency"
+    ]}
+    original_asset = SimpleNamespace(
+        type_id=9001, item_id=42, is_blueprint_copy=False,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
+    )
+    blueprint_row = _blueprint_row()
+    blueprint_row["research_material_job"] = {"time_seconds": 105}
+    blueprint_row["research_time_job"] = {"time_seconds": 105}
+    service = _build_service(
+        blueprint_rows=[blueprint_row], profile=profile,
+        character_modifiers={"modifier_skills": [], "implants": []}, trained_skill_levels={},
+        owned_assets=([], [original_asset], {}, {}, {}),
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
+    )
+    (row,) = service.industry_manufacturing_product_overview(
+        build_from_bpc=False, have_blueprint_source_only=True, maximize_bp_runs=False, character_id=1,
+    )
+    mj = row["manufacturing_job"]
+    assert mj["research_job_cost_by_level"]["research_material"] is None
+    assert "research_material cost index" in mj["research_job_cost_by_level_unknown_reason"]["research_material"]
+    assert mj["research_job_cost_by_level"]["research_time"] is not None
+    assert "research_time" not in mj["research_job_cost_by_level_unknown_reason"]
+
+
+def test_a_partly_priced_component_has_no_fee_and_says_why() -> None:
+    """A material without an adjusted price used to give a partial EIV, so a
+    low fee that looked exact."""
+    blueprint_row = _blueprint_row()
+    blueprint_row["manufacturing_job"]["materials"].append(
+        {"type_id": 35, "type_name": "Pyerite", "quantity": 4, "group_name": "Mineral", "category_name": "Material"},
+    )
+    service = _build_service(
+        blueprint_rows=[blueprint_row], profile=_FEE_PROFILE,
+        character_modifiers={"modifier_skills": [], "implants": []}, trained_skill_levels={},
+        owned_assets=([], [], {}, {}, {}),
+        # No adjusted, average or SDE base price for 35.
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
+    )
+    (row,) = service.industry_manufacturing_product_overview(
+        build_from_bpc=False, have_blueprint_source_only=False, maximize_bp_runs=False, character_id=1,
+    )
+    mj = row["manufacturing_job"]
+    assert mj["manufacturing_job_cost"] is None
+    assert "EIV" in mj["manufacturing_job_cost_unknown_reason"]

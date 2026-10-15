@@ -16,21 +16,50 @@ def budget_fit(corp_wallet: float | None, total_isk: float, cumul_isk: float) ->
     return "Yes" if (corp_wallet - total_isk) >= cumul_isk else "No"
 
 
-def remaining_after_shopping(corp_wallet: float | None, total_isk: float) -> float | None:
+def remaining_after_shopping(corp_wallet: float | None, total_isk: float, *, unpriced_lines: int = 0) -> float | None:
     """What the wallet has left after the shopping list; negative is a deficit.
 
-    None when the wallet is unknown. A genuine 0.0 wallet is a real balance,
-    so it yields -total_isk, not an unknown.
+    None when the wallet is unknown, or when a line has no price (the real
+    total is higher, so the exact remainder is unknown; see budget_metric).
+    A genuine 0.0 wallet is a real balance, so it yields -total_isk, not an
+    unknown.
     """
-    if corp_wallet is None:
+    if corp_wallet is None or unpriced_lines > 0:
         return None
     return corp_wallet - total_isk
 
 
-def wallet_is_short(corp_wallet: float | None, total_isk: float) -> bool:
-    """True when a known wallet (0.0 included) cannot cover the shopping list."""
-    remaining = remaining_after_shopping(corp_wallet, total_isk)
-    return remaining is not None and remaining < 0
+def wallet_is_short(corp_wallet: float | None, total_isk: float, *, unpriced_lines: int = 0) -> bool | None:
+    """True when a known wallet (0.0 included) cannot cover the shopping list.
+    With unpriced lines the priced total is a lower bound: True when even it
+    exceeds the wallet, else None (unknown, not "not short"). An unknown
+    wallet is False (nothing to compare)."""
+    if corp_wallet is None:
+        return False
+    if corp_wallet - total_isk < 0:
+        return True
+    return None if unpriced_lines > 0 else False
+
+
+def budget_metric(corp_wallet: float | None, total_isk: float, unpriced_lines: int) -> tuple[str, str, str | None]:
+    """(label, value, caption) of the budget metric: an exact Remaining or
+    Deficit when every line is priced; with unpriced lines a deficit is a
+    lower bound ("at least") and a remainder is unknown, both captioned."""
+    if corp_wallet is None:
+        return "Remaining", _fmt_isk(None), None
+    remaining = corp_wallet - total_isk
+    if unpriced_lines <= 0:
+        return ("Deficit", _fmt_isk(abs(remaining)), None) if remaining < 0 else ("Remaining", _fmt_isk(remaining), None)
+    if remaining < 0:
+        return (
+            "Deficit", f"at least {_fmt_isk(abs(remaining))}",
+            f"{unpriced_lines} unpriced line(s) are not counted: the real deficit is larger.",
+        )
+    return (
+        "Remaining", "unknown",
+        f"At most {_fmt_isk(remaining)}: {unpriced_lines} unpriced line(s) are not counted, "
+        "so the wallet may not cover the list.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +263,10 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         + sum(r["Est. Total"] or 0.0 for r in invention_rows)
     )
 
-    wallet_short = wallet_is_short(corp_wallet, total_isk)
+    all_rows = [*current_rows, *future_rows, *invention_rows]
+    unpriced_lines = sum(1 for r in all_rows if r.get("Est. Total") is None)
+    # None = unknown (unpriced lines, priced total within the wallet).
+    wallet_short = wallet_is_short(corp_wallet, total_isk, unpriced_lines=unpriced_lines)
 
     # Current job materials (highest priority)
     _render_materials_section("Current Job Materials", current_rows, deemphasise=False, ag_imports=ag)
@@ -242,7 +274,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     st.markdown("")
 
     # Future stock (optional if wallet is short)
-    _render_materials_section("Future Build Stock", future_rows, deemphasise=wallet_short, ag_imports=ag)
+    _render_materials_section("Future Build Stock", future_rows, deemphasise=bool(wallet_short), ag_imports=ag)
 
     st.markdown("")
 
@@ -252,22 +284,30 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     st.markdown("---")
 
     # Budget summary
-    remaining = remaining_after_shopping(corp_wallet, total_isk)
+    budget_label, budget_value, budget_caption = budget_metric(corp_wallet, total_isk, unpriced_lines)
+    remaining = remaining_after_shopping(corp_wallet, total_isk, unpriced_lines=unpriced_lines)
     budget_cols = st.columns(3)
     with budget_cols[0]:
         st.metric("Total to Spend", _fmt_isk(total_isk))
-        unpriced_caption = unpriced_total_caption([*current_rows, *future_rows, *invention_rows])
+        unpriced_caption = unpriced_total_caption(all_rows)
         if unpriced_caption:
             st.caption(unpriced_caption)
     with budget_cols[1]:
         st.metric("Corp Wallet", _fmt_isk(corp_wallet))
     with budget_cols[2]:
-        if wallet_short:
-            st.metric("Deficit", _fmt_isk(abs(remaining)), delta=f"-{_fmt_isk(abs(remaining))}", delta_color="inverse")
+        if remaining is not None and remaining < 0:
+            # Exact deficit (every line priced).
+            st.metric("Deficit", budget_value, delta=f"-{_fmt_isk(abs(remaining))}", delta_color="inverse")
         else:
-            # _fmt_isk renders an unknown (None) remainder as "—".
-            st.metric("Remaining", _fmt_isk(remaining))
+            # An unknown wallet renders "—"; unpriced lines "unknown" / "at least".
+            st.metric(budget_label, budget_value)
+        if budget_caption:
+            st.caption(budget_caption)
 
+    if wallet_short is None:
+        st.info(
+            "Some lines have no price, so whether the corp wallet covers the list is unknown."
+        )
     if wallet_short:
         st.warning(
             "Total shopping cost exceeds corp wallet. "

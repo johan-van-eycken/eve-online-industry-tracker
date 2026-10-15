@@ -1123,6 +1123,9 @@ class DailyActionLogModel(BaseApp):
     # Every job action (D4, A2): the job's estimated install fee, summed into
     # Capital Reserved. NULL = unknown (or a row from before the column).
     estimated_job_fee_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Why an unknown fee is unknown; NULL with a NULL fee = no recorded cause
+    # (an old plan or overview: a refresh / recompute fixes it).
+    estimated_job_fee_unknown_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 class PlanItemOutcomeModel(BaseApp):

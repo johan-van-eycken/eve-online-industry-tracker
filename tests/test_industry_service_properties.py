@@ -512,8 +512,10 @@ def _service(admin_values: dict[str, float] | None = None) -> IndustryService:
 
 
 class TestProfileJobSurchargeRates:
-    def test_defaults_without_a_profile(self):
-        assert _service()._profile_job_surcharge_rates(None) == JobSurchargeRates(facility_tax=0.0, scc=0.04, research_scc=0.02)
+    def test_no_profile_leaves_the_facility_tax_unknown(self):
+        rates = _service()._profile_job_surcharge_rates(None)
+        assert rates.facility_tax is None and rates.unknown_reason
+        assert (rates.scc, rates.research_scc) == (0.04, 0.02)
 
     def test_the_scc_rates_come_from_the_admin_settings(self):
         rates = _service({"scc_surcharge": 0.05, "research_scc_surcharge": 0.03})._profile_job_surcharge_rates({"facility_tax": 0.01})
@@ -525,10 +527,24 @@ class TestProfileJobSurchargeRates:
         assert math.isclose(rates.rate("manufacturing"), 0.10)
 
     @given(st.floats(min_value=-5.0, max_value=5.0, allow_nan=False, allow_infinity=False))
-    def test_the_facility_tax_is_never_negative(self, value: float):
+    def test_the_facility_tax_is_never_guessed(self, value: float):
+        """Fix round 1: a negative tax or a legacy modifier below SCC is not
+        clamped to 0 %: the tax (so every fee) is unknown, with a reason."""
         service = _service()
-        assert service._profile_job_surcharge_rates({"installation_cost_modifier": value}).facility_tax >= 0.0
-        assert service._profile_job_surcharge_rates({"facility_tax": value}).facility_tax >= 0.0
+        for profile in ({"installation_cost_modifier": value}, {"facility_tax": value}):
+            rates = service._profile_job_surcharge_rates(profile)
+            if rates.facility_tax is None:
+                assert rates.unknown_reason
+            else:
+                assert rates.facility_tax >= 0.0 and rates.unknown_reason is None
+        assert service._profile_job_surcharge_rates({"facility_tax": -0.01}).facility_tax is None
+        assert service._profile_job_surcharge_rates({"installation_cost_modifier": 0.01}).facility_tax is None
+
+    def test_an_underivable_facility_tax_logs_a_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            _service()._profile_job_surcharge_rates({"installation_cost_modifier": 0.01})
+        assert any("facility tax" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -864,3 +880,24 @@ class TestReductionPipelineIntegration:
         assert reduced <= original + 1  # +1 for ceil rounding edge case
         # Should never go below runs (1 per run)
         assert reduced >= runs
+
+
+# ---------------------------------------------------------------------------
+# _sum_estimated_item_value (fix round 1: never a partial EIV)
+# ---------------------------------------------------------------------------
+
+class TestSumEstimatedItemValueNeverPartial:
+    def test_all_priced_sums_every_line(self):
+        total, priced = IndustryService._sum_estimated_item_value(
+            [{"type_id": 1, "quantity": 2}, {"type_id": 2, "quantity": 3}],
+            quantity_key="quantity", adjusted_price_map={1: {"adjusted_price": 10.0}, 2: {"adjusted_price": 1.0}},
+        )
+        assert (total, priced) == (23.0, 2)
+
+    def test_one_unpriced_material_makes_the_eiv_unknown(self):
+        """A partial sum would price the fee low and pass as exact."""
+        total, priced = IndustryService._sum_estimated_item_value(
+            [{"type_id": 1, "quantity": 2}, {"type_id": 2, "quantity": 3}],
+            quantity_key="quantity", adjusted_price_map={1: {"adjusted_price": 10.0}},
+        )
+        assert total is None and priced == 1

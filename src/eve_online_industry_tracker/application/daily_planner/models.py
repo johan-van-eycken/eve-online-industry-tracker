@@ -127,6 +127,10 @@ class AssignedAction:
     # of the job(s) this action launches, from the producer's fee estimates.
     # None = unknown (the producer could not price it), never 0.
     estimated_job_fee_isk: float | None = None
+    # Why the fee is unknown (a missing index, an unpriced material, an
+    # unknown facility tax ...). None with an unknown fee = no recorded
+    # cause: an old product overview, which a refresh fixes.
+    estimated_job_fee_unknown_reason: str | None = None
 
 
 @dataclass

@@ -83,3 +83,91 @@ def test_research_fee_is_rank_independent_and_linear_in_levels() -> None:
     assert research_level_multiplier(0, 1) == pytest.approx(1.0)
     assert research_level_multiplier(9, 10) + research_level_multiplier(0, 9) == pytest.approx(research_level_multiplier(0, 10))
     assert research_level_multiplier(5, 5) == 0.0
+
+
+# --- fix round 1: an unknown input makes the fee unknown, with its reason ---
+
+from eve_online_industry_tracker.application.industry.job_cost import profile_facility_tax  # noqa: E402
+
+
+def test_a_profile_facility_tax_is_used_as_stored() -> None:
+    assert profile_facility_tax({"facility_tax": 0.015}, scc=0.04) == (0.015, None)
+
+
+def test_a_legacy_profile_derives_its_facility_tax_from_the_modifier() -> None:
+    tax, reason = profile_facility_tax({"installation_cost_modifier": 0.05}, scc=0.04)
+    assert tax == pytest.approx(0.01) and reason is None
+    # The profile's own stored SCC is what its modifier was built with.
+    tax, reason = profile_facility_tax({"installation_cost_modifier": 0.05, "scc_surcharge": 0.03}, scc=0.04)
+    assert tax == pytest.approx(0.02) and reason is None
+
+
+@pytest.mark.parametrize("profile", [
+    None,
+    {},
+    {"installation_cost_modifier": None, "facility_tax": None},
+    {"installation_cost_modifier": 0.01},  # below SCC: inconsistent
+    {"facility_tax": -0.01},
+    {"facility_tax": "n/a"},
+])
+def test_an_underivable_facility_tax_is_unknown_with_a_reason(profile) -> None:
+    tax, reason = profile_facility_tax(profile, scc=0.04)
+    assert tax is None
+    assert reason
+
+
+def test_an_unknown_facility_tax_makes_every_fee_unknown_with_its_reason() -> None:
+    rates = JobSurchargeRates(facility_tax=None, unknown_reason="no facility tax")
+    result = job_install_cost(
+        activity="manufacturing", process_value=1_000.0, system_index=0.02,
+        structure_cost_reduction=0.0, surcharge_rates=rates,
+    )
+    assert result["total_job_cost"] is None
+    assert result["fee_unknown_reason"] == "no facility tax"
+
+
+@pytest.mark.parametrize("value, index, needle", [
+    (None, 0.02, "EIV"),
+    (0.0, 0.02, "EIV"),
+    (1_000.0, 0.0, "cost index"),
+])
+def test_an_unknown_value_or_index_names_its_cause(value, index, needle) -> None:
+    result = job_install_cost(
+        activity="copying", process_value=value, system_index=index,
+        structure_cost_reduction=0.0, surcharge_rates=_RATES,
+    )
+    assert result["total_job_cost"] is None
+    assert needle in result["fee_unknown_reason"]
+
+
+def test_a_priced_fee_has_no_unknown_reason() -> None:
+    result = job_install_cost(
+        activity="copying", process_value=10.0, system_index=0.02,
+        structure_cost_reduction=0.0, surcharge_rates=_RATES,
+    )
+    assert result["fee_unknown_reason"] is None
+
+
+# --- fix round 1: the profile page shows the producer's two totals ---
+
+from eve_online_industry_tracker.application.industry.job_cost import job_fee_rates_summary  # noqa: E402
+
+
+def test_the_profile_summary_shows_both_totals_from_the_admin_rates():
+    summary = job_fee_rates_summary({"facility_tax": 0.01, "scc_surcharge": 0.04}, scc=0.05, research_scc=0.03)
+    assert summary == (
+        "Facility tax 1.00% | Manufacturing / reaction / copy / invention total 6.00% (SCC 5.00%) | "
+        "ME/TE research total 4.00% (SCC 3.00%)"
+    )
+
+
+def test_the_profile_summary_names_an_unknown_facility_tax():
+    summary = job_fee_rates_summary({"installation_cost_modifier": 0.01}, scc=0.04, research_scc=0.02)
+    assert summary.startswith("Job fees unknown: ")
+
+
+def test_the_scc_help_says_reactions_are_not_validated():
+    from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+
+    help_text = ADMIN_SETTINGS_SCHEMA["industry"]["settings"]["scc_surcharge"]["help"]
+    assert "reaction" in help_text and "not validated" in help_text

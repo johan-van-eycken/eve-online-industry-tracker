@@ -504,6 +504,8 @@ class ChainPlanner:
                 # priced it (fix round 1): used when the component has no
                 # overview row of its own.
                 "parent_fee_per_run": _non_negative((entries.get(mat_type_id) or {}).get("component_job_fee_per_run")),
+                # Why the parent's producer could not price it (8b fix round 1).
+                "parent_fee_unknown_reason": (entries.get(mat_type_id) or {}).get("component_job_fee_per_run_unknown_reason"),
                 **facility_bonus.sub_job_facility_reductions(profile, entries.get(mat_type_id)),
             })
         return requests
@@ -569,11 +571,18 @@ class ChainPlanner:
         if fee_per_run is None:
             fee_per_run = request.get("parent_fee_per_run")
         install_fee = fee_per_run * runs if fee_per_run is not None else None
+        # Why it is unknown: the component's own row, else its parent's
+        # figure; None = neither recorded one (an old overview: refresh).
+        fee_unknown_reason = (
+            (self._component_fee_unknown_reason(mat_type_id, phase1_data)
+             or _str_or_none(request.get("parent_fee_unknown_reason")))
+            if install_fee is None else None
+        )
         if install_fee is None:
-            logger.info(
-                "ChainPlanner: install fee unknown for sub-manufacturing type_id=%s; "
-                "build vs buy compares materials only",
-                mat_type_id,
+            logger.warning(
+                "ChainPlanner: install fee unknown for sub-manufacturing type_id=%s (%s); "
+                "build vs buy compares materials only, so building may look cheaper than it is",
+                mat_type_id, fee_unknown_reason or "no fee published; refresh the product overview",
             )
         if sub_cost + (install_fee or 0.0) >= market_cost:
             return None
@@ -583,6 +592,7 @@ class ChainPlanner:
                 **job,
                 "cost": self._price_materials(job["materials"], market_depth_cache),
                 "fee": fee_per_run * job["runs"] if fee_per_run is not None else None,
+                "fee_unknown_reason": fee_unknown_reason,
             }
             for job in jobs
         ]
@@ -628,9 +638,20 @@ class ChainPlanner:
                 "sub_manufacture_cost": sub_cost,
                 # The jobs' install fees (None = unknown), in build vs buy.
                 "sub_install_fee": install_fee,
+                "sub_install_fee_unknown_reason": fee_unknown_reason,
                 "market_buy_cost": market_cost,
             },
         )
+
+    @staticmethod
+    def _component_fee_unknown_reason(type_id: int, phase1_data: dict[str, Any]) -> str | None:
+        """The producer's reason the component's own row has no fee, or None."""
+        for row in phase1_data.get("overview_rows") or []:
+            if isinstance(row, dict) and int(row.get("type_id") or 0) == int(type_id):
+                reason = orow.get_manufacturing_fee_unknown_reason(row)
+                if reason is not None:
+                    return reason
+        return None
 
     @staticmethod
     def _component_fee_per_run(type_id: int, phase1_data: dict[str, Any]) -> float | None:
@@ -1136,3 +1157,7 @@ def _get_attr(obj: Any, attr: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(attr)
     return getattr(obj, attr, None)
+
+
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None

@@ -905,3 +905,22 @@ def test_a_job_actions_install_fee_survives_a_reload_on_a_legacy_table() -> None
     repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [action], now))
     (row,) = repo.get_actions(plan_id)
     assert row.estimated_job_fee_isk == 25.5
+
+
+def test_a_job_actions_unknown_fee_reason_survives_a_reload() -> None:
+    """Task 8b fix round 1: the cause of an unknown fee is persisted, so
+    Capital Reserved can name it (and show the refresh hint only without one)."""
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    repo, _engine = _make_repo()
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    action = AssignedAction(
+        type_id=12345, type_name="Widget", action_type="manufacture", character_id=1, character_name="Pilot",
+        quantity=10, runs=10, estimated_cost_isk=500.0, estimated_profit_isk=None, estimated_completion=None,
+        notes=None, estimated_job_fee_isk=None, estimated_job_fee_unknown_reason="no manufacturing cost index",
+    )
+    repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [action], now))
+    (row,) = repo.get_actions(plan_id)
+    assert (row.estimated_job_fee_isk, row.estimated_job_fee_unknown_reason) == (None, "no manufacturing cost index")

@@ -185,3 +185,52 @@ def test_invention_fee_accessors_fall_back_to_the_later_batch_plan():
     assert orow.get_invention_fee_per_attempt(row) == 4.4
     assert orow.get_source_copy_fee_per_run(row) == 0.0099
     assert orow.get_invention_fee_per_attempt({"manufacturing_job": {}}) is None
+
+
+# --- Task 8b fix round 1: an unknown fee carries its cause to Capital Reserved ---
+
+
+def test_a_priced_fee_records_no_unknown_reason():
+    actions = _actions(_invent_row())
+    assert all(a.estimated_job_fee_unknown_reason is None for a in actions.values())
+
+
+def test_each_unknown_fee_carries_the_producers_reason():
+    row = _invent_row(per_attempt=None, per_copy_run=None)
+    job = row["manufacturing_job"]
+    job["manufacturing_job_cost"] = None
+    job["manufacturing_job_cost_unknown_reason"] = "no manufacturing cost index"
+    job["activity_breakdown"]["invention"]["job_cost_per_attempt_unknown_reason"] = "no invention cost index"
+    job["activity_breakdown"]["invention"]["source_copy_job_cost_per_run_unknown_reason"] = "no copying cost index"
+    actions = _actions(row)
+    assert actions["manufacture"].estimated_job_fee_unknown_reason == "no manufacturing cost index"
+    assert actions["invent"].estimated_job_fee_unknown_reason == "no invention cost index"
+    assert actions["copy"].estimated_job_fee_unknown_reason == "no copying cost index"
+
+
+def test_an_unknown_fee_without_a_published_reason_has_none_so_the_refresh_hint_shows():
+    row = _invent_row()
+    row["manufacturing_job"]["manufacturing_job_cost"] = None  # an old cached overview
+    assert _actions(row)["manufacture"].estimated_job_fee_unknown_reason is None
+
+
+def test_research_fee_reasons():
+    row = _research_row(needs_me_research=True, me_current=0, me_research_target=4)
+    row["manufacturing_job"]["research_job_cost_by_level"]["research_material"] = None
+    row["manufacturing_job"]["research_job_cost_by_level_unknown_reason"] = {"research_material": "no research index"}
+    assert _actions(row)["me_research"].estimated_job_fee_unknown_reason == "no research index"
+    unknown_levels = _research_row(needs_me_research=True, me_current=None, me_research_target=4)
+    assert "level" in _actions(unknown_levels)["me_research"].estimated_job_fee_unknown_reason
+
+
+def test_a_sub_manufacture_action_carries_its_jobs_fee_reason():
+    row = {
+        "type_id": 54321, "type_name": "Part", "market_buy_cost": 1.0, "sub_max_runs_per_job": 6,
+        "sub_job_batches": [
+            {"runs": 2, "quantity": 2, "output": 2, "materials": {34: 20}, "cost": 100.0, "fee": None,
+             "fee_unknown_reason": "no index"},
+        ],
+    }
+    plan = ChainPlan(decisions=[_decision(row, is_sub_component=True, meta_group_id=1)])
+    (sub,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin()) if a.action_type == "sub_manufacture"]
+    assert sub.estimated_job_fee_unknown_reason == "no index"

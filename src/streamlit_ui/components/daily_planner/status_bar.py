@@ -49,6 +49,14 @@ class CapitalReserved:
     total: float
     unpriced_purchases: int
     unknown_fee_jobs: int
+    #: (reason, job count) for the unknown fees whose cause was recorded,
+    #: sorted by reason. The rest of unknown_fee_jobs has no recorded cause:
+    #: an old plan or product overview, which a refresh / recompute fixes.
+    unknown_fee_reasons: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def stale_fee_jobs(self) -> int:
+        return self.unknown_fee_jobs - sum(n for _, n in self.unknown_fee_reasons)
 
 
 def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
@@ -64,6 +72,7 @@ def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
     total = 0.0
     unpriced_purchases = 0
     unknown_fee_jobs = 0
+    reasons: dict[str, int] = {}
     for action in actions:
         if str(action.get("status") or "pending") != "pending":
             continue
@@ -78,13 +87,19 @@ def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
             fee = action.get("estimated_job_fee_isk")
             if fee is None:
                 unknown_fee_jobs += 1
+                reason = action.get("estimated_job_fee_unknown_reason")
+                if isinstance(reason, str) and reason.strip():
+                    reasons[reason] = reasons.get(reason, 0) + 1
             else:
                 total += float(fee)
-    return CapitalReserved(total, unpriced_purchases, unknown_fee_jobs)
+    return CapitalReserved(total, unpriced_purchases, unknown_fee_jobs, tuple(sorted(reasons.items())))
 
 
-#: Appended to the caption when a job's fee is unknown: a plan or product
-#: overview from before the fee estimates carries no fees at all.
+#: Appended to the caption when a job's fee is unknown with no recorded
+#: cause: a plan or product overview from before the fee estimates (or
+#: their reasons) carries none, which a refresh fixes. An unknown with a
+#: recorded cause (a missing index, an unpriced material) names the cause
+#: instead: a refresh would not fix it.
 STALE_FEE_HINT = (
     " (if the plan or the product overview predates the fee estimates, "
     "refresh the product overview and recompute the plan)"
@@ -99,10 +114,13 @@ def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None
     if reserved.unpriced_purchases:
         missing.append(f"{reserved.unpriced_purchases} purchase(s) have no price")
     if reserved.unknown_fee_jobs:
-        missing.append(f"install fee unknown for {reserved.unknown_fee_jobs} job(s)")
+        fee_part = f"install fee unknown for {reserved.unknown_fee_jobs} job(s)"
+        if reserved.unknown_fee_reasons:
+            fee_part += ": " + "; ".join(f"{reason} ({n} job(s))" for reason, n in reserved.unknown_fee_reasons)
+        missing.append(fee_part)
     if missing:
         caption = "; ".join(missing)
-        return "unknown", caption + (STALE_FEE_HINT if reserved.unknown_fee_jobs else "")
+        return "unknown", caption + (STALE_FEE_HINT if reserved.stale_fee_jobs > 0 else "")
     return (_fmt_isk(reserved.total) if reserved.total else "—"), None
 
 

@@ -224,6 +224,7 @@ class ActionPlanBuilder:
                 decryptor_type_id=action.decryptor_type_id,
                 decryptor_type_name=action.decryptor_type_name,
                 estimated_job_fee_isk=action.estimated_job_fee_isk,
+                estimated_job_fee_unknown_reason=action.estimated_job_fee_unknown_reason,
             ))
         return rows
 

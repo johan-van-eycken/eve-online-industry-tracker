@@ -372,6 +372,38 @@ def get_research_fee(row: dict[str, Any], activity: str, from_level: int, to_lev
     return high - low if high is not None and low is not None else None
 
 
+def _published_reason(value: Any) -> str | None:
+    return str(value) if isinstance(value, str) and value.strip() else None
+
+
+def get_manufacturing_fee_unknown_reason(row: dict[str, Any]) -> str | None:
+    """Why the producer could not price the manufacturing fee (a missing
+    index, an unpriced material, an unknown facility tax), or None when it
+    published no reason: a row from before fix round 1, which a product
+    overview refresh fixes."""
+    return _published_reason(get_manufacturing_job(row).get("manufacturing_job_cost_unknown_reason"))
+
+
+def get_invention_fee_unknown_reason(row: dict[str, Any], key: str) -> str | None:
+    """Why the per-attempt (`job_cost_per_attempt`) or per-source-copy-run
+    (`source_copy_job_cost_per_run`) fee is unknown, from the same plan the
+    fee is read from; None = no published reason (refresh)."""
+    for plan in (get_invention_costs(row), get_invention_bpc_plan(row)):
+        if plan is None:
+            continue
+        reason = _published_reason(plan.get(f"{key}_unknown_reason"))
+        if reason is not None:
+            return reason
+    return None
+
+
+def get_research_fee_unknown_reason(row: dict[str, Any], activity: str) -> str | None:
+    """Why the research fee table of `activity` is unknown; None = no
+    published reason (refresh)."""
+    reasons = get_manufacturing_job(row).get("research_job_cost_by_level_unknown_reason")
+    return _published_reason(reasons.get(activity)) if isinstance(reasons, dict) else None
+
+
 def get_meta_group_name(row: dict[str, Any]) -> str:
     """Meta group as a normalised display name.
 

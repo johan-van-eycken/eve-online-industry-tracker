@@ -72,6 +72,7 @@ from eve_online_industry_tracker.application.industry.job_cost import (
     DEFAULT_SCC_SURCHARGE,
     JobSurchargeRates,
     job_install_cost,
+    profile_facility_tax,
     research_level_multiplier,
 )
 from eve_online_industry_tracker.application.industry import overview_row as orow
@@ -3444,26 +3445,19 @@ class IndustryService:
 
     def _profile_job_surcharge_rates(self, profile_payload: dict[str, Any] | None) -> JobSurchargeRates:
         """The surcharges charged on every job's value (job_cost.py): the SCC
-        rates from the admin settings, and the profile's facility tax. A
-        profile without `facility_tax` falls back to its
-        installation_cost_modifier (facility tax + SCC) minus its SCC.
-        No profile = no facility tax."""
+        rates from the admin settings, and the profile's facility tax
+        (job_cost.profile_facility_tax). A tax the profile does not determine
+        is unknown, never 0 %: every fee then reads unknown with the reason,
+        and a WARNING is logged once per reason."""
         scc = max(0.0, float(self._adm("industry", "scc_surcharge", DEFAULT_SCC_SURCHARGE)))
         research_scc = max(0.0, float(self._adm("industry", "research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)))
-        facility_tax = 0.0
-        if isinstance(profile_payload, dict):
-            try:
-                if profile_payload.get("facility_tax") is not None:
-                    facility_tax = float(profile_payload["facility_tax"])
-                else:
-                    profile_scc = profile_payload.get("scc_surcharge")
-                    facility_tax = float(profile_payload.get("installation_cost_modifier") or 0.0) - (
-                        float(profile_scc) if profile_scc is not None else scc
-                    )
-            except (TypeError, ValueError):
-                logger.warning("Industry profile has a non-numeric facility tax; using none")
-                facility_tax = 0.0
-        return JobSurchargeRates(facility_tax=max(0.0, facility_tax), scc=scc, research_scc=research_scc)
+        facility_tax, reason = profile_facility_tax(profile_payload, scc=scc)
+        if reason is not None and isinstance(profile_payload, dict):
+            warned = self.__dict__.setdefault("_facility_tax_warned", set())
+            if reason not in warned:
+                warned.add(reason)
+                logger.warning("Job install fees unknown: %s", reason)
+        return JobSurchargeRates(facility_tax=facility_tax, scc=scc, research_scc=research_scc, unknown_reason=reason)
 
     _manufacturing_group_cache: dict[tuple[int, int, int], str | None] = {}
 
@@ -3670,8 +3664,12 @@ class IndustryService:
         quantity_key: str,
         adjusted_price_map: dict[int, dict[str, Any]],
     ) -> tuple[float | None, int]:
+        """(EIV, priced line count). The EIV is None when no line, or ANY line,
+        lacks a price (fix round 1): a partial sum would price a job fee low
+        and pass as exact, so the fee reads unknown instead."""
         total = 0.0
         priced_count = 0
+        unpriced = False
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -3687,6 +3685,7 @@ class IndustryService:
                 adjusted_price_map=adjusted_price_map,
             )
             if unit_value is None:
+                unpriced = True
                 continue
             try:
                 quantity = int(entry.get(quantity_key) or 0)
@@ -3696,6 +3695,8 @@ class IndustryService:
             priced_count += 1
         if priced_count == 0:
             return None, 0
+        if unpriced:
+            return None, priced_count
         return total, priced_count
 
     @classmethod
@@ -7410,10 +7411,16 @@ class IndustryService:
         # The install fee of ONE attempt (the same EIV x index x reductions +
         # surcharge as above, at one attempt): the daily planner pays it per
         # whole attempt it launches (D4, Capital Reserved). None = unpriced.
-        costs["job_cost_per_attempt"] = compute_activity(
+        per_attempt_fee = compute_activity(
             activity="invention", base_time_seconds=invention_base_time, runs=1,
             process_value=per_attempt_process_value,
-        ).get("total_job_cost")
+        )
+        costs["job_cost_per_attempt"] = per_attempt_fee.get("total_job_cost")
+        # Why an unknown fee is unknown (fix round 1): the planner names it.
+        costs["job_cost_per_attempt_unknown_reason"] = (
+            (per_attempt_fee.get("fee_unknown_reason") or "the invention fee could not be priced")
+            if costs["job_cost_per_attempt"] is None else None
+        )
         costs["whole_attempts"] = whole_attempts
         costs["elapsed_duration_seconds"] = (
             compute_activity(activity="invention", base_time_seconds=invention_base_time, runs=whole_attempts, process_value=None)["duration_seconds"]
@@ -7482,7 +7489,7 @@ class IndustryService:
         source_copy_costs["job_duration_seconds"] = compute_activity(activity="copying", base_time_seconds=source_base_time, runs=1, process_value=None)["duration_seconds"]
         # The install fee of ONE source-copy run (D4): the planner's copy
         # action copies one run per whole invention attempt.
-        source_copy_costs["job_cost_per_run"] = self._source_copy_fee_per_run(
+        source_copy_costs["job_cost_per_run"], source_copy_costs["job_cost_per_run_unknown_reason"] = self._source_copy_fee_per_run(
             compute_activity=compute_activity, invention_source_row=invention_source_row,
             adjusted_price_map=adjusted_price_map,
         )
@@ -7499,23 +7506,26 @@ class IndustryService:
         compute_activity: Callable[..., dict[str, Any]],
         invention_source_row: dict[str, Any],
         adjusted_price_map: dict[int, dict[str, Any]],
-    ) -> float | None:
-        """The install fee of one copy run of the T1 source blueprint: the
-        same process value as _invention_source_copy_costs (source EIV x
-        copy_cost_eiv_multiplier) at one run. None when the source has no
-        copy time or no priced EIV (unknown, not free)."""
+    ) -> tuple[float | None, str | None]:
+        """(fee, None) for one copy run of the T1 source blueprint: the same
+        process value as _invention_source_copy_costs (source EIV x
+        copy_cost_eiv_multiplier) at one run. (None, why) when the source has
+        no copy time, no priced EIV or another unknown input (unknown, not
+        free)."""
         source_copying_job = invention_source_row.get("copying_job") or {}
         source_base_time = int((source_copying_job if isinstance(source_copying_job, dict) else {}).get("time_seconds") or 0)
         if source_base_time <= 0:
-            return None
+            return None, "the T1 source blueprint has no copy time in the SDE"
         source_mfg_materials = [dict(e) for e in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or []) if isinstance(e, dict)]
         source_pv, _ = self._sum_estimated_item_value(source_mfg_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map)
         if source_pv is None:
-            return None
-        return compute_activity(
+            return None, "no priced EIV for the source copy (a material has no adjusted price)"
+        fee = compute_activity(
             activity="copying", base_time_seconds=source_base_time, runs=1,
             process_value=float(source_pv) * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER)),
-        ).get("total_job_cost")
+        )
+        total = fee.get("total_job_cost")
+        return total, (None if total is not None else (fee.get("fee_unknown_reason") or "the copy fee could not be priced"))
 
     @staticmethod
     def _whole_source_runs_key(source_bp_type_id: int) -> int:
@@ -8040,8 +8050,9 @@ class IndustryService:
         # The planner's copy action copies one source run per attempt (D4).
         # Computed even when batch 1 copies nothing (an owned T2 BPC covers it):
         # the later batches' plan carries it too.
-        costs["source_copy_job_cost_per_run"] = (
-            source_copy_costs.get("job_cost_per_run") if source_copy_costs is not None
+        costs["source_copy_job_cost_per_run"], costs["source_copy_job_cost_per_run_unknown_reason"] = (
+            (source_copy_costs.get("job_cost_per_run"), source_copy_costs.get("job_cost_per_run_unknown_reason"))
+            if source_copy_costs is not None
             else self._source_copy_fee_per_run(
                 compute_activity=lambda **kw: self._plan_activity_costs(ctx, **kw),
                 invention_source_row=invention_source_row, adjusted_price_map=ctx.adjusted_market_price_map,
@@ -8095,37 +8106,44 @@ class IndustryService:
         material is itself manufactured (Task 8 fix round 1): the daily
         planner's sub_manufacture fee when the component has no overview row
         of its own (e.g. owned_blueprints_scope excludes corp assets)."""
-        fee = self._component_job_fee_per_run(ctx, int(entry.get("type_id") or 0))
-        return {**entry, "component_job_fee_per_run": fee} if fee is not None else entry
+        fee, reason = self._component_job_fee_per_run(ctx, int(entry.get("type_id") or 0))
+        if fee is not None:
+            return {**entry, "component_job_fee_per_run": fee}
+        if reason is not None:
+            return {**entry, "component_job_fee_per_run_unknown_reason": reason}
+        return entry
 
-    def _component_job_fee_per_run(self, ctx: _ProductPlanningContext, component_type_id: int) -> float | None:
+    def _component_job_fee_per_run(self, ctx: _ProductPlanningContext, component_type_id: int) -> tuple[float | None, str | None]:
         """The install fee of ONE manufacturing run of a component in this
         refresh's industry profile (the parent's structure, F-Q2): the SDE
         base (ME 0) materials x adjusted prices as the EIV, priced by
         _plan_activity_costs -- the same formula as a row's own
-        manufacturing_job_cost. None when the component has no manufacturing
-        blueprint, no time, or no priced EIV (unknown, not free)."""
+        manufacturing_job_cost. (None, None) for a material with no
+        manufacturing blueprint (bought, no fee); (None, why) when the
+        component's time, EIV or another input is unknown (unknown, not free)."""
         component_row = ctx.manufacturing_row_by_product_type_id.get(int(component_type_id))
         job = (component_row or {}).get("manufacturing_job")
         if not isinstance(job, dict):
-            return None
+            return None, None
         base_time = int(job.get("time_seconds") or 0)
         if base_time <= 0:
-            return None
+            return None, "the component's blueprint has no manufacturing time in the SDE"
         materials = [dict(e) for e in (job.get("materials") or []) if isinstance(e, dict)]
         process_value, _ = self._sum_estimated_item_value(
             materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map,
         )
         if process_value is None:
-            return None
+            return None, "no priced EIV for the component (a material has no adjusted price)"
         product = next(
             (p for p in (job.get("products") or []) if isinstance(p, dict) and int(p.get("type_id") or 0) == int(component_type_id)),
             {},
         )
-        return self._plan_activity_costs(
+        fee = self._plan_activity_costs(
             ctx, activity="manufacturing", base_time_seconds=base_time, runs=1, process_value=process_value,
             manufacturing_group=self._infer_manufacturing_group(product),
-        ).get("total_job_cost")
+        )
+        total = fee.get("total_job_cost")
+        return total, (None if total is not None else (fee.get("fee_unknown_reason") or "the component fee could not be priced"))
 
     def _research_process_value(self, per_run_material_eiv: float | None, target_level: int) -> float | None:
         """The job value of a research job from level 0 to `target_level`:
@@ -8148,33 +8166,38 @@ class IndustryService:
         *,
         row: dict[str, Any],
         per_run_material_eiv: float | None,
-    ) -> dict[str, list[float] | None]:
-        """The install fee of researching this blueprint from level 0 to each
+    ) -> tuple[dict[str, list[float] | None], dict[str, str]]:
+        """(tables, reasons). The install fee of researching this blueprint from level 0 to each
         level 0..max (A2), per research activity: a list indexed by level,
         [0] = 0.0. Priced exactly like _plan_research_chain_for_variant (the
         same process value, cost index, structure/rig/implant reductions and
         surcharge). The fee is linear in the process value, so a job from
         level a to b costs [b] - [a]. None for an activity whose fee is
-        unknown at any level (no research time, no EIV or no cost index)."""
+        unknown at any level (no research time, no EIV, no cost index or no
+        facility tax); `reasons[activity]` then says why."""
         tables: dict[str, list[float] | None] = {}
+        reasons: dict[str, str] = {}
         for activity_name, source_field in [("research_material", "research_material_job"), ("research_time", "research_time_job")]:
             base_level_one = int(((row.get(source_field) or {}).get("time_seconds") or 0))
             fees: list[float] | None = [0.0]
             for level in range(1, self._MAX_RESEARCH_LEVEL + 1):
                 duration = self._research_target_duration_seconds(level_one_duration_seconds=base_level_one, target_level=level)
-                fee = (
-                    self._plan_activity_costs(
-                        ctx, activity=activity_name, base_time_seconds=duration, runs=1,
-                        process_value=self._research_process_value(per_run_material_eiv, level),
-                    ).get("total_job_cost")
-                    if duration > 0 else None
+                if duration <= 0:
+                    fees = None
+                    reasons[activity_name] = "the blueprint has no research time in the SDE"
+                    break
+                priced = self._plan_activity_costs(
+                    ctx, activity=activity_name, base_time_seconds=duration, runs=1,
+                    process_value=self._research_process_value(per_run_material_eiv, level),
                 )
+                fee = priced.get("total_job_cost")
                 if fee is None:
                     fees = None
+                    reasons[activity_name] = priced.get("fee_unknown_reason") or "the research fee could not be priced"
                     break
                 fees.append(float(fee))
             tables[activity_name] = fees
-        return tables
+        return tables, reasons
 
     @staticmethod
     def _row_invents(ctx: _ProductPlanningContext, blueprint_type_id: int) -> bool:
@@ -8810,7 +8833,9 @@ class IndustryService:
                     # the planner's invent / copy actions when batch 1 does
                     # not invent (activity_breakdown.invention is then absent).
                     "job_cost_per_attempt": inv_costs.get("job_cost_per_attempt"),
+                    "job_cost_per_attempt_unknown_reason": inv_costs.get("job_cost_per_attempt_unknown_reason"),
                     "source_copy_job_cost_per_run": inv_costs.get("source_copy_job_cost_per_run"),
+                    "source_copy_job_cost_per_run_unknown_reason": inv_costs.get("source_copy_job_cost_per_run_unknown_reason"),
                 }
         # Batches 2..N (shopping list only). A later batch differs from batch
         # 1 when batch 1 spent owned BPC runs (top level or in a sub-build)
@@ -8986,6 +9011,7 @@ class IndustryService:
                 "cost_reduction": manufacturing_cost_reduction,
                 "job_cost": manufacturing_job_cost.get("total_job_cost"),
                 "manufacturing_job_cost": manufacturing_job_cost.get("total_job_cost"),
+                "manufacturing_job_cost_unknown_reason": manufacturing_job_cost.get("fee_unknown_reason"),
                 "total_job_cost": (total_job_cost if priced_job_count > 0 else None),
                 "estimated_item_value": base_material_eiv_total,
                 "estimated_item_value_source": "materials_adjusted_price",
@@ -9040,9 +9066,10 @@ class IndustryService:
             # a row that builds from an owned BPC of it: the planner schedules
             # the research whenever the BPO is owned, and the fee depends on
             # the blueprint, not on the variant.
-            row_out["manufacturing_job"]["research_job_cost_by_level"] = self._research_job_cost_by_level(
-                ctx, row=row, per_run_material_eiv=per_run_material_eiv,
-            )
+            (
+                row_out["manufacturing_job"]["research_job_cost_by_level"],
+                row_out["manufacturing_job"]["research_job_cost_by_level_unknown_reason"],
+            ) = self._research_job_cost_by_level(ctx, row=row, per_run_material_eiv=per_run_material_eiv)
         top_level_chance = (
             inv_costs.get("invention_chance") if requires_invention_chain and inv_costs is not None else None
         ) or extra_chance

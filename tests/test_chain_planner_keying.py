@@ -814,11 +814,13 @@ def test_a_sub_batch_over_the_max_runs_records_each_job():
     """Jobs of 7, 7 and 6 runs at 10 units per run: 70 + 70 + 60 = 200 units,
     13 + 13 + 11 = 37 Tritanium, priced at 1 ISK each."""
     (sub,) = _subs_for(200, _limited_sub_phase1(7))
-    # No overview row of the component: its install fee is unknown (D4).
+    # No overview row of the component and no parent figure: its install fee
+    # is unknown (D4), with no recorded cause (an old overview: refresh).
+    unknown = {"fee": None, "fee_unknown_reason": None}
     assert sub.overview_row["sub_job_batches"] == [
-        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, "fee": None},
-        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, "fee": None},
-        {"runs": 6, "output": 60, "quantity": 60, "materials": {34: 11}, "cost": 11.0, "fee": None},
+        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, **unknown},
+        {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, **unknown},
+        {"runs": 6, "output": 60, "quantity": 60, "materials": {34: 11}, "cost": 11.0, **unknown},
     ]
 
 
@@ -1409,3 +1411,38 @@ def test_build_vs_buy_counts_the_install_fee():
     assert _subs_with_parent_fee(200, 10.0, _limited_sub_phase1(7)) == []
     (sub,) = _subs_with_parent_fee(200, 1.0, _limited_sub_phase1(7))
     assert sub.overview_row["sub_install_fee"] == 20.0
+
+
+# --- Task 8b fix round 1: a build decision on an unknown fee warns and records why ---
+
+
+def test_a_build_decision_on_an_unknown_fee_warns_and_records_the_cause(caplog):
+    materials = _batch_materials(**{"54321": 200})
+    materials["54321"]["component_job_fee_per_run_unknown_reason"] = "the industry profile has no manufacturing cost index"
+    with caplog.at_level(logging.WARNING):
+        plan = _planner().plan_chain([_decision(_row(materials=materials))], _limited_sub_phase1(7))
+    (sub,) = [d for d in plan.decisions if d.is_sub_component]
+    assert sub.overview_row["sub_install_fee"] is None
+    assert sub.overview_row["sub_install_fee_unknown_reason"] == "the industry profile has no manufacturing cost index"
+    assert all(job["fee"] is None for job in sub.overview_row["sub_job_batches"])
+    assert {job["fee_unknown_reason"] for job in sub.overview_row["sub_job_batches"]} == {
+        "the industry profile has no manufacturing cost index",
+    }
+    assert any(
+        r.levelno == logging.WARNING and "install fee unknown" in r.getMessage() and "54321" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_the_components_own_row_reason_wins_over_the_parents():
+    phase1 = {**_limited_sub_phase1(7), "overview_rows": [
+        {"type_id": 54321, "manufacturing_job": {
+            "runs": 4, "manufacturing_job_cost": None,
+            "manufacturing_job_cost_unknown_reason": "own row: no priced EIV",
+        }},
+    ]}
+    materials = _batch_materials(**{"54321": 200})
+    materials["54321"]["component_job_fee_per_run_unknown_reason"] = "parent: no index"
+    plan = _planner().plan_chain([_decision(_row(materials=materials))], phase1)
+    (sub,) = [d for d in plan.decisions if d.is_sub_component]
+    assert sub.overview_row["sub_install_fee_unknown_reason"] == "own row: no priced EIV"

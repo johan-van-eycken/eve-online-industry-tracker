@@ -73,3 +73,30 @@ def test_the_shopping_total_names_its_unpriced_lines():
         "1 line(s) have no price: the total excludes them, so the real cost is higher."
     )
     assert tab_shopping.unpriced_total_caption(rows[:1]) is None
+
+
+# --- Task 8b fix round 1: an unpriced line makes the remainder unknown ---
+
+from streamlit_ui.components.daily_planner.tab_shopping import budget_metric  # noqa: E402
+
+
+def test_with_every_line_priced_the_budget_is_exact():
+    assert budget_metric(1000.0, 400.0, 0) == ("Remaining", "600 ISK", None)
+    assert budget_metric(100.0, 400.0, 0) == ("Deficit", "300 ISK", None)
+    assert budget_metric(None, 400.0, 0) == ("Remaining", "—", None)
+
+
+def test_an_unpriced_line_makes_a_positive_remainder_unknown():
+    label, value, caption = budget_metric(1000.0, 400.0, 2)
+    assert (label, value) == ("Remaining", "unknown")
+    assert "2 unpriced line(s)" in caption and "600 ISK" in caption
+    assert wallet_is_short(1000.0, 400.0, unpriced_lines=2) is None
+
+
+def test_an_unpriced_line_makes_a_deficit_a_lower_bound():
+    label, value, caption = budget_metric(100.0, 400.0, 1)
+    assert (label, value) == ("Deficit", "at least 300 ISK")
+    assert "1 unpriced line(s)" in caption
+    # Already short on the priced lines alone: short for certain.
+    assert wallet_is_short(100.0, 400.0, unpriced_lines=1) is True
+    assert remaining_after_shopping(100.0, 400.0, unpriced_lines=1) is None

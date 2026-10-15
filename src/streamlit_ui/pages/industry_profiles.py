@@ -6,6 +6,11 @@ from streamlit_ui.state.session_state import ensure_state_defaults
 from streamlit_ui.api.streamlit_client import cached_api_get
 from streamlit_ui.components.selectors import select_character_id
 from streamlit_ui.components.webpage_ui import render_aggrid_table, require_aggrid
+from eve_online_industry_tracker.application.industry.job_cost import (
+    DEFAULT_RESEARCH_SCC_SURCHARGE,
+    DEFAULT_SCC_SURCHARGE,
+    job_fee_rates_summary,
+)
 
 
 @st.cache_data(ttl=300)
@@ -107,6 +112,24 @@ def _get_industry_admin_defaults() -> tuple[float, float]:
             float(vals.get("scc_surcharge", _NPC_STATION_SCC_SURCHARGE)),
         )
     return _NPC_STATION_FACILITY_TAX, _NPC_STATION_SCC_SURCHARGE
+
+
+def _get_job_scc_rates() -> tuple[float, float]:
+    """(SCC, ME/TE research SCC): the admin settings the producer charges
+    (falls back to the producer's defaults)."""
+    resp = api_get("/admin_settings")
+    if resp and resp.get("status") == "success":
+        vals = (resp.get("data") or {}).get("values", {}).get("industry", {})
+        return (
+            float(vals.get("scc_surcharge", DEFAULT_SCC_SURCHARGE)),
+            float(vals.get("research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)),
+        )
+    return DEFAULT_SCC_SURCHARGE, DEFAULT_RESEARCH_SCC_SURCHARGE
+
+
+def _job_fee_rates_line(profile: dict) -> str:
+    scc, research_scc = _get_job_scc_rates()
+    return job_fee_rates_summary(profile, scc=scc, research_scc=research_scc)
 
 
 def _rig_breakdown_lines(rig_type_ids: list[int], rig_options: dict[int, str], rig_bonus_map: dict[int, dict]) -> list[str]:
@@ -445,18 +468,10 @@ def _render_existing_profiles(
                         st.write(f"**System Cost Index (stored):** {float(stored_ci):.2%}")
                         st.caption("Cost index could not be loaded live — stored value may be stale. Open the system's profile and re-select it to refresh.")
 
-                facility_tax = profile.get("facility_tax")
-                scc_surcharge = profile.get("scc_surcharge")
-                if facility_tax is None and scc_surcharge is None:
-                    st.write("**NPC job fees:** N/A" if is_profile_npc_station else "**Job fees:** N/A")
-                else:
-                    facility_tax = float(facility_tax or 0.0)
-                    scc_surcharge = float(scc_surcharge or 0.0)
-                    total = facility_tax + scc_surcharge
-                    if is_profile_npc_station:
-                        st.write(f"**NPC job fees:** Facility {facility_tax:.2%} | SCC {scc_surcharge:.2%} | Total {total:.2%}")
-                    else:
-                        st.write(f"**Job fees:** Facility {facility_tax:.2%} | SCC {scc_surcharge:.2%} | Total {total:.2%}")
+                # The producer's own rates: the profile's facility tax plus
+                # the admin SCC rates (research has its own).
+                fee_label = "**NPC job fees:**" if is_profile_npc_station else "**Job fees:**"
+                st.write(f"{fee_label} {_job_fee_rates_line(profile)}")
 
                 if not is_profile_npc_station:
                     st.write(f"**Rig Material Bonus:** {profile['structure_rig_material_bonus']:.2%}")
@@ -753,7 +768,7 @@ def _render_create_profile_section(
                 f"SCC surcharge: {float(npc_scc_surcharge or 0.0):.2%}"
             )
             total_npc_rate = float(npc_facility_tax or 0.0) + float(npc_scc_surcharge or 0.0)
-            st.write(f"**Total NPC surcharge:** {total_npc_rate:.2%}")
+            st.write(f"**NPC job fees:** {_job_fee_rates_line({'facility_tax': npc_facility_tax})}")
             installation_cost_modifier = total_npc_rate * 100.0
         else:
             installation_cost_modifier = st.number_input(
@@ -765,8 +780,8 @@ def _render_create_profile_section(
             )
             upwell_facility_tax_pct = float(installation_cost_modifier)
             upwell_scc_surcharge = _get_industry_admin_defaults()[1]  # SCC surcharge
-            st.caption(f"SCC surcharge (fixed): {float(upwell_scc_surcharge):.2%}")
-            st.write(f"**Total job surcharge:** {(upwell_facility_tax_pct / 100.0 + float(upwell_scc_surcharge)):.2%}")
+            st.caption(f"SCC surcharge (admin setting): {float(upwell_scc_surcharge):.2%}")
+            st.write(f"**Job fees:** {_job_fee_rates_line({'facility_tax': upwell_facility_tax_pct / 100.0})}")
 
     rig_slot0_type_id = 0
     rig_slot1_type_id = 0
