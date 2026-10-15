@@ -605,6 +605,22 @@ class DailyPlannerService:
 
         with _ComputeStep(self, "indexing corp blueprints"):
             bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
+        # Blueprints installed in an active job: chain planning neither
+        # researches nor builds from them (Task 8c fix round 5).
+        busy_item_ids = busy_blueprint_item_ids(industry_jobs)
+        if busy_item_ids:
+            owned = {
+                int(_asset_attr(a, "item_id") or 0)
+                for assets in (*bpo_assets_by_type_id.values(), *bpc_assets_by_type_id.values())
+                for a in assets
+            }
+            still_listed = sorted(busy_item_ids & owned)
+            if still_listed:
+                logger.info(
+                    "DailyPlannerService: %d blueprint(s) in active industry jobs are still in the "
+                    "corp asset snapshot (item_ids %s): not researched or built from in this plan",
+                    len(still_listed), still_listed,
+                )
 
         # Blueprint data (SDE) — loaded for chain planning. Owned BPOs are
         # included because sub-manufacture only ever builds from an owned BPO,
@@ -634,6 +650,7 @@ class DailyPlannerService:
             "input_rows": input_rows,
             "variant_rows_by_type_id": variant_rows_by_type_id,
             "industry_jobs": industry_jobs,
+            "busy_blueprint_item_ids": busy_item_ids,
             "corp_assets": corp_assets,
             "corp_material_stock": corp_material_stock,
             "corp_orders": corp_orders,
@@ -1374,6 +1391,25 @@ def _get_attr(obj: Any, attr: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(attr)
     return getattr(obj, attr, None)
+
+
+def busy_blueprint_item_ids(industry_jobs: list[Any]) -> set[int]:
+    """The blueprint item_ids installed in these (active) industry jobs.
+
+    EVE runs one job per blueprint. An installed blueprint normally drops
+    out of the ESI assets, but the asset snapshot is cached longer than the
+    jobs and can still list it, so the planner excludes these explicitly.
+    """
+    out: set[int] = set()
+    for job in industry_jobs or []:
+        value = job.get("blueprint_item_id") if isinstance(job, dict) else getattr(job, "blueprint_item_id", None)
+        try:
+            item_id = int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            continue
+        if item_id > 0:
+            out.add(item_id)
+    return out
 
 
 def index_blueprint_assets(

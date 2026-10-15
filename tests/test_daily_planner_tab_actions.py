@@ -71,3 +71,45 @@ def test_a_te_queued_after_me_is_not_todays_work():
     assert pending_character_action_count(actions) == 0
     assert tab_actions._todays(actions) == actions[:1]
     assert tab_actions._is_queued(actions[1]) and not tab_actions._is_queued(actions[0])
+
+
+# --- Task 8c fix round 5: "Mark started" on a queued TE once the ME ends -------------
+
+def _queued_pair(me_completion, me_status="pending"):
+    me = {"action_type": "me_research", "status": me_status, "type_id": 7, "character_id": 1,
+          "estimated_completion": me_completion}
+    te = {"action_type": "te_research", "status": "pending", "type_id": 7, "character_id": 1,
+          "queued_after_me": True, "estimated_completion": "2026-01-03T00:00:00Z"}
+    return me, te
+
+
+def test_a_queued_te_can_be_started_once_the_me_research_has_ended():
+    from datetime import datetime, timezone
+
+    from streamlit_ui.components.daily_planner.status_bar import queued_te_startable
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    me, te = _queued_pair("2026-01-01T12:00:00Z")
+    assert queued_te_startable(te, [me, te], now) is True
+    me, te = _queued_pair("2026-01-02T12:00:00Z")
+    assert queued_te_startable(te, [me, te], now) is False
+    # Skipped ME: the BPO is free now.
+    me, te = _queued_pair("2026-01-02T12:00:00Z", me_status="skipped")
+    assert queued_te_startable(te, [me, te], now) is True
+    # An unknown ME end keeps it waiting.
+    me, te = _queued_pair(None, me_status="done")
+    assert queued_te_startable(te, [me, te], now) is False
+    # Not queued: not this helper's case.
+    assert queued_te_startable(me, [me, te], now) is False
+
+
+def test_a_startable_queued_te_is_todays_work_again():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
+    assert tab_actions._todays([me, te], now) == [me, te]
+    assert pending_character_action_count([me, te], now) == 1
+    me, te = _queued_pair("2026-01-02T12:00:00Z", me_status="done")
+    assert tab_actions._todays([me, te], now) == [me]
+    assert pending_character_action_count([me, te], now) == 0

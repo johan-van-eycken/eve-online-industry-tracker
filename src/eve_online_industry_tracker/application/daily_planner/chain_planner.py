@@ -183,8 +183,20 @@ class ChainPlanner:
         # BPO ownership and blueprint_data are keyed by blueprint type_id.
         product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
         invention_source = build_invention_source_index(blueprint_data)
-        # {material type_id: merged sub-manufacture request}, in first-seen order.
-        sub_requests: dict[int, dict[str, Any]] = {}
+        # Blueprints installed in an active industry job (Task 8c fix round
+        # 5): EVE runs one job per blueprint, so they neither research nor
+        # build. The asset snapshot can predate the job (ESI caches assets
+        # longer than jobs), so they are excluded here, not trusted to have
+        # dropped out of the assets.
+        busy_item_ids: set[int] = {int(i) for i in (phase1_data.get("busy_blueprint_item_ids") or ())}
+        free_bpo_assets_by_type_id = {
+            type_id: [a for a in assets if research_first.item_id(a) not in busy_item_ids]
+            for type_id, assets in bpo_assets_by_type_id.items()
+        } if busy_item_ids else bpo_assets_by_type_id
+        # Each parent's sub-manufacture requests, in order, and (research
+        # first) the ones its kept BPO row would make instead.
+        requests_by_parent: list[tuple[int, list[dict[str, Any]]]] = []
+        fallback_requests: dict[int, list[dict[str, Any]]] = {}
 
         for decision in top_level_decisions:
             if decision.decision != "build":
@@ -208,6 +220,7 @@ class ChainPlanner:
                         market_depth_cache=market_depth_cache,
                         bpo_opportunities=bpo_opportunities,
                         te_research_target=te_research_target,
+                        busy_item_ids=busy_item_ids,
                         bpo_strong_buy_days=bpo_strong_buy_days,
                         bpo_consider_days=bpo_consider_days,
                     )
@@ -215,6 +228,7 @@ class ChainPlanner:
                         decision, bp_type_id, bpo_plan,
                         variant_rows_by_type_id.get(int(decision.type_id)) or [],
                         raw_market_depth.get(int(decision.type_id)),
+                        bp_data=bp_data, market_depth_cache=market_depth_cache,
                     )
                 else:
                     # T2+ — invention chain only
@@ -236,41 +250,35 @@ class ChainPlanner:
                 # Which of this batch's materials the corp could build itself.
                 # Collected across every parent first, so one material needed
                 # by several builds becomes ONE sub-manufacture decision.
-                for request in self._collect_sub_manufacture_requests(
+                requests = self._collect_sub_manufacture_requests(
                     decision=decision,
-                    bpo_assets_by_type_id=bpo_assets_by_type_id,
+                    bpo_assets_by_type_id=free_bpo_assets_by_type_id,
                     product_to_blueprint=product_to_blueprint,
-                ):
-                    merged = sub_requests.setdefault(request["type_id"], {
-                        **request, "quantity": 0, "requested_by_type_ids": [],
-                    })
-                    merged["quantity"] += request["quantity"]
-                    merged["requested_by_type_ids"].append(int(decision.type_id))
-                    # One sub job serves every requester. If their structures
-                    # differ, take the smallest facility bonus so no parent's
-                    # share is under-bought.
-                    if facility_bonus.facility_reduction(request) < facility_bonus.facility_reduction(merged):
-                        merged.update({k: request[k] for k in facility_bonus.FACILITY_KEYS})
+                )
+                requests_by_parent.append((int(decision.type_id), requests))
+                kept_row = self._research_first_fallback_row(decision.overview_row)
+                if kept_row is not None:
+                    fallback_requests[int(decision.type_id)] = self._collect_sub_manufacture_requests(
+                        decision=decision, row=kept_row,
+                        bpo_assets_by_type_id=free_bpo_assets_by_type_id,
+                        product_to_blueprint=product_to_blueprint,
+                    )
 
             except (TypeError, ValueError):
                 # Per-item isolation for malformed SDE / market values (int()
                 # and float() conversions); anything else is a bug and aborts.
                 logger.exception("ChainPlanner: error planning chain for type_id=%s", decision.type_id)
 
-        for request in sub_requests.values():
-            try:
-                sub_decision = self._resolve_sub_manufacture(
-                    request=request,
-                    market_depth_cache=market_depth_cache,
-                    phase1_data=phase1_data,
-                )
-            except (TypeError, ValueError):
-                logger.exception(
-                    "ChainPlanner: error resolving sub-manufacture for type_id=%s", request["type_id"]
-                )
-                continue
-            if sub_decision is not None:
-                all_decisions.append(sub_decision)
+        def _sub_decisions(fallen: set[int]) -> list[ItemDecision]:
+            per_parent = [
+                (parent, fallback_requests[parent] if parent in fallen and parent in fallback_requests else requests)
+                for parent, requests in requests_by_parent
+            ]
+            return self._resolve_sub_requests(
+                self._merge_sub_requests(per_parent), market_depth_cache, phase1_data,
+            )
+
+        all_decisions.extend(_sub_decisions(set()))
 
         # Logged once, and only for components that are actually sub-built.
         unknown_rig = sorted(
@@ -290,7 +298,62 @@ class ChainPlanner:
             decisions=all_decisions,
             bpo_opportunities=bpo_opportunities,
             sub_manufacture_actions=sub_manufacture_actions,
+            resize_sub_components=_sub_decisions,
         )
+
+    @staticmethod
+    def _merge_sub_requests(
+        per_parent: list[tuple[int, list[dict[str, Any]]]],
+    ) -> dict[int, dict[str, Any]]:
+        """{material type_id: one merged request}, in first-seen order."""
+        sub_requests: dict[int, dict[str, Any]] = {}
+        for parent_type_id, requests in per_parent:
+            for request in requests:
+                merged = sub_requests.setdefault(request["type_id"], {
+                    **request, "quantity": 0, "requested_by_type_ids": [],
+                })
+                merged["quantity"] += request["quantity"]
+                merged["requested_by_type_ids"].append(parent_type_id)
+                # One sub job serves every requester. If their structures
+                # differ, take the smallest facility bonus so no parent's
+                # share is under-bought.
+                if facility_bonus.facility_reduction(request) < facility_bonus.facility_reduction(merged):
+                    merged.update({k: request[k] for k in facility_bonus.FACILITY_KEYS})
+        return sub_requests
+
+    def _resolve_sub_requests(
+        self,
+        sub_requests: dict[int, dict[str, Any]],
+        market_depth_cache: dict[int, Any],
+        phase1_data: dict[str, Any],
+    ) -> list[ItemDecision]:
+        decisions: list[ItemDecision] = []
+        for request in sub_requests.values():
+            try:
+                sub_decision = self._resolve_sub_manufacture(
+                    request=request,
+                    market_depth_cache=market_depth_cache,
+                    phase1_data=phase1_data,
+                )
+            except (TypeError, ValueError):
+                logger.exception(
+                    "ChainPlanner: error resolving sub-manufacture for type_id=%s", request["type_id"]
+                )
+                continue
+            if sub_decision is not None:
+                decisions.append(sub_decision)
+        return decisions
+
+    @staticmethod
+    def _research_first_fallback_row(row: dict[str, Any]) -> dict[str, Any] | None:
+        """The row the parent builds from when its planned research gets no
+        slot (CharacterAssigner), when that differs from the plan: the kept
+        BPO row of a variant, else the row without its research-first plan.
+        None when the plan does not depend on a research slot."""
+        first = row.get("research_first")
+        if not isinstance(first, dict) or first.get("unconditional") or first.get("mode") == "other_bpo":
+            return None
+        return first.get("kept_row") or {k: v for k, v in row.items() if k != "research_first"}
 
     def _plan_t1_chain(
         self,
@@ -305,11 +368,13 @@ class ChainPlanner:
         te_research_target: int,
         bpo_strong_buy_days: float,
         bpo_consider_days: float,
+        busy_item_ids: set[int] = frozenset(),
     ) -> dict[str, Any] | None:
         """Plan T1 chain: BPO path, ME/TE research, or BPC/shopping fallback.
 
         Returns the owned-BPO plan ({assets (producer order), priced, research
-        (index or None)}) for research first, or None without an owned BPO."""
+        (index or None), busy (indices of BPOs in an active job)}) for
+        research first, or None without an owned BPO."""
         bpo_owned = bp_type_id in bpo_assets_by_type_id and bool(bpo_assets_by_type_id[bp_type_id])
 
         if bpo_owned:
@@ -337,7 +402,12 @@ class ChainPlanner:
             bpo_assets = research_first.producer_bpo_order(bpo_assets_by_type_id[bp_type_id])
             priced = research_first.priced_bpo_index(decision.overview_row, bpo_assets)
 
+            busy = {i for i, a in enumerate(bpo_assets) if research_first.item_id(a) in busy_item_ids}
+
             def _needs_research(asset: Any) -> bool:
+                # A BPO installed in an active job cannot start a research job.
+                if research_first.item_id(asset) in busy_item_ids:
+                    return False
                 me = _blueprint_efficiency(asset, "material")
                 te = _blueprint_efficiency(asset, "time")
                 return (me is not None and optimal_me is not None and me < optimal_me) or (
@@ -373,7 +443,11 @@ class ChainPlanner:
                     bp_type_id,
                 )
 
-            # Schedule ME/TE research in the action plan (signals to ActionPlanBuilder)
+            # Schedule ME/TE research in the action plan (signals to
+            # ActionPlanBuilder), only on a BPO chosen for research: never on
+            # one in an active job.
+            if research_index is None:
+                current_me = current_te = None
             if current_me is not None and optimal_me is not None and current_me < optimal_me:
                 decision.overview_row["needs_me_research"] = True
                 decision.overview_row["me_research_target"] = optimal_me
@@ -389,7 +463,13 @@ class ChainPlanner:
                 decision.overview_row["te_current"] = current_te
 
             decision.pipeline_stage = "manufacturing"
-            return {"assets": bpo_assets, "priced": priced, "research": research_index}
+            if priced in busy:
+                logger.info(
+                    "ChainPlanner: type_id=%s: the BPO its row is priced from (item %s) is in an "
+                    "active industry job; not building from it in this plan",
+                    decision.type_id, research_first.item_id(bpo_assets[priced]),
+                )
+            return {"assets": bpo_assets, "priced": priced, "research": research_index, "busy": busy}
 
         elif bp_type_id in bpc_assets_by_type_id and bpc_assets_by_type_id[bp_type_id]:
             # BPC available — plan manufacturing from BPC + run BPO investment analysis
@@ -494,6 +574,9 @@ class ChainPlanner:
         bpo_plan: dict[str, Any] | None,
         variants: list[dict[str, Any]],
         market_depth: Any | None,
+        *,
+        bp_data: dict[str, Any] | None = None,
+        market_depth_cache: dict[int, Any] | None = None,
     ) -> None:
         """Research first (see research_first.py): when research is scheduled
         on the BPO this batch builds from or copies, build from an owned-BPC
@@ -511,14 +594,26 @@ class ChainPlanner:
         BPO is not the one the row is priced from, the row builds as usual
         (mode other_bpo). When it is, the batch builds from another BPO: at
         the same ME/TE from the row itself, else from that BPO's own variant
-        row (its materials, cost and profit), never at the priced BPO's ME."""
+        row (its materials, cost and profit), else (fix round 5: the producer
+        emits no per-BPO row with build-from-BPC on) sized by the planner
+        from the SDE at that BPO's ME (_size_on_other_bpo); never at the
+        priced BPO's ME.
+
+        A priced BPO installed in an active industry job (fix round 5) is
+        unavailable the same way, but unconditionally (`unconditional`): it
+        does not wait for a research slot."""
         row = decision.overview_row
-        if not (row.get("needs_me_research") or row.get("needs_te_research")):
-            return
-        if not research_first.batch_uses_bpo(row) or not bpo_plan or bpo_plan.get("research") is None:
+        if not bpo_plan or not research_first.batch_uses_bpo(row):
             return
         assets, priced, research = bpo_plan["assets"], bpo_plan["priced"], bpo_plan["research"]
-        if research != priced:
+        busy: set[int] = set(bpo_plan.get("busy") or ())
+        researching = research is not None and bool(
+            row.get("needs_me_research") or row.get("needs_te_research")
+        )
+        priced_busy = priced in busy
+        if not priced_busy and not researching:
+            return
+        if not priced_busy and research != priced:
             build = research_first.describe_bpo(assets[priced])
             row["research_first"] = {
                 "mode": "other_bpo",
@@ -528,34 +623,68 @@ class ChainPlanner:
             }
             logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, row["research_first"]["note"])
             return
-        for other in (i for i in range(len(assets)) if i != priced):
+        cause = "BPO in an active industry job" if priced_busy else "BPO in research"
+        # Busy is a fact of this plan, research a plan that needs a slot.
+        flags = {"unconditional": True} if priced_busy else {}
+        unavailable = busy | ({research} if researching else set())
+
+        def _log(note: str) -> None:
+            if priced_busy:
+                logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, note)
+            else:
+                logger.info(
+                    "ChainPlanner: type_id=%s: research planned on BPO %s; if its research gets a slot: %s",
+                    decision.type_id, bp_type_id, note,
+                )
+
+        unsized: list[str] = []
+        for other in (i for i in range(len(assets)) if i != priced and i not in unavailable):
             build = research_first.describe_bpo(assets[other])
             if research_first.bpo_levels(assets[other]) == research_first.bpo_levels(assets[priced]):
+                note = (
+                    f"{cause}: the batch builds from another BPO at {build}" if priced_busy
+                    else f"researching one of {len(assets)} BPOs; the batch builds from another at {build}"
+                )
                 row["research_first"] = {
-                    "mode": "other_bpo",
-                    "note": f"researching one of {len(assets)} BPOs; the batch builds from another at {build}",
-                    "build_note": f"built from another BPO at {build}",
+                    "mode": "other_bpo", "note": note,
+                    "build_note": f"built from another BPO at {build}", **flags,
                 }
-                logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, row["research_first"]["note"])
+                _log(note)
                 return
             other_variant = research_first.variant_for_bpo(variants, bp_type_id, assets[other])
+            sized_reason = None
             if other_variant is not None:
                 new_row = self._research_first_variant_row(row, other_variant)
                 profit, reason = _variant_profit(other_variant, market_depth)
-                new_row["research_first"] = {
-                    "mode": "variant",
-                    "note": f"BPO in research: built from another BPO at {build}",
-                    "profit": profit, "profit_unknown_reason": reason,
-                    "kept_row": row,
-                    "sized_note": f"its components were sized for the BPO at {build}; "
-                                  "the shopping list buys any difference",
-                }
-                decision.overview_row = new_row
-                logger.info(
-                    "ChainPlanner: type_id=%s: research planned on BPO %s; if its research gets a slot: %s",
-                    decision.type_id, bp_type_id, new_row["research_first"]["note"],
+                note = f"{cause}: built from another BPO at {build}"
+            else:
+                new_row, sized_reason = self._size_on_other_bpo(
+                    row, assets[other], bp_data or {}, market_depth_cache or {},
                 )
-                return
+                if new_row is None:
+                    unsized.append(f"the BPO at {build}: {sized_reason}")
+                    continue
+                profit, reason = (
+                    _variant_profit(new_row, market_depth)
+                    if orow.get_material_cost_total(new_row) is not None
+                    else (None, "a material of the batch has no market price")
+                )
+                note = (
+                    f"{cause}: built from another BPO at {build} (its BPO runs sized by the planner "
+                    "from the SDE at that ME, with the row's structure and rig bonuses)"
+                )
+            new_row["research_first"] = {
+                "mode": "variant", "note": note,
+                "profit": profit, "profit_unknown_reason": reason,
+                "kept_row": row,
+                "sized_note": f"its components were sized for the BPO at {build}; "
+                              "the shopping list buys any shortfall, any surplus stays in stock",
+                **flags,
+            }
+            decision.overview_row = new_row
+            _log(note)
+            return
+        unsized_note = f"; another BPO could not size the batch ({'; '.join(unsized)})" if unsized else ""
         variant = research_first.best_bpc_variant(variants, bp_type_id)
         total_runs = orow.get_manufacturing_job(row).get("runs")
         if variant is not None:
@@ -563,11 +692,12 @@ class ChainPlanner:
             profit, reason = _variant_profit(variant, market_depth)
             new_row["research_first"] = {
                 "mode": "variant",
-                "note": "BPO in research: built from the owned-BPC variant",
+                "note": f"{cause}: built from the owned-BPC variant{unsized_note}",
                 "profit": profit, "profit_unknown_reason": reason,
                 "kept_row": row,
                 "sized_note": "its components were sized for the owned-BPC variant's batch; "
-                              "the shopping list buys any difference",
+                              "the shopping list buys any shortfall, any surplus stays in stock",
+                **flags,
             }
             decision.overview_row = new_row
             note = new_row["research_first"]["note"]
@@ -576,22 +706,135 @@ class ChainPlanner:
             if part is not None:
                 row["research_first"] = {
                     "mode": "part", **part,
-                    "note": f"BPO in research: built from the owned BPC runs only ({part['runs']} of "
-                            f"{total_runs} runs)",
+                    "note": f"{cause}: built from the owned BPC runs only ({part['runs']} of "
+                            f"{total_runs} runs){unsized_note}",
                     "cost_unknown_reason": research_first.PART_COST_UNKNOWN_REASON,
                     "sized_note": f"its components were sized for {part['runs']} of {total_runs} runs; "
                                   f"the shopping list buys the rest",
+                    **flags,
                 }
             else:
                 row["research_first"] = {
-                    "mode": "none", "note": "BPO in research: not built from it in this plan",
+                    "mode": "none", "note": f"{cause}: not built from it in this plan{unsized_note}",
                     "sized_note": "its components were not sub-built in this plan; the shopping list buys them",
+                    **flags,
                 }
             note = row["research_first"]["note"]
-        logger.info(
-            "ChainPlanner: type_id=%s: research planned on BPO %s; if its research gets a slot: %s",
-            decision.type_id, bp_type_id, note,
+        _log(note)
+
+    def _size_on_other_bpo(
+        self,
+        row: dict[str, Any],
+        asset: Any,
+        bp_data: dict[str, Any],
+        market_depth_cache: dict[int, Any],
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """The kept row rebuilt on another owned BPO that has no producer row
+        of its own (Task 8c fix round 5): (row, None), or (None, why).
+
+        The row's owned-BPC job segments keep their own materials; the runs
+        it builds from (or copies from) the BPO are built from this BPO
+        instead, sized like a sub job (_sub_batch): SDE base quantities x
+        runs, split at the blueprint's max runs per job, each job rounded
+        up (blueprints.reduced_batch_quantity) at the producer's combination
+        of [this BPO's ME, the structure bonus, the rig bonus] from the
+        row's industry profile (facility_bonus). A rig whose coverage of the
+        product is unknown adds only an "All" rig, so the result is an upper
+        bound, never an under-buy. Priced with _price_materials (unknown
+        when a line has no price). The manufacturing fee is EIV-based (ME 0
+        inputs, job_cost.py), so the same runs keep the row's fee; the
+        row's other job fees stay in total_cost.
+        """
+        from eve_online_industry_tracker.infrastructure.sde.blueprints import reduced_batch_quantity
+
+        me, te = research_first.bpo_levels(asset)
+        if me is None:
+            return None, "its ME is unknown"
+        manufacturing = bp_data.get("manufacturing") if isinstance(bp_data, dict) else None
+        if not isinstance(manufacturing, dict):
+            return None, "no SDE manufacturing data for the blueprint"
+        base_materials: dict[int, int] = {}
+        for mat in manufacturing.get("materials") or []:
+            if isinstance(mat, dict) and int(mat.get("type_id") or 0) > 0 and int(mat.get("quantity") or 0) > 0:
+                base_materials[int(mat["type_id"])] = base_materials.get(int(mat["type_id"]), 0) + int(mat["quantity"])
+        if not base_materials:
+            return None, "no SDE manufacturing data for the blueprint (no materials)"
+        max_runs = _max_runs_per_job(bp_data)
+        if max_runs is None:
+            return None, "no SDE manufacturing data for the blueprint (no max runs per job)"
+        job = orow.get_manufacturing_job(row)
+        profile = job.get("industry_profile")
+        if not isinstance(profile, dict):
+            return None, "no industry profile on the row, so the structure bonus is unknown"
+
+        segments = research_first.job_segments(row)
+        if segments is None:
+            runs, reason = _batch_runs(job)
+            if runs is None:
+                return None, reason
+            segments = [{"runs": runs, "source": "owned_blueprint_original"}]
+        kept_segments: list[dict[str, Any]] = []
+        bpo_runs = 0
+        for segment in segments:
+            if str(segment.get("source")) in research_first.BPO_SOURCES:
+                bpo_runs += int(segment.get("runs") or 0)
+            elif isinstance(segment.get("materials"), dict):
+                kept_segments.append(segment)
+            else:
+                return None, "a job segment's materials are unknown"
+        if bpo_runs <= 0:
+            return None, "the batch has no BPO runs"
+
+        product_type_id = int(row.get("type_id") or 0)
+        product_entry = next(
+            (p for p in (job.get("products") or [])
+             if isinstance(p, dict) and int(p.get("type_id") or 0) == product_type_id),
+            row,
         )
+        bonuses = facility_bonus.sub_job_facility_reductions(profile, product_entry)
+        reduction = facility_bonus.combine_reductions([
+            float(me) / 100.0, bonuses["structure_material_reduction"], bonuses["rig_material_reduction"],
+        ])
+        full_jobs, remainder = divmod(bpo_runs, max_runs)
+        new_segments = [dict(s) for s in kept_segments]
+        for runs_in_job in [max_runs] * full_jobs + ([remainder] if remainder else []):
+            new_segments.append({
+                "runs": runs_in_job, "source": "owned_blueprint_original",
+                "blueprint_material_efficiency": me, "blueprint_time_efficiency": te,
+                "material_reduction": reduction,
+                "materials": {
+                    str(t): reduced_batch_quantity(q, runs_in_job, reduction) for t, q in base_materials.items()
+                },
+            })
+        batch: dict[int, int] = {}
+        for segment in new_segments:
+            for type_id, quantity in segment["materials"].items():
+                batch[int(type_id)] = batch.get(int(type_id), 0) + int(quantity)
+        batch = {t: q for t, q in batch.items() if q > 0}
+
+        entries = {
+            int(e.get("type_id") or 0): e
+            for e in (job.get("materials") or {}).values() if isinstance(e, dict)
+        }
+        names = {int(m.get("type_id") or 0): m.get("type_name") for m in manufacturing.get("materials") or []
+                 if isinstance(m, dict)}
+        materials = {
+            str(t): {**(entries.get(t) or {"type_id": t, "type_name": names.get(t) or f"type_{t}"}), "quantity": q}
+            for t, q in batch.items()
+        }
+        cost = self._price_materials(batch, market_depth_cache)
+        kept_material = orow.get_material_cost_total(row)
+        kept_total = orow.get_total_cost(row)
+        other_fees = kept_total - kept_material if kept_total is not None and kept_material is not None else None
+        new_job = {
+            **job, "materials": materials, "job_segments": new_segments,
+            "material_cost": cost,
+            "total_cost": cost + other_fees if cost is not None and other_fees is not None else None,
+            "blueprint_source_kind": job.get("blueprint_source_kind"),
+            "blueprint_original": {"item_id": research_first.item_id(asset)},
+            "rig_applicability": bonuses["rig_applicability"],
+        }
+        return {**row, "manufacturing_job": new_job}, None
 
     @staticmethod
     def _research_first_variant_row(row: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
@@ -614,9 +857,11 @@ class ChainPlanner:
         decision: ItemDecision,
         bpo_assets_by_type_id: dict[int, list],
         product_to_blueprint: dict[int, int],
+        row: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """This batch's materials that the corp owns a BPO for, with the
-        quantity the batch actually consumes.
+        quantity the batch actually consumes. `row` is the parent row to
+        size from (default: the decision's).
 
         The quantity is the producer's manufacturing_job.materials entry:
         already per-run x runs and after ME/structure reduction. The SDE's
@@ -629,14 +874,15 @@ class ChainPlanner:
         the sub job gets in this parent's structure
         (facility_bonus.sub_job_facility_reductions).
         """
-        first = decision.overview_row.get("research_first")
+        row = decision.overview_row if row is None else row
+        first = row.get("research_first")
         mode = first.get("mode") if isinstance(first, dict) else None
         if mode == "none":
             # Research first: the parent is not built, so neither are its components.
             return []
         batch_materials = (
             dict(first["materials"]) if mode == "part"
-            else orow.get_batch_materials(decision.overview_row)
+            else orow.get_batch_materials(row)
         )
         if batch_materials is None:
             logger.warning(
@@ -647,7 +893,7 @@ class ChainPlanner:
             )
             return []
 
-        manufacturing_job = orow.get_manufacturing_job(decision.overview_row)
+        manufacturing_job = orow.get_manufacturing_job(row)
         entries = {
             int(e.get("type_id") or 0): e
             for e in (manufacturing_job.get("materials") or {}).values()

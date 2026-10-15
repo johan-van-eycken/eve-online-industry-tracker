@@ -156,3 +156,8 @@ class ChainPlan:
     decisions: list[ItemDecision]   # top-level + sub-component decisions
     bpo_opportunities: list[dict[str, Any]] = field(default_factory=list)
     sub_manufacture_actions: list[AssignedAction] = field(default_factory=list)
+    #: Re-plans the sub-components when research-first parents fall back to
+    #: their kept BPO row (no free research slot, Task 8c fix round 5):
+    #: called with those parents' type_ids, returns the new sub-component
+    #: decisions. None for a hand-built plan (the plan's sizes then stand).
+    resize_sub_components: Any = field(default=None, repr=False, compare=False)

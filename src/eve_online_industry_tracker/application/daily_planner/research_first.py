@@ -12,6 +12,12 @@ batch builds from or copies it, the item falls back, in this order, to:
    producer priced the whole batch, so material cost and profit are unknown;
 3. nothing: the item is not built in this plan.
 
+With several BPOs of the type, another free BPO builds instead: from its own
+producer row, else sized by the planner from the SDE at its ME in the row's
+structure (Task 8c fix round 5). A BPO installed in an active industry job
+is unavailable the same way, but unconditionally: it is not waiting for a
+research slot.
+
 ChainPlanner decides it once, before the sub-components are sized, and
 records it on the row as `research_first`; the sub-component requests and
 CharacterAssigner's manufacture action both follow that one decision.
@@ -108,6 +114,11 @@ def _level(asset: Any, attr: str) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def item_id(asset: Any) -> int | None:
+    """The asset's item_id, or None."""
+    return _level(asset, "item_id")
 
 
 def bpo_levels(asset: Any) -> tuple[int | None, int | None]:

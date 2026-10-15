@@ -131,3 +131,25 @@ def test_the_refresh_hint_shows_only_for_the_unknowns_without_a_reason():
     caption = status_bar.capital_reserved_display(reserved)[1]
     assert "no cost index (1 job(s))" in caption
     assert caption.endswith(status_bar.STALE_FEE_HINT)
+
+
+# --- Task 8c fix round 5: the queued TE's fee is shown apart ------------------------
+
+def test_a_queued_te_fee_stays_in_the_total_and_is_named_in_the_caption():
+    actions = [
+        _a("buy_materials", 400.0),
+        _a("me_research", None, fee=10.0),
+        {**_a("te_research", None, fee=20.0), "queued_after_me": True},
+    ]
+    reserved = status_bar.compute_capital_reserved(actions)
+    assert reserved.total == 430.0
+    assert (reserved.queued_fee, reserved.queued_jobs) == (20.0, 1)
+    assert status_bar.capital_reserved_display(reserved) == (
+        "430 ISK", "incl. 20 ISK for 1 queued job(s)",
+    )
+
+
+def test_without_queued_jobs_there_is_no_queued_caption():
+    reserved = status_bar.compute_capital_reserved([_a("te_research", None, fee=20.0)])
+    assert (reserved.queued_fee, reserved.queued_jobs) == (0.0, 0)
+    assert status_bar.capital_reserved_display(reserved) == ("20 ISK", None)

@@ -14,6 +14,8 @@ from streamlit_ui.components.daily_planner.status_bar import (
     PLANNER_MAX_PLAN_AGE_HOURS,
     _fmt_isk,
     _parse_dt,
+    is_waiting,
+    queued_te_startable,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,9 +102,11 @@ def _is_queued(action: dict[str, Any]) -> bool:
     return bool(action.get("queued_after_me"))
 
 
-def _todays(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The actions that can be done today: every action but a queued one."""
-    return [a for a in actions if not _is_queued(a)]
+def _todays(actions: list[dict[str, Any]], now: datetime | None = None) -> list[dict[str, Any]]:
+    """The actions that can be done today: every action but a queued one
+    whose ME research has not ended yet (fix round 5: once it has, the
+    queued TE is today's work, with a "Mark started" button)."""
+    return [a for a in actions if not is_waiting(a, actions, now)]
 
 
 def _has_pending_buys(plan: dict[str, Any]) -> bool:
@@ -135,6 +139,7 @@ def _render_action_row(
     action: dict[str, Any],
     page_state: DailyPlannerPageState,
     readiness_ok: bool,
+    siblings: list[dict[str, Any]] | None = None,
 ) -> None:
     action_id = int(action.get("id") or 0)
     status = str(action.get("status") or "pending")
@@ -166,10 +171,37 @@ def _render_action_row(
         return
 
     if _is_queued(action):
-        # Not startable today: no done/skip buttons.
-        st.markdown(f"⏳ {type_name} — *queued: start when the ME research on this BPO ends*")
-        if completion_label:
-            st.caption(completion_label)
+        if not queued_te_startable(action, siblings or [action]):
+            # Not startable yet: no done/skip buttons.
+            st.markdown(f"⏳ {type_name} — *queued: start when the ME research on this BPO ends*")
+            if completion_label:
+                st.caption(completion_label)
+            return
+        # The ME research has ended: start it in EVE, then record it.
+        cols = st.columns([1.2, 0.6, 5])
+        with cols[0]:
+            if st.button("Mark started", key=f"started_{action_id}",
+                         help="The ME research on this BPO has ended: mark this TE research as started"):
+                try:
+                    mark_action_done(action_id)
+                    _reload_plan(page_state)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+        with cols[1]:
+            if st.button("Skip", key=f"skip_{action_id}", help="Skip this action"):
+                try:
+                    set_action_status(action_id, "skipped")
+                    _reload_plan(page_state)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+        with cols[2]:
+            st.markdown(f"{type_name} — *the ME research on this BPO has ended: start it now*")
+            if completion_label:
+                st.caption(completion_label)
+        if notes:
+            st.caption(f"  ↳ {notes}")
         return
 
     # Pending action
@@ -302,7 +334,7 @@ def _render_character_section(
                         st.rerun()
 
             for action in section_actions:
-                _render_action_row(action, page_state, readiness_ok)
+                _render_action_row(action, page_state, readiness_ok, char_actions)
 
             st.markdown("")  # spacer between sections
 

@@ -53,6 +53,11 @@ class CapitalReserved:
     #: sorted by reason. The rest of unknown_fee_jobs has no recorded cause:
     #: an old plan or product overview, which a refresh / recompute fixes.
     unknown_fee_reasons: tuple[tuple[str, int], ...] = ()
+    #: The known fees of pending jobs queued behind another job on the same
+    #: blueprint (a TE research after its BPO's ME research): in `total`,
+    #: since the fee is paid once the job starts, and named in the caption.
+    queued_fee: float = 0.0
+    queued_jobs: int = 0
 
     @property
     def stale_fee_jobs(self) -> int:
@@ -72,6 +77,8 @@ def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
     total = 0.0
     unpriced_purchases = 0
     unknown_fee_jobs = 0
+    queued_fee = 0.0
+    queued_jobs = 0
     reasons: dict[str, int] = {}
     for action in actions:
         if str(action.get("status") or "pending") != "pending":
@@ -92,7 +99,13 @@ def compute_capital_reserved(actions: list[dict[str, Any]]) -> CapitalReserved:
                     reasons[reason] = reasons.get(reason, 0) + 1
             else:
                 total += float(fee)
-    return CapitalReserved(total, unpriced_purchases, unknown_fee_jobs, tuple(sorted(reasons.items())))
+                if action.get("queued_after_me"):
+                    queued_fee += float(fee)
+                    queued_jobs += 1
+    return CapitalReserved(
+        total, unpriced_purchases, unknown_fee_jobs, tuple(sorted(reasons.items())),
+        queued_fee=queued_fee, queued_jobs=queued_jobs,
+    )
 
 
 #: Appended to the caption when a job's fee is unknown with no recorded
@@ -121,18 +134,52 @@ def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None
     if missing:
         caption = "; ".join(missing)
         return "unknown", caption + (STALE_FEE_HINT if reserved.stale_fee_jobs > 0 else "")
-    return (_fmt_isk(reserved.total) if reserved.total else "—"), None
+    queued = (
+        f"incl. {_fmt_isk(reserved.queued_fee)} for {reserved.queued_jobs} queued job(s)"
+        if reserved.queued_jobs else None
+    )
+    return (_fmt_isk(reserved.total) if reserved.total else "—"), queued
 
 
-def pending_character_action_count(actions: list[dict[str, Any]]) -> int:
+def queued_te_startable(
+    action: dict[str, Any], actions: list[dict[str, Any]], now: datetime | None = None,
+) -> bool:
+    """Whether a TE research queued behind the ME research on its BPO
+    (queued_after_me) can be started now: the ME action on the same BPO
+    (type_id) for the same pilot has ended (its estimated completion has
+    passed) or was skipped. An unknown ME end keeps it waiting (the next
+    plan schedules it from the jobs); with no such ME action nothing says
+    it must wait. False for an action that is not queued."""
+    if not action.get("queued_after_me"):
+        return False
+    now = now or datetime.now(tz=timezone.utc)
+    me = next((
+        a for a in actions
+        if str(a.get("action_type") or "") == "me_research"
+        and a.get("type_id") == action.get("type_id")
+        and a.get("character_id") == action.get("character_id")
+    ), None)
+    if me is None or str(me.get("status") or "pending") == "skipped":
+        return True
+    me_end = _parse_dt(me.get("estimated_completion"))
+    return me_end is not None and me_end <= now
+
+
+def is_waiting(action: dict[str, Any], actions: list[dict[str, Any]], now: datetime | None = None) -> bool:
+    """A queued action that cannot be started yet: not today's work."""
+    return bool(action.get("queued_after_me")) and not queued_te_startable(action, actions, now)
+
+
+def pending_character_action_count(actions: list[dict[str, Any]], now: datetime | None = None) -> int:
     """Pending actions a pilot still has to do. Rows of a type this planner
     no longer produces (e.g. a legacy relist_order) do not count."""
     return sum(
         1 for a in actions
         if str(a.get("status") or "pending") == "pending"
         and str(a.get("action_type") or "") in CHARACTER_ACTION_TYPES
-        # A TE research queued behind its BPO's ME job cannot be done today.
-        and not a.get("queued_after_me")
+        # A TE research queued behind its BPO's ME job cannot be done
+        # until that job ends.
+        and not is_waiting(a, actions, now)
     )
 
 

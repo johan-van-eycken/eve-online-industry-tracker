@@ -276,9 +276,10 @@ def test_a_te_0_bpo_without_a_free_research_slot_is_built_from_in_full(caplog):
     assert "no free research slot" in build.notes
     assert any("no free research slot" in r.getMessage() and r.levelno == logging.WARNING
                for r in caplog.records)
-    # The plan's components were sized for the research-first batch (none):
-    # the note says the shopping list buys them.
-    assert "the shopping list buys them" in build.notes
+    # The plan sized no components for the research-first batch (none):
+    # they are re-sized to the full BPO batch (fix round 5).
+    assert "components re-sized for the BPO's batch" in build.notes
+    assert actions["sub_manufacture"].quantity == 1000
 
 
 def test_a_partial_case_without_a_free_research_slot_is_built_in_full():
@@ -286,7 +287,8 @@ def test_a_partial_case_without_a_free_research_slot_is_built_in_full():
     build = actions["manufacture"]
     assert build.runs == 10 and build.materials == {54321: 1000}
     assert build.estimated_cost_isk == 1000.0
-    assert "components were sized for 4 of 10 runs" in build.notes
+    assert "components re-sized for the BPO's batch" in build.notes
+    assert actions["sub_manufacture"].quantity == 1000
 
 
 def test_a_variant_case_without_a_free_research_slot_builds_from_the_kept_bpo_row():
@@ -416,3 +418,150 @@ def test_the_queued_flag_is_persisted_on_the_action_log_row():
     from eve_online_industry_tracker.infrastructure.models import DailyActionLogModel
 
     assert "queued_after_me" in DailyActionLogModel.__table__.columns
+
+
+# --- fix round 5: another BPO without its own producer row (default settings) -----
+#
+# With build_from_bpc on and owned BPCs, the producer emits only the BPC
+# variant: no row per BPO. While BPO 1 researches, BPO 2 builds the BPO runs;
+# the planner sizes them from the SDE at BPO 2's ME in the row's structure.
+
+PARENT_SDE = {**BLUEPRINT_DATA, 999: {"max_production_limit": 300,
+                                      "manufacturing": BLUEPRINT_DATA[999]["manufacturing"]}}
+
+
+def _bpc_then_bpo_row(profile=None, *, with_profile=True):
+    """The kept row: 4 runs on owned BPCs (400), then 6 on BPO 1 at ME 10 (540)."""
+    row = _row(segments=[_segment(4, "owned_blueprint_copy", 400),
+                         _segment(6, "owned_blueprint_original", 540)],
+               kind="owned_blueprint_copy", material_cost=940.0, overview_row_id="bpc-1", bpo_item_id=1)
+    if with_profile:
+        row["manufacturing_job"]["industry_profile"] = profile if profile is not None else {}
+    return row
+
+
+def _plan5(row, *, bpos, blueprint_data=PARENT_SDE, variants=None, busy=None):
+    planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
+    component_bpo = SimpleNamespace(type_id=888, item_id=88, is_blueprint_copy=False,
+                                    blueprint_material_efficiency=10, blueprint_time_efficiency=20)
+    data = {
+        "bpo_assets_by_type_id": {999: bpos, 888: [component_bpo]},
+        "blueprint_data": blueprint_data,
+        "market_depth_cache": MARKET,
+        "variant_rows_by_type_id": {12345: variants or []},
+    }
+    if busy is not None:
+        data["busy_blueprint_item_ids"] = set(busy)
+    return planner.plan_chain([_decision(row)], data)
+
+
+def test_another_bpo_without_a_producer_row_builds_the_bpo_runs_at_its_own_me():
+    plan = _plan5(_bpc_then_bpo_row(), bpos=[A_PRICED, B_BUILDS])
+    (sub,) = _subs(plan)
+    # 400 on the BPCs + ceil(6 x 100 x 0.95) = 570 at BPO 2's ME 5.
+    assert sub.overview_row["quantity_needed"] == 970
+    actions = _assign(plan)
+    build = actions["manufacture"]
+    assert build.runs == 10
+    assert build.materials == {54321: 970}
+    assert build.estimated_cost_isk == 970.0
+    # The fee is EIV-based (ME 0 inputs): the same 10 runs, the same fee.
+    assert build.estimated_job_fee_isk == 50.0
+    # Scored like the kept row: (sell 100 - cost 970 / 10 units) x 10 units.
+    assert build.estimated_profit_isk == pytest.approx(30.0)
+    assert "ME 5 / TE 20" in build.notes
+    assert "sized by the planner" in build.notes
+    assert actions["te_research"].notes.startswith("TE research: 0% → 20%")
+
+
+def test_the_other_bpo_sizing_applies_the_rows_structure_bonus():
+    plan = _plan5(_bpc_then_bpo_row({"material_efficiency_bonus": 0.01}), bpos=[A_PRICED, B_BUILDS])
+    # ceil(600 x (1 - (1 - 0.95 x 0.99))) = ceil(564.3) = 565.
+    assert _assign(plan)["manufacture"].materials == {54321: 965}
+
+
+def test_the_other_bpo_sizing_splits_the_runs_at_the_max_runs_per_job():
+    sde = {**PARENT_SDE, 999: {**PARENT_SDE[999], "max_production_limit": 4}}
+    plan = _plan5(_bpc_then_bpo_row({"material_efficiency_bonus": 0.01}), bpos=[A_PRICED, B_BUILDS],
+                  blueprint_data=sde)
+    # Jobs of 4 + 2 runs, each rounded up: 377 + 189 = 566 (one job: 565).
+    assert _assign(plan)["manufacture"].materials == {54321: 966}
+
+
+@pytest.mark.parametrize("case, expected_reason", [
+    ("unknown_me", "its ME is unknown"),
+    ("no_sde", "no SDE manufacturing data"),
+    ("no_profile", "no industry profile"),
+])
+def test_another_bpo_that_cannot_be_sized_keeps_the_safe_fallback_with_a_reason(case, expected_reason):
+    other = _bpo(2, None, 20) if case == "unknown_me" else B_BUILDS
+    sde = {**PARENT_SDE, 999: {}} if case == "no_sde" else PARENT_SDE
+    row = _bpc_then_bpo_row(with_profile=case != "no_profile")
+    plan = _plan5(row, bpos=[A_PRICED, other], blueprint_data=sde)
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    first = top.overview_row["research_first"]
+    assert first["mode"] == "part"  # the BPC runs only: never the BPO runs at ME 10
+    assert expected_reason in first["note"]
+    build = _assign(plan)["manufacture"]
+    assert build.runs == 4 and build.materials == {54321: 400}
+    assert expected_reason in build.notes
+
+
+# --- fix round 5: no research slot re-sizes the components to the kept row ---------
+
+def test_no_slot_fallback_resizes_the_components_to_the_kept_bpo_row():
+    """The variant planned BPO 2 (950); without a research slot BPO 1 builds
+    its kept row (900): the component is re-sized to 900, not left at 950."""
+    plan = _plan(_priced_row(), bpos=[A_PRICED, B_BUILDS], variants=[_variant_of_bpo_2()])
+    actions = _assign(plan, busy_research_slots=ALL_SIX_SLOTS)
+    assert actions["manufacture"].materials == {54321: 900}
+    assert actions["sub_manufacture"].quantity == 900
+    (sub,) = _subs(plan)
+    assert sub.overview_row["quantity_needed"] == 900
+    assert "components re-sized for the BPO's batch" in actions["manufacture"].notes
+    assert "buys any difference" not in actions["manufacture"].notes
+
+
+# --- fix round 5: blueprints installed in an active job ------------------------------
+
+def test_a_bpo_in_an_active_job_is_neither_researched_nor_built_from():
+    plan = _plan5(_priced_row(), bpos=[A_PRICED], busy={1})
+    assert _subs(plan) == []
+    actions = _assign(plan)
+    assert actions == {}
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert "in an active industry job" in top.overview_row["research_first"]["note"]
+
+
+def test_a_busy_priced_bpo_builds_from_a_free_one_without_a_research_slot():
+    free = _bpo(2, 10, 20)  # needs no research
+    row = _priced_row()
+    row["manufacturing_job"]["industry_profile"] = {}
+    plan = _plan5(row, bpos=[A_PRICED, free], busy={1})
+    # Busy is not conditional on a research slot.
+    actions = _assign(plan, busy_research_slots=ALL_SIX_SLOTS)
+    assert "te_research" not in actions
+    build = actions["manufacture"]
+    assert build.materials == {54321: 900}  # ceil(10 x 100 x 0.90) at BPO 2's ME 10
+    assert "in an active industry job" in build.notes
+
+
+def test_research_skips_a_busy_bpo_and_takes_a_free_one():
+    # BPO 1 (TE 2, priced, first in producer order) is busy; BPO 2 (TE 0) researches.
+    plan = _plan5(_priced_row(), bpos=[_bpo(1, 10, 2), _bpo(2, 10, 0)], busy={1})
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert top.overview_row.get("needs_te_research") is True
+    assert top.overview_row["te_current"] == 0
+
+
+def test_a_busy_component_bpo_is_not_sub_built_from():
+    plan = _plan5(_row(**BPO_ROW), bpos=[_bpo(1, 10, 20)], busy={88})
+    assert _subs(plan) == []
+
+
+def test_the_service_collects_the_blueprints_of_active_jobs():
+    from eve_online_industry_tracker.application.daily_planner.service import busy_blueprint_item_ids
+
+    jobs = [SimpleNamespace(blueprint_item_id=11), {"blueprint_item_id": 12}, SimpleNamespace(blueprint_item_id=None)]
+    assert busy_blueprint_item_ids(jobs) == {11, 12}

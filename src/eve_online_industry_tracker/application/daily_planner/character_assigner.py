@@ -169,19 +169,40 @@ class CharacterAssigner:
         )
         sub_components = [d for d in build_decisions if d.is_sub_component]
 
-        for decision in [*top_level, *sub_components]:
-            actions = self._assign_decision(
-                decision=decision,
-                row=decision.overview_row,
-                char_slots=char_slots,
-                characters=characters,
-                now=now,
-                probability_floor=probability_floor,
-                price_map=price_map or {},
-            )
-            # Slots are consumed inside _assign_decision, as each action is
-            # created -- two research actions on one item must not share a slot.
-            assigned_actions.extend(actions)
+        resize = getattr(chain_plan, "resize_sub_components", None)
+        # Research-first parents that got no research slot and build from
+        # their kept BPO row instead (filled by _assign_decision).
+        fell_back: set[int] = set()
+        for pass_decisions in (top_level, None):
+            if pass_decisions is None:
+                if fell_back and callable(resize):
+                    # Their components were sized for the research-first
+                    # batch: re-plan them for the batch actually built (fix
+                    # round 5), before any sub-component takes a slot.
+                    sub_components = [d for d in resize(set(fell_back)) if d.decision in ("build", "pause")]
+                    chain_plan.decisions[:] = [
+                        *(d for d in chain_plan.decisions if not d.is_sub_component), *sub_components,
+                    ]
+                    logger.info(
+                        "CharacterAssigner: re-sized the sub-components for type_id(s) %s, "
+                        "built from their kept BPO row", sorted(fell_back),
+                    )
+                pass_decisions = sub_components
+            for decision in pass_decisions:
+                actions = self._assign_decision(
+                    decision=decision,
+                    row=decision.overview_row,
+                    char_slots=char_slots,
+                    characters=characters,
+                    now=now,
+                    probability_floor=probability_floor,
+                    price_map=price_map or {},
+                    fell_back=fell_back,
+                    can_resize=callable(resize),
+                )
+                # Slots are consumed inside _assign_decision, as each action is
+                # created -- two research actions on one item must not share a slot.
+                assigned_actions.extend(actions)
 
         return assigned_actions
 
@@ -205,8 +226,12 @@ class CharacterAssigner:
         now: datetime,
         probability_floor: float,
         price_map: dict[int, Any],
+        fell_back: set[int] | None = None,
+        can_resize: bool = False,
     ) -> list[AssignedAction]:
-        """Return AssignedAction(s) for a single ItemDecision."""
+        """Return AssignedAction(s) for a single ItemDecision. A research-first
+        parent that builds from its kept BPO row is added to `fell_back`;
+        `can_resize` says its components will be re-sized for that row."""
         actions: list[AssignedAction] = []
         type_id = decision.type_id
         type_name = decision.type_name
@@ -427,26 +452,34 @@ class CharacterAssigner:
         # in the lab: from an owned-BPC variant (the row is that variant),
         # from the owned-BPC runs only, or not at all. It applies only when a
         # research action was emitted; without a free research slot the BPO
-        # is not in the lab and builds from the kept row as usual.
+        # is not in the lab and builds from the kept row as usual. A priced
+        # BPO in an active industry job (`unconditional`) applies always.
         first = row.get("research_first") if isinstance(row.get("research_first"), dict) else None
         build_note: str | None = None
         if first is not None:
             research = [a for a in actions if a.action_type in ("me_research", "te_research")]
-            if not research and first["mode"] != "other_bpo":
+            if not research and first["mode"] != "other_bpo" and not first.get("unconditional"):
                 build_note = "BPO research planned but no free research slot: built from the BPO"
-                if first.get("sized_note"):
-                    build_note += f"; {first['sized_note']}"
+                sized = (
+                    "its components re-sized for the BPO's batch" if can_resize
+                    else first.get("sized_note")
+                )
+                if sized:
+                    build_note += f"; {sized}"
                 logger.warning(
                     "CharacterAssigner: type_id=%s: no free research slot for the planned research "
                     "on its BPO; building from the BPO instead (%s)",
-                    type_id, first.get("sized_note") or "no sub-component change",
+                    type_id, sized or "no sub-component change",
                 )
                 row = first.get("kept_row") or row
                 first = None
+                if fell_back is not None:
+                    fell_back.add(int(type_id))
             else:
                 for action in research:
                     action.notes = f"{action.notes}; {first['note']}"
                 if first["mode"] == "none":
+                    logger.info("CharacterAssigner: type_id=%s: no manufacture: %s", type_id, first["note"])
                     return actions
 
         # Manufacturing
