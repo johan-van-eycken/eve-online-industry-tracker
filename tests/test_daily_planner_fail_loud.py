@@ -265,13 +265,14 @@ def _decision(row, **overrides):
 
 # --- ChainPlanner: optimal ME/TE no longer swallow to 0 --------------------------
 
-def test_an_sde_failure_makes_optimal_me_and_te_unknown_not_zero(caplog):
+def test_an_sde_failure_makes_optimal_me_unknown_not_zero(caplog):
+    # TE has no SDE lookup: it is always researched to the max TE setting
+    # (Task 8c fix round 1).
     planner = ChainPlanner(None, _BrokenSdeProvider(_sde_error()), _AdminKeyError())
     with caplog.at_level(logging.WARNING):
         assert planner._compute_optimal_me(999) is None
-        assert planner._compute_optimal_te(999, 1.0) is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 2
+    assert len(warnings) == 1
     assert all("999" in r.getMessage() for r in warnings)
 
 
@@ -281,20 +282,20 @@ def test_a_non_database_error_in_optimal_me_propagates():
         planner._compute_optimal_me(999)
 
 
-def test_an_unknown_optimal_level_schedules_no_research_and_says_why(caplog):
+def test_an_unknown_optimal_me_schedules_no_me_research_and_says_why(caplog):
     row = {"type_id": 12345, "type_name": "Thing", "quantity": 1,
            "manufacturing_job": {"runs": 1, "blueprint_sde": {"blueprint_type_id": 999}}}
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
                           blueprint_material_efficiency=0, blueprint_time_efficiency=0)
     planner = ChainPlanner(None, None, _AdminKeyError())
     planner._compute_optimal_me = lambda bp_type_id, runs=1: None
-    planner._compute_optimal_te = lambda bp_type_id, threshold: None
 
     with caplog.at_level(logging.WARNING):
         planner.plan_chain([_decision(row)], {"bpo_assets_by_type_id": {999: [bpo]}})
 
     assert "needs_me_research" not in row
-    assert "needs_te_research" not in row
+    # The TE target is the max TE setting, never unknown: TE 0 -> 20.
+    assert row["te_research_target"] == 20
     assert any("optimal" in r.getMessage() and r.levelno == logging.WARNING
                for r in caplog.records)
 

@@ -344,7 +344,10 @@ def _every_assignment_plan():
         _decision(overview_row={
             "type_id": 12345, "needs_invention": True, "has_t1_bpo": True, "t1_blueprint_type_id": 999,
             "needs_me_research": True, "needs_te_research": True,
-            "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999}},
+            # Built from an owned BPC, so the BPO's research does not block
+            # the manufacture (research first, Task 8c fix round 1).
+            "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999},
+                                  "blueprint_source_kind": "owned_blueprint_copy"},
         }),
         _decision(type_id=777, type_name="Component", is_sub_component=True, overview_row={
             "type_id": 777,

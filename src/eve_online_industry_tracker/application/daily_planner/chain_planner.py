@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.industry.invention_model import MAX_BLUEPRINT_TE as DEFAULT_MAX_BLUEPRINT_TE
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner import facility_bonus
 from eve_online_industry_tracker.application.daily_planner.models import (
@@ -157,7 +158,11 @@ class ChainPlanner:
 
         bpo_strong_buy_days = float(_adm(self._admin, "planner_bpo_strong_buy_days", 30))
         bpo_consider_days = float(_adm(self._admin, "planner_bpo_consider_days", 90))
-        optimal_te_threshold = float(_adm(self._admin, "planner_optimal_te_threshold_pct", 1.0))
+        # TE is always researched to the max (the user's decision, Task 8c fix
+        # round 1): EVE's percentage, 0..20 in steps of 2.
+        te_research_target = int(admin_setting(
+            self._admin, "industry", "max_blueprint_time_efficiency", DEFAULT_MAX_BLUEPRINT_TE,
+        ))
         invention_min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
 
         bpo_assets_by_type_id: dict[int, list] = phase1_data.get("bpo_assets_by_type_id", {})
@@ -197,7 +202,7 @@ class ChainPlanner:
                         bpc_assets_by_type_id=bpc_assets_by_type_id,
                         market_depth_cache=market_depth_cache,
                         bpo_opportunities=bpo_opportunities,
-                        optimal_te_threshold=optimal_te_threshold,
+                        te_research_target=te_research_target,
                         bpo_strong_buy_days=bpo_strong_buy_days,
                         bpo_consider_days=bpo_consider_days,
                     )
@@ -287,7 +292,7 @@ class ChainPlanner:
         bpc_assets_by_type_id: dict[int, list],
         market_depth_cache: dict[int, Any],
         bpo_opportunities: list[dict[str, Any]],
-        optimal_te_threshold: float,
+        te_research_target: int,
         bpo_strong_buy_days: float,
         bpo_consider_days: float,
     ) -> None:
@@ -310,7 +315,7 @@ class ChainPlanner:
                 optimal_me = None
             else:
                 optimal_me = self._compute_optimal_me(bp_type_id, runs=batch_runs)
-            optimal_te = self._compute_optimal_te(bp_type_id, optimal_te_threshold)
+            optimal_te = te_research_target
 
             bpo_assets = bpo_assets_by_type_id[bp_type_id]
             # Corp asset columns are blueprint_*-prefixed. None means unknown,
@@ -326,13 +331,14 @@ class ChainPlanner:
                 )
 
             # None means the SDE lookup failed (already logged at WARNING by
-            # _compute_optimal_*): schedule no research rather than treating
-            # the optimum as 0, which silently reads as "already optimal".
-            if optimal_me is None or optimal_te is None:
+            # _compute_optimal_me): schedule no ME research rather than
+            # treating the optimum as 0, which silently reads as "already
+            # optimal". The TE target is the setting and always known.
+            if optimal_me is None:
                 logger.warning(
-                    "ChainPlanner: optimal ME/TE unknown for owned BPO %s (optimal_me=%s, "
-                    "optimal_te=%s); not scheduling research for the unknown level(s)",
-                    bp_type_id, optimal_me, optimal_te,
+                    "ChainPlanner: optimal ME unknown for owned BPO %s; "
+                    "not scheduling ME research",
+                    bp_type_id,
                 )
 
             # Schedule ME/TE research in the action plan (signals to ActionPlanBuilder)
@@ -342,10 +348,10 @@ class ChainPlanner:
                 decision.overview_row["me_current"] = current_me
 
             # TE is EVE's percentage on both sides (0..20, 2% per research
-            # level): the asset's blueprint_time_efficiency and
-            # compute_optimal_te's target. CharacterAssigner converts to
-            # research levels for the fee.
-            if current_te is not None and optimal_te is not None and current_te < optimal_te:
+            # level): the asset's blueprint_time_efficiency and the max TE
+            # setting. CharacterAssigner converts to research levels for the
+            # fee and the duration.
+            if current_te is not None and current_te < optimal_te:
                 decision.overview_row["needs_te_research"] = True
                 decision.overview_row["te_research_target"] = optimal_te
                 decision.overview_row["te_current"] = current_te
@@ -1039,23 +1045,6 @@ class ChainPlanner:
         except SQLAlchemyError:
             logger.warning(
                 "ChainPlanner: SDE lookup of optimal ME failed for bp_type_id=%s",
-                blueprint_type_id, exc_info=True,
-            )
-            return None
-
-    def _compute_optimal_te(self, blueprint_type_id: int, threshold_pct: float) -> int | None:
-        """Optimal TE as EVE's percentage (0..20, steps of 2) from the SDE, or
-        None when the SDE query fails (see _compute_optimal_me)."""
-        from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_te
-        try:
-            sde_session = self._session_provider.sde_session()
-            try:
-                return compute_optimal_te(blueprint_type_id, sde_session, threshold_pct)
-            finally:
-                sde_session.close()
-        except SQLAlchemyError:
-            logger.warning(
-                "ChainPlanner: SDE lookup of optimal TE failed for bp_type_id=%s",
                 blueprint_type_id, exc_info=True,
             )
             return None

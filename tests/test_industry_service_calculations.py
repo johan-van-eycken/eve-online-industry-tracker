@@ -3471,7 +3471,7 @@ def test_the_invention_publishes_its_fee_per_attempt_and_per_source_copy_run(mon
     assert invention["total_job_cost"] == pytest.approx(0.12 * invention["runs"])
 
 
-def _owned_bpo_research_table(*, level_one_seconds: int = 105) -> dict:
+def _owned_bpo_manufacturing_job(*, level_one_seconds: int = 105) -> dict:
     original_asset = SimpleNamespace(
         type_id=9001, item_id=42, is_blueprint_copy=False,
         blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
@@ -3490,7 +3490,11 @@ def _owned_bpo_research_table(*, level_one_seconds: int = 105) -> dict:
     )
     mj = row["manufacturing_job"]
     assert mj["blueprint_source_kind"] == "owned_blueprint_original"
-    return mj["research_job_cost_by_level"]
+    return mj
+
+
+def _owned_bpo_research_table(*, level_one_seconds: int = 105) -> dict:
+    return _owned_bpo_manufacturing_job(level_one_seconds=level_one_seconds)["research_job_cost_by_level"]
 
 
 def test_an_owned_bpo_row_publishes_its_cumulative_research_fee_per_level() -> None:
@@ -3518,6 +3522,25 @@ def test_the_research_fee_uses_the_level_multiplier_not_the_rank_scaled_seconds(
     expected = 50 * 0.02 * (256000 / 105) * (0.02 + 0.08)
     assert rank_one["research_material"][10] == pytest.approx(expected)
     assert rank_twenty["research_material"][10] == pytest.approx(expected)
+
+
+def test_an_owned_bpo_row_publishes_its_cumulative_research_duration_per_level() -> None:
+    """Task 8c fix round 1: the research-time model the fee uses (rank x the
+    rank-1 level table, then the skill / structure time reductions), per
+    level, so the planner can show a research action's duration for its
+    exact level span. Fake rank 20, no skills, no structure time bonus."""
+    durations = _owned_bpo_manufacturing_job(level_one_seconds=20 * 105)["research_duration_seconds_by_level"]
+    te = durations["research_time"]
+    assert len(te) == 11 and te[0] == 0
+    assert te[5] == 20 * 3360
+    # TE 0 -> 20 is levels 0 -> 10.
+    assert te[10] - te[0] == 20 * 256000
+    assert durations["research_material"][10] == 20 * 256000
+
+
+def test_a_blueprint_without_research_time_publishes_an_unknown_duration() -> None:
+    durations = _owned_bpo_manufacturing_job(level_one_seconds=0)["research_duration_seconds_by_level"]
+    assert durations["research_time"] is None
 
 
 def test_a_row_without_an_owned_bpo_publishes_no_research_fee_table(monkeypatch) -> None:

@@ -372,6 +372,23 @@ def get_research_fee(row: dict[str, Any], activity: str, from_level: int, to_lev
     return high - low if high is not None and low is not None else None
 
 
+def get_research_duration_seconds(row: dict[str, Any], activity: str, from_level: int, to_level: int) -> int | None:
+    """Seconds to research the row's owned BPO from `from_level` to
+    `to_level` (levels 0..10): the producer's cumulative duration to
+    `to_level` minus that to `from_level`
+    (manufacturing_job.research_duration_seconds_by_level). None when the
+    table is absent, or the levels are out of range."""
+    tables = get_manufacturing_job(row).get("research_duration_seconds_by_level")
+    table = tables.get(activity) if isinstance(tables, dict) else None
+    if not isinstance(table, list) or not (0 <= from_level <= to_level < len(table)):
+        return None
+    try:
+        high, low = int(table[to_level]), int(table[from_level])
+    except (TypeError, ValueError):
+        return None
+    return high - low if high >= low >= 0 else None
+
+
 def _published_reason(value: Any) -> str | None:
     return str(value) if isinstance(value, str) and value.strip() else None
 

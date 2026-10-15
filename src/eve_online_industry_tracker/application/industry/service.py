@@ -8199,6 +8199,30 @@ class IndustryService:
             tables[activity_name] = fees
         return tables, reasons
 
+    def _research_duration_by_level(
+        self, ctx: _ProductPlanningContext, *, row: dict[str, Any],
+    ) -> dict[str, list[int] | None]:
+        """The duration in seconds of researching this blueprint from level 0
+        to each level 0..max, per research activity: a list indexed by level,
+        [0] = 0. The model the research fee uses (Task 8b): the SDE rank
+        (level-1 time / 105 s) x EVE's rank-1 level table, then the skill,
+        structure, rig and implant time reductions of _plan_activity_costs.
+        A job from level a to b takes [b] - [a] (EVE's table is cumulative).
+        None for an activity without a research time in the SDE."""
+        tables: dict[str, list[int] | None] = {}
+        for activity_name, source_field in [("research_material", "research_material_job"), ("research_time", "research_time_job")]:
+            base_level_one = int(((row.get(source_field) or {}).get("time_seconds") or 0))
+            if base_level_one <= 0:
+                tables[activity_name] = None
+                continue
+            durations = [0]
+            for level in range(1, self._MAX_RESEARCH_LEVEL + 1):
+                target = self._research_target_duration_seconds(level_one_duration_seconds=base_level_one, target_level=level)
+                priced = self._plan_activity_costs(ctx, activity=activity_name, base_time_seconds=target, runs=1, process_value=None)
+                durations.append(int(priced["duration_seconds"]))
+            tables[activity_name] = durations
+        return tables
+
     @staticmethod
     def _row_invents(ctx: _ProductPlanningContext, blueprint_type_id: int) -> bool:
         """Whether rows of this blueprint invent (in batch 1 or the later
@@ -9070,6 +9094,7 @@ class IndustryService:
                 row_out["manufacturing_job"]["research_job_cost_by_level"],
                 row_out["manufacturing_job"]["research_job_cost_by_level_unknown_reason"],
             ) = self._research_job_cost_by_level(ctx, row=row, per_run_material_eiv=per_run_material_eiv)
+            row_out["manufacturing_job"]["research_duration_seconds_by_level"] = self._research_duration_by_level(ctx, row=row)
         top_level_chance = (
             inv_costs.get("invention_chance") if requires_invention_chain and inv_costs is not None else None
         ) or extra_chance

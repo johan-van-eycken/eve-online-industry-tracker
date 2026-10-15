@@ -321,10 +321,15 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "max_blueprint_time_efficiency": {
                 "type": "int",
                 "default": 20,
-                "min": 1,
-                "max": 30,
-                "label": "Max blueprint TE",
-                "help": "Maximum time efficiency level for blueprints.",
+                "min": 0,
+                "max": 20,
+                "step": 2,
+                "label": "Max blueprint TE (%)",
+                "help": (
+                    "Maximum blueprint time efficiency, as EVE's percentage (0-20 %, 2 % per research "
+                    "level, so 20 % = level 10). The daily planner researches every owned BPO below "
+                    "it up to this TE; blueprints without an owned source are costed at it."
+                ),
             },
             "invention_probability_floor": {
                 "type": "float",
@@ -590,21 +595,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Price outlier sigma",
                 "help": "Standard deviations from avg_30d beyond which a sell order is excluded as a price outlier.",
             },
-            "planner_optimal_te_threshold_pct": {
-                "type": "float",
-                "default": 1.0,
-                "min": 0.1,
-                "max": 2.0,
-                "step": 0.1,
-                "format": "%.1f",
-                "label": "Optimal TE threshold (% per level)",
-                "help": (
-                    "Minimum manufacturing time saved per TE research level, as % of the base time "
-                    "(one run, rounded to whole seconds). Each level is TE +2%, up to TE 20 (level 10); "
-                    "the planner researches to the highest level that still saves this much per level "
-                    "on average. 2.0 needs the full 2% step; at the default 1.0 every SDE blueprint targets TE 20."
-                ),
-            },
         },
     },
     "esi_resilience": {
@@ -761,10 +751,47 @@ class AdminSettingsManager:
             return
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
-            self._data = payload if isinstance(payload, dict) else {}
         except Exception:
             logging.warning("Failed to load admin settings from %s; using defaults", self._path)
             self._data = {}
+            return
+        self._data = self._coerce_stored(payload if isinstance(payload, dict) else {})
+
+    @classmethod
+    def _coerce_stored(cls, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """The stored settings, each coerced against its spec (type, min/max)
+        as set() would. A value that changes logs a WARNING with the key and
+        the old and new value; one that cannot be coerced falls back to the
+        default (dropped, so get() returns the default). A key the schema no
+        longer has (e.g. the removed planner_optimal_te_threshold_pct) is
+        ignored with an INFO log."""
+        data: dict[str, dict[str, Any]] = {}
+        for category, values in payload.items():
+            cat_schema = ADMIN_SETTINGS_SCHEMA.get(category)
+            if cat_schema is None or not isinstance(values, dict):
+                logging.info("Admin settings: ignoring stored category %r, not in the schema", category)
+                continue
+            for key, raw in values.items():
+                spec = cat_schema["settings"].get(key)
+                if spec is None:
+                    logging.info("Admin settings: ignoring stored setting %s/%s=%r, not in the schema", category, key, raw)
+                    continue
+                try:
+                    coerced = cls._coerce(raw, spec)
+                except (TypeError, ValueError, OverflowError):
+                    logging.warning(
+                        "Admin settings: stored %s/%s=%r is not a valid %s; using the default %r",
+                        category, key, raw, spec["type"], spec["default"],
+                    )
+                    continue
+                widened = isinstance(raw, int) and not isinstance(raw, bool) and isinstance(coerced, float)
+                if coerced != raw or (type(coerced) is not type(raw) and not widened):
+                    logging.warning(
+                        "Admin settings: stored %s/%s=%r is outside its spec; using %r",
+                        category, key, raw, coerced,
+                    )
+                data.setdefault(category, {})[key] = coerced
+        return data
 
     def _persist(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

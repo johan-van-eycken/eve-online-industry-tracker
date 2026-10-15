@@ -33,10 +33,9 @@ class _AdminStub:
         raise KeyError(key)  # forces ChainPlanner's own fallbacks
 
 
-def _planner(*, optimal_me=10, optimal_te=20):
+def _planner(*, optimal_me=10):
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
     planner._compute_optimal_me = lambda bp_type_id, runs=1: optimal_me
-    planner._compute_optimal_te = lambda bp_type_id, threshold: optimal_te
     return planner
 
 

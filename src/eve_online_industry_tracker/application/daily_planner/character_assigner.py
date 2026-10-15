@@ -11,7 +11,7 @@ Priority rules:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.assigned_invention import (
@@ -237,8 +237,10 @@ class CharacterAssigner:
                     runs=None,
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
-                    estimated_completion=None,
-                    notes=f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
+                    **_research_timing(
+                        row, "research_material", "me_current", "me_research_target", now,
+                        f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
+                    ),
                     **_job_fee(
                         *_research_fee(row, "research_material", "me_current", "me_research_target"),
                         "me_research", type_id,
@@ -265,8 +267,9 @@ class CharacterAssigner:
                     runs=None,
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
-                    estimated_completion=None,
-                    notes=_te_research_note(row),
+                    **_research_timing(
+                        row, "research_time", "te_current", "te_research_target", now, _te_research_note(row),
+                    ),
                     **_job_fee(
                         *_research_fee(row, "research_time", "te_current", "te_research_target"),
                         "te_research", type_id,
@@ -399,9 +402,54 @@ class CharacterAssigner:
                 self._take_slot(char_slots, char_id, "sub_manufacture")
             return actions  # sub-components don't get a manufacture action
 
+        # Research first (the user's decision, Task 8c fix round 1): a BPO
+        # with a research action in this plan is in the lab, so it neither
+        # builds nor copies for this item; the batch falls back to its owned
+        # BPC runs, or is not built.
+        research = [a for a in actions if a.action_type in ("me_research", "te_research")]
+        bpc_only = None
+        if research and _batch_uses_bpo(row):
+            bpc_only = _owned_bpc_part(row)
+            note = (
+                f"BPO in research: built from the owned BPC runs only ({bpc_only['runs']} of "
+                f"{_batch_runs(type_id, row)} runs)"
+                if bpc_only is not None
+                else "BPO in research: not built from it in this plan"
+            )
+            for action in research:
+                action.notes = f"{action.notes}; {note}"
+            logger.info("CharacterAssigner: type_id=%s: %s", type_id, note)
+            if bpc_only is None:
+                return actions
+            bpc_only["notes"] = note
+
         # Manufacturing
         char_id, char_name = self._best_mfg_char(char_slots, characters)
-        if char_id is not None:
+        if char_id is not None and bpc_only is not None:
+            actions.append(AssignedAction(
+                type_id=type_id,
+                type_name=type_name,
+                action_type="manufacture",
+                character_id=char_id,
+                character_name=char_name,
+                quantity=bpc_only["quantity"],
+                runs=bpc_only["runs"],
+                # The batch's material cost and profit are for the whole
+                # batch, not this part of it: unknown, not a wrong figure.
+                estimated_cost_isk=None,
+                estimated_build_cost_isk=None,
+                estimated_profit_isk=None,
+                estimated_completion=None,
+                notes=f"Build: {decision.decision_reason}; {bpc_only['notes']}",
+                materials=bpc_only["materials"],
+                **_job_fee(
+                    _times_runs(orow.get_manufacturing_fee_per_run(row), bpc_only["runs"]),
+                    orow.get_manufacturing_fee_unknown_reason(row),
+                    "manufacture", type_id,
+                ),
+            ))
+            self._take_slot(char_slots, char_id, "manufacture")
+        elif char_id is not None:
             # Both live under manufacturing_job. A top-level runs_per_batch /
             # runs / estimated_material_cost is written by no producer, so
             # every manufacture action used to get 1 run and a 0 ISK cost --
@@ -676,6 +724,95 @@ def _times_runs(fee_per_run: float | None, runs: int | None) -> float | None:
     if fee_per_run is None or runs is None or runs <= 0:
         return None
     return fee_per_run * runs
+
+
+#: Batch sources that need the owned BPO itself: building from it, or
+#: copying it. A BPO in research can do neither.
+_BPO_SOURCES = frozenset({"owned_blueprint_original", "copied_from_owned_blueprint_original"})
+
+
+def _job_segments(row: dict[str, Any]) -> list[dict[str, Any]] | None:
+    segments = orow.get_manufacturing_job(row).get("job_segments")
+    if not isinstance(segments, list) or not all(isinstance(s, dict) for s in segments):
+        return None
+    return segments
+
+
+def _batch_uses_bpo(row: dict[str, Any]) -> bool:
+    """Whether the batch builds from, or copies, the owned BPO. Without job
+    segments the batch's source kind decides; with neither the BPO is
+    assumed in use (the chain planner chose the BPO path)."""
+    segments = _job_segments(row)
+    if segments:
+        return any(str(s.get("source")) in _BPO_SOURCES for s in segments)
+    kind = orow.get_manufacturing_job(row).get("blueprint_source_kind")
+    return kind is None or str(kind) in _BPO_SOURCES
+
+
+def _owned_bpc_part(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The part of the batch on owned BPCs (the producer's
+    owned_blueprint_copy job segments): {runs, quantity, materials}, or None
+    when there is none or its materials are unknown."""
+    segments = [s for s in (_job_segments(row) or []) if str(s.get("source")) == "owned_blueprint_copy"]
+    runs = sum(int(s.get("runs") or 0) for s in segments)
+    if runs <= 0:
+        return None
+    materials: dict[int, int] = {}
+    for segment in segments:
+        per_job = segment.get("materials")
+        if not isinstance(per_job, dict):
+            return None
+        for type_id, quantity in per_job.items():
+            try:
+                materials[int(type_id)] = materials.get(int(type_id), 0) + int(quantity)
+            except (TypeError, ValueError):
+                return None
+    total_runs = int(orow.get_manufacturing_job(row).get("runs") or 0)
+    units = orow.get_product_quantity(row)
+    quantity = units * runs // total_runs if total_runs > 0 and units > 0 else None
+    return {"runs": runs, "quantity": quantity, "materials": materials}
+
+
+def _research_levels(row: dict[str, Any], activity: str, current_key: str, target_key: str) -> tuple[int, int] | None:
+    """(from, to) research level of the row's research job, or None when a
+    level is unknown. ME is stored as the level (0..10), TE as EVE's
+    percentage (see _te_research_levels)."""
+    try:
+        current, target = int(row[current_key]), int(row[target_key])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if activity == "research_time":
+        return _te_research_levels(current, target)
+    return current, target
+
+
+def _format_duration(seconds: int) -> str:
+    """'2d 1h 36m', '16h 48m', '5m' (whole minutes, rounded down)."""
+    minutes = int(seconds) // 60
+    days, minutes = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = [f"{days}d"] if days else []
+    if days or hours:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+def _research_timing(
+    row: dict[str, Any], activity: str, current_key: str, target_key: str, now: datetime, note: str,
+) -> dict[str, Any]:
+    """The research action's estimated_completion and notes: the duration of
+    exactly the levels from the current to the target, from the producer's
+    research-time model (manufacturing_job.research_duration_seconds_by_level).
+    Unknown is said in the note, with no completion."""
+    levels = _research_levels(row, activity, current_key, target_key)
+    seconds = orow.get_research_duration_seconds(row, activity, *levels) if levels is not None else None
+    if seconds is None:
+        return {"estimated_completion": None, "notes": f"{note}; duration unknown"}
+    return {
+        "estimated_completion": now + timedelta(seconds=seconds),
+        "notes": f"{note}; duration {_format_duration(seconds)}",
+    }
 
 
 def _te_research_levels(current_pct: int, target_pct: int) -> tuple[int, int]:
