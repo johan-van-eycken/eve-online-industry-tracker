@@ -146,10 +146,12 @@ def queued_te_startable(
 ) -> bool:
     """Whether a TE research queued behind the ME research on its BPO
     (queued_after_me) can be started now: the ME action on the same BPO
-    (type_id) for the same pilot has ended (its estimated completion has
-    passed) or was skipped. An unknown ME end keeps it waiting (the next
-    plan schedules it from the jobs); with no such ME action nothing says
-    it must wait. False for an action that is not queued."""
+    (type_id) for the same pilot was marked started (done) and has ended
+    (its estimated completion has passed), or was skipped. A pending ME was
+    never started, so its estimate proves nothing and the TE waits (carry
+    14). An unknown ME end keeps it waiting (the next plan schedules it
+    from the jobs); with no such ME action nothing says it must wait.
+    False for an action that is not queued."""
     if not action.get("queued_after_me"):
         return False
     now = now or datetime.now(tz=timezone.utc)
@@ -159,8 +161,11 @@ def queued_te_startable(
         and a.get("type_id") == action.get("type_id")
         and a.get("character_id") == action.get("character_id")
     ), None)
-    if me is None or str(me.get("status") or "pending") == "skipped":
+    me_status = str(me.get("status") or "pending") if me is not None else None
+    if me is None or me_status == "skipped":
         return True
+    if me_status != "done":
+        return False
     me_end = _parse_dt(me.get("estimated_completion"))
     return me_end is not None and me_end <= now
 

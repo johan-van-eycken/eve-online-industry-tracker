@@ -99,9 +99,9 @@ def test_a_queued_te_can_be_started_once_the_me_research_has_ended():
     from streamlit_ui.components.daily_planner.status_bar import queued_te_startable
 
     now = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    me, te = _queued_pair("2026-01-01T12:00:00Z")
+    me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
     assert queued_te_startable(te, [me, te], now) is True
-    me, te = _queued_pair("2026-01-02T12:00:00Z")
+    me, te = _queued_pair("2026-01-02T12:00:00Z", me_status="done")
     assert queued_te_startable(te, [me, te], now) is False
     # Skipped ME: the BPO is free now.
     me, te = _queued_pair("2026-01-02T12:00:00Z", me_status="skipped")
@@ -123,3 +123,17 @@ def test_a_startable_queued_te_is_todays_work_again():
     me, te = _queued_pair("2026-01-02T12:00:00Z", me_status="done")
     assert tab_actions._todays([me, te], now) == [me]
     assert pending_character_action_count([me, te], now) == 0
+
+
+def test_a_queued_te_waits_while_its_me_research_was_never_started():
+    """Carry 14: the ME's estimated completion passing proves nothing while
+    the ME action is still pending (never marked started): the BPO may still
+    be free, or the ME job may have started late."""
+    from datetime import datetime, timezone
+
+    from streamlit_ui.components.daily_planner.status_bar import queued_te_startable
+
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="pending")
+    assert queued_te_startable(te, [me, te], now) is False
+    assert pending_character_action_count([me, te], now) == 1   # the ME itself

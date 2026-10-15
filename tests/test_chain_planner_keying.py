@@ -1479,3 +1479,129 @@ def test_a_zero_or_negative_bpo_spot_price_is_no_price(spot):
         bpo_opportunities=[], bpo_strong_buy_days=30.0, bpo_consider_days=90.0,
     )
     assert decision.bpo_analysis_skip_reason == "no BPO market price for bp_type_id=999"
+
+
+# --- round 5 Task 10 carries 12, 13: busy blueprints in the invention chain ------
+# A blueprint installed in an active job cannot copy or build. The asset
+# snapshot can still list it, or can already have dropped it.
+
+def _t1_bpo(item_id):
+    return SimpleNamespace(type_id=999, item_id=item_id, is_blueprint_copy=False,
+                           blueprint_material_efficiency=10, blueprint_time_efficiency=20)
+
+
+def _t2_bpc(item_id):
+    return SimpleNamespace(type_id=1999, item_id=item_id, is_blueprint_copy=True,
+                           blueprint_material_efficiency=2, blueprint_time_efficiency=4, blueprint_runs=10)
+
+
+def _copy_job(item_id, bp_type_id=999):
+    return {"blueprint_item_id": item_id, "blueprint_type_id": bp_type_id,
+            "blueprint_is_blueprint_copy": False, "activity_id": 5, "status": "active"}
+
+
+def _t2_actions(plan):
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
+
+    chars = SimpleNamespace(list_characters=lambda: [{
+        "character_id": 1, "character_name": "Pilot",
+        "skills": {"skills": [{"skill_name": "Laboratory Operation", "trained_skill_level": 5}]},
+    }])
+    return CharacterAssigner().assign(plan, [], chars, _AdminStub())
+
+
+def test_a_busy_t1_bpo_gets_no_copy_and_is_not_suggested_for_purchase():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {999: [_t1_bpo(77)]}, "blueprint_data": INVENTION_BLUEPRINT_DATA,
+              "busy_blueprint_item_ids": {77}, "industry_jobs": [_copy_job(77)]}
+    plan = _planner().plan_chain([decision], phase1)
+
+    assert not row.get("needs_invention") and not row.get("has_t1_bpo")
+    assert "needs_t1_bpo" not in row
+    assert "in an active industry job" in decision.bpo_analysis_skip_reason
+    assert plan.bpo_opportunities == []
+    assert [a.action_type for a in _t2_actions(plan)] == []
+
+
+def test_a_t1_bpo_the_snapshot_dropped_while_in_a_job_is_busy_not_missing():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {}, "blueprint_data": INVENTION_BLUEPRINT_DATA,
+              "busy_blueprint_item_ids": {77}, "industry_jobs": [_copy_job(77)]}
+    plan = _planner().plan_chain([decision], phase1)
+
+    assert "needs_t1_bpo" not in row
+    assert "in an active industry job" in decision.bpo_analysis_skip_reason
+    # No copy, so no invention: nothing is built or bought for it this plan.
+    assert [a.action_type for a in _t2_actions(plan)] == []
+
+
+def test_a_bpc_job_of_the_t1_type_does_not_make_the_bpo_busy():
+    # A manufacturing job on a T1 *BPC* leaves no BPO busy: still "acquire one".
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    job = {**_copy_job(78), "blueprint_is_blueprint_copy": True, "activity_id": 1}
+    phase1 = {"bpo_assets_by_type_id": {}, "blueprint_data": INVENTION_BLUEPRINT_DATA,
+              "busy_blueprint_item_ids": {78}, "industry_jobs": [job]}
+    _planner().plan_chain([decision], phase1)
+    assert row["needs_t1_bpo"] is True
+
+
+def test_a_free_t1_bpo_beside_a_busy_one_is_copied():
+    row = _t2_row()
+    phase1 = {"bpo_assets_by_type_id": {999: [_t1_bpo(77), _t1_bpo(79)]},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA,
+              "busy_blueprint_item_ids": {77}, "industry_jobs": [_copy_job(77)]}
+    plan = _planner().plan_chain([_decision(row, meta_group_id=2)], phase1)
+    assert row["has_t1_bpo"] is True
+    assert [a.type_id for a in _t2_actions(plan) if a.action_type == "copy"] == [999]
+
+
+def test_a_busy_owned_t2_bpc_does_not_stand_in_for_invention():
+    # The row is priced for invention (no owned BPC); the only T2 BPC is in a job.
+    row = _t2_row()
+    phase1 = {"bpo_assets_by_type_id": {999: [_t1_bpo(79)]}, "bpc_assets_by_type_id": {1999: [_t2_bpc(55)]},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA, "busy_blueprint_item_ids": {55}}
+    decision = _decision(row, meta_group_id=2)
+    _planner().plan_chain([decision], phase1)
+    assert row["needs_invention"] is True and row["has_t1_bpo"] is True
+
+
+def _row_on_owned_bpcs(blueprint_copy):
+    row = _t2_row()
+    job = row["manufacturing_job"]
+    job.update({
+        "blueprint_source_kind": "owned_blueprint_copy", "blueprint_copy": blueprint_copy,
+        "job_segments": [{"runs": 1, "source": "owned_blueprint_copy", "materials": {"34": 10}}],
+        "materials": {"34": {"type_id": 34, "quantity": 10}},
+    })
+    return row
+
+
+@pytest.mark.parametrize("blueprint_copy", [{"item_id": 55}, {"item_id": None, "item_ids": [56, 55]}])
+def test_a_row_built_on_a_busy_bpc_is_not_built_and_plans_no_invention(blueprint_copy):
+    # The producer counted the BPC's runs, so the row buys no datacores: building
+    # it otherwise, or inventing from it, would under-buy.
+    row = _row_on_owned_bpcs(blueprint_copy)
+    phase1 = {"bpo_assets_by_type_id": {999: [_t1_bpo(79)]},
+              "bpc_assets_by_type_id": {1999: [_t2_bpc(55), _t2_bpc(56)]},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA, "busy_blueprint_item_ids": {55}}
+    decision = _decision(row, meta_group_id=2)
+    plan = _planner().plan_chain([decision], phase1)
+
+    first = decision.overview_row["research_first"]
+    assert first["mode"] == "none" and first["unconditional"] is True
+    assert "BPC in an active industry job" in first["note"]
+    assert not row.get("needs_invention")
+    assert [a.action_type for a in _t2_actions(plan)] == []
+
+
+def test_a_row_on_free_bpcs_is_built_as_usual():
+    row = _row_on_owned_bpcs({"item_id": 56})
+    phase1 = {"bpc_assets_by_type_id": {1999: [_t2_bpc(55), _t2_bpc(56)]},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA, "busy_blueprint_item_ids": {55}}
+    decision = _decision(row, meta_group_id=2)
+    plan = _planner().plan_chain([decision], phase1)
+    assert "research_first" not in decision.overview_row
+    assert [a.action_type for a in _t2_actions(plan)] == ["manufacture"]

@@ -587,3 +587,39 @@ def test_the_other_bpo_sizing_note_names_only_the_bonuses_applied(profile, wordi
 ])
 def test_the_sizing_bonus_wording(structure, rig, wording):
     assert _sizing_bonus_wording(structure, rig) == wording
+
+
+# --- round 5 Task 10 carries 12, 16: busy blueprints in research first ------------
+
+def test_a_research_first_variant_on_a_busy_bpc_is_not_used():
+    variant = _bpc_variant()
+    variant["manufacturing_job"]["blueprint_copy"] = {"item_id": 55}
+    plan = _plan5(_row(**BPO_ROW), bpos=[_bpo(1, 10, 0)], variants=[variant], busy={55})
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert top.overview_row["overview_row_id"] != "bpc-variant"
+    assert top.overview_row["research_first"]["mode"] == "none"
+
+
+def test_a_free_research_first_variant_is_still_used():
+    variant = _bpc_variant()
+    variant["manufacturing_job"]["blueprint_copy"] = {"item_id": 56}
+    plan = _plan5(_row(**BPO_ROW), bpos=[_bpo(1, 10, 0)], variants=[variant], busy={55})
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert top.overview_row["overview_row_id"] == "bpc-variant"
+
+
+def _unknown_levels_warnings(caplog):
+    return [r for r in caplog.records if r.levelno == logging.WARNING and "unknown ME/TE" in r.getMessage()]
+
+
+def test_a_busy_priced_bpo_with_unknown_levels_does_not_warn_about_them(caplog):
+    caplog.set_level(logging.INFO)
+    plan = _plan5(_priced_row(), bpos=[_bpo(1, None, None)], busy={1})
+    assert _unknown_levels_warnings(caplog) == []
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert "in an active industry job" in top.overview_row["research_first"]["note"]
+
+
+def test_a_free_bpo_with_unknown_levels_still_warns(caplog):
+    _plan5(_priced_row(), bpos=[_bpo(1, None, None)])
+    assert len(_unknown_levels_warnings(caplog)) == 1

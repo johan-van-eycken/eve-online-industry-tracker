@@ -182,6 +182,24 @@ class ChainPlanner:
             type_id: [a for a in assets if research_first.item_id(a) not in busy_item_ids]
             for type_id, assets in bpo_assets_by_type_id.items()
         } if busy_item_ids else bpo_assets_by_type_id
+        # The same for BPCs (Task 10 carry 12), and the blueprint types with a
+        # BPO / BPC in a job, which covers a blueprint the snapshot dropped.
+        free_bpc_assets_by_type_id = {
+            type_id: [a for a in assets if research_first.item_id(a) not in busy_item_ids]
+            for type_id, assets in bpc_assets_by_type_id.items()
+        } if busy_item_ids else bpc_assets_by_type_id
+        industry_jobs = phase1_data.get("industry_jobs") or []
+        busy_bpo_type_ids = research_first.busy_blueprint_type_ids(industry_jobs, copies=False) | {
+            t for t, assets in bpo_assets_by_type_id.items()
+            if any(research_first.item_id(a) in busy_item_ids for a in assets)
+        }
+        busy_bpc_type_ids = research_first.busy_blueprint_type_ids(industry_jobs, copies=True) | {
+            t for t, assets in bpc_assets_by_type_id.items()
+            if any(research_first.item_id(a) in busy_item_ids for a in assets)
+        }
+
+        def _on_busy_bpc(candidate: dict[str, Any]) -> bool:
+            return self._row_on_busy_bpc(candidate, busy_item_ids, busy_bpc_type_ids) is not None
         # Each parent's sub-manufacture requests, in order, and (research
         # first) the ones its kept BPO row would make instead.
         requests_by_parent: list[tuple[int, list[dict[str, Any]]]] = []
@@ -197,6 +215,14 @@ class ChainPlanner:
             # is no top-level blueprint_type_id key.
             bp_type_id = orow.get_blueprint_type_id(row) or 0
             bp_data = blueprint_data.get(bp_type_id, {})
+            # Research first never builds from a variant on a busy BPC.
+            variants = [
+                v for v in variant_rows_by_type_id.get(int(decision.type_id)) or []
+                if not _on_busy_bpc(v)
+            ]
+            busy_bpc_reason = self._row_on_busy_bpc(row, busy_item_ids, busy_bpc_type_ids)
+            if busy_bpc_reason is not None:
+                self._mark_not_built(decision, busy_bpc_reason)
 
             try:
                 if meta_group_id == META_GROUP_T1:
@@ -205,7 +231,7 @@ class ChainPlanner:
                         bp_type_id=bp_type_id,
                         bp_data=bp_data,
                         bpo_assets_by_type_id=bpo_assets_by_type_id,
-                        bpc_assets_by_type_id=bpc_assets_by_type_id,
+                        bpc_assets_by_type_id=free_bpc_assets_by_type_id,
                         market_depth_cache=market_depth_cache,
                         bpo_opportunities=bpo_opportunities,
                         te_research_target=te_research_target,
@@ -214,11 +240,14 @@ class ChainPlanner:
                         bpo_consider_days=bpo_consider_days,
                     )
                     self._apply_research_first(
-                        decision, bp_type_id, bpo_plan,
-                        variant_rows_by_type_id.get(int(decision.type_id)) or [],
+                        decision, bp_type_id, bpo_plan, variants,
                         raw_market_depth.get(int(decision.type_id)),
                         bp_data=bp_data, market_depth_cache=market_depth_cache,
                     )
+                elif busy_bpc_reason is not None:
+                    # Priced on the busy BPC's runs: inventing instead would
+                    # buy no datacores for them (an under-buy). Not built.
+                    decision.pipeline_stage = "manufacturing"
                 else:
                     # T2+ — invention chain only
                     self._plan_t2_chain(
@@ -227,8 +256,9 @@ class ChainPlanner:
                         bp_data=bp_data,
                         blueprint_data=blueprint_data,
                         invention_source=invention_source,
-                        bpo_assets_by_type_id=bpo_assets_by_type_id,
-                        bpc_assets_by_type_id=bpc_assets_by_type_id,
+                        bpo_assets_by_type_id=free_bpo_assets_by_type_id,
+                        bpc_assets_by_type_id=free_bpc_assets_by_type_id,
+                        busy_bpo_type_ids=busy_bpo_type_ids,
                         market_depth_cache=market_depth_cache,
                         invention_success_rates=invention_success_rates,
                         bpo_opportunities=bpo_opportunities,
@@ -334,6 +364,38 @@ class ChainPlanner:
         return decisions
 
     @staticmethod
+    def _row_on_busy_bpc(
+        row: dict[str, Any], busy_item_ids: set[int], busy_bpc_type_ids: set[int],
+    ) -> str | None:
+        """Why the row's owned-BPC runs are not available, or None.
+
+        The producer counts the runs of every owned BPC in the asset
+        snapshot, which can still list a BPC installed in a job. The row
+        names its BPCs (row_bpc_item_ids); a row that names none while a BPC
+        of its blueprint is in a job cannot be shown to be free."""
+        if not research_first.builds_on_owned_bpcs(row):
+            return None
+        item_ids = research_first.row_bpc_item_ids(row)
+        if item_ids:
+            busy = sorted(item_ids & busy_item_ids)
+            return f"BPC in an active industry job (item {', '.join(map(str, busy))})" if busy else None
+        if (orow.get_blueprint_type_id(row) or 0) in busy_bpc_type_ids:
+            return "BPC in an active industry job (the row does not name its BPCs)"
+        return None
+
+    @staticmethod
+    def _mark_not_built(decision: ItemDecision, reason: str) -> None:
+        """Research first's "not built" plan, unconditional like a busy BPO
+        (a blueprint it needs is in an active job): no manufacture action and
+        no sub-builds, so nothing is bought for it."""
+        decision.overview_row["research_first"] = {
+            "mode": "none", "note": f"{reason}: not built from it in this plan",
+            "sized_note": "its components were not sub-built in this plan",
+            "unconditional": True,
+        }
+        logger.info("ChainPlanner: type_id=%s: %s: not built from it in this plan", decision.type_id, reason)
+
+    @staticmethod
     def _research_first_fallback_row(row: dict[str, Any]) -> dict[str, Any] | None:
         """The row the parent builds from when its planned research gets no
         slot (CharacterAssigner), when that differs from the plan: the kept
@@ -414,7 +476,10 @@ class ChainPlanner:
             # job on a blueprint that may already be fully researched.
             current_me = _blueprint_efficiency(subject, "material")
             current_te = _blueprint_efficiency(subject, "time")
-            if current_me is None or current_te is None:
+            # A busy BPO is not researched anyway, and the busy state is the
+            # reason (carry 16): no WARNING about its unknown levels.
+            subject_busy = research_first.item_id(subject) in busy_item_ids
+            if (current_me is None or current_te is None) and not subject_busy:
                 logger.warning(
                     "ChainPlanner: owned BPO %s has unknown ME/TE (me=%s, te=%s); "
                     "not scheduling research for the unknown level(s)",
@@ -502,8 +567,14 @@ class ChainPlanner:
         bpo_opportunities: list[dict[str, Any]],
         bpo_strong_buy_days: float,
         bpo_consider_days: float,
+        busy_bpo_type_ids: set[int] = frozenset(),
     ) -> None:
-        """Plan T2+ chain: invention pipeline or BPC fallback."""
+        """Plan T2+ chain: invention pipeline or BPC fallback.
+
+        `bpo_assets_by_type_id` / `bpc_assets_by_type_id` hold only the
+        blueprints not installed in an active job. A T1 BPO that is in a job
+        (`busy_bpo_type_ids`, also when the snapshot dropped it) gets no copy
+        and is not flagged for purchase: it is owned, only busy."""
         if bp_type_id in bpc_assets_by_type_id and bpc_assets_by_type_id[bp_type_id]:
             decision.pipeline_stage = "manufacturing"
             return
@@ -522,7 +593,16 @@ class ChainPlanner:
                 bp_type_id, decision.type_id,
             )
 
-        if t1_bpo_owned:
+        if not t1_bpo_owned and t1_bp_type_id is not None and t1_bp_type_id in busy_bpo_type_ids:
+            decision.pipeline_stage = "copying"
+            self._skip_bpo_analysis(
+                decision,
+                f"the T1 BPO ({t1_bp_type_id}) is in an active industry job: no copy in this plan; "
+                "it is owned, so not a purchase",
+            )
+            # No copy, so no invention and no T2 BPC to build from.
+            self._mark_not_built(decision, "T1 BPO in an active industry job")
+        elif t1_bpo_owned:
             t1_invention = (blueprint_data.get(t1_bp_type_id) or {}).get("invention") or {}
             decision.pipeline_stage = "copying"
             decision.overview_row["needs_invention"] = True
@@ -596,6 +676,8 @@ class ChainPlanner:
         row = decision.overview_row
         if not bpo_plan or not research_first.batch_uses_bpo(row):
             return
+        if isinstance(row.get("research_first"), dict):
+            return  # already not built: its owned BPC is in an active job
         assets, priced, research = bpo_plan["assets"], bpo_plan["priced"], bpo_plan["research"]
         busy: set[int] = set(bpo_plan.get("busy") or ())
         researching = research is not None and bool(

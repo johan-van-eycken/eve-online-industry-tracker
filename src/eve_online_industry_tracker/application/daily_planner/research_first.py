@@ -84,6 +84,62 @@ def owned_bpc_part(row: dict[str, Any]) -> dict[str, Any] | None:
     return {"runs": runs, "quantity": quantity, "materials": materials}
 
 
+def builds_on_owned_bpcs(row: dict[str, Any]) -> bool:
+    """Whether some of the batch's runs come from owned BPCs."""
+    segments = job_segments(row)
+    if segments:
+        return any(str(s.get("source")) == OWNED_BPC_SOURCE for s in segments)
+    return orow.get_manufacturing_job(row).get("blueprint_source_kind") == OWNED_BPC_SOURCE
+
+
+def row_bpc_item_ids(row: dict[str, Any]) -> set[int]:
+    """The item_ids of the owned BPCs the producer planned the row on
+    (manufacturing_job.blueprint_copy: `item_id` for one BPC, `item_ids` for
+    several). Empty when it names none."""
+    payload = orow.get_manufacturing_job(row).get("blueprint_copy")
+    if not isinstance(payload, dict):
+        return set()
+    raw = [payload.get("item_id"), *(payload.get("item_ids") or [])]
+    out: set[int] = set()
+    for value in raw:
+        try:
+            item = int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            continue
+        if item > 0:
+            out.add(item)
+    return out
+
+
+def _job_field(job: Any, name: str) -> Any:
+    return job.get(name) if isinstance(job, dict) else getattr(job, name, None)
+
+
+#: Activities that only a BPO can run: ME and TE research, copying.
+_BPO_ONLY_ACTIVITY_IDS = frozenset({3, 4, 5})
+
+
+def busy_blueprint_type_ids(industry_jobs: list[Any], *, copies: bool) -> set[int]:
+    """Blueprint type ids with a BPO (copies=False) or a BPC (copies=True)
+    installed in one of these active jobs. A job that does not say whether
+    its blueprint is a copy counts as a BPO job when its activity needs a
+    BPO (research, copying), and as a BPC job otherwise."""
+    out: set[int] = set()
+    for job in industry_jobs or []:
+        try:
+            bp_type_id = int(_job_field(job, "blueprint_type_id") or 0)
+            activity_id = int(_job_field(job, "activity_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if bp_type_id <= 0:
+            continue
+        is_copy = _job_field(job, "blueprint_is_blueprint_copy")
+        job_is_copy = bool(is_copy) if is_copy is not None else activity_id not in _BPO_ONLY_ACTIVITY_IDS
+        if job_is_copy == copies:
+            out.add(bp_type_id)
+    return out
+
+
 def best_bpc_variant(variants: list[dict[str, Any]], blueprint_type_id: int) -> dict[str, Any] | None:
     """The first variant row of the same blueprint that does not touch the
     BPO and builds on owned BPCs, or None."""
