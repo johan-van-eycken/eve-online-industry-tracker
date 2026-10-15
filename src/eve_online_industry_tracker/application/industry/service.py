@@ -97,8 +97,12 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     DecryptorOption,
     CharacterSlotCapacity,
     InventionContext,
+    PARALLEL_CAPACITY_NOTE,
     ParallelLanes,
     QuietWarningsFilter,
+    SourceOriginals,
+    elapsed_lane_note,
+    split_invention_attempts,
     decryptor_choice_payload,
     decryptor_options_from_rows,
     effective_invention_probability,
@@ -126,6 +130,17 @@ from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption
 
 
 logger = logging.getLogger(__name__)
+
+
+def _payload_from_skill_levels(levels: Mapping[str, int]) -> dict[str, Any]:
+    """An industry payload from a character's skill levels with no implants
+    (its implants are unknown: the conservative, longer duration)."""
+    return {
+        "modifier_skills": [{"type_name": str(name), "trained_skill_level": int(level or 0)} for name, level in levels.items()],
+        "implants": [],
+    }
+
+
 # Decryptor candidates and the extra-batch plan are evaluated inside
 # invention_model.quiet_warnings(): only the plan that is kept logs.
 logger.addFilter(QuietWarningsFilter())
@@ -1672,7 +1687,75 @@ class IndustryService:
             if character_id <= 0:
                 continue
             levels = _character_skill_levels_by_name(char)
-            out[character_id] = CharacterSlotCapacity(research_slot_capacity(levels), levels)
+            out[character_id] = CharacterSlotCapacity(
+                research_slot_capacity(levels), levels, self._pilot_industry_payload(character_id),
+            )
+        return out
+
+    def _pilot_industry_payload(self, character_id: int) -> dict[str, Any] | None:
+        """A corp pilot's own industry payload (skills and implants), the
+        one convention for "another pilot" (Task 12 fix round 1). None, with
+        a WARNING, when the character cannot be read: its lane is then timed
+        at its skills without implants (longer, never understated)."""
+        try:
+            return self._get_character_industry_modifier_payload(character_id=int(character_id))
+        except ServiceError as exc:
+            logger.warning(
+                "Product overview: no industry payload for character %s (%s); its parallel lanes are "
+                "timed at its skills without implants", character_id, exc,
+            )
+            return None
+
+    @staticmethod
+    def _elapsed_lane_notes(manufacturing_job: Mapping[str, Any]) -> list[str]:
+        """The row's parallel-lane notes (invention_model.elapsed_lane_note),
+        for its own invention and source copy and every nested one, deduped
+        in order."""
+        notes: list[str] = []
+
+        def walk(node: Any, prefix: str) -> None:
+            if not isinstance(node, Mapping):
+                return
+            activity = node.get("activity")
+            if activity in ("invention", "copying") and "elapsed_parallel" in node:
+                note = elapsed_lane_note(
+                    node.get("elapsed_parallel"), label="invention" if activity == "invention" else "source copying",
+                )
+                if note:
+                    notes.append(f"{prefix}{note}")
+            for child in node.values():
+                if isinstance(child, Mapping):
+                    walk(child, prefix)
+
+        breakdown = manufacturing_job.get("activity_breakdown")
+        if isinstance(breakdown, Mapping):
+            for key in ("invention", "invention_source_copying"):
+                walk(breakdown.get(key), "")
+        walk(manufacturing_job.get("recursive_activity_breakdown"), "sub-build ")
+        return list(dict.fromkeys(notes))
+
+    @staticmethod
+    def _source_originals_by_owner(
+        blueprint_original_assets_by_type_id: Mapping[int, list[Any]],
+    ) -> dict[int, SourceOriginals]:
+        """{blueprint type_id: owned originals per owning character, and the
+        corp's}: only a BPO's owner installs it (source_copy_lanes). A
+        character asset carries its character_id; a corp asset does not."""
+        out: dict[int, SourceOriginals] = {}
+        for bp_type_id, assets in blueprint_original_assets_by_type_id.items():
+            by_character: dict[int, int] = {}
+            corporation = 0
+            for asset in assets or []:
+                owner = getattr(asset, "character_id", None)
+                try:
+                    owner_id = int(owner) if owner is not None else 0
+                except (TypeError, ValueError):
+                    owner_id = 0
+                if owner_id > 0:
+                    by_character[owner_id] = by_character.get(owner_id, 0) + 1
+                else:
+                    corporation += 1
+            out[int(bp_type_id)] = SourceOriginals(by_character, corporation)
         return out
 
     def _no_inventor_reason(self) -> str:
@@ -2629,6 +2712,9 @@ class IndustryService:
                 reasons.append(f"Invention chance: {invention_chance['note']}.")
             for nested_note in manufacturing_job.get("invention_chance_notes") or []:
                 reasons.append(f"Invention chance: {nested_note}.")
+            for lane_note in manufacturing_job.get("elapsed_lane_notes") or []:
+                # Informational (Task 12): the build time's parallel lanes.
+                reasons.append(f"Build time: {lane_note}.")
             for later_batch_note in manufacturing_job.get("later_batch_notes") or []:
                 # Informational: the shopping list may over-buy, never under-buy.
                 reasons.append(f"Shopping list: {later_batch_note}.")
@@ -7120,6 +7206,29 @@ class IndustryService:
             base_runs = max(1, int(max_production_limit or 0) or 1)
         return invented_runs_per_blueprint(base_runs, decryptor)
 
+    #: The skills that change each activity's duration (_skill_time_reduction).
+    _TIME_SKILLS_BY_ACTIVITY: dict[str, tuple[str, ...]] = {
+        "manufacturing": ("Industry", "Advanced Industry"),
+        "reaction": ("Industry", "Advanced Industry"),
+        "copying": ("Science", "Advanced Industry"),
+        "research_material": ("Metallurgy", "Advanced Industry"),
+        "research_time": ("Research", "Advanced Industry"),
+        "invention": ("Advanced Industry",),
+    }
+
+    @classmethod
+    def _pilot_time_fingerprint(cls, activity: str, payload: Mapping[str, Any]) -> tuple[Any, ...]:
+        """A lane pilot's cache key: only what changes `activity`'s duration
+        and fee (its time skills, and its implants' time and cost
+        reductions for that activity), so pilots with the same figures share
+        one cached job."""
+        levels = cls._skill_levels_by_name(dict(payload))
+        return (
+            tuple(int(levels.get(name, 0) or 0) for name in cls._TIME_SKILLS_BY_ACTIVITY.get(activity, ())),
+            cls._implant_reduction(character_modifier_payload=dict(payload), activity=activity, metric="time"),
+            cls._implant_reduction(character_modifier_payload=dict(payload), activity=activity, metric="cost"),
+        )
+
     def _plan_activity_costs(
         self,
         ctx: _ProductPlanningContext,
@@ -7132,13 +7241,14 @@ class IndustryService:
         required_skill_entries: list[dict[str, Any]] | None = None,
         blueprint_material_efficiency: int = 0,
         blueprint_time_efficiency: int = 0,
-        other_pilot_skill_levels_by_name: Mapping[str, int] | None = None,
+        pilot_industry_payload: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Unified activity cost calculator — delegates to _compute_activity_job with per-refresh caching.
 
-        `other_pilot_skill_levels_by_name`: time the job for another corp pilot
-        (a parallel invention or copy lane, Task 12): that pilot's skills and
-        no implants (only the selected character's implants are known)."""
+        `pilot_industry_payload`: time the job for another corp pilot (a
+        parallel invention or copy lane, Task 12) with that pilot's own
+        industry payload, skills and implants (the one convention for
+        "another pilot", _get_character_industry_modifier_payload)."""
         # The required skills' trained levels change the time reduction
         # (_manufacturing_required_skill_time_reduction), so they are part of the key.
         skill_fingerprint = tuple(sorted(
@@ -7146,8 +7256,8 @@ class IndustryService:
             for entry in (required_skill_entries or []) if isinstance(entry, dict)
         ))
         pilot_fingerprint = (
-            tuple(sorted((str(k), int(v or 0)) for k, v in other_pilot_skill_levels_by_name.items()))
-            if other_pilot_skill_levels_by_name is not None else None
+            self._pilot_time_fingerprint(activity, pilot_industry_payload)
+            if pilot_industry_payload is not None else None
         )
         cache_key = (activity, base_time_seconds, runs, process_value, manufacturing_group, blueprint_material_efficiency, blueprint_time_efficiency, skill_fingerprint, pilot_fingerprint)
         cached = ctx.activity_job_cache.get(cache_key)
@@ -7160,11 +7270,11 @@ class IndustryService:
             process_value=process_value,
             selected_industry_profile=ctx.selected_industry_profile,
             selected_character_modifiers=(
-                ctx.selected_character_modifiers if other_pilot_skill_levels_by_name is None else None
+                ctx.selected_character_modifiers if pilot_industry_payload is None else dict(pilot_industry_payload)
             ),
             character_skill_levels_by_name=(
-                ctx.character_skill_levels_by_name if other_pilot_skill_levels_by_name is None
-                else dict(other_pilot_skill_levels_by_name)
+                ctx.character_skill_levels_by_name if pilot_industry_payload is None
+                else self._skill_levels_by_name(dict(pilot_industry_payload))
             ),
             manufacturing_group=manufacturing_group,
             required_skill_entries=required_skill_entries,
@@ -7340,9 +7450,7 @@ class IndustryService:
                 # Parallel invention and copy lanes (Task 12).
                 slot_capacity_by_character_id=self._get_corp_slot_capacity(),
                 selected_character_id=int(character_id) if character_id else None,
-                blueprint_original_count_by_type_id={
-                    int(bp_type_id): len(assets) for bp_type_id, assets in blueprint_original_assets_by_type_id.items()
-                },
+                source_originals_by_type_id=self._source_originals_by_owner(blueprint_original_assets_by_type_id),
             ),
             blueprint_row_by_type_id={
                 int(row.get("blueprint_type_id") or 0): row
@@ -7625,13 +7733,29 @@ class IndustryService:
         # Whole attempts over the parallel invention lanes (Task 12): every
         # qualifying corp inventor's total research slots. Unknown slots or
         # skills: one slot in sequence, as before, with the reason.
+        # Each lane at its own pilot's chance (split_invention_attempts):
+        # whole_attempts stays the best inventor's (cost and procurement);
+        # lane_whole_attempts is what the lanes run, never fewer.
         lanes = (
-            invention_lanes(invention_context, chance, invention_job.get("skill_entries") or [])
+            invention_lanes(
+                invention_context, chance, invention_job.get("skill_entries") or [],
+                probability_floor=probability_floor,
+            )
             if whole_attempts > 0 else None
+        )
+        lane_attempts = (
+            split_invention_attempts(
+                int(math.ceil(float(invented_runs) / float(runs_per_invented_blueprint))), lanes.probabilities,
+            )
+            if lanes is not None and lanes.sequential_reason is None else None
         )
         costs["elapsed_duration_seconds"], costs["elapsed_parallel"] = self._lane_elapsed_seconds(
             compute_activity=compute_activity, invention_context=invention_context, lanes=lanes,
-            activity="invention", base_time_seconds=invention_base_time, whole_jobs=whole_attempts,
+            jobs_per_lane=lane_attempts, activity="invention", base_time_seconds=invention_base_time,
+            whole_jobs=whole_attempts,
+        )
+        costs["lane_whole_attempts"] = (
+            int(costs["elapsed_parallel"]["lane_whole_jobs"]) if costs["elapsed_parallel"] else whole_attempts
         )
         costs["duration_is_amortized"] = invention_attempts > 0
         if cost_unknown_reason is not None:
@@ -7661,9 +7785,10 @@ class IndustryService:
         `available_blueprint_copy_runs_by_type_id`. Returns (costs or None when
         not `enabled` or the source has no copy time, missing source runs).
 
-        The whole copy runs spread over the parallel copy lanes of
-        `invention_context` (Task 12: min(owned source BPOs, corp research
-        slots)); without it, or with one BPO, they run in sequence."""
+        The whole copy runs (one per lane attempt) spread over the parallel
+        copy lanes of `invention_context` (Task 12, source_copy_lanes: per
+        owner, min(its BPOs, its slots)); without it, or with one lane, they
+        run in sequence."""
         attempts = float(invention_costs.get("runs") or 0.0)
         whole_attempts = int(invention_costs.get("whole_attempts") or 0)
         cost_unknown = invention_costs.get("cost_unknown_reason") is not None
@@ -7706,13 +7831,24 @@ class IndustryService:
             compute_activity=compute_activity, invention_source_row=invention_source_row,
             adjusted_price_map=adjusted_price_map,
         )
+        # The lanes' attempts (each lane at its own chance) need one source
+        # run each: never fewer copies than the invention elapsed assumes.
+        lane_whole_attempts = max(whole_attempts, int(invention_costs.get("lane_whole_attempts") or 0))
+        elapsed_missing_runs = max(0, lane_whole_attempts - whole_source_runs_left)
         copy_lanes = (
             source_copy_lanes(invention_context, source_bp_type_id)
-            if invention_context is not None else ParallelLanes(1, (), "no invention context")
-        ) if whole_missing_source_runs > 0 else None
+            if invention_context is not None else ParallelLanes((), (), "no invention context")
+        ) if elapsed_missing_runs > 0 else None
+        copy_jobs = (
+            tuple(
+                len(range(index, elapsed_missing_runs, copy_lanes.lanes)) for index in range(copy_lanes.lanes)
+            )
+            if copy_lanes is not None and copy_lanes.sequential_reason is None else None
+        )
         copy_elapsed, copy_parallel = self._lane_elapsed_seconds(
             compute_activity=compute_activity, invention_context=invention_context, lanes=copy_lanes,
-            activity="copying", base_time_seconds=source_base_time, whole_jobs=whole_missing_source_runs,
+            jobs_per_lane=copy_jobs, activity="copying", base_time_seconds=source_base_time,
+            whole_jobs=elapsed_missing_runs,
         )
         source_copy_costs["elapsed_duration_seconds"] = copy_elapsed if not cost_unknown else None
         source_copy_costs["elapsed_parallel"] = copy_parallel if not cost_unknown else None
@@ -7758,42 +7894,61 @@ class IndustryService:
         compute_activity: Callable[..., dict[str, Any]],
         invention_context: InventionContext | None,
         lanes: ParallelLanes | None,
+        jobs_per_lane: tuple[int, ...] | None,
         activity: str,
         base_time_seconds: int,
         whole_jobs: int,
     ) -> tuple[int, dict[str, Any] | None]:
-        """(elapsed seconds, lanes payload) for `whole_jobs` jobs of `activity`
-        over `lanes` (Task 12).
+        """(elapsed seconds, lanes payload) for `activity` over `lanes`
+        (Task 12), `jobs_per_lane` aligned with lanes.character_ids.
 
-        Parallel: ceil(whole_jobs / lanes) x one job's duration of the SLOWEST
-        lane pilot (the conservative choice: never understated, whichever
-        pilot gets the last round). The selected character is timed with the
-        producer's own skills and implants; every other pilot with its own
-        skills and no implants. Sequential (lanes None, or a
-        sequential_reason): whole_jobs in one slot, as before."""
-        if whole_jobs <= 0:
+        Parallel: the most jobs any lane runs x one job's duration of the
+        SLOWEST pilot of a used lane (never understated, whichever pilot gets
+        the last round). The selected character is timed with the producer's
+        own calculator; every other pilot with its own industry payload
+        (skills and implants). Sequential (no lanes, or a sequential_reason):
+        `whole_jobs` in one slot, as before."""
+        if whole_jobs <= 0 and not any(jobs_per_lane or ()):
             return 0, None
-        if lanes is None or lanes.sequential_reason is not None or invention_context is None:
+        sequential = lanes is None or lanes.sequential_reason is not None or invention_context is None or not jobs_per_lane
+        if sequential:
             elapsed = int(compute_activity(
                 activity=activity, base_time_seconds=base_time_seconds, runs=whole_jobs, process_value=None,
             )["duration_seconds"])
-            payload = (lanes or ParallelLanes(1, (), "sequential")).payload(
-                whole_jobs=whole_jobs, lane_duration_seconds=None,
-            )
-            return elapsed, payload
+            return elapsed, {
+                "lanes": 1, "lanes_used": 1, "pilots_used": 0, "whole_jobs": int(whole_jobs),
+                "lane_whole_jobs": int(whole_jobs), "rounds": int(whole_jobs), "lane_duration_seconds": None,
+                "sequential_reason": (lanes.sequential_reason if lanes is not None else None) or "sequential",
+                "note": None,
+            }
+        assert lanes is not None and invention_context is not None and jobs_per_lane is not None
         slots = invention_context.slot_capacity_by_character_id or {}
+        used = sorted({cid for cid, jobs in zip(lanes.character_ids, jobs_per_lane) if jobs > 0})
         durations: list[float] = []
-        for character_id in lanes.character_ids:
+        for character_id in used:
             kw: dict[str, Any] = {}
             if character_id != invention_context.selected_character_id:
                 capacity = slots.get(character_id)
-                kw["other_pilot_skill_levels_by_name"] = dict(capacity.skill_levels_by_name) if capacity is not None else {}
+                kw["pilot_industry_payload"] = dict(
+                    (capacity.industry_payload if capacity is not None else None)
+                    or _payload_from_skill_levels(capacity.skill_levels_by_name if capacity is not None else {})
+                )
             durations.append(float(compute_activity(
                 activity=activity, base_time_seconds=base_time_seconds, runs=1, process_value=None, **kw,
             )["duration_seconds"]))
         lane_duration = max(durations) if durations else 0.0
-        elapsed = int(round(lanes.rounds(whole_jobs) * lane_duration))
-        return elapsed, lanes.payload(whole_jobs=whole_jobs, lane_duration_seconds=lane_duration)
+        rounds = max(jobs_per_lane) if jobs_per_lane else 0
+        return int(round(rounds * lane_duration)), {
+            "lanes": lanes.lanes,
+            "lanes_used": sum(1 for jobs in jobs_per_lane if jobs > 0),
+            "pilots_used": len(used),
+            "whole_jobs": int(whole_jobs),
+            "lane_whole_jobs": int(sum(jobs_per_lane)),
+            "rounds": int(rounds),
+            "lane_duration_seconds": lane_duration,
+            "sequential_reason": None,
+            "note": PARALLEL_CAPACITY_NOTE,
+        }
 
     @staticmethod
     def _invention_elapsed_adjustment(
@@ -7844,14 +7999,14 @@ class IndustryService:
         expected attempts for fees, slot time and the (amortized) inputs, whole
         attempts for the elapsed time, and no division by a zero probability."""
         def compute_activity(**kw: Any) -> dict[str, Any]:
-            # A parallel lane of another pilot (Task 12): its skills, no implants.
-            other_pilot = kw.pop("other_pilot_skill_levels_by_name", None)
+            # A parallel lane of another pilot (Task 12): its own payload.
+            pilot = kw.pop("pilot_industry_payload", None)
             return self._compute_activity_job(
                 **kw,
                 selected_industry_profile=selected_industry_profile,
-                selected_character_modifiers=selected_character_modifiers if other_pilot is None else None,
+                selected_character_modifiers=selected_character_modifiers if pilot is None else dict(pilot),
                 character_skill_levels_by_name=(
-                    character_skill_levels_by_name if other_pilot is None else dict(other_pilot)
+                    character_skill_levels_by_name if pilot is None else self._skill_levels_by_name(dict(pilot))
                 ),
                 surcharge_rates=surcharge_rates,
             )
@@ -8551,8 +8706,29 @@ class IndustryService:
             tables[activity_name] = fees
         return tables, reasons
 
+    def _research_implant_multipliers(self, ctx: _ProductPlanningContext) -> dict[str, dict[str, float]]:
+        """{character_id: {research activity: the share of the duration its
+        implants leave}} for the selected character and every corp pilot
+        whose industry payload is known (an unknown one is left out: the
+        planner then applies no implants, the longer duration)."""
+        payloads: dict[int, Any] = {}
+        for cid, capacity in (ctx.invention_context.slot_capacity_by_character_id or {}).items():
+            if capacity.industry_payload is not None:
+                payloads[int(cid)] = capacity.industry_payload
+        if ctx.character_id and ctx.selected_character_modifiers is not None:
+            payloads[int(ctx.character_id)] = ctx.selected_character_modifiers
+        return {
+            str(cid): {
+                activity: 1.0 - self._implant_reduction(
+                    character_modifier_payload=dict(payload), activity=activity, metric="time",
+                )
+                for activity in ("research_material", "research_time")
+            }
+            for cid, payload in sorted(payloads.items())
+        }
+
     def _research_duration_by_level(
-        self, ctx: _ProductPlanningContext, *, row: dict[str, Any], skilled: bool = True,
+        self, ctx: _ProductPlanningContext, *, row: dict[str, Any], skilled: bool = True, implants: bool = True,
     ) -> dict[str, list[int] | None]:
         """The duration in seconds of researching this blueprint from level 0
         to each level 0..max, per research activity: a list indexed by level,
@@ -8564,7 +8740,8 @@ class IndustryService:
 
         skilled=False leaves the research skills out (structure, rig and
         implant reductions stay): the daily planner applies the ASSIGNED
-        pilot's skills to it (research_time.research_skill_time_multiplier)."""
+        pilot's skills to it (research_time.research_skill_time_multiplier).
+        implants=False also leaves the producer character's implants out."""
         tables: dict[str, list[int] | None] = {}
         for activity_name, source_field in [("research_material", "research_material_job"), ("research_time", "research_time_job")]:
             base_level_one = int(((row.get(source_field) or {}).get("time_seconds") or 0))
@@ -8580,7 +8757,7 @@ class IndustryService:
                     priced = self._compute_activity_job(
                         activity=activity_name, base_time_seconds=target, runs=1, process_value=None,
                         selected_industry_profile=ctx.selected_industry_profile,
-                        selected_character_modifiers=ctx.selected_character_modifiers,
+                        selected_character_modifiers=ctx.selected_character_modifiers if implants else None,
                         character_skill_levels_by_name={}, surcharge_rates=ctx.surcharge_rates,
                     )
                 durations.append(int(priced["duration_seconds"]))
@@ -9476,6 +9653,16 @@ class IndustryService:
             row_out["manufacturing_job"]["research_duration_seconds_by_level_unskilled"] = self._research_duration_by_level(
                 ctx, row=row, skilled=False,
             )
+            # Task 12 fix round 1: one convention for "another pilot". The
+            # planner times a research action with the ASSIGNED pilot's own
+            # skills and implants: this table has neither (structure and rigs
+            # only), and each corp pilot's implant multiplier is beside it.
+            row_out["manufacturing_job"]["research_duration_seconds_by_level_base"] = self._research_duration_by_level(
+                ctx, row=row, skilled=False, implants=False,
+            )
+            row_out["manufacturing_job"]["research_implant_time_multiplier_by_character_id"] = (
+                self._research_implant_multipliers(ctx)
+            )
         top_level_chance = (
             inv_costs.get("invention_chance") if requires_invention_chain and inv_costs is not None else None
         ) or extra_chance
@@ -9488,6 +9675,11 @@ class IndustryService:
         ))
         if nested_chance_notes:
             row_out["manufacturing_job"]["invention_chance_notes"] = nested_chance_notes
+        lane_notes = self._elapsed_lane_notes(row_out["manufacturing_job"])
+        if lane_notes:
+            # Task 12 fix round 1: the build time's parallel lanes (capacity),
+            # or why an invention is timed in one slot. Informational.
+            row_out["manufacturing_job"]["elapsed_lane_notes"] = lane_notes
         if datacore_need_unknown_reasons:
             # Read by the shopping list (invention_need_unknown_rows): these
             # batches' datacores are not in either invention list.

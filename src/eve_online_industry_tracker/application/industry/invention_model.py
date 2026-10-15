@@ -284,9 +284,10 @@ class InventionContext:
     #: The producer's selected character: its lane uses the producer's own
     #: implants; every other pilot's lane is timed without implants.
     selected_character_id: int | None = None
-    #: {blueprint type_id: owned originals}. A BPO is in one job at a time, so
-    #: it caps the parallel source copies. None: unknown (copies sequential).
-    blueprint_original_count_by_type_id: Mapping[int, int] | None = None
+    #: {T1 blueprint type_id: owned originals by owner}. A BPO is in one job
+    #: at a time and only its owner installs it, so it caps the parallel
+    #: source copies. None: unknown (copies sequential).
+    source_originals_by_type_id: Mapping[int, "SourceOriginals"] | None = None
     _warned: set[str] = field(default_factory=set, init=False, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
@@ -374,49 +375,84 @@ NO_QUALIFYING_INVENTOR_REASON = (
 )
 NO_SLOTS_FOR_INVENTORS_REASON = "no qualifying inventor has slot data"
 NO_BPO_COUNT_REASON = "the owned source BPOs are not counted"
-ONE_SOURCE_BPO_REASON = "one owned source BPO at most: a BPO is in one copy job at a time"
+ONE_SOURCE_BPO_REASON = "one copy lane at most: a BPO is in one copy job at a time, and only its owner installs it"
 NO_COPY_SLOTS_REASON = "no industry-enabled corp character has slot data"
 
 
 @dataclass(frozen=True)
 class CharacterSlotCapacity:
     """One corp character's research slots (character_slots.research_slot_capacity,
-    the planner's count) and skill levels by name (for its lane's duration)."""
+    the planner's count), its skill levels by name, and its own industry
+    payload (skills and implants, IndustryService._get_character_industry_modifier_payload)
+    that times its lane. industry_payload None: built from its skills, no implants."""
 
     research_slots: int
     skill_levels_by_name: Mapping[str, int] = field(default_factory=dict)
+    industry_payload: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class SourceOriginals:
+    """Owned originals of one T1 source: per owning character, and the corp's.
+    A character's BPO is installed only by that character."""
+
+    by_character_id: Mapping[int, int] = field(default_factory=dict)
+    corporation: int = 0
 
 
 @dataclass(frozen=True)
 class ParallelLanes:
-    """How many jobs of one kind run side by side. sequential_reason set: the
-    slot data or skills are unknown, so the caller keeps the sequential
-    (one-slot) elapsed time and records the reason."""
+    """Jobs of one kind that run side by side: one entry per lane (a
+    research slot), naming the pilot that runs it, best chance first for
+    invention (`probabilities`, aligned). sequential_reason set: the slot
+    data or skills are unknown, so the caller keeps the sequential (one-slot)
+    elapsed time and records the reason."""
 
-    lanes: int
     character_ids: tuple[int, ...] = ()
+    probabilities: tuple[float, ...] = ()
     sequential_reason: str | None = None
 
-    def rounds(self, whole_jobs: int) -> int:
-        """ceil(whole_jobs / lanes): jobs one lane runs back to back."""
-        if whole_jobs <= 0:
-            return 0
-        return int(math.ceil(int(whole_jobs) / max(1, int(self.lanes))))
-
-    def payload(self, *, whole_jobs: int, lane_duration_seconds: float | None) -> dict[str, Any]:
-        return {
-            "lanes": int(self.lanes),
-            "lane_character_count": len(self.character_ids),
-            "whole_jobs": int(whole_jobs),
-            "rounds": self.rounds(whole_jobs) if self.sequential_reason is None else int(whole_jobs),
-            "lane_duration_seconds": lane_duration_seconds,
-            "sequential_reason": self.sequential_reason,
-            "note": PARALLEL_CAPACITY_NOTE if self.sequential_reason is None else None,
-        }
+    @property
+    def lanes(self) -> int:
+        return len(self.character_ids)
 
 
 def _sequential(reason: str) -> ParallelLanes:
-    return ParallelLanes(1, (), reason)
+    return ParallelLanes((), (), reason)
+
+
+def split_invention_attempts(whole_blueprints: int, lane_probabilities: Iterable[float]) -> tuple[int, ...]:
+    """Whole attempts per lane (in the order given; callers put the best
+    chance first) whose expected successes cover `whole_blueprints`.
+
+    Every lane runs the same number of rounds r = ceil(B / sum of the lane
+    chances), the fewest that cover B. Lanes are filled in order with r
+    attempts until the expected successes reach B; the last lane used gets
+    ceil(remaining / its chance) and the rest none. Each lane counts at its
+    OWN chance, so a weaker pilot never borrows the best inventor's odds.
+
+    The one formula shared by the producer's elapsed time and the daily
+    planner's per-lane invent actions. One lane gives ceil(B / p), exactly
+    invention_attempts' whole count."""
+    probabilities = [max(0.0, min(1.0, float(p))) for p in lane_probabilities]
+    attempts = [0] * len(probabilities)
+    total = sum(probabilities)
+    if whole_blueprints <= 0 or total <= 0:
+        return tuple(attempts)
+    rounds = max(1, int(math.ceil(float(whole_blueprints) / total - 1e-9)))
+    remaining = float(whole_blueprints)
+    for index, probability in enumerate(probabilities):
+        if remaining <= 1e-9:
+            break
+        if probability <= 0:
+            continue
+        if rounds * probability >= remaining - 1e-9:
+            attempts[index] = max(1, int(math.ceil(remaining / probability - 1e-9)))
+            remaining = 0.0
+            break
+        attempts[index] = rounds
+        remaining -= rounds * probability
+    return tuple(attempts)
 
 
 def required_invention_skill_levels(
@@ -445,57 +481,120 @@ def required_invention_skill_levels(
 def can_run_invention(required_levels: Mapping[int, int], levels_by_skill_type_id: Mapping[int, int]) -> bool:
     """Whether one character has every required invention skill trained."""
     return all(
-        int(levels_by_skill_type_id.get(type_id, 0) or 0) >= int(level)
+        int(levels_by_skill_type_id.get(int(type_id), 0) or 0) >= int(level)
         for type_id, level in required_levels.items()
+    )
+
+
+def pilot_invention_probability(
+    skill_set: InventionSkillSet, levels_by_skill_type_id: Mapping[int, int],
+    *, base_probability: float, decryptor_multiplier: float, probability_floor: float,
+) -> float:
+    """One pilot's effective chance: EVE's chance at its skills, then the
+    admin floor and the cap (the producer's best inventor and every lane)."""
+    return effective_invention_probability(
+        invention_probability(
+            base_probability, invention_skill_factor(skill_set, levels_by_skill_type_id), decryptor_multiplier,
+        ),
+        probability_floor,
     )
 
 
 def invention_lanes(
     context: InventionContext, chance: InventionChance | None, skill_entries: Iterable[Mapping[str, Any]],
+    *, probability_floor: float,
 ) -> ParallelLanes:
-    """Parallel invention lanes: the total research slots of every corp
-    character that can run this invention (every required science and
-    encryption skill trained; industry_enabled=False characters are never in
-    the context). Total slots, not free ones: steady-state capacity. Unknown
-    slot data or skills: one sequential lane with the reason."""
+    """Parallel invention lanes: one per research slot (total slots, not
+    free ones: steady-state capacity) of every corp character that can run
+    this invention (every required science and encryption skill trained;
+    industry_enabled=False characters are never in the context), each at its
+    own pilot's chance, best chance first (ties: lowest character id).
+    Unknown slot data or skills: sequential, with the reason."""
     if context.slot_capacity_by_character_id is None:
         return _sequential(NO_SLOT_DATA_REASON)
     if chance is None or chance.skill_set is None or chance.skills_unknown_reason is not None:
         why = (chance.skills_unknown_reason if chance is not None else None) or "the invention skills are unknown"
         return _sequential(f"invention skills unknown ({why})")
     required = required_invention_skill_levels(chance.skill_set, skill_entries)
-    qualifying = sorted(
-        int(character_id) for character_id, levels in context.inventor_skill_levels_by_character_id.items()
-        if can_run_invention(required, levels)
-    )
+    levels_by_character = context.inventor_skill_levels_by_character_id
+    qualifying = [int(cid) for cid, levels in levels_by_character.items() if can_run_invention(required, levels)]
     if not qualifying:
         return _sequential(NO_QUALIFYING_INVENTOR_REASON)
     slots = context.slot_capacity_by_character_id
-    with_slots = [cid for cid in qualifying if cid in slots and int(slots[cid].research_slots) > 0]
-    if not with_slots:
+    pilots: list[tuple[float, int]] = []
+    for cid in qualifying:
+        capacity = slots.get(cid)
+        if capacity is None or int(capacity.research_slots) <= 0:
+            continue
+        probability = pilot_invention_probability(
+            chance.skill_set, levels_by_character[cid], base_probability=chance.base_probability,
+            decryptor_multiplier=chance.decryptor_multiplier, probability_floor=probability_floor,
+        )
+        pilots.append((probability, cid))
+    if not pilots:
         return _sequential(NO_SLOTS_FOR_INVENTORS_REASON)
-    return ParallelLanes(sum(int(slots[cid].research_slots) for cid in with_slots), tuple(with_slots))
+    pilots.sort(key=lambda pc: (-pc[0], pc[1]))
+    character_ids: list[int] = []
+    probabilities: list[float] = []
+    for probability, cid in pilots:
+        for _ in range(int(slots[cid].research_slots)):
+            character_ids.append(cid)
+            probabilities.append(probability)
+    return ParallelLanes(tuple(character_ids), tuple(probabilities))
 
 
 def source_copy_lanes(context: InventionContext, source_blueprint_type_id: int) -> ParallelLanes:
-    """Parallel copy lanes for an invention's T1 source: min(owned source
-    BPOs, total research slots of the industry-enabled corp characters). A
-    BPO runs one copy job at a time, so one BPO (or an unknown count) keeps
-    the copies sequential, with the reason. Copying needs no skill."""
+    """Parallel copy lanes for an invention's T1 source. A BPO is in one job
+    at a time and only its owner installs it, so per owning character
+    min(its BPOs, its research slots), then for the corp's BPOs
+    min(corp BPOs, the research slots left over). BPOs of a character not
+    in the slot data (excluded from industry) are left out. One lane or
+    less (or unknown data) keeps the copies sequential, with the reason.
+    Copying needs no skill."""
     slots = context.slot_capacity_by_character_id
     if slots is None:
         return _sequential(NO_SLOT_DATA_REASON)
-    counts = context.blueprint_original_count_by_type_id
-    if counts is None:
+    originals_by_type = context.source_originals_by_type_id
+    if originals_by_type is None:
         return _sequential(NO_BPO_COUNT_REASON)
-    originals = int(counts.get(int(source_blueprint_type_id), 0) or 0)
-    if originals <= 1:
-        return _sequential(ONE_SOURCE_BPO_REASON)
-    copiers = sorted(int(cid) for cid, cap in slots.items() if int(cap.research_slots) > 0)
-    if not copiers:
+    originals = originals_by_type.get(int(source_blueprint_type_id)) or SourceOriginals()
+    if not any(int(cap.research_slots) > 0 for cap in slots.values()):
         return _sequential(NO_COPY_SLOTS_REASON)
-    lanes = min(originals, sum(int(slots[cid].research_slots) for cid in copiers))
-    return ParallelLanes(lanes, tuple(copiers))
+    lanes: list[int] = []
+    left = {int(cid): int(cap.research_slots) for cid, cap in slots.items() if int(cap.research_slots) > 0}
+    for cid in sorted(int(c) for c in originals.by_character_id):
+        own = min(int(originals.by_character_id[cid] or 0), left.get(cid, 0))
+        lanes.extend([cid] * own)
+        if cid in left:
+            left[cid] -= own
+    corp = int(originals.corporation or 0)
+    for cid in sorted(left):
+        if corp <= 0:
+            break
+        take = min(corp, left[cid])
+        lanes.extend([cid] * take)
+        corp -= take
+    if len(lanes) <= 1:
+        return _sequential(ONE_SOURCE_BPO_REASON)
+    return ParallelLanes(tuple(lanes))
+
+
+def elapsed_lane_note(parallel: Mapping[str, Any] | None, *, label: str = "invention") -> str | None:
+    """The row note for an elapsed time over more than one lane, or for an
+    invention timed in one slot because nobody qualifies (Task 12)."""
+    if not isinstance(parallel, Mapping):
+        return None
+    if parallel.get("sequential_reason") == NO_QUALIFYING_INVENTOR_REASON:
+        return f"{label} timed in one slot: {NO_QUALIFYING_INVENTOR_REASON}"
+    used = int(parallel.get("lanes_used") or 0)
+    if parallel.get("sequential_reason") is None and used > 1:
+        pilots = int(parallel.get("pilots_used") or 0)
+        who = "inventor" if label == "invention" else "pilot"
+        return (
+            f"{label} assumes {used} research slots over {pilots} {who}{'s' if pilots != 1 else ''} "
+            "(capacity, not today's free slots)"
+        )
+    return None
 
 
 # --- decryptor selection (amendment A1) -----------------------------------

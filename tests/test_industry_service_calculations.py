@@ -5,7 +5,12 @@ from typing import Any, cast
 
 import pytest
 
-from eve_online_industry_tracker.application.industry.invention_model import NO_DECRYPTOR, DecryptorOption
+from eve_online_industry_tracker.application.industry.invention_model import (
+    NO_DECRYPTOR,
+    NO_QUALIFYING_INVENTOR_REASON,
+    ONE_SOURCE_BPO_REASON,
+    DecryptorOption,
+)
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
@@ -2386,8 +2391,21 @@ def test_two_parallel_inventors_halve_the_invention_elapsed_time(monkeypatch) ->
     # No owned source BPO counted: the 2 copy runs stay in sequence, with the reason.
     copying = mj["activity_breakdown"]["invention_source_copying"]
     assert copying["elapsed_duration_seconds"] == 40
-    assert copying["elapsed_parallel"]["sequential_reason"] == "one owned source BPO at most: a BPO is in one copy job at a time"
+    assert copying["elapsed_parallel"]["sequential_reason"] == ONE_SOURCE_BPO_REASON
     assert mj["elapsed_time_seconds"] == 96 + 40 + 40
+    # Fix round 1: a row note, shown with the confidence reasons and the Build time.
+    note = "invention assumes 2 research slots over 2 inventors (capacity, not today's free slots)"
+    assert mj["elapsed_lane_notes"] == [note]
+    assert f"Build time: {note}." in mj["pricing_confidence_reasons"]
+
+
+def test_no_qualifying_inventor_is_a_build_time_note(monkeypatch) -> None:
+    untrained = {"skills": [{"skill_id": 11433, "skill_name": "High Energy Physics", "trained_skill_level": 5}]}
+    mj = _overview_with_real_skill_loader(monkeypatch, [{"character_id": 1, "skills": untrained}])
+    note = f"invention timed in one slot: {NO_QUALIFYING_INVENTOR_REASON}"
+    assert mj["elapsed_lane_notes"] == [note]
+    assert f"Build time: {note}." in mj["pricing_confidence_reasons"]
+    assert mj["activity_breakdown"]["invention"]["elapsed_duration_seconds"] == 2 * 40
 
 
 def test_a_nested_invention_runs_over_the_parallel_inventors_too(monkeypatch) -> None:
@@ -2410,6 +2428,9 @@ def test_a_nested_invention_runs_over_the_parallel_inventors_too(monkeypatch) ->
     assert invention["elapsed_time_seconds"] == 40
     # Parent 200 + component 96 + invention 40 (1 round) + copy 2 x 20.
     assert mj["elapsed_time_seconds"] == 200 + 96 + 40 + 40
+    assert mj["elapsed_lane_notes"] == [
+        "sub-build invention assumes 2 research slots over 2 inventors (capacity, not today's free slots)",
+    ]
 
 
 # --- round 5 Task 3: the best decryptor per invented item (amendment A1) ------
@@ -3629,6 +3650,35 @@ def test_the_unskilled_research_duration_leaves_the_research_skills_out() -> Non
     # ME research has no Research bonus: both tables agree.
     assert mj["research_duration_seconds_by_level"]["research_material"] == (
         mj["research_duration_seconds_by_level_unskilled"]["research_material"]
+    )
+
+
+def test_the_base_research_duration_leaves_skills_and_implants_out() -> None:
+    """Task 12 fix round 1: the planner times research with the assigned
+    pilot's own skills and implants, on a table that has neither. A fake
+    implant cuts the producer character's TE research time 10 %."""
+    implant = {"modifiers": [{"activity": "research_te", "metric": "time", "value": 0.1}]}
+    original_asset = SimpleNamespace(
+        type_id=9001, item_id=42, is_blueprint_copy=False,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=None,
+    )
+    blueprint_row = _blueprint_row()
+    blueprint_row["research_material_job"] = {"time_seconds": 20 * 105}
+    blueprint_row["research_time_job"] = {"time_seconds": 20 * 105}
+    service = _build_service(
+        blueprint_rows=[blueprint_row], profile=_FEE_PROFILE,
+        character_modifiers={"modifier_skills": [], "implants": [implant]}, trained_skill_levels={},
+        owned_assets=([], [original_asset], {}, {}, {}),
+        adjusted_price_map={34: {"adjusted_price": 5.0}, 5001: {"adjusted_price": 100.0}},
+    )
+    (row,) = service.industry_manufacturing_product_overview(
+        build_from_bpc=False, have_blueprint_source_only=True, maximize_bp_runs=False, character_id=1,
+    )
+    mj = row["manufacturing_job"]
+    assert mj["research_duration_seconds_by_level_unskilled"]["research_time"][10] == round(20 * 256000 * 0.9)
+    assert mj["research_duration_seconds_by_level_base"]["research_time"][10] == 20 * 256000
+    assert mj["research_implant_time_multiplier_by_character_id"]["1"] == pytest.approx(
+        {"research_material": 1.0, "research_time": 0.9}
     )
 
 

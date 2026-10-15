@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,6 +17,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     NO_DECRYPTOR,
     CharacterSlotCapacity,
     InventionContext,
+    SourceOriginals,
 )
 from eve_online_industry_tracker.application.industry.service import IndustryService
 
@@ -32,19 +33,36 @@ _TRAINED = {_SCI_A: 3, _SCI_B: 3, _ENC: 3}
 def _service() -> IndustryService:
     service = object.__new__(IndustryService)
     service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    # Each pilot's own industry payload: no skills, no implants.
+    service._get_character_industry_modifier_payload = MethodType(  # type: ignore[attr-defined]
+        lambda self, *, character_id: {"modifier_skills": [], "implants": []}, service,
+    )
     return service
 
 
 def _fake_compute(**kw: Any) -> dict[str, Any]:
-    """base x runs x (1 - 3% per Advanced Industry level). The selected
-    character (no override) has Advanced Industry 0."""
-    levels = kw.get("other_pilot_skill_levels_by_name") or {}
-    factor = 1.0 - 0.03 * int(levels.get("Advanced Industry", 0))
+    """base x runs x (1 - 3% per Advanced Industry level) x (1 - the pilot's
+    implant time reduction for the activity). The selected character (no
+    pilot payload) has Advanced Industry 0 and no implants."""
+    payload = kw.get("pilot_industry_payload") or {"modifier_skills": [], "implants": []}
+    levels = {e["type_name"]: e["trained_skill_level"] for e in payload["modifier_skills"]}
+    implant = sum(
+        m["value"] for i in payload["implants"] for m in i["modifiers"]
+        if m["activity"] == kw["activity"] and m["metric"] == "time"
+    )
+    factor = (1.0 - 0.03 * int(levels.get("Advanced Industry", 0))) * (1.0 - implant)
     return {"duration_seconds": round(kw["base_time_seconds"] * kw["runs"] * factor), "total_job_cost": None}
 
 
-def _capacity(slots: int, advanced_industry: int = 0) -> CharacterSlotCapacity:
-    return CharacterSlotCapacity(slots, {"Laboratory Operation": slots - 1, "Advanced Industry": advanced_industry})
+def _capacity(
+    slots: int, advanced_industry: int = 0, *, implant: float = 0.0, payload: bool = True,
+) -> CharacterSlotCapacity:
+    levels = {"Laboratory Operation": slots - 1, "Advanced Industry": advanced_industry}
+    industry_payload = {
+        "modifier_skills": [{"type_name": n, "trained_skill_level": lvl} for n, lvl in levels.items()],
+        "implants": [{"modifiers": [{"activity": "invention", "metric": "time", "value": implant}]}] if implant else [],
+    }
+    return CharacterSlotCapacity(slots, levels, industry_payload if payload else None)
 
 
 def _invention(
@@ -78,7 +96,40 @@ def test_three_inventors_with_two_slots_each_run_twelve_attempts_in_two_rounds()
     assert costs["elapsed_duration_seconds"] == math.ceil(12 / 6) * 100
     parallel = costs["elapsed_parallel"]
     assert (parallel["lanes"], parallel["rounds"], parallel["sequential_reason"]) == (6, 2, None)
+    assert (parallel["lanes_used"], parallel["pilots_used"], parallel["lane_whole_jobs"]) == (6, 3, 12)
     assert parallel["note"] == im.PARALLEL_CAPACITY_NOTE
+
+
+def test_weaker_lanes_count_at_their_own_chance():
+    """Fix round 1: the best pilot 5/5/5 with 1 slot plus four 1/1/1 alts
+    with 5 slots each, 300 runs / 10 per BPC = 30 BPCs, base 34 %.
+    p_best = 0.34 x (1 + 10/30 + 5/40) = 0.495833, p_alt = 0.34 x
+    (1 + 2/30 + 1/40) = 0.371167; 21 lanes, sum 7.919167, so
+    ceil(30 / 7.919167) = 4 rounds. The best inventor's 61 attempts over
+    21 lanes would have said 3. Lanes run 4 each until the expected
+    successes reach 30: the best lane and 18 alt lanes (28.72), then a 19th
+    alt lane ceil(1.2927 / 0.371167) = 4: 80 attempts."""
+    best = {_SCI_A: 5, _SCI_B: 5, _ENC: 5}
+    alt = {_SCI_A: 1, _SCI_B: 1, _ENC: 1}
+    costs = _invention(
+        levels={1: best, 2: alt, 3: alt, 4: alt, 5: alt},
+        slots={1: _capacity(1), 2: _capacity(5), 3: _capacity(5), 4: _capacity(5), 5: _capacity(5)},
+        base_pct=34.0, invented_runs=300,
+    )
+    assert costs["success_probability"] == pytest.approx(0.34 * (1 + 10 / 30 + 5 / 40))
+    assert costs["whole_attempts"] == 61  # the best inventor's: cost and the producer's procurement
+    parallel = costs["elapsed_parallel"]
+    assert (parallel["lanes"], parallel["lanes_used"], parallel["pilots_used"]) == (21, 20, 5)
+    assert parallel["rounds"] == 4
+    assert costs["lane_whole_attempts"] == parallel["lane_whole_jobs"] == 80
+    assert costs["elapsed_duration_seconds"] == 4 * 100
+
+
+def test_split_invention_attempts_is_the_single_lane_count_for_one_lane():
+    assert im.split_invention_attempts(3, [0.4]) == (8,)  # ceil(3 / 0.4)
+    assert im.split_invention_attempts(1, [0.5, 0.5, 0.5]) == (1, 1, 0)  # one round over two lanes
+    assert im.split_invention_attempts(0, [0.5]) == (0,)
+    assert im.split_invention_attempts(2, []) == ()
 
 
 def test_a_character_missing_a_required_skill_is_not_counted():
@@ -145,7 +196,8 @@ def test_a_dc_ii_style_example_with_a_known_whole_attempt_count():
     (3 BPCs). Both pilots at 4/4/4: factor 1 + 8/30 + 4/40, p = 0.4647, so
     ceil(3 / 0.4647) = 7 whole attempts. Pilot 1 has 3 slots and Advanced
     Industry 3 (910 s), pilot 2 has 2 slots and Advanced Industry 5 (850 s):
-    5 lanes, ceil(7 / 5) = 2 rounds of the slowest pilot's 910 s."""
+    5 lanes, ceil(3 / (5 x 0.4647)) = 2 rounds (lanes 2, 2, 2, 1, 0) of the
+    slowest used pilot's 910 s."""
     four = {_SCI_A: 4, _SCI_B: 4, _ENC: 4}
     costs = _invention(
         levels={1: four, 2: four}, slots={1: _capacity(3, 3), 2: _capacity(2, 5)},
@@ -154,6 +206,7 @@ def test_a_dc_ii_style_example_with_a_known_whole_attempt_count():
     assert costs["success_probability"] == pytest.approx(0.34 * (1 + 8 / 30 + 4 / 40))
     assert costs["whole_attempts"] == 7
     assert costs["elapsed_parallel"]["lanes"] == 5
+    assert costs["lane_whole_attempts"] == 7
     assert costs["elapsed_parallel"]["lane_duration_seconds"] == 910
     assert costs["elapsed_duration_seconds"] == 2 * 910  # sequential was 7 x 1000
 
@@ -171,6 +224,30 @@ def test_the_selected_character_is_timed_with_the_producers_own_calculator():
     assert costs["elapsed_duration_seconds"] == 200
 
 
+def test_another_pilot_is_timed_with_its_own_implants():
+    """Fix round 1: one convention for another pilot, its own payload."""
+    costs = _invention(levels={2: _TRAINED}, slots={2: _capacity(2, implant=0.1)})
+    assert costs["elapsed_parallel"]["lane_duration_seconds"] == 90
+    no_payload = _invention(levels={2: _TRAINED}, slots={2: _capacity(2, implant=0.1, payload=False)})
+    assert no_payload["elapsed_parallel"]["lane_duration_seconds"] == 100  # implants unknown: none
+
+
+def test_the_lane_note_names_slots_and_inventors():
+    costs = _invention(
+        levels={1: _TRAINED, 2: _TRAINED, 3: _TRAINED},
+        slots={1: _capacity(2), 2: _capacity(2), 3: _capacity(2)},
+    )
+    assert im.elapsed_lane_note(costs["elapsed_parallel"]) == (
+        "invention assumes 6 research slots over 3 inventors (capacity, not today's free slots)"
+    )
+    nobody = _invention(levels={1: {_SCI_A: 5}}, slots={1: _capacity(3)})
+    assert im.elapsed_lane_note(nobody["elapsed_parallel"]) == (
+        f"invention timed in one slot: {im.NO_QUALIFYING_INVENTOR_REASON}"
+    )
+    one = _invention(levels={1: _TRAINED}, slots={1: _capacity(1)})
+    assert im.elapsed_lane_note(one["elapsed_parallel"]) is None
+
+
 # --- source copies -----------------------------------------------------------
 
 def _source_copy(context: InventionContext | None, whole_attempts: int) -> dict[str, Any]:
@@ -186,30 +263,72 @@ def _source_copy(context: InventionContext | None, whole_attempts: int) -> dict[
     return costs
 
 
-def test_source_copies_spread_over_the_owned_source_bpos():
+def test_source_copies_spread_per_owner_and_leave_out_excluded_owners():
+    """Pilot 1 owns 2 BPOs (2 lanes of its 3 slots), excluded pilot 9 owns 4
+    (not counted: it is not in the slot data), the corp owns 1 (a slot left
+    over: pilot 1's third). 3 lanes for 5 copy runs: 2 rounds of 20 s."""
     context = InventionContext(
         slot_capacity_by_character_id={1: _capacity(3), 2: _capacity(3)},
-        blueprint_original_count_by_type_id={1001: 2},
+        source_originals_by_type_id={1001: SourceOriginals({1: 2, 9: 4}, corporation=1)},
+    )
+    assert im.source_copy_lanes(context, 1001).character_ids == (1, 1, 1)
+    costs = _source_copy(context, 5)
+    assert costs["elapsed_parallel"]["lanes"] == 3
+    assert costs["elapsed_duration_seconds"] == 2 * 20
+
+
+def test_a_character_bpo_is_capped_by_its_owners_slots():
+    context = InventionContext(
+        slot_capacity_by_character_id={1: _capacity(1), 2: _capacity(5)},
+        source_originals_by_type_id={1001: SourceOriginals({1: 3})},
     )
     costs = _source_copy(context, 5)
-    # min(2 BPOs, 6 slots) = 2 lanes: ceil(5 / 2) = 3 rounds of 20 s.
-    assert costs["elapsed_parallel"]["lanes"] == 2
-    assert costs["elapsed_duration_seconds"] == 3 * 20
+    assert costs["elapsed_duration_seconds"] == 5 * 20  # one lane: pilot 2 cannot install pilot 1's BPOs
+    assert costs["elapsed_parallel"]["sequential_reason"] == im.ONE_SOURCE_BPO_REASON
 
 
 @pytest.mark.parametrize(("context", "reason"), [
-    (InventionContext(slot_capacity_by_character_id={1: _capacity(3)}, blueprint_original_count_by_type_id={1001: 1}),
+    (InventionContext(slot_capacity_by_character_id={1: _capacity(3)},
+                      source_originals_by_type_id={1001: SourceOriginals(corporation=1)}),
+     im.ONE_SOURCE_BPO_REASON),
+    (InventionContext(slot_capacity_by_character_id={1: _capacity(3)},
+                      source_originals_by_type_id={1001: SourceOriginals({9: 4})}),
      im.ONE_SOURCE_BPO_REASON),
     (InventionContext(slot_capacity_by_character_id={1: _capacity(3)}), im.NO_BPO_COUNT_REASON),
-    (InventionContext(blueprint_original_count_by_type_id={1001: 4}), im.NO_SLOT_DATA_REASON),
+    (InventionContext(source_originals_by_type_id={1001: SourceOriginals(corporation=4)}), im.NO_SLOT_DATA_REASON),
 ])
-def test_source_copies_stay_sequential_without_a_second_bpo_or_slot_data(context, reason):
+def test_source_copies_stay_sequential_without_a_second_lane_or_slot_data(context, reason):
     costs = _source_copy(context, 5)
     assert costs["elapsed_duration_seconds"] == 5 * 20
     assert costs["elapsed_parallel"]["sequential_reason"] == reason
 
 
-# --- producer and planner count the same slots -------------------------------
+def test_copies_cover_the_lane_attempts_not_only_the_best_inventors():
+    context = InventionContext(
+        slot_capacity_by_character_id={1: _capacity(2)},
+        source_originals_by_type_id={1001: SourceOriginals(corporation=2)},
+    )
+    source_row = {"blueprint_type_id": 1001, "copying_job": {"time_seconds": 20},
+                  "manufacturing_job": {"materials": []}}
+    costs, _ = _service()._invention_source_copy_costs(
+        compute_activity=_fake_compute, invention_source_row=source_row,
+        invention_costs={"runs": 5.0, "whole_attempts": 5, "lane_whole_attempts": 7},
+        available_blueprint_copy_runs_by_type_id={}, adjusted_price_map={}, enabled=True,
+        invention_context=context,
+    )
+    assert costs is not None
+    assert costs["elapsed_parallel"]["lane_whole_jobs"] == 7
+    assert costs["elapsed_duration_seconds"] == 4 * 20  # 7 runs over 2 corp BPOs
+
+
+def test_the_producer_reads_bpo_owners_from_the_assets():
+    originals = IndustryService._source_originals_by_owner({1001: [
+        SimpleNamespace(character_id=1), SimpleNamespace(character_id=1), SimpleNamespace(corporation_id=77),
+    ]})
+    assert originals[1001] == SourceOriginals({1: 2}, corporation=1)
+
+
+# --- producer and planner count the same research slots ----------------------
 
 def test_producer_and_planner_count_the_same_research_slots():
     characters = [

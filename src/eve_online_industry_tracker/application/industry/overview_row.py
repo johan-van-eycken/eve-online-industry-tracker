@@ -374,15 +374,17 @@ def get_research_fee(row: dict[str, Any], activity: str, from_level: int, to_lev
 
 def get_research_duration_seconds(
     row: dict[str, Any], activity: str, from_level: int, to_level: int, *, unskilled: bool = False,
+    base: bool = False,
 ) -> int | None:
     """Seconds to research the row's owned BPO from `from_level` to
     `to_level` (levels 0..10): the producer's cumulative duration to
     `to_level` minus that to `from_level`
     (manufacturing_job.research_duration_seconds_by_level, with the
     producer character's research skills; `unskilled=True` reads the
-    _unskilled table, without them). None when the table is absent, or the
-    levels are out of range."""
-    key = "research_duration_seconds_by_level" + ("_unskilled" if unskilled else "")
+    _unskilled table, without them; `base=True` the _base table, without
+    skills or implants: structure and rigs only, Task 12 fix round 1). None
+    when the table is absent, or the levels are out of range."""
+    key = "research_duration_seconds_by_level" + ("_base" if base else "_unskilled" if unskilled else "")
     tables = get_manufacturing_job(row).get(key)
     table = tables.get(activity) if isinstance(tables, dict) else None
     if not isinstance(table, list) or not (0 <= from_level <= to_level < len(table)):
@@ -392,6 +394,18 @@ def get_research_duration_seconds(
     except (TypeError, ValueError):
         return None
     return high - low if high >= low >= 0 else None
+
+
+def get_research_implant_time_multiplier(row: dict[str, Any], character_id: int, activity: str) -> float | None:
+    """The share of a research job's duration pilot `character_id`'s implants
+    leave (manufacturing_job.research_implant_time_multiplier_by_character_id),
+    or None when the producer published none for that pilot."""
+    table = get_manufacturing_job(row).get("research_implant_time_multiplier_by_character_id")
+    entry = table.get(str(int(character_id))) if isinstance(table, dict) else None
+    value = entry.get(activity) if isinstance(entry, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < float(value) <= 1:
+        return None
+    return float(value)
 
 
 def _published_reason(value: Any) -> str | None:

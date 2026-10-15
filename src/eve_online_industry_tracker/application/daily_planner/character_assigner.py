@@ -186,7 +186,7 @@ class CharacterAssigner:
                 me_timing = _research_timing(
                     row, "research_material", "me_current", "me_research_target", now,
                     f"ME research: {row.get('me_current', '?')} → {row.get('me_research_target', '?')}",
-                    _pilot_skills(char_slots, char_id),
+                    _pilot_skills(char_slots, char_id), pilot_id=char_id,
                 )
                 # EVE runs one job per blueprint: a TE job on the same BPO starts after this one.
                 lab_free_at: datetime | None = me_timing["estimated_completion"]
@@ -238,7 +238,7 @@ class CharacterAssigner:
                     **_research_timing(
                         row, "research_time", "te_current", "te_research_target", lab_free_at,
                         _te_research_note(row), _pilot_skills(char_slots, char_id),
-                        after_me=me_scheduled,
+                        after_me=me_scheduled, pilot_id=char_id,
                     ),
                     **_job_fee(
                         *_research_fee(row, "research_time", "te_current", "te_research_target"),
@@ -760,34 +760,57 @@ def _pilot_skills(char_slots: dict[int, dict[str, Any]], char_id: int) -> dict[s
     return slot.get("skills") if slot.get("skills_by_id") is not None else None
 
 
+#: Which structure and implants a research duration assumes (the note).
+_PRODUCER_STRUCTURE_AND_IMPLANTS = "structure and implants: the producer's"
+_PILOT_IMPLANTS = "structure: the producer's; implants: the pilot's"
+_NO_PILOT_IMPLANTS = "structure: the producer's; the pilot's implants are unknown, none applied"
+
+
 def _research_seconds(
     row: dict[str, Any], activity: str, levels: tuple[int, int], pilot_skills: dict[str, int] | None,
-) -> tuple[int | None, str | None]:
-    """(seconds, basis note) of the research job over `levels`: the
-    producer's unskilled duration x the assigned pilot's research-skill
-    multiplier; else the producer's figure (its own character's skills),
-    said in the note; (None, None) when neither is published."""
+    pilot_id: int | None = None,
+) -> tuple[int | None, str | None, str]:
+    """(seconds, basis note, structure/implants note) of the research job
+    over `levels`.
+
+    The one convention for another pilot (Task 12 fix round 1): the
+    producer's skill- and implant-free duration x the assigned pilot's
+    research-skill multiplier x its own implant multiplier (none applied
+    when the producer published none for it: longer, never understated).
+    A row without that table: the producer's unskilled duration (its own
+    character's implants) x the pilot's skills; else the producer's figure
+    (its own character's skills), said in the note; None when neither is
+    published."""
+    if pilot_skills is not None and pilot_id is not None:
+        base = orow.get_research_duration_seconds(row, activity, *levels, base=True)
+        if base is not None:
+            implants = orow.get_research_implant_time_multiplier(row, pilot_id, activity)
+            seconds = base * research_skill_time_multiplier(activity, pilot_skills) * (implants or 1.0)
+            return math.ceil(seconds), None, (_PILOT_IMPLANTS if implants is not None else _NO_PILOT_IMPLANTS)
     unskilled = orow.get_research_duration_seconds(row, activity, *levels, unskilled=True)
     if pilot_skills is not None and unskilled is not None:
-        return math.ceil(unskilled * research_skill_time_multiplier(activity, pilot_skills)), None
+        return math.ceil(unskilled * research_skill_time_multiplier(activity, pilot_skills)), None, _PRODUCER_STRUCTURE_AND_IMPLANTS
     producer = orow.get_research_duration_seconds(row, activity, *levels)
     if producer is None:
-        return None, None
+        return None, None, _PRODUCER_STRUCTURE_AND_IMPLANTS
     why = "the pilot's are unknown" if pilot_skills is None else "no unskilled duration published"
-    return producer, f"at the producer character's skills: {why}"
+    return producer, f"at the producer character's skills: {why}", _PRODUCER_STRUCTURE_AND_IMPLANTS
 
 
 def _research_timing(
     row: dict[str, Any], activity: str, current_key: str, target_key: str, start: datetime | None,
-    note: str, pilot_skills: dict[str, int] | None, *, after_me: bool = False,
+    note: str, pilot_skills: dict[str, int] | None, *, after_me: bool = False, pilot_id: int | None = None,
 ) -> dict[str, Any]:
     """The research action's estimated_completion and notes: the duration of
     exactly the levels from the current to the target, at the assigned
-    pilot's skills (_research_seconds), from `start` (now, or the end of
-    the ME job on the same BPO: one job per blueprint). Unknown is said in
-    the note, with no completion."""
+    pilot's skills and implants (_research_seconds), from `start` (now, or
+    the end of the ME job on the same BPO: one job per blueprint). Unknown
+    is said in the note, with no completion."""
     levels = _research_levels(row, activity, current_key, target_key)
-    seconds, basis = _research_seconds(row, activity, levels, pilot_skills) if levels is not None else (None, None)
+    seconds, basis, convention = (
+        _research_seconds(row, activity, levels, pilot_skills, pilot_id) if levels is not None
+        else (None, None, _PRODUCER_STRUCTURE_AND_IMPLANTS)
+    )
     queued = "; starts after the ME research on this BPO" if after_me else ""
     no_slot = "; no research slot taken in this plan" if after_me else ""
     if seconds is None:
@@ -795,7 +818,7 @@ def _research_timing(
     note = f"{note}; duration {_format_duration(seconds)}"
     if basis:
         note += f" ({basis})"
-    note += f" (structure and implants: the producer's){queued}"
+    note += f" ({convention}){queued}"
     if start is None:
         return {"estimated_completion": None, "notes": f"{note}, whose duration is unknown{no_slot}"}
     return {"estimated_completion": start + timedelta(seconds=seconds), "notes": note + no_slot}

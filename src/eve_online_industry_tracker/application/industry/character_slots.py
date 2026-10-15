@@ -42,7 +42,7 @@ def skill_levels_by_name(char: dict[str, Any]) -> dict[str, int]:
     entries = raw.get("skills") if isinstance(raw, dict) else None
     if not isinstance(entries, list):
         logger.warning(
-            "CharacterAssigner: character %s has a 'skills' payload that is not the "
+            "Character slots: character %s has a 'skills' payload that is not the "
             "expected {'skills': [...]} wrapper (got %s) -- treating as no trained "
             "skills for this pilot rather than aborting the plan",
             char.get("character_id") or char.get("id") or char.get("character_name") or char.get("name") or "?",

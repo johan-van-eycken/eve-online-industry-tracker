@@ -773,7 +773,12 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
                 anomaly_reasons = row.get("price_anomaly_reasons")
 
                 st.caption(f"**Score:** {score}")
-                st.caption(f"**Build time:** {time_secs / 3600:.1f}h" if time_secs > 0 else "**Build time:** —")
+                # Task 12: the parallel invention/copy lanes the build time assumes.
+                lane_notes = [str(n) for n in (mj.get("elapsed_lane_notes") or []) if n]
+                st.caption(
+                    f"**Build time:** {time_secs / 3600:.1f}h" if time_secs > 0 else "**Build time:** —",
+                    help="; ".join(lane_notes) if lane_notes else None,
+                )
                 if me is not None:
                     st.caption(f"**Blueprint ME:** {me}")
                 if prep_pct is not None:

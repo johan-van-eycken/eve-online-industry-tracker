@@ -237,6 +237,37 @@ def test_unknown_pilot_skills_keep_the_producer_figure_and_say_so():
     assert "(at the producer character's skills: the pilot's are unknown)" in te.notes
 
 
+def _with_base(row, implants=None):
+    """Task 12 fix round 1: the skill- and implant-free table, and the
+    pilots' own implant multipliers."""
+    row["manufacturing_job"]["research_duration_seconds_by_level_base"] = {
+        "research_material": list(SECONDS_TO_LEVEL), "research_time": list(SECONDS_TO_LEVEL),
+    }
+    if implants is not None:
+        row["manufacturing_job"]["research_implant_time_multiplier_by_character_id"] = implants
+
+
+def test_the_assigned_pilots_own_implants_time_the_research():
+    row = _row(**BPO_ROW)
+    _with_unskilled(row, 0.5)  # the producer character's implants are in this one: not used
+    _with_base(row, {"1": {"research_material": 0.9, "research_time": 0.9}})
+    pilot = _pilot(("Research", 3403, 4))
+    before = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    te = _assign(_plan(row), pilot=pilot)["te_research"]
+    expected = timedelta(seconds=-(-SECONDS_TO_LEVEL[10] * 0.80 * 0.9 // 1))
+    assert abs((te.estimated_completion - before) - expected) < timedelta(seconds=5)
+    assert "(structure: the producer's; implants: the pilot's)" in te.notes
+
+
+def test_a_pilot_without_published_implants_gets_none_applied():
+    row = _row(**BPO_ROW)
+    _with_base(row, {"7": {"research_material": 0.5, "research_time": 0.5}})  # another pilot's
+    before = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    te = _assign(_plan(row), pilot=_pilot())["te_research"]
+    assert te.estimated_completion >= before + timedelta(seconds=SECONDS_TO_LEVEL[10])
+    assert "the pilot's implants are unknown, none applied" in te.notes
+
+
 # --- ME and TE on one BPO run one after the other ----------------------------------
 
 def test_te_research_starts_when_the_me_research_on_the_same_bpo_ends():

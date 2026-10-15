@@ -1002,7 +1002,8 @@ class ChainPlanner:
         kept_job = orow.get_manufacturing_job(row)
         job = dict(orow.get_manufacturing_job(variant))
         for key in ("research_job_cost_by_level", "research_job_cost_by_level_unknown_reason",
-                    "research_duration_seconds_by_level", "research_duration_seconds_by_level_unskilled"):
+                    "research_duration_seconds_by_level", "research_duration_seconds_by_level_unskilled",
+                    "research_duration_seconds_by_level_base", "research_implant_time_multiplier_by_character_id"):
             if key not in job and key in kept_job:
                 job[key] = kept_job[key]
         new_row = {**variant, "manufacturing_job": job}
