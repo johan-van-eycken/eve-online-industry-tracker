@@ -307,15 +307,24 @@ class CharacterAssigner:
                 )
                 needed = self._copy_need(results, char_slots, row, probability_floor=probability_floor, price_map=price_map)
                 copy_runs = None if needed is None else max(0, needed - on_hand)
-                # 3. Give back the slots no copy needs.
-                keep = len(reserved) if copy_runs is None else min(len(reserved), copy_runs)
-                for char_id, _name in reserved[keep:]:
-                    self._release_slot(char_slots, char_id, "copy")
-                if keep < len(reserved) and on_hand > 0:
+                # 3. Give back the slots no copy needs; a returned slot can free
+                #    an invent lane, so the lanes AND the copy runs are re-sized
+                #    (fix round 4) until no further slot comes back.
+                while True:
+                    keep = len(reserved) if copy_runs is None else min(len(reserved), copy_runs)
+                    if keep >= len(reserved):
+                        break
+                    for char_id, _name in reserved[keep:]:
+                        self._release_slot(char_slots, char_id, "copy")
+                    reserved = reserved[:keep]
                     results, free_lanes = self._invention_results(
                         char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
                     )
-                if keep == 0 and reserved and (copy_runs is None or copy_runs > 0):
+                    needed = self._copy_need(
+                        results, char_slots, row, probability_floor=probability_floor, price_map=price_map,
+                    )
+                    copy_runs = None if needed is None else max(0, needed - on_hand)
+                if not reserved and (copy_runs is None or copy_runs > 0):
                     logger.info("CharacterAssigner: type_id=%s: no free research slot for its copy", type_id)
                 if copy_runs is None:
                     note = f"the copy runs are unknown (the invention attempts are unknown); {on_hand} T1 BPC run(s) on hand"
@@ -325,7 +334,7 @@ class CharacterAssigner:
                     note = f"{on_hand} T1 BPC run(s) on hand cover part of the attempts; these copies cover the rest"
                 if copy_runs is None or copy_runs > 0:
                     actions.extend(self._copy_actions(
-                        row, type_id, type_name, t1_blueprint_type_id, reserved[:keep], copy_runs, note,
+                        row, type_id, type_name, t1_blueprint_type_id, reserved, copy_runs, note,
                     ))
                 if on_hand <= 0:
                     logger.info(
@@ -340,6 +349,8 @@ class CharacterAssigner:
                     )
                 if bpc_runs_cap is not None:
                     results = _cap_invention_attempts(results, bpc_runs_cap)
+                    # The lanes kept after the cap (fix round 4), not the free ones.
+                    free_lanes = min(free_lanes, len(results))
                     if bpc_pool is not None:
                         bpc_pool[t1_blueprint_type_id] = max(0, bpc_runs_cap - sum(
                             int(inv.whole_attempts) if inv.whole_attempts is not None else bpc_runs_cap

@@ -758,3 +758,31 @@ def test_two_rows_share_the_t1_bpc_runs_on_hand_once():
     assert sum(a.runs for a in invents_first) == 4
     assert invents_second == []
     assert [a for a in actions if a.action_type == "copy" and a.type_id == 998]
+
+
+# --- fix round 4 ------------------------------------------------------------------
+
+
+def test_the_copy_is_re_sized_after_a_released_slot():
+    """Two corp BPOs reserve both inventors' slots for copies. With nobody
+    free the weakest qualifying pilot alone needs 5: 1 copy run beyond the 4
+    on hand, so one reserved slot (the best inventor's) is given back.
+    Re-sized with that lane free, the best inventor's 4 attempts are covered
+    by the 4 runs on hand: no copy is needed and the other slot returns too,
+    so both lanes invent (3 + 1)."""
+    row = _row(t1_bpo=True)
+    row["t1_bpo_count"], row["t1_bpc_runs_on_hand"] = 2, 4
+    actions = _assign(row, [_best_inventor(), _second_inventor()])
+    assert [a for a in actions if a.action_type == "copy"] == []
+    assert sorted(a.runs for a in actions if a.action_type == "invent") == [1, 3]
+
+
+def test_the_fewer_lanes_note_counts_the_lanes_kept_after_the_cap():
+    row = _row(t1_bpo=True)
+    row["t1_bpc_runs_on_hand"] = 1
+    row["manufacturing_job"]["activity_breakdown"]["invention"]["elapsed_parallel"] = {
+        "lanes": 2, "lanes_used": 2, "pilots_used": 2, "sequential_reason": None,
+    }
+    actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
+    (invent,) = [a for a in actions if a.action_type == "invent"]
+    assert "1 of 2 lanes free today" in invent.notes

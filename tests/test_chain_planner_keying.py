@@ -1697,7 +1697,7 @@ def test_a_t2_item_without_a_t2_bpc_or_a_t1_bpo_is_not_built():
     assert row["needs_t1_bpo"] is True   # still analysed as an invention enabler
     first = decision.overview_row["research_first"]
     assert (first["mode"], first["unconditional"]) == ("none", True)
-    assert first["note"].startswith("no T2 BPC and no T1 BPO to copy: invent needs a T1 BPO/BPC first")
+    assert first["note"].startswith("no T2 BPC and no T1 BPO to copy: buy a T1 BPO (999) first to copy and invent")
     assert decision.pipeline_stage == "blocked"
     assert [a.action_type for a in _t2_actions(plan)] == []
 
@@ -1760,3 +1760,52 @@ def test_a_t1_row_building_its_free_bpc_jobs_is_manufacturing():
     })
     assert row["research_first"]["mode"] == "part"
     assert decision.pipeline_stage == "manufacturing"
+
+
+# --- Task 12 fix round 4: a parent that is not built ----------------------------
+
+
+def _pilot_chars():
+    return SimpleNamespace(list_characters=lambda: [{
+        "character_id": 1, "character_name": "Pilot",
+        "skills": {"skills": [{"skill_name": "Laboratory Operation", "trained_skill_level": 5},
+                              {"skill_name": "Mass Production", "trained_skill_level": 5}]},
+    }])
+
+
+def test_a_copying_stage_parent_sub_builds_no_component():
+    """Review probe: a T2 parent still copying (owned T1 BPO, no T2 BPC)
+    requested its component, which got a sub_manufacture action (Tritanium
+    bought, a slot and a fee reserved) for a parent that cannot be built."""
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
+
+    blueprint_data = {**INVENTION_BLUEPRINT_DATA, 888: SUB_BLUEPRINT_DATA[888]}
+    row = _row(type_id=12345, blueprint_type_id=1999, materials=_batch_materials(**{"54321": 100}))
+    phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=10, te=20)], 888: [_bpo(888, me=10, te=20)]},
+              "blueprint_data": blueprint_data,
+              "market_depth_cache": {34: {"vwap_5d": 1.0}, 54321: {"vwap_5d": 1.0}}}
+    plan = _planner().plan_chain([_decision(row, meta_group_id=2)], phase1)
+    (parent,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert parent.pipeline_stage == "copying"
+    assert [d for d in plan.decisions if d.is_sub_component] == []
+    actions = CharacterAssigner().assign(plan, [], _pilot_chars(), _AdminStub())
+    assert [a.action_type for a in actions] == ["copy"]
+
+
+def test_a_blocked_row_says_why_in_its_persisted_reason():
+    """The not-built reason reaches decision_reason (the Build Plan's Reason
+    column), naming the purchase for the invention branch."""
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    _planner().plan_chain([decision], {"bpo_assets_by_type_id": {}, "blueprint_data": INVENTION_BLUEPRINT_DATA})
+    assert decision.decision_reason.startswith("test; not built: ")
+    assert "buy a T1 BPO (999) first to copy and invent" in decision.decision_reason
+
+
+def test_a_busy_t1_bpo_row_says_why_in_its_persisted_reason():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {999: [_t1_bpo(77)]}, "blueprint_data": INVENTION_BLUEPRINT_DATA,
+              "busy_blueprint_item_ids": {77}, "industry_jobs": [_copy_job(77)]}
+    _planner().plan_chain([decision], phase1)
+    assert decision.decision_reason == "test; not built: T1 BPO in an active industry job"

@@ -471,6 +471,9 @@ class ChainPlanner:
         }
         # Not "manufacturing": nothing is built from this row (minor 5).
         decision.pipeline_stage = NOT_BUILT_STAGE
+        # Persisted and shown in the Build Plan's Reason column (Task 12 fix
+        # round 4): the row keeps decision="build", so say why it is not.
+        decision.decision_reason = f"{decision.decision_reason}; not built: {reason}"
         logger.info("ChainPlanner: type_id=%s: %s: not built from it in this plan", decision.type_id, reason)
 
     @staticmethod
@@ -717,7 +720,13 @@ class ChainPlanner:
             )
             # Nothing can build it in this plan: a manufacture action would
             # buy its materials for a job that cannot run (I2).
-            self._mark_not_built(decision, "no T2 BPC and no T1 BPO to copy: invent needs a T1 BPO/BPC first")
+            t1_name = str((blueprint_data.get(t1_bp_type_id) or {}).get("type_name") or "") if t1_bp_type_id else ""
+            purchase = (
+                f"buy a T1 BPO ({f'{t1_name}, ' if t1_name else ''}{t1_bp_type_id}) first to copy and invent"
+                if t1_bp_type_id is not None
+                else "buy a T1 BPO first to copy and invent (no known T1 source in the SDE)"
+            )
+            self._mark_not_built(decision, f"no T2 BPC and no T1 BPO to copy: {purchase}")
 
     def _blueprint_for_product(
         self,
@@ -1050,6 +1059,14 @@ class ChainPlanner:
         (facility_bonus.sub_job_facility_reductions).
         """
         row = decision.overview_row if row is None else row
+        if decision.pipeline_stage in ("copying", "invention"):
+            # No T2 BPC yet (Task 12 fix round 4): the parent gets no
+            # manufacture action, so its components are not sub-built either.
+            logger.info(
+                "ChainPlanner: type_id=%s: stage %s, no sub-builds until a T2 BPC exists",
+                decision.type_id, decision.pipeline_stage,
+            )
+            return []
         first = row.get("research_first")
         mode = first.get("mode") if isinstance(first, dict) else None
         if mode == "none":
