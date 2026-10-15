@@ -103,8 +103,9 @@ _PUBLIC_STRING_KEYS: frozenset[str] = frozenset({"type_name", "meta_group_name"}
 _PUBLIC_NUMERIC_KEYS: frozenset[str] = frozenset({"type_id", "blueprint_type_id"})
 
 #: Every value IndustryService assigns to `blueprint_source_kind`: the
-#: literals at industry/service.py:4102-4146 and :6949-6973, plus the activity
-#: names a prerequisite-chain node inherits (`blueprint_source_kind = activity`).
+#: literals in IndustryService._build_single_product_row and
+#: _plan_blueprint_chain_for_quantity, plus the activity names a
+#: prerequisite-chain node inherits (`blueprint_source_kind = activity`).
 #: A closed enum naming no player, corp or place. The ownership values disclose
 #: per-item BPO ownership, the same information `has_bpo` already passes
 #: verbatim (see "Known disclosure" above). Allow-listed by VALUE, so anything

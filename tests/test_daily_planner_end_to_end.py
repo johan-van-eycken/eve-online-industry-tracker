@@ -32,9 +32,9 @@ Phase 9's persisted plan, not the shopping/action lists).
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
 from eve_online_industry_tracker.config.admin_settings import AdminSettingsManager
@@ -368,6 +368,20 @@ def test_a_material_with_no_hub_price_still_warns(session_provider, planner_repo
 # 10 runs x ceil(100 x 0.9) = 900 Tritanium x 4 = 3,600 < 10 x 1,000 = 10,000.
 
 
+class _DepthOverlayRepo:
+    """The real repository, with extra market-depth rows laid over its own."""
+
+    def __init__(self, repo, depth_extra):
+        self._repo = repo
+        self._depth_extra = depth_extra
+
+    def __getattr__(self, name):
+        return getattr(self._repo, name)
+
+    def get_market_depth(self, type_ids, hub):
+        return {**self._repo.get_market_depth(type_ids, hub), **self._depth_extra}
+
+
 def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_extra=None):
     from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
 
@@ -409,11 +423,7 @@ def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_
         {7777: [SimpleNamespace(type_id=7777, blueprint_material_efficiency=10, blueprint_time_efficiency=20)]}, {},
     )
     if depth_extra:
-        real_depth = planner_repo.get_market_depth
-        svc._repo = SimpleNamespace(**{
-            name: getattr(planner_repo, name) for name in dir(planner_repo) if not name.startswith("__")
-        })
-        svc._repo.get_market_depth = lambda type_ids, hub: {**real_depth(type_ids, hub), **depth_extra}
+        svc._repo = _DepthOverlayRepo(planner_repo, depth_extra)
     decision = ItemDecision(
         type_id=GOOD_ROW["type_id"], type_name="Parent", decision="build", decision_reason="test",
         adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,

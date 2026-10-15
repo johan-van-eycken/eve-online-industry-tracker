@@ -401,8 +401,9 @@ def _me_reduction(me: int) -> float:
     """ME level as the producer's combined material-reduction fraction.
 
     IndustryService._combine_reductions([me / 100.0]) for the ME term alone:
-    1 - (1 - me/100), capped at 0.99. Mirrored, not simplified to me/100, so
-    the float result is bit-for-bit the producer's.
+    1 - (1 - me/100), capped at 0.99. Bit-for-bit the producer's for ME 0-10,
+    EVE's range. Outside it the two differ: the producer's _normalize_fraction
+    takes abs() and rescales values >= 1, which ME 0-10 never reaches.
     """
     fraction = int(me) / 100.0
     if fraction <= 0.0:

@@ -3756,3 +3756,85 @@ def test_the_producer_picks_the_lowest_blueprint_id_for_a_shared_product() -> No
     high, low = _row(200), _row(100)
     manufacturing, _, _ = IndustryService._build_blueprint_row_indexes([high, low])
     assert manufacturing[5] is low
+
+
+# --- round 5 Task 10 T9: three invented levels ---------------------------------
+
+
+def _three_level_invention_rows() -> list[dict]:
+    """5002 (T2) <- 1 x 5102 (T2) <- 1 x 5202 (T2) <- 10 Tritanium per run.
+    Each T2 blueprint is invented from its own T1 source with its own
+    datacore (204, 205, 206): p 0.5, 10 runs per BPC, 2 per attempt."""
+    def source(bp, product, invented_bp, datacore):
+        return {
+            "blueprint_type_id": bp,
+            "blueprint": {"type_id": bp, "type_name": f"Source {bp}", "base_price": 1000.0},
+            "manufacturing_job": {
+                "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 3, "category_name": "Material"}],
+                "skill_entries": [], "time_seconds": 50, "max_production_limit": 10,
+                "products": [{"type_id": product, "type_name": f"Source item {product}", "quantity": 1,
+                              "meta_group_name": "Tech I"}],
+            },
+            "copying_job": {"time_seconds": 20},
+            "invention_job": {
+                "materials": [{"type_id": datacore, "type_name": f"Datacore {datacore}", "quantity": 2,
+                               "category_name": "Material"}],
+                "skill_entries": [], "time_seconds": 40,
+                "products": [{"probability_pct": 50.0, "quantity": 10,
+                              "product": {"type_id": invented_bp, "type_name": f"T2 Blueprint {invented_bp}"}}],
+            },
+        }
+
+    def t2(bp, product, material, quantity):
+        return {
+            "blueprint_type_id": bp,
+            "blueprint": {"type_id": bp, "type_name": f"T2 Blueprint {bp}", "base_price": 5000.0},
+            "manufacturing_job": {
+                "materials": [{"type_id": material, "type_name": f"Input {material}", "quantity": quantity,
+                               "category_name": "Material"}],
+                "skill_entries": [], "time_seconds": 100, "max_production_limit": 10,
+                "products": [{"type_id": product, "type_name": f"T2 item {product}", "quantity": 1,
+                              "meta_group_name": "Tech II"}],
+            },
+        }
+
+    return [
+        source(1001, 6001, 9002, 204), source(1101, 6101, 9102, 205), source(1201, 6201, 9202, 206),
+        t2(9002, 5002, 5102, 1), t2(9102, 5102, 5202, 1), t2(9202, 5202, 34, 10),
+    ]
+
+
+_THREE_LEVEL_PRICES = {34: 5.0, 204: 100.0, 205: 100.0, 206: 100.0, 5102: 100_000.0, 5202: 100_000.0}
+
+
+def test_three_invented_levels_buy_every_levels_datacores_for_every_batch(monkeypatch) -> None:
+    # The deepest component runs on an owned 10-run 9202 BPC in batch 1; each
+    # level invents 1 run otherwise: 1 BPC, 2 attempts, 4 datacores.
+    deep_bpc = SimpleNamespace(
+        type_id=9202, item_id=99, is_blueprint_copy=True,
+        blueprint_material_efficiency=0, blueprint_time_efficiency=0, blueprint_runs=10,
+        location_id=None, location_type=None, location_flag=None, top_location_id=None,
+        container_name=None, ship_name=None, is_singleton=True, quantity=1,
+    )
+    row = _invention_overview(
+        monkeypatch, blueprint_rows=_three_level_invention_rows(), prices=_THREE_LEVEL_PRICES,
+        owned_assets=([deep_bpc], [], {}, {}, {}),
+    )[5002]
+    mj = row["manufacturing_job"]
+
+    batch_one = mj["invention_procurement_materials"]
+    assert (batch_one["204"]["quantity"], batch_one["205"]["quantity"]) == (4, 4)
+    assert "206" not in batch_one                       # the owned BPC covers batch 1
+    # Batch 1 spent an owned run, so batches 2..N follow the extra-batch plan
+    # (Task 5), which invents every level again.
+    assert "invention_procurement_materials_per_extra_batch" not in mj
+    extra = _later_plan(mj, 2)["invention_procurement_materials"]
+    assert (extra["204"]["quantity"], extra["205"]["quantity"], extra["206"]["quantity"]) == (4, 4, 4)
+
+    row["max_batches_total"] = 3
+    needs = {t: (_shopping_line(row, t) or {}).get("need") for t in (204, 205, 206)}
+    # 204: the top-level invented BPC's runs are shared across batches, so one
+    # 10-run BPC covers all three 1-run batches. 205/206: nested levels are
+    # invented again per later batch (their BPC remainder is not carried), so
+    # they are bought on the safe side: 3 x 4 and 2 x 4.
+    assert needs == {204: 4, 205: 12, 206: 8}

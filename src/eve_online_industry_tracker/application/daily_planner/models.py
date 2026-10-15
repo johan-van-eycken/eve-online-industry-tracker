@@ -10,7 +10,7 @@ from typing import Any
 class PipelineState:
     """Phase 2 output — pipeline state for one item."""
     type_id: int
-    effective_velocity: float          # units/day (floored at 0.01)
+    effective_velocity: float          # units/day; the analyzer's 0.01 floor when velocity_unknown_reason is set
     total_pipeline_days: float         # (stock + in-mfg + on-market) / velocity
     competition_index: float | None    # None in Phase A (no MIJ data yet)
     competitor_units: int              # raw competitor units from market_depth_cache

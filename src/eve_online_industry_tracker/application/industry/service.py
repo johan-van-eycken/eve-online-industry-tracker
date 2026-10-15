@@ -7128,6 +7128,11 @@ class IndustryService:
             assets.sort(key=lambda a: (-int(a.blueprint_material_efficiency or 0), -int(a.blueprint_time_efficiency or 0), -int(a.blueprint_runs or 0), int(a.item_id or 0)))
         for assets in blueprint_original_assets_by_type_id.values():
             assets.sort(key=lambda a: (-int(a.blueprint_material_efficiency or 0), -int(a.blueprint_time_efficiency or 0), int(a.item_id or 0)))
+        # Owned BPC runs keyed by blueprint type id. Planning also writes a
+        # negative key into the per-variant copies of this map: -source_bp_type_id
+        # (_whole_source_runs_key) holds a T1 source's budget of WHOLE owned
+        # runs for invention, beside the expected-value budget under the
+        # positive id. It is never a real type id.
         available_blueprint_copy_runs_by_type_id_base: dict[int, int] = {
             int(bp_type_id): sum(max(0, int(a.blueprint_runs or 0)) for a in assets)
             for bp_type_id, assets in blueprint_copy_assets_by_type_id.items()
@@ -8484,7 +8489,9 @@ class IndustryService:
         product_quantity_per_run = int(raw_product.get("quantity") or 0)
         max_production_limit = int(manufacturing_job.get("max_production_limit") or 0)
 
-        # Per-variant mutable state (each variant gets its own copy)
+        # Per-variant mutable state (each variant gets its own copy). The BPC
+        # run map also carries negative keys (_whole_source_runs_key): a T1
+        # source's whole-run invention budget, not a type id.
         available_blueprint_copy_runs_by_type_id = dict(ctx.available_blueprint_copy_runs_by_type_id_base)
         available_owned_item_quantity_by_type_id = dict(ctx.available_owned_item_quantity_by_type_id_base)
         if bool(ctx.build_from_bpc):

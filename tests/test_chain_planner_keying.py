@@ -10,15 +10,21 @@ BPO's ME/TE was read from attributes the asset model does not have.
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner.chain_planner import (
     ChainPlanner,
+    build_invention_source_index,
     build_product_to_blueprint_index,
 )
-from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
+from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
+from eve_online_industry_tracker.infrastructure.sde.blueprints import (
+    me_adjusted_batch_quantity,
+    me_adjusted_quantity,
+    optimal_me_for_quantities,
+)
 
 BLUEPRINT_DATA = {
     999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
@@ -275,10 +281,6 @@ def test_service_loads_blueprint_data_for_nested_ids_and_owned_bpos(monkeypatch)
 
 # --- invention: which T1 BPO feeds a T2 blueprint ------------------------------
 
-from eve_online_industry_tracker.application.daily_planner.chain_planner import (  # noqa: E402
-    build_invention_source_index,
-)
-
 DATACORE = {"type_id": 20410, "quantity": 2}
 INVENTION_BLUEPRINT_DATA = {
     # T1 blueprint 999 invents into T2 blueprint 1999.
@@ -359,12 +361,6 @@ def test_owned_t1_bpo_and_assigner_produce_a_copy_of_the_t1_blueprint():
 # The old analysis read three phantom keys, so it always computed a 0 saving and
 # recommended "hold". It also used a flat 10% of material cost, which overstates
 # the saving whenever ceil() rounding eats the ME reduction.
-
-from eve_online_industry_tracker.infrastructure.sde.blueprints import (  # noqa: E402
-    me_adjusted_batch_quantity,
-    me_adjusted_quantity,
-    optimal_me_for_quantities,
-)
 
 
 def test_me_adjusted_quantity_rounds_up_per_material():
@@ -652,8 +648,6 @@ def test_a_slow_measured_velocity_is_used_as_is_not_floored():
 
 
 # --- sub-manufacture: corp stock, owned BPO ME, carried batch -----------------
-
-from eve_online_industry_tracker.application.daily_planner.models import ChainPlan  # noqa: E402
 
 
 def _sub_phase1(*, me=10, stock=None, blueprint_data=None):
@@ -1249,7 +1243,6 @@ def test_the_adapter_matches_the_producer_statics():
         S._infer_manufacturing_group_uncached(_COMPONENT_ENTRY))
 
 
-
 # --- fix round 2 ---------------------------------------------------------------
 
 def _entry(group_id, group_name, category_id, category_name):
@@ -1292,8 +1285,8 @@ def test_name_token_groups_need_their_category():
     assert group({"group_name": "Advanced Hybrid Charge", "category_name": "Charge"}) == "Ammo & Charges"
     assert group({"group_name": "Construction Components", "category_name": "Commodity"}) == (
         "Advanced Components")
-    # A hypothetical Module-category group whose name contains "component".
-    assert group({"group_name": "Component Analyzer", "category_name": "Module"}) is None
+    # A real non-Commodity group whose name contains "component" (SDE group 1676).
+    assert group({"group_name": "Named Components", "category_name": "Material"}) is None
     assert group({"group_name": "Capital Construction Components", "category_name": "Commodity"}) == (
         "Capital Components")
 

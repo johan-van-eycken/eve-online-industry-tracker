@@ -1,7 +1,13 @@
 # tests/test_fixture_sanitisation.py
 from __future__ import annotations
 
+import ast
+import os
+
+import pytest
+
 from eve_online_industry_tracker.application.daily_planner.fixture_export import (
+    BLUEPRINT_SOURCE_KINDS,
     _PUBLIC_STRING_KEYS,
     _is_identity_key,
     IDENTITY_KEY_SUBSTRINGS,
@@ -9,6 +15,11 @@ from eve_online_industry_tracker.application.daily_planner.fixture_export import
 )
 
 REDACTED = "<redacted>"
+
+_PRODUCER = os.path.join(
+    os.path.dirname(__file__), "..", "src", "eve_online_industry_tracker",
+    "application", "industry", "service.py",
+)
 
 RAW = [
     {
@@ -158,16 +169,6 @@ def test_sanitisation_is_deterministic():
     assert sanitise_overview_rows(RAW) == sanitise_overview_rows(RAW)
 
 
-import ast  # noqa: E402
-import os  # noqa: E402
-
-import pytest  # noqa: E402
-
-from eve_online_industry_tracker.application.daily_planner.fixture_export import (  # noqa: E402
-    BLUEPRINT_SOURCE_KINDS,
-)
-
-
 @pytest.mark.parametrize("kind", sorted(BLUEPRINT_SOURCE_KINDS))
 def test_a_blueprint_source_kind_survives_sanitisation(kind):
     (row,) = sanitise_overview_rows(
@@ -184,11 +185,7 @@ def test_an_unknown_blueprint_source_kind_is_still_redacted():
 
 
 def test_every_literal_source_kind_the_producer_assigns_is_allow_listed():
-    producer = os.path.join(
-        os.path.dirname(__file__), "..", "src", "eve_online_industry_tracker",
-        "application", "industry", "service.py",
-    )
-    with open(producer, encoding="utf-8") as fh:
+    with open(_PRODUCER, encoding="utf-8") as fh:
         tree = ast.parse(fh.read())
     written = {
         node.value.value
@@ -215,3 +212,19 @@ def test_a_source_kind_under_any_other_key_is_redacted(kind):
     assert row["entries"][0]["origin"] == REDACTED
     # control: under the allow-listed key, in the same list, it survives
     assert row["entries"][1]["blueprint_source_kind"] == kind
+
+
+def test_every_activity_a_prerequisite_node_inherits_is_allow_listed():
+    """_plan_blueprint_chain_for_quantity sets blueprint_source_kind = activity,
+    and the activities it is called with are the child_activity literals."""
+    with open(_PRODUCER, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    activities = {
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "child_activity" for t in node.targets)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    }
+    assert activities == {"manufacturing", "reaction"}
+    assert activities <= BLUEPRINT_SOURCE_KINDS

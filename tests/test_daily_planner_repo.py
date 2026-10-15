@@ -924,3 +924,23 @@ def test_a_job_actions_unknown_fee_reason_survives_a_reload() -> None:
     repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [action], now))
     (row,) = repo.get_actions(plan_id)
     assert (row.estimated_job_fee_isk, row.estimated_job_fee_unknown_reason) == (None, "no manufacturing cost index")
+
+
+def test_get_analytics_reads_out_of_band_weights_through_the_band(app_session, session_provider):
+    """FU-03: get_analytics reads plan_learning_weights through read_weight,
+    so a pre-clamp or hand-edited row is shown clamped, not raw."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    plan = BuildPlanModel(created_at=now, updated_at=now, status="active", freshness_score=1.0)
+    app_session.add(plan)
+    app_session.commit()
+    app_session.add(BuildPlanItemModel(plan_id=plan.id, type_id=4242, decision="build"))
+    app_session.add(PlanLearningWeightsModel(
+        type_id=4242, accuracy_ema=9.0, velocity_multiplier=1.0, cost_multiplier=0.1,
+        sample_count=3, last_updated=now, confidence_tier="low",
+    ))
+    app_session.commit()
+
+    (item,) = _service(session_provider).get_analytics()["items"]
+    assert item["accuracy_ema"] == 4.0       # LEARNING_WEIGHT_MAX
+    assert item["cost_multiplier"] == 0.25   # LEARNING_WEIGHT_MIN
+    assert item["velocity_multiplier"] == 1.0

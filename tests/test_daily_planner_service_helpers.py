@@ -179,8 +179,6 @@ def test_wallet_balance_from_a_dict_keyed_by_division_string_balance():
     assert _select_division_one_balance({"1": "123456789.1234"}) == 123456789.1234
 
 
-
-
 def test_parse_isk_returns_none_for_unparseable_balance():
     """A malformed balance must not silently become a real zero -- that is
     the exact silent-swallow shape the original wallet review finding was

@@ -709,6 +709,11 @@ class CharacterAssigner:
     def _research_blueprint_type_id(row: dict[str, Any], type_id: int, kind: str) -> int | None:
         """The blueprint to research, or None (WARNING): a product id is not a blueprint."""
         bp_type_id = orow.get_blueprint_type_id(row)
+        # Unreachable today: needs_me/te_research is set only by
+        # ChainPlanner._plan_t1_chain for an owned BPO found through this same
+        # accessor (and copied onto a research-first variant of the same
+        # blueprint), so a flagged row always has a blueprint id. Kept so a
+        # future flag source cannot schedule research on a product id.
         if bp_type_id is None:
             logger.warning(
                 "CharacterAssigner: %s research flagged for type_id=%s but its row has no "

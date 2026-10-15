@@ -378,7 +378,7 @@ def _render_tab_captions(monkeypatch, rows: list[dict]) -> list[str]:
     monkeypatch.setattr(page.st, "columns", lambda *a, **k: (_ for _ in ()).throw(_Stop()), raising=False)
     try:
         page._render_shopping_list_tab(rows)
-    except Exception:
+    except _Stop:
         pass
     return captions
 

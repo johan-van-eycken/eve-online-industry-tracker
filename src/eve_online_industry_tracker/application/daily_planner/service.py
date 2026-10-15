@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -1130,7 +1131,7 @@ class DailyPlannerService:
     def _get_blueprint_data(
         self,
         overview_rows: list[dict[str, Any]],
-        extra_blueprint_type_ids: Any = (),
+        extra_blueprint_type_ids: Iterable[int] = (),
     ) -> dict[int, dict[str, Any]]:
         """Load blueprint SDE data for the overview rows' blueprints plus any extras.
 
