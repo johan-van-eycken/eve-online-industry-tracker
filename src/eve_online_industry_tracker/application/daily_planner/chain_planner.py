@@ -421,11 +421,12 @@ class ChainPlanner:
                     bp_type_id, current_me, current_te,
                 )
 
-            # None means the SDE lookup failed (already logged at WARNING by
-            # _compute_optimal_me): schedule no ME research rather than
+            # None means no optimal ME: schedule no ME research rather than
             # treating the optimum as 0, which silently reads as "already
-            # optimal". The TE target is the setting and always known.
-            # (Missing runs were already logged above and explain it.)
+            # optimal". The TE target is the setting and always known. When
+            # the missing batch runs caused it, that WARNING was logged above
+            # and this one is skipped; an SDE lookup failure (runs fine)
+            # still gets this WARNING on top of _compute_optimal_me's own.
             if optimal_me is None and runs_reason is None:
                 logger.warning(
                     "ChainPlanner: optimal ME unknown for owned BPO %s; "

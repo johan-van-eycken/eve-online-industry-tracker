@@ -1465,9 +1465,9 @@ def _plan_owned_bpo(planner, row, caplog):
 
 
 def test_missing_runs_log_one_warning_not_two(caplog):
-    row = _row()
+    row = _row(materials=_batch_materials(**{"34": 100}))
     del row["manufacturing_job"]["runs"]
-    warnings = [w for w in _plan_owned_bpo(_planner(), row, caplog) if "run count" in w or "optimal ME" in w]
+    warnings = _plan_owned_bpo(_planner(), row, caplog)
     assert len(warnings) == 1 and "unusable batch run count" in warnings[0]
 
 

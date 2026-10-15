@@ -4325,6 +4325,14 @@ class IndustryService:
         manufacturing_row_by_product_type_id: dict[int, dict[str, Any]] = {}
         reaction_row_by_product_type_id: dict[int, dict[str, Any]] = {}
         invention_row_by_blueprint_type_id: dict[int, dict[str, Any]] = {}
+
+        def _keep_lowest(index: dict[int, dict[str, Any]], key: int, row: dict[str, Any]) -> None:
+            # One rule for a product several blueprints make: the lowest
+            # blueprint type_id wins (same as chain_planner's index builders).
+            current = index.get(key)
+            if current is None or int(row.get("blueprint_type_id") or 0) < int(current.get("blueprint_type_id") or 0):
+                index[key] = row
+
         for row in blueprint_rows:
             if not isinstance(row, dict):
                 continue
@@ -4335,8 +4343,8 @@ class IndustryService:
                     product_type_id = int(product.get("type_id") or 0)
                 except Exception:
                     product_type_id = 0
-                if product_type_id > 0 and product_type_id not in manufacturing_row_by_product_type_id:
-                    manufacturing_row_by_product_type_id[product_type_id] = row
+                if product_type_id > 0:
+                    _keep_lowest(manufacturing_row_by_product_type_id, product_type_id, row)
             for product in (row.get("reaction_job") or {}).get("products") or []:
                 if not isinstance(product, dict):
                     continue
@@ -4344,8 +4352,8 @@ class IndustryService:
                     product_type_id = int(product.get("type_id") or 0)
                 except Exception:
                     product_type_id = 0
-                if product_type_id > 0 and product_type_id not in reaction_row_by_product_type_id:
-                    reaction_row_by_product_type_id[product_type_id] = row
+                if product_type_id > 0:
+                    _keep_lowest(reaction_row_by_product_type_id, product_type_id, row)
             for product in (row.get("invention_job") or {}).get("products") or []:
                 if not isinstance(product, dict):
                     continue
@@ -4356,8 +4364,8 @@ class IndustryService:
                     product_type_id = int(invention_product.get("type_id") or product.get("type_id") or 0)
                 except Exception:
                     product_type_id = 0
-                if product_type_id > 0 and product_type_id not in invention_row_by_blueprint_type_id:
-                    invention_row_by_blueprint_type_id[product_type_id] = row
+                if product_type_id > 0:
+                    _keep_lowest(invention_row_by_blueprint_type_id, product_type_id, row)
         return (
             manufacturing_row_by_product_type_id,
             reaction_row_by_product_type_id,

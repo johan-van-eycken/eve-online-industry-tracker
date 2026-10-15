@@ -3742,4 +3742,17 @@ def test_a_source_copy_covered_by_owned_runs_is_still_listed_for_its_elapsed_tim
     mj = _invention_overview(monkeypatch, owned_assets=([source_bpc], [], {}, {}, {}))[5002]["manufacturing_job"]
     copying = mj["activity_breakdown"]["invention_source_copying"]
     assert copying["duration_seconds"] == 0
-    assert copying["elapsed_duration_seconds"] > 0
+    assert copying["elapsed_duration_seconds"] == 20
+    assert mj["time_seconds"] == 96 + 8          # no copy slot time
+    assert mj["elapsed_time_seconds"] == 96 + 80 + 20
+
+
+def test_the_producer_picks_the_lowest_blueprint_id_for_a_shared_product() -> None:
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    def _row(bp_id):
+        return {"blueprint_type_id": bp_id, "manufacturing_job": {"products": [{"type_id": 5}]}}
+
+    high, low = _row(200), _row(100)
+    manufacturing, _, _ = IndustryService._build_blueprint_row_indexes([high, low])
+    assert manufacturing[5] is low
