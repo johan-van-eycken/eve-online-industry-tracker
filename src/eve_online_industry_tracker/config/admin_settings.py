@@ -594,11 +594,16 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "type": "float",
                 "default": 1.0,
                 "min": 0.1,
-                "max": 10.0,
+                "max": 2.0,
                 "step": 0.1,
                 "format": "%.1f",
-                "label": "Optimal TE threshold (%)",
-                "help": "Minimum % time saving per TE level to continue researching; below this compute_optimal_te() stops.",
+                "label": "Optimal TE threshold (% per level)",
+                "help": (
+                    "Minimum manufacturing time saved per TE research level, as % of the base time "
+                    "(one run, rounded to whole seconds). Each level is TE +2%, up to TE 20 (level 10); "
+                    "the planner researches to the highest level that still saves this much per level "
+                    "on average. 2.0 needs the full 2% step; at the default 1.0 every SDE blueprint targets TE 20."
+                ),
             },
         },
     },

@@ -478,20 +478,46 @@ def optimal_me_for_quantities(quantities: Iterable[int], *, runs: int = 1) -> in
     return max(per_material_optimal) if per_material_optimal else 0
 
 
+#: EVE's TE research: each research level cuts the base time by 2%, so a
+#: blueprint's TE is a percentage 0..20 in steps of 2 (level = TE / 2, 0..10).
+TE_PCT_PER_LEVEL = 2
+MAX_TE_LEVEL = 10
+
+
+def te_adjusted_batch_time(base_time: int, runs: int, te_pct: int) -> int:
+    """Seconds of a `runs`-run batch at TE `te_pct` (a percentage, 0..20).
+
+    time = ceil(base_time * runs * (1 - TE / 100)): TE applied as a
+    percentage and one ceiling over the batch, like the producer's
+    _round_duration_seconds. Exact integer arithmetic, so 100 s at TE 6 is
+    94 s, not the float ceil of 94.00000000000001.
+    """
+    total = int(base_time) * int(runs)
+    if total <= 0:
+        return 0
+    return max(1, -(-(total * (100 - int(te_pct))) // 100))
+
+
 def compute_optimal_te(
     blueprint_type_id: int,
     session,
     time_savings_threshold_pct: float = 1.0,
 ) -> int:
-    """Return the TE level where per-level time savings fall below threshold_pct%.
+    """The TE percentage (0..20, steps of 2) to research this blueprint to.
 
-    Iterates TE levels 1..10. When the time saved by going from TE-1 to TE
-    falls below ``time_savings_threshold_pct``% of the base manufacturing time,
-    returns TE-1 (the last level still worth researching). Returns 10 if the
-    threshold is never reached within 1..10.
+    Each TE research level saves 2% of the base manufacturing time (EVE:
+    level L gives TE 2L%). The target is the highest level L in 0..10 whose
+    rounded one-run time saves at least ``time_savings_threshold_pct``% of
+    the base time per level on average:
 
-    time(TE) = ceil(base_time * (1 - 0.01 * TE))
-    saved_pct(TE) = (time(TE-1) - time(TE)) / base_time * 100
+        base_time - time(TE 2L) >= L * threshold% * base_time
+
+    Returned as the percentage 2L, the unit of the asset's TE. Taking the
+    highest qualifying level (not stopping at the first level that falls
+    short) removes the ceil noise: on a 10 s blueprint level 1 rounds back
+    up to 10 s and saves nothing, but level 10 saves 2 s = 20%. A threshold
+    above the 2% step researches nothing. 0 when the blueprint or its
+    manufacturing time is missing.
     """
     blueprint = session.query(Blueprints).filter(
         Blueprints.blueprintTypeID == int(blueprint_type_id)
@@ -511,12 +537,11 @@ def compute_optimal_te(
     if base_time <= 0:
         return 0
 
-    prev_time = base_time  # TE=0: ceil(base_time * 1.0) = base_time
-    for te in range(1, 11):
-        curr_time = math.ceil(base_time * (1.0 - 0.01 * te))
-        saved_pct = (prev_time - curr_time) / base_time * 100.0
-        if saved_pct < time_savings_threshold_pct:
-            return te - 1  # last level worth researching is the previous one
-        prev_time = curr_time
-
-    return 10  # threshold never reached within TE 1–10
+    threshold = float(time_savings_threshold_pct)
+    best_level = 0
+    for level in range(1, MAX_TE_LEVEL + 1):
+        saved = base_time - te_adjusted_batch_time(base_time, 1, TE_PCT_PER_LEVEL * level)
+        # saved / base_time * 100 >= level * threshold, without a float division.
+        if saved * 100 >= level * threshold * base_time - 1e-9:
+            best_level = level
+    return TE_PCT_PER_LEVEL * best_level

@@ -266,7 +266,7 @@ class CharacterAssigner:
                     estimated_cost_isk=None,
                     estimated_profit_isk=None,
                     estimated_completion=None,
-                    notes=f"TE research: {row.get('te_current', '?')} → {row.get('te_research_target', '?')}",
+                    notes=_te_research_note(row),
                     **_job_fee(
                         *_research_fee(row, "research_time", "te_current", "te_research_target"),
                         "te_research", type_id,
@@ -678,6 +678,24 @@ def _times_runs(fee_per_run: float | None, runs: int | None) -> float | None:
     return fee_per_run * runs
 
 
+def _te_research_levels(current_pct: int, target_pct: int) -> tuple[int, int]:
+    """(from, to) research level of a TE job between two TE percentages
+    (EVE: 2 % per level, 0..20): the level held (te // 2) and the lowest
+    level that reaches the target percentage (ceil(te / 2))."""
+    return current_pct // 2, -(-target_pct // 2)
+
+
+def _te_research_note(row: dict[str, Any]) -> str:
+    """'TE research: 10% → 20% (level 5 → 10)': TE is a percentage, the
+    research job spans levels."""
+    try:
+        current, target = int(row["te_current"]), int(row["te_research_target"])
+    except (KeyError, TypeError, ValueError):
+        return f"TE research: {row.get('te_current', '?')} → {row.get('te_research_target', '?')}"
+    from_level, to_level = _te_research_levels(current, target)
+    return f"TE research: {current}% → {target}% (level {from_level} → {to_level})"
+
+
 def _research_fee(row: dict[str, Any], activity: str, current_key: str, target_key: str) -> tuple[float | None, str | None]:
     """(fee, None), or (None, why), for the research job from the row's
     current level to its target (A2), via the producer's cumulative fee
@@ -690,7 +708,7 @@ def _research_fee(row: dict[str, Any], activity: str, current_key: str, target_k
     except (KeyError, TypeError, ValueError):
         return None, f"the blueprint's current or target {current_key.split('_')[0].upper()} level is unknown"
     if activity == "research_time":
-        current, target = current // 2, -(-target // 2)
+        current, target = _te_research_levels(current, target)
     fee = orow.get_research_fee(row, activity, current, target)
     if fee is not None:
         return fee, None

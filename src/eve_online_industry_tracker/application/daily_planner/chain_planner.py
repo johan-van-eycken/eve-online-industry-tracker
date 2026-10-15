@@ -341,6 +341,10 @@ class ChainPlanner:
                 decision.overview_row["me_research_target"] = optimal_me
                 decision.overview_row["me_current"] = current_me
 
+            # TE is EVE's percentage on both sides (0..20, 2% per research
+            # level): the asset's blueprint_time_efficiency and
+            # compute_optimal_te's target. CharacterAssigner converts to
+            # research levels for the fee.
             if current_te is not None and optimal_te is not None and current_te < optimal_te:
                 decision.overview_row["needs_te_research"] = True
                 decision.overview_row["te_research_target"] = optimal_te
@@ -1040,7 +1044,8 @@ class ChainPlanner:
             return None
 
     def _compute_optimal_te(self, blueprint_type_id: int, threshold_pct: float) -> int | None:
-        """Optimal TE from the SDE, or None when the SDE query fails (see _compute_optimal_me)."""
+        """Optimal TE as EVE's percentage (0..20, steps of 2) from the SDE, or
+        None when the SDE query fails (see _compute_optimal_me)."""
         from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_te
         try:
             sde_session = self._session_provider.sde_session()
