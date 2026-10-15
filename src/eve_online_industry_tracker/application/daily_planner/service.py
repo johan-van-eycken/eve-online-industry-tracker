@@ -863,7 +863,9 @@ class DailyPlannerService:
                 )
                 notes = _unavailable_input_notes(scored.type_id, unavailable, margin_correlations)
                 if notes:
-                    decision.decision_reason = "; ".join([decision.decision_reason, *notes])
+                    decision.decision_reason = "; ".join(
+                        part for part in (decision.decision_reason, *notes) if part
+                    )
                 decisions.append(decision)
             except (TypeError, ValueError):
                 # float() of a malformed setting; per-item isolation.

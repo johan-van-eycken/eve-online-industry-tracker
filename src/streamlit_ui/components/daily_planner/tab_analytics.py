@@ -17,6 +17,24 @@ def analytics_unavailable_caption(analytics: dict | None) -> str | None:
     return "Some analytics could not be read: " + "; ".join(str(r) for r in unavailable.values())
 
 
+def section_empty_message(analytics: dict | None, key: str, default: str) -> tuple[str, bool]:
+    """(message, read failed) for an Analytics section with no rows.
+
+    A failed read gives its reason instead of the "no data yet" default, so
+    the section does not name a false cause for a DB error (RM-35)."""
+    unavailable = (analytics or {}).get("unavailable") or {}
+    reason = unavailable.get(key) if isinstance(unavailable, dict) else None
+    return (str(reason), True) if reason else (default, False)
+
+
+def _render_empty_section(analytics: dict, key: str, default: str) -> None:
+    message, failed = section_empty_message(analytics, key, default)
+    if failed:
+        st.warning(message)
+    else:
+        st.info(message)
+
+
 def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
     """Render the Analytics tab — self-learning stats, competition, correlation, invention."""
     try:
@@ -69,9 +87,10 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
     with st.expander("Competition Monitor", expanded=True):
         items_with_comp = [i for i in items if i.get("competition_index") is not None]
         if not items_with_comp:
-            st.info(
+            _render_empty_section(
+                analytics, "market_depth",
                 "No market depth data yet — run MarketIntelligenceJob first "
-                "(starts automatically every 3h)."
+                "(starts automatically every 3h).",
             )
         else:
             rows = []
@@ -102,9 +121,10 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
             i for i in items if int(i.get("correlation_data_points") or 0) > 0
         ]
         if not items_with_corr:
-            st.info(
+            _render_empty_section(
+                analytics, "margin_correlation",
                 "Correlation data appears after 30+ days of market history and "
-                "realized profit data."
+                "realized profit data.",
             )
         else:
             rows = []
@@ -127,7 +147,10 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
     with st.expander("Invention Success Rates", expanded=True):
         items_with_inv = [i for i in items if i.get("invention_details") is not None]
         if not items_with_inv:
-            st.info("Invention data appears after T2 invention jobs complete.")
+            _render_empty_section(
+                analytics, "invention_details",
+                "Invention data appears after T2 invention jobs complete.",
+            )
         else:
             rows = []
             for i in items_with_inv:

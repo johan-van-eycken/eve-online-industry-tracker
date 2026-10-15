@@ -355,3 +355,44 @@ def test_analytics_caption_lists_the_unavailable_reads():
 @pytest.mark.parametrize("analytics", [None, {}, {"unavailable": {}}])
 def test_analytics_caption_is_absent_without_a_status(analytics):
     assert tab_analytics.analytics_unavailable_caption(analytics) is None
+
+
+# --- fix round 1 ---------------------------------------------------------------
+
+_SECTION_KEYS = ("market_depth", "margin_correlation", "invention_details")
+
+
+@pytest.mark.parametrize("key", _SECTION_KEYS)
+def test_an_empty_section_shows_the_failed_read_not_a_false_cause(key):
+    """I1: a failed read must not show "no data yet, run X first" as its cause."""
+    reason = f"{key} unavailable (DB error: X): data not shown"
+    message, unavailable = tab_analytics.section_empty_message(
+        {"unavailable": {key: reason}}, key, "No data yet.",
+    )
+    assert (message, unavailable) == (reason, True)
+
+
+@pytest.mark.parametrize("key", _SECTION_KEYS)
+@pytest.mark.parametrize("analytics", [None, {}, {"unavailable": {}}, {"unavailable": {"other": "x"}}])
+def test_an_empty_section_without_a_failed_read_shows_the_default(key, analytics):
+    assert tab_analytics.section_empty_message(analytics, key, "No data yet.") == ("No data yet.", False)
+
+
+def test_the_status_bar_caption_says_it_is_a_compute_time_snapshot():
+    """M2: the status is the plan's, recorded when it was computed."""
+    caption = status_bar.unavailable_inputs_caption({"unavailable_inputs": {"margin_correlation": MARGIN_NOTE}})
+    assert caption == f"When this plan was computed, some scoring inputs could not be read: {MARGIN_NOTE}"
+
+
+def test_an_empty_decision_reason_gets_no_leading_separator(session_provider, monkeypatch):
+    """M3: the notes are joined without an empty first part."""
+    svc = _service(session_provider)
+    real_decide = svc._decision_engine.decide
+
+    def decide(**kwargs):
+        decision = real_decide(**kwargs)
+        decision.decision_reason = ""
+        return decision
+    monkeypatch.setattr(svc._decision_engine, "decide", decide)
+    _, decision = _score_and_decide(svc, {}, None, {"margin_correlation": MARGIN_NOTE})
+    assert decision.decision_reason == MARGIN_NOTE

@@ -343,7 +343,8 @@ def unavailable_inputs_caption(plan_data: dict[str, Any] | None) -> str | None:
     unavailable = (plan_data or {}).get("unavailable_inputs") or {}
     if not isinstance(unavailable, dict) or not unavailable:
         return None
-    return "Some scoring inputs could not be read: " + "; ".join(
+    # A compute-time snapshot: a later read may well succeed.
+    return "When this plan was computed, some scoring inputs could not be read: " + "; ".join(
         str(reason) for reason in unavailable.values()
     )
 
