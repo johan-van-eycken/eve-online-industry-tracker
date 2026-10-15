@@ -61,10 +61,14 @@ def batch_uses_bpo(row: dict[str, Any]) -> bool:
     return kind is None or str(kind) in BPO_SOURCES
 
 
-def owned_bpc_part(row: dict[str, Any]) -> dict[str, Any] | None:
+def owned_bpc_part(row: dict[str, Any], *, exclude_item_ids: Any = frozenset()) -> dict[str, Any] | None:
     """The part of the batch on owned BPCs: {runs, quantity, materials}, or
-    None when there is none or its materials are unknown."""
-    segments = [s for s in (job_segments(row) or []) if str(s.get("source")) == OWNED_BPC_SOURCE]
+    None when there is none or its materials are unknown. Jobs on a BPC in
+    `exclude_item_ids` (one in an active job) are left out."""
+    segments = [
+        s for s in (job_segments(row) or [])
+        if str(s.get("source")) == OWNED_BPC_SOURCE and segment_bpc_item_id(s) not in exclude_item_ids
+    ]
     runs = sum(int(s.get("runs") or 0) for s in segments)
     if runs <= 0:
         return None
@@ -82,6 +86,16 @@ def owned_bpc_part(row: dict[str, Any]) -> dict[str, Any] | None:
     units = orow.get_product_quantity(row)
     quantity = units * runs // total_runs if total_runs > 0 and units > 0 else None
     return {"runs": runs, "quantity": quantity, "materials": materials}
+
+
+def segment_bpc_item_id(segment: dict[str, Any]) -> int | None:
+    """The owned BPC a job segment runs on (the producer's
+    blueprint_item_id), or None when the segment does not say."""
+    try:
+        value = int(segment.get("blueprint_item_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def builds_on_owned_bpcs(row: dict[str, Any]) -> bool:

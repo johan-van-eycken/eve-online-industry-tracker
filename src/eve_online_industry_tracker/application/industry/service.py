@@ -146,7 +146,7 @@ class _BatchRunLayout:
     bought next source is one job per batch: its copy is made per batch.
     """
 
-    owned: tuple[tuple[int, int, int], ...]  # (runs, ME, TE) per owned BPC, in use order
+    owned: tuple[tuple[int, int, int, int | None], ...]  # (runs, ME, TE, item_id) per owned BPC, in use order
     next_material_efficiency: int
     next_time_efficiency: int
     next_source: str
@@ -154,17 +154,22 @@ class _BatchRunLayout:
 
     @property
     def owned_runs(self) -> int:
-        return sum(runs for runs, _me, _te in self.owned)
+        return sum(owned[0] for owned in self.owned)
 
     def segments(self, start_run: int, runs: int) -> list[dict[str, Any]]:
         """The jobs of the batch that covers runs [start_run, start_run + runs)."""
         out: list[dict[str, Any]] = []
         end = int(start_run) + int(runs)
         cursor = 0
-        for owned_runs, me, te in self.owned:
+        for owned_runs, me, te, item_id in self.owned:
             low, high = max(cursor, int(start_run)), min(cursor + owned_runs, end)
             if high > low:
-                out.append(_job_segment(high - low, me, te, "owned_blueprint_copy"))
+                segment = _job_segment(high - low, me, te, "owned_blueprint_copy")
+                if item_id is not None:
+                    # The BPC this job runs on, so the daily planner can leave
+                    # out the jobs of a BPC already in an active job (I1).
+                    segment["blueprint_item_id"] = int(item_id)
+                out.append(segment)
             cursor += owned_runs
         position = max(cursor, int(start_run))
         while position < end:
@@ -197,7 +202,7 @@ class _BatchRunLayout:
             # Batches inside one owned BPC repeat this one's jobs: skip them.
             count = 1
             cursor = 0
-            for runs, _me, _te in self.owned:
+            for runs, *_levels_and_item in self.owned:
                 if cursor <= start and start + batch_runs <= cursor + runs:
                     count = max(1, min(steady_batch - batch, (cursor + runs - start) // batch_runs))
                     break
@@ -6836,12 +6841,13 @@ class IndustryService:
     @classmethod
     def _owned_blueprint_copy_jobs(
         cls, assets: list[Any], *, runs: int,
-    ) -> tuple[tuple[int, int, int], ...]:
-        """(runs, ME, TE) per owned BPC for `runs` owned runs, in the order
-        _allocate_owned_blueprint_copy_run_usage spends them: one job each."""
+    ) -> tuple[tuple[int, int, int, int | None], ...]:
+        """(runs, ME, TE, item_id) per owned BPC for `runs` owned runs, in the
+        order _allocate_owned_blueprint_copy_run_usage spends them: one job each."""
         return tuple(
             (int(used), int(getattr(asset, "blueprint_material_efficiency", 0) or 0),
-             int(getattr(asset, "blueprint_time_efficiency", 0) or 0))
+             int(getattr(asset, "blueprint_time_efficiency", 0) or 0),
+             int(getattr(asset, "item_id", 0) or 0) or None)
             for asset, used in cls._allocate_owned_blueprint_copy_run_usage(
                 cast(list[CharacterAssetsModel | CorporationAssetsModel], list(assets or [])),
                 requested_runs=max(0, int(runs)), available_total_runs=max(0, int(runs)),

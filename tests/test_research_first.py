@@ -532,6 +532,16 @@ def test_a_bpo_in_an_active_job_is_neither_researched_nor_built_from():
     assert actions == {}
     (top,) = [d for d in plan.decisions if not d.is_sub_component]
     assert "in an active industry job" in top.overview_row["research_first"]["note"]
+    # Not shown as "manufacturing": nothing is built from it (fix round 1, minor 5).
+    assert top.pipeline_stage == "blocked"
+
+
+def test_a_bpo_in_research_without_a_bpc_keeps_its_stage():
+    # Conditional on a research slot: it may still build from the BPO.
+    plan = _plan(_row(**BPO_ROW))
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert top.overview_row["research_first"]["mode"] == "none"
+    assert top.pipeline_stage == "manufacturing"
 
 
 def test_a_busy_priced_bpo_builds_from_a_free_one_without_a_research_slot():

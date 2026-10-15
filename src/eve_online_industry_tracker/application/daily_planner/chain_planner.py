@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 META_GROUP_T1 = 1
 
 
+#: The pipeline stage of an item this plan does not build: a blueprint it
+#: needs is in an active job, or it has no blueprint source to build from.
+NOT_BUILT_STAGE = "blocked"
+
+
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
@@ -199,7 +204,8 @@ class ChainPlanner:
         }
 
         def _on_busy_bpc(candidate: dict[str, Any]) -> bool:
-            return self._row_on_busy_bpc(candidate, busy_item_ids, busy_bpc_type_ids) is not None
+            # A research-first variant is used whole: any busy BPC rules it out.
+            return self._busy_bpc_plan(candidate, busy_item_ids, busy_bpc_type_ids) is not None
         # Each parent's sub-manufacture requests, in order, and (research
         # first) the ones its kept BPO row would make instead.
         requests_by_parent: list[tuple[int, list[dict[str, Any]]]] = []
@@ -220,9 +226,10 @@ class ChainPlanner:
                 v for v in variant_rows_by_type_id.get(int(decision.type_id)) or []
                 if not _on_busy_bpc(v)
             ]
-            busy_bpc_reason = self._row_on_busy_bpc(row, busy_item_ids, busy_bpc_type_ids)
-            if busy_bpc_reason is not None:
-                self._mark_not_built(decision, busy_bpc_reason)
+            busy_bpc = self._busy_bpc_plan(row, busy_item_ids, busy_bpc_type_ids)
+            busy_bpc_reason = busy_bpc["reason"] if busy_bpc is not None else None
+            if busy_bpc is not None:
+                self._build_free_bpc_jobs_only(decision, busy_bpc)
 
             try:
                 if meta_group_id == META_GROUP_T1:
@@ -246,8 +253,10 @@ class ChainPlanner:
                     )
                 elif busy_bpc_reason is not None:
                     # Priced on the busy BPC's runs: inventing instead would
-                    # buy no datacores for them (an under-buy). Not built.
-                    decision.pipeline_stage = "manufacturing"
+                    # buy no datacores for them (an under-buy). Only the free
+                    # BPCs' jobs build (or nothing: stage set above).
+                    if decision.pipeline_stage != NOT_BUILT_STAGE:
+                        decision.pipeline_stage = "manufacturing"
                 else:
                     # T2+ — invention chain only
                     self._plan_t2_chain(
@@ -364,24 +373,63 @@ class ChainPlanner:
         return decisions
 
     @staticmethod
-    def _row_on_busy_bpc(
+    def _busy_bpc_plan(
         row: dict[str, Any], busy_item_ids: set[int], busy_bpc_type_ids: set[int],
-    ) -> str | None:
-        """Why the row's owned-BPC runs are not available, or None.
+    ) -> dict[str, Any] | None:
+        """{reason, part} when a BPC the batch builds on is in an active job,
+        else None. `part` is the batch's jobs on the free BPCs
+        (research_first.owned_bpc_part), None when none is left.
 
-        The producer counts the runs of every owned BPC in the asset
-        snapshot, which can still list a BPC installed in a job. The row
-        names its BPCs (row_bpc_item_ids); a row that names none while a BPC
-        of its blueprint is in a job cannot be shown to be free."""
+        The producer counts the runs of every owned BPC in the asset snapshot
+        (it adds BPCs locked in active jobs back in), so one variant can hold
+        a busy BPC. Each owned-BPC job names its BPC (blueprint_item_id), so
+        only the jobs on a busy BPC are left out. An older row without those
+        ids falls back to the variant's BPC list (row_bpc_item_ids), and a
+        row that names no BPC while one of its blueprint is in a job cannot
+        be shown to be free: neither builds."""
         if not research_first.builds_on_owned_bpcs(row):
             return None
+        bpc_segments = [
+            s for s in research_first.job_segments(row) or []
+            if str(s.get("source")) == research_first.OWNED_BPC_SOURCE
+        ]
+        segment_ids = [research_first.segment_bpc_item_id(s) for s in bpc_segments]
+        if bpc_segments and all(i is not None for i in segment_ids):
+            busy = sorted({i for i in segment_ids if i in busy_item_ids})
+            if not busy:
+                return None
+            return {
+                "reason": f"BPC in an active industry job (item {', '.join(map(str, busy))})",
+                "part": research_first.owned_bpc_part(row, exclude_item_ids=busy_item_ids),
+            }
         item_ids = research_first.row_bpc_item_ids(row)
         if item_ids:
             busy = sorted(item_ids & busy_item_ids)
-            return f"BPC in an active industry job (item {', '.join(map(str, busy))})" if busy else None
+            if not busy:
+                return None
+            return {"reason": f"BPC in an active industry job (item {', '.join(map(str, busy))})", "part": None}
         if (orow.get_blueprint_type_id(row) or 0) in busy_bpc_type_ids:
-            return "BPC in an active industry job (the row does not name its BPCs)"
+            return {"reason": "BPC in an active industry job (the row does not name its BPCs)", "part": None}
         return None
+
+    def _build_free_bpc_jobs_only(self, decision: ItemDecision, busy_bpc: dict[str, Any]) -> None:
+        """Research first's "part" plan over the free BPCs' jobs, unconditional
+        like a busy BPO: the manufacture action and the sub-builds cover those
+        runs only. Not built when no free job is left."""
+        part = busy_bpc["part"]
+        if part is None:
+            self._mark_not_built(decision, busy_bpc["reason"])
+            return
+        total_runs = orow.get_manufacturing_job(decision.overview_row).get("runs")
+        note = (f"{busy_bpc['reason']}: built from the free owned BPC runs only "
+                f"({part['runs']} of {total_runs} runs)")
+        decision.overview_row["research_first"] = {
+            "mode": "part", **part, "note": note,
+            "cost_unknown_reason": research_first.PART_COST_UNKNOWN_REASON,
+            "sized_note": f"its components were sized for {part['runs']} of {total_runs} runs",
+            "unconditional": True,
+        }
+        logger.info("ChainPlanner: type_id=%s: %s", decision.type_id, note)
 
     @staticmethod
     def _mark_not_built(decision: ItemDecision, reason: str) -> None:
@@ -393,6 +441,8 @@ class ChainPlanner:
             "sized_note": "its components were not sub-built in this plan",
             "unconditional": True,
         }
+        # Not "manufacturing": nothing is built from this row (minor 5).
+        decision.pipeline_stage = NOT_BUILT_STAGE
         logger.info("ChainPlanner: type_id=%s: %s: not built from it in this plan", decision.type_id, reason)
 
     @staticmethod
@@ -578,6 +628,13 @@ class ChainPlanner:
         if bp_type_id in bpc_assets_by_type_id and bpc_assets_by_type_id[bp_type_id]:
             decision.pipeline_stage = "manufacturing"
             return
+        if bpo_assets_by_type_id.get(bp_type_id):
+            # A free owned T2 BPO builds the item: no invention (I2).
+            decision.pipeline_stage = "manufacturing"
+            return
+        if bp_type_id in busy_bpo_type_ids:
+            self._mark_not_built(decision, "T2 BPO in an active industry job")
+            return
 
         # No BPC — need invention chain. bp_type_id is the T2 blueprint; the
         # blueprint that is copied and invented from is its T1 source, and the
@@ -623,6 +680,9 @@ class ChainPlanner:
                 bpo_consider_days=bpo_consider_days,
                 as_invention_enabler=True,
             )
+            # Nothing can build it in this plan: a manufacture action would
+            # buy its materials for a job that cannot run (I2).
+            self._mark_not_built(decision, "no T2 BPC and no T1 BPO to copy: invent needs a T1 BPO/BPC first")
 
     def _blueprint_for_product(
         self,
@@ -792,6 +852,9 @@ class ChainPlanner:
                     "sized_note": "its components were not sub-built in this plan; the shopping list buys them",
                     **flags,
                 }
+                if priced_busy:
+                    # A fact of this plan, not a research slot's outcome.
+                    decision.pipeline_stage = NOT_BUILT_STAGE
             note = row["research_first"]["note"]
         _log(note)
 

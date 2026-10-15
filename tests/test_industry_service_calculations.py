@@ -3907,3 +3907,13 @@ def test_the_manufacturing_eiv_publishes_how_many_materials_it_covers(monkeypatc
     priced = _invention_overview(monkeypatch)[5002]["manufacturing_job"]["activity_breakdown"]["manufacturing"]
     assert priced["estimated_item_value"] is not None
     assert (priced["estimated_item_value_priced_material_count"], priced["estimated_item_value_material_count"]) == (1, 1)
+
+
+def test_each_owned_bpc_job_names_its_bpc(monkeypatch) -> None:
+    # Task 10 fix round 1, I1: the daily planner leaves out a BPC in a job.
+    mj = _invention_overview(
+        monkeypatch, maximize_bp_runs=True, owned_assets=([_owned_t2_bpc(runs=4, item_id=81)], [], {}, {}, {}),
+    )[5002]["manufacturing_job"]
+    owned = [s for s in mj["job_segments"] if s["source"] == "owned_blueprint_copy"]
+    assert [(s["runs"], s["blueprint_item_id"]) for s in owned] == [(4, 81)]
+    assert all("blueprint_item_id" not in s for s in mj["job_segments"] if s["source"] != "owned_blueprint_copy")

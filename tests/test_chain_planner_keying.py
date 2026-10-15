@@ -333,7 +333,8 @@ def test_unowned_t1_bpo_means_one_must_be_acquired():
     assert row.get("has_t1_bpo") is not True
     assert row["needs_t1_bpo"] is True
     assert row["t1_blueprint_type_id"] == 999
-    assert decision.pipeline_stage == "invention"
+    # Not built until a T1 BPO is acquired (fix round 1, I2).
+    assert decision.pipeline_stage == "blocked"
 
 
 def test_owned_t1_bpo_and_assigner_produce_a_copy_of_the_t1_blueprint():
@@ -1568,33 +1569,79 @@ def test_a_busy_owned_t2_bpc_does_not_stand_in_for_invention():
     assert row["needs_invention"] is True and row["has_t1_bpo"] is True
 
 
-def _row_on_owned_bpcs(blueprint_copy):
+def _row_on_owned_bpcs(blueprint_copy, segments=None):
     row = _t2_row()
     job = row["manufacturing_job"]
+    segments = segments if segments is not None else [
+        {"runs": 1, "source": "owned_blueprint_copy", "materials": {"34": 10}},
+    ]
     job.update({
+        "runs": sum(s["runs"] for s in segments),
         "blueprint_source_kind": "owned_blueprint_copy", "blueprint_copy": blueprint_copy,
-        "job_segments": [{"runs": 1, "source": "owned_blueprint_copy", "materials": {"34": 10}}],
-        "materials": {"34": {"type_id": 34, "quantity": 10}},
+        "job_segments": segments,
+        "materials": {"34": {"type_id": 34, "quantity": sum(s["materials"]["34"] for s in segments)}},
     })
+    row["quantity"] = job["runs"]
     return row
 
 
-@pytest.mark.parametrize("blueprint_copy", [{"item_id": 55}, {"item_id": None, "item_ids": [56, 55]}])
-def test_a_row_built_on_a_busy_bpc_is_not_built_and_plans_no_invention(blueprint_copy):
+def _bpc_segment(item_id, runs, tritanium):
+    return {"runs": runs, "source": "owned_blueprint_copy", "blueprint_item_id": item_id,
+            "materials": {"34": tritanium}}
+
+
+_BUSY_55 = {"bpo_assets_by_type_id": {999: [_t1_bpo(79)]},
+            "bpc_assets_by_type_id": {1999: [_t2_bpc(55), _t2_bpc(56)]},
+            "blueprint_data": INVENTION_BLUEPRINT_DATA, "busy_blueprint_item_ids": {55}}
+
+
+@pytest.mark.parametrize("blueprint_copy, segments", [
+    # The batch's only BPC is in a job.
+    ({"item_id": 55}, [_bpc_segment(55, 1, 10)]),
+    # An older row names no BPC per job: the variant's BPC list decides.
+    ({"item_id": 55}, None),
+    ({"item_id": None, "item_ids": [56, 55]}, None),
+])
+def test_a_row_whose_bpc_jobs_are_all_busy_is_not_built_and_plans_no_invention(blueprint_copy, segments):
     # The producer counted the BPC's runs, so the row buys no datacores: building
     # it otherwise, or inventing from it, would under-buy.
-    row = _row_on_owned_bpcs(blueprint_copy)
-    phase1 = {"bpo_assets_by_type_id": {999: [_t1_bpo(79)]},
-              "bpc_assets_by_type_id": {1999: [_t2_bpc(55), _t2_bpc(56)]},
-              "blueprint_data": INVENTION_BLUEPRINT_DATA, "busy_blueprint_item_ids": {55}}
+    row = _row_on_owned_bpcs(blueprint_copy, segments)
     decision = _decision(row, meta_group_id=2)
-    plan = _planner().plan_chain([decision], phase1)
+    plan = _planner().plan_chain([decision], dict(_BUSY_55))
 
     first = decision.overview_row["research_first"]
     assert first["mode"] == "none" and first["unconditional"] is True
     assert "BPC in an active industry job" in first["note"]
     assert not row.get("needs_invention")
+    assert decision.pipeline_stage == "blocked"
     assert [a.action_type for a in _t2_actions(plan)] == []
+
+
+def test_the_free_bpc_jobs_build_when_another_bpc_of_the_batch_is_busy():
+    # Fix round 1, I1: with grouped BPCs one variant holds every BPC of the
+    # type. BPC 55 is in a job; the batch's 3 runs on the free BPC 56 build.
+    row = _row_on_owned_bpcs(
+        {"item_id": None, "item_ids": [56, 55]},
+        [_bpc_segment(56, 3, 30), _bpc_segment(55, 2, 20)],
+    )
+    decision = _decision(row, meta_group_id=2)
+    plan = _planner().plan_chain([decision], dict(_BUSY_55))
+
+    first = decision.overview_row["research_first"]
+    assert (first["mode"], first["unconditional"], first["runs"]) == ("part", True, 3)
+    assert "BPC in an active industry job (item 55)" in first["note"]
+    assert not row.get("needs_invention")
+    (build,) = _t2_actions(plan)
+    assert (build.action_type, build.runs, build.quantity) == ("manufacture", 3, 3)
+    assert build.materials == {34: 30}
+
+
+def test_a_row_whose_bpc_jobs_are_all_free_is_built_as_usual():
+    row = _row_on_owned_bpcs({"item_id": None, "item_ids": [56, 55]}, [_bpc_segment(56, 1, 10)])
+    decision = _decision(row, meta_group_id=2)
+    plan = _planner().plan_chain([decision], dict(_BUSY_55))
+    assert "research_first" not in decision.overview_row
+    assert [a.action_type for a in _t2_actions(plan)] == ["manufacture"]
 
 
 def test_a_row_on_free_bpcs_is_built_as_usual():
@@ -1605,3 +1652,46 @@ def test_a_row_on_free_bpcs_is_built_as_usual():
     plan = _planner().plan_chain([decision], phase1)
     assert "research_first" not in decision.overview_row
     assert [a.action_type for a in _t2_actions(plan)] == ["manufacture"]
+
+
+# --- Task 10 fix round 1, I2: a T2 item with no way to build it ----------------
+
+def _t2_bpo(item_id):
+    return SimpleNamespace(type_id=1999, item_id=item_id, is_blueprint_copy=False,
+                           blueprint_material_efficiency=10, blueprint_time_efficiency=20)
+
+
+def test_a_t2_item_without_a_t2_bpc_or_a_t1_bpo_is_not_built():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    plan = _planner().plan_chain([decision], {"bpo_assets_by_type_id": {}, "blueprint_data": INVENTION_BLUEPRINT_DATA})
+
+    assert row["needs_t1_bpo"] is True   # still analysed as an invention enabler
+    first = decision.overview_row["research_first"]
+    assert (first["mode"], first["unconditional"]) == ("none", True)
+    assert first["note"].startswith("no T2 BPC and no T1 BPO to copy: invent needs a T1 BPO/BPC first")
+    assert decision.pipeline_stage == "blocked"
+    assert [a.action_type for a in _t2_actions(plan)] == []
+
+
+def test_a_free_owned_t2_bpo_builds_without_invention():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {1999: [_t2_bpo(31)], 999: [_t1_bpo(79)]},
+              "blueprint_data": INVENTION_BLUEPRINT_DATA}
+    plan = _planner().plan_chain([decision], phase1)
+
+    assert not row.get("needs_invention") and not row.get("needs_t1_bpo")
+    assert "research_first" not in decision.overview_row
+    assert decision.pipeline_stage == "manufacturing"
+    assert [a.action_type for a in _t2_actions(plan)] == ["manufacture"]
+
+
+def test_a_busy_owned_t2_bpo_does_not_count_as_a_source():
+    row = _t2_row()
+    decision = _decision(row, meta_group_id=2)
+    phase1 = {"bpo_assets_by_type_id": {1999: [_t2_bpo(31)]}, "blueprint_data": INVENTION_BLUEPRINT_DATA,
+              "busy_blueprint_item_ids": {31}}
+    plan = _planner().plan_chain([decision], phase1)
+    assert decision.pipeline_stage == "blocked"
+    assert [a.action_type for a in _t2_actions(plan)] == []
