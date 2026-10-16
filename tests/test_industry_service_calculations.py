@@ -929,10 +929,24 @@ def _invented_t2_blueprint_rows() -> list[dict]:
 
 _INVENTION_FAKE_PRICES = {34: 5.0, 204: 100.0}
 
+# Task 15 fix round 1 (minor 1): a sub-build whose job fees are unknown is
+# bought, so the harness's default profile prices every fee (a test passes
+# profile=None for "no profile"). Every index 1e-9, no facility tax: each fee
+# is the SCC surcharge on the job value.
+_FEES_KNOWN_PROFILE = {
+    "facility_tax": 0.0, "installation_cost_modifier": 0.0,
+    "material_efficiency_bonus": 0.0, "time_efficiency_bonus": 0.0, "facility_cost_bonus": 0.0,
+    "system_cost_indices": [
+        {"activity": activity, "cost_index": 1e-9}
+        for activity in ("manufacturing", "copying", "invention", "research_material", "research_time", "reaction")
+    ],
+    "structure_rigs": [],
+}
+
 
 def _invention_service(
     monkeypatch, *, owned_assets=([], [], {}, {}, {}), owned_item_inventory=None,
-    prices=None, profile=None, blueprint_rows=None, real_confidence=False, adm_overrides=None,
+    prices=None, profile=_FEES_KNOWN_PROFILE, blueprint_rows=None, real_confidence=False, adm_overrides=None,
     fee_context=None, busy_blueprint_item_ids=None,
 ):
     prices = dict(_INVENTION_FAKE_PRICES if prices is None else prices)
@@ -1130,6 +1144,18 @@ _INVENTION_ONLY_PROFILE = {
     "facility_cost_bonus": 0.0,
     "system_cost_indices": [{"activity": "invention", "cost_index": 0.02}],
     "structure_rigs": [],
+}
+
+
+# _INVENTION_ONLY_PROFILE for a row with a sub-build: the sub-build's other
+# fees must be priced too, or it is bought (Task 15 fix round 1, minor 1).
+# The other indices are 1e-9, so each other fee is ~ the 4 % SCC on its value.
+_NESTED_FEES_PROFILE = {
+    **_INVENTION_ONLY_PROFILE,
+    "system_cost_indices": [
+        *_INVENTION_ONLY_PROFILE["system_cost_indices"],
+        *({"activity": activity, "cost_index": 1e-9} for activity in ("manufacturing", "copying")),
+    ],
 }
 
 
@@ -1483,7 +1509,7 @@ _NESTED_FAKE_PRICES = {34: 5.0, 204: 100.0, 5002: 10_000.0}
 def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> None:
     rows = _invention_overview(
         monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(),
-        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE,
+        prices=_NESTED_FAKE_PRICES, profile=_NESTED_FEES_PROFILE,
     )
     mj = rows[7100]["manufacturing_job"]
 
@@ -1509,8 +1535,11 @@ def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> No
     # Tritanium 10 x 5 from the component, plus 40 of amortized datacores.
     assert mj["invention_material_cost"] == pytest.approx(40.0)
     assert mj["material_cost"] == pytest.approx(90.0)
-    assert mj["total_job_cost"] == pytest.approx(0.012)
-    assert mj["total_cost"] == pytest.approx(90.012)
+    # The other fees are ~ the 4 % SCC on their job values (_NESTED_FEES_PROFILE):
+    # parent manufacturing 10,000 EIV -> 400, component 50 -> 2, the source copy
+    # 0.02 x 15 x 0.2 attempts -> 0.0024; the invention fee is the 0.012 above.
+    assert mj["total_job_cost"] == pytest.approx(400.0 + 2.0 + 0.0024 + 0.012, abs=1e-4)
+    assert mj["total_cost"] == pytest.approx(90.0 + mj["total_job_cost"])
 
     # Slot time: parent 200 + component 96 (1 run x 100 s, TE 4) + invention
     # 40 x 0.2 + copy 20 x 0.2.
@@ -1521,7 +1550,7 @@ def test_nested_t2_component_uses_expected_invention_attempts(monkeypatch) -> No
     # The top-level T2 row in the same refresh is unchanged.
     t2 = rows[5002]["manufacturing_job"]
     assert t2["material_cost"] == pytest.approx(90.0)
-    assert t2["total_job_cost"] == pytest.approx(0.012)
+    assert t2["total_job_cost"] == pytest.approx(2.0 + 0.0024 + 0.012, abs=1e-4)
     assert t2["elapsed_time_seconds"] == 96 + 80 + 40  # manufacturing 96 (TE 4)
 
 
@@ -2058,7 +2087,7 @@ def test_a_nested_invented_component_is_built_at_me_2_without_a_copy_job(monkeyp
     rows[1]["copying_job"] = {"time_seconds": 30}
     out = _invention_overview(
         monkeypatch, maximize_bp_runs=True, blueprint_rows=rows,
-        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE,
+        prices=_NESTED_FAKE_PRICES, profile=_NESTED_FEES_PROFILE,
     )
     mj = out[7100]["manufacturing_job"]
     nested = mj["recursive_activity_breakdown"]["manufacturing:5002"]
@@ -2300,7 +2329,7 @@ def test_no_character_manager_means_no_inventor_skills() -> None:
 def _nested_skilled_overview(monkeypatch, *, levels, real_confidence=False):
     service = _invention_service(
         monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(),
-        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE, real_confidence=real_confidence,
+        prices=_NESTED_FAKE_PRICES, profile=_NESTED_FEES_PROFILE, real_confidence=real_confidence,
     )
     service._get_inventor_skill_levels = MethodType(lambda self: levels, service)  # type: ignore[attr-defined]
     out = service.industry_manufacturing_product_overview(
@@ -2486,7 +2515,7 @@ def test_no_qualifying_inventor_is_a_build_time_note(monkeypatch) -> None:
 def test_a_nested_invention_runs_over_the_parallel_inventors_too(monkeypatch) -> None:
     service = _invention_service(
         monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(),
-        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE,
+        prices=_NESTED_FAKE_PRICES, profile=_NESTED_FEES_PROFILE,
     )
     del service._get_inventor_skill_levels  # back to the class method
     service._state.char_manager = SimpleNamespace(get_characters=lambda: [  # type: ignore[attr-defined]
@@ -2535,6 +2564,8 @@ _ATT_CYCLE_COST = 695 + (1 / 0.9) * (2 * 100 + 1000)
 
 
 def _decryptor_service(monkeypatch, options, *, prices=None, **kwargs):
+    # No profile unless a test sets one: the decryptor figures carry no fees.
+    kwargs.setdefault("profile", None)
     service = _invention_service(monkeypatch, prices=prices or _DECRYPTOR_PRICES, **kwargs)
     service._load_decryptor_options = MethodType(  # type: ignore[attr-defined]
         lambda self: (NO_DECRYPTOR, *options), service,
@@ -2674,7 +2705,7 @@ def test_a_nested_invented_component_uses_its_blueprints_decryptor(monkeypatch) 
     # against 10 x 10,000 - 890 without a decryptor.
     out = _decryptor_overview(
         monkeypatch, [_ACCELERANT_LIKE], blueprint_rows=_nested_invention_blueprint_rows(),
-        prices={**_NESTED_FAKE_PRICES, 34201: 50.0},
+        prices={**_NESTED_FAKE_PRICES, 34201: 50.0}, profile=_FEES_KNOWN_PROFILE,
     )
     mj = out[7100]["manufacturing_job"]
 
@@ -3052,7 +3083,7 @@ def test_a_nested_invented_second_job_carries_the_decryptor_me_and_te(monkeypatc
     service = _decryptor_service(
         monkeypatch, [_ACCELERANT_LIKE], prices={**_NESTED_FAKE_PRICES, 34201: 50.0},
         blueprint_rows=_nested_invention_blueprint_rows(),
-        owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}),
+        owned_assets=([_owned_t2_bpc(runs=4)], [], {}, {}, {}), profile=_FEES_KNOWN_PROFILE,
     )
     rows = service.industry_manufacturing_product_overview(
         build_from_bpc=True, have_blueprint_source_only=False, maximize_bp_runs=True, character_id=1,

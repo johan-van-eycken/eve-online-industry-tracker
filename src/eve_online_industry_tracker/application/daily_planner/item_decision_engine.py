@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner.models import (
     ItemDecision,
     PipelineState,
@@ -23,6 +24,23 @@ class ItemDecisionEngine:
     """Phase 4: assign a decision to each scored item."""
 
     def decide(
+        self,
+        scored: ScoredItem,
+        pipeline: PipelineState,
+        overview_row: dict[str, Any],
+        admin_settings: Any,
+        meta_group_id: int | None = None,
+    ) -> ItemDecision:
+        """_decide's decision; when the row's profit is an upper bound (job
+        fees unknown, Task 15 fix round 1 I2) its reason says so. The scores
+        stay on that bound, labelled."""
+        decision = self._decide(scored, pipeline, overview_row, admin_settings, meta_group_id)
+        upper_bound = orow.get_profit_upper_bound_reason(overview_row)
+        if upper_bound is not None and upper_bound not in (decision.decision_reason or ""):
+            decision.decision_reason = f"{decision.decision_reason}; {upper_bound}"
+        return decision
+
+    def _decide(
         self,
         scored: ScoredItem,
         pipeline: PipelineState,

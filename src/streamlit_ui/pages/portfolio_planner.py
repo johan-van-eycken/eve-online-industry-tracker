@@ -34,6 +34,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     load_character_context,
 )
 from streamlit_ui.eve_constants import ACTIVITY_LAB_IDS, ACTIVITY_REACTION_IDS
+from eve_online_industry_tracker.application.industry.overview_row import get_profit_upper_bound_reason
 
 _ALL_META_GROUPS = {"Tech I", "Tech II", "Tech III", "Faction", "Storyline", "Other"}
 _DEFAULT_META_GROUPS_ON = {"Tech I", "Tech II", "Faction", "Storyline", "Other"}
@@ -302,6 +303,10 @@ def _warnings(row: dict[str, Any]) -> list[str]:
     prep_pct = row.get("prep_time_fraction_pct")
     margin = sf(row.get("profit_margin_fraction"))
 
+    upper_bound = get_profit_upper_bound_reason(row)
+    if upper_bound is not None:
+        # Task 15 fix round 1 (I2): the ranking stays on this bound, labelled.
+        warns.append(upper_bound)
     if anomaly == "Medium":
         reasons = row.get("price_anomaly_reasons")
         detail = ""

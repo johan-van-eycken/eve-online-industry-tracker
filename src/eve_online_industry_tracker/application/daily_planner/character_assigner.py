@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 #: On the copy / invent actions of a row that cannot manufacture yet.
 NO_MANUFACTURE_NOTE = "no manufacture until a T2 BPC exists"
+#: Task 15 fix round 1 (I1): nobody free today has the invention's skills.
+NO_FREE_INVENTOR_REASON = "no free pilot can run this invention today"
 
 # EVE activity IDs
 ACTIVITY_MANUFACTURING = 1
@@ -364,6 +366,14 @@ class CharacterAssigner:
                     free_lanes = min(free_lanes, len(lanes))
                     used_bpcs.update(bpc[0] for _cid, _inv, bpc in lanes if bpc is not None)
                 notes = _fewer_lanes_note(row, free_lanes)
+                if not results:
+                    # I1 (Task 15 fix round 1): never an unqualified pilot,
+                    # whose chance and attempts would be another pilot's.
+                    logger.info("CharacterAssigner: type_id=%s: %s", type_id, NO_FREE_INVENTOR_REASON)
+                    if NO_FREE_INVENTOR_REASON not in (decision.decision_reason or ""):
+                        decision.decision_reason = (
+                            f"{decision.decision_reason}; no invention today: {NO_FREE_INVENTOR_REASON}"
+                        )
                 # The producer's choice: bought one per attempt by the shopping list.
                 decryptor = orow.get_invention_decryptor(row)
                 for char_id, invention, bpc in lanes:
@@ -515,6 +525,12 @@ class CharacterAssigner:
             estimated_cost = orow.get_material_cost_total(row)
             estimated_profit = decision.absolute_profit_per_batch
             notes = f"Build: {decision.decision_reason}"
+            # Task 15 fix round 1 (I2): a lower-bound total cost is no build
+            # cost to learn cost_multiplier from (FeedbackProcessor skips None).
+            upper_bound = orow.get_profit_upper_bound_reason(row)
+            build_cost = None if upper_bound is not None else orow.get_total_cost(row)
+            if upper_bound is not None and upper_bound not in notes:
+                notes += f"; {upper_bound}; build cost left unknown for feedback"
             if build_note:
                 notes += f"; {build_note}"
             if first is not None and first.get("build_note"):
@@ -542,7 +558,7 @@ class CharacterAssigner:
                 # of a realized industry-build unit cost, which includes the
                 # manufacturing install fee (FeedbackProcessor compares these;
                 # the remaining differences are documented there).
-                estimated_build_cost_isk=orow.get_total_cost(row),
+                estimated_build_cost_isk=build_cost,
                 estimated_profit_isk=estimated_profit,
                 estimated_completion=None,
                 notes=notes,
@@ -1006,9 +1022,17 @@ class CharacterAssigner:
         chance it assumed). A row without them ranks by the generic
         SCIENCE_SKILLS sum (logged at INFO). Pilots excluded from industry
         have no slot (see _compute_available_slots). Ties break toward the
-        fewest active jobs."""
+        fewest active jobs.
+
+        Only a pilot who can run the invention (every required skill level,
+        _required_levels) is ranked (Task 15 fix round 1, I1): an unqualified
+        pilot's chance would size another pilot's attempts (an under-buy). A
+        pilot whose skills are not loaded stays a candidate: A4 then buys at
+        the SDE base chance with a reason (an over-buy). None: nobody free
+        qualifies."""
         skills = orow.get_invention_skill_set(row or {})
         skill_set = InventionSkillSet(skills[0], skills[1]) if skills is not None else None
+        required = self._required_levels(row or {}) if skill_set is not None else None
         if skill_set is None:
             logger.info(
                 "CharacterAssigner: type_id=%s carries no invention skills from the producer; "
@@ -1018,6 +1042,9 @@ class CharacterAssigner:
         candidates = []
         for slot in char_slots.values():
             if slot.get("free_research", 0) <= 0:
+                continue
+            loaded = slot.get("skills_by_id")
+            if required is not None and loaded is not None and not can_run_invention(required, loaded):
                 continue
             if skill_set is not None:
                 score = invention_skill_factor(skill_set, slot.get("skills_by_id") or {})

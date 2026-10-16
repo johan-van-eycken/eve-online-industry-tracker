@@ -85,10 +85,15 @@ def _best_inventor():
     ]}}
 
 
-def _weaker_pilot(skills=None):
-    # Laboratory Operation 1: two research slots (the invent and the copy action).
-    entries = [_skill("Science A", 2, SCIENCE_A), _skill("Science B", 2, SCIENCE_B)] if skills is None else skills
-    entries = [*entries, _skill("Laboratory Operation", 1, 3406)]
+def _weaker_pilot(skills=None, *, copy_slot=False):
+    # Encryption 1: the pilot can run the invention (Task 15 fix round 1, I1).
+    # One research slot, so one invent lane (the single-pilot A4 path);
+    # copy_slot: Laboratory Operation 1, a second slot for the copy action.
+    entries = [
+        _skill("Science A", 2, SCIENCE_A), _skill("Science B", 2, SCIENCE_B), _skill("Encryption", 1, ENCRYPTION),
+    ] if skills is None else skills
+    if copy_slot:
+        entries = [*entries, _skill("Laboratory Operation", 1, 3406)]
     return {"character_id": WEAK_ID, "character_name": "Weaker", "skills": {"skills": entries}}
 
 
@@ -198,7 +203,7 @@ def _buy(action):
 
 
 E_BEST = 2 / 0.525
-E_WEAK = 2 / 0.408
+E_WEAK = 2 / 0.417
 
 
 def _cost(expected):
@@ -219,39 +224,39 @@ def test_a_weaker_assigned_pilot_gets_its_own_lower_chance_and_buys_more():
     invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
 
     assert invent.character_id == WEAK_ID
-    # 0.30 x (1 + 4/30) x 1.2 = 0.408; best 0.30 x 1.458333 x 1.2 = 0.525.
-    assert invent.invention_probability == pytest.approx(0.408)
+    # 0.30 x (1 + 4/30 + 1/40) x 1.2 = 0.417; best 0.30 x 1.458333 x 1.2 = 0.525.
+    assert invent.invention_probability == pytest.approx(0.417)
     assert invent.invention_best_probability == pytest.approx(0.525)
-    # 2 BPCs / 0.408 = 4.902 expected, ceil -> 5 whole (best inventor: 4).
+    # 2 BPCs / 0.417 = 4.796 expected, ceil -> 5 whole (best inventor: 4).
     assert invent.invention_expected_attempts == pytest.approx(E_WEAK)
     assert invent.runs == 5
     assert invent.invention_chance_reason is None
-    assert "chance 40.8% (assigned pilot), best inventor 52.5%" in invent.notes
+    assert "chance 41.7% (assigned pilot), best inventor 52.5%" in invent.notes
     # 2 per attempt x 5 attempts; one decryptor per attempt.
     assert _buy(invent) == {DATACORE_A: 10, DATACORE_B: 10, DECRYPTOR: 5}
 
 
 def test_the_extra_expected_units_are_priced_at_the_market_not_the_fifo_cost():
     """Minor 2: the best inventor's inputs keep their line totals (Datacore A
-    at FIFO 50); the weaker pilot's extra 1.0924 expected attempts buy at the
+    at FIFO 50); the weaker pilot's extra 0.9866 expected attempts buy at the
     market (900 ISK per attempt), the fee scales with the attempts."""
     invent = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
     assert invent.estimated_cost_isk == pytest.approx(_cost(E_WEAK))
-    # 1286.765 fee + 3047.619 best inputs + 1.092437 x 900 (983.193) = 5317.577
-    assert invent.estimated_cost_isk == pytest.approx(5317.577, abs=0.001)
+    # 1258.993 fee + 3047.619 best inputs + 0.986638 x 900 (887.974) = 5194.587
+    assert invent.estimated_cost_isk == pytest.approx(5194.587, abs=0.001)
 
 
 def test_the_assigned_pilots_chance_caps_at_one():
     row = _row(base=0.90)
     invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
-    # 0.90 x 1.133333 x 1.2 = 1.224 -> 1.0: one attempt per BPC.
+    # 0.90 x 1.158333 x 1.2 = 1.251 -> 1.0: one attempt per BPC.
     assert invent.invention_probability == 1.0
     assert invent.runs == 2
 
 
 def test_the_admin_floor_applies_to_the_assigned_pilot():
     invent = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)], admin=_Admin(floor=0.45))
-    # 0.408 is below the floor 0.45: ceil(2 / 0.45) = 5.
+    # 0.417 is below the floor 0.45: ceil(2 / 0.45) = 5.
     assert invent.invention_probability == pytest.approx(0.45)
     assert invent.runs == 5
 
@@ -259,18 +264,18 @@ def test_the_admin_floor_applies_to_the_assigned_pilot():
 def test_a_bad_floor_value_warns_and_uses_the_default(caplog):
     with caplog.at_level(logging.WARNING):
         invent = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)], admin=_Admin(floor="x"))
-    assert invent.invention_probability == pytest.approx(0.408)
+    assert invent.invention_probability == pytest.approx(0.417)
     assert any(r.levelno == logging.WARNING and "invention_probability_floor" in r.getMessage()
                for r in caplog.records)
 
 
 def test_without_a_decryptor_only_the_datacores_scale():
-    best = _invent(_row(multiplier=1.0, decryptor=False), [_best_inventor(), _weaker_pilot()])
+    best = _invent(_row(multiplier=1.0, decryptor=False), [_best_inventor(), _weaker_pilot()], jobs=[_busy(WEAK_ID)])
     weak = _invent(_row(multiplier=1.0, decryptor=False), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
 
-    # Best 0.4375 -> ceil(2 / 0.4375) = 5; weaker 0.30 x 1.133333 = 0.34 -> ceil(5.88) = 6.
+    # Best 0.4375 -> ceil(2 / 0.4375) = 5; weaker 0.30 x 1.158333 = 0.3475 -> ceil(5.76) = 6.
     assert (best.runs, weak.runs) == (5, 6)
-    assert weak.invention_probability == pytest.approx(0.34)
+    assert weak.invention_probability == pytest.approx(0.3475)
     assert weak.decryptor_type_id is None
     assert _buy(best) == {DATACORE_A: 10, DATACORE_B: 10}
     assert _buy(weak) == {DATACORE_A: 12, DATACORE_B: 12}
@@ -281,14 +286,14 @@ def test_the_copy_action_makes_one_t1_bpc_run_per_invention_attempt():
     BPC runs on hand do not, for the pilot free to invent today (the best
     inventor is busy: the weaker pilot's 5); with none on hand it is the only
     action, and with them on hand today's attempts are capped by them."""
-    actions = _assign(_row(t1_bpo=True), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    actions = _assign(_row(t1_bpo=True), [_best_inventor(), _weaker_pilot(copy_slot=True)], jobs=[_busy(BEST_ID)])
     assert [a for a in actions if a.action_type == "invent"] == []
     (copy,) = [a for a in actions if a.action_type == "copy"]
     assert copy.runs == 5
     assert "no T1 BPC on hand: no invention today" in copy.notes
     row = _row(t1_bpo=True)
     row["t1_bpc_runs_on_hand"] = 4
-    actions = _assign(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
+    actions = _assign(row, [_best_inventor(), _weaker_pilot(copy_slot=True)], jobs=[_busy(BEST_ID)])
     (invent,) = [a for a in actions if a.action_type == "invent"]
     (copy,) = [a for a in actions if a.action_type == "copy"]
     assert copy.runs == 1  # 5 needed, 4 on hand
@@ -301,7 +306,8 @@ def test_the_copy_action_makes_one_t1_bpc_run_per_invention_attempt():
 
 def test_the_best_inventor_keeps_the_producers_numbers():
     row = _row()
-    invent = _invent(row, [_best_inventor(), _weaker_pilot()])
+    # The weaker pilot busy: one lane, the best inventor's (both free would split into lanes).
+    invent = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(WEAK_ID)])
 
     assert invent.character_id == BEST_ID
     best = row["manufacturing_job"]["activity_breakdown"]["invention"]
@@ -360,15 +366,16 @@ def test_unloaded_pilot_skills_buy_at_the_sde_base_chance_with_a_warning(caplog)
     [],  # loaded, nothing trained
     [_skill("Mass Production", 5, 3387)],  # loaded, none of the item's skills
 ])
-def test_loaded_skills_without_the_items_skills_are_level_zero(skills, caplog):
-    """Minor 7 / I2: a loaded list without the item's skills is level 0, computed, no warning."""
-    with caplog.at_level(logging.WARNING):
-        invent = _invent(_row(), [_best_inventor(), _weaker_pilot(skills=skills)], jobs=[_busy(BEST_ID)])
-    assert invent.invention_probability == pytest.approx(0.36)
-    assert invent.runs == 6
-    assert invent.invention_chance_reason is None
-    assert "chance 36% (assigned pilot), best inventor 52.5%" in invent.notes
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+def test_loaded_skills_without_the_items_skills_cannot_invent(skills, caplog):
+    """Minor 7 / I2, then Task 15 fix round 1 (I1): a loaded list without the
+    item's skills is level 0, so the pilot cannot run the invention at all:
+    no invent action (never another pilot's chance), and the reason."""
+    plan = _plan(_row())
+    actions = CharacterAssigner().assign(
+        plan, [_busy(BEST_ID)], _Chars([_best_inventor(), _weaker_pilot(skills=skills)]), _Admin(), price_map=PRICES,
+    )
+    assert [a for a in actions if a.action_type == "invent"] == []
+    assert "no invention today: no free pilot can run this invention today" in plan.decisions[0].decision_reason
 
 
 def test_the_pilots_chance_is_computed_when_the_producer_had_no_skills_loaded():
@@ -377,7 +384,7 @@ def test_the_pilots_chance_is_computed_when_the_producer_had_no_skills_loaded():
     pilot's skills: compute them."""
     row = _row(skills_unknown_reason="no corp character has its skills loaded", inventor=None, best_factor=None)
     invent = _invent(row, [_weaker_pilot()])
-    assert invent.invention_probability == pytest.approx(0.408)
+    assert invent.invention_probability == pytest.approx(0.417)
     assert invent.invention_best_probability == pytest.approx(0.36)
     assert invent.runs == 5
     assert invent.invention_chance_reason is None
@@ -408,7 +415,7 @@ def test_an_owned_bpc_covering_batch_one_sizes_from_the_later_batch_plan():
     invention_bpc_plan and chance: one batch of 20 runs at the pilot's chance."""
     row = _row(plan="bpc_plan")
     weak = _invent(row, [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
-    best = _invent(_row(plan="bpc_plan"), [_best_inventor(), _weaker_pilot()])
+    best = _invent(_row(plan="bpc_plan"), [_best_inventor(), _weaker_pilot()], jobs=[_busy(WEAK_ID)])
 
     assert (best.runs, weak.runs) == (4, 5)
     assert weak.invention_expected_attempts == pytest.approx(E_WEAK)
@@ -493,12 +500,12 @@ def test_invention_attempts_never_divides_by_zero():
 
 
 def test_the_invent_fee_is_paid_per_attempt_the_assigned_pilot_launches():
-    """D4: a weaker pilot launches 6 whole attempts (best inventor: 4), so
-    the invent action's install fee is 6 x 4.0, not the best inventor's 4 x 4.0."""
-    best = _invent(_row(), [_best_inventor(), _weaker_pilot(skills=[])])
-    weak = _invent(_row(), [_best_inventor(), _weaker_pilot(skills=[])], jobs=[_busy(BEST_ID)])
+    """D4: a weaker pilot launches 5 whole attempts (best inventor: 4), so
+    the invent action's install fee is 5 x 4.0, not the best inventor's 4 x 4.0."""
+    best = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(WEAK_ID)])
+    weak = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
     assert (best.runs, best.estimated_job_fee_isk) == (4, pytest.approx(16.0))
-    assert (weak.runs, weak.estimated_job_fee_isk) == (6, pytest.approx(24.0))
+    assert (weak.runs, weak.estimated_job_fee_isk) == (5, pytest.approx(20.0))
 
 
 # --- Task 12 fix round 1: invention split over the free qualifying inventors -----
@@ -560,7 +567,8 @@ def test_the_shopping_list_buys_the_lanes_attempts_summed():
 
 
 def test_a_pilot_without_the_encryption_skill_gets_no_lane():
-    (invent,) = _invents(_row(), [_best_inventor(), _weaker_pilot()])
+    no_encryption = _weaker_pilot(skills=[_skill("Science A", 2, SCIENCE_A), _skill("Science B", 2, SCIENCE_B)])
+    (invent,) = _invents(_row(), [_best_inventor(), no_encryption])
     assert invent.character_id == BEST_ID and invent.runs == 4
 
 

@@ -281,17 +281,19 @@ def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
 
 def test_invention_ranking_without_an_encryption_skill_uses_the_science_skills():
     """A3: an item whose SDE entry has no encryption skill still ranks by its
-    two science skills."""
+    two science skills. Both pilots train both science skills, so both can run it."""
     chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": None}
     encryptor = _char(1, "Encryptor", [_skill("Laboratory Operation", 5), _skill("Caldari Encryption Methods", 5, 21790),
-                                        _skill("High Energy Physics", 1, 11433)])
-    physicist = _char(2, "Physicist", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 3, 11433)])
-    plan = ChainPlan(decisions=[_decision(overview_row={
-        "type_id": 12345, "needs_invention": True,
-        "manufacturing_job": {"invention_chance": chance},
-    })])
-    actions = CharacterAssigner().assign(plan, [], _Chars([encryptor, physicist]), _AdminStub())
-    assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
+                                        _skill("High Energy Physics", 1, 11433),
+                                        _skill("Caldari Starship Engineering", 1, 11454)])
+    physicist = _char(2, "Physicist", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 3, 11433),
+                                        _skill("Caldari Starship Engineering", 1, 11454)])
+    row = {"type_id": 12345, "needs_invention": True, "manufacturing_job": {"invention_chance": chance}}
+    # Both qualify, so the full plan would split over their lanes: rank directly.
+    assigner = CharacterAssigner()
+    from datetime import datetime as _dt, timezone as _tz
+    slots = assigner._compute_available_slots([encryptor, physicist], [], _dt.now(tz=_tz.utc).replace(tzinfo=None))
+    assert assigner._best_invention_char(slots, [encryptor, physicist], row)[0] == 2
 
 
 def test_skill_levels_by_id_reads_the_enriched_list():
@@ -324,7 +326,9 @@ def test_invention_skips_a_pilot_excluded_from_industry():
         _skill("Laboratory Operation", 5), _skill("High Energy Physics", 5, 11433),
         _skill("Caldari Starship Engineering", 5, 11454), _skill("Caldari Encryption Methods", 5, 21790),
     ]), "industry_enabled": False}
-    weaker = {**_char(2, "Weaker", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 1, 11433)]),
+    weaker = {**_char(2, "Weaker", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 1, 11433),
+                                    _skill("Caldari Starship Engineering", 1, 11454),
+                                    _skill("Caldari Encryption Methods", 1, 21790)]),
               "industry_enabled": True}
     plan = ChainPlan(decisions=[_decision(overview_row={
         "type_id": 12345, "needs_invention": True,

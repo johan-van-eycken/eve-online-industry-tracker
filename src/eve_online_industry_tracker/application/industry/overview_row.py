@@ -83,6 +83,18 @@ def get_material_cost_total(row: dict[str, Any]) -> float | None:
     return _as_optional_float(get_manufacturing_job(row).get("material_cost"))
 
 
+def get_profit_upper_bound_reason(row: dict[str, Any]) -> str | None:
+    """"profit is an upper bound: job fees unknown for: ..." when the producer
+    left unpriced job fees out of the row's total_cost (Task 15 I1/I2: then
+    profit, margin and ISK/h are upper bounds and total_cost a lower bound),
+    else None. The one wording of the planner, the decision reason and the
+    Portfolio warnings."""
+    reasons = get_manufacturing_job(row).get("job_fee_unknown_reasons")
+    if not reasons:
+        return None
+    return f"profit is an upper bound: job fees unknown for: {'; '.join(str(r) for r in reasons)}"
+
+
 def get_total_cost(row: dict[str, Any]) -> float | None:
     """The batch's full build cost (materials + job costs), or None.
 

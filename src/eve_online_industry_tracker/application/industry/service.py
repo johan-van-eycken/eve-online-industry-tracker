@@ -538,28 +538,35 @@ class IndustryService:
         if decision.uncertain and decision.reason and IndustryService._first_warning(warned, decision.reason):
             logger.warning("%s: %s", prefix, decision.reason)
 
+    _ONCE_WARNING_LOCK = threading.Lock()
+
     @staticmethod
     def _first_warning(warned: set[Any], key: Any) -> bool:
         """True the first time `key` is met in this refresh (log it now).
         While warnings are quiet (a thrown-away plan, quiet_warnings) nothing
         is registered, so the plan that is kept still logs it, as
-        InventionContext.warn_once does."""
-        if warnings_are_quiet() or key in warned:
+        InventionContext.warn_once does. The check-then-add holds a lock:
+        the product rows are built on worker threads."""
+        if warnings_are_quiet():
             return False
-        warned.add(key)
-        return True
+        with IndustryService._ONCE_WARNING_LOCK:
+            if key in warned:
+                return False
+            warned.add(key)
+            return True
 
     @classmethod
     def _reset_once_warnings(cls) -> None:
         """Scope the once-only WARNING sets to one refresh: cleared when an
         overview is computed (industry_manufacturing_product_overview), so a
         long-running process logs a still-missing input again each refresh."""
-        for warned in (
-            IndustryService._facility_gate_warned, IndustryService._reaction_gate_warned,
-            IndustryService._unclassified_rig_group_warned, IndustryService._rig_security_warned,
-            IndustryService._aggregate_rig_warned,
-        ):
-            warned.clear()
+        with IndustryService._ONCE_WARNING_LOCK:
+            for warned in (
+                IndustryService._facility_gate_warned, IndustryService._reaction_gate_warned,
+                IndustryService._unclassified_rig_group_warned, IndustryService._rig_security_warned,
+                IndustryService._aggregate_rig_warned,
+            ):
+                warned.clear()
 
     @classmethod
     def _reaction_gate(cls, profile_payload: dict[str, Any] | None) -> Any:
@@ -2638,9 +2645,13 @@ class IndustryService:
                 )
             rig_bonus_unknown_reason = manufacturing_job.get("rig_bonus_unknown_reason")
             if rig_bonus_unknown_reason:
+                impacts = [
+                    self._AGGREGATE_RIG_IMPACT[m] for m in (manufacturing_job.get("rig_bonus_unknown_metrics") or [])
+                    if m in self._AGGREGATE_RIG_IMPACT
+                ] or ["the costs may be overstated"]
                 reasons.append(
                     f"{str(rig_bonus_unknown_reason)[:1].upper()}{str(rig_bonus_unknown_reason)[1:]} — "
-                    f"the material cost is overstated, never an under-buy."
+                    f"{'; '.join(impacts)}, never an under-buy."
                 )
             net_proceeds_unknown_reason = manufacturing_job.get("net_proceeds_unknown_reason")
             if net_proceeds_unknown_reason:
@@ -2710,6 +2721,10 @@ class IndustryService:
             invention_cost_unknown_reason = manufacturing_job.get("invention_cost_unknown_reason")
             if invention_cost_unknown_reason:
                 material_confidence = "Low"
+                # Task 15 fix round 1 (minor 2): the T2 cost leaves the
+                # invention out, so the shown confidence is Low too.
+                manufacturing_job["pricing_confidence"] = "Low"
+                row["pricing_confidence"] = "Low"
                 datacore_need_unknown = manufacturing_job.get("invention_datacore_need_unknown")
                 if isinstance(datacore_need_unknown, dict) and datacore_need_unknown.get("batch_one_cost_exact"):
                     # Only the batches past the owned BPC runs invent with
@@ -2798,6 +2813,11 @@ class IndustryService:
             else:
                 isk_per_hour_effective = None
 
+            # Task 15 fix round 1 (I2): a cost that leaves unknown job fees out
+            # makes profit, margin and ISK/h upper bounds (orow.get_profit_upper_bound_reason).
+            upper_bound = bool(manufacturing_job.get("job_fee_unknown_reasons"))
+            manufacturing_job["profit_is_upper_bound"] = upper_bound
+            row["profit_is_upper_bound"] = upper_bound
             manufacturing_job["profit_amount"] = profit_amount
             manufacturing_job["profit_margin_fraction"] = margin_fraction
             manufacturing_job["isk_per_hour"] = isk_per_hour
@@ -2973,6 +2993,11 @@ class IndustryService:
             is_optimal = not uses_contended
             row["inventory_allocation_optimal"] = is_optimal
             row["inventory_priority_rank"] = rank_by_row_index.get(row_index)
+            # Task 15 fix round 1 (I2): the rank orders ISK/h, an upper bound
+            # on a row whose job fees are partly unknown; flagged, not changed.
+            uses_upper_bound = bool(row.get("profit_is_upper_bound"))
+            row["inventory_priority_uses_upper_bound"] = uses_upper_bound
+            manufacturing_job["inventory_priority_uses_upper_bound"] = uses_upper_bound
             manufacturing_job["inventory_allocation_optimal"] = is_optimal
             manufacturing_job["inventory_priority_rank"] = rank_by_row_index.get(row_index)
 
@@ -3344,6 +3369,8 @@ class IndustryService:
             ),
             "pricing_confidence": row.get("pricing_confidence"),
             "pricing_confidence_reasons": row.get("pricing_confidence_reasons") or [],
+            # Task 15 fix round 1: its profit is an upper bound (job fees unknown).
+            "profit_is_upper_bound": bool(row.get("profit_is_upper_bound")),
             "market_price_age_minutes": cls._as_float(row.get("market_price_age_minutes")),
             "estimated_market_absorption_units": estimated_market_absorption_units,
             "max_batches_total": max_batches_total,
@@ -3771,42 +3798,51 @@ class IndustryService:
         # superseding Task 11 I1 / 11b M2): no rig bonus, the same as the
         # daily planner's facility_bonus (an over-buy, never an under-buy),
         # with a WARNING here and a row reason (_aggregate_only_rig_reason).
-        if (
-            activity == "manufacturing"
-            and cls._normalize_fraction(profile_payload.get(f"structure_rig_{metric}_bonus")) > 0.0
-            and cls._aggregate_only_rig_reason(profile_payload) is not None
-        ):
+        if activity == "manufacturing" and metric in cls._aggregate_only_rig_metrics(profile_payload):
             if IndustryService._first_warning(IndustryService._aggregate_rig_warned, metric):
                 logger.warning(
                     "Rig bonus: %s (aggregate structure_rig_%s_bonus %s ignored)",
-                    cls._AGGREGATE_ONLY_RIG_REASON, metric,
+                    cls._aggregate_only_rig_reason(profile_payload), metric,
                     profile_payload.get(f"structure_rig_{metric}_bonus"),
                 )
         return 0.0
 
-    _AGGREGATE_ONLY_RIG_REASON = (
-        "rig bonus unknown: profile has no rig ids, only the aggregate structure rig bonus, "
-        "so no rig bonus applies (re-save the profile with its rigs)"
-    )
+    #: What leaving each aggregate rig metric out does to a row (Task 15 fix round 1).
+    _AGGREGATE_RIG_IMPACT = {
+        "material": "the material quantities and cost are overstated",
+        "time": "the build time is overstated",
+        "cost": "the job fees are overstated",
+    }
 
     @classmethod
-    def _aggregate_only_rig_reason(cls, profile_payload: dict[str, Any] | None) -> str | None:
-        """_AGGREGATE_ONLY_RIG_REASON when the profile has a positive
-        aggregate structure_rig_*_bonus but no per-effect rig entries (the
-        producer then applies no rig bonus); None otherwise."""
+    def _aggregate_only_rig_metrics(cls, profile_payload: dict[str, Any] | None) -> tuple[str, ...]:
+        """The metrics (material, time, cost) with a positive aggregate
+        structure_rig_*_bonus on a profile with no per-effect rig entries:
+        the bonuses the producer does not apply. Empty otherwise. The
+        aggregate was only ever a manufacturing bonus (never reactions)."""
         if not isinstance(profile_payload, dict):
-            return None
+            return ()
         if any(
             isinstance(rig, dict) and any(isinstance(effect, dict) for effect in (rig.get("effects") or []))
             for rig in profile_payload.get("structure_rigs") or []
         ):
+            return ()
+        return tuple(
+            metric for metric in ("material", "time", "cost")
+            if cls._normalize_fraction(profile_payload.get(f"structure_rig_{metric}_bonus")) > 0.0
+        )
+
+    @classmethod
+    def _aggregate_only_rig_reason(cls, profile_payload: dict[str, Any] | None) -> str | None:
+        """The row reason when _aggregate_only_rig_metrics is not empty (the
+        producer then applies no rig bonus to manufacturing), else None."""
+        metrics = cls._aggregate_only_rig_metrics(profile_payload)
+        if not metrics:
             return None
-        if any(
-            cls._normalize_fraction(profile_payload.get(f"structure_rig_{metric}_bonus")) > 0.0
-            for metric in ("material", "time", "cost")
-        ):
-            return cls._AGGREGATE_ONLY_RIG_REASON
-        return None
+        return (
+            f"rig bonus unknown: profile has no rig ids, only the aggregate structure rig "
+            f"{', '.join(metrics)} bonus, so no rig bonus applies to manufacturing (re-save the profile with its rigs)"
+        )
 
     # Rig security-multiplier / aggregate-fallback reasons already logged.
     _rig_security_warned: set[str] = set()
@@ -5325,6 +5361,7 @@ class IndustryService:
                             activity="material",
                             sourcing_strategy="buy",
                             recommendation_action="buy",
+                            **self._build_cost_unknown_fields(child_plan, build_total_cost),
                             category_name=str(material.get("category_name") or "") or None,
                             meta_group_name=str(material.get("meta_group_name") or "") or None,
                             type_id=child_type_id,
@@ -5574,9 +5611,12 @@ class IndustryService:
             "estimated_item_value_priced_material_count": priced_material_count,
             "estimated_item_value_material_count": eiv_material_count,
             "estimated_material_cost": estimated_material_cost,
+            # Unknown (not a partial sum) when any job fee is unknown (Task 15
+            # fix round 1, minor 1).
             "estimated_total_cost": (
                 float(total_job_cost or 0.0) + float(estimated_material_cost or 0.0)
-                if total_job_cost is not None or estimated_material_cost is not None
+                if (total_job_cost is not None or estimated_material_cost is not None)
+                and not job_fee_unknown_reasons
                 else None
             ),
             "leaf_materials": self._aggregate_material_entries(leaf_materials),
@@ -5967,6 +6007,7 @@ class IndustryService:
                         activity="material",
                         sourcing_strategy="buy",
                         recommendation_action="buy",
+                        **self._build_cost_unknown_fields(child_plan, build_total_cost),
                         category_name=str(material.get("category_name") or "") or None,
                         meta_group_name=str(material.get("meta_group_name") or "") or None,
                         type_id=material_type_id,
@@ -8265,12 +8306,34 @@ class IndustryService:
 
     @classmethod
     def _build_total_cost_or_none(cls, child_plan: dict[str, Any]) -> float | None:
-        """A sub-build's total cost for the build-vs-buy choice, or None (buy)
-        when its invention cost is unknown: its estimated_total_cost then leaves
-        the invention out, and building it would buy no datacores."""
-        if child_plan.get("invention_cost_unknown_reasons"):
+        """A sub-build's total cost for the build-vs-buy choice, or None (buy,
+        _build_cost_unknown_reason says why) when its invention cost or any
+        of its job fees is unknown: its cost would leave them out, a partial
+        cost that favours building (Task 15 fix round 1)."""
+        if cls._build_cost_unknown_reason(child_plan) is not None:
             return None
         return cls._as_float(child_plan.get("estimated_total_cost"))
+
+    @classmethod
+    def _build_cost_unknown_fields(cls, child_plan: dict[str, Any] | None, build_total_cost: float | None) -> dict[str, Any]:
+        """{"build_cost_unknown_reason": ...} for a bought node whose sub-build
+        was not costed, else {}."""
+        if not child_plan or build_total_cost is not None:
+            return {}
+        reason = cls._build_cost_unknown_reason(child_plan)
+        return {"build_cost_unknown_reason": reason} if reason is not None else {}
+
+    @staticmethod
+    def _build_cost_unknown_reason(child_plan: dict[str, Any]) -> str | None:
+        """The bought sub-component's node reason when its build cost is
+        unknown (an unknown invention cost or job fee), else None."""
+        invention = [str(r) for r in (child_plan.get("invention_cost_unknown_reasons") or [])]
+        if invention:
+            return f"build cost unknown: invention cost unknown ({'; '.join(dict.fromkeys(invention))}); bought"
+        fees = [str(r) for r in (child_plan.get("job_fee_unknown_reasons") or [])]
+        if fees:
+            return f"build cost unknown: job fees unknown for: {'; '.join(dict.fromkeys(fees))}; bought"
+        return None
 
     @staticmethod
     def _commit_trial(target: dict[int, Any] | None, trial: dict[int, Any]) -> None:
@@ -9846,7 +9909,12 @@ class IndustryService:
             row_out["manufacturing_job"]["job_fee_unknown_reasons"] = list(dict.fromkeys(job_fee_unknown_reasons))
         rig_reason = self._aggregate_only_rig_reason(ctx.selected_industry_profile)
         if rig_reason is not None:
+            # A product row is a manufacturing row: the aggregate was never a
+            # reaction bonus, so its reaction sub-builds lose nothing.
             row_out["manufacturing_job"]["rig_bonus_unknown_reason"] = rig_reason
+            row_out["manufacturing_job"]["rig_bonus_unknown_metrics"] = list(
+                self._aggregate_only_rig_metrics(ctx.selected_industry_profile)
+            )
         if matched_blueprint_originals:
             # An owned BPO, the only blueprint the daily planner researches:
             # its ME/TE research fee per level (A2, Capital Reserved). Also on

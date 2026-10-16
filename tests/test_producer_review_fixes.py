@@ -180,13 +180,8 @@ def test_a_fully_priced_row_has_no_fee_flag(monkeypatch):
     assert why is None and total == pytest.approx(mj["total_cost"])
 
 
-def test_unknown_fees_in_a_built_sub_component_reach_the_parent_row(monkeypatch):
-    rows = h._nested_invention_blueprint_rows(probability_pct=30.0)
-    service = _service(monkeypatch, profile=_F_PROFILE, rows=rows,
-                       prices={34: 5.0, 204: 100.0, 5002: 10_000.0, 7100: 50_000.0})
-    parent = [r for r in _overview(service) if r["type_id"] == 7100][0]
-    reasons = parent["manufacturing_job"]["job_fee_unknown_reasons"]
-    assert any(r.startswith("invention (") and "invention cost index" in r for r in reasons)
+# A sub-build with unknown fees is bought, not built (fix round 1, minor 1):
+# test_producer_review_fixes_round1.test_a_sub_build_with_unknown_fees_is_bought_with_the_reason.
 
 
 def test_the_decryptor_comparison_names_the_excluded_fees(monkeypatch):
@@ -356,7 +351,8 @@ def test_m1_uncovered_product_under_aggregate_only_profile_gets_no_rig_and_a_rea
     mj = row["manufacturing_job"]
     # Structure 1% only: no rig on top (3 Tritanium per run, 1 run).
     assert mj["material_reduction"] == pytest.approx(0.01)
-    assert mj["rig_bonus_unknown_reason"] == IndustryService._AGGREGATE_ONLY_RIG_REASON
+    assert mj["rig_bonus_unknown_reason"] == IndustryService._aggregate_only_rig_reason(_AGGREGATE_ONLY)
+    assert mj["rig_bonus_unknown_metrics"] == ["material", "time"]
     assert any(r.startswith("Rig bonus unknown: profile has no rig ids") for r in row["pricing_confidence_reasons"])
 
 
@@ -374,7 +370,8 @@ def test_m1_no_reason_without_an_aggregate():
     assert IndustryService._aggregate_only_rig_reason(PROFILE) is None
     assert IndustryService._aggregate_only_rig_reason({"structure_rigs": []}) is None
     assert IndustryService._aggregate_only_rig_reason(None) is None
-    assert IndustryService._aggregate_only_rig_reason(_AGGREGATE_ONLY) == IndustryService._AGGREGATE_ONLY_RIG_REASON
+    assert IndustryService._aggregate_only_rig_reason(_AGGREGATE_ONLY).startswith(
+        "rig bonus unknown: profile has no rig ids, only the aggregate structure rig material, time bonus")
 
 
 # --- M2 / M3 / M4 / M5: one copy of each formula ------------------------------------

@@ -311,7 +311,7 @@ def _render_overview_grid(
             if col == "ID":
                 gb.configure_column(col, hide=True)
 
-    for col in ["_path", "_parent_path", "_depth", "_sort_order", "_has_children"]:
+    for col in ["_path", "_parent_path", "_depth", "_sort_order", "_has_children", "_total_cost_lower_bound"]:
         if col in df.columns:
             gb.configure_column(col, hide=True)
 
@@ -333,7 +333,10 @@ def _render_overview_grid(
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                valueFormatter=js_eu_isk_formatter(
+                    JsCode=runtime.js_code, locale=runtime.locale, decimals=2,
+                    lower_bound_field=("_total_cost_lower_bound" if col == "Total Cost" else None),
+                ),
                 minWidth=130,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,

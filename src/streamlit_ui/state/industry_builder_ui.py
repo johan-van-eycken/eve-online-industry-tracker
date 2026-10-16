@@ -276,6 +276,9 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         total_cost = node.get("total_cost")
         if total_cost is None:
             total_cost = job_cost
+        # The row's own total_cost leaves unknown job fees out (Task 15): the
+        # grid's formatter shows it as "≥".
+        total_cost_lower_bound = False
         market_unit_price = node.get("unit_price")
         market_price_source = node.get("price_source")
         market_volume = node.get("price_volume_total") or node.get("volume_total")
@@ -365,6 +368,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             material_cost = manufacturing_job.get("material_cost")
             job_cost = manufacturing_job.get("total_job_cost")
             total_cost = manufacturing_job.get("total_cost")
+            total_cost_lower_bound = bool(manufacturing_job.get("total_cost_excludes_unknown_job_fees"))
             market_unit_price = source_row.get("market_unit_price")
             market_price_source = source_row.get("market_price_source")
             market_volume = source_row.get("market_volume_total")
@@ -435,6 +439,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             if int(node.get("type_id") or 0) == int(source_row.get("type_id") or 0):
                 material_cost = manufacturing_job.get("material_cost")
                 total_cost = manufacturing_job.get("total_cost")
+                total_cost_lower_bound = bool(manufacturing_job.get("total_cost_excludes_unknown_job_fees"))
                 market_unit_price = source_row.get("market_unit_price")
                 market_price_source = source_row.get("market_price_source")
                 market_volume = source_row.get("market_volume_total")
@@ -501,6 +506,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "ISK/Hour": isk_per_hour,
                 "Net Proceeds": net_proceeds,
                 "Total Cost": total_cost,
+                "_total_cost_lower_bound": bool(total_cost_lower_bound and total_cost is not None),
                 "Material Cost": material_cost,
                 "Job Cost": job_cost,
                 "Broker Fee": broker_fee_amount,

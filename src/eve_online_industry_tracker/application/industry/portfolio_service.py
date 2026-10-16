@@ -44,6 +44,7 @@ class PortfolioPlanRequest:
 
 
 class IndustryPortfolioService:
+    _CONFIDENCE_CAPPED_NOTE = "capped: job fees unknown"
     _CONFIDENCE_RANK = {
         "low": 1,
         "medium": 2,
@@ -223,6 +224,7 @@ class IndustryPortfolioService:
         unfulfilled_locked_items: list[dict[str, Any]] = []
 
         filtered_candidates: list[dict[str, Any]] = []
+        capped_by_confidence = 0
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
@@ -280,7 +282,13 @@ class IndustryPortfolioService:
             ):
                 reasons.append("Below minimum owned input coverage")
             if not bypass_scope and cls._confidence_rank_value(candidate.get("pricing_confidence")) < minimum_confidence_rank:
-                reasons.append("Below minimum pricing confidence")
+                if candidate.get("profit_is_upper_bound") and candidate_confidence == "medium":
+                    # Task 15 fix round 1 (minor 3): Medium may be the cap below
+                    # High for unknown job fees (the market alone may be High).
+                    reasons.append(f"Below minimum pricing confidence ({cls._CONFIDENCE_CAPPED_NOTE})")
+                    capped_by_confidence += 1
+                else:
+                    reasons.append("Below minimum pricing confidence")
             if not bypass_scope and candidate.get("skill_requirements_met") is False:
                 reasons.append("Missing required manufacturing skills")
             if not bool(candidate.get("is_portfolio_candidate", False)):
@@ -575,6 +583,11 @@ class IndustryPortfolioService:
             "selected_count": len(selected_items),
             "skipped_count": len(skipped_items),
             "candidate_scope_count": len(filtered_candidates),
+            # Why a confidence filter emptied the plan: rows capped for unknown job fees.
+            "confidence_capped_hint": (
+                f"{capped_by_confidence} rows capped: job fees unknown"
+                if capped_by_confidence and not selected_items else None
+            ),
             "minimum_pricing_confidence": str(plan_request.minimum_pricing_confidence or "low"),
             "operator_decisions": {
                 "forced_includes": forced_items,

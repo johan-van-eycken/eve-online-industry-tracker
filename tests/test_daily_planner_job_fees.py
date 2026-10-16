@@ -33,9 +33,14 @@ class _Admin:
 class _Chars:
     def list_characters(self):
         # Laboratory Operation 5 / Mass Production 5: enough slots for every action.
+        # Level 1 of the row's invention skills: the pilot can run it (Task 15
+        # fix round 1, I1); as the row's inventor it keeps the producer's figures.
         return [{"character_id": PILOT, "character_name": "Pilot", "skills": {"skills": [
             {"skill_id": 3406, "skill_name": "Laboratory Operation", "trained_skill_level": 5},
             {"skill_id": 3387, "skill_name": "Mass Production", "trained_skill_level": 5},
+            {"skill_id": 11433, "skill_name": "High Energy Physics", "trained_skill_level": 1},
+            {"skill_id": 11454, "skill_name": "Caldari Starship Engineering", "trained_skill_level": 1},
+            {"skill_id": 21790, "skill_name": "Caldari Encryption Methods", "trained_skill_level": 1},
         ]}}]
 
 
