@@ -1475,7 +1475,7 @@ def test_an_unknown_fee_buys_the_component_warns_and_records_the_cause(caplog):
         plan = _planner().plan_chain([_decision(_row(materials=materials))], _limited_sub_phase1(7))
     assert [d for d in plan.decisions if d.is_sub_component] == []
     assert plan.decisions[0].overview_row["component_buy_reasons"][54321] == (
-        "component Widget bought: its install fee is unknown (the industry profile has no manufacturing cost index)"
+        "component Widget bought: its install fee is unknown for Thing's structure (the industry profile has no manufacturing cost index)"
     )
     assert any(
         r.levelno == logging.WARNING and "install fee unknown" in r.getMessage() and "54321" in r.getMessage()
@@ -1495,7 +1495,7 @@ def test_the_components_own_row_reason_wins_over_the_parents():
     plan = _planner().plan_chain([_decision(_row(materials=materials))], phase1)
     assert [d for d in plan.decisions if d.is_sub_component] == []
     assert plan.decisions[0].overview_row["component_buy_reasons"][54321] == (
-        "component Widget bought: its install fee is unknown (own row: no priced EIV)"
+        "component Widget bought: its install fee is unknown for Thing's structure (own row: no priced EIV)"
     )
 
 

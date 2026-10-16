@@ -113,8 +113,10 @@ class CharacterAssigner:
         fell_back: set[int] = set()
         # The T1 BPCs ("bpcs") and T1 BPOs ("bpos") already given to an
         # invent / copy job, across rows (fix round 3, Task 14): one job per
-        # blueprint, so each is used once, in assignment order.
-        bpc_pool: dict[str, set[Any]] = {}
+        # blueprint, so each is used once, in assignment order. "released":
+        # {T1 blueprint type_id: BPCs} a row could not invent from today,
+        # offered to the lower rows of that source (Task 15 fix round 4).
+        bpc_pool: dict[str, Any] = {}
         for pass_decisions in (top_level, None):
             if pass_decisions is None:
                 if fell_back and callable(resize):
@@ -176,7 +178,7 @@ class CharacterAssigner:
         price_map: dict[int, Any],
         fell_back: set[int] | None = None,
         can_resize: bool = False,
-        bpc_pool: dict[int, int] | None = None,
+        bpc_pool: dict[str, Any] | None = None,
     ) -> list[AssignedAction]:
         """Return AssignedAction(s) for a single ItemDecision. A research-first
         parent that builds from its kept BPO row is added to `fell_back`;
@@ -303,6 +305,16 @@ class CharacterAssigner:
             used_bpos: set[Any] = pools.setdefault("bpos", set())
             # None: a row without BPC data (not from ChainPlanner): uncapped.
             bpcs = _row_bpcs(row, t1_blueprint_type_id, used_bpcs, carries_bpcs=wants_copy)
+            # Task 15 fix round 4: T1 BPCs a higher row of the same source
+            # could not invent from today (no qualifying pilot free) are
+            # this row's too; used_bpcs keeps each in one job.
+            released: dict[int, list[Any]] = pools.setdefault("released", {})
+            if bpcs is not None and released.get(t1_blueprint_type_id):
+                own = {e[0] for e in bpcs}
+                bpcs = sorted(
+                    [*bpcs, *(e for e in released[t1_blueprint_type_id] if e[0] not in used_bpcs and e[0] not in own)],
+                    key=lambda e: (-e[2], str(e[0])),
+                )
             on_hand = sum(runs for _key, _item, runs in bpcs) if bpcs is not None else 0
             if wants_copy:
                 copy_bpos = _row_copy_bpos(row, t1_blueprint_type_id, used_bpos)
@@ -378,6 +390,13 @@ class CharacterAssigner:
                         else NO_FREE_RESEARCH_SLOT_REASON
                     )
                     logger.info("CharacterAssigner: type_id=%s: no invention today: %s", type_id, why)
+                    if bpcs:
+                        # Task 15 fix round 4: the BPCs ChainPlanner claimed
+                        # for it would sit idle all day; a lower row of the
+                        # same T1 source may invent from them instead.
+                        released.setdefault(t1_blueprint_type_id, []).extend(bpcs)
+                        named = ", ".join(str(e[1]) for e in bpcs if e[1] is not None) or "unnamed"
+                        why = f"{why}; its T1 BPC(s) {named} go to a lower row of the same source"
                     if "no invention today:" not in (decision.decision_reason or ""):
                         decision.decision_reason = f"{decision.decision_reason}; no invention today: {why}"
                 # The producer's choice: bought one per attempt by the shopping list.

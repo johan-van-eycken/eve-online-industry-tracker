@@ -380,7 +380,7 @@ def test_c_a_sub_component_with_an_unknown_fee_is_bought_with_the_reason():
     assert [d for d in plan.decisions if d.is_sub_component] == []
     (parent,) = plan.decisions
     assert parent.overview_row["component_buy_reasons"][54321] == (
-        "component Widget bought: its install fee is unknown "
+        "component Widget bought: its install fee is unknown for Thing's structure "
         "(the industry profile has no manufacturing cost index)"
     )
 
@@ -395,7 +395,7 @@ def test_c_the_shopping_list_buys_the_whole_component_on_the_parent():
     actions = [a for a in ca.CharacterAssigner().assign(plan, [], fl._mfg_pilot(), fl._AdminKeyError())
                if a.action_type in ("manufacture", "sub_manufacture")]
     assert [a.action_type for a in actions] == ["manufacture"]
-    assert "component Widget bought: its install fee is unknown (no index)" in actions[0].notes
+    assert "component Widget bought: its install fee is unknown for Thing's structure (no index)" in actions[0].notes
 
     class _Resolver:
         def is_blueprint(self, type_id):

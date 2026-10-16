@@ -458,23 +458,20 @@ class ChainPlanner:
                 (parent, fallback_requests[parent] if parent in fallen and parent in fallback_requests else requests)
                 for parent, requests in requests_by_parent
             ]
-            buy_reasons: dict[int, str] = {}
+            buy_reasons: dict[int, dict[int, str]] = {}
             subs = self._resolve_sub_requests(
                 self._merge_sub_requests(per_parent), market_depth_cache, phase1_data,
                 buy_reasons=buy_reasons,
             )
-            # Fix round 3 (Task 15): a component bought for an unknown fee
-            # says so on every parent that requested it.
+            # Fix rounds 3-4 (Task 15): a component bought for an unknown fee
+            # says why on every parent that requested it, each in its own words.
             parents = {int(d.type_id): d for d in build_decisions}
-            for request in self._merge_sub_requests(per_parent).values():
-                reason = buy_reasons.get(int(request["type_id"]))
-                if reason is None:
-                    continue
-                for parent_type_id in request["requested_by_type_ids"]:
+            for mat_type_id, by_parent in buy_reasons.items():
+                for parent_type_id, reason in by_parent.items():
                     parent = parents.get(int(parent_type_id))
                     if parent is not None:
                         parent.overview_row.setdefault("component_buy_reasons", {}).setdefault(
-                            int(request["type_id"]), reason,
+                            int(mat_type_id), reason,
                         )
             return subs
 
@@ -509,20 +506,45 @@ class ChainPlanner:
     def _merge_sub_requests(
         per_parent: list[tuple[int, list[dict[str, Any]]]],
     ) -> dict[int, dict[str, Any]]:
-        """{material type_id: one merged request}, in first-seen order."""
+        """{material type_id: one merged request}, in first-seen order.
+
+        One sub job serves every requester, so the parents' published fee
+        per run (the fallback when the component has no row of its own) is
+        merged independently of their order (Task 15 fix round 4): unknown
+        when ANY requester's is unknown (the job's cost is then a lower
+        bound, so the component is bought), else the highest, so no parent's
+        share is under-priced. `parent_fee_unknown_by_parent` names the
+        parents whose fee is unknown: {parent type_id: (name, reason)}."""
         sub_requests: dict[int, dict[str, Any]] = {}
         for parent_type_id, requests in per_parent:
             for request in requests:
                 merged = sub_requests.setdefault(request["type_id"], {
                     **request, "quantity": 0, "requested_by_type_ids": [],
+                    "parent_fee_per_run": None, "parent_fee_unknown_reason": None,
+                    "parent_fee_unknown_by_parent": {}, "_fees_seen": [],
                 })
                 merged["quantity"] += request["quantity"]
                 merged["requested_by_type_ids"].append(parent_type_id)
+                fee = request.get("parent_fee_per_run")
+                merged["_fees_seen"].append(fee)
+                if fee is None:
+                    merged["parent_fee_unknown_by_parent"][int(parent_type_id)] = (
+                        str(request.get("parent_type_name") or f"type_{parent_type_id}"),
+                        _str_or_none(request.get("parent_fee_unknown_reason")),
+                    )
                 # One sub job serves every requester. If their structures
                 # differ, take the smallest facility bonus so no parent's
                 # share is under-bought.
                 if facility_bonus.facility_reduction(request) < facility_bonus.facility_reduction(merged):
                     merged.update({k: request[k] for k in facility_bonus.FACILITY_KEYS})
+        for merged in sub_requests.values():
+            fees = merged.pop("_fees_seen")
+            unknown = merged["parent_fee_unknown_by_parent"]
+            merged["parent_fee_per_run"] = None if unknown else max(fees)
+            # The first unknown parent's reason, for the job and the log.
+            merged["parent_fee_unknown_reason"] = next(
+                (reason for _name, reason in unknown.values() if reason is not None), None,
+            )
         return sub_requests
 
     def _resolve_sub_requests(
@@ -531,10 +553,10 @@ class ChainPlanner:
         market_depth_cache: dict[int, Any],
         phase1_data: dict[str, Any],
         *,
-        buy_reasons: dict[int, str] | None = None,
+        buy_reasons: dict[int, dict[int, str]] | None = None,
     ) -> list[ItemDecision]:
-        """`buy_reasons`: filled with {type_id: reason} for each component
-        _resolve_sub_manufacture buys for a stated reason."""
+        """`buy_reasons`: filled with {type_id: {parent type_id: reason}} for
+        each component _resolve_sub_manufacture buys for a stated reason."""
         decisions: list[ItemDecision] = []
         for request in sub_requests.values():
             try:
@@ -1496,6 +1518,8 @@ class ChainPlanner:
                 "parent_fee_per_run": _non_negative((entries.get(mat_type_id) or {}).get("component_job_fee_per_run")),
                 # Why the parent's producer could not price it (8b fix round 1).
                 "parent_fee_unknown_reason": (entries.get(mat_type_id) or {}).get("component_job_fee_per_run_unknown_reason"),
+                # Named in the buy reason when this parent's fee is unknown (Task 15 fix round 4).
+                "parent_type_name": str(decision.type_name),
                 **facility_bonus.sub_job_facility_reductions(profile, entries.get(mat_type_id)),
             })
         return requests
@@ -1506,7 +1530,7 @@ class ChainPlanner:
         request: dict[str, Any],
         market_depth_cache: dict[int, Any],
         phase1_data: dict[str, Any],
-        buy_reasons: dict[int, str] | None = None,
+        buy_reasons: dict[int, dict[int, str]] | None = None,
     ) -> ItemDecision | None:
         """Build vs buy for one merged material request, net of corp stock.
 
@@ -1579,7 +1603,9 @@ class ChainPlanner:
                 mat_type_id, why,
             )
             if buy_reasons is not None:
-                buy_reasons[mat_type_id] = f"component {request['type_name']} bought: its install fee is unknown ({why})"
+                buy_reasons[mat_type_id] = _unknown_fee_buy_reasons(request, self._component_fee_unknown_reason(
+                    mat_type_id, phase1_data,
+                ))
             return None
         if sub_cost + install_fee >= market_cost:
             return None
@@ -2158,9 +2184,12 @@ def _one_decision_per_type(
         sub = sub_by_type.get(int(decision.type_id))
         if sub is not None and decision.decision != "build":
             _append_reason(sub, f"as a product: {decision.decision} ({decision.decision_reason})")
-            # M4: the persisted item keeps the product's own figures.
+            # M4: the persisted item keeps the product's own figures, and
+            # whether its ISK/h is an upper bound (Task 15 fix round 4), so
+            # isk_per_hour_is_upper_bound is persisted with that ISK/h.
             for name in ("adjusted_score", "isk_per_hour", "margin_pct", "days_of_supply_current",
-                         "effective_velocity", "velocity_unknown_reason", "meta_group_id"):
+                         "effective_velocity", "velocity_unknown_reason", "meta_group_id",
+                         "profit_is_upper_bound"):
                 setattr(sub, name, getattr(decision, name))
             continue
         kept.append(decision)
@@ -2298,6 +2327,35 @@ def _get_attr(obj: Any, attr: str) -> Any:
     if isinstance(obj, dict):
         return obj.get(attr)
     return getattr(obj, attr, None)
+
+
+def _unknown_fee_buy_reasons(request: dict[str, Any], own_row_reason: str | None) -> dict[int, str]:
+    """{parent type_id: reason} for a component bought because the merged
+    sub job's install fee is unknown (Task 15 fix round 4). Only a parent
+    whose own published fee is unknown is told so; the others learn that
+    the one sub job they share is unpriced. The component's own row reason
+    wins over a parent's, as for the fee itself."""
+    name = request["type_name"]
+    default_why = "no fee published; refresh the product overview"
+    unknown: dict[int, tuple[str, str | None]] = request.get("parent_fee_unknown_by_parent") or {}
+    requesters = [int(p) for p in request.get("requested_by_type_ids") or []]
+    if not unknown:
+        # A request without per-parent fees (not from _merge_sub_requests).
+        why = own_row_reason or _str_or_none(request.get("parent_fee_unknown_reason")) or default_why
+        return {p: f"component {name} bought: its install fee is unknown ({why})" for p in requesters}
+    structures = ", ".join(f"{parent_name}'s" for parent_name, _r in unknown.values())
+    reasons: dict[int, str] = {}
+    for parent in requesters:
+        if parent in unknown:
+            parent_name, parent_reason = unknown[parent]
+            why = own_row_reason or parent_reason or default_why
+            reasons[parent] = f"component {name} bought: its install fee is unknown for {parent_name}'s structure ({why})"
+        else:
+            reasons[parent] = (
+                f"component {name} bought: one sub job serves every requester, and its install fee "
+                f"is unknown for {structures} structure"
+            )
+    return reasons
 
 
 def _str_or_none(value: Any) -> str | None:

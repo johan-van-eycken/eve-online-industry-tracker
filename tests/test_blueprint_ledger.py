@@ -443,8 +443,10 @@ def test_probe_d_the_composed_plan_is_unchanged():
         plan_id=0, assigned_actions=actions, shopping_items=items, industry_jobs=[], admin_settings=_Adm(),
         bpo_opportunities=[], character_name_map={}, meta_resolver=_Meta(),
     )
-    value, _caption = capital_reserved_display(compute_capital_reserved([_model_to_dict(r) for r in rows]))
-    assert value == "unknown"
+    value, caption = capital_reserved_display(compute_capital_reserved([_model_to_dict(r) for r in rows]))
+    # Task 15 fix round 4: the cause is the unpriced Datacore B purchase
+    # (estimated_total None above), and only that: every job fee is known.
+    assert (value, caption) == ("unknown", "1 purchase(s) have no price")
 
 
 # --- minor 2: rows not manufactured today say why -----------------------------------
