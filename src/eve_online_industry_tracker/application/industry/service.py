@@ -7017,7 +7017,6 @@ class IndustryService:
             "group_icon_id": entry.get("group_icon_id"),
             "group_id": entry.get("group_id"),
             "group_name": entry.get("group_name"),
-            "group_repackaged_volume": entry.get("group_repackaged_volume"),
             "group_use_base_price": entry.get("group_use_base_price"),
             "icon_id": entry.get("icon_id"),
             "portion_size": entry.get("portion_size"),

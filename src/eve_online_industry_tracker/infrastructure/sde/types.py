@@ -9,6 +9,22 @@ from eve_online_industry_tracker.db_models import Categories, Factions, Groups, 
 from eve_online_industry_tracker.infrastructure.sde.localization import parse_localized
 
 
+def asset_volumes(type_row: Any, *, is_singleton: bool) -> tuple[float | None, float | None, float | None]:
+    """(volume, packaged volume, the item's volume) of one asset of an SDE type.
+
+    The SDE's types.packagedVolume is the packaged (repackaged) volume; it
+    equals volume for a type that does not repackage. A packaged item (not a
+    singleton) takes packagedVolume when the SDE has one, otherwise volume;
+    an assembled item (a singleton) takes volume. An unknown type: 0.0."""
+    if type_row is None:
+        return 0.0, None, 0.0
+    volume = getattr(type_row, "volume", None)
+    packaged = getattr(type_row, "packagedVolume", None)
+    if not is_singleton and packaged is not None:
+        return volume, packaged, packaged
+    return volume, packaged, volume
+
+
 def get_type_data(session: Any, language: str, type_ids: list[int]) -> dict[int, dict]:
     """Return type metadata for the given list of type IDs."""
     if not type_ids:
@@ -66,7 +82,7 @@ def get_type_data(session: Any, language: str, type_ids: list[int]) -> dict[int,
             "type_id": t.id,
             "type_name": parse_localized(t.name, language) or str(t.id),
             "volume": getattr(t, "volume", None),
-            "repackaged_volume": getattr(t, "repackagedVolume", None),
+            "repackaged_volume": getattr(t, "packagedVolume", None),
             "radius": getattr(t, "radius", None),
             "portion_size": getattr(t, "portionSize", None),
             "description": parse_localized(getattr(t, "description", None), language),
@@ -83,7 +99,6 @@ def get_type_data(session: Any, language: str, type_ids: list[int]) -> dict[int,
             "group_anchored": getattr(group, "anchored", None) if group else None,
             "group_use_base_price": getattr(group, "useBasePrice", None) if group else None,
             "group_fittable_non_singleton": getattr(group, "fittableNonSingleton", None) if group else None,
-            "group_repackaged_volume": getattr(group, "repackagedVolume", None) if group else None,
             "category_id": getattr(group, "categoryID", None) if group else None,
             "category_name": parse_localized(getattr(category, "name", None), language) if category else "",
             "category_icon_id": getattr(category, "iconID", None) if category else None,

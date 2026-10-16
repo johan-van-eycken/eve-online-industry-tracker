@@ -240,6 +240,7 @@ class CharacterAssetsModel(BaseApp):
     type_id: Mapped[int] = mapped_column(Integer, nullable=False)
     type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     type_default_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # The SDE's types.packagedVolume (the column keeps its old name: no migration).
     type_repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_capacity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -360,6 +361,7 @@ class CorporationAssetsModel(BaseApp):
     type_id: Mapped[int] = mapped_column(Integer, nullable=False)
     type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     type_default_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # The SDE's types.packagedVolume (the column keeps its old name: no migration).
     type_repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     type_capacity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -821,6 +823,8 @@ class Types(BaseSde):
     portionSize: Mapped[int] = mapped_column(Integer, nullable=True)
     published: Mapped[bool] = mapped_column(Boolean, nullable=True)
     volume: Mapped[float] = mapped_column(Float, nullable=True)
+    # The SDE's packaged (repackaged) volume, from build 3607705 on.
+    packagedVolume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     radius: Mapped[int] = mapped_column(Integer, nullable=True)
     description: Mapped[dict[str, str]] = mapped_column(JSON, nullable=True)
     graphicID: Mapped[int] = mapped_column(Integer, nullable=True)
@@ -834,7 +838,6 @@ class Types(BaseSde):
     metaLevel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     variationParentTypeID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     factionID: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 class Groups(BaseSde):
     __tablename__ = "groups"
@@ -848,7 +851,6 @@ class Groups(BaseSde):
     published: Mapped[bool] = mapped_column(Boolean, nullable=True)
     useBasePrice: Mapped[bool] = mapped_column(Boolean, nullable=True)
     iconID: Mapped[int] = mapped_column(Integer, nullable=True)
-    repackaged_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 class Categories(BaseSde):
     __tablename__ = "categories"

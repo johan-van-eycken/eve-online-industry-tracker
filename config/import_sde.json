@@ -4,7 +4,6 @@
   "SDE_URL": "https://developers.eveonline.com/static-data/eve-online-static-data-latest-yaml.zip",
   "DEFAULT_DB_URI": "sqlite:///database/eve_sde.db",
   "DEFAULT_TMP_DIR": "database/data/tmp_sde",
-  "REPACKAGED_JSON_PATH": "database/data/static_data/repackaged_volumes.json",
   "TABLES_TO_IMPORT": [
     "agentsInSpace",
     "agentTypes",
