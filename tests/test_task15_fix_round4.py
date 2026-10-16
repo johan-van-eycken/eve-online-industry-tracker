@@ -196,5 +196,5 @@ def test_a_row_not_built_for_the_releasing_rows_bpcs_says_that_row_does_not_inve
     _assign_rows(high, low)
     assert low.decision_reason == (
         "test; not built: T1 BPCs (998) used by invention for Widget II (12345) "
-        "(that row does not invent today) today and no T1 BPO to copy: no invention in this plan"
+        "(which ended up not inventing) today and no T1 BPO to copy: no invention in this plan"
     )

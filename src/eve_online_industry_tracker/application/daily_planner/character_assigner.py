@@ -1198,7 +1198,7 @@ def _reword_released_bpcs(decisions: list[ItemDecision], bpc_pool: dict[str, Any
             parts.append(f"its T1 BPC(s) {', '.join(unused)} stay unused today")
         releaser.decision_reason = (releaser.decision_reason or "").replace(placeholder, "; ".join(parts))
         label = f"invention for {releaser.type_name} ({releaser.type_id})"
-        marked = f"{label} (that row does not invent today)"
+        marked = f"{label} (which ended up not inventing)"
         for decision in decisions:
             reason = decision.decision_reason or ""
             if decision is releaser or "not built:" not in reason or f"used by {label}" not in reason:
