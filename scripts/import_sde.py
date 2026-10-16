@@ -533,7 +533,8 @@ def main():
                 f"\n!!! SDE import incomplete: {len(failed_tables)} table(s) failed: {', '.join(failed_tables)}.\n"
                 "    The SDE version was not recorded and the extracted files were kept (no --cleanup).\n"
                 "    The tables that imported stay as they are. Fix the cause shown above, then re-run\n"
-                "    scripts/import_sde.py --import --force."
+                "    scripts/import_sde.py --import --force (add --download when the extracted SDE is old\n"
+                "    or a table's YAML file is missing)."
             )
             sys.exit(1)
 
