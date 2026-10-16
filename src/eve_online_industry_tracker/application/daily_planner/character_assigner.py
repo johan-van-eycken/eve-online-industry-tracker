@@ -154,6 +154,7 @@ class CharacterAssigner:
 
         if fell_back:
             _reword_unused_research_claims(chain_plan.decisions, assigned_actions, fell_back)
+        _reword_released_bpcs(chain_plan.decisions, bpc_pool)
         return assigned_actions
 
     def _take_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
@@ -378,6 +379,11 @@ class CharacterAssigner:
                     # The lanes kept after the cap (fix round 4), not the free ones.
                     free_lanes = min(free_lanes, len(lanes))
                     used_bpcs.update(bpc[0] for _cid, _inv, bpc in lanes if bpc is not None)
+                    # Who invents from each BPC, for a releasing row's reason.
+                    takers: dict[Any, ItemDecision] = pools.setdefault("taken_by", {})
+                    for _cid, _inv, bpc in lanes:
+                        if bpc is not None:
+                            takers.setdefault(bpc[0], decision)
                 notes = _fewer_lanes_note(row, free_lanes)
                 if not results:
                     # I1 (Task 15 fix round 1): never an unqualified pilot,
@@ -394,9 +400,12 @@ class CharacterAssigner:
                         # Task 15 fix round 4: the BPCs ChainPlanner claimed
                         # for it would sit idle all day; a lower row of the
                         # same T1 source may invent from them instead.
+                        # Fix round 5: what became of each BPC is worded after
+                        # every row is assigned (_reword_released_bpcs).
                         released.setdefault(t1_blueprint_type_id, []).extend(bpcs)
-                        named = ", ".join(str(e[1]) for e in bpcs if e[1] is not None) or "unnamed"
-                        why = f"{why}; its T1 BPC(s) {named} go to a lower row of the same source"
+                        placeholder = _released_placeholder(type_id)
+                        pools.setdefault("releases", []).append((decision, list(bpcs), placeholder))
+                        why = f"{why}; {placeholder}"
                     if "no invention today:" not in (decision.decision_reason or ""):
                         decision.decision_reason = f"{decision.decision_reason}; no invention today: {why}"
                 # The producer's choice: bought one per attempt by the shopping list.
@@ -1156,6 +1165,49 @@ def _no_manufacture_today(decision: ItemDecision, reason: str) -> None:
     if "not built:" in current or "no manufacture today:" in current:
         return
     decision.decision_reason = f"{current}; no manufacture today: {reason}"
+
+
+def _released_placeholder(type_id: int) -> str:
+    """A unique marker in a releasing row's reason, replaced once every row
+    is assigned (Task 15 fix round 5)."""
+    return f"\x00released-bpcs-{int(type_id)}\x00"
+
+
+def _reword_released_bpcs(decisions: list[ItemDecision], bpc_pool: dict[str, Any]) -> None:
+    """Task 15 fix rounds 4-5: a row that invents nothing today released its
+    T1 BPCs. Its reason names the row that invents from each BPC ("go to
+    <row>") or says it stays unused today. A row ChainPlanner marked not
+    built because that row's invention held the BPCs is told that row does
+    not invent today."""
+    taken_by: dict[Any, ItemDecision] = bpc_pool.get("taken_by") or {}
+    for releaser, bpcs, placeholder in bpc_pool.get("releases") or []:
+        groups: dict[int, tuple[ItemDecision, list[str]]] = {}
+        unused: list[str] = []
+        for key, item, _runs in bpcs:
+            name = str(item) if item is not None else "unnamed"
+            taker = taken_by.get(key)
+            if taker is None or taker is releaser:
+                unused.append(name)
+            else:
+                groups.setdefault(id(taker), (taker, []))[1].append(name)
+        parts = [
+            f"its T1 BPC(s) {', '.join(names)} go to {taker.type_name} ({taker.type_id})"
+            for taker, names in groups.values()
+        ]
+        if unused:
+            parts.append(f"its T1 BPC(s) {', '.join(unused)} stay unused today")
+        releaser.decision_reason = (releaser.decision_reason or "").replace(placeholder, "; ".join(parts))
+        label = f"invention for {releaser.type_name} ({releaser.type_id})"
+        marked = f"{label} (that row does not invent today)"
+        for decision in decisions:
+            reason = decision.decision_reason or ""
+            if decision is releaser or "not built:" not in reason or f"used by {label}" not in reason:
+                continue
+            if marked not in reason:
+                decision.decision_reason = reason.replace(label, marked)
+            first = decision.overview_row.get("research_first")
+            if isinstance(first, dict) and isinstance(first.get("note"), str) and marked not in first["note"]:
+                first["note"] = first["note"].replace(label, marked)
 
 
 def _row_bpcs(

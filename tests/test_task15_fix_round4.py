@@ -133,7 +133,7 @@ def test_bpcs_of_a_row_without_a_qualifying_pilot_go_to_the_next_row_of_the_sour
     ]
     assert (
         "; no invention today: no free pilot with the invention skills; "
-        "its T1 BPC(s) 701 go to a lower row of the same source;"
+        "its T1 BPC(s) 701 go to Widget II (12346);"
     ) in high.decision_reason
 
 
@@ -148,3 +148,53 @@ def test_a_row_that_invents_keeps_its_bpcs():
     assert [(a.action_type, a.type_id, a.blueprint_item_id) for a in actions] == [
         ("invent", 12345, 701), ("copy", 998, None),
     ]
+
+
+# --- Task 15 fix round 5: the release note says what happened to each BPC ----------
+
+def _assign_rows(*decisions, lab_slots=1):
+    return CharacterAssigner().assign(
+        ChainPlan(decisions=list(decisions)), [], a4._Chars([_other_pilot(lab_slots=lab_slots)]), a4._Admin(),
+        price_map=a4.PRICES,
+    )
+
+
+def test_released_bpcs_name_the_row_that_takes_them():
+    high = a4._decision(_t2_row(12345, a4.ENCRYPTION, [[701, 10]]), type_id=12345, score=2.0)
+    _assign_rows(high, _copying_low_row())
+    assert ("; no invention today: no free pilot with the invention skills; "
+            "its T1 BPC(s) 701 go to Widget II (12346);") in high.decision_reason
+    assert "lower row of the same source" not in high.decision_reason
+
+
+def test_released_bpcs_nobody_takes_stay_unused_today():
+    high = a4._decision(_t2_row(12345, a4.ENCRYPTION, [[701, 10]]), type_id=12345, score=2.0)
+    _assign_rows(high)
+    assert ("; no invention today: no free pilot with the invention skills; "
+            "its T1 BPC(s) 701 stay unused today;") in high.decision_reason
+    assert "go to" not in high.decision_reason
+
+
+def test_released_bpcs_partly_taken_say_both():
+    """One research slot: the lower row runs one lane, on 701 (the tie goes
+    to the lower key); 702 stays unused."""
+    high = a4._decision(_t2_row(12345, a4.ENCRYPTION, [[701, 10], [702, 10]]), type_id=12345, score=2.0)
+    actions = _assign_rows(high, _copying_low_row(), lab_slots=0)
+    assert [(a.action_type, a.type_id, a.blueprint_item_id) for a in actions] == [("invent", 12346, 701)]
+    assert ("; no invention today: no free pilot with the invention skills; "
+            "its T1 BPC(s) 701 go to Widget II (12346); its T1 BPC(s) 702 stay unused today;") in high.decision_reason
+
+
+def test_a_row_not_built_for_the_releasing_rows_bpcs_says_that_row_does_not_invent():
+    high = a4._decision(_t2_row(12345, a4.ENCRYPTION, [[701, 10]]), type_id=12345, score=2.0)
+    low = a4._decision(a4._row(), type_id=12346, score=1.0, stage="invention")
+    low.overview_row = {"type_id": 12346, "manufacturing_job": {"runs": 20}}
+    cp.ChainPlanner._mark_not_built(
+        low, "T1 BPCs (998) used by invention for Widget II (12345) today and no T1 BPO to copy: "
+             "no invention in this plan",
+    )
+    _assign_rows(high, low)
+    assert low.decision_reason == (
+        "test; not built: T1 BPCs (998) used by invention for Widget II (12345) "
+        "(that row does not invent today) today and no T1 BPO to copy: no invention in this plan"
+    )
