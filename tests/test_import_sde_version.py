@@ -102,3 +102,31 @@ def test_the_up_to_date_check_still_needs_the_online_version(importer, tmp_path,
     assert "Could not fetch latest SDE version" in capsys.readouterr().out
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT count(*) FROM sde_version").fetchone() == (0,)
+
+
+# --- a partial import never looks current ------------------------------------------
+
+def test_the_import_returns_the_tables_that_failed(importer, tmp_path):
+    sde_dir = _sde_dir(tmp_path)
+    (sde_dir / "groups.yaml").write_text("not: [valid", encoding="utf-8")  # unparsable YAML
+    failed = importer.import_sde_to_sqlite(str(sde_dir), db_uri=f"sqlite:///{tmp_path / 'sde.db'}",
+                                           tables_to_import=["categories", "groups"])
+    assert failed == ["groups"]
+
+
+def test_a_failed_table_records_no_version_keeps_the_files_and_exits_non_zero(importer, tmp_path, monkeypatch,
+                                                                               capsys):
+    sde_dir = _sde_dir(tmp_path)
+    (sde_dir / "groups.yaml").write_text("not: [valid", encoding="utf-8")
+    db = tmp_path / "sde.db"
+    monkeypatch.setattr(importer, "get_latest_sde_version", lambda url: None)
+    with pytest.raises(SystemExit) as exit_info:
+        _run_main(importer, monkeypatch, "--import", "--cleanup", "--force", "--tables", "categories", "groups",
+                  "--db", f"sqlite:///{db}", "--tmp", str(sde_dir))
+    assert exit_info.value.code not in (0, None)
+    out = capsys.readouterr().out
+    assert "groups" in out and "not recorded" in out and "re-run" in out
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT count(*) FROM sde_version").fetchone() == (0,)
+        assert conn.execute("SELECT count(*) FROM categories").fetchone() == (1,)  # imported tables stay
+    assert (sde_dir / "_sde.yaml").exists()  # --cleanup skipped: the files stay for the retry

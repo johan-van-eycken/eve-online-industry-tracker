@@ -230,7 +230,9 @@ def download_sde(url: str, dest_dir: str) -> str:
 # ----------------------------
 # Import YAML SDE tables to SQLite
 # ----------------------------
-def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
+def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list) -> list[str]:
+    """Import the tables; return the ones that failed (an error, or no YAML
+    file in sde_dir), in tables_to_import order. Tables that imported stay."""
     db = DatabaseManager(db_uri)
 
     table_files = []
@@ -244,6 +246,12 @@ def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
     tqdm.write(f"Importing {len(table_files)} tables...\n")
 
     import_summary = []
+    errors: dict[str, str] = {}
+    found = {name for name, _ in table_files}
+    for table_name in tables_to_import:
+        if table_name not in found:
+            errors[table_name] = f"no {table_name}.yaml in {sde_dir}"
+            import_summary.append((table_name, "MISSING"))
 
     with tqdm(total=len(table_files), desc="Overall Progress", unit="table") as overall_pbar:
         for table_name, yaml_path in table_files:
@@ -276,6 +284,7 @@ def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
             except Exception as e:
                 tqdm.write(f"{table_name:<25} | ERROR: {e}")
                 import_summary.append((table_name, "ERROR"))
+                errors[table_name] = str(e)
             overall_pbar.update(1)
 
     tqdm.write("\n=== Import Summary ===")
@@ -284,7 +293,15 @@ def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list):
     for name, count in import_summary:
         tqdm.write(f"{name:<25} | {str(count):>12}")
 
-    tqdm.write(f"\nAll selected SDE tables imported to {db_uri}\n")
+    failed = [t for t in tables_to_import if t in errors]
+    if failed:
+        tqdm.write(f"\n{len(failed)} of {len(tables_to_import)} SDE tables NOT imported to {db_uri}:")
+        for table_name in failed:
+            tqdm.write(f"  {table_name:<25} | {errors[table_name]}")
+        tqdm.write("")
+    else:
+        tqdm.write(f"\nAll selected SDE tables imported to {db_uri}\n")
+    return failed
 
 
 # ----------------------------
@@ -504,11 +521,21 @@ def main():
         if version_warning:
             print(f"\n⚠ WARNING: {version_warning}")
 
-        import_sde_to_sqlite(
+        failed_tables = import_sde_to_sqlite(
             sde_path,
             db_uri=args.db,
             tables_to_import=tables_to_import,
         )
+        if failed_tables:
+            # A partial import must never look current: no version recorded,
+            # and no cleanup, so the extracted files stay for the retry.
+            print(
+                f"\n!!! SDE import incomplete: {len(failed_tables)} table(s) failed: {', '.join(failed_tables)}.\n"
+                "    The SDE version was not recorded and the extracted files were kept (no --cleanup).\n"
+                "    The tables that imported stay as they are. Fix the cause shown above, then re-run\n"
+                "    scripts/import_sde.py --import --force."
+            )
+            sys.exit(1)
 
         # Record the imported files' version
         if version is not None:
