@@ -42,10 +42,10 @@ def check_sde_industry_data(state) -> None:
     loader (infrastructure.sde.industry), then load it.
 
     An SDE imported before them is not fatal for startup (characters and
-    assets still load), but every problem is logged as an ERROR and listed
-    in the /health warnings, each naming the re-import; the rig and shipyard
-    calculations then raise until the SDE is re-imported (picked up on the
-    next use, no restart)."""
+    assets still load), but every problem is logged as an ERROR and kept in
+    state.sde_warnings, which /health lists and re-checks (the warning goes
+    once a live re-import makes the data load), each naming the re-import.
+    The rig and shipyard calculations raise until then."""
     from eve_online_industry_tracker.infrastructure.sde import industry as sde_industry
 
     def load():
@@ -55,20 +55,17 @@ def check_sde_industry_data(state) -> None:
         finally:
             session.close()
 
+    sde_industry.configure_industry_data_loader(load)
     session = state.db_sde.Session()
     try:
         problems = sde_industry.sde_schema_problems(session)
+        for problem in problems:
+            logging.error("SDE check: %s", problem)
+        if not problems:
+            problems = sde_industry.sde_health_problems(session)  # loads it; a failure is logged as an ERROR
     finally:
         session.close()
-    for problem in problems:
-        logging.error("SDE check: %s", problem)
-        state.init_warnings.append(problem)
-    sde_industry.configure_industry_data_loader(load)
-    if not problems:
-        try:
-            sde_industry.industry_data()
-        except sde_industry.SdeIndustryDataMissing as exc:  # logged as an ERROR by industry_data()
-            state.init_warnings.append(str(exc))
+    state.sde_warnings = list(problems)
 
 
 def initialize_application(app_state: AppState | None = None, *, refresh_metadata: bool = True) -> None:

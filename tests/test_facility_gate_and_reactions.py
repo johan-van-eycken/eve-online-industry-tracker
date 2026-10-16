@@ -105,6 +105,7 @@ def _can(hull, profile, category=(6, "Ship")):
 # --- I1: the hull groups come from CCP's assembly lines ------------------------------
 
 _CAPITAL_HULLS = {485, 547, 883, 1538, 4594, 5120}
+_GROUP_CATEGORIES = {gid: cat for gid, (cat, _) in fakes.GROUPS.items()}
 
 
 @pytest.fixture(params=["fake_sde", "local_sde"])
@@ -129,13 +130,13 @@ def test_the_shipyard_hull_groups_are_ccps_assembly_lines(lines):
 def test_a_service_module_the_sde_does_not_list_is_an_error():
     installation_types = {k: v for k, v in fakes.INSTALLATION_TYPES.items() if k != 35881}
     with pytest.raises(ValueError, match="35881"):
-        fac.build_shipyard_lines(fakes.ASSEMBLY_LINES, installation_types)
+        fac.build_shipyard_lines(fakes.ASSEMBLY_LINES, installation_types, group_categories=_GROUP_CATEGORIES)
 
 
 def test_a_line_the_sde_does_not_have_is_an_error():
     assembly_lines = {k: v for k, v in fakes.ASSEMBLY_LINES.items() if k != 177}
     with pytest.raises(ValueError, match="177"):
-        fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES)
+        fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
 
 
 def test_the_lines_follow_the_sde_not_a_constant():
@@ -147,8 +148,35 @@ def test_the_lines_follow_the_sde_not_a_constant():
         d for d in assembly_lines[175]["detailsPerGroup"] if d["groupID"] != 513]}
     assembly_lines[176] = {**assembly_lines[176], "detailsPerGroup": [
         *assembly_lines[176]["detailsPerGroup"], {"groupID": 513}]}
-    lines = fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES)
+    lines = fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
     assert fac.required_shipyard(513, lines) == fac.CAPITAL_SHIPYARD
+
+
+def test_a_category_on_the_basic_line_builds_every_hull_in_it():
+    """M4: detailsPerCategory counts. A made-up SDE whose basic line lists
+    category 6 (Ship) builds every hull there: no shipyard is required."""
+    assembly_lines = {**fakes.ASSEMBLY_LINES}
+    assembly_lines[175] = {**assembly_lines[175], "detailsPerCategory": [{"categoryID": 6}]}
+    lines = fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
+    assert fac.required_shipyard(485, lines) is None
+    assert lines.capital_group_ids == set()
+
+
+def test_a_category_on_a_shipyard_line_adds_its_groups():
+    assembly_lines = {**fakes.ASSEMBLY_LINES}
+    assembly_lines[176] = {**assembly_lines[176], "detailsPerCategory": [{"categoryID": 87}]}
+    group_categories = {**_GROUP_CATEGORIES, 1652: 87}  # Light Fighter, not on the basic line
+    lines = fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=group_categories)
+    assert fac.required_shipyard(1652, lines) == fac.CAPITAL_SHIPYARD
+
+
+def test_a_type_list_on_a_service_line_is_an_error():
+    """M4: detailsPerTypeList names types, which the hull-group gate cannot
+    read: the data is unreadable, not silently ignored."""
+    assembly_lines = {**fakes.ASSEMBLY_LINES}
+    assembly_lines[176] = {**assembly_lines[176], "detailsPerTypeList": [{"typeListID": 583}]}
+    with pytest.raises(ValueError, match="detailsPerTypeList"):
+        fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
 
 
 def test_no_installation_type_uses_line_35_so_the_npc_station_assumption_is_checked():

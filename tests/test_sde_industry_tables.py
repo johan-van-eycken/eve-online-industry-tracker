@@ -168,7 +168,7 @@ def test_a_missing_table_is_logged_once_as_an_error_and_retried(caplog):
         calls.append(1)
         if len(calls) < 3:
             raise industry.SdeIndustryDataMissing("SDE industry tables missing: industryAssemblyLines; "
-                                                  "re-run scripts/import_sde.py --import --force")
+                                                  "re-run scripts/import_sde.py --download --import --force")
         return fakes.fake_industry_data()
 
     industry.configure_industry_data_loader(loader)
@@ -203,31 +203,106 @@ def test_the_producer_and_planner_raise_when_the_tables_are_missing():
 # --- startup ---------------------------------------------------------------------------
 
 def _state(engine):
-    return SimpleNamespace(db_sde=SimpleNamespace(Session=sessionmaker(bind=engine)), init_warnings=[])
+    return SimpleNamespace(db_sde=SimpleNamespace(Session=sessionmaker(bind=engine)), init_warnings=[],
+                           sde_warnings=[], init_state="Ready", init_error=None)
 
 
 def test_startup_on_an_old_sde_logs_an_error_and_a_health_warning(sde_without_industry_tables, caplog):
+    from eve_online_industry_tracker.application.admin.service import AdminService
     from flask_app.bootstrap import check_sde_industry_data
 
     industry.reset_industry_data()
     state = _state(sde_without_industry_tables)
     with caplog.at_level(logging.ERROR):
         check_sde_industry_data(state)
-    assert state.init_warnings and all("re-run scripts/import_sde.py" in w for w in state.init_warnings)
+    assert state.sde_warnings and all("re-run scripts/import_sde.py" in w for w in state.sde_warnings)
     assert any(r.levelno == logging.ERROR and "re-run scripts/import_sde.py" in r.getMessage()
                for r in caplog.records)
+    payload, status = AdminService(state=state).health_payload()
+    assert status == 200 and payload["warnings"] == state.sde_warnings
     with pytest.raises(industry.SdeIndustryDataMissing):
         industry.rig_catalog()
 
 
 def test_startup_on_a_current_sde_loads_the_tables(imported_fake_sde):
+    from eve_online_industry_tracker.application.admin.service import AdminService
     from flask_app.bootstrap import check_sde_industry_data
 
     industry.reset_industry_data()
     state = _state(imported_fake_sde)
     check_sde_industry_data(state)
-    assert state.init_warnings == []
+    assert state.sde_warnings == [] and state.init_warnings == []
     assert industry.rig_catalog() == fakes.fake_industry_data().rig_catalog
+    assert "warnings" not in AdminService(state=state).health_payload()[0]
+
+
+def test_health_drops_the_warning_once_the_sde_is_reimported_live(tmp_path):
+    """M2: /health re-checks the SDE while it has a warning; after a re-import
+    into the running app's SDE the industry data loads and the warning goes."""
+    from eve_online_industry_tracker.application.admin.service import AdminService
+    from flask_app.bootstrap import check_sde_industry_data
+
+    db = tmp_path / "eve_sde.db"
+    engine = create_engine(f"sqlite:///{db}")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE types (id INTEGER PRIMARY KEY, volume FLOAT, packagedVolume FLOAT)"))
+        industry.reset_industry_data()
+        state = _state(engine)
+        check_sde_industry_data(state)
+        assert AdminService(state=state).health_payload()[0]["warnings"]
+
+        sde_dir = tmp_path / "sde"
+        sde_dir.mkdir()
+        _write_fake_sde(sde_dir)
+        with open(os.path.join(_ROOT, "config", "import_sde.json"), encoding="utf-8") as fh:
+            tables = json.load(fh)["TABLES_TO_IMPORT"]
+        _importer().import_sde_to_sqlite(str(sde_dir), db_uri=f"sqlite:///{db}", tables_to_import=tables)
+
+        payload, status = AdminService(state=state).health_payload()
+        assert status == 200 and "warnings" not in payload
+        assert state.sde_warnings == []
+        assert industry.rig_catalog() == fakes.fake_industry_data().rig_catalog
+    finally:
+        engine.dispose()
+
+
+def test_the_hint_names_download_and_a_restart():
+    assert "scripts/import_sde.py --download --import --force" in industry.REIMPORT_HINT
+    assert "restart the app" in industry.REIMPORT_HINT
+
+
+def test_an_empty_industry_table_is_not_loaded(imported_fake_sde):
+    """M3: a table that exists but has no rows (an import in progress or one
+    that failed) counts as missing; the load is not tried."""
+    with imported_fake_sde.begin() as conn:
+        conn.execute(text("DELETE FROM industryAssemblyLines"))
+    with Session(imported_fake_sde) as session:
+        assert industry.missing_industry_tables(session) == ["industryAssemblyLines"]
+        with pytest.raises(industry.SdeIndustryDataMissing, match="industryAssemblyLines"):
+            industry.load_industry_data(session)
+
+
+def test_a_request_that_needs_the_tables_gets_a_503_and_no_traceback(caplog):
+    """M1: SdeIndustryDataMissing is a 503 with code sde_reimport_required and
+    the hint, logged without a traceback per request."""
+    from flask_app.app import create_app
+
+    app = create_app()
+
+    def needs_the_tables():
+        raise industry.SdeIndustryDataMissing(f"SDE industry tables missing: industryTargetFilters; "
+                                              f"{industry.REIMPORT_HINT}")
+
+    app.add_url_rule("/_test_needs_sde_tables", "needs_sde_tables", needs_the_tables)
+    with caplog.at_level(logging.DEBUG):
+        response = app.test_client().get("/_test_needs_sde_tables")
+    assert response.status_code == 503
+    body = response.get_json()
+    assert body["error"]["code"] == "sde_reimport_required"
+    assert "re-run scripts/import_sde.py" in body["message"]
+    assert body["hint"] == industry.REIMPORT_HINT
+    assert not any(r.exc_info for r in caplog.records)
 
 
 # --- the local SDE ---------------------------------------------------------------------
@@ -242,7 +317,7 @@ def test_the_local_sde_tables_have_ccps_row_counts():
         present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         missing = [t for t in industry.INDUSTRY_TABLES if t not in present]
         if missing:
-            pytest.skip(f"local SDE lacks {', '.join(missing)}: re-run scripts/import_sde.py --import --force")
+            pytest.skip(f"local SDE lacks {', '.join(missing)}: re-run scripts/import_sde.py --download --import --force")
         counts = {t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in industry.INDUSTRY_TABLES}
     assert counts == {"industryTargetFilters": 18, "industryModifierSources": 220,
                       "industryAssemblyLines": 146, "industryInstallationTypes": 102}

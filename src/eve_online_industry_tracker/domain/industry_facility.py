@@ -118,13 +118,18 @@ class ShipyardLines:
 
 
 def build_shipyard_lines(
-    assembly_lines: Mapping[int, Mapping[str, Any]], installation_types: Mapping[int, Mapping[str, Any]],
+    assembly_lines: Mapping[int, Mapping[str, Any]], installation_types: Mapping[int, Mapping[str, Any]], *,
+    group_categories: Mapping[int, int],
 ) -> ShipyardLines:
     """ShipyardLines from the SDE's industryAssemblyLines and
-    industryInstallationTypes ({id: row} as the SDE YAML has them). A
-    manufacturing service module the installation types do not list, or a
-    line they name that the assembly lines lack, is a ValueError: the gate
-    cannot be told from such data."""
+    industryInstallationTypes ({id: row} as the SDE YAML has them) and the
+    SDE's group -> category map. A line builds the groups its
+    detailsPerGroup lists and every group in a category its
+    detailsPerCategory lists. A manufacturing service module the
+    installation types do not list, a line they name that the assembly lines
+    lack, or a service line with a detailsPerTypeList (types, which the
+    hull-group gate cannot read) is a ValueError: the gate cannot be told
+    from such data."""
     service_lines: dict[str, frozenset[int]] = {}
     for service in _MANUFACTURING_SERVICES:
         lines: set[int] = set()
@@ -139,7 +144,14 @@ def build_shipyard_lines(
         row = assembly_lines.get(line_id)
         if row is None:
             raise ValueError(f"SDE industryAssemblyLines lacks line {line_id}, which a service module runs")
-        line_groups[line_id] = frozenset(int(d["groupID"]) for d in row.get("detailsPerGroup") or ())
+        if row.get("detailsPerTypeList"):
+            raise ValueError(f"SDE industryAssemblyLines line {line_id}, which a service module runs, has a "
+                             "detailsPerTypeList; the shipyard gate reads groups and categories only")
+        categories = {int(d["categoryID"]) for d in row.get("detailsPerCategory") or ()}
+        line_groups[line_id] = frozenset(
+            {int(d["groupID"]) for d in row.get("detailsPerGroup") or ()}
+            | {int(g) for g, c in group_categories.items() if c is not None and int(c) in categories}
+        )
     return ShipyardLines(service_lines, line_groups)
 
 

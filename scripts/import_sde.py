@@ -81,6 +81,41 @@ def get_latest_sde_version(version_url: str) -> dict:
         return None
 
 
+def read_extracted_sde_version(sde_dir: str) -> dict | None:
+    """The build of the extracted SDE files, from their _sde.yaml
+    (sde: buildNumber, releaseDate); None when the folder has none."""
+    path = os.path.join(sde_dir, "_sde.yaml")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    sde = data.get("sde") if isinstance(data, dict) else None
+    if not isinstance(sde, dict) or sde.get("buildNumber") is None:
+        return None
+    return {"buildNumber": int(sde["buildNumber"]), "releaseDate": str(sde.get("releaseDate") or "")}
+
+
+def version_to_record(extracted: dict | None, latest: dict | None) -> tuple[dict | None, str | None]:
+    """(the version to record for an import, a warning or None).
+
+    The extracted files' own build is recorded; the online latest version is
+    only a fallback for files without _sde.yaml. A warning says when the
+    extracted files are older than the latest, or when the build is unknown."""
+    if extracted is not None:
+        if latest is not None and int(latest["buildNumber"]) > int(extracted["buildNumber"]):
+            return extracted, (
+                f"extracted SDE is older than the latest; add --download "
+                f"(extracted build {extracted['buildNumber']}, latest {latest['buildNumber']})"
+            )
+        return extracted, None
+    if latest is not None:
+        return latest, (
+            f"the extracted SDE has no _sde.yaml; recording the latest online build {latest['buildNumber']}, "
+            "which may not be the one imported"
+        )
+    return None, "the extracted SDE has no _sde.yaml and the latest version is unknown; no version recorded"
+
+
 def get_current_sde_version(db: DatabaseManager) -> dict:
     """Get the current (most recent) SDE version from the database."""
     query = f"""
@@ -380,13 +415,18 @@ def main():
             print("No SDE version history found.")
         return
 
-    # Check version
+    # Check version. The online latest version is needed only for
+    # --check-version and the "up to date" short-circuit; --import --force
+    # works offline (the import records the extracted files' own build).
     version_url = cfg.get("SDE_VERSION")
     latest_version = get_latest_sde_version(version_url)
+    needs_online = args.check_version or not args.force
 
-    if not latest_version:
+    if not latest_version and needs_online:
         print("!!! Could not fetch latest SDE version. Exiting.")
         return
+    if not latest_version:
+        print("!!! Could not fetch latest SDE version; continuing (--force).")
 
     current_version = get_current_sde_version(db)
 
@@ -460,16 +500,19 @@ def main():
         if not tables_to_import:
             raise ValueError("No tables specified for import (check config or CLI args).")
 
+        version, version_warning = version_to_record(read_extracted_sde_version(sde_path), latest_version)
+        if version_warning:
+            print(f"\n⚠ WARNING: {version_warning}")
+
         import_sde_to_sqlite(
             sde_path,
             db_uri=args.db,
             tables_to_import=tables_to_import,
         )
 
-        # Record the new version
-        record_sde_version(
-            db, latest_version["buildNumber"], latest_version["releaseDate"]
-        )
+        # Record the imported files' version
+        if version is not None:
+            record_sde_version(db, version["buildNumber"], version["releaseDate"])
 
     if args.cleanup:
         cleanup_temp(sde_path)

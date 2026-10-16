@@ -38,7 +38,8 @@ INDUSTRY_TABLES: tuple[str, ...] = (
     "industryAssemblyLines",
     "industryInstallationTypes",
 )
-REIMPORT_HINT = "re-run scripts/import_sde.py --import --force (from the repository root) to re-import the SDE"
+REIMPORT_HINT = ("re-run scripts/import_sde.py --download --import --force (from the repository root) to re-import "
+                 "the SDE, then restart the app")
 
 
 class SdeIndustryDataMissing(RuntimeError):
@@ -65,7 +66,8 @@ def industry_data_from_tables(
     return IndustryData(
         rig_catalog=_rig_groups.build_rig_catalog(target_filters, modifier_sources, groups=groups,
                                                   categories=categories),
-        shipyard_lines=_industry_facility.build_shipyard_lines(assembly_lines, installation_types),
+        shipyard_lines=_industry_facility.build_shipyard_lines(
+            assembly_lines, installation_types, group_categories={g: cat for g, (cat, _) in groups.items()}),
     )
 
 
@@ -76,14 +78,20 @@ def _table_names(session: Any) -> set[str]:
 
 
 def missing_industry_tables(session: Any) -> list[str]:
-    """The industry tables this SDE lacks, in INDUSTRY_TABLES order."""
+    """The industry tables this SDE lacks or has empty (an import in
+    progress, or one that failed), in INDUSTRY_TABLES order. The load is
+    tried only when this is empty."""
     present = _table_names(session)
-    return [t for t in INDUSTRY_TABLES if t not in present]
+    missing: list[str] = []
+    for table in INDUSTRY_TABLES:
+        if table not in present or session.execute(text(f'SELECT 1 FROM "{table}" LIMIT 1')).first() is None:
+            missing.append(table)
+    return missing
 
 
 def _missing_message(missing: list[str]) -> str:
-    return (f"SDE industry tables missing: {', '.join(missing)} (an SDE imported before build 3607705 or with an "
-            f"older importer); rig groups and the shipyard gate cannot be computed: {REIMPORT_HINT}")
+    return (f"SDE industry tables missing: {', '.join(missing)} (missing or empty: an SDE imported before build "
+            f"3607705, with an older importer, or an import still running); rig groups and the shipyard gate cannot be computed: {REIMPORT_HINT}")
 
 
 def _decode(value: Any) -> Any:
@@ -154,9 +162,21 @@ def sde_schema_problems(session: Any) -> list[str]:
         if "packagedVolume" not in columns:
             problems.append("SDE column types.packagedVolume missing (an SDE before build 3607705); every type "
                             f"lookup fails: {REIMPORT_HINT}")
-    missing = [t for t in INDUSTRY_TABLES if t not in present]
+    missing = missing_industry_tables(session)
     if missing:
         problems.append(_missing_message(missing))
+    return problems
+
+
+def sde_health_problems(session: Any) -> list[str]:
+    """sde_schema_problems now, and, when the tables are there, whether the
+    industry data loads (the /health re-check after a live re-import)."""
+    problems = sde_schema_problems(session)
+    if not any(p.startswith("SDE industry tables") for p in problems):
+        try:
+            industry_data()
+        except SdeIndustryDataMissing as exc:
+            problems.append(str(exc))
     return problems
 
 

@@ -174,7 +174,7 @@ def _local_industry_data() -> Any:
         with Session(engine) as session:
             missing = industry.missing_industry_tables(session)
             if missing:
-                return (f"local SDE lacks {', '.join(missing)}: re-run scripts/import_sde.py --import --force "
+                return (f"local SDE lacks {', '.join(missing)}: re-run scripts/import_sde.py --download --import --force "
                         "to import CCP's industry tables")
             return industry.load_industry_data(session)
     finally:

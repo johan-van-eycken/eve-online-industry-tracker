@@ -26,10 +26,27 @@ class AdminService:
                 payload["error"] = self._state.init_error
             return payload, 503
         payload: dict[str, Any] = {"status": "OK"}
-        warnings = getattr(self._state, "init_warnings", None)
+        warnings = list(getattr(self._state, "init_warnings", None) or []) + self._sde_warnings()
         if warnings:
-            payload["warnings"] = list(warnings)
+            payload["warnings"] = warnings
         return payload, 200
+
+    def _sde_warnings(self) -> list[str]:
+        """The SDE problems found at startup, re-checked while there are any:
+        after a live re-import the industry data loads and they go."""
+        from eve_online_industry_tracker.infrastructure.sde import industry as sde_industry
+
+        warnings = list(getattr(self._state, "sde_warnings", None) or [])
+        db_sde = getattr(self._state, "db_sde", None)
+        if not warnings or db_sde is None:
+            return warnings
+        session = db_sde.Session()
+        try:
+            warnings = sde_industry.sde_health_problems(session)
+        finally:
+            session.close()
+        self._state.sde_warnings = warnings
+        return list(warnings)
 
     def public_structures_status(self, *, system_id: int | None) -> dict:
         if self._state.db_app is None:

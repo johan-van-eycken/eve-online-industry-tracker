@@ -202,6 +202,13 @@ The SDE hasn't been imported yet. Run:
 python scripts/import_sde.py --download --import --force
 ```
 
+**`SDE industry tables missing`** (an ERROR at startup, a `/health` warning, industry pages answering 503 `sde_reimport_required`)
+The SDE was imported before build 3607705 or with an older importer, so it lacks CCP's industry tables (`industryTargetFilters`, `industryModifierSources`, `industryAssemblyLines`, `industryInstallationTypes`) that the rig groups and the shipyard gate are read from. Stop the app, re-import, then restart the app:
+```bash
+python scripts/import_sde.py --download --import --force
+```
+`--force` is needed when the recorded build is already current. The importer records the build of the files it imported (their `_sde.yaml`) and warns when they are older than the latest online build.
+
 **`SSL certificate verification failed`**
 You are likely behind a corporate proxy (e.g. Zscaler). Install truststore so Python uses your system certificate store:
 ```bash
