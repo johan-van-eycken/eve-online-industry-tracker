@@ -412,7 +412,9 @@ def test_probe_d_the_composed_plan_is_unchanged():
         ("manufacture", 12345, 1, 10, 10, 50.0),
         ("copy", 998, 4, 2, 1, 1.0),
         ("invent", 22345, 1, 2, None, 8.0),
-        ("sub_manufacture", 54321, 1, 69, 690, None),
+        # The parent row publishes the component's fee (0 per run, the
+        # research-first fixture): an unknown fee would buy it (Task 15 fix round 3).
+        ("sub_manufacture", 54321, 1, 69, 690, 0.0),
     ]
     (invent,) = [a for a in actions if a.action_type == "invent"]
     assert invent.blueprint_item_id == 14

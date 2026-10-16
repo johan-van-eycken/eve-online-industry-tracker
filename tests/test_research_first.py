@@ -74,7 +74,9 @@ def _row(*, segments, kind="owned_blueprint_original", material_cost=1000.0, pro
         "manufacturing_job": {
             "runs": 10, "manufacturing_job_cost": 50.0, "material_cost": material_cost,
             "total_cost": material_cost + 50.0,
-            "materials": {"54321": {"type_id": 54321, "quantity": widgets, "type_name": "Widget"}},
+            # A published install fee: an unknown one buys the component (Task 15 fix round 3).
+            "materials": {"54321": {"type_id": 54321, "quantity": widgets, "type_name": "Widget",
+                                    "component_job_fee_per_run": 0.0}},
             "blueprint_sde": {"blueprint_type_id": 999},
             "blueprint_source_kind": kind,
             "blueprint_original": {"item_id": bpo_item_id} if bpo_item_id is not None else {},

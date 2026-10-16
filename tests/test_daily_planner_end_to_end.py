@@ -391,7 +391,9 @@ def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_
         "manufacturing_job": {
             **GOOD_ROW["manufacturing_job"],
             "blueprint_sde": {"blueprint_type_id": 999},
-            "materials": {"7778": {"type_id": 7778, "type_name": "Component", "quantity": 10}},
+            # A published install fee: an unknown one buys the component (Task 15 fix round 3).
+            "materials": {"7778": {"type_id": 7778, "type_name": "Component", "quantity": 10,
+                                   "component_job_fee_per_run": 0.0}},
         },
     }
     prices = {34: 4.0, 7778: 1_000.0}

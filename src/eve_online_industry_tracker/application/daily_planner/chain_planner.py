@@ -458,9 +458,25 @@ class ChainPlanner:
                 (parent, fallback_requests[parent] if parent in fallen and parent in fallback_requests else requests)
                 for parent, requests in requests_by_parent
             ]
-            return self._resolve_sub_requests(
+            buy_reasons: dict[int, str] = {}
+            subs = self._resolve_sub_requests(
                 self._merge_sub_requests(per_parent), market_depth_cache, phase1_data,
+                buy_reasons=buy_reasons,
             )
+            # Fix round 3 (Task 15): a component bought for an unknown fee
+            # says so on every parent that requested it.
+            parents = {int(d.type_id): d for d in build_decisions}
+            for request in self._merge_sub_requests(per_parent).values():
+                reason = buy_reasons.get(int(request["type_id"]))
+                if reason is None:
+                    continue
+                for parent_type_id in request["requested_by_type_ids"]:
+                    parent = parents.get(int(parent_type_id))
+                    if parent is not None:
+                        parent.overview_row.setdefault("component_buy_reasons", {}).setdefault(
+                            int(request["type_id"]), reason,
+                        )
+            return subs
 
         def _rebuild(subs: list[ItemDecision]) -> list[ItemDecision]:
             return _one_decision_per_type(top_level_decisions, subs)
@@ -514,7 +530,11 @@ class ChainPlanner:
         sub_requests: dict[int, dict[str, Any]],
         market_depth_cache: dict[int, Any],
         phase1_data: dict[str, Any],
+        *,
+        buy_reasons: dict[int, str] | None = None,
     ) -> list[ItemDecision]:
+        """`buy_reasons`: filled with {type_id: reason} for each component
+        _resolve_sub_manufacture buys for a stated reason."""
         decisions: list[ItemDecision] = []
         for request in sub_requests.values():
             try:
@@ -522,6 +542,7 @@ class ChainPlanner:
                     request=request,
                     market_depth_cache=market_depth_cache,
                     phase1_data=phase1_data,
+                    buy_reasons=buy_reasons,
                 )
             except (TypeError, ValueError):
                 logger.exception(
@@ -1485,6 +1506,7 @@ class ChainPlanner:
         request: dict[str, Any],
         market_depth_cache: dict[int, Any],
         phase1_data: dict[str, Any],
+        buy_reasons: dict[int, str] | None = None,
     ) -> ItemDecision | None:
         """Build vs buy for one merged material request, net of corp stock.
 
@@ -1548,12 +1570,18 @@ class ChainPlanner:
             if install_fee is None else None
         )
         if install_fee is None:
+            # Task 15 fix round 3: a build cost without its fee is a lower
+            # bound, so the component is bought, the producer's rule
+            # (IndustryService._build_cost_unknown_reason).
+            why = fee_unknown_reason or "no fee published; refresh the product overview"
             logger.warning(
-                "ChainPlanner: install fee unknown for sub-manufacturing type_id=%s (%s); "
-                "build vs buy compares materials only, so building may look cheaper than it is",
-                mat_type_id, fee_unknown_reason or "no fee published; refresh the product overview",
+                "ChainPlanner: install fee unknown for sub-manufacturing type_id=%s (%s); buying the component",
+                mat_type_id, why,
             )
-        if sub_cost + (install_fee or 0.0) >= market_cost:
+            if buy_reasons is not None:
+                buy_reasons[mat_type_id] = f"component {request['type_name']} bought: its install fee is unknown ({why})"
+            return None
+        if sub_cost + install_fee >= market_cost:
             return None
         # Linear pricing, so the per-job costs sum to sub_cost exactly.
         # One job per unclaimed BPO runs today; the rest wait on the same
@@ -1571,19 +1599,11 @@ class ChainPlanner:
         ]
 
         mat_name = request["type_name"]
-        # Task 15 fix round 2 (C): this decision bypasses ItemDecisionEngine,
-        # so it names its own lower bound: build vs buy left the fee out.
-        upper_bound_note = (
-            "build cost is a lower bound: job fees unknown for: manufacturing "
-            f"({fee_unknown_reason or 'no fee published; refresh the product overview'})"
-            if install_fee is None else None
-        )
         return ItemDecision(
             type_id=mat_type_id,
             type_name=mat_name,
             decision="build",
-            decision_reason="; ".join(["Sub-manufacture: cheaper than market buy", *filter(None, [upper_bound_note])]),
-            profit_is_upper_bound=upper_bound_note is not None,
+            decision_reason="Sub-manufacture: cheaper than market buy",
             adjusted_score=0.0,
             absolute_profit_per_batch=0.0,
             isk_per_hour=0.0,

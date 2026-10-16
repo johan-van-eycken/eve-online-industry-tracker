@@ -369,18 +369,46 @@ def test_b_no_free_skilled_inventor_and_no_free_slot_are_told_apart():
     assert ca.NO_FREE_RESEARCH_SLOT_REASON == "no free research slot today"
 
 
-def test_c_a_sub_component_built_on_an_unknown_fee_carries_the_upper_bound_note():
+def test_c_a_sub_component_with_an_unknown_fee_is_bought_with_the_reason():
+    """Fix round 3: the planner buys it, as the producer does
+    (_build_cost_unknown_reason), and the parent names why."""
     import test_chain_planner_keying as ck
 
-    materials = ck._batch_materials(**{"54321": 200})
+    materials = ck._batch_materials(fee=None, **{"54321": 200})
     materials["54321"]["component_job_fee_per_run_unknown_reason"] = "the industry profile has no manufacturing cost index"
     plan = ck._planner().plan_chain([ck._decision(ck._row(materials=materials))], ck._limited_sub_phase1(7))
-    (sub,) = [d for d in plan.decisions if d.is_sub_component]
-    assert sub.profit_is_upper_bound is True
-    assert sub.decision_reason == (
-        "Sub-manufacture: cheaper than market buy; build cost is a lower bound: job fees unknown for: "
-        "manufacturing (the industry profile has no manufacturing cost index)"
+    assert [d for d in plan.decisions if d.is_sub_component] == []
+    (parent,) = plan.decisions
+    assert parent.overview_row["component_buy_reasons"][54321] == (
+        "component Widget bought: its install fee is unknown "
+        "(the industry profile has no manufacturing cost index)"
     )
+
+
+def test_c_the_shopping_list_buys_the_whole_component_on_the_parent():
+    import test_chain_planner_keying as ck
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+
+    materials = ck._batch_materials(fee=None, **{"54321": 200})
+    materials["54321"]["component_job_fee_per_run_unknown_reason"] = "no index"
+    plan = ck._planner().plan_chain([ck._decision(ck._row(materials=materials))], ck._limited_sub_phase1(7))
+    actions = [a for a in ca.CharacterAssigner().assign(plan, [], fl._mfg_pilot(), fl._AdminKeyError())
+               if a.action_type in ("manufacture", "sub_manufacture")]
+    assert [a.action_type for a in actions] == ["manufacture"]
+    assert "component Widget bought: its install fee is unknown (no index)" in actions[0].notes
+
+    class _Resolver:
+        def is_blueprint(self, type_id):
+            return False
+
+        def prefetch(self, type_ids):
+            return None
+
+    items = ShoppingListBuilder().build(
+        assigned_actions=actions, corp_assets=[], market_depth_cache={54321: {"vwap_5d": 1.0}},
+        admin_settings=a4._Admin(), blueprint_data={}, meta_resolver=_Resolver(),
+    )
+    assert {i.type_id: i.quantity for i in items}[54321] == 200
 
 
 def test_a_the_decision_and_the_plan_item_carry_the_upper_bound_flag(app_session, session_provider):
