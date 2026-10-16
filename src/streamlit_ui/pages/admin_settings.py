@@ -17,6 +17,33 @@ def _load_settings() -> tuple[dict, dict] | None:
     return data.get("schema") or {}, data.get("values") or {}
 
 
+def _number_input_args(spec: dict, current: object) -> dict:
+    """st.number_input's value/min/max/step(/format) for an int or float
+    setting. The value is clamped into [min, max] and falls back to the
+    default when it is not a number: st.number_input raises on a value
+    outside its bounds, which used to crash the page on a stale stored value
+    (the backend now coerces on load too, Task 8c fix round 1)."""
+    is_int = spec.get("type") == "int"
+    cast = int if is_int else float
+    try:
+        value = cast(current)
+    except (TypeError, ValueError, OverflowError):
+        value = cast(spec.get("default", 0))
+    min_value = cast(spec["min"]) if "min" in spec else None
+    max_value = cast(spec["max"]) if "max" in spec else None
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    args: dict = {"value": value, "min_value": min_value, "max_value": max_value}
+    if is_int:
+        args["step"] = int(spec.get("step", 1))
+    else:
+        args["step"] = float(spec.get("step", 0.01))
+        args["format"] = spec.get("format", "%.4f")
+    return args
+
+
 def render() -> None:
     st.title("Application Settings")
     st.caption("Runtime-configurable settings. Changes are saved immediately and take effect on the next operation that reads them.")
@@ -48,24 +75,10 @@ def render() -> None:
                 typ = spec.get("type", "str")
                 widget_key = f"admin_{cat_key}_{key}"
 
-                if typ == "int":
+                if typ in ("int", "float"):
                     new_val = st.number_input(
                         label,
-                        value=int(current),
-                        min_value=spec.get("min"),
-                        max_value=spec.get("max"),
-                        step=spec.get("step", 1),
-                        help=help_text,
-                        key=widget_key,
-                    )
-                elif typ == "float":
-                    new_val = st.number_input(
-                        label,
-                        value=float(current),
-                        min_value=float(spec["min"]) if "min" in spec else None,
-                        max_value=float(spec["max"]) if "max" in spec else None,
-                        step=float(spec.get("step", 0.01)),
-                        format=spec.get("format", "%.4f"),
+                        **_number_input_args(spec, current),
                         help=help_text,
                         key=widget_key,
                     )

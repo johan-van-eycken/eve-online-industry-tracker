@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,28 +9,47 @@ import streamlit as st
 from streamlit_ui.api.daily_planner import mark_action_done, set_action_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.daily_planner.status_bar import (
+    CHARACTER_ACTION_TYPES,
+    CORP_LEVEL_ACTION_TYPES,
     PLANNER_MAX_PLAN_AGE_HOURS,
     _fmt_isk,
     _parse_dt,
+    is_waiting,
+    load_active_jobs,
+    queued_te_status,
 )
+
+logger = logging.getLogger(__name__)
+
+# Unknown action types already reported this process; Streamlit reruns the
+# page on every interaction, and one warning per type is enough.
+_WARNED_UNKNOWN_ACTION_TYPES: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Action type ordering and display config
 # ---------------------------------------------------------------------------
 
-# Action types that are corp-level and do NOT appear in Tab 1
-_CORP_LEVEL_ACTIONS = frozenset({"buy_materials", "buy_bpo"})
+# Section label and marker per action type. The order and the set of types
+# come from status_bar.CHARACTER_ACTION_TYPES, the single source.
+_SECTION_DISPLAY: dict[str, tuple[str, str]] = {
+    "deliver":         ("DELIVER",         "🔴"),
+    "invent":          ("INVENT",          "🟡"),
+    "copy":            ("COPY",            "🟣"),
+    "me_research":     ("ME RESEARCH",     "🔧"),
+    "te_research":     ("TE RESEARCH",     "🔧"),
+    "sub_manufacture": ("SUB-MANUFACTURE", "🔧"),
+    "manufacture":     ("MANUFACTURE",     "🟢"),
+}
+
+
+def _action_sections(action_types: tuple[str, ...]) -> list[tuple[str, str, str]]:
+    """(action type, label, marker) per type, in the given order. A type with
+    no display entry raises KeyError at import, not a silently missing section."""
+    return [(t, *_SECTION_DISPLAY[t]) for t in action_types]
+
 
 # Ordered sections for Tab 1
-_ACTION_ORDER: list[tuple[str, str, str]] = [
-    ("deliver",          "DELIVER",          "🔴"),
-    ("invent",           "INVENT",           "🟡"),
-    ("copy",             "COPY",             "🟣"),
-    ("me_research",      "ME RESEARCH",      "🔧"),
-    ("te_research",      "TE RESEARCH",      "🔧"),
-    ("sub_manufacture",  "SUB-MANUFACTURE",  "🔧"),
-    ("manufacture",      "MANUFACTURE",      "🟢"),
-]
+_ACTION_ORDER: list[tuple[str, str, str]] = _action_sections(CHARACTER_ACTION_TYPES)
 
 # Which action types are "START" actions (require materials to be ready)
 _START_ACTIONS = frozenset({
@@ -69,11 +89,39 @@ def _character_level_actions(actions: list[dict[str, Any]]) -> list[dict[str, An
     """Actions shown in Tab 1: the types this tab renders.
 
     Corp-level buy actions belong to Tab 2. Any other type (e.g. one persisted
-    by an older planner version) is dropped here so it neither crashes the tab
-    nor keeps "Day complete" from ever showing as an invisible pending row.
+    by an older planner version) is dropped here, so it neither crashes the
+    tab nor keeps "Day complete" from showing. It is logged once per type, so
+    a type the planner starts producing without a section here is noticed.
     """
-    rendered = {action_type for action_type, _, _ in _ACTION_ORDER}
+    rendered = set(CHARACTER_ACTION_TYPES)
+    unknown = {
+        str(a.get("action_type") or "") for a in actions
+    } - rendered - CORP_LEVEL_ACTION_TYPES - _WARNED_UNKNOWN_ACTION_TYPES
+    if unknown:
+        logger.warning(
+            "Daily planner actions tab: not showing action type(s) %s "
+            "(not produced by this planner version)",
+            ", ".join(sorted(t or "<missing>" for t in unknown)),
+        )
+        _WARNED_UNKNOWN_ACTION_TYPES.update(unknown)
     return [a for a in actions if str(a.get("action_type") or "") in rendered]
+
+
+def _is_queued(action: dict[str, Any]) -> bool:
+    """A TE research queued behind the ME research on the same BPO (Task 8c
+    fix round 4): EVE runs one job per blueprint, so it cannot start today
+    and does not count as today's work."""
+    return bool(action.get("queued_after_me"))
+
+
+def _todays(
+    actions: list[dict[str, Any]], now: datetime | None = None, *, jobs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """The actions that can be done today: every action but a queued one
+    whose ME research has not ended yet (fix round 5: once it has, the
+    queued TE is today's work, with a "Mark started" button). `jobs`: the
+    active industry jobs, whose ME job end_date decides (status_bar.queued_te_status)."""
+    return [a for a in actions if not is_waiting(a, actions, now, jobs=jobs)]
 
 
 def _has_pending_buys(plan: dict[str, Any]) -> bool:
@@ -102,28 +150,42 @@ def _reload_plan(page_state: DailyPlannerPageState) -> None:
 # Action row renderer
 # ---------------------------------------------------------------------------
 
+def action_quantity_label(action: dict[str, Any]) -> str:
+    """The row's quantity label. A copy (Task 14 M6) is one job of
+    `quantity` copies whose `runs` are the copied runs in all, so it reads
+    "N copies × M runs" (M runs per copy)."""
+    quantity = action.get("quantity")
+    runs = action.get("runs")
+    if str(action.get("action_type") or "") == "copy" and isinstance(quantity, int) and quantity > 0 \
+            and isinstance(runs, int) and runs > 0:
+        per_copy = runs // quantity
+        return (f"{quantity} {'copy' if quantity == 1 else 'copies'} × "
+                f"{per_copy} {'run' if per_copy == 1 else 'runs'}")
+    if runs is not None:
+        return f"×{runs} runs"
+    if quantity is not None:
+        return f"×{quantity:,}" if isinstance(quantity, int) else f"×{quantity}"
+    return ""
+
+
 def _render_action_row(
     action: dict[str, Any],
     page_state: DailyPlannerPageState,
     readiness_ok: bool,
+    siblings: list[dict[str, Any]] | None = None,
+    *,
+    jobs: list[dict[str, Any]] | None = None,
 ) -> None:
     action_id = int(action.get("id") or 0)
     status = str(action.get("status") or "pending")
     action_type = str(action.get("action_type") or "")
     type_name = str(action.get("type_name") or "Unknown")
-    quantity = action.get("quantity")
-    runs = action.get("runs")
     cost = action.get("estimated_cost_isk")
     completion = action.get("estimated_completion")
     notes = str(action.get("notes") or "")
     is_override = bool(action.get("is_force_override"))
 
-    # Build label
-    qty_label = ""
-    if runs is not None:
-        qty_label = f"×{runs} runs"
-    elif quantity is not None:
-        qty_label = f"×{quantity:,}" if isinstance(quantity, int) else f"×{quantity}"
+    qty_label = action_quantity_label(action)
 
     cost_label = _fmt_isk(float(cost)) if cost is not None else ""
     completion_label = _fmt_completion(completion)
@@ -134,6 +196,45 @@ def _render_action_row(
         return
     if status == "skipped":
         st.markdown(f"~~{type_name} {qty_label}~~ *(skipped)*")
+        return
+
+    if _is_queued(action):
+        startable, queue_note = queued_te_status(action, siblings or [action], jobs=jobs)
+        if not startable:
+            # Not startable yet: no done/skip buttons.
+            st.markdown(f"⏳ {type_name} — *queued: start when the ME research on this BPO ends*")
+            if completion_label:
+                st.caption(completion_label)
+            if queue_note:
+                st.caption(f"  ↳ {queue_note}")
+            return
+        # The ME research has ended: start it in EVE, then record it.
+        cols = st.columns([1.2, 0.6, 5])
+        with cols[0]:
+            if st.button("Mark started", key=f"started_{action_id}",
+                         help="The ME research on this BPO has ended: mark this TE research as started"):
+                try:
+                    mark_action_done(action_id)
+                    _reload_plan(page_state)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+        with cols[1]:
+            if st.button("Skip", key=f"skip_{action_id}", help="Skip this action"):
+                try:
+                    set_action_status(action_id, "skipped")
+                    _reload_plan(page_state)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed: {exc}")
+        with cols[2]:
+            st.markdown(f"{type_name} — *the ME research on this BPO has ended: start it now*")
+            if completion_label:
+                st.caption(completion_label)
+            if queue_note:
+                st.caption(f"  ↳ {queue_note}")
+        if notes:
+            st.caption(f"  ↳ {notes}")
         return
 
     # Pending action
@@ -190,7 +291,7 @@ def _render_action_row(
 # Workflow progress header
 # ---------------------------------------------------------------------------
 
-def _render_workflow_header(actions: list[dict[str, Any]]) -> None:
+def _render_workflow_header(actions: list[dict[str, Any]], *, jobs: list[dict[str, Any]] | None = None) -> None:
     deliver_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
         for a in actions
@@ -199,7 +300,7 @@ def _render_workflow_header(actions: list[dict[str, Any]]) -> None:
 
     start_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
-        for a in actions
+        for a in _todays(actions, jobs=jobs)
         if str(a.get("action_type") or "") in _START_ACTIONS
     ) and any(str(a.get("action_type") or "") in _START_ACTIONS for a in actions)
 
@@ -222,6 +323,8 @@ def _render_character_section(
     char_actions: list[dict[str, Any]],
     page_state: DailyPlannerPageState,
     readiness_ok: bool,
+    *,
+    jobs: list[dict[str, Any]] | None = None,
 ) -> None:
     # Group by action type
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -230,7 +333,7 @@ def _render_character_section(
         by_type.setdefault(at, []).append(a)
 
     pending_count = sum(
-        1 for a in char_actions
+        1 for a in _todays(char_actions, jobs=jobs)
         if str(a.get("status") or "pending") == "pending"
     )
     label = f"{char_name} — {pending_count} pending"
@@ -266,7 +369,7 @@ def _render_character_section(
                         st.rerun()
 
             for action in section_actions:
-                _render_action_row(action, page_state, readiness_ok)
+                _render_action_row(action, page_state, readiness_ok, char_actions, jobs=jobs)
 
             st.markdown("")  # spacer between sections
 
@@ -308,11 +411,13 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
     if not char_actions:
         st.info("No actions for today. The plan has no pending character-level tasks.")
         return
+    # Read once per render: a queued TE starts on its ME job's real end.
+    jobs = load_active_jobs()
 
     # Check if day is complete
     all_done = all(
         str(a.get("status") or "pending") in ("done", "skipped")
-        for a in char_actions
+        for a in _todays(char_actions, jobs=jobs)
     )
     if all_done:
         # Day complete banner
@@ -343,7 +448,7 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
         return
 
     # Workflow progress header
-    _render_workflow_header(char_actions)
+    _render_workflow_header(char_actions, jobs=jobs)
 
     # Determine readiness: if any current_job buy_materials actions are pending, not ready
     readiness_ok = not _has_pending_buys(page_state.plan)
@@ -363,4 +468,4 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
         char_groups.setdefault(name, []).append(action)
 
     for char_name, actions in sorted(char_groups.items()):
-        _render_character_section(char_name, actions, page_state, readiness_ok)
+        _render_character_section(char_name, actions, page_state, readiness_ok, jobs=jobs)

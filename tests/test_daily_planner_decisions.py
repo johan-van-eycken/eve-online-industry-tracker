@@ -255,3 +255,15 @@ class TestItemDecisionEngine:
         # skip -- this item was never priced, not deliberately deferred after
         # being priced -- so persisted build_plan_item rows can tell the two apart.
         assert decision.pipeline_stage == "unscoreable"
+
+
+def test_the_decision_carries_the_pipelines_velocity_unknown_reason():
+    import dataclasses
+    reason = "no corp sales in 30 days and no days-of-supply estimate"
+    pipeline = dataclasses.replace(_make_pipeline(), velocity_unknown_reason=reason)
+    for scored in (_make_scored(), _make_scored(unscoreable_reason="no cost basis")):
+        decision = ItemDecisionEngine().decide(
+            scored=scored, pipeline=pipeline, overview_row=_make_overview_row(),
+            admin_settings=_make_admin(),
+        )
+        assert decision.velocity_unknown_reason == reason

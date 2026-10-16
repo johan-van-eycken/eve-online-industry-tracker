@@ -334,8 +334,9 @@ def get_invention_source_blueprint_ids(
     invention products. `activities` is a JSON text column; SQLite's
     json_each expands the products list so this is a single query instead of
     loading and scanning every blueprint in Python. Ids that nothing invents
-    into are simply absent. First source seen wins when
-    several blueprints invent into the same one.
+    into are simply absent.
+    The lowest source blueprint id wins when several blueprints invent into
+    the same one.
     """
     ids = sorted({int(i) for i in invented_blueprint_type_ids if i is not None})
     if not ids:
@@ -357,7 +358,7 @@ def get_invention_source_blueprint_ids(
     return result
 
 
-def compute_optimal_me(blueprint_type_id: int, session) -> int:
+def compute_optimal_me(blueprint_type_id: int, session, runs: int = 1) -> int:
     """Return the ME level where no material quantity further decreases.
 
     For each material in the blueprint's manufacturing activity, find the last
@@ -366,9 +367,13 @@ def compute_optimal_me(blueprint_type_id: int, session) -> int:
     from ME research (e.g. qty=1 for all materials), returns 0.
 
     Algorithm:
-        For ME in 1..10, compute ceil(qty * (1 - 0.01 * ME)) and compare to the
+        For ME in 1..10, compute me_adjusted_batch_quantity(qty, runs, ME) =
+        max(runs, ceil(qty * runs * (1 - 0.01 * ME))) -- one ceiling over the
+        whole batch, never fewer than one unit per run -- and compare it to the
         previous level. The last ME that yields a reduction is the material's
         optimal ME. optimal_ME = max across all materials.
+
+    `runs` is the planned batch size (default 1, a single run).
     """
     blueprint = session.query(Blueprints).filter(
         Blueprints.blueprintTypeID == int(blueprint_type_id)
@@ -389,22 +394,73 @@ def compute_optimal_me(blueprint_type_id: int, session) -> int:
             quantities.append(int(mat.get("quantity", 0)))
         except (TypeError, ValueError):
             continue
-    return optimal_me_for_quantities(quantities)
+    return optimal_me_for_quantities(quantities, runs=runs)
+
+
+def _me_reduction(me: int) -> float:
+    """ME level as the producer's combined material-reduction fraction.
+
+    IndustryService._combine_reductions([me / 100.0]) for the ME term alone:
+    1 - (1 - me/100), capped at 0.99. Bit-for-bit the producer's for ME 0-10,
+    EVE's range. Outside it the two differ: the producer's _normalize_fraction
+    takes abs() and rescales values >= 1, which ME 0-10 never reaches.
+    """
+    fraction = int(me) / 100.0
+    if fraction <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0 - max(0.0, 1.0 - fraction), 0.99))
+
+
+def me_adjusted_batch_quantity(base_qty_per_run: int, runs: int, me: int) -> int:
+    """Units of one material for a whole batch at a blueprint ME level.
+
+    Mirrors the producer's "Material adjustment" loop (application/industry/
+    service.py, `adjusted_total = self._round_material_quantity(...)`): one
+    ceiling over the whole batch, never per run, and never fewer than one
+    unit per run:
+
+        max(runs, ceil(base_qty_per_run * runs * (1 - reduction)))
+
+    0 when base_qty_per_run or runs is not positive.
+    """
+    return reduced_batch_quantity(base_qty_per_run, runs, _me_reduction(me))
+
+
+def reduced_batch_quantity(base_qty_per_run: int, runs: int, material_reduction: float) -> int:
+    """me_adjusted_batch_quantity for an already-combined material reduction.
+
+    `material_reduction` is the producer's combined fraction, i.e.
+    IndustryService._combine_reductions([me / 100, structure, rig, ...]) --
+    the caller combines, so the factors and their order stay the producer's.
+    Same rounding as the producer's _round_material_quantity with a per-run
+    floor: max(runs, ceil(base_qty_per_run * runs * (1 - reduction))).
+    0 when base_qty_per_run or runs is not positive.
+    """
+    base = int(base_qty_per_run)
+    runs = int(runs)
+    if base <= 0 or runs <= 0:
+        return 0
+    raw = float(base * runs) * max(0.0, 1.0 - float(material_reduction))
+    if raw <= 0:
+        return 0
+    return max(runs, int(math.ceil(raw)))
 
 
 def me_adjusted_quantity(base_qty: int, me: int) -> int:
-    """Per-run material quantity at a blueprint ME level.
+    """Per-run material quantity at a blueprint ME level (a one-run batch).
 
-    qty(ME) = ceil(base_qty * (1 - 0.01 * ME)). The ceiling is why ME research
-    saves nothing on small quantities (5 units: ceil(4.5) = 5 at ME10).
+    qty(ME) = ceil(base_qty * (1 - 0.01 * ME)). For a batch of more than one
+    run use me_adjusted_batch_quantity: the ceiling is applied to the batch
+    total, so per-run rounding times runs overstates the quantity.
     """
-    return math.ceil(int(base_qty) * (1.0 - 0.01 * int(me)))
+    return me_adjusted_batch_quantity(base_qty, 1, me)
 
 
-def optimal_me_for_quantities(quantities: Iterable[int]) -> int:
-    """Highest ME level (0-10) that still reduces any of these base quantities.
+def optimal_me_for_quantities(quantities: Iterable[int], *, runs: int = 1) -> int:
+    """Highest ME level (0-10) that still reduces any of these base quantities
+    for a batch of `runs` runs.
 
-    For each quantity, the last ME in 1..10 whose me_adjusted_quantity is lower
+    For each quantity, the last ME in 1..10 whose batch quantity is lower
     than the level below it; the maximum over quantities. 0 when none benefit.
     """
     per_material_optimal: list[int] = []
@@ -412,56 +468,12 @@ def optimal_me_for_quantities(quantities: Iterable[int]) -> int:
         if qty <= 0:
             continue
         last_useful_me = 0
-        prev_qty = qty  # ME0: ceil(qty * 1.0) = qty
+        prev_qty = me_adjusted_batch_quantity(qty, runs, 0)
         for me in range(1, 11):
-            curr_qty = me_adjusted_quantity(qty, me)
+            curr_qty = me_adjusted_batch_quantity(qty, runs, me)
             if curr_qty < prev_qty:
                 last_useful_me = me
             prev_qty = curr_qty
         per_material_optimal.append(last_useful_me)
 
     return max(per_material_optimal) if per_material_optimal else 0
-
-
-def compute_optimal_te(
-    blueprint_type_id: int,
-    session,
-    time_savings_threshold_pct: float = 1.0,
-) -> int:
-    """Return the TE level where per-level time savings fall below threshold_pct%.
-
-    Iterates TE levels 1..10. When the time saved by going from TE-1 to TE
-    falls below ``time_savings_threshold_pct``% of the base manufacturing time,
-    returns TE-1 (the last level still worth researching). Returns 10 if the
-    threshold is never reached within 1..10.
-
-    time(TE) = ceil(base_time * (1 - 0.01 * TE))
-    saved_pct(TE) = (time(TE-1) - time(TE)) / base_time * 100
-    """
-    blueprint = session.query(Blueprints).filter(
-        Blueprints.blueprintTypeID == int(blueprint_type_id)
-    ).first()
-    if blueprint is None:
-        return 0
-
-    activities = blueprint.activities if isinstance(blueprint.activities, dict) else {}
-    manufacturing = activities.get("manufacturing", {}) if isinstance(activities.get("manufacturing"), dict) else {}
-    base_time = manufacturing.get("time", 0)
-
-    try:
-        base_time = int(base_time)
-    except (TypeError, ValueError):
-        return 0
-
-    if base_time <= 0:
-        return 0
-
-    prev_time = base_time  # TE=0: ceil(base_time * 1.0) = base_time
-    for te in range(1, 11):
-        curr_time = math.ceil(base_time * (1.0 - 0.01 * te))
-        saved_pct = (prev_time - curr_time) / base_time * 100.0
-        if saved_pct < time_savings_threshold_pct:
-            return te - 1  # last level worth researching is the previous one
-        prev_time = curr_time
-
-    return 10  # threshold never reached within TE 1–10

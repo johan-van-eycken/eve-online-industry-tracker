@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
     ShoppingListBuilder,
 )
@@ -179,16 +179,17 @@ SUB_MFG_BLUEPRINTS_ZERO_OUTPUT = {
 }
 
 
-def test_material_with_no_market_price_is_skipped_not_priced_at_zero():
+def test_material_with_no_market_price_is_bought_with_an_unknown_price_not_zero():
     """A material absent from market_depth_cache (no vwap_5d, no spot price)
-    must be skipped from the shopping list entirely -- not appended with a
-    price of 0.0, which would silently make it look free."""
+    is never priced at 0.0, which would make it look free; nor dropped, which
+    under-buys it (Task 8 fix round 1): its price is None."""
     items = ShoppingListBuilder().build(
         assigned_actions=[_action(runs=20)], corp_assets=[], market_depth_cache={},
         admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
         meta_resolver=_NoBlueprints(),
     )
-    assert items == []
+    assert items and all(i.estimated_unit_price is None and i.estimated_total is None for i in items)
+    assert all(i.quantity > 0 for i in items)
 
 
 def test_sub_manufacture_with_no_usable_per_run_output_falls_back_to_one_run():
@@ -232,9 +233,9 @@ INVENTION_BLUEPRINTS = {
 INVENTION_DEPTH = {DATACORE_ID: {"vwap_5d": 100_000.0}}
 
 
-def _invent_action(type_id=12345, runs=None):
+def _invent_action(type_id=12345, runs=1):
     # character_assigner builds invent actions with the T2 product's type_id
-    # and runs=None.
+    # and runs = the assigned pilot's whole attempts (None: need unknown).
     return AssignedAction(
         type_id=type_id, type_name="Widget II", action_type="invent",
         character_id=1, character_name="Pilot", quantity=None, runs=runs,
@@ -315,10 +316,15 @@ def test_invent_action_whose_source_has_no_invention_materials_is_skipped_with_a
     )
 
 
-def test_invention_input_without_a_price_is_skipped_with_a_warning(caplog):
+def test_invention_input_without_a_price_is_still_bought_at_an_unknown_cost(caplog):
+    """Fix round 1: dropping the line under-bought the input and made
+    Capital Reserved look exact. The line stays, with its quantity."""
     with caplog.at_level(logging.WARNING):
         items = _build_invention([_invent_action()], depth={})
-    assert items == []
+    datacore = next(i for i in items if i.type_id == DATACORE_ID)
+    assert datacore.quantity > 0
+    assert (datacore.estimated_unit_price, datacore.estimated_total) == (None, None)
+    assert "no price" in (datacore.notes or "")
     assert any(
         str(DATACORE_ID) in r.getMessage() and "no price" in r.getMessage()
         for r in caplog.records if r.levelno == logging.WARNING
@@ -375,3 +381,108 @@ def test_sub_manufacture_covers_several_parents_in_order():
     )
 
     assert sum(i.quantity for i in items if i.type_id == 54321) == 100
+
+
+def test_a_sub_manufacture_action_buys_its_own_me_adjusted_batch_materials():
+    sub = AssignedAction(
+        type_id=54321, type_name="Widget", action_type="sub_manufacture",
+        character_id=1, character_name="Pilot", quantity=100, runs=10,
+        estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None, materials={34: 18},
+    )
+    blueprints = {888: {"manufacturing": {
+        "materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 2}],
+        "products": [{"type_id": 54321, "quantity": 10}],
+    }}}
+    items = ShoppingListBuilder().build(
+        assigned_actions=[sub], corp_assets=[], market_depth_cache={34: {"vwap_5d": 5.0}},
+        admin_settings=_Admin(), blueprint_data=blueprints, meta_resolver=_NoBlueprints(),
+    )
+    assert [(i.type_id, i.quantity) for i in items] == [(34, 18)]   # not the SDE's 2 x 10
+
+
+def test_build_corp_stock_map_is_shared_and_skips_blueprints():
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
+        build_corp_stock_map,
+    )
+    assets = [SimpleNamespace(type_id=34, quantity=5), SimpleNamespace(type_id=34, quantity=7),
+              SimpleNamespace(type_id=999, quantity=1)]
+    assert build_corp_stock_map(assets, _BlueprintsAre(999)) == {34: 12}
+
+
+def test_an_unpriced_manufacturing_material_is_still_bought_at_an_unknown_cost(caplog):
+    with caplog.at_level("WARNING"):
+        items = ShoppingListBuilder().build(
+            assigned_actions=[_action(runs=1, materials={35: 10})], corp_assets=[],
+            market_depth_cache={}, admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
+            meta_resolver=_NoBlueprints(),
+        )
+    assert [(i.type_id, i.quantity, i.estimated_unit_price, i.estimated_total) for i in items] == [
+        (35, 10, None, None)]
+    assert any("type_id=35" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
+
+
+def test_a_merged_line_with_one_unpriced_part_has_an_unknown_total():
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import _merge_lines
+
+    priced = ShoppingItem(type_id=35, type_name="X", quantity=4, shopping_category="current_job",
+                          estimated_unit_price=2.0, estimated_total=8.0)
+    unpriced = ShoppingItem(type_id=35, type_name="X", quantity=6, shopping_category="current_job",
+                            estimated_unit_price=None, estimated_total=None, notes="no price")
+    (line,) = _merge_lines([priced, unpriced])
+    assert (line.quantity, line.estimated_total) == (10, None)
+
+
+def test_an_unpriced_material_makes_capital_reserved_unknown():
+    """End to end: the unpriced line becomes a buy_materials row with no
+    cost, and Capital Reserved reads unknown with a count."""
+    import os
+    import sys
+    from datetime import datetime
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+    from streamlit_ui.components.daily_planner import status_bar
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+
+    items = ShoppingListBuilder().build(
+        assigned_actions=[_action(runs=1, materials={35: 10})], corp_assets=[],
+        market_depth_cache={}, admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
+        meta_resolver=_NoBlueprints(),
+    )
+    rows = ActionPlanBuilder()._build_buy_material_actions(0, items, datetime(2026, 1, 1))
+    actions = [{"action_type": r.action_type, "status": r.status, "quantity": r.quantity,
+                "estimated_cost_isk": r.estimated_cost_isk} for r in rows]
+    assert actions[0]["quantity"] == 10
+    reserved = status_bar.compute_capital_reserved(actions)
+    assert reserved.unpriced_purchases == 1
+    assert status_bar.capital_reserved_display(reserved)[0] == "unknown"
+
+
+def test_split_sub_jobs_buy_one_merged_line_per_material():
+    """A sub-build split into jobs of 13, 13 and 11 Tritanium is one shopping
+    line of 37, with the summed total, not three lines."""
+    jobs = [
+        AssignedAction(
+            type_id=54321, type_name="Widget", action_type="sub_manufacture",
+            character_id=1, character_name="Pilot", quantity=q, runs=r,
+            estimated_cost_isk=None, estimated_profit_isk=None,
+            estimated_completion=None, notes=None, materials={34: m},
+        )
+        for q, r, m in [(70, 7, 13), (70, 7, 13), (60, 6, 11)]
+    ]
+    items = _build(jobs, [])
+    assert [(i.type_id, i.quantity, i.estimated_total, i.shopping_category) for i in items] == [
+        (34, 37, 37 * 5.0, "current_job")]
+    assert items[0].estimated_unit_price == 5.0
+    assert items[0].notes is None
+
+
+def test_merged_lines_keep_the_spot_price_note():
+    jobs = [_action(runs=1, materials={34: 2}), _action(runs=1, materials={34: 3})]
+    items = ShoppingListBuilder().build(
+        assigned_actions=jobs, corp_assets=[], market_depth_cache={34: {"spot_sell_price": 4.0}},
+        admin_settings=_Admin(), blueprint_data=BLUEPRINTS, meta_resolver=_NoBlueprints(),
+    )
+    assert [(i.quantity, i.estimated_total, i.notes) for i in items] == [
+        (5, 20.0, "price: spot (no VWAP data)")]

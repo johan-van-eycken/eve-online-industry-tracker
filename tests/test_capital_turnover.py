@@ -118,3 +118,29 @@ def test_isk_per_cycle_day_in_candidate() -> None:
     )
     candidate = IndustryService._build_portfolio_candidate(row, planning_horizon_hours=24.0)
     assert "isk_per_cycle_day" in candidate
+
+
+def test_capital_cycle_build_days_use_elapsed_time_for_invented_t2() -> None:
+    """An invented T2 row's time_seconds is amortized slot time (1 day here);
+    the capital cycle must use the whole-job elapsed time (3 days) instead.
+    sell_days = 3.0 as in the test above, so cycle_days = 3 + 3 = 6.0 and
+    isk_per_cycle_day = (10_000_000 * 30) / 6 = 50_000_000."""
+    row = _make_row(
+        quantity=1,
+        region_daily_volume=10,
+        region_daily_volume_7d_avg=10.0,
+        manufacturing_job={
+            "time_seconds": 86400,
+            "elapsed_time_seconds": 3 * 86400,
+            "manufacturing_time_seconds": 43200,
+            "preparation_time_seconds": 43200,
+            "total_cost": 90_000_000.0,
+            "material_cost": 80_000_000.0,
+            "total_job_cost": 10_000_000.0,
+            "procurement_materials": {},
+            "blueprint_source_kind": "unowned_blueprint_copy",
+        },
+    )
+    candidate = IndustryService._build_portfolio_candidate(row, planning_horizon_hours=72.0)
+    assert candidate["elapsed_time_seconds"] == 3 * 86400
+    assert abs(candidate["isk_per_cycle_day"] - 50_000_000.0) < 1.0

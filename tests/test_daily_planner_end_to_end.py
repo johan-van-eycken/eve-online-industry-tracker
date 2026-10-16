@@ -34,6 +34,8 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
 from eve_online_industry_tracker.config.admin_settings import AdminSettingsManager
 
@@ -191,3 +193,292 @@ def test_a_compute_logs_no_pricing_suggestion_or_relist_warning(
         or "pricing suggestion" in r.getMessage().lower()
     ]
     assert offending == []
+
+
+# --- round 5 Task 3 fix round 1, I3: invention inputs are priced in phase 1 ---
+# FAKE prices. The market-depth table only holds the plan's product types, so
+# datacores and decryptors need their own price lookup or the shopping list
+# skips them as unpriced.
+
+
+def _invention_planner(session_provider, planner_repo, tmp_path, *, prices):
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    t2_row = {
+        **GOOD_ROW,
+        "manufacturing_job": {
+            **GOOD_ROW["manufacturing_job"],
+            "blueprint_sde": {"blueprint_type_id": 9002},
+            "invention_decryptor": {"type_id": 34201, "type_name": "Accelerant Decryptor"},
+        },
+    }
+    asked: list[list[int]] = []
+
+    def get_type_price_map(*, type_ids, hub="jita", side="sell", progress_callback=None):
+        asked.append(sorted(type_ids))
+        return {int(t): {"unit_price": prices[int(t)]} for t in type_ids if int(t) in prices}
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [t2_row]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+    # The SDE read (the in-memory SDE has no blueprints); the prices are not injected.
+    svc._get_blueprint_data = lambda rows, extra_blueprint_type_ids=(): {
+        1001: {"manufacturing": {"materials": [], "products": [{"type_id": 6001, "quantity": 1}]},
+               "invention": {"materials": [{"type_id": 204, "type_name": "Datacore", "quantity": 2}],
+                             "products": [{"type_id": 9002, "quantity": 10}]}},
+        9002: {"manufacturing": {"materials": [], "products": [{"type_id": GOOD_ROW["type_id"], "quantity": 1}]}},
+    }
+    invent = AssignedAction(
+        type_id=GOOD_ROW["type_id"], type_name="Hobgoblin II", action_type="invent", character_id=1,
+        character_name="Pilot", quantity=None, runs=1, estimated_cost_isk=None, estimated_profit_isk=None,
+        estimated_completion=None, notes=None, decryptor_type_id=34201, decryptor_type_name="Accelerant Decryptor",
+    )
+    return svc, invent, asked
+
+
+def test_phase_1_prices_datacores_and_the_chosen_decryptor(session_provider, planner_repo, tmp_path):
+    svc, invent, asked = _invention_planner(
+        session_provider, planner_repo, tmp_path, prices={204: 100.0, 34201: 50.0},
+    )
+    phase1 = svc._phase_1_collect()
+
+    assert asked == [[204, 34201]]
+    items = {i.type_id: i for i in svc._phase_7_shopping([invent], phase1)}
+    assert (items[204].quantity, items[204].estimated_unit_price) == (2, 100.0)
+    assert (items[34201].quantity, items[34201].estimated_unit_price) == (1, 50.0)
+    assert items[34201].shopping_category == "invention_input"
+
+
+def test_an_unpriced_invention_input_still_warns(session_provider, planner_repo, tmp_path, caplog):
+    svc, invent, _ = _invention_planner(session_provider, planner_repo, tmp_path, prices={204: 100.0})
+    phase1 = svc._phase_1_collect()
+    with caplog.at_level(logging.WARNING):
+        items = {i.type_id: i for i in svc._phase_7_shopping([invent], phase1)}
+
+    # Task 8 fix round 1: still bought, at an unknown cost.
+    assert 204 in items and items[34201].estimated_total is None and items[34201].quantity > 0
+    assert any(
+        "type_id=34201" in r.getMessage() and "unknown cost" in r.getMessage() for r in caplog.records
+    )
+
+
+# --- round 5 Task 3 fix round 2: every buyable material is priced in phase 1 --
+# FAKE prices. A mineral (Tritanium) from the producer's batch materials and a
+# component (Intact Armor Plates 25624) from an owned BPO's SDE materials are
+# both outside the market-depth table; a depth row without any price must not
+# block the spot fill either.
+
+
+def _material_planner(session_provider, planner_repo, tmp_path, *, prices):
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    row = {
+        **GOOD_ROW,
+        "manufacturing_job": {
+            **GOOD_ROW["manufacturing_job"],
+            "blueprint_sde": {"blueprint_type_id": 999},
+            "materials": {"34": {"type_id": 34, "type_name": "Tritanium", "quantity": 500}},
+        },
+    }
+    asked: list[list[int]] = []
+
+    def get_type_price_map(*, type_ids, hub="jita", side="sell", progress_callback=None):
+        asked.append(sorted(type_ids))
+        return {int(t): {"unit_price": prices[int(t)]} for t in type_ids if int(t) in prices}
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [row]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+    # The SDE read only: blueprint 999 builds the row's product; owned BPO
+    # 7777 builds a component from Intact Armor Plates.
+    svc._get_blueprint_data = lambda rows, extra_blueprint_type_ids=(): {
+        999: {"manufacturing": {"materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 50}],
+                                "products": [{"type_id": GOOD_ROW["type_id"], "quantity": 1}]}},
+        7777: {"manufacturing": {"materials": [{"type_id": 25624, "type_name": "Intact Armor Plates", "quantity": 120}],
+                                 "products": [{"type_id": 7778, "quantity": 1}]}},
+    }
+    # A depth row with neither vwap_5d nor spot_sell_price for Tritanium.
+    real_depth = svc._repo.get_market_depth
+    svc._repo = SimpleNamespace(**{
+        name: getattr(planner_repo, name) for name in dir(planner_repo) if not name.startswith("__")
+    })
+    svc._repo.get_market_depth = lambda type_ids, hub: {
+        **real_depth(type_ids, hub), 34: SimpleNamespace(vwap_5d=None, spot_sell_price=None),
+    }
+
+    def action(action_type, type_id, materials):
+        return AssignedAction(
+            type_id=type_id, type_name=str(type_id), action_type=action_type, character_id=1,
+            character_name="Pilot", quantity=None, runs=1, estimated_cost_isk=None, estimated_profit_isk=None,
+            estimated_completion=None, notes=None, materials=materials,
+        )
+
+    actions = [
+        action("manufacture", GOOD_ROW["type_id"], {34: 500}),
+        action("sub_manufacture", 7778, None),
+    ]
+    return svc, actions, asked
+
+
+def test_phase_1_prices_minerals_and_components_so_they_are_bought(session_provider, planner_repo, tmp_path):
+    svc, actions, asked = _material_planner(
+        session_provider, planner_repo, tmp_path, prices={34: 4.0, 25624: 2_000.0},
+    )
+    phase1 = svc._phase_1_collect()
+
+    assert asked == [[34, 25624]]
+    items = {i.type_id: i for i in svc._phase_7_shopping(actions, phase1)}
+    assert (items[34].quantity, items[34].estimated_unit_price) == (500, 4.0)
+    assert (items[25624].quantity, items[25624].estimated_unit_price) == (120, 2_000.0)
+
+
+def test_a_material_with_no_hub_price_still_warns(session_provider, planner_repo, tmp_path, caplog):
+    svc, actions, _ = _material_planner(session_provider, planner_repo, tmp_path, prices={34: 4.0})
+    phase1 = svc._phase_1_collect()
+    with caplog.at_level(logging.WARNING):
+        items = {i.type_id: i for i in svc._phase_7_shopping(actions, phase1)}
+
+    # Task 8 fix round 1: still bought, at an unknown cost.
+    assert 34 in items and items[25624].estimated_total is None and items[25624].quantity > 0
+    assert any("type_id=25624" in r.getMessage() and "unknown cost" in r.getMessage() for r in caplog.records)
+
+
+# --- round 5 Task 3 fix round 3: one merged price map for phases 5 and 7 -----
+# FAKE prices. A T1 parent (12345) needs 10 x component 7778 per batch; the
+# corp owns BPO 7777 (ME 10) for it, 100 Tritanium per run. Depth holds only
+# the parent, so the component and the mineral are priced in phase 1. Build:
+# 10 runs x ceil(100 x 0.9) = 900 Tritanium x 4 = 3,600 < 10 x 1,000 = 10,000.
+
+
+class _DepthOverlayRepo:
+    """The real repository, with extra market-depth rows laid over its own."""
+
+    def __init__(self, repo, depth_extra):
+        self._repo = repo
+        self._depth_extra = depth_extra
+
+    def __getattr__(self, name):
+        return getattr(self._repo, name)
+
+    def get_market_depth(self, type_ids, hub):
+        return {**self._repo.get_market_depth(type_ids, hub), **self._depth_extra}
+
+
+def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_extra=None):
+    from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
+
+    admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
+    row = {
+        **GOOD_ROW,
+        "manufacturing_job": {
+            **GOOD_ROW["manufacturing_job"],
+            "blueprint_sde": {"blueprint_type_id": 999},
+            # A published install fee: an unknown one buys the component (Task 15 fix round 3).
+            "materials": {"7778": {"type_id": 7778, "type_name": "Component", "quantity": 10,
+                                   "component_job_fee_per_run": 0.0}},
+        },
+    }
+    prices = {34: 4.0, 7778: 1_000.0}
+
+    def get_type_price_map(*, type_ids, hub="jita", side="sell", progress_callback=None):
+        return {int(t): {"unit_price": prices[int(t)]} for t in type_ids if int(t) in prices}
+
+    svc = DailyPlannerService(
+        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: [row]),
+        corporations_service=SimpleNamespace(list_corporations=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: []),
+        sales_history_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
+        realized_profit_service=SimpleNamespace(),
+        repo=planner_repo,
+        admin_settings=admin,
+        session_provider=session_provider,
+    )
+    # SDE reads only (the in-memory SDE holds no blueprints or categories).
+    svc._get_blueprint_data = lambda rows, extra_blueprint_type_ids=(): {
+        999: {"max_production_limit": 100,
+              "manufacturing": {"materials": [{"type_id": 7778, "type_name": "Component", "quantity": 1}],
+                                "products": [{"type_id": GOOD_ROW["type_id"], "quantity": 1}]}},
+        7777: {"max_production_limit": 100,
+               "manufacturing": {"materials": [{"type_id": 34, "type_name": "Tritanium", "quantity": 100}],
+                                 "products": [{"type_id": 7778, "quantity": 1}]}},
+    }
+    svc._index_blueprint_assets = lambda assets: (
+        # The parent's own BPO too: a row with no owned blueprint is not built (Task 14 I3).
+        {7777: [SimpleNamespace(type_id=7777, blueprint_material_efficiency=10, blueprint_time_efficiency=20)],
+         999: [SimpleNamespace(type_id=999, blueprint_material_efficiency=10, blueprint_time_efficiency=20)]}, {},
+    )
+    if depth_extra:
+        svc._repo = _DepthOverlayRepo(planner_repo, depth_extra)
+    decision = ItemDecision(
+        type_id=GOOD_ROW["type_id"], type_name="Parent", decision="build", decision_reason="test",
+        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
+        days_of_supply_current=1.0, effective_velocity=1.0, meta_group_id=1,
+        pipeline_stage="manufacturing", overview_row=row,
+    )
+    return svc, decision
+
+
+def _sub_action(sub):
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    (job,) = sub.overview_row["sub_job_batches"]
+    # What CharacterAssigner makes of the sub decision's one job.
+    return AssignedAction(
+        type_id=sub.type_id, type_name=sub.type_name, action_type="sub_manufacture", character_id=1,
+        character_name="Pilot", quantity=job["quantity"], runs=job["runs"], estimated_cost_isk=job["cost"],
+        estimated_profit_isk=None, estimated_completion=None, notes=None, materials=job["materials"],
+    )
+
+
+def test_a_component_whose_minerals_are_not_in_depth_is_sub_manufactured(session_provider, planner_repo, tmp_path):
+    svc, decision = _sub_manufacture_planner(session_provider, planner_repo, tmp_path)
+    phase1 = svc._phase_1_collect()
+    plan = svc._phase_5_chain([decision], phase1)
+
+    subs = [d for d in plan.decisions if d.is_sub_component]
+    assert [s.type_id for s in subs] == [7778]
+    assert subs[0].overview_row["sub_job_batches"][0]["cost"] == pytest.approx(900 * 4.0)
+
+    items = {i.type_id: i for i in svc._phase_7_shopping([_sub_action(subs[0])], phase1)}
+    assert (items[34].quantity, items[34].estimated_unit_price) == (900, 4.0)
+    # Phases 2-4 and 9 still see the raw depth map, unchanged.
+    assert 34 not in phase1["market_depth_cache"] and 34 in phase1["price_map"]
+
+
+def test_a_zero_depth_price_does_not_block_the_hub_price(session_provider, planner_repo, tmp_path):
+    # Tritanium has a depth row whose vwap_5d is 0.0 and spot is unknown.
+    svc, decision = _sub_manufacture_planner(
+        session_provider, planner_repo, tmp_path,
+        depth_extra={34: SimpleNamespace(vwap_5d=0.0, spot_sell_price=None)},
+    )
+    phase1 = svc._phase_1_collect()
+    assert phase1["price_map"][34] == {"spot_sell_price": 4.0}
+    plan = svc._phase_5_chain([decision], phase1)
+    (sub,) = [d for d in plan.decisions if d.is_sub_component]
+    items = {i.type_id: i for i in svc._phase_7_shopping([_sub_action(sub)], phase1)}
+    assert items[34].estimated_unit_price == 4.0
+
+
+def test_a_zero_vwap_falls_through_to_the_spot_price():
+    from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+
+    assert ShoppingListBuilder()._get_price(34, {34: SimpleNamespace(vwap_5d=0.0, spot_sell_price=5.0)}) == (5.0, False)

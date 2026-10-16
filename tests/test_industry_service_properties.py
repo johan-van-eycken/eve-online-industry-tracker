@@ -16,6 +16,7 @@ from hypothesis import strategies as st
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.industry.service import IndustryService  # noqa: E402
+from eve_online_industry_tracker.application.industry.job_cost import JobSurchargeRates  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -229,118 +230,94 @@ class TestSkillTimeReduction:
 
 
 # ---------------------------------------------------------------------------
-# _job_cost_total
+# _job_install_cost (job_cost.job_install_cost)
 # ---------------------------------------------------------------------------
 
-class TestJobCostTotal:
+def _rates(surcharge: float) -> JobSurchargeRates:
+    return JobSurchargeRates(facility_tax=surcharge, scc=0.0, research_scc=0.0)
+
+
+def _install_cost(process_value, cost_index, reduction, surcharge, activity="manufacturing"):
+    return IndustryService._job_install_cost(
+        activity=activity,
+        process_value=process_value,
+        system_index=cost_index,
+        structure_cost_reduction=reduction,
+        surcharge_rates=_rates(surcharge),
+    )
+
+
+class TestJobInstallCost:
     @given(positive_floats, positive_floats, fraction_floats, non_negative_floats)
     def test_total_is_sum_of_parts(self, process_value: float, cost_index: float, reduction: float, surcharge: float):
         """total = discounted + surcharge_cost."""
-        result = IndustryService._job_cost_total(
-            process_value=process_value,
-            cost_index=cost_index,
-            cost_reduction=reduction,
-            installation_surcharge=surcharge,
-        )
-        if result["total_job_cost"] is not None:
-            expected = result["job_cost_before_surcharge"] + result["installation_surcharge"]
-            assert math.isclose(result["total_job_cost"], expected, rel_tol=1e-9)
+        result = _install_cost(process_value, cost_index, reduction, surcharge)
+        expected = result["job_cost_before_surcharge"] + result["installation_surcharge"]
+        assert math.isclose(result["total_job_cost"], expected, rel_tol=1e-9)
 
     @given(positive_floats, positive_floats, fraction_floats, non_negative_floats)
     def test_base_cost_formula(self, process_value: float, cost_index: float, reduction: float, surcharge: float):
         """base = process_value * cost_index."""
-        result = IndustryService._job_cost_total(
-            process_value=process_value,
-            cost_index=cost_index,
-            cost_reduction=reduction,
-            installation_surcharge=surcharge,
-        )
-        if result["base_job_cost"] is not None:
-            assert math.isclose(result["base_job_cost"], process_value * cost_index, rel_tol=1e-9)
+        result = _install_cost(process_value, cost_index, reduction, surcharge)
+        assert math.isclose(result["base_job_cost"], process_value * cost_index, rel_tol=1e-9)
+
+    @given(positive_floats, positive_floats, fraction_floats, non_negative_floats)
+    def test_the_surcharge_is_charged_on_the_job_value_not_the_index_cost(
+        self, process_value: float, cost_index: float, reduction: float, surcharge: float,
+    ):
+        """EVE: surcharge = job value x rate, whatever the index or reduction."""
+        result = _install_cost(process_value, cost_index, reduction, surcharge)
+        assert math.isclose(result["installation_surcharge"], process_value * surcharge, rel_tol=1e-9, abs_tol=1e-9)
 
     @given(positive_floats, positive_floats, fraction_floats, non_negative_floats)
     def test_discount_reduces_cost(self, process_value: float, cost_index: float, reduction: float, surcharge: float):
         """Discounted cost <= base cost."""
-        result = IndustryService._job_cost_total(
-            process_value=process_value,
-            cost_index=cost_index,
-            cost_reduction=reduction,
-            installation_surcharge=surcharge,
-        )
-        if result["base_job_cost"] is not None:
-            assert result["job_cost_before_surcharge"] <= result["base_job_cost"] + 1e-6
+        result = _install_cost(process_value, cost_index, reduction, surcharge)
+        assert result["job_cost_before_surcharge"] <= result["base_job_cost"] + 1e-6
 
     def test_zero_process_value_returns_none(self):
-        result = IndustryService._job_cost_total(
-            process_value=0.0,
-            cost_index=0.05,
-            cost_reduction=0.0,
-            installation_surcharge=0.0,
-        )
-        assert result["total_job_cost"] is None
+        assert _install_cost(0.0, 0.05, 0.0, 0.0)["total_job_cost"] is None
 
     def test_none_process_value_returns_none(self):
-        result = IndustryService._job_cost_total(
-            process_value=None,
-            cost_index=0.05,
-            cost_reduction=0.0,
-            installation_surcharge=0.0,
-        )
-        assert result["total_job_cost"] is None
+        assert _install_cost(None, 0.05, 0.0, 0.0)["total_job_cost"] is None
 
     def test_zero_cost_index_returns_none(self):
-        result = IndustryService._job_cost_total(
-            process_value=1_000_000.0,
-            cost_index=0.0,
-            cost_reduction=0.0,
-            installation_surcharge=0.0,
-        )
-        assert result["total_job_cost"] is None
+        """No index for the activity in the profile = unknown, not a surcharge-only fee."""
+        assert _install_cost(1_000_000.0, 0.0, 0.0, 0.04)["total_job_cost"] is None
 
     @given(positive_floats, positive_floats, non_negative_floats)
     def test_zero_reduction_no_discount(self, process_value: float, cost_index: float, surcharge: float):
         """With 0% cost reduction, discounted == base."""
-        result = IndustryService._job_cost_total(
-            process_value=process_value,
-            cost_index=cost_index,
-            cost_reduction=0.0,
-            installation_surcharge=surcharge,
-        )
-        if result["base_job_cost"] is not None:
-            assert math.isclose(
-                result["job_cost_before_surcharge"],
-                result["base_job_cost"],
-                rel_tol=1e-9,
-            )
+        result = _install_cost(process_value, cost_index, 0.0, surcharge)
+        assert math.isclose(result["job_cost_before_surcharge"], result["base_job_cost"], rel_tol=1e-9)
 
     @given(positive_floats, positive_floats, fraction_floats)
     def test_zero_surcharge(self, process_value: float, cost_index: float, reduction: float):
         """With 0% surcharge, total == discounted."""
-        result = IndustryService._job_cost_total(
-            process_value=process_value,
-            cost_index=cost_index,
-            cost_reduction=reduction,
-            installation_surcharge=0.0,
-        )
-        if result["total_job_cost"] is not None:
-            assert math.isclose(
-                result["total_job_cost"],
-                result["job_cost_before_surcharge"],
-                rel_tol=1e-9,
-            )
+        result = _install_cost(process_value, cost_index, reduction, 0.0)
+        assert math.isclose(result["total_job_cost"], result["job_cost_before_surcharge"], rel_tol=1e-9)
 
     @given(positive_floats, positive_floats, fraction_floats, non_negative_floats)
     def test_all_values_non_negative(self, process_value: float, cost_index: float, reduction: float, surcharge: float):
         """All cost components must be >= 0."""
-        result = IndustryService._job_cost_total(
-            process_value=process_value,
-            cost_index=cost_index,
-            cost_reduction=reduction,
-            installation_surcharge=surcharge,
-        )
+        result = _install_cost(process_value, cost_index, reduction, surcharge)
         for key in ("base_job_cost", "job_cost_before_surcharge", "installation_surcharge", "total_job_cost"):
-            if result[key] is not None:
-                assert result[key] >= 0.0
+            assert result[key] >= 0.0
+
+    @given(positive_floats, positive_floats, fraction_floats)
+    def test_research_pays_the_research_scc_and_the_rest_the_full_scc(
+        self, process_value: float, cost_index: float, reduction: float,
+    ):
+        rates = JobSurchargeRates(facility_tax=0.01, scc=0.04, research_scc=0.02)
+        for activity, rate in (
+            ("manufacturing", 0.05), ("reaction", 0.05), ("copying", 0.05), ("invention", 0.05),
+            ("research_material", 0.03), ("research_time", 0.03),
+        ):
+            result = IndustryService._job_install_cost(
+                activity=activity, process_value=process_value, system_index=cost_index,
+                structure_cost_reduction=reduction, surcharge_rates=rates,
+            )
+            assert math.isclose(result["installation_surcharge"], process_value * rate, rel_tol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -518,21 +495,56 @@ class TestProfileBaseReduction:
 
 
 # ---------------------------------------------------------------------------
-# _profile_installation_surcharge
+# _profile_job_surcharge_rates
 # ---------------------------------------------------------------------------
 
-class TestProfileInstallationSurcharge:
-    @given(non_negative_floats)
-    def test_non_negative(self, value: float):
-        profile = {"installation_cost_modifier": value}
-        result = IndustryService._profile_installation_surcharge(profile)
-        assert result >= 0.0
+class _Admin:
+    def __init__(self, values: dict[str, float]):
+        self._values = values
 
-    def test_none_profile_returns_zero(self):
-        assert IndustryService._profile_installation_surcharge(None) == 0.0
+    def get(self, category: str, key: str):
+        return self._values[key]
 
-    def test_negative_clamped_to_zero(self):
-        assert IndustryService._profile_installation_surcharge({"installation_cost_modifier": -5.0}) == 0.0
+
+def _service(admin_values: dict[str, float] | None = None) -> IndustryService:
+    state = type("S", (), {"admin_settings": _Admin(admin_values) if admin_values is not None else None})()
+    return IndustryService(state=state)
+
+
+class TestProfileJobSurchargeRates:
+    def test_no_profile_leaves_the_facility_tax_unknown(self):
+        rates = _service()._profile_job_surcharge_rates(None)
+        assert rates.facility_tax is None and rates.unknown_reason
+        assert (rates.scc, rates.research_scc) == (0.04, 0.02)
+
+    def test_the_scc_rates_come_from_the_admin_settings(self):
+        rates = _service({"scc_surcharge": 0.05, "research_scc_surcharge": 0.03})._profile_job_surcharge_rates({"facility_tax": 0.01})
+        assert rates == JobSurchargeRates(facility_tax=0.01, scc=0.05, research_scc=0.03)
+
+    def test_the_facility_tax_falls_back_to_the_installation_modifier_minus_scc(self):
+        rates = _service()._profile_job_surcharge_rates({"installation_cost_modifier": 0.10})
+        assert math.isclose(rates.facility_tax, 0.06)
+        assert math.isclose(rates.rate("manufacturing"), 0.10)
+
+    @given(st.floats(min_value=-5.0, max_value=5.0, allow_nan=False, allow_infinity=False))
+    def test_the_facility_tax_is_never_guessed(self, value: float):
+        """Fix round 1: a negative tax or a legacy modifier below SCC is not
+        clamped to 0 %: the tax (so every fee) is unknown, with a reason."""
+        service = _service()
+        for profile in ({"installation_cost_modifier": value}, {"facility_tax": value}):
+            rates = service._profile_job_surcharge_rates(profile)
+            if rates.facility_tax is None:
+                assert rates.unknown_reason
+            else:
+                assert rates.facility_tax >= 0.0 and rates.unknown_reason is None
+        assert service._profile_job_surcharge_rates({"facility_tax": -0.01}).facility_tax is None
+        assert service._profile_job_surcharge_rates({"installation_cost_modifier": 0.01}).facility_tax is None
+
+    def test_an_underivable_facility_tax_logs_a_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            _service()._profile_job_surcharge_rates({"installation_cost_modifier": 0.01})
+        assert any("facility tax" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -798,16 +810,16 @@ class TestProfileRigReduction:
         )
         assert result_no_match == 0.0
 
-    def test_fallback_to_aggregate_keys(self):
-        """When no rig effects array, should use aggregate bonus keys."""
+    def test_no_fallback_to_aggregate_keys(self):
+        """Task 15 M1: with no rig effects array the aggregate bonus keys name
+        no rig, so no rig bonus applies (never an under-buy)."""
         profile = {"structure_rig_material_bonus": 0.044}
         result = IndustryService._profile_rig_reduction(
             profile_payload=profile,
             activity="manufacturing",
             metric="material",
         )
-        expected = IndustryService._normalize_fraction(0.044)
-        assert math.isclose(result, expected, abs_tol=1e-9)
+        assert result == 0.0
 
     def test_none_profile_returns_zero(self):
         assert IndustryService._profile_rig_reduction(
@@ -868,3 +880,24 @@ class TestReductionPipelineIntegration:
         assert reduced <= original + 1  # +1 for ceil rounding edge case
         # Should never go below runs (1 per run)
         assert reduced >= runs
+
+
+# ---------------------------------------------------------------------------
+# _sum_estimated_item_value (fix round 1: never a partial EIV)
+# ---------------------------------------------------------------------------
+
+class TestSumEstimatedItemValueNeverPartial:
+    def test_all_priced_sums_every_line(self):
+        total, priced = IndustryService._sum_estimated_item_value(
+            [{"type_id": 1, "quantity": 2}, {"type_id": 2, "quantity": 3}],
+            quantity_key="quantity", adjusted_price_map={1: {"adjusted_price": 10.0}, 2: {"adjusted_price": 1.0}},
+        )
+        assert (total, priced) == (23.0, 2)
+
+    def test_one_unpriced_material_makes_the_eiv_unknown(self):
+        """A partial sum would price the fee low and pass as exact."""
+        total, priced = IndustryService._sum_estimated_item_value(
+            [{"type_id": 1, "quantity": 2}, {"type_id": 2, "quantity": 3}],
+            quantity_key="quantity", adjusted_price_map={1: {"adjusted_price": 10.0}},
+        )
+        assert total is None and priced == 1

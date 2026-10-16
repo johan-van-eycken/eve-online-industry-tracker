@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -175,7 +175,7 @@ def _make_repo() -> tuple[DailyPlannerRepository, sqlite3.Connection]:
 
 
 def _now() -> datetime:
-    return datetime.utcnow().replace(microsecond=0)
+    return datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +511,7 @@ def test_plan_history_returns_recent_plans(app_session, session_provider):
 
     from eve_online_industry_tracker.infrastructure.models import BuildPlanModel
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     app_session.add(BuildPlanModel(
         created_at=now, updated_at=now, status="active", freshness_score=1.0,
     ))
@@ -574,7 +574,7 @@ def test_plan_history_keeps_an_unknown_freshness_unknown(app_session, session_pr
 
     from eve_online_industry_tracker.infrastructure.models import BuildPlanModel
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     app_session.add(BuildPlanModel(created_at=now, updated_at=now, status="active",
                                    freshness_score=None))
     app_session.add(BuildPlanModel(created_at=now, updated_at=now, status="superseded",
@@ -657,3 +657,349 @@ def test_persisted_plan_item_snapshot_price_is_none_when_type_id_has_no_market_d
 
     item = app_session.query(BuildPlanItemModel).one()
     assert item.snapshot_sell_price is None
+
+
+# ---------------------------------------------------------------------------
+# An unknown sell velocity persists as NULL, never as the analyzer's 0.01 floor
+# ---------------------------------------------------------------------------
+
+def _unknown_velocity_decision() -> ItemDecision:
+    import dataclasses
+
+    return dataclasses.replace(
+        _decision(),
+        effective_velocity=0.01,
+        velocity_unknown_reason="no corp sales in 30 days and no days-of-supply estimate",
+    )
+
+
+def test_an_unknown_velocity_persists_as_null_not_the_floor(app_session, session_provider):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    service = _service(session_provider)
+    service._persist_plan_items(
+        plan_id=1, decisions=[_unknown_velocity_decision()], market_depth_cache={}
+    )
+    assert app_session.query(BuildPlanItemModel).one().effective_velocity is None
+
+
+def test_a_measured_velocity_still_persists_as_is(app_session, session_provider):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    service = _service(session_provider)
+    service._persist_plan_items(plan_id=1, decisions=[_decision()], market_depth_cache={})
+    assert app_session.query(BuildPlanItemModel).one().effective_velocity == 10.0
+
+
+def test_readers_do_not_treat_a_null_velocity_as_measured(app_session, session_provider):
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+        _estimate_predicted_sell_days,
+    )
+    from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import (
+        MarketDepthCollector,
+    )
+    from eve_online_industry_tracker.infrastructure.models import (
+        BuildPlanItemModel,
+        BuildPlanModel,
+    )
+
+    now = datetime(2026, 1, 1)
+    app_session.add(BuildPlanModel(id=1, created_at=now, updated_at=now, status="active"))
+    app_session.commit()
+    _service(session_provider)._persist_plan_items(
+        plan_id=1, decisions=[_unknown_velocity_decision()], market_depth_cache={}
+    )
+    item = app_session.query(BuildPlanItemModel).one()
+
+    # feedback_processor: NULL is no prediction at all, not the 30-day clamp of 1/0.01.
+    assert _estimate_predicted_sell_days(item) is None
+    assert _estimate_predicted_sell_days(SimpleNamespace(effective_velocity=0.01)) == 30.0
+
+    # market_depth_collector: the NULL row is skipped, so with no corp to fall
+    # back on the velocity is unknown (None) and competition_index stays None.
+    collector = object.__new__(MarketDepthCollector)
+    collector._sessions = SimpleNamespace(app_session=lambda: app_session)
+    assert collector._get_effective_velocity(item.type_id, None) is None
+
+
+def test_a_bpo_analysis_skip_reason_is_persisted(app_session, session_provider):
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    decision = _decision()
+    decision.bpo_analysis_skip_reason = "no BPO market price for bp_type_id=999"
+    _service(session_provider)._persist_plan_items(
+        plan_id=1, decisions=[decision], market_depth_cache={}
+    )
+    item = app_session.query(BuildPlanItemModel).one()
+    assert item.bpo_analysis_skip_reason == "no BPO market price for bp_type_id=999"
+
+
+def test_ensure_app_schema_adds_the_skip_reason_column_to_a_legacy_table() -> None:
+    conn = sqlite3.connect(":memory:")
+    db = _FakeDb(conn)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS market_history (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "type_id INTEGER NOT NULL, region_id INTEGER NOT NULL, date TEXT NOT NULL,"
+        "close REAL NOT NULL, high REAL, low REAL, volume INTEGER NOT NULL,"
+        "order_count INTEGER NOT NULL, fetched_at DATETIME, updated_at DATETIME,"
+        "UNIQUE(type_id, region_id, date))"
+    )
+    conn.execute(
+        "CREATE TABLE build_plan_item (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "plan_id INTEGER NOT NULL, type_id INTEGER NOT NULL, decision TEXT NOT NULL)"
+    )
+    conn.commit()
+
+    ensure_app_schema(db)
+    ensure_app_schema(db)  # idempotent
+
+    columns = {row[1] for row in db.query("PRAGMA table_info(build_plan_item)")}
+    assert "bpo_analysis_skip_reason" in columns
+
+
+def test_a_decision_without_a_skip_reason_stores_null(app_session, session_provider):
+    from sqlalchemy import text
+
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    decision = _decision()
+    assert decision.bpo_analysis_skip_reason is None
+    _service(session_provider)._persist_plan_items(
+        plan_id=1, decisions=[decision], market_depth_cache={}
+    )
+    assert app_session.query(BuildPlanItemModel).one().bpo_analysis_skip_reason is None
+    stored = app_session.execute(
+        text("SELECT bpo_analysis_skip_reason FROM build_plan_item")
+    ).scalar_one()
+    assert stored is None  # SQL NULL, not the string 'None' or ''
+
+
+def test_a_legacy_row_reads_back_with_no_skip_reason_after_the_column_is_added() -> None:
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    BaseApp.metadata.create_all(engine)
+    raw = engine.raw_connection().driver_connection
+    # Make the table look like it did before the column existed, with a row in it.
+    raw.execute("ALTER TABLE build_plan_item DROP COLUMN bpo_analysis_skip_reason")
+    raw.execute(
+        "INSERT INTO build_plan_item (plan_id, type_id, decision) VALUES (1, 590, 'build')"
+    )
+    raw.commit()
+    db = _FakeDb(raw)
+    assert "bpo_analysis_skip_reason" not in {
+        r[1] for r in db.query("PRAGMA table_info(build_plan_item)")
+    }
+
+    ensure_app_schema(db)
+
+    with sessionmaker(bind=engine, future=True)() as session:
+        item = session.query(BuildPlanItemModel).one()
+        assert item.type_id == 590
+        assert item.bpo_analysis_skip_reason is None
+
+
+_INVENT_COLUMNS = (
+    "invention_probability", "invention_best_probability", "invention_expected_attempts",
+    "decryptor_type_id", "decryptor_type_name",
+)
+
+
+def test_an_invent_actions_chance_and_decryptor_survive_a_reload_on_a_legacy_table() -> None:
+    """A4 fix round 1, minor 5: the assigned chance, the best inventor's, the
+    expected attempts and Task 3's decryptor are persisted. ensure_app_schema
+    adds the columns to a pre-existing daily_action_log (idempotent: run twice)."""
+    from sqlalchemy import text
+
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    repo, engine = _make_repo()
+    legacy_cols = [c for c in DailyActionLogModel.__table__.columns if c.name not in _INVENT_COLUMNS]
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE daily_action_log"))
+        conn.execute(text(
+            "CREATE TABLE daily_action_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            + ", ".join(f"{c.name} {c.type.compile(engine.dialect)}" for c in legacy_cols if c.name != "id")
+            + ")"
+        ))
+
+    class _EngineDb:
+        def execute(self, query, params=None):
+            with engine.begin() as conn:
+                conn.execute(text(query), params or {})
+
+        def query(self, query, params=None):
+            with engine.begin() as conn:
+                return conn.execute(text(query), params or {}).fetchall()
+
+    ensure_app_schema(_EngineDb())
+    ensure_app_schema(_EngineDb())
+
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    invent = AssignedAction(
+        type_id=12345, type_name="Widget II", action_type="invent", character_id=2, character_name="Weaker",
+        quantity=None, runs=5, estimated_cost_isk=5317.56, estimated_profit_isk=None, estimated_completion=None,
+        notes="chance 40.8% (assigned pilot), best inventor 52.5%",
+        decryptor_type_id=34201, decryptor_type_name="Fake Decryptor",
+        invention_probability=0.408, invention_best_probability=0.525, invention_expected_attempts=4.902,
+    )
+    repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [invent], now))
+
+    (row,) = repo.get_actions(plan_id)
+    assert (row.runs, row.decryptor_type_id, row.decryptor_type_name) == (5, 34201, "Fake Decryptor")
+    assert (row.invention_probability, row.invention_best_probability, row.invention_expected_attempts) == (
+        0.408, 0.525, 4.902,
+    )
+
+
+def test_a_job_actions_install_fee_survives_a_reload_on_a_legacy_table() -> None:
+    """D4 (Task 8): estimated_job_fee_isk is persisted; ensure_app_schema adds
+    the column to a pre-existing daily_action_log (idempotent: run twice).
+    A legacy row reads back NULL (unknown), never 0."""
+    from sqlalchemy import text
+
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    repo, engine = _make_repo()
+    legacy_cols = [c for c in DailyActionLogModel.__table__.columns if c.name != "estimated_job_fee_isk"]
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE daily_action_log"))
+        conn.execute(text(
+            "CREATE TABLE daily_action_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            + ", ".join(f"{c.name} {c.type.compile(engine.dialect)}" for c in legacy_cols if c.name != "id")
+            + ")"
+        ))
+        conn.execute(text(
+            "INSERT INTO daily_action_log (plan_id, generated_at, action_type, type_id, status, processed_for_feedback) "
+            "VALUES (0, '2026-01-01 00:00:00', 'manufacture', 1, 'pending', 0)"
+        ))
+
+    class _EngineDb:
+        def execute(self, query, params=None):
+            with engine.begin() as conn:
+                conn.execute(text(query), params or {})
+
+        def query(self, query, params=None):
+            with engine.begin() as conn:
+                return conn.execute(text(query), params or {}).fetchall()
+
+    ensure_app_schema(_EngineDb())
+    ensure_app_schema(_EngineDb())
+
+    (legacy,) = repo.get_actions(0)
+    assert legacy.estimated_job_fee_isk is None
+
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    action = AssignedAction(
+        type_id=12345, type_name="Widget", action_type="manufacture", character_id=1, character_name="Pilot",
+        quantity=10, runs=10, estimated_cost_isk=500.0, estimated_profit_isk=None, estimated_completion=None,
+        notes=None, estimated_job_fee_isk=25.5,
+    )
+    repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [action], now))
+    (row,) = repo.get_actions(plan_id)
+    assert row.estimated_job_fee_isk == 25.5
+
+
+def test_a_job_actions_unknown_fee_reason_survives_a_reload() -> None:
+    """Task 8b fix round 1: the cause of an unknown fee is persisted, so
+    Capital Reserved can name it (and show the refresh hint only without one)."""
+    from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+    from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+
+    repo, _engine = _make_repo()
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    action = AssignedAction(
+        type_id=12345, type_name="Widget", action_type="manufacture", character_id=1, character_name="Pilot",
+        quantity=10, runs=10, estimated_cost_isk=500.0, estimated_profit_isk=None, estimated_completion=None,
+        notes=None, estimated_job_fee_isk=None, estimated_job_fee_unknown_reason="no manufacturing cost index",
+    )
+    repo.insert_actions(ActionPlanBuilder()._build_job_actions(plan_id, [action], now))
+    (row,) = repo.get_actions(plan_id)
+    assert (row.estimated_job_fee_isk, row.estimated_job_fee_unknown_reason) == (None, "no manufacturing cost index")
+
+
+def test_get_analytics_reads_out_of_band_weights_through_the_band(app_session, session_provider):
+    """FU-03: get_analytics reads plan_learning_weights through read_weight,
+    so a pre-clamp or hand-edited row is shown clamped, not raw."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    plan = BuildPlanModel(created_at=now, updated_at=now, status="active", freshness_score=1.0)
+    app_session.add(plan)
+    app_session.commit()
+    app_session.add(BuildPlanItemModel(plan_id=plan.id, type_id=4242, decision="build"))
+    app_session.add(PlanLearningWeightsModel(
+        type_id=4242, accuracy_ema=9.0, velocity_multiplier=1.0, cost_multiplier=0.1,
+        sample_count=3, last_updated=now, confidence_tier="low",
+    ))
+    app_session.commit()
+
+    (item,) = _service(session_provider).get_analytics()["items"]
+    assert item["accuracy_ema"] == 4.0       # LEARNING_WEIGHT_MAX
+    assert item["cost_multiplier"] == 0.25   # LEARNING_WEIGHT_MIN
+    assert item["velocity_multiplier"] == 1.0
+
+
+def test_a_compute_warns_once_for_a_corrupt_weight_row(session_provider, caplog):
+    """FU-04: _run_compute is one compute for the learned-weight warnings, so
+    two readers of the same corrupt row produce one WARNING."""
+    import logging
+    from types import SimpleNamespace
+
+    from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
+
+    corrupt = SimpleNamespace(type_id=4242, velocity_multiplier=float("nan"))
+    svc = _service(session_provider)
+
+    def phase_1():
+        read_weight(corrupt, "velocity_multiplier")   # e.g. the pipeline analyzer
+        read_weight(corrupt, "velocity_multiplier")   # e.g. the scorer
+        return {"overview_rows": []}
+
+    svc._phase_1_collect = phase_1
+    with caplog.at_level(logging.WARNING):
+        svc._run_compute()
+    assert sum("not a finite number" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_the_copy_flag_of_busy_blueprints_comes_from_the_asset_history(app_session, session_provider):
+    """Fix round 1, minor 3: many live job rows have a NULL
+    blueprint_is_blueprint_copy; the asset history says what the item is."""
+    from eve_online_industry_tracker.infrastructure.models import (
+        CharacterAssetHistoryModel,
+        CorporationAssetHistoryModel,
+    )
+
+    app_session.add(CorporationAssetHistoryModel(
+        corporation_id=1, item_id=501, observed_at="2026-01-01T00:00:00Z", type_id=999, is_blueprint_copy=False,
+    ))
+    app_session.add(CharacterAssetHistoryModel(
+        character_id=2, item_id=502, observed_at="2026-01-01T00:00:00Z", type_id=999, is_blueprint_copy=True,
+    ))
+    app_session.add(CorporationAssetHistoryModel(
+        corporation_id=1, item_id=503, observed_at="2026-01-01T00:00:00Z", type_id=999, is_blueprint_copy=None,
+    ))
+    app_session.commit()
+    flags = _service(session_provider)._blueprint_copy_flags({501, 502, 503, 504})
+    assert flags == {501: False, 502: True}
+
+
+def test_a_job_with_a_null_status_holds_its_slot_and_blueprint(session_provider):
+    """Fix round 3, item 3: NOT IN drops NULL rows; a NULL status is active."""
+    from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
+
+    session = session_provider.app_session()
+    try:
+        session.add(CorporationIndustryJobsModel(corporation_id=1, job_id=11, blueprint_item_id=601, status=None))
+        session.add(CorporationIndustryJobsModel(corporation_id=1, job_id=12, blueprint_item_id=602, status="delivered"))
+        session.commit()
+    finally:
+        session.close()
+    jobs = _service(session_provider)._get_industry_jobs()
+    assert sorted(int(j.blueprint_item_id) for j in jobs) == [601]

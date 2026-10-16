@@ -198,7 +198,17 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "step": 0.005,
                 "format": "%.4f",
                 "label": "SCC surcharge",
-                "help": "CONCORD surcharge applied to all industry jobs.",
+                "help": "CONCORD surcharge on the job value of manufacturing, reaction, copying and invention jobs (4%). Manufacturing, copying and invention are fitted on real ESI jobs; reactions use EVE's documented formula and are not validated (no reaction jobs to fit).",
+            },
+            "research_scc_surcharge": {
+                "type": "float",
+                "default": 0.02,
+                "min": 0.0,
+                "max": 0.20,
+                "step": 0.005,
+                "format": "%.4f",
+                "label": "SCC surcharge (ME/TE research)",
+                "help": "CONCORD surcharge on the job value of ME/TE research jobs (2%, fitted on real ESI jobs).",
             },
             "base_sales_tax_rate": {
                 "type": "float",
@@ -280,15 +290,25 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Copy cost EIV multiplier",
                 "help": "Fraction of material EIV used for blueprint copy job cost (2%).",
             },
+            "invention_cost_eiv_multiplier": {
+                "type": "float",
+                "default": 0.02,
+                "min": 0.0,
+                "max": 0.10,
+                "step": 0.005,
+                "format": "%.4f",
+                "label": "Invention cost EIV multiplier",
+                "help": "Invention job value per attempt = this × the invented blueprint's per-run material EIV (2%).",
+            },
             "research_cost_eiv_multiplier": {
                 "type": "float",
-                "default": 0.02105,
+                "default": 0.02,
                 "min": 0.0,
                 "max": 0.10,
                 "step": 0.005,
                 "format": "%.5f",
                 "label": "Research cost EIV multiplier",
-                "help": "Fraction of material EIV × duration used for research job cost.",
+                "help": "Research job value = material EIV × this × EVE's level multiplier (1 at level 1 … 2438.1 at level 10, the same for every blueprint rank) (2%).",
             },
             "max_blueprint_material_efficiency": {
                 "type": "int",
@@ -301,10 +321,15 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "max_blueprint_time_efficiency": {
                 "type": "int",
                 "default": 20,
-                "min": 1,
-                "max": 30,
-                "label": "Max blueprint TE",
-                "help": "Maximum time efficiency level for blueprints.",
+                "min": 0,
+                "max": 20,
+                "step": 2,
+                "label": "Max blueprint TE (%)",
+                "help": (
+                    "Maximum blueprint time efficiency, as EVE's percentage (0-20 %, 2 % per research "
+                    "level, so 20 % = level 10). The daily planner researches every owned BPO below "
+                    "it up to this TE; blueprints without an owned source are costed at it."
+                ),
             },
             "invention_probability_floor": {
                 "type": "float",
@@ -315,6 +340,14 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "format": "%.3f",
                 "label": "Invention probability floor",
                 "help": "Minimum invention success probability used in attempt calculations.",
+            },
+            "invention_decryptor_selection_enabled": {
+                "type": "bool",
+                "default": True,
+                "label": "Pick the best decryptor per invented item",
+                "help": "Evaluate no decryptor and every T2 decryptor for each invented item and use the one "
+                        "with the highest profit per invention cycle (the lowest cost per unit when the sell "
+                        "price is unknown). Off: every invention is planned without a decryptor.",
             },
             "portfolio_liquidity_threshold": {
                 "type": "int",
@@ -562,16 +595,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Price outlier sigma",
                 "help": "Standard deviations from avg_30d beyond which a sell order is excluded as a price outlier.",
             },
-            "planner_optimal_te_threshold_pct": {
-                "type": "float",
-                "default": 1.0,
-                "min": 0.1,
-                "max": 10.0,
-                "step": 0.1,
-                "format": "%.1f",
-                "label": "Optimal TE threshold (%)",
-                "help": "Minimum % time saving per TE level to continue researching; below this compute_optimal_te() stops.",
-            },
         },
     },
     "esi_resilience": {
@@ -628,6 +651,10 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 # AdminSettingsManager
 # ---------------------------------------------------------------------------
+
+_FALSE_STRINGS = frozenset({"false", "0", "no", "off", "n", ""})
+_TRUE_STRINGS = frozenset({"true", "1", "yes", "on", "y"})
+
 
 class AdminSettingsManager:
     """Loads, validates and persists admin settings from/to a JSON file."""
@@ -697,7 +724,13 @@ class AdminSettingsManager:
     def _coerce(value: Any, spec: dict[str, Any]) -> Any:
         typ = spec["type"]
         if typ == "int":
+            if isinstance(value, str):
+                value = value.strip()
             coerced = int(value)
+            if "step" in spec:
+                # Snap to the nearest value on the step grid from min (TE 15 -> 16).
+                origin, step = int(spec.get("min", 0)), int(spec["step"])
+                coerced = origin + ((coerced - origin) * 2 + step) // (2 * step) * step
             if "min" in spec:
                 coerced = max(spec["min"], coerced)
             if "max" in spec:
@@ -711,6 +744,13 @@ class AdminSettingsManager:
                 coerced = min(spec["max"], coerced)
             return coerced
         if typ == "bool":
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in _FALSE_STRINGS:
+                    return False
+                if text in _TRUE_STRINGS:
+                    return True
+                raise ValueError(f"not a boolean: {value!r}")
             return bool(value)
         if typ == "str":
             return str(value)
@@ -728,10 +768,47 @@ class AdminSettingsManager:
             return
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
-            self._data = payload if isinstance(payload, dict) else {}
         except Exception:
             logging.warning("Failed to load admin settings from %s; using defaults", self._path)
             self._data = {}
+            return
+        self._data = self._coerce_stored(payload if isinstance(payload, dict) else {})
+
+    @classmethod
+    def _coerce_stored(cls, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """The stored settings, each coerced against its spec (type, min/max)
+        as set() would. A value that changes logs a WARNING with the key and
+        the old and new value; one that cannot be coerced falls back to the
+        default (dropped, so get() returns the default). A key the schema no
+        longer has (e.g. the removed planner_optimal_te_threshold_pct) is
+        ignored with an INFO log."""
+        data: dict[str, dict[str, Any]] = {}
+        for category, values in payload.items():
+            cat_schema = ADMIN_SETTINGS_SCHEMA.get(category)
+            if cat_schema is None or not isinstance(values, dict):
+                logging.info("Admin settings: ignoring stored category %r, not in the schema", category)
+                continue
+            for key, raw in values.items():
+                spec = cat_schema["settings"].get(key)
+                if spec is None:
+                    logging.info("Admin settings: ignoring stored setting %s/%s=%r, not in the schema", category, key, raw)
+                    continue
+                try:
+                    coerced = cls._coerce(raw, spec)
+                except (TypeError, ValueError, OverflowError):
+                    logging.warning(
+                        "Admin settings: stored %s/%s=%r is not a valid %s; using the default %r",
+                        category, key, raw, spec["type"], spec["default"],
+                    )
+                    continue
+                widened = isinstance(raw, int) and not isinstance(raw, bool) and isinstance(coerced, float)
+                if coerced != raw or (type(coerced) is not type(raw) and not widened):
+                    logging.warning(
+                        "Admin settings: stored %s/%s=%r is outside its spec; using %r",
+                        category, key, raw, coerced,
+                    )
+                data.setdefault(category, {})[key] = coerced
+        return data
 
     def _persist(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

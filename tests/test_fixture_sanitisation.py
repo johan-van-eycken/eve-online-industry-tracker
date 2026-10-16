@@ -1,12 +1,25 @@
 # tests/test_fixture_sanitisation.py
 from __future__ import annotations
 
+import ast
+import os
+
+import pytest
+
 from eve_online_industry_tracker.application.daily_planner.fixture_export import (
+    BLUEPRINT_SOURCE_KINDS,
+    _PUBLIC_STRING_KEYS,
+    _is_identity_key,
     IDENTITY_KEY_SUBSTRINGS,
     sanitise_overview_rows,
 )
 
 REDACTED = "<redacted>"
+
+_PRODUCER = os.path.join(
+    os.path.dirname(__file__), "..", "src", "eve_online_industry_tracker",
+    "application", "industry", "service.py",
+)
 
 RAW = [
     {
@@ -100,9 +113,42 @@ def test_ship_name_is_redacted_when_nested_under_blueprint_copy():
     assert "Some Pilot" not in blueprint_copy["ship_name"]
 
 
+def _string_values(node, key=""):
+    """Yield (key, string) for every string value in a sanitised structure."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _string_values(v, k)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _string_values(item, key)
+    elif isinstance(node, str):
+        yield key, node
+
+
 def test_non_allow_listed_string_value_is_redacted():
-    row = sanitise_overview_rows(RAW)[0]
-    assert row["blueprint_source_kind"] == REDACTED
+    """Default-deny: EVERY string value is redacted unless its key is public,
+    or it is a blueprint_source_kind with an enum value."""
+    def exempt(key, value):
+        return key in _PUBLIC_STRING_KEYS or (
+            key == "blueprint_source_kind" and value in BLUEPRINT_SOURCE_KINDS
+        )
+
+    raw_strings = list(_string_values(RAW))
+    raw_exempt = [(k, v) for k, v in raw_strings if exempt(k, v)]
+    # Identity keys are dropped outright by design, so they are not redacted.
+    raw_private = [
+        (k, v) for k, v in raw_strings if not exempt(k, v) and not _is_identity_key(k)
+    ]
+    assert len(raw_private) >= 4 and raw_exempt, "the property would be vacuous"
+
+    seen = list(_string_values(sanitise_overview_rows(RAW)))
+    for key, value in seen:
+        if not exempt(key, value):
+            assert value == REDACTED, f"{key!r} leaked {value!r}"
+    # Nothing private may be dropped instead of redacted, and the public
+    # strings must survive verbatim.
+    assert sum(1 for _, v in seen if v == REDACTED) == len(raw_private)
+    assert sorted(kv for kv in seen if exempt(*kv)) == sorted(raw_exempt)
 
 
 def test_timestamp_string_is_redacted():
@@ -121,3 +167,64 @@ def test_magnitudes_are_replaced_but_types_and_signs_kept():
 
 def test_sanitisation_is_deterministic():
     assert sanitise_overview_rows(RAW) == sanitise_overview_rows(RAW)
+
+
+@pytest.mark.parametrize("kind", sorted(BLUEPRINT_SOURCE_KINDS))
+def test_a_blueprint_source_kind_survives_sanitisation(kind):
+    (row,) = sanitise_overview_rows(
+        [{"type_id": 1, "manufacturing_job": {"blueprint_source_kind": kind}}]
+    )
+    assert row["manufacturing_job"]["blueprint_source_kind"] == kind
+
+
+def test_an_unknown_blueprint_source_kind_is_still_redacted():
+    (row,) = sanitise_overview_rows(
+        [{"type_id": 1, "manufacturing_job": {"blueprint_source_kind": "Some Pilot's hangar"}}]
+    )
+    assert row["manufacturing_job"]["blueprint_source_kind"] == "<redacted>"
+
+
+def test_every_literal_source_kind_the_producer_assigns_is_allow_listed():
+    with open(_PRODUCER, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    written = {
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "blueprint_source_kind" for t in node.targets)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    }
+    assert written, "scan found no blueprint_source_kind assignments"
+    assert written <= BLUEPRINT_SOURCE_KINDS, written - BLUEPRINT_SOURCE_KINDS
+
+
+@pytest.mark.parametrize("kind", sorted(BLUEPRINT_SOURCE_KINDS))
+def test_a_source_kind_under_any_other_key_is_redacted(kind):
+    """The enum is allow-listed per KEY. The same value elsewhere is not public."""
+    (row,) = sanitise_overview_rows([{
+        "type_id": 1,
+        "provenance_note": kind,
+        "nested": {"source": kind},
+        "entries": [{"origin": kind}, {"blueprint_source_kind": kind}],
+    }])
+    assert row["provenance_note"] == REDACTED
+    assert row["nested"]["source"] == REDACTED
+    assert row["entries"][0]["origin"] == REDACTED
+    # control: under the allow-listed key, in the same list, it survives
+    assert row["entries"][1]["blueprint_source_kind"] == kind
+
+
+def test_every_activity_a_prerequisite_node_inherits_is_allow_listed():
+    """_plan_blueprint_chain_for_quantity sets blueprint_source_kind = activity,
+    and the activities it is called with are the child_activity literals."""
+    with open(_PRODUCER, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    activities = {
+        node.value.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "child_activity" for t in node.targets)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    }
+    assert activities == {"manufacturing", "reaction"}
+    assert activities <= BLUEPRINT_SOURCE_KINDS

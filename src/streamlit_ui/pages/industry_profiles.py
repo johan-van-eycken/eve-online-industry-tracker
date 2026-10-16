@@ -1,3 +1,5 @@
+import logging
+
 import streamlit as st
 import pandas as pd
 
@@ -6,6 +8,14 @@ from streamlit_ui.state.session_state import ensure_state_defaults
 from streamlit_ui.api.streamlit_client import cached_api_get
 from streamlit_ui.components.selectors import select_character_id
 from streamlit_ui.components.webpage_ui import render_aggrid_table, require_aggrid
+from eve_online_industry_tracker.domain import security_band as _security_band
+from eve_online_industry_tracker.application.industry.job_cost import (
+    DEFAULT_RESEARCH_SCC_SURCHARGE,
+    DEFAULT_SCC_SURCHARGE,
+    job_fee_rates_summary,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @st.cache_data(ttl=300)
@@ -67,49 +77,140 @@ def _compute_combined_reduction(reductions: list[float]) -> float:
 def _compute_rig_bonuses(
     rig_type_ids: list[int],
     rig_bonus_map: dict[int, dict],
+    *,
+    security_band: str | None = None,
 ) -> tuple[float, float, float]:
-    rig_material_reductions = [
-        (rig_bonus_map.get(int(tid)) or {}).get("material_reduction", 0.0)
-        for tid in rig_type_ids
-        if int(tid) != 0
+    """Combined rig ME / TE / cost for display and the saved aggregate: per
+    rig and metric its largest effect value, scaled by the rig's multiplier
+    for the system's band (domain.security_band; the smallest when unknown)."""
+    per_metric: dict[str, list[float]] = {"material": [], "time": [], "cost": []}
+    for tid in rig_type_ids:
+        if int(tid or 0) == 0:
+            continue
+        rig = rig_bonus_map.get(int(tid)) or {}
+        effects = [e for e in (rig.get("effects") or []) if isinstance(e, dict)]
+        for metric, values in per_metric.items():
+            if effects:
+                scaled = [_security_band.scaled_effect_value(rig, e, security_band)
+                          for e in effects if str(e.get("metric") or "") == metric]
+                values.append(max(scaled, default=0.0))
+            else:
+                values.append(float(rig.get(f"{metric}_reduction") or 0.0))
+
+    return (
+        _compute_combined_reduction(per_metric["material"]),
+        _compute_combined_reduction(per_metric["time"]),
+        _compute_combined_reduction(per_metric["cost"]),
+    )
+
+
+def _rig_bonus_save_fields(rig_type_ids: list[int], rig_bonus_map: dict[int, dict]) -> dict[str, float]:
+    """The structure_rig_*_bonus a profile saves: the rigs' raw, unscaled
+    bonuses. The producer reads them only for a profile without rig ids and
+    then applies the smallest security multiplier for the band itself
+    (IndustryService._profile_rig_reduction), so scaling them here as well
+    would count the band twice. Only the displayed totals are band-scaled."""
+    per_metric: dict[str, list[float]] = {"material": [], "time": [], "cost": []}
+    for tid in rig_type_ids:
+        if int(tid or 0) == 0:
+            continue
+        rig = rig_bonus_map.get(int(tid)) or {}
+        effects = [e for e in (rig.get("effects") or []) if isinstance(e, dict)]
+        for metric, values in per_metric.items():
+            if effects:
+                values.append(max((float(e.get("value") or 0.0) for e in effects
+                                   if str(e.get("metric") or "") == metric), default=0.0))
+            else:
+                values.append(float(rig.get(f"{metric}_reduction") or 0.0))
+    return {
+        "structure_rig_material_bonus": _compute_combined_reduction(per_metric["material"]),
+        "structure_rig_time_bonus": _compute_combined_reduction(per_metric["time"]),
+        "structure_rig_cost_bonus": _compute_combined_reduction(per_metric["cost"]),
+    }
+
+
+def _stored_rig_bonus_lines(profile: dict) -> list[str]:
+    """The profile's stored rig ME/TE lines, labelled as unscaled: they are the
+    rigs' raw bonuses (_rig_bonus_save_fields), while the "Total rig bonuses"
+    caption beside them is scaled by the system's security band."""
+    label = "(stored, unscaled, before security band)"
+    return [
+        f"**Rig Material Bonus {label}:** {profile['structure_rig_material_bonus']:.2%}",
+        f"**Rig Time Bonus {label}:** {profile['structure_rig_time_bonus']:.2%}",
     ]
-    rig_time_reductions = [
-        (rig_bonus_map.get(int(tid)) or {}).get("time_reduction", 0.0)
-        for tid in rig_type_ids
-        if int(tid) != 0
-    ]
-    rig_cost_reductions = [
-        (rig_bonus_map.get(int(tid)) or {}).get("cost_reduction", 0.0)
-        for tid in rig_type_ids
-        if int(tid) != 0
-    ]
-
-    structure_rig_material_bonus = _compute_combined_reduction([float(x or 0.0) for x in rig_material_reductions])
-    structure_rig_time_bonus = _compute_combined_reduction([float(x or 0.0) for x in rig_time_reductions])
-    structure_rig_cost_bonus = _compute_combined_reduction([float(x or 0.0) for x in rig_cost_reductions])
-
-    return structure_rig_material_bonus, structure_rig_time_bonus, structure_rig_cost_bonus
 
 
-# NPC station job fee components (fractions) — defaults; overridden by admin settings at runtime.
+def _security_band_of_system(system: dict | None) -> str | None:
+    if not isinstance(system, dict):
+        return None
+    return _security_band.security_band(system.get("security_status"), system.get("region_id"))
+
+
+# NPC station facility tax (fraction) — default; overridden by admin settings
+# at runtime. The SCC default is the producer's one DEFAULT_SCC_SURCHARGE.
 _NPC_STATION_FACILITY_TAX = 0.0025
-_NPC_STATION_SCC_SURCHARGE = 0.04
-_UPWELL_SCC_SURCHARGE = 0.04
+
+#: Shown when /admin_settings cannot be read (Task 14 minor 3): the rates
+#: on the page are then the defaults, not the stored settings.
+ADMIN_SETTINGS_UNAVAILABLE_CAPTION = (
+    "Admin settings could not be read: the fee rates shown are the default rates, "
+    "not the stored settings."
+)
 
 
-def _get_industry_admin_defaults() -> tuple[float, float]:
-    """Fetch NPC facility tax and SCC surcharge from admin settings (falls back to module defaults)."""
+def _admin_industry_values() -> tuple[dict, str | None]:
+    """(the admin settings' industry section, a caption when the read
+    failed), read once per page render. A failed read gives {} (every rate
+    then uses its default) and ADMIN_SETTINGS_UNAVAILABLE_CAPTION, with a
+    WARNING, so the defaults are never shown as the stored settings."""
     resp = api_get("/admin_settings")
     if resp and resp.get("status") == "success":
         vals = (resp.get("data") or {}).get("values", {}).get("industry", {})
-        return (
-            float(vals.get("npc_station_facility_tax", _NPC_STATION_FACILITY_TAX)),
-            float(vals.get("scc_surcharge", _NPC_STATION_SCC_SURCHARGE)),
-        )
-    return _NPC_STATION_FACILITY_TAX, _NPC_STATION_SCC_SURCHARGE
+        return (vals if isinstance(vals, dict) else {}), None
+    logger.warning(
+        "Industry profiles: /admin_settings read failed (%s); showing the default fee rates",
+        (resp or {}).get("message") if isinstance(resp, dict) else "no response",
+    )
+    return {}, ADMIN_SETTINGS_UNAVAILABLE_CAPTION
 
 
-def _rig_breakdown_lines(rig_type_ids: list[int], rig_options: dict[int, str], rig_bonus_map: dict[int, dict]) -> list[str]:
+def _npc_admin_defaults(industry_values: dict) -> tuple[float, float]:
+    """NPC facility tax and SCC surcharge (falls back to module defaults)."""
+    return (
+        float(industry_values.get("npc_station_facility_tax", _NPC_STATION_FACILITY_TAX)),
+        float(industry_values.get("scc_surcharge", DEFAULT_SCC_SURCHARGE)),
+    )
+
+
+def _job_scc_rates(industry_values: dict) -> tuple[float, float]:
+    """(SCC, ME/TE research SCC): the admin settings the producer charges
+    (falls back to the producer's defaults)."""
+    return (
+        float(industry_values.get("scc_surcharge", DEFAULT_SCC_SURCHARGE)),
+        float(industry_values.get("research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)),
+    )
+
+
+def _job_fee_rates_line(profile: dict, *, scc_rates: tuple[float, float]) -> str:
+    """`scc_rates` is _job_scc_rates() of the one admin settings read per render."""
+    scc, research_scc = scc_rates
+    return job_fee_rates_summary(profile, scc=scc, research_scc=research_scc)
+
+
+def _npc_create_fee_line(
+    selected_facility_id: int | None, npc_facility_tax: float | None, *, scc_rates: tuple[float, float],
+) -> str:
+    """The NPC create form's fee line. Before a station is picked the tax is
+    not loaded yet, which is not a profile to re-save."""
+    if selected_facility_id is None:
+        return "pick a station first"
+    return _job_fee_rates_line({"facility_tax": npc_facility_tax}, scc_rates=scc_rates)
+
+
+def _rig_breakdown_lines(
+    rig_type_ids: list[int], rig_options: dict[int, str], rig_bonus_map: dict[int, dict],
+    *, security_band: str | None = None,
+) -> list[str]:
     lines: list[str] = []
     for tid in rig_type_ids:
         tid = int(tid or 0)
@@ -131,7 +232,7 @@ def _rig_breakdown_lines(rig_type_ids: list[int], rig_options: dict[int, str], r
             activity = str(e.get("activity") or "")
             group = str(e.get("group") or "")
             metric = str(e.get("metric") or "")
-            value = float(e.get("value") or 0.0)
+            value = _security_band.scaled_effect_value(bonus, e, security_band)
             if not activity or not metric or value <= 0:
                 continue
             key = (activity, group or "All")
@@ -164,6 +265,8 @@ def _rig_effects_table(
     rig_type_ids: list[int],
     rig_options: dict[int, str],
     rig_bonus_map: dict[int, dict],
+    *,
+    security_band: str | None = None,
 ) -> pd.DataFrame:
     """Rig effects table based on SDE dogma-derived `effects`.
 
@@ -182,7 +285,8 @@ def _rig_effects_table(
         bonus = rig_bonus_map.get(tid) or {}
         for e in bonus.get("effects") or []:
             if isinstance(e, dict):
-                effects.append(e)
+                # Scaled for the system's band, as the producer applies it.
+                effects.append({**e, "value": _security_band.scaled_effect_value(bonus, e, security_band)})
 
     # Rows as requested.
     rows = [
@@ -200,9 +304,9 @@ def _rig_effects_table(
         ("Capital Ships", "manufacturing"),
         ("Advanced Capital Components", "manufacturing"),
         ("Structures", "manufacturing"),
-        ("Biochemical Reactions", "manufacturing"),
-        ("Composite Reactions", "manufacturing"),
-        ("Hybrid Reactions", "manufacturing"),
+        ("Biochemical Reactions", "reaction"),
+        ("Composite Reactions", "reaction"),
+        ("Hybrid Reactions", "reaction"),
         ("Invention", "invention"),
         ("Copying", "copying"),
         ("Research ME", "research_me"),
@@ -224,8 +328,8 @@ def _rig_effects_table(
         if row_activity in {"invention", "copying"}:
             return act == row_activity
 
-        # manufacturing
-        return act == "manufacturing" and (group == row_group)
+        # manufacturing / reaction
+        return act == row_activity and (group == row_group)
 
     table = []
     for group, activity in rows:
@@ -329,6 +433,7 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
         "public_structure_type_id_by_id": {},
         "corp_structure_type_id_by_id": {},
         "facility_bonuses_by_type_id": {},
+        "solar_system_by_id": {},
     }
     try:
         system_ids = sorted({int(profile.get("system_id")) for profile in profiles if profile.get("system_id") is not None})
@@ -367,6 +472,23 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
                         pass
     except Exception:
         pass
+    # Security status and region of each profile's system, in a try of its
+    # own: the rig totals are shown for the system's band, and a failure here
+    # must not cost the cost indices above.
+    try:
+        wanted = {int(profile.get("system_id")) for profile in profiles if profile.get("system_id") is not None}
+        if wanted:
+            systems_resp = cached_api_get("/solar_systems")
+            if systems_resp and systems_resp.get("status") == "success":
+                for system in systems_resp.get("data") or []:
+                    if isinstance(system, dict) and system.get("id") in wanted:
+                        context["solar_system_by_id"][int(system["id"])] = system
+            else:
+                logger.warning("Industry profiles: the solar systems did not load; rig totals use the smallest "
+                               "security multiplier")
+    except Exception:
+        logger.warning("Industry profiles: loading the solar systems failed; rig totals use the smallest "
+                       "security multiplier", exc_info=True)
     return context
 
 
@@ -377,6 +499,7 @@ def _render_existing_profiles(
     rig_bonus_map: dict[int, dict],
     rig_option_ids: list[int],
     profile_context: dict[str, dict],
+    scc_rates: tuple[float, float],
 ) -> None:
     for profile in profiles:
         with st.expander(f"{'⭐ ' if profile['is_default'] else ''}{profile['profile_name']}"):
@@ -445,22 +568,14 @@ def _render_existing_profiles(
                         st.write(f"**System Cost Index (stored):** {float(stored_ci):.2%}")
                         st.caption("Cost index could not be loaded live — stored value may be stale. Open the system's profile and re-select it to refresh.")
 
-                facility_tax = profile.get("facility_tax")
-                scc_surcharge = profile.get("scc_surcharge")
-                if facility_tax is None and scc_surcharge is None:
-                    st.write("**NPC job fees:** N/A" if is_profile_npc_station else "**Job fees:** N/A")
-                else:
-                    facility_tax = float(facility_tax or 0.0)
-                    scc_surcharge = float(scc_surcharge or 0.0)
-                    total = facility_tax + scc_surcharge
-                    if is_profile_npc_station:
-                        st.write(f"**NPC job fees:** Facility {facility_tax:.2%} | SCC {scc_surcharge:.2%} | Total {total:.2%}")
-                    else:
-                        st.write(f"**Job fees:** Facility {facility_tax:.2%} | SCC {scc_surcharge:.2%} | Total {total:.2%}")
+                # The producer's own rates: the profile's facility tax plus
+                # the admin SCC rates (research has its own).
+                fee_label = "**NPC job fees:**" if is_profile_npc_station else "**Job fees:**"
+                st.write(f"{fee_label} {_job_fee_rates_line(profile, scc_rates=scc_rates)}")
 
                 if not is_profile_npc_station:
-                    st.write(f"**Rig Material Bonus:** {profile['structure_rig_material_bonus']:.2%}")
-                    st.write(f"**Rig Time Bonus:** {profile['structure_rig_time_bonus']:.2%}")
+                    for line in _stored_rig_bonus_lines(profile):
+                        st.write(line)
                     st.markdown("**Rigs**")
 
                     def _default_index(saved_id: int) -> int:
@@ -488,13 +603,19 @@ def _render_existing_profiles(
                         key=f"edit_rig2_{profile['id']}",
                     )
 
+                    profile_band = _security_band_of_system(
+                        profile_context.get("solar_system_by_id", {}).get(int(profile_system_id))
+                        if profile_system_id is not None else None
+                    )
                     computed_mat, computed_time, computed_cost = _compute_rig_bonuses(
                         [int(rig0), int(rig1), int(rig2)],
                         rig_bonus_map,
+                        security_band=profile_band,
                     )
                     st.caption(f"Total rig bonuses — ME: {computed_mat:.2%} | TE: {computed_time:.2%} | Cost: {computed_cost:.2%}")
 
-                    breakdown = _rig_breakdown_lines([int(rig0), int(rig1), int(rig2)], rig_options, rig_bonus_map)
+                    breakdown = _rig_breakdown_lines([int(rig0), int(rig1), int(rig2)], rig_options, rig_bonus_map,
+                                                     security_band=profile_band)
                     if breakdown:
                         with st.expander("Rig bonus details"):
                             st.markdown("\n".join(breakdown))
@@ -505,9 +626,7 @@ def _render_existing_profiles(
                         "rig_slot0_type_id": None if int(rig0) == 0 else int(rig0),
                         "rig_slot1_type_id": None if int(rig1) == 0 else int(rig1),
                         "rig_slot2_type_id": None if int(rig2) == 0 else int(rig2),
-                        "structure_rig_material_bonus": computed_mat,
-                        "structure_rig_time_bonus": computed_time,
-                        "structure_rig_cost_bonus": computed_cost,
+                        **_rig_bonus_save_fields([int(rig0), int(rig1), int(rig2)], rig_bonus_map),
                     }
                     update_response = api_put(f"/industry_profiles/{profile['id']}", payload)
                     if update_response and update_response.get("status") == "success":
@@ -534,6 +653,8 @@ def _render_create_profile_section(
     rig_bonus_map: dict[int, dict],
     rig_option_ids: list[int],
     runtime,
+    scc_rates: tuple[float, float],
+    admin_industry: dict,
 ) -> None:
     st.markdown("### Create New Profile")
 
@@ -741,19 +862,20 @@ def _render_create_profile_section(
             selected_facility_id = None
 
     if is_npc_station and selected_facility_id is not None:
-        npc_facility_tax, npc_scc_surcharge = _get_industry_admin_defaults()
+        npc_facility_tax, npc_scc_surcharge = _npc_admin_defaults(admin_industry)
 
     col1, col2 = st.columns(2)
     with col1:
         st.write(f"**System Index Cost (live):** {float(system_mfg_cost_index):.2%}")
     with col2:
         if is_npc_station:
-            st.caption(
-                f"NPC station job fees — Facility tax: {float(npc_facility_tax or 0.0):.2%} | "
-                f"SCC surcharge: {float(npc_scc_surcharge or 0.0):.2%}"
-            )
+            if selected_facility_id is not None:
+                st.caption(
+                    f"NPC station job fees — Facility tax: {float(npc_facility_tax or 0.0):.2%} | "
+                    f"SCC surcharge: {float(npc_scc_surcharge or 0.0):.2%}"
+                )
             total_npc_rate = float(npc_facility_tax or 0.0) + float(npc_scc_surcharge or 0.0)
-            st.write(f"**Total NPC surcharge:** {total_npc_rate:.2%}")
+            st.write(f"**NPC job fees:** {_npc_create_fee_line(selected_facility_id, npc_facility_tax, scc_rates=scc_rates)}")
             installation_cost_modifier = total_npc_rate * 100.0
         else:
             installation_cost_modifier = st.number_input(
@@ -764,9 +886,9 @@ def _render_create_profile_section(
                 step=0.1,
             )
             upwell_facility_tax_pct = float(installation_cost_modifier)
-            upwell_scc_surcharge = _get_industry_admin_defaults()[1]  # SCC surcharge
-            st.caption(f"SCC surcharge (fixed): {float(upwell_scc_surcharge):.2%}")
-            st.write(f"**Total job surcharge:** {(upwell_facility_tax_pct / 100.0 + float(upwell_scc_surcharge)):.2%}")
+            upwell_scc_surcharge = _npc_admin_defaults(admin_industry)[1]  # SCC surcharge
+            st.caption(f"SCC surcharge (admin setting): {float(upwell_scc_surcharge):.2%}")
+            st.write(f"**Job fees:** {_job_fee_rates_line({'facility_tax': upwell_facility_tax_pct / 100.0}, scc_rates=scc_rates)}")
 
     rig_slot0_type_id = 0
     rig_slot1_type_id = 0
@@ -803,9 +925,11 @@ def _render_create_profile_section(
         with col5:
             rig_slot2_type_id = st.selectbox("Rig Slot 3", options=filtered_rig_option_ids, format_func=lambda x: rig_options.get(x, str(x)))
 
+        selected_band = _security_band_of_system(selected_system)
         structure_rig_material_bonus, structure_rig_time_bonus, structure_rig_cost_bonus = _compute_rig_bonuses(
             [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)],
             rig_bonus_map,
+            security_band=selected_band,
         )
 
         st.caption(
@@ -815,6 +939,7 @@ def _render_create_profile_section(
             [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)],
             rig_options,
             rig_bonus_map,
+            security_band=selected_band,
         )
         if breakdown:
             with st.expander("Rig bonus details"):
@@ -839,6 +964,7 @@ def _render_create_profile_section(
             [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)],
             rig_options,
             rig_bonus_map,
+            security_band=selected_band,
         )
         render_aggrid_table(
             effects_df,
@@ -900,9 +1026,9 @@ def _render_create_profile_section(
                 if is_npc_station
                 else ((float(upwell_facility_tax_pct or 0.0) / 100.0) + float(upwell_scc_surcharge or 0.0))
             ),
-            "structure_rig_material_bonus": structure_rig_material_bonus,
-            "structure_rig_time_bonus": structure_rig_time_bonus,
-            "structure_rig_cost_bonus": structure_rig_cost_bonus,
+            # Raw rig bonuses (the displayed totals above are band-scaled).
+            **_rig_bonus_save_fields(
+                [int(rig_slot0_type_id), int(rig_slot1_type_id), int(rig_slot2_type_id)], rig_bonus_map),
             "rig_slot0_type_id": None if int(rig_slot0_type_id) == 0 else int(rig_slot0_type_id),
             "rig_slot1_type_id": None if int(rig_slot1_type_id) == 0 else int(rig_slot1_type_id),
             "rig_slot2_type_id": None if int(rig_slot2_type_id) == 0 else int(rig_slot2_type_id),
@@ -944,6 +1070,11 @@ def render():
 
     profiles = response.get("data", [])
     profile_context = _load_profile_context(int(selected_character_id), profiles)
+    # One /admin_settings read per render, not one per rendered profile.
+    admin_industry, admin_unavailable = _admin_industry_values()
+    scc_rates = _job_scc_rates(admin_industry)
+    if admin_unavailable:
+        st.caption(admin_unavailable)
 
     st.markdown("### Existing Profiles")
     if profiles:
@@ -953,6 +1084,7 @@ def render():
             rig_bonus_map=rig_bonus_map,
             rig_option_ids=rig_option_ids,
             profile_context=profile_context,
+            scc_rates=scc_rates,
         )
     else:
         st.info("No profiles found. Create one below.")
@@ -971,4 +1103,6 @@ def render():
         rig_bonus_map=rig_bonus_map,
         rig_option_ids=rig_option_ids,
         runtime=runtime,
+        scc_rates=scc_rates,
+        admin_industry=admin_industry,
     )

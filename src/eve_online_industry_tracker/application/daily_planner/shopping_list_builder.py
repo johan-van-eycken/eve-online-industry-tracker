@@ -49,7 +49,7 @@ class ShoppingListBuilder:
             material stock in corp_assets
         """
         # Build corp stock map: type_id → available quantity
-        corp_stock: dict[int, int] = self._build_corp_stock_map(corp_assets, meta_resolver)
+        corp_stock: dict[int, int] = build_corp_stock_map(corp_assets, meta_resolver)
 
         # Track allocated quantities to prevent double-buying
         already_allocated: dict[int, int] = {}
@@ -106,29 +106,35 @@ class ShoppingListBuilder:
                 if net_required <= 0:
                     continue
 
-                estimated_unit_price, is_vwap = self._get_price(mat_type_id, market_depth_cache)
-                if estimated_unit_price is None or estimated_unit_price <= 0:
-                    logger.debug("ShoppingListBuilder: no price for type_id=%s", mat_type_id)
-                    continue
-
-                shopping.append(ShoppingItem(
-                    type_id=mat_type_id,
-                    type_name=mat_name,
-                    quantity=net_required,
-                    shopping_category="current_job",
-                    estimated_unit_price=estimated_unit_price,
-                    estimated_total=estimated_unit_price * net_required,
-                    notes=None if is_vwap else "price: spot (no VWAP data)",
+                shopping.append(_priced_line(
+                    mat_type_id, mat_name, net_required, "current_job", market_depth_cache, self._get_price,
+                    context=f"{action.action_type} type_id={action.type_id}",
                 ))
 
-        # Invention inputs (datacores). Decryptors are optional and not part of
-        # the SDE invention materials, so they are not bought here.
+        # Invention inputs: the datacores, plus the decryptor the producer chose
+        # (one per attempt, AssignedAction.decryptor_type_id).
         for action in invention_actions:
+            # runs = the assigned pilot's whole attempts (CharacterAssigner,
+            # A4). None: the datacore need is unknown (unknown odds). Nothing
+            # is bought for it, never a guessed attempt count; the reason is
+            # on the action, as on the Portfolio shopping list.
+            attempts = _positive_int(action.runs)
+            if attempts is None:
+                logger.warning(
+                    "ShoppingListBuilder: skipping invention inputs for invent type_id=%s: %s",
+                    action.type_id, action.invention_chance_reason or "datacore need unknown",
+                )
+                continue
             inv_mats = self._get_invention_materials(
                 action, blueprint_data, product_to_blueprint, invention_source
             )
-            # Invention inputs are consumed per attempt; runs=None means one attempt.
-            attempts = _positive_int(action.runs) or 1
+            if action.decryptor_type_id:
+                inv_mats = [*inv_mats, {
+                    "type_id": int(action.decryptor_type_id),
+                    "type_name": action.decryptor_type_name or f"type_{action.decryptor_type_id}",
+                    "quantity": 1,
+                }]
+            # Invention inputs are consumed per attempt.
             for mat in inv_mats:
                 mat_type_id = int(mat.get("type_id") or 0)
                 if mat_type_id <= 0:
@@ -149,26 +155,13 @@ class ShoppingListBuilder:
                 if net_required <= 0:
                     continue
 
-                unit_price, is_vwap = self._get_price(mat_type_id, market_depth_cache)
-                if unit_price is None or unit_price <= 0:
-                    logger.warning(
-                        "ShoppingListBuilder: skipping invention input type_id=%s for "
-                        "invent type_id=%s: no price in market depth cache",
-                        mat_type_id, action.type_id,
-                    )
-                    continue
-
-                shopping.append(ShoppingItem(
-                    type_id=mat_type_id,
-                    type_name=str(mat.get("type_name") or f"type_{mat_type_id}"),
-                    quantity=net_required,
-                    shopping_category="invention_input",
-                    estimated_unit_price=unit_price,
-                    estimated_total=unit_price * net_required,
-                    notes=None if is_vwap else "price: spot (no VWAP data)",
+                shopping.append(_priced_line(
+                    mat_type_id, str(mat.get("type_name") or f"type_{mat_type_id}"), net_required,
+                    "invention_input", market_depth_cache, self._get_price,
+                    context=f"invent type_id={action.type_id}",
                 ))
 
-        return shopping
+        return _merge_lines(shopping)
 
     def _get_materials_and_output_for_action(
         self,
@@ -266,11 +259,13 @@ class ShoppingListBuilder:
     ) -> list[tuple[int, str, int]]:
         """(material type_id, name, units needed) for one job.
 
-        A manufacture action carrying the producer's batch materials uses
-        those as-is: they are already per-run x runs after ME/structure
-        reduction. Otherwise (sub_manufacture, or a manufacture action whose
-        row had no materials mapping) the SDE per-run quantities x runs are
-        used, which carry no ME/structure reduction.
+        An action carrying a batch-materials mapping uses it as-is. For
+        manufacture that is the producer's batch (per-run x runs after
+        ME/structure reduction). For sub_manufacture it is ChainPlanner's
+        batch at the owned BPO's ME plus the parent structure's material
+        bonus (and the rig bonus where the rig covers the component's own
+        group). Otherwise (no mapping) the SDE per-run
+        quantities x runs are used, which carry no ME/structure reduction.
         """
         mats, per_run_output = self._get_materials_and_output_for_action(
             action, blueprint_data, product_to_blueprint
@@ -279,7 +274,7 @@ class ShoppingListBuilder:
             int(m.get("type_id") or 0): m.get("type_name") for m in mats if isinstance(m, dict)
         }
 
-        if action.action_type == "manufacture" and action.materials is not None:
+        if action.materials is not None:
             return [
                 (t, str(names.get(t) or f"type_{t}"), int(q))
                 for t, q in action.materials.items()
@@ -311,13 +306,14 @@ class ShoppingListBuilder:
         """Runs to buy materials for.
 
         `manufacture` actions carry a real run count in `action.runs`; use it
-        directly when positive. `sub_manufacture` actions instead carry the
-        target component quantity in `action.quantity` with `action.runs` left
-        None (character_assigner.py), so derive runs as
-        ceil(quantity / per_run_output). Guards the division: a missing, zero,
-        or non-numeric per_run_output falls back to 1 run (never divides by
-        zero), logged at debug since it means the blueprint data is
-        incomplete rather than that only 1 unit was actually needed.
+        directly when positive. A `sub_manufacture` action normally carries
+        ChainPlanner's runs and batch materials (used as-is upstream); one
+        without them carries only the target component quantity in
+        `action.quantity`, so derive runs as ceil(quantity / per_run_output).
+        Guards the division: a missing, zero, or non-numeric per_run_output
+        falls back to 1 run (never divides by zero), logged at debug since it
+        means the blueprint data is incomplete rather than that only 1 unit
+        was actually needed.
         """
         runs = _positive_int(action.runs)
         if runs is not None:
@@ -353,49 +349,104 @@ class ShoppingListBuilder:
         self, type_id: int, market_depth_cache: dict[int, Any]
     ) -> tuple[float | None, bool]:
         """Return (price, is_vwap). Prefers vwap_5d over spot_sell_price."""
-        entry = market_depth_cache.get(type_id)
-        if entry is None:
-            return None, False
+        return price_map_unit_price(market_depth_cache.get(type_id))
 
-        vwap = _get_attr(entry, "vwap_5d")
-        if vwap is not None:
-            return float(vwap), True
 
-        spot = _get_attr(entry, "spot_sell_price")
-        if spot is not None:
-            return float(spot), False
-
+def price_map_unit_price(entry: Any) -> tuple[float | None, bool]:
+    """(unit price, is_vwap) of one phase-1 price map entry: vwap_5d, else
+    spot_sell_price; 0 or negative is no price. Shared with the invent
+    action's cost (assigned_invention), so both price one way."""
+    if entry is None:
         return None, False
+    vwap = _get_attr(entry, "vwap_5d")
+    if vwap is not None and float(vwap) > 0:
+        return float(vwap), True
+    spot = _get_attr(entry, "spot_sell_price")
+    if spot is not None and float(spot) > 0:
+        return float(spot), False
+    return None, False
 
-    def _build_corp_stock_map(
-        self, corp_assets: list[Any], meta_resolver: Any
-    ) -> dict[int, int]:
-        """{type_id: quantity} of material stock, excluding blueprints.
 
-        Pre-warms meta_resolver's cache with every distinct asset type_id in one
-        batched SDE query. Without this, TypeMetadataResolver._entry() self-heals
-        a cache miss by calling prefetch() for a single id, so is_blueprint()
-        inside the per-asset loop below would otherwise open one SDE session
-        (with its metaGroups table reflection) per distinct type_id. prefetch()
-        is idempotent (skips ids already cached or already marked missing), so
-        this is safe even if a caller already warmed it. Same shape as
-        index_blueprint_assets in daily_planner/service.py.
-        """
-        type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
-        meta_resolver.prefetch({t for t in type_ids if t > 0})
+#: The note on a line bought without a price.
+UNPRICED_LINE_NOTE = "no price: buy at market, cost unknown"
 
-        stock: dict[int, int] = {}
-        for asset in corp_assets:
-            type_id = int(_asset_attr(asset, "type_id") or 0)
-            if type_id <= 0:
-                continue
-            if meta_resolver.is_blueprint(type_id):
-                continue  # blueprints are not material stock
-            qty = int(_asset_attr(asset, "quantity") or 0)
-            if qty <= 0:
-                continue
-            stock[type_id] = stock.get(type_id, 0) + qty
-        return stock
+
+def _priced_line(
+    type_id: int, type_name: str, quantity: int, category: str,
+    market_depth_cache: dict[int, Any], get_price: Any, *, context: str,
+) -> ShoppingItem:
+    """A shopping line, priced from the market depth cache. Without a price
+    the line is still emitted with its quantity and an unknown (None) cost:
+    dropping it under-bought the material and made Capital Reserved look
+    exact (Task 8 fix round 1)."""
+    unit_price, is_vwap = get_price(type_id, market_depth_cache)
+    if unit_price is None or unit_price <= 0:
+        logger.warning(
+            "ShoppingListBuilder: material type_id=%s for %s has no price in market depth cache; "
+            "bought at an unknown cost",
+            type_id, context,
+        )
+        return ShoppingItem(
+            type_id=type_id, type_name=type_name, quantity=quantity, shopping_category=category,
+            estimated_unit_price=None, estimated_total=None, notes=UNPRICED_LINE_NOTE,
+        )
+    return ShoppingItem(
+        type_id=type_id, type_name=type_name, quantity=quantity, shopping_category=category,
+        estimated_unit_price=unit_price, estimated_total=unit_price * quantity,
+        notes=None if is_vwap else "price: spot (no VWAP data)",
+    )
+
+
+def _merge_lines(shopping: list[ShoppingItem]) -> list[ShoppingItem]:
+    """One line per (category, material): quantities and totals summed.
+
+    A sub-build split over several jobs (or several jobs sharing a material)
+    otherwise lists the material once per job (x13, x13, x11 instead of
+    x37). The unit price per material is one lookup, so it is the same on
+    every line; distinct notes are kept, joined with "; ". First-seen order.
+    """
+    merged: dict[tuple[str, int], ShoppingItem] = {}
+    for item in shopping:
+        key = (item.shopping_category, item.type_id)
+        line = merged.get(key)
+        if line is None:
+            merged[key] = ShoppingItem(**vars(item))
+            continue
+        line.quantity += item.quantity
+        # One unpriced part makes the merged total unknown, never a partial sum.
+        line.estimated_total = (
+            None if line.estimated_total is None or item.estimated_total is None
+            else line.estimated_total + item.estimated_total
+        )
+        if item.notes and item.notes not in (line.notes or "").split("; "):
+            line.notes = f"{line.notes}; {item.notes}" if line.notes else item.notes
+    return list(merged.values())
+
+
+def build_corp_stock_map(corp_assets: list[Any], meta_resolver: Any) -> dict[int, int]:
+    """{type_id: quantity} of material stock, excluding blueprints.
+
+    Shared by ChainPlanner (sub-manufacture nets corp stock before deciding
+    to build) and ShoppingListBuilder, so both read the same stock.
+    Pre-warms meta_resolver's cache with every distinct asset type_id in one
+    batched SDE query (prefetch() is idempotent); without it is_blueprint()
+    below would open one SDE session per distinct type_id.
+    """
+    type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
+    meta_resolver.prefetch({t for t in type_ids if t > 0})
+
+    stock: dict[int, int] = {}
+    for asset in corp_assets:
+        type_id = int(_asset_attr(asset, "type_id") or 0)
+        if type_id <= 0:
+            continue
+        if meta_resolver.is_blueprint(type_id):
+            continue  # blueprints are not material stock
+        qty = int(_asset_attr(asset, "quantity") or 0)
+        if qty <= 0:
+            continue
+        stock[type_id] = stock.get(type_id, 0) + qty
+    return stock
 
 
 def _positive_int(value: Any) -> int | None:

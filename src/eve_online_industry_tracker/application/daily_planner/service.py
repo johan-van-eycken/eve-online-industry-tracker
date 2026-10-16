@@ -8,12 +8,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
@@ -24,9 +27,16 @@ from eve_online_industry_tracker.application.daily_planner.input_row import (
     dedupe_by_type_id,
 )
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
+from eve_online_industry_tracker.application.daily_planner.learning_weights import (
+    read_weight,
+    weight_warnings_once_per_compute,
+)
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer
 from eve_online_industry_tracker.application.daily_planner.profitability_scorer import ProfitabilityScorer
-from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import (
+    ShoppingListBuilder,
+    build_corp_stock_map,
+)
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
 from eve_online_industry_tracker.infrastructure.models import (
@@ -39,6 +49,63 @@ logger = logging.getLogger(__name__)
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
+
+
+#: The effect of a failed modifier read on the score, in its reason text.
+_SCORED_WITHOUT_IT = "scored without it"
+
+
+def _db_read_unavailable(label: str, exc: BaseException, effect: str) -> str:
+    """The reason a read that failed with a DB error records (RM-35), e.g.
+    "margin correlation unavailable (DB error: OperationalError): scored
+    without it". A read that succeeded with no rows records nothing."""
+    return f"{label} unavailable (DB error: {type(exc).__name__}): {effect}"
+
+
+def _warn_read_failed(reader: str, exc: BaseException) -> None:
+    logger.warning(
+        "DailyPlannerService: %s read failed (%s); marked unavailable",
+        reader, type(exc).__name__, exc_info=True,
+    )
+
+
+def _unavailable_input_notes(
+    type_id: int, unavailable: dict[str, str], margin_correlations: dict[int, Any],
+) -> list[str]:
+    """The unavailable-input reasons that apply to one scored row.
+
+    A failed margin-correlation read affects every row (no row's squeeze
+    sensitivity is known, so the Tritanium trend is unknown to all of them
+    too). A failed trend read with the correlations read affects only the
+    squeeze-sensitive rows: no other row reads the trend.
+    """
+    notes: list[str] = []
+    margin = unavailable.get("margin_correlation")
+    trend = unavailable.get("tritanium_trend")
+    if margin:
+        notes.append(margin)
+    if trend and (
+        margin or getattr(margin_correlations.get(type_id), "is_squeeze_sensitive", False)
+    ):
+        notes.append(trend)
+    return notes
+
+
+def _plan_unavailable_inputs(plan: Any) -> dict[str, str]:
+    """The unavailable inputs Phase 9 recorded in plan_summary_json, {} when none."""
+    raw = getattr(plan, "plan_summary_json", None)
+    if not raw:
+        return {}
+    try:
+        summary = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "DailyPlannerService: plan %s has an unreadable plan_summary_json",
+            getattr(plan, "id", "?"), exc_info=True,
+        )
+        return {"plan_summary": "plan summary unreadable: its unavailable inputs are unknown"}
+    found = summary.get("unavailable_inputs") if isinstance(summary, dict) else None
+    return dict(found) if isinstance(found, dict) else {}
 
 
 def _spot_sell_price(entry: Any) -> float | None:
@@ -134,10 +201,7 @@ def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
     AdminSettingsManager.get raises for an unknown key (every key read here is
     pinned to the schema by tests/test_daily_planner_fail_loud.py).
     """
-    try:
-        return admin_settings.get("daily_planner", key)
-    except (AttributeError, KeyError):
-        return fallback
+    return admin_setting(admin_settings, "daily_planner", key, fallback)
 
 
 #: Job statuses ESI reports for a *finished* job -- excluded from "active" job
@@ -159,6 +223,49 @@ def _no_sde_session() -> None:
     matching TypeMetadataResolver's own SessionProvider protocol.
     """
     return None
+
+
+class _ComputeStep:
+    """Names the input or phase a compute failure came from, for the status banner.
+
+    __exit__ only records the label (innermost wins) and returns False, so the
+    exception propagates unchanged to _run_compute. There is no except clause,
+    which keeps the fail-loud guard's single allowed broad handler where it is.
+    """
+
+    def __init__(self, service: "DailyPlannerService", label: str) -> None:
+        self._service = service
+        self._label = label
+
+    def __enter__(self) -> "_ComputeStep":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is not None and self._service._failed_step is None:
+            self._service._failed_step = self._label
+        return False
+
+
+def _positive_price(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _has_depth_price(entry: Any) -> bool:
+    """Whether a market-depth entry carries a usable (> 0) vwap_5d or
+    spot_sell_price; 0 or a negative value is no price."""
+    return entry is not None and (
+        _positive_price(_get_attr(entry, "vwap_5d")) or _positive_price(_get_attr(entry, "spot_sell_price"))
+    )
+
+
+def _merge_price_sources(market_depth: dict[int, Any], hub_prices: dict[int, Any]) -> dict[int, Any]:
+    """Market depth wins; a hub price fills a type depth lacks or holds
+    without any price."""
+    merged = dict(hub_prices)
+    for type_id, entry in market_depth.items():
+        if _has_depth_price(entry) or type_id not in merged:
+            merged[type_id] = entry
+    return merged
 
 
 class DailyPlannerService:
@@ -196,6 +303,7 @@ class DailyPlannerService:
         self._lock = threading.Lock()
         self._status: str = "idle"   # "idle" | "running" | "done" | "failed"
         self._error: str | None = None
+        self._failed_step: str | None = None
 
         # Sub-components
         self._feedback_processor = FeedbackProcessor(
@@ -262,7 +370,7 @@ class DailyPlannerService:
         """
         plan = self._repo.get_active_plan()
         if plan is None:
-            return {"plan": None, "items": [], "actions": []}
+            return {"plan": None, "items": [], "actions": [], "unavailable_inputs": {}}
 
         items = self._repo.get_plan_items(int(plan.id))
         actions = self._repo.get_actions(int(plan.id))
@@ -280,6 +388,9 @@ class DailyPlannerService:
             # that visible in the response instead of only in a log line.
             "freshness_comparable_items": comparable_items,
             "freshness_total_items": total_items,
+            # RM-35: scoring inputs whose read failed this compute, {input:
+            # reason}. Empty when every read succeeded (even with no rows).
+            "unavailable_inputs": _plan_unavailable_inputs(plan),
         }
 
     def mark_action_done(self, action_id: int) -> None:
@@ -296,19 +407,26 @@ class DailyPlannerService:
         """Fetch self-learning accuracy stats for all tracked type_ids."""
         plan = self._repo.get_active_plan()
         if plan is None:
-            return {"items": [], "plan_history": []}
+            return {"items": [], "plan_history": [], "unavailable": {}}
 
         items = self._repo.get_plan_items(int(plan.id))
         type_ids = [int(i.type_id) for i in items]
         weights = self._repo.get_weights(type_ids)
         invention_rates = self._repo.get_invention_success_rates(type_ids)
 
+        # A read that fails is named here (RM-35), so the tab does not show
+        # "no data yet" for a DB error. An empty successful read adds nothing.
+        unavailable: dict[str, str] = {}
+
         # Competition data
         try:
             hub = str(_adm(self._admin, "planner_market_hub", "jita"))
             market_depth = self._repo.get_market_depth(type_ids, hub)
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: analytics market depth unavailable", exc_info=True)
+        except SQLAlchemyError as exc:
+            _warn_read_failed("get_analytics/market_depth", exc)
+            unavailable["market_depth"] = _db_read_unavailable(
+                "market depth", exc, "competition data not shown",
+            )
             market_depth = {}
 
         # Margin correlation data
@@ -322,8 +440,11 @@ class DailyPlannerService:
                 margin_by_type = {int(r.type_id): r for r in margin_rows}
             finally:
                 mc_session.close()
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: analytics margin correlations unavailable", exc_info=True)
+        except SQLAlchemyError as exc:
+            _warn_read_failed("get_analytics/margin_correlation", exc)
+            unavailable["margin_correlation"] = _db_read_unavailable(
+                "margin correlation", exc, "correlation data not shown",
+            )
             margin_by_type: dict[int, Any] = {}
 
         # Invention details from raw SQL
@@ -350,8 +471,11 @@ class DailyPlannerService:
                 }
                 for r in inv_rows
             }
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: analytics invention details unavailable", exc_info=True)
+        except SQLAlchemyError as exc:
+            _warn_read_failed("get_analytics/invention_details", exc)
+            unavailable["invention_details"] = _db_read_unavailable(
+                "invention details", exc, "invention data not shown",
+            )
             inv_details: dict[int, Any] = {}
 
         result = []
@@ -365,9 +489,9 @@ class DailyPlannerService:
                 "type_id": tid,
                 "type_name": item.type_name,
                 "decision": item.decision,
-                "accuracy_ema": float(getattr(w, "accuracy_ema", 1.0)) if w else 1.0,
-                "velocity_multiplier": float(getattr(w, "velocity_multiplier", 1.0)) if w else 1.0,
-                "cost_multiplier": float(getattr(w, "cost_multiplier", 1.0)) if w else 1.0,
+                "accuracy_ema": read_weight(w, "accuracy_ema"),
+                "velocity_multiplier": read_weight(w, "velocity_multiplier"),
+                "cost_multiplier": read_weight(w, "cost_multiplier"),
                 "sample_count": int(getattr(w, "sample_count", 0)) if w else 0,
                 "confidence_tier": str(getattr(w, "confidence_tier", "low")) if w else "low",
                 "invention_success_rate": invention_rates.get(tid),
@@ -394,7 +518,7 @@ class DailyPlannerService:
         # against it, so a bare `except` around this used to hide a permanently
         # empty plan_history. Let a genuinely broken query raise instead.
         history_days = int(_adm(self._admin, "planner_history_days", 90))
-        cutoff = datetime.utcnow() - timedelta(days=history_days)
+        cutoff = _now() - timedelta(days=history_days)
         ph_session = self._session_provider.app_session()
         try:
             plan_history_rows = (
@@ -420,18 +544,24 @@ class DailyPlannerService:
             for p in plan_history_rows
         ]
 
-        return {"items": result, "plan_history": plan_history}
+        return {"items": result, "plan_history": plan_history, "unavailable": unavailable}
 
     # ──────────────────────────────────────────────────────────────────────────
     # Private: computation phases
     # ──────────────────────────────────────────────────────────────────────────
 
     def _run_compute(self) -> None:
-        """Main compute pipeline — runs in background thread."""
+        """Main compute pipeline — runs in background thread. One compute is
+        one scope for the learned-weight warnings (FU-04)."""
+        with weight_warnings_once_per_compute():
+            self._run_compute_pipeline()
+
+    def _run_compute_pipeline(self) -> None:
         logger.info("DailyPlannerService: starting plan computation")
+        self._failed_step = None
         try:
-            # Phase 1 — Data collection + feedback processing
-            phase1_data = self._phase_1_collect()
+            with _ComputeStep(self, "collecting data (phase 1)"):
+                phase1_data = self._phase_1_collect()
 
             if not phase1_data["overview_rows"]:
                 logger.error(
@@ -446,33 +576,26 @@ class DailyPlannerService:
                     )
                 return
 
-            # Phase 2 — Pipeline state per item
-            pipeline_states = self._phase_2_pipeline(phase1_data)
-
-            # Phase 3 — Profitability scoring
-            scored_items = self._phase_3_score(pipeline_states, phase1_data)
-
-            # Phase 4 — Item decisions (Pass 1 — top-level only)
-            top_level_decisions = self._phase_4_decide(scored_items, pipeline_states, phase1_data)
-
-            # Phase 5 — Chain planning (Pass 2 — adds sub-components)
-            chain_plan = self._phase_5_chain(top_level_decisions, phase1_data)
-
-            # Phase 6 — Character assignment
-            assigned_actions = self._phase_6_assign(chain_plan, phase1_data)
-
-            # Phase 7 — Shopping list
-            shopping_items = self._phase_7_shopping(assigned_actions, phase1_data)
-
-            # Phase 8 — Action list
-            action_log_rows = self._phase_8_actions(assigned_actions, shopping_items, phase1_data, chain_plan)
-
-            # Phase 9 — Persistence
-            self._phase_9_persist(
-                phase1_data=phase1_data,
-                chain_plan=chain_plan,
-                action_log_rows=action_log_rows,
-            )
+            with _ComputeStep(self, "analysing pipelines (phase 2)"):
+                pipeline_states = self._phase_2_pipeline(phase1_data)
+            with _ComputeStep(self, "scoring profitability (phase 3)"):
+                scored_items = self._phase_3_score(pipeline_states, phase1_data)
+            with _ComputeStep(self, "deciding items (phase 4)"):
+                top_level_decisions = self._phase_4_decide(scored_items, pipeline_states, phase1_data)
+            with _ComputeStep(self, "planning chains (phase 5)"):
+                chain_plan = self._phase_5_chain(top_level_decisions, phase1_data)
+            with _ComputeStep(self, "assigning characters (phase 6)"):
+                assigned_actions = self._phase_6_assign(chain_plan, phase1_data)
+            with _ComputeStep(self, "building the shopping list (phase 7)"):
+                shopping_items = self._phase_7_shopping(assigned_actions, phase1_data)
+            with _ComputeStep(self, "building the action list (phase 8)"):
+                action_log_rows = self._phase_8_actions(assigned_actions, shopping_items, phase1_data, chain_plan)
+            with _ComputeStep(self, "saving the plan (phase 9)"):
+                self._phase_9_persist(
+                    phase1_data=phase1_data,
+                    chain_plan=chain_plan,
+                    action_log_rows=action_log_rows,
+                )
 
             with self._lock:
                 self._status = "done"
@@ -493,83 +616,149 @@ class DailyPlannerService:
                 self._status = "failed"
                 self._error = _contract_violation_message(exc)
         except Exception as exc:
-            logger.exception("DailyPlannerService: plan computation failed")
+            logger.exception(
+                "DailyPlannerService: plan computation failed while %s", self._failed_step or "?"
+            )
             with self._lock:
                 self._status = "failed"
-                self._error = str(exc)
+                self._error = (
+                    f"Plan computation failed while {self._failed_step}: {exc}"
+                    if self._failed_step else str(exc)
+                )
 
     def _phase_1_collect(self) -> dict[str, Any]:
         """Phase 1: collect all data needed for plan computation."""
         logger.info("DailyPlannerService: Phase 1 — data collection")
 
         # Feedback processing first (before new scoring begins)
-        feedback_count = self._feedback_processor.process_pending_feedback()
+        with _ComputeStep(self, "processing feedback on done actions"):
+            feedback_count = self._feedback_processor.process_pending_feedback()
         if feedback_count > 0:
             logger.info("DailyPlannerService: processed %d feedback actions", feedback_count)
 
-        # Corp wallet
-        corp_wallet = self._get_corp_wallet()
+        with _ComputeStep(self, "reading the corp wallet"):
+            corp_wallet = self._get_corp_wallet()
 
         # IndustryService overview rows, validated and cut to one row per
         # product (the producer emits one per blueprint variant). From here
         # on overview_rows holds only the kept rows, so every later phase and
         # every per-type query sees the same single row per type_id.
-        input_rows = self._build_input_rows(self._get_overview_rows())
+        with _ComputeStep(self, "reading the product overview"):
+            all_overview_rows = self._get_overview_rows()
+            input_rows = self._build_input_rows(all_overview_rows)
         overview_rows = [r.raw for r in input_rows]
+        # The variants dedupe_by_type_id dropped, by type_id: research first
+        # (ChainPlanner) builds from an owned-BPC variant while the BPO is in
+        # the lab. Raw rows, read only for that.
+        variant_rows_by_type_id = _dropped_variants(all_overview_rows, overview_rows)
 
-        # Active industry jobs (corp + character)
-        industry_jobs = self._get_industry_jobs()
+        with _ComputeStep(self, "reading industry jobs"):
+            industry_jobs = self._get_industry_jobs()
+        with _ComputeStep(self, "reading corp assets"):
+            corp_assets = self._get_corp_assets()
+        # Material stock (blueprints excluded), shared by chain planning and
+        # the shopping list.
+        with _ComputeStep(self, "indexing corp material stock"):
+            corp_material_stock = build_corp_stock_map(corp_assets, self._meta_resolver)
+        with _ComputeStep(self, "reading corp market orders"):
+            corp_orders = self._get_corp_orders()
 
-        # Corp assets
-        corp_assets = self._get_corp_assets()
-
-        # Corp market orders
-        corp_orders = self._get_corp_orders()
-
-        # Learning weights
         type_ids = [r.type_id for r in input_rows]
-        weights =self._repo.get_weights(type_ids) if type_ids else {}
-
-        # Sell velocity per type_id
-        sell_velocities = self._get_sell_velocities(type_ids)
+        with _ComputeStep(self, "reading learning weights"):
+            weights = self._repo.get_weights(type_ids) if type_ids else {}
+        with _ComputeStep(self, "reading sell history"):
+            sell_velocities, sell_velocity_unavailable = self._get_sell_velocities(type_ids)
 
         # Market depth cache (from pre-populated tables written by MarketIntelligenceJob)
         hub = str(_adm(self._admin, "planner_market_hub", "jita"))
-        market_depth = self._repo.get_market_depth(type_ids, hub) if type_ids else {}
+        with _ComputeStep(self, "reading market depth"):
+            market_depth = self._repo.get_market_depth(type_ids, hub) if type_ids else {}
 
-        # Margin correlation cache
-        margin_correlations = self._get_margin_correlations(type_ids)
+        margin_correlations, margin_unavailable = self._get_margin_correlations(type_ids)
 
-        # Invention success rates
         min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
-        invention_rates = self._repo.get_invention_success_rates(type_ids, min_attempts) if type_ids else {}
+        with _ComputeStep(self, "reading invention success rates"):
+            invention_rates = (
+                self._repo.get_invention_success_rates(type_ids, min_attempts) if type_ids else {}
+            )
 
         # Tritanium 7d price trend (for squeeze penalty gate)
-        trit_trend_7d = self._get_trit_trend_7d()
+        trit_trend_7d, trend_unavailable = self._get_trit_trend_7d()
+        # RM-35: scoring modifiers whose read failed. Recorded on the plan
+        # (Phase 9) and on the affected rows' reason (Phase 4).
+        unavailable_inputs = {
+            name: reason
+            for name, reason in (
+                ("margin_correlation", margin_unavailable),
+                ("tritanium_trend", trend_unavailable),
+            )
+            if reason
+        }
 
-        # BPO and BPC asset indexes
-        bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
+        with _ComputeStep(self, "indexing corp blueprints"):
+            bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
+        # Blueprints installed in an active job: chain planning neither
+        # researches nor builds from them (Task 8c fix round 5).
+        busy_item_ids = busy_blueprint_item_ids(industry_jobs)
+        if busy_item_ids:
+            owned = {
+                int(_asset_attr(a, "item_id") or 0)
+                for assets in (*bpo_assets_by_type_id.values(), *bpc_assets_by_type_id.values())
+                for a in assets
+            }
+            still_listed = sorted(busy_item_ids & owned)
+            if still_listed:
+                logger.info(
+                    "DailyPlannerService: %d blueprint(s) in active industry jobs are still in the "
+                    "corp asset snapshot (item_ids %s): not researched or built from in this plan",
+                    len(still_listed), still_listed,
+                )
 
         # Blueprint data (SDE) — loaded for chain planning. Owned BPOs are
         # included because sub-manufacture only ever builds from an owned BPO,
         # and those blueprints are usually not themselves overview rows.
-        blueprint_data = self._get_blueprint_data(
-            overview_rows, extra_blueprint_type_ids=bpo_assets_by_type_id.keys()
-        )
+        with _ComputeStep(self, "reading blueprint data from the SDE"):
+            blueprint_data = self._get_blueprint_data(
+                overview_rows, extra_blueprint_type_ids=bpo_assets_by_type_id.keys()
+            )
+
+        # The market-depth table holds the plan's product types only, so every
+        # other type the shopping list can buy (materials, components,
+        # datacores, decryptors) gets its own hub price, or the list would skip
+        # it as unpriced.
+        with _ComputeStep(self, "reading material prices"):
+            material_prices = self._get_material_prices(
+                overview_rows, blueprint_data, market_depth, hub,
+            )
+        # The ONE price source of phase 5 (build vs buy, BPO analysis) and
+        # phase 7 (shopping list). Prices only: market_depth_cache itself stays
+        # the raw depth rows for scoring, velocity, the snapshot hash and
+        # freshness, which read its other fields.
+        price_map = _merge_price_sources(market_depth, material_prices)
 
         return {
             "corp_wallet": corp_wallet,
             "overview_rows": overview_rows,
             "input_rows": input_rows,
+            "variant_rows_by_type_id": variant_rows_by_type_id,
             "industry_jobs": industry_jobs,
+            "busy_blueprint_item_ids": busy_item_ids,
+            # BPO or BPC, per busy item, from the asset history (a job's own
+            # flag is often NULL; chain planning adds the current snapshot).
+            "blueprint_copy_flags": self._blueprint_copy_flags(busy_item_ids) if busy_item_ids else {},
             "corp_assets": corp_assets,
+            "corp_material_stock": corp_material_stock,
             "corp_orders": corp_orders,
             "weights": weights,
             "sell_velocities": sell_velocities,
+            "sell_velocity_unavailable": sell_velocity_unavailable,
             "market_depth_cache": market_depth,
+            "material_prices": material_prices,
+            "price_map": price_map,
             "margin_correlations": margin_correlations,
             "invention_success_rates": invention_rates,
             "trit_trend_7d": trit_trend_7d,
+            "unavailable_inputs": unavailable_inputs,
             "blueprint_data": blueprint_data,
             "bpo_assets_by_type_id": bpo_assets_by_type_id,
             "bpc_assets_by_type_id": bpc_assets_by_type_id,
@@ -602,6 +791,7 @@ class DailyPlannerService:
             market_depth_cache=phase1["market_depth_cache"],
             weights=phase1["weights"],
             sell_velocities=phase1["sell_velocities"],
+            sell_velocity_unavailable=phase1["sell_velocity_unavailable"],
             meta_resolver=self._meta_resolver,
         )
 
@@ -651,6 +841,8 @@ class DailyPlannerService:
         pipeline_by_type = {ps.type_id: ps for ps in pipeline_states}
         overview_by_type = {int(r["type_id"]): r for r in phase1["overview_rows"] if r.get("type_id")}
         input_by_type = {r.type_id: r for r in phase1["input_rows"]}
+        unavailable: dict[str, str] = phase1.get("unavailable_inputs") or {}
+        margin_correlations: dict[int, Any] = phase1.get("margin_correlations") or {}
         decisions = []
         for scored in scored_items:
             ps = pipeline_by_type.get(scored.type_id)
@@ -669,6 +861,11 @@ class DailyPlannerService:
                     # the validated input row instead.
                     meta_group_id=input_row.meta_group_id if input_row is not None else None,
                 )
+                notes = _unavailable_input_notes(scored.type_id, unavailable, margin_correlations)
+                if notes:
+                    decision.decision_reason = "; ".join(
+                        part for part in (decision.decision_reason, *notes) if part
+                    )
                 decisions.append(decision)
             except (TypeError, ValueError):
                 # float() of a malformed setting; per-item isolation.
@@ -697,6 +894,8 @@ class DailyPlannerService:
             industry_jobs=phase1["industry_jobs"],
             characters_service=self._characters,
             admin_settings=self._admin,
+            # The invent action prices a weaker pilot's extra inputs with it (A4).
+            price_map=phase1.get("price_map", phase1["market_depth_cache"]),
         )
 
     def _phase_7_shopping(
@@ -708,7 +907,9 @@ class DailyPlannerService:
         return self._shopping_list_builder.build(
             assigned_actions=assigned_actions,
             corp_assets=phase1["corp_assets"],
-            market_depth_cache=phase1["market_depth_cache"],
+            # Phase 1's merged price map (market depth first, hub prices for
+            # the rest), the same source phase 5 priced build vs buy with.
+            market_depth_cache=phase1.get("price_map", phase1["market_depth_cache"]),
             admin_settings=self._admin,
             blueprint_data=phase1["blueprint_data"],
             meta_resolver=self._meta_resolver,
@@ -757,13 +958,12 @@ class DailyPlannerService:
         overview_rows = phase1_data["overview_rows"]
         snapshot_hash = self._compute_snapshot_hash(overview_rows, market_depth_cache)
 
-        # Corp wallet. `None` means "unparseable balance, unknown" (see
-        # _get_corp_wallet) and must reach the DB as NULL, not as a
-        # misleading 0.0 -- corp_wallet_snapshot is nullable precisely for
-        # this. Only a genuinely absent phase1 key collapses to 0.0.
-        _raw_corp_wallet = phase1_data.get("corp_wallet", 0.0)
+        # Corp wallet: None means unknown (see _get_corp_wallet) and must reach
+        # the DB as NULL. corp_wallet_snapshot is nullable for exactly this.
+        _raw_corp_wallet = phase1_data.get("corp_wallet")
         corp_wallet = None if _raw_corp_wallet is None else float(_raw_corp_wallet)
 
+        unavailable_inputs = phase1_data.get("unavailable_inputs") or {}
         now = _now()
         plan = BuildPlanModel(
             created_at=now,
@@ -772,7 +972,11 @@ class DailyPlannerService:
             corp_wallet_snapshot=corp_wallet,
             market_snapshot_hash=snapshot_hash,
             freshness_score=1.0,
-            plan_summary_json=None,
+            # RM-35: the scoring inputs whose read failed, NULL when none did.
+            plan_summary_json=(
+                json.dumps({"unavailable_inputs": unavailable_inputs}, sort_keys=True)
+                if unavailable_inputs else None
+            ),
         )
         plan_id = self._repo.insert_plan(plan)
 
@@ -814,29 +1018,30 @@ class DailyPlannerService:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _get_corp_wallet(self) -> float | None:
-        """Master wallet (division 1) balance.
+        """Master wallet (division 1) balance, or None when it is unknown.
 
-        Returns `0.0` when the corp/division-1 wallet is genuinely absent
-        (no corporations, no division-1 entry) and `None` when a division-1
-        balance was present but unparseable -- see `_select_division_one_balance`.
-        Callers must not coerce the `None` case to `0.0`; a real zero balance
-        and "we could not read the wallet" must stay distinguishable.
+        Unknown covers: listing corporations failed, there is no corporation,
+        and the corporation has no parseable division-1 balance (see
+        _select_division_one_balance). A real 0 ISK balance and "we could not
+        read the wallet" must stay distinguishable, so nothing here returns 0.0
+        unless the balance itself is 0.
         """
         try:
             corps = self._corporations.list_corporations()
         except (KeyError, TypeError, ValueError):
-            logger.exception("DailyPlannerService: failed to list corporations")
-            return 0.0
+            logger.exception("DailyPlannerService: failed to list corporations; corp wallet unknown")
+            return None
 
         if not corps:
-            return 0.0
+            logger.warning("DailyPlannerService: no corporation listed; corp wallet unknown")
+            return None
         corp = corps[0] if isinstance(corps, list) else corps
         wallets = corp.get("wallets") if isinstance(corp, dict) else getattr(corp, "wallets", None)
         balance = _select_division_one_balance(wallets)
         if balance is None:
             logger.warning(
-                "DailyPlannerService: division-1 wallet balance present but unparseable "
-                "-- treating as unknown, not zero"
+                "DailyPlannerService: no parseable division-1 wallet balance "
+                "(absent, undecodable or malformed); corp wallet unknown, not zero"
             )
         return balance
 
@@ -934,11 +1139,13 @@ class DailyPlannerService:
         finally:
             session.close()
 
-    def _get_sell_velocities(self, type_ids: list[int]) -> dict[int, float]:
-        """Compute sell velocity per day for each type_id using SalesHistoryService.
+    def _get_sell_velocities(self, type_ids: list[int]) -> tuple[dict[int, float], dict[int, str]]:
+        """(units sold per day over 30 days, reason per type_id with no reading).
 
-        Type ids missing from the result have no known velocity; the analyzer
-        reads them as 0.0, but the reason is logged instead of hidden.
+        A type id in the second map has no sell-history reading: there is no
+        corporation to query for, or its query failed. That is not "sold
+        nothing". PipelineAnalyzer records the reason on the item when it has
+        no other velocity signal, instead of reading 0.0 as a measurement.
         """
         velocities: dict[int, float] = {}
         try:
@@ -946,11 +1153,12 @@ class DailyPlannerService:
         except (KeyError, TypeError, ValueError):
             # Same failure set _get_corp_wallet tolerates from list_corporations.
             logger.exception("DailyPlannerService: failed to resolve the corporation id")
-            return velocities
+            return velocities, {t: "corporation id unavailable" for t in type_ids}
         if corp_id <= 0:
             logger.warning("DailyPlannerService: no corporation, so no sell velocities")
-            return velocities
+            return velocities, {t: "no corporation to read sell history for" for t in type_ids}
 
+        unavailable: dict[int, str] = {}
         for type_id in type_ids:
             try:
                 txs = self._sales_history.get_sold_history(
@@ -960,14 +1168,15 @@ class DailyPlannerService:
                     days=30,
                 )
                 total_sold = sum(int(tx.get("quantity") or 0) for tx in txs)
-            except (SQLAlchemyError, TypeError, ValueError):
+            except (SQLAlchemyError, TypeError, ValueError) as exc:
                 logger.warning(
                     "DailyPlannerService: sell history unavailable for type_id=%s",
                     type_id, exc_info=True,
                 )
+                unavailable[type_id] = f"sell history query failed ({type(exc).__name__})"
                 continue
             velocities[type_id] = total_sold / 30.0
-        return velocities
+        return velocities, unavailable
 
     def _get_corp_id(self) -> int:
         """Corporation id of the first listed corporation, or 0 when there is none.
@@ -982,10 +1191,15 @@ class DailyPlannerService:
         raw = corp.get("corporation_id") if isinstance(corp, dict) else getattr(corp, "corporation_id", None)
         return int(raw or 0)
 
-    def _get_margin_correlations(self, type_ids: list[int]) -> dict[int, Any]:
-        """Get margin correlation cache entries."""
+    def _get_margin_correlations(self, type_ids: list[int]) -> tuple[dict[int, Any], str | None]:
+        """(margin correlation cache entries by type_id, unavailable reason).
+
+        The reason is None when the read succeeded, also with no rows. A DB
+        error returns ({}, reason): the plan scores without the mineral-squeeze
+        penalty and says so (RM-35).
+        """
         if not type_ids:
-            return {}
+            return {}, None
         try:
             session = self._session_provider.app_session()
             try:
@@ -993,20 +1207,25 @@ class DailyPlannerService:
                 rows = session.query(MarginCorrelationCacheModel).filter(
                     MarginCorrelationCacheModel.type_id.in_(type_ids)
                 ).all()
-                return {int(r.type_id): r for r in rows}
+                return {int(r.type_id): r for r in rows}, None
             finally:
                 session.close()
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: margin correlations unavailable", exc_info=True)
-            return {}
+        except SQLAlchemyError as exc:
+            _warn_read_failed("_get_margin_correlations", exc)
+            return {}, _db_read_unavailable("margin correlation", exc, _SCORED_WITHOUT_IT)
 
-    def _get_trit_trend_7d(self) -> float | None:
-        """Compute Tritanium 7-day price trend % from market history (type_id=34, Jita region)."""
+    def _get_trit_trend_7d(self) -> tuple[float | None, str | None]:
+        """(Tritanium 7-day price trend %, unavailable reason), from market
+        history (type_id=34, Jita region).
+
+        Too little history is a successful read: (None, None), as before. A
+        DB error is (None, reason) (RM-35).
+        """
         try:
             from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
             session = self._session_provider.app_session()
             try:
-                cutoff = (datetime.utcnow() - timedelta(days=14)).date().isoformat()
+                cutoff = (_now() - timedelta(days=14)).date().isoformat()
                 rows = session.query(MarketHistoryModel).filter(
                     MarketHistoryModel.type_id == 34,
                     MarketHistoryModel.region_id == 10000002,
@@ -1016,20 +1235,20 @@ class DailyPlannerService:
                 session.close()
             prices = [float(r.close) for r in rows if r.close and float(r.close) > 0]
             if len(prices) < 8:
-                return None
+                return None, None
             recent_avg = sum(prices[:7]) / 7.0
             older_avg = sum(prices[7:]) / len(prices[7:])
             if older_avg <= 0:
-                return None
-            return (recent_avg - older_avg) / older_avg * 100.0
-        except SQLAlchemyError:
-            logger.warning("DailyPlannerService: Tritanium price trend unavailable", exc_info=True)
-            return None
+                return None, None
+            return (recent_avg - older_avg) / older_avg * 100.0, None
+        except SQLAlchemyError as exc:
+            _warn_read_failed("_get_trit_trend_7d", exc)
+            return None, _db_read_unavailable("Tritanium 7-day price trend", exc, _SCORED_WITHOUT_IT)
 
     def _get_blueprint_data(
         self,
         overview_rows: list[dict[str, Any]],
-        extra_blueprint_type_ids: Any = (),
+        extra_blueprint_type_ids: Iterable[int] = (),
     ) -> dict[int, dict[str, Any]]:
         """Load blueprint SDE data for the overview rows' blueprints plus any extras.
 
@@ -1073,6 +1292,77 @@ class DailyPlannerService:
         finally:
             sde_session.close()
 
+    def _get_material_prices(
+        self,
+        overview_rows: list[dict[str, Any]],
+        blueprint_data: dict[int, dict[str, Any]],
+        market_depth: dict[int, Any],
+        hub: str,
+    ) -> dict[int, dict[str, Any]]:
+        """{type_id: {"spot_sell_price": hub price}} for every type the
+        shopping list can buy that market depth does not price:
+
+        - the SDE manufacturing materials of every blueprint in
+          blueprint_data (the overview blueprints and the owned BPOs, so
+          sub_manufacture is covered);
+        - the SDE invention materials there, and each row's chosen decryptor
+          (manufacturing_job.invention_decryptor);
+        - each overview row's producer batch materials (the manufacture
+          action's materials).
+
+        A depth entry with neither vwap_5d nor spot_sell_price counts as
+        absent. A type without a hub price is left out, so the shopping list
+        still warns that it is unpriced."""
+        type_ids: set[int] = set()
+        for data in blueprint_data.values():
+            for activity in ("manufacturing", "invention"):
+                job = data.get(activity) if isinstance(data, dict) else None
+                for mat in (job.get("materials") or []) if isinstance(job, dict) else []:
+                    if isinstance(mat, dict) and int(mat.get("type_id") or 0) > 0:
+                        type_ids.add(int(mat["type_id"]))
+        for row in overview_rows:
+            if not isinstance(row, dict):
+                continue
+            decryptor = orow.get_invention_decryptor(row)
+            if decryptor is not None:
+                type_ids.add(decryptor[0])
+            type_ids.update((orow.get_batch_materials(row) or {}).keys())
+        missing = sorted(t for t in type_ids if not _has_depth_price(market_depth.get(t)))
+        if not missing:
+            return {}
+        prices = self._market_pricing.get_type_price_map(type_ids=missing, hub=hub, side="sell")
+        out: dict[int, dict[str, Any]] = {}
+        for type_id in missing:
+            unit_price = (prices.get(type_id) or {}).get("unit_price")
+            if isinstance(unit_price, (int, float)) and unit_price > 0:
+                out[type_id] = {"spot_sell_price": float(unit_price)}
+        return out
+
+    def _blueprint_copy_flags(self, item_ids: set[int]) -> dict[int, bool]:
+        """{item_id: is_blueprint_copy} from the character and corporation
+        asset history, for the items whose flag is known. No error handler:
+        a failed read fails the compute (fail loud)."""
+        from eve_online_industry_tracker.infrastructure.models import (  # noqa: PLC0415
+            CharacterAssetHistoryModel,
+            CorporationAssetHistoryModel,
+        )
+
+        ids = sorted({int(i) for i in item_ids})
+        out: dict[int, bool] = {}
+        session = self._session_provider.app_session()
+        try:
+            for model in (CorporationAssetHistoryModel, CharacterAssetHistoryModel):
+                rows = (
+                    session.query(model.item_id, model.is_blueprint_copy)
+                    .filter(model.item_id.in_(ids), model.is_blueprint_copy.isnot(None))
+                    .all()
+                )
+                for item, is_copy in rows:
+                    out.setdefault(int(item), bool(is_copy))
+        finally:
+            session.close()
+        return out
+
     def _index_blueprint_assets(
         self, corp_assets: list[Any]
     ) -> tuple[dict[int, list[Any]], dict[int, list[Any]]]:
@@ -1111,8 +1401,15 @@ class DailyPlannerService:
                 bpo_market_price=d.bpo_market_price,
                 break_even_days=d.break_even_days,
                 projected_annual_savings=d.projected_annual_savings,
-                effective_velocity=d.effective_velocity,
+                bpo_analysis_skip_reason=d.bpo_analysis_skip_reason,
+                # NULL, not the analyzer's 0.01 floor, when there was no signal:
+                # market_depth_collector and feedback_processor read this column
+                # and treat any number as a measured sell rate.
+                effective_velocity=(
+                    None if d.velocity_unknown_reason is not None else d.effective_velocity
+                ),
                 snapshot_sell_price=_spot_sell_price(market_depth_cache.get(d.type_id)),
+                isk_per_hour_is_upper_bound=bool(getattr(d, "profit_is_upper_bound", False)),
             ))
         return items
 
@@ -1240,6 +1537,25 @@ def _get_attr(obj: Any, attr: str) -> Any:
     return getattr(obj, attr, None)
 
 
+def busy_blueprint_item_ids(industry_jobs: list[Any]) -> set[int]:
+    """The blueprint item_ids installed in these (active) industry jobs.
+
+    EVE runs one job per blueprint. An installed blueprint normally drops
+    out of the ESI assets, but the asset snapshot is cached longer than the
+    jobs and can still list it, so the planner excludes these explicitly.
+    """
+    out: set[int] = set()
+    for job in industry_jobs or []:
+        value = job.get("blueprint_item_id") if isinstance(job, dict) else getattr(job, "blueprint_item_id", None)
+        try:
+            item_id = int(value) if value is not None else 0
+        except (TypeError, ValueError):
+            continue
+        if item_id > 0:
+            out.add(item_id)
+    return out
+
+
 def index_blueprint_assets(
     corp_assets: list[Any], meta_resolver: Any
 ) -> tuple[dict[int, list[Any]], dict[int, list[Any]]]:
@@ -1290,11 +1606,11 @@ def _select_division_one_balance(wallets: Any) -> float | None:
     for both already-stored double-encoded rows and newly written
     single-encoded ones.
 
-    Returns `0.0` when no division-1 entry is present at all (division-1
-    genuinely absent from the payload). Returns `None` when a division-1
-    entry *is* present but its balance could not be parsed as a number --
-    see `_parse_isk` -- so callers can tell "known zero" apart from
-    "unknown/unparseable".
+    Returns `None` whenever there is no parseable division-1 balance: the
+    payload does not decode, decodes to neither a list nor a dict, has no
+    division-1 entry, or has one whose balance `_parse_isk` cannot read.
+    An entry whose `division` is not an integer is skipped, not raised.
+    Only a balance that parses (including a real `"0"`) is a number.
     """
     import json as _json
 
@@ -1304,17 +1620,23 @@ def _select_division_one_balance(wallets: Any) -> float | None:
         try:
             wallets = _json.loads(wallets)
         except ValueError:
-            return 0.0
+            return None
 
     if isinstance(wallets, list):
         for entry in wallets:
-            if isinstance(entry, dict) and int(entry.get("division") or 0) == 1:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                division = int(entry.get("division") or 0)
+            except (TypeError, ValueError):
+                continue
+            if division == 1:
                 return _parse_isk(entry.get("balance"))
     elif isinstance(wallets, dict):
         raw = wallets.get("1", wallets.get(1))
         if raw is not None:
             return _parse_isk(raw)
-    return 0.0
+    return None
 
 
 def _parse_isk(raw: Any) -> float | None:
@@ -1323,9 +1645,31 @@ def _parse_isk(raw: Any) -> float | None:
     Returns `None` when `raw` cannot be parsed as a number, so a malformed
     balance is distinguishable from a genuine `0.0` balance -- unlike a
     plain `float(...) or 0.0` coercion, which would make the two look
-    identical to every caller.
+    identical to every caller. `float()` also accepts "nan" and "inf";
+    those are not balances either, so a non-finite result is `None` too.
     """
     try:
-        return float(str(raw).replace(",", ""))
+        value = float(str(raw).replace(",", ""))
     except (TypeError, ValueError):
         return None
+    return value if math.isfinite(value) else None
+
+
+def _dropped_variants(
+    all_rows: list[Any], kept_rows: list[dict[str, Any]],
+) -> dict[int, list[dict[str, Any]]]:
+    """{type_id: [overview rows of that product dedupe_by_type_id dropped]}:
+    every dict row of a kept product that is not the kept row itself."""
+    kept = {id(r) for r in kept_rows}
+    kept_types = {int(r.get("type_id") or 0) for r in kept_rows if isinstance(r, dict)}
+    out: dict[int, list[dict[str, Any]]] = {}
+    for row in all_rows or []:
+        if not isinstance(row, dict) or id(row) in kept:
+            continue
+        try:
+            type_id = int(row.get("type_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if type_id in kept_types:
+            out.setdefault(type_id, []).append(row)
+    return out

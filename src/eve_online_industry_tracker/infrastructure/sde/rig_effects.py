@@ -1,113 +1,42 @@
+"""Engineering and reactor rig effects, read from the SDE's dogma.
+
+Every rig bonus is a dogma effect whose modifierInfo says which attribute
+of the structure it modifies (modifiedAttributeID, e.g. 2538 "equipment
+manufacture material multiplier") and which attribute of the rig holds the
+value (modifyingAttributeID). The value attribute differs per rig family:
+2594/2593/2595 for the standard engineering rigs, 2653 for the Thukker
+capital-component material bonus, 2714/2713 for the reactor rigs. Reading
+it from the effect, not from a fixed list, gives every rig its own value.
+
+The modified structure attribute decides what the effect reduces
+(domain.rig_groups.ATTRIBUTE_BINDINGS: activity, metric and the CCP target
+filter, cross-checked against the Hoboleaks industrymodifiersources
+snapshot in tests/fixtures/hoboleaks/).
+
+The rig's security effect (e.g. 6842) scales its value attributes by the
+system's security band (domain.security_band); each effect records whether
+it is scaled, and each rig its per-band multipliers.
+"""
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Iterable
 
 from sqlalchemy import bindparam, text
 
+from eve_online_industry_tracker.domain import rig_groups as _rig_groups
+from eve_online_industry_tracker.domain import security_band as _security
 
-_RIG_ATTR_TIME_REDUCTION = 2593
-_RIG_ATTR_MATERIAL_REDUCTION = 2594
-_RIG_ATTR_COST_REDUCTION = 2595
+logger = logging.getLogger(__name__)
 
-
-_RIG_GROUP_TOKEN_LABELS: dict[str, str] = {
-    # Manufacturing
-    "Equipment": "Modules",
-    "Ammo": "Ammo & Charges",
-    "Drone": "Drones",
-    "Smallship": "Basic Small Ships",
-    "Mediumship": "Basic Medium Ships",
-    "Mediumships": "Basic Medium Ships",
-    "Largeship": "Basic Large Ships",
-    "AdvComponent": "Advanced Components",
-    "AdvSmship": "Advanced Small Ships",
-    "AdvMedShip": "Advanced Medium Ships",
-    "AdvLarShip": "Advanced Large Ships",
-    "BasCapComp": "Capital Components",
-    "CapShip": "Capital Ships",
-    "AdvCapComponent": "Advanced Capital Components",
-    "Structure": "Structures",
-    # Reactions
-    "ReactionBio": "Biochemical Reactions",
-    "ReactionComp": "Composite Reactions",
-    "ReactionHyb": "Hybrid Reactions",
-    # Variants
-    "ThukkerAdvCapComp": "Advanced Capital Components",
-    "ThukkerBasCapComp": "Capital Components",
-    "AllShip": "All Ships",
-}
-
-
-def _camel_to_words(s: str) -> str:
-    out: list[str] = []
-    buf = ""
-    for ch in s:
-        if buf and ch.isupper() and (not buf[-1].isupper()):
-            out.append(buf)
-            buf = ch
-        else:
-            buf += ch
-    if buf:
-        out.append(buf)
-    return " ".join(out).strip()
-
-
-def _parse_rig_effect(effect_name: str) -> tuple[str | None, str | None, str | None]:
-    if not effect_name or not effect_name.startswith("rig"):
-        return None, None, None
-
-    metric: str | None
-    if ("Material" in effect_name) or ("MatBonus" in effect_name):
-        metric = "material"
-    elif "Time" in effect_name:
-        metric = "time"
-    elif "Cost" in effect_name:
-        metric = "cost"
-    else:
-        metric = None
-
-    activity: str | None = None
-    group_token: str | None = None
-
-    rest = effect_name[3:]
-
-    if rest.startswith("ME") and "Research" in rest:
-        return "research_me", None, metric
-    if rest.startswith("TE") and "Research" in rest:
-        return "research_te", None, metric
-
-    if rest.startswith("Reaction"):
-        group_part = rest
-        for suffix in [
-            "MatBonus",
-            "TimeBonus",
-            "CostBonus",
-            "MaterialBonus",
-            "TimeBonus",
-            "CostBonus",
-        ]:
-            if suffix in group_part:
-                group_part = group_part.split(suffix, 1)[0]
-                break
-        return "manufacturing", group_part or None, metric
-
-    for token, activity_key in [
-        ("Manufacture", "manufacturing"),
-        ("Invention", "invention"),
-        ("Research", "research"),
-        ("Copying", "copying"),
-        ("Copy", "copying"),
-        ("Reaction", "manufacturing"),
-    ]:
-        idx = rest.find(token)
-        if idx >= 0:
-            activity = activity_key
-            if idx > 0:
-                group_token = rest[:idx]
-            break
-
-    return activity, group_token, metric
+# SDE dogma attribute names (ids resolved from the SDE: 2355, 2356, 2357,
+# 2358 and 1970 at the time of writing).
+_ATTR_HISEC = "hiSecModifier"
+_ATTR_LOWSEC = "lowSecModifier"
+_ATTR_NULLSEC = "nullSecModifier"
+_ATTR_SECURITY = "securityModifier"
+_ATTR_DISALLOW_HISEC = "disallowInHighSec"
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -119,130 +48,151 @@ def _safe_json_loads(value: Any) -> Any:
     return value
 
 
+def _rows(session: Any, sql: str, ids: Iterable[Any], key: str = "ids") -> list[Any]:
+    values = sorted(set(ids))
+    if not values:
+        return []
+    return session.execute(text(sql).bindparams(bindparam(key, expanding=True)), {key: values}).fetchall()
+
+
+def _attribute_map(attrs_raw: Any) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for a in _safe_json_loads(attrs_raw) or []:
+        if not isinstance(a, dict) or a.get("attributeID") is None or a.get("value") is None:
+            continue
+        try:
+            out[int(a["attributeID"])] = float(a["value"])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _effect_ids(effects_raw: Any) -> list[int]:
+    out: list[int] = []
+    for e in _safe_json_loads(effects_raw) or []:
+        if isinstance(e, dict) and e.get("effectID") is not None:
+            try:
+                out.append(int(e["effectID"]))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _item_modifiers(modifier_info: Any) -> list[dict[str, Any]]:
+    return [m for m in (_safe_json_loads(modifier_info) or []) if isinstance(m, dict)]
+
+
 def get_rig_effects_for_type_ids(sde_session: Any, rig_type_ids: Iterable[int]) -> list[dict]:
+    """One entry per rig type: its industry effects and security multipliers.
+
+    effects: [{effect_id, effect_name, activity, group, metric, value,
+    modified_attribute_id, modifying_attribute_id, security_scaled}], value a
+    fraction (0.024 == 2.4 %) before the security multiplier.
+    security_multipliers: {band: multiplier, or None where the rig cannot be
+    fitted}. material/time/cost_reduction: the largest effect value per
+    metric (a summary for display; the producer reads the effects)."""
     ids = sorted({int(x) for x in rig_type_ids if x is not None and int(x) != 0})
     if not ids:
         return []
 
-    dogma_rows = (
-        sde_session.execute(
-            text("SELECT id, dogmaAttributes, dogmaEffects FROM typeDogma WHERE id IN :ids").bindparams(
-                bindparam("ids", expanding=True)
-            ),
-            {"ids": ids},
-        ).fetchall()
-    )
+    dogma_by_type_id = {
+        int(tid): (_attribute_map(attrs_raw), _effect_ids(effects_raw))
+        for tid, attrs_raw, effects_raw in _rows(
+            sde_session, "SELECT id, dogmaAttributes, dogmaEffects FROM typeDogma WHERE id IN :ids", ids)
+    }
+    all_effect_ids = {eid for _, effect_ids in dogma_by_type_id.values() for eid in effect_ids}
+    effects_by_id = {
+        int(eid): (str(name or ""), _item_modifiers(modifier_info))
+        for eid, name, modifier_info in _rows(
+            sde_session, "SELECT id, name, modifierInfo FROM dogmaEffects WHERE id IN :ids", all_effect_ids)
+    }
 
-    dogma_by_type_id: dict[int, dict] = {}
-    all_effect_ids: set[int] = set()
+    named = (_ATTR_HISEC, _ATTR_LOWSEC, _ATTR_NULLSEC, _ATTR_SECURITY, _ATTR_DISALLOW_HISEC)
+    attr_rows = _rows(sde_session, "SELECT id, name, defaultValue FROM dogmaAttributes WHERE name IN :names",
+                      named, key="names")
+    attr_id_by_name = {str(name): int(aid) for aid, name, _ in attr_rows}
+    modifying_ids = {
+        int(m["modifyingAttributeID"])
+        for _, modifiers in effects_by_id.values() for m in modifiers if m.get("modifyingAttributeID") is not None
+    }
+    default_by_attr_id = {int(aid): float(default or 0.0) for aid, _, default in attr_rows}
+    default_by_attr_id.update({
+        int(aid): float(default or 0.0)
+        for aid, default in _rows(sde_session, "SELECT id, defaultValue FROM dogmaAttributes WHERE id IN :ids",
+                                  modifying_ids)
+    })
+    missing = [n for n in named if n not in attr_id_by_name]
+    if missing:
+        logger.warning("Rig effects: the SDE has no dogma attribute %s; rig security multipliers are not read",
+                       ", ".join(missing))
 
-    for tid, attrs_raw, effects_raw in dogma_rows:
-        attr_map: dict[int, float] = {}
-        effect_ids: list[int] = []
-
-        attrs = _safe_json_loads(attrs_raw) or []
-        if isinstance(attrs, list):
-            for a in attrs:
-                if not isinstance(a, dict):
-                    continue
-                aid = a.get("attributeID")
-                val = a.get("value")
-                if aid is None or val is None:
-                    continue
-                try:
-                    attr_map[int(aid)] = float(val)
-                except Exception:
-                    continue
-
-        effs = _safe_json_loads(effects_raw) or []
-        if isinstance(effs, list):
-            for e in effs:
-                if not isinstance(e, dict):
-                    continue
-                eid = e.get("effectID")
-                if eid is None:
-                    continue
-                try:
-                    eid_i = int(eid)
-                    effect_ids.append(eid_i)
-                    all_effect_ids.add(eid_i)
-                except Exception:
-                    continue
-
-        dogma_by_type_id[int(tid)] = {"attr_map": attr_map, "effect_ids": effect_ids}
-
-    effect_name_by_id: dict[int, str] = {}
-    if all_effect_ids:
-        eff_rows = (
-            sde_session.execute(
-                text("SELECT id, name FROM dogmaEffects WHERE id IN :ids").bindparams(bindparam("ids", expanding=True)),
-                {"ids": sorted(all_effect_ids)},
-            ).fetchall()
-        )
-        effect_name_by_id = {int(r[0]): (r[1] or "") for r in eff_rows}
+    def attr(attr_map: dict[int, float], attribute_id: int | None) -> float | None:
+        if attribute_id is None:
+            return None
+        return attr_map.get(attribute_id, default_by_attr_id.get(attribute_id, 0.0))
 
     rigs_out: list[dict] = []
     for type_id in ids:
-        d = dogma_by_type_id.get(int(type_id)) or {}
-        attr_map = d.get("attr_map") or {}
-
-        time_val = attr_map.get(_RIG_ATTR_TIME_REDUCTION, 0.0)
-        mat_val = attr_map.get(_RIG_ATTR_MATERIAL_REDUCTION, 0.0)
-        cost_val = attr_map.get(_RIG_ATTR_COST_REDUCTION, 0.0)
-
-        time_reduction = max(0.0, (-float(time_val)) / 100.0)
-        material_reduction = max(0.0, (-float(mat_val)) / 100.0)
-        cost_reduction = max(0.0, (-float(cost_val)) / 100.0)
+        attr_map, effect_ids = dogma_by_type_id.get(int(type_id), ({}, []))
+        security_attr_id = attr_id_by_name.get(_ATTR_SECURITY)
+        # Value attributes the rig's own security effect multiplies.
+        scaled_attr_ids = {
+            int(m["modifiedAttributeID"])
+            for eid in effect_ids for m in effects_by_id.get(eid, ("", []))[1]
+            if security_attr_id is not None and m.get("modifyingAttributeID") == security_attr_id
+            and m.get("domain") == "itemID" and m.get("modifiedAttributeID") is not None
+        }
+        security_multipliers: dict[str, float | None] | None = None
+        if scaled_attr_ids and not missing:
+            disallow_hisec = bool(attr(attr_map, attr_id_by_name[_ATTR_DISALLOW_HISEC]))
+            null = attr(attr_map, attr_id_by_name[_ATTR_NULLSEC])
+            security_multipliers = {
+                _security.HIGH: None if disallow_hisec else attr(attr_map, attr_id_by_name[_ATTR_HISEC]),
+                _security.LOW: attr(attr_map, attr_id_by_name[_ATTR_LOWSEC]),
+                _security.NULL: null,
+                _security.WORMHOLE: null,
+            }
 
         effects_out: list[dict] = []
-        for eid in d.get("effect_ids") or []:
-            ename = effect_name_by_id.get(int(eid)) or ""
-            if ename in {"rigSlot"}:
-                continue
-            if not ename.startswith("rig"):
-                continue
-            if "Bonus" not in ename:
-                continue
-
-            activity, group_token, metric = _parse_rig_effect(ename)
-            if activity is None or metric is None:
-                continue
-
-            if metric == "material":
-                val = material_reduction
-            elif metric == "time":
-                val = time_reduction
-            else:
-                val = cost_reduction
-
-            if val <= 0:
-                continue
-
-            if not group_token:
-                group = "All"
-            else:
-                group = _RIG_GROUP_TOKEN_LABELS.get(group_token) or _camel_to_words(group_token)
-
-            effects_out.append(
-                {
+        for eid in effect_ids:
+            name, modifiers = effects_by_id.get(eid, ("", []))
+            for m in modifiers:
+                if m.get("func") != "ItemModifier" or m.get("domain") != "structureID":
+                    continue
+                try:
+                    modified = int(m["modifiedAttributeID"])
+                    modifying = int(m["modifyingAttributeID"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                binding = _rig_groups.ATTRIBUTE_BINDINGS.get(modified)
+                if binding is None:
+                    continue
+                value = max(0.0, -float(attr(attr_map, modifying) or 0.0) / 100.0)
+                if value <= 0:
+                    continue
+                effects_out.append({
                     "effect_id": int(eid),
-                    "effect_name": ename,
-                    "activity": activity,
-                    "group": group,
-                    "metric": metric,
-                    "value": float(val),
-                }
-            )
+                    "effect_name": name,
+                    "activity": binding.activity,
+                    "group": binding.label,
+                    "metric": binding.metric,
+                    "value": float(value),
+                    "modified_attribute_id": modified,
+                    "modifying_attribute_id": modifying,
+                    "security_scaled": modifying in scaled_attr_ids,
+                })
 
-        rigs_out.append(
-            {
-                "type_id": int(type_id),
-                "time_reduction": float(time_reduction),
-                "material_reduction": float(material_reduction),
-                "cost_reduction": float(cost_reduction),
-                "effects": effects_out,
-            }
-        )
+        def summary(metric: str) -> float:
+            return max((e["value"] for e in effects_out if e["metric"] == metric), default=0.0)
+
+        rigs_out.append({
+            "type_id": int(type_id),
+            "time_reduction": summary("time"),
+            "material_reduction": summary("material"),
+            "cost_reduction": summary("cost"),
+            "security_multipliers": security_multipliers,
+            "effects": effects_out,
+        })
 
     return rigs_out
 
@@ -269,46 +219,3 @@ def compute_combined_reduction(reductions: Iterable[float]) -> float:
 
     total = 1.0 - mul
     return max(0.0, min(total, 1.0))
-
-
-def compute_rig_reduction_for(
-    *,
-    rigs_payload: list[dict],
-    activity: str,
-    group: str | None,
-    metric: str,
-) -> float:
-    """Compute the effective rig reduction for one job.
-
-    - activity: manufacturing/invention/copying/research_me/research_te
-    - group: group label (e.g. "Modules")
-    - metric: material/time/cost
-
-    Rig effects with group == "All" always apply.
-    """
-
-    if not rigs_payload:
-        return 0.0
-
-    wanted_group = (group or "").strip()
-
-    reductions: list[float] = []
-    for rig in rigs_payload:
-        for e in (rig.get("effects") or []):
-            if not isinstance(e, dict):
-                continue
-            if str(e.get("activity") or "") != str(activity):
-                continue
-            if str(e.get("metric") or "") != str(metric):
-                continue
-
-            e_group = str(e.get("group") or "").strip()
-            if e_group not in {"All", wanted_group}:
-                continue
-
-            try:
-                reductions.append(float(e.get("value") or 0.0))
-            except Exception:
-                continue
-
-    return compute_combined_reduction(reductions)

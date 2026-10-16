@@ -13,7 +13,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     prepare_shared_industry_snapshot_page,
     render_pricing_batch_panel,
 )
-from streamlit_ui.state.industry_builder_ui import meta_group_label, ordered_meta_group_names, get_meta_group_name
+from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, invention_summary_lines, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name, total_cost_label
 from streamlit_ui.components.webpage_ui import require_aggrid
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
@@ -22,6 +22,14 @@ from streamlit_ui.state.industry_builder_page import (
 )
 from streamlit_ui.api.industry_builder import start_product_overview_refresh
 from typing import cast, Any
+
+
+#: Drilldown caption for a row flagged assumes_owned_t2_bpo (Build from BPC off).
+ASSUMES_OWNED_T2_BPO_CAPTION = (
+    "Costed as if a T2 BPO is owned: Build from BPC is off, so no invention "
+    "cost or datacores are included. Nested T2 components are costed the same "
+    "way, as an owned T2 BPO (SDE blueprint, max ME/TE)."
+)
 
 
 def _format_age_minutes(value: Any) -> str:
@@ -81,7 +89,7 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
     with st.expander("Why profitable", expanded=False):
         metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
         metric_col_1.metric("Net Proceeds", f"{float(selected_row.get('net_proceeds') or 0.0):,.2f}" if selected_row.get("net_proceeds") is not None else "N/A")
-        metric_col_2.metric("Total Cost", f"{float((manufacturing_job or {}).get('total_cost') or 0.0):,.2f}" if manufacturing_job.get("total_cost") is not None else "N/A")
+        metric_col_2.metric("Total Cost", total_cost_label(manufacturing_job))
         metric_col_3.metric("Profit", f"{float(selected_row.get('profit_amount') or 0.0):,.2f}" if selected_row.get("profit_amount") is not None else "N/A")
         metric_col_4.metric("Confidence", str(selected_row.get("pricing_confidence") or "N/A"))
 
@@ -107,6 +115,8 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 {
                     "material_cost": manufacturing_job.get("material_cost"),
                     "job_cost": manufacturing_job.get("total_job_cost"),
+                    "slot_time_s (expected, amortized)": manufacturing_job.get("time_seconds"),
+                    "elapsed_time_s (whole jobs)": manufacturing_job.get("elapsed_time_seconds"),
                     "gross_sale_value": selected_row.get("gross_sale_value"),
                     "broker_fee_amount": selected_row.get("broker_fee_amount"),
                     "sales_tax_amount": selected_row.get("sales_tax_amount"),
@@ -119,40 +129,67 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 }
             )
 
+        if row_assumes_owned_t2_bpo(selected_row):
+            st.caption(ASSUMES_OWNED_T2_BPO_CAPTION)
+        for line in invention_summary_lines(selected_row):
+            st.caption(line)
+
         reasons = selected_row.get("pricing_confidence_reasons") or []
         if isinstance(reasons, list) and reasons:
             st.markdown("**Confidence reasoning**")
             for reason in reasons:
                 st.write(f"- {reason}")
 
-        top_material_rows = sorted(
+        invention_materials = manufacturing_job.get("expected_invention_materials") or {}
+        if not isinstance(invention_materials, dict):
+            invention_materials = {}
+        # Every line priced into Material Cost: the manufacturing job's own
+        # materials plus, for invented T2, the amortized invention inputs.
+        material_rows = sorted(
             [
-                {
-                    "Type": str(material.get("type_name") or material.get("type_id") or "Material"),
-                    "Qty": int(material.get("quantity") or 0),
-                    "Unit Price": material.get("unit_price"),
-                    "Line Total": material.get("line_total"),
-                    "Source": material.get("price_source"),
-                    "Est. Cost?": "⚠ est." if bool(material.get("uses_unknown_owned_cost_basis")) else "",
-                }
-                for material in procurement_materials.values()
-                if isinstance(material, dict)
+                *[
+                    {
+                        "Type": str(material.get("type_name") or material.get("type_id") or "Material"),
+                        "Qty": int(material.get("quantity") or 0),
+                        "Unit Price": material.get("unit_price"),
+                        "Line Total": material.get("line_total"),
+                        "Source": material.get("price_source"),
+                        "Est. Cost?": "⚠ est." if bool(material.get("uses_unknown_owned_cost_basis")) else "",
+                    }
+                    for material in procurement_materials.values()
+                    if isinstance(material, dict)
+                ],
+                *[
+                    {
+                        "Type": f"{material.get('type_name') or material.get('type_id') or 'Material'} (amortized invention input)",
+                        "Qty": round(float(material.get("quantity") or 0.0), 2),
+                        "Unit Price": material.get("unit_price"),
+                        "Line Total": material.get("line_total"),
+                        "Source": material.get("price_source"),
+                        "Est. Cost?": "⚠ no price" if material.get("unit_price") is None else "",
+                    }
+                    for material in invention_materials.values()
+                    if isinstance(material, dict)
+                ],
             ],
             key=lambda row: float(row.get("Line Total") or 0.0),
             reverse=True,
-        )[:8]
-        if top_material_rows:
-            st.markdown("**Top material cost drivers**")
-            st.dataframe(top_material_rows, width="stretch", hide_index=True)
+        )
+        if material_rows:
+            st.markdown("**Material cost lines** (sum to Material Cost)")
+            st.dataframe(material_rows, width="stretch", hide_index=True)
 
         activity_breakdown = manufacturing_job.get("activity_breakdown") or {}
         if isinstance(activity_breakdown, dict) and activity_breakdown:
             activity_rows = [
                 {
                     "Activity": str(activity_name),
-                    "Duration (s)": activity_payload.get("duration_seconds"),
+                    "Expected slot time (s)": activity_payload.get("duration_seconds"),
+                    "Amortized?": "amortized" if activity_payload.get("duration_is_amortized") else "",
+                    "Per-job duration (s)": activity_payload.get("job_duration_seconds"),
+                    "Elapsed, whole jobs (s)": activity_payload.get("elapsed_duration_seconds"),
                     "Job Cost": activity_payload.get("total_job_cost") or activity_payload.get("job_cost"),
-                    "Estimated Item Value": activity_payload.get("estimated_item_value"),
+                    "Estimated Item Value": estimated_item_value_cell(activity_payload),
                 }
                 for activity_name, activity_payload in activity_breakdown.items()
                 if isinstance(activity_payload, dict)
@@ -261,7 +298,12 @@ def _render_overview_grid(
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
+                # Invention runs and datacore quantities are fractional expected
+                # (amortized) values: up to 2 decimals, whole numbers stay whole.
+                valueFormatter=js_eu_number_formatter(
+                    JsCode=runtime.js_code, locale=runtime.locale,
+                    decimals=(0 if col == "ID" else 2), min_decimals=0,
+                ),
                 minWidth=105,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
@@ -269,7 +311,7 @@ def _render_overview_grid(
             if col == "ID":
                 gb.configure_column(col, hide=True)
 
-    for col in ["_path", "_parent_path", "_depth", "_sort_order", "_has_children"]:
+    for col in ["_path", "_parent_path", "_depth", "_sort_order", "_has_children", "_total_cost_lower_bound"]:
         if col in df.columns:
             gb.configure_column(col, hide=True)
 
@@ -291,7 +333,10 @@ def _render_overview_grid(
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                valueFormatter=js_eu_isk_formatter(
+                    JsCode=runtime.js_code, locale=runtime.locale, decimals=2,
+                    lower_bound_field=("_total_cost_lower_bound" if col == "Total Cost" else None),
+                ),
                 minWidth=130,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
@@ -581,7 +626,7 @@ function(params) {
     if "Job Duration" in df.columns:
         gb.configure_column(
             "Job Duration",
-            minWidth=140,
+            minWidth=260,
             wrapHeaderText=False,
             autoHeaderHeight=False,
         )

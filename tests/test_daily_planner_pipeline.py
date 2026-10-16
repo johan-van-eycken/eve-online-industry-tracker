@@ -1,6 +1,7 @@
 """Tests for PipelineAnalyzer (Phase 2)."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from types import SimpleNamespace
@@ -360,3 +361,76 @@ def test_is_blueprint_lookups_are_prefetched_in_one_batch_not_per_asset():
 
     assert loader.calls == [[888, 999]], "the loader must be invoked exactly once, batched"
     assert states[0].bpc_runs_available == 8
+
+
+def test_the_analyzer_clamps_an_out_of_band_velocity_multiplier():
+    states = PipelineAnalyzer().analyze(
+        input_rows=[_input_row(type_id=1)], industry_jobs=[], corp_assets=[],
+        market_depth_cache={}, weights={1: SimpleNamespace(type_id=1, velocity_multiplier=10.0)},
+        sell_velocities={1: 2.0}, meta_resolver=_NoBlueprints(),
+    )
+    assert states[0].effective_velocity == 8.0  # 2.0 x 4.0, not 2.0 x 10.0
+
+
+def _analyze_one(row, sell_velocities):
+    return PipelineAnalyzer().analyze(
+        input_rows=[row], industry_jobs=[], corp_assets=[], market_depth_cache={},
+        weights={}, sell_velocities=sell_velocities, meta_resolver=_NoBlueprints(),
+    )[0]
+
+
+def test_no_velocity_signal_is_flagged_not_just_floored():
+    state = _analyze_one(_input_row(type_id=1, days_of_supply=None), {})
+    assert state.effective_velocity == 0.01
+    assert state.velocity_unknown_reason == "no corp sales in 30 days and no days-of-supply estimate"
+
+
+def test_a_measured_velocity_has_no_unknown_reason():
+    assert _analyze_one(_input_row(type_id=1), {1: 2.0}).velocity_unknown_reason is None
+
+
+def test_a_days_of_supply_fallback_has_no_unknown_reason():
+    state = _analyze_one(_input_row(type_id=1, days_of_supply=5.0), {})
+    assert abs(state.effective_velocity - 0.2) < 1e-12
+    assert state.velocity_unknown_reason is None
+
+
+def test_a_tiny_measured_velocity_floored_to_0_01_is_still_a_signal():
+    state = _analyze_one(_input_row(type_id=1), {1: 0.001})
+    assert state.effective_velocity == 0.01
+    assert state.velocity_unknown_reason is None
+
+
+def test_a_failed_sell_history_is_the_recorded_reason_when_nothing_else_is_known():
+    state = PipelineAnalyzer().analyze(
+        input_rows=[_input_row(type_id=1, days_of_supply=None)], industry_jobs=[],
+        corp_assets=[], market_depth_cache={}, weights={}, sell_velocities={},
+        sell_velocity_unavailable={1: "sell history query failed (OperationalError)"},
+        meta_resolver=_NoBlueprints(),
+    )[0]
+    assert state.velocity_unknown_reason == (
+        "sell history query failed (OperationalError) and no days-of-supply estimate"
+    )
+
+
+def test_days_of_supply_used_while_sell_history_was_unavailable_logs_a_warning(caplog):
+    with caplog.at_level(logging.WARNING):
+        state = PipelineAnalyzer().analyze(
+            input_rows=[_input_row(type_id=1, days_of_supply=5.0)], industry_jobs=[],
+            corp_assets=[], market_depth_cache={}, weights={}, sell_velocities={},
+            sell_velocity_unavailable={1: "corporation id unavailable"},
+            meta_resolver=_NoBlueprints(),
+        )[0]
+    assert abs(state.effective_velocity - 0.2) < 1e-12
+    assert state.velocity_unknown_reason is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "type_id=1" in m and "corporation id unavailable" in m and "days of supply" in m
+        for m in warnings
+    ), warnings
+
+
+def test_days_of_supply_used_when_sell_history_was_read_logs_no_warning(caplog):
+    with caplog.at_level(logging.WARNING):
+        _analyze_one(_input_row(type_id=1, days_of_supply=5.0), {})
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]

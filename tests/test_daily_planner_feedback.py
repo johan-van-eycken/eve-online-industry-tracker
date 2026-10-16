@@ -4,9 +4,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -15,6 +17,10 @@ from eve_online_industry_tracker.infrastructure.models import (
     PlanLearningWeightsModel,
     PlanItemOutcomeModel,
 )
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class _StaticSessionProvider:
@@ -70,6 +76,7 @@ def _make_action(
     generated_at: datetime | None = None,
     estimated_cost_isk: float | None = None,
     quantity: int | None = None,
+    estimated_build_cost_isk: float | None = None,
 ) -> MagicMock:
     action = MagicMock()
     action.id = action_id
@@ -78,11 +85,12 @@ def _make_action(
     action.action_type = action_type
     action.status = status
     action.processed_for_feedback = processed
-    action.generated_at = generated_at or datetime.utcnow() - timedelta(days=1)
+    action.generated_at = generated_at or _utcnow() - timedelta(days=1)
     # Set explicitly: a bare MagicMock attribute satisfies float() as 1.0
     # (see _make_plan_item's docstring), which would silently fabricate a
     # 1 ISK batch cost over 1 unit.
     action.estimated_cost_isk = estimated_cost_isk
+    action.estimated_build_cost_isk = estimated_build_cost_isk
     action.quantity = quantity
     return action
 
@@ -105,8 +113,8 @@ def _make_plan_item(
     the 7.0 fallback in their `expected_velocity` math while the code under
     test was actually consuming 1.0.
 
-    Pass `effective_velocity=None` explicitly to deliberately exercise the
-    7.0-day fallback instead (as the velocity/slow-mover tests below do).
+    Pass `effective_velocity=None` explicitly to exercise an unknown
+    velocity, which gives no predicted sell time at all (no 7.0 fallback).
     """
     item = MagicMock()
     item.id = 1
@@ -160,7 +168,6 @@ class TestFeedbackProcessor:
         # Realized sale: actual ISK/hour = 8M
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 8_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 10.0,
         }
 
@@ -179,76 +186,131 @@ class TestFeedbackProcessor:
             f"Expected accuracy_ema={expected_accuracy}, got {weights_arg.accuracy_ema}"
         )
 
-    def _run_cost_case(self, *, action_cost, action_qty, sale_cost, sale_qty, old_cost=1.0):
-        action = _make_action(type_id=200, estimated_cost_isk=action_cost, quantity=action_qty)
+    def test_an_out_of_band_stored_weight_is_clamped_before_the_ema(self):
+        """A hand-edited 10.0 must enter the EMA as 4.0: 0.8*4.0 + 0.2*0.8 = 3.36,
+        not 0.8*10.0 + 0.2*0.8 = 8.16 clamped to 4.0."""
+        action = _make_action(type_id=220)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {220: _make_weights(accuracy_ema=10.0)}
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=220, isk_per_hour=10_000_000)]
+        self.processor._find_realized_sale.return_value = {
+            "isk_per_hour": 8_000_000.0, "sell_days": 5.0,
+        }
+        self.processor.process_pending_feedback()
+        weights = self.repo.upsert_weights.call_args[0][0]
+        assert abs(weights.accuracy_ema - (0.8 * 4.0 + 0.2 * 0.8)) < 1e-9
+
+    def _run_cost_case(self, *, build_cost, action_qty, allocations, old_cost=1.0):
+        action = _make_action(type_id=200, estimated_build_cost_isk=build_cost, quantity=action_qty)
         self.repo.get_unprocessed_done_actions.return_value = [action]
         self.repo.get_weights.return_value = {200: _make_weights(cost_multiplier=old_cost)}
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=200, isk_per_hour=10_000_000)]
         self.processor._find_realized_sale.return_value = {
-            "isk_per_hour": 8_000_000.0,
-            "material_cost": sale_cost,
-            "priced_quantity": sale_qty,
-            "sell_days": 5.0,
+            "isk_per_hour": 8_000_000.0, "allocation_details": allocations, "sell_days": 5.0,
         }
         self.processor.process_pending_feedback()
         return (self.repo.upsert_weights.call_args[0][0],
                 self.repo.insert_outcome.call_args[0][0])
 
-    def test_cost_update_compares_per_unit_costs(self):
-        """F1: predicted is a WHOLE-BATCH cost, actual is ONE sale's allocated
-        cost. Compared raw, a 50M batch vs a 10-unit sale gave a ratio of ~24.
-        Per unit: 50M / 100 = 500k predicted vs 6M / 10 = 600k actual."""
+    def test_cost_update_compares_full_build_cost_per_unit(self):
+        """Both sides are materials + job fees per unit: 55M / 100 = 550k
+        predicted vs 6M / 10 = 600k actual from the sale's industry-built units."""
         weights, outcome = self._run_cost_case(
-            action_cost=50_000_000.0, action_qty=100, sale_cost=6_000_000.0, sale_qty=10
+            build_cost=55_000_000.0, action_qty=100,
+            allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0}],
         )
-        expected = 0.8 * 1.0 + 0.2 * (500_000.0 / 600_000.0)
+        expected = 0.8 * 1.0 + 0.2 * (550_000.0 / 600_000.0)
         assert abs(weights.cost_multiplier - expected) < 1e-9
-        assert outcome.predicted_material_cost == 500_000.0
+        assert outcome.predicted_material_cost == 550_000.0
         assert outcome.actual_material_cost == 600_000.0
 
-    def test_zero_allocated_cost_skips_the_cost_update(self, caplog):
-        """allocated_cost 0 used to fall back to 1.0 ISK -> ratio 10,000,000."""
+    def test_only_industry_built_units_count_as_actual_cost(self):
+        """A market-bought lot's unit price is not a build cost."""
+        weights, outcome = self._run_cost_case(
+            build_cost=55_000_000.0, action_qty=100,
+            allocations=[
+                {"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0},
+                {"source": "market_buy", "quantity": 90, "total_cost": 1.0},
+            ],
+        )
+        assert outcome.actual_material_cost == 600_000.0
+
+    def test_transferred_build_lots_count_as_actual_cost(self):
+        """Character-built units moved to the corp carry the job's
+        unit_build_cost (FIFO-matched or quantity-weighted average)."""
+        weights, outcome = self._run_cost_case(
+            build_cost=55_000_000.0, action_qty=100,
+            allocations=[
+                {"source": "industry_build_transferred", "quantity": 4, "total_cost": 2_000_000.0},
+                {"source": "industry_build_transferred_avg", "quantity": 6, "total_cost": 4_000_000.0},
+                {"source": "opening_inventory", "quantity": 5, "total_cost": 1.0},
+            ],
+        )
+        assert outcome.actual_material_cost == 600_000.0
+
+    @staticmethod
+    def _skip_messages(caplog):
+        return [r.getMessage() for r in caplog.records if "cost update skipped" in r.getMessage()]
+
+    def test_a_sale_with_no_industry_built_units_skips_the_cost_update(self, caplog):
         with caplog.at_level(logging.INFO):
             weights, outcome = self._run_cost_case(
-                action_cost=50_000_000.0, action_qty=100, sale_cost=0.0, sale_qty=10, old_cost=0.9
+                build_cost=55_000_000.0, action_qty=100, old_cost=0.9,
+                allocations=[{"source": "market_buy", "quantity": 10, "total_cost": 6_000_000.0}],
             )
         assert weights.cost_multiplier == 0.9
         assert outcome.actual_material_cost is None
-        assert any("cost update skipped" in r.getMessage() for r in caplog.records)
+        (message,) = self._skip_messages(caplog)
+        assert "no industry-built lots in this sale" in message
+        assert "market_buy" in message
 
-    def test_unknown_predicted_cost_skips_the_cost_update(self, caplog):
-        """No batch cost (unpriced) or no batch units: nothing to compare.
-        The old code substituted 1.0 ISK as the predicted cost."""
-        for cost, qty in ((None, 100), (50_000_000.0, None), (50_000_000.0, 0)):
+    def test_zero_allocated_cost_skips_the_cost_update(self, caplog):
+        with caplog.at_level(logging.INFO):
+            weights, outcome = self._run_cost_case(
+                build_cost=55_000_000.0, action_qty=100, old_cost=0.9,
+                allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 0.0}],
+            )
+        assert weights.cost_multiplier == 0.9
+        assert outcome.actual_material_cost is None
+        (message,) = self._skip_messages(caplog)
+        assert "industry-built lots have no positive cost and quantity" in message
+
+    @pytest.mark.parametrize("allocations", [None, "not-a-list", {"source": "industry_build"}])
+    def test_missing_or_malformed_allocation_details_skips_the_cost_update(self, caplog, allocations):
+        with caplog.at_level(logging.INFO):
+            weights, outcome = self._run_cost_case(
+                build_cost=55_000_000.0, action_qty=100, old_cost=0.9, allocations=allocations,
+            )
+        assert weights.cost_multiplier == 0.9
+        assert outcome.actual_material_cost is None
+        (message,) = self._skip_messages(caplog)
+        assert "allocation_details missing or not a list" in message
+
+    def test_unknown_predicted_build_cost_skips_the_cost_update(self, caplog):
+        for cost, qty in ((None, 100), (55_000_000.0, None), (55_000_000.0, 0)):
             caplog.clear()
             with caplog.at_level(logging.INFO):
                 weights, outcome = self._run_cost_case(
-                    action_cost=cost, action_qty=qty, sale_cost=6_000_000.0, sale_qty=10,
-                    old_cost=1.1,
+                    build_cost=cost, action_qty=qty, old_cost=1.1,
+                    allocations=[{"source": "industry_build", "quantity": 10, "total_cost": 6e6}],
                 )
             assert weights.cost_multiplier == 1.1, (cost, qty)
             assert outcome.predicted_material_cost is None
             assert any("cost update skipped" in r.getMessage() for r in caplog.records)
 
-    def test_zero_priced_quantity_skips_the_cost_update(self):
-        weights, _ = self._run_cost_case(
-            action_cost=50_000_000.0, action_qty=100, sale_cost=6_000_000.0, sale_qty=0,
-            old_cost=1.2,
-        )
-        assert weights.cost_multiplier == 1.2
-
     def test_cost_multiplier_is_clamped_to_the_band(self):
-        """Even per-unit, one odd sale must not swing the score by orders of magnitude."""
         from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
             LEARNING_WEIGHT_MAX, LEARNING_WEIGHT_MIN,
         )
         high, _ = self._run_cost_case(
-            action_cost=1_000_000_000.0, action_qty=1, sale_cost=1.0, sale_qty=1
+            build_cost=1_000_000_000.0, action_qty=1,
+            allocations=[{"source": "industry_build", "quantity": 1, "total_cost": 1.0}],
         )
         assert high.cost_multiplier == LEARNING_WEIGHT_MAX
         self.repo.reset_mock()
         low, _ = self._run_cost_case(
-            action_cost=1.0, action_qty=1, sale_cost=1_000_000_000.0, sale_qty=1, old_cost=0.0
+            build_cost=1.0, action_qty=1, old_cost=0.0,
+            allocations=[{"source": "industry_build", "quantity": 1, "total_cost": 1e9}],
         )
         assert low.cost_multiplier == LEARNING_WEIGHT_MIN
 
@@ -266,46 +328,184 @@ class TestFeedbackProcessor:
             _make_plan_item(type_id=210, isk_per_hour=1.0, effective_velocity=1 / 30.0)
         ]
         self.processor._find_realized_sale.return_value = {
-            "isk_per_hour": 1_000_000_000.0, "material_cost": None,
-            "priced_quantity": 0, "sell_days": 0.1,
+            "isk_per_hour": 1_000_000_000.0, "sell_days": 0.1,
         }
         self.processor.process_pending_feedback()
         weights = self.repo.upsert_weights.call_args[0][0]
         assert weights.velocity_multiplier == LEARNING_WEIGHT_MAX
         assert weights.accuracy_ema == LEARNING_WEIGHT_MAX
 
+    @staticmethod
+    def _accuracy_skip_messages(caplog):
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO and "accuracy update skipped" in r.getMessage()
+        ]
+
+    @pytest.mark.parametrize("plan_items, realized_isk, reason", [
+        ([], 8_000_000.0, "predicted ISK/h is unknown (no plan item"),
+        ([_make_plan_item(type_id=320, isk_per_hour=None)], 8_000_000.0, "predicted ISK/h is unknown"),
+        ([_make_plan_item(type_id=320, isk_per_hour=0.0)], 8_000_000.0, "predicted ISK/h is not a positive"),
+        ([_make_plan_item(type_id=320, isk_per_hour=10_000_000.0)], None, "realized ISK/h is unknown"),
+        ([_make_plan_item(type_id=320, isk_per_hour=10_000_000.0)], float("nan"), "realized ISK/h is not a finite"),
+    ])
+    def test_a_sale_with_unknown_isk_per_hour_keeps_the_accuracy_weight(
+        self, caplog, plan_items, realized_isk, reason,
+    ):
+        """No invented 1 ISK/h prediction or 0 ISK/h realization: accuracy stays,
+        velocity and cost still learn from their own inputs."""
+        action = _make_action(type_id=320, estimated_build_cost_isk=55_000_000.0, quantity=100)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {
+            320: _make_weights(accuracy_ema=1.3, velocity_multiplier=1.0, cost_multiplier=1.0)
+        }
+        self.repo.get_plan_items.return_value = plan_items
+        self.processor._find_realized_sale.return_value = {
+            "isk_per_hour": realized_isk, "sell_days": 4.0,
+            "allocation_details": [{"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0}],
+        }
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert weights.accuracy_ema == 1.3
+        assert outcome.accuracy_ratio is None
+        assert abs(weights.cost_multiplier - (0.8 + 0.2 * (550_000.0 / 600_000.0))) < 1e-9
+        if plan_items:
+            # velocity learns from the plan item's own velocity (1.0 -> 1 day / 4 days)
+            assert abs(weights.velocity_multiplier - (0.8 + 0.2 * 0.25)) < 1e-9
+        (message,) = self._accuracy_skip_messages(caplog)
+        assert reason in message
+        assert "type_id=320" in message
+
+    @pytest.mark.parametrize("realized_isk", [0.0, -5e6])
+    def test_a_zero_or_negative_realized_isk_per_hour_still_updates_accuracy(self, caplog, realized_isk):
+        """A sale at zero or a loss is real data: it pulls accuracy down, not skipped."""
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import clamp_weight
+
+        action = _make_action(type_id=322)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {322: _make_weights(accuracy_ema=1.0)}
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=322, isk_per_hour=10_000_000.0)]
+        self.processor._find_realized_sale.return_value = {"isk_per_hour": realized_isk, "sell_days": 4.0}
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        ratio = realized_isk / 10_000_000.0
+        assert weights.accuracy_ema == clamp_weight(0.8 * 1.0 + 0.2 * ratio)
+        assert outcome.accuracy_ratio == ratio
+        assert outcome.accuracy_ratio <= 0
+        assert self._accuracy_skip_messages(caplog) == []
+
+    def test_a_sale_with_no_plan_item_stores_no_predicted_isk_per_hour(self):
+        action = _make_action(type_id=321)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {321: _make_weights(accuracy_ema=1.1)}
+        self.repo.get_plan_items.return_value = []
+        self.processor._find_realized_sale.return_value = {"isk_per_hour": 5.0, "sell_days": 2.0}
+        self.processor.process_pending_feedback()
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert outcome.predicted_isk_per_hour is None
+        assert outcome.actual_isk_per_hour == 5.0
+        assert outcome.accuracy_ratio is None
+
     def test_normal_outcome_ema_velocity_update(self):
-        """velocity_multiplier = 0.8*old + 0.2*(predicted_days/actual_days)."""
+        """velocity_multiplier = 0.8*old + 0.2*(predicted_days/actual_days),
+        predicted_days = 1 / effective_velocity (0.2 units/day -> 5 days)."""
         action = _make_action(type_id=300, action_type="manufacture")
         self.repo.get_unprocessed_done_actions.return_value = [action]
         old_velocity = 1.0
         self.repo.get_weights.return_value = {
             300: _make_weights(velocity_multiplier=old_velocity)
         }
-        # effective_velocity=None deliberately exercises the 7.0-day
-        # fallback in _estimate_predicted_sell_days (see _make_plan_item's
-        # docstring for why this must be explicit rather than left to a
-        # bare MagicMock attribute).
-        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=300, effective_velocity=None)]
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=300, effective_velocity=0.2)]
 
-        # Actual sell_days = 5.0; predicted = 7.0 (velocity fallback)
-        actual_days = 5.0
+        actual_days = 4.0
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": actual_days,
         }
 
         self.processor.process_pending_feedback()
 
         weights_arg = self.repo.upsert_weights.call_args[0][0]
-        # predicted_days = 7.0 (fallback from _estimate_predicted_sell_days
-        # when effective_velocity is None)
-        # velocity = 0.8 * 1.0 + 0.2 * (7.0 / 5.0) = 0.8 + 0.28 = 1.08
-        expected_velocity = 0.8 * old_velocity + 0.2 * (7.0 / actual_days)
-        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 0.001, (
-            f"Expected {expected_velocity}, got {weights_arg.velocity_multiplier}"
+        expected_velocity = 0.8 * old_velocity + 0.2 * (5.0 / actual_days)
+        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 1e-9
+
+    @staticmethod
+    def _velocity_skip_messages(caplog):
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO and "velocity update skipped" in r.getMessage()
+        ]
+
+    @pytest.mark.parametrize("plan_items, reason", [
+        ([_make_plan_item(type_id=310, effective_velocity=None)], "effective_velocity is unknown"),
+        ([], "no plan item for this type"),
+    ])
+    def test_a_sale_with_unknown_predicted_velocity_keeps_the_velocity_weight(
+        self, caplog, plan_items, reason,
+    ):
+        """No invented 7-day prediction: velocity stays, accuracy and cost still learn."""
+        action = _make_action(type_id=310, estimated_build_cost_isk=55_000_000.0, quantity=100)
+        self.repo.get_unprocessed_done_actions.return_value = [action]
+        self.repo.get_weights.return_value = {
+            310: _make_weights(accuracy_ema=1.0, velocity_multiplier=1.3, cost_multiplier=1.0)
+        }
+        self.repo.get_plan_items.return_value = plan_items
+        self.processor._find_realized_sale.return_value = {
+            "isk_per_hour": 8_000_000.0, "sell_days": 5.0,
+            "allocation_details": [{"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0}],
+        }
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert weights.velocity_multiplier == 1.3
+        assert outcome.predicted_sell_days is None
+        assert outcome.actual_sell_days == 5.0
+        # Cost has its own inputs and still updates: 0.8 + 0.2 * (550k / 600k).
+        assert abs(weights.cost_multiplier - (0.8 + 0.2 * (550_000.0 / 600_000.0))) < 1e-9
+        if plan_items:
+            # Accuracy needs the plan item's isk_per_hour (10M): 0.8 + 0.2 * 0.8.
+            assert abs(weights.accuracy_ema - (0.8 + 0.2 * 0.8)) < 1e-9
+        (message,) = self._velocity_skip_messages(caplog)
+        assert reason in message
+        assert "type_id=310" in message
+
+    @pytest.mark.parametrize("plan_items, reason", [
+        ([_make_plan_item(type_id=400, effective_velocity=None)], "effective_velocity is unknown"),
+        ([], "no plan item for this type"),
+    ])
+    def test_slow_mover_with_unknown_predicted_velocity_keeps_every_weight(
+        self, caplog, plan_items, reason,
+    ):
+        """Slow mover path: accuracy and cost are never updated, and with no
+        predicted velocity there is no velocity penalty to compute either."""
+        old_action = _make_action(type_id=400, generated_at=_utcnow() - timedelta(days=65))
+        self.repo.get_unprocessed_done_actions.return_value = [old_action]
+        self.repo.get_weights.return_value = {
+            400: _make_weights(accuracy_ema=0.95, cost_multiplier=1.05, velocity_multiplier=1.2)
+        }
+        self.repo.get_plan_items.return_value = plan_items
+        self.processor._find_realized_sale.return_value = None
+
+        with caplog.at_level(logging.INFO):
+            assert self.processor.process_pending_feedback() == 1
+
+        weights = self.repo.upsert_weights.call_args[0][0]
+        outcome = self.repo.insert_outcome.call_args[0][0]
+        assert (weights.accuracy_ema, weights.cost_multiplier, weights.velocity_multiplier) == (
+            0.95, 1.05, 1.2,
         )
+        assert outcome.slow_mover is True
+        assert outcome.predicted_sell_days is None
+        (message,) = self._velocity_skip_messages(caplog)
+        assert reason in message
 
     def test_slow_mover_skips_accuracy_and_cost(self):
         """Slow mover path: only velocity_multiplier updated; accuracy_ema and cost_multiplier unchanged."""
@@ -318,15 +518,14 @@ class TestFeedbackProcessor:
         old_action = _make_action(
             type_id=400,
             action_type="manufacture",
-            generated_at=datetime.utcnow() - timedelta(days=65),
+            generated_at=_utcnow() - timedelta(days=65),
         )
         self.repo.get_unprocessed_done_actions.return_value = [old_action]
         self.repo.get_weights.return_value = {
             400: _make_weights(accuracy_ema=old_accuracy, cost_multiplier=old_cost, velocity_multiplier=old_velocity)
         }
-        # effective_velocity=None deliberately exercises the 7.0-day
-        # fallback (see _make_plan_item's docstring).
-        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=400, effective_velocity=None)]
+        # 0.125 units/day -> an 8-day predicted sell time.
+        self.repo.get_plan_items.return_value = [_make_plan_item(type_id=400, effective_velocity=0.125)]
 
         # No realized sale (slow mover)
         self.processor._find_realized_sale.return_value = None
@@ -345,11 +544,9 @@ class TestFeedbackProcessor:
             f"cost_multiplier should not change for slow_mover, got {weights_arg.cost_multiplier}"
         )
 
-        # velocity_multiplier IS updated: 0.8 * 1.0 + 0.2 * (7.0 / 60.0)
-        expected_velocity = 0.8 * old_velocity + 0.2 * (7.0 / slow_mover_timeout)
-        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 0.001, (
-            f"Expected velocity_multiplier={expected_velocity}, got {weights_arg.velocity_multiplier}"
-        )
+        # velocity_multiplier IS updated: 0.8 * 1.0 + 0.2 * (8.0 / 60.0)
+        expected_velocity = 0.8 * old_velocity + 0.2 * (8.0 / slow_mover_timeout)
+        assert abs(weights_arg.velocity_multiplier - expected_velocity) < 1e-9
 
     def test_processed_for_feedback_marked_true(self):
         """After processing, action is marked processed_for_feedback=True."""
@@ -359,7 +556,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {500: _make_weights()}
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -376,7 +572,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {601: _make_weights()}
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -404,7 +599,7 @@ class TestFeedbackProcessor:
         recent_action = _make_action(
             type_id=700,
             action_type="manufacture",
-            generated_at=datetime.utcnow() - timedelta(days=5),  # only 5 days old, timeout=60
+            generated_at=_utcnow() - timedelta(days=5),  # only 5 days old, timeout=60
         )
         self.repo.get_unprocessed_done_actions.return_value = [recent_action]
         self.repo.get_plan_items.return_value = [_make_plan_item(type_id=700)]
@@ -429,7 +624,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {800: _make_weights(sample_count=old_count)}
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -446,7 +640,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {900: _make_weights(sample_count=4)}  # 4 → 5 after increment
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -463,7 +656,6 @@ class TestFeedbackProcessor:
         self.repo.get_weights.return_value = {901: _make_weights(sample_count=19)}  # 19 → 20
         self.processor._find_realized_sale.return_value = {
             "isk_per_hour": 10_000_000.0,
-            "material_cost": 5_000_000.0,
             "sell_days": 7.0,
         }
 
@@ -473,31 +665,32 @@ class TestFeedbackProcessor:
         assert weights_arg.confidence_tier == "high", f"Got {weights_arg.confidence_tier}"
 
 
-class TestEstimatePredictedSellDaysFallback:
-    """Direct coverage for `_estimate_predicted_sell_days`'s 7.0-day fallback.
+class TestEstimatePredictedSellDays:
+    """`_estimate_predicted_sell_days` has no constant fallback: an unknown
+    velocity is an unknown prediction (None), never an invented 7 days."""
 
-    `test_normal_outcome_ema_velocity_update` and
-    `test_slow_mover_skips_accuracy_and_cost` above now also exercise this
-    path (via `effective_velocity=None`), but nothing tested the fallback
-    in isolation before -- and it is exactly this function's fallback that
-    the `float(MagicMock())` trap (see `_make_plan_item`'s docstring) hid
-    for so long, by making it look like it always returned 1.0 instead.
-    """
-
-    def test_falls_back_to_seven_days_when_velocity_is_none(self):
+    @pytest.mark.parametrize("velocity", [None, 0.0, -1.0, float("nan"), float("inf"), "abc"])
+    def test_an_unknown_or_unusable_velocity_gives_no_prediction(self, velocity):
         from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
             _estimate_predicted_sell_days,
         )
 
-        item = _make_plan_item(effective_velocity=None)
-        assert _estimate_predicted_sell_days(item) == 7.0
+        assert _estimate_predicted_sell_days(_make_plan_item(effective_velocity=velocity)) is None
 
-    def test_falls_back_to_seven_days_when_plan_item_is_none(self):
+    def test_no_plan_item_gives_no_prediction(self):
         from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
             _estimate_predicted_sell_days,
         )
 
-        assert _estimate_predicted_sell_days(None) == 7.0
+        assert _estimate_predicted_sell_days(None) is None
+
+    @pytest.mark.parametrize("velocity, days", [(0.25, 4.0), (0.01, 30.0), (100.0, 0.1)])
+    def test_a_known_velocity_is_inverted_and_clamped(self, velocity, days):
+        from eve_online_industry_tracker.application.daily_planner.feedback_processor import (
+            _estimate_predicted_sell_days,
+        )
+
+        assert _estimate_predicted_sell_days(_make_plan_item(effective_velocity=velocity)) == days
 
 
 class TestFindRealizedSaleAttribution:
@@ -538,6 +731,7 @@ class TestFindRealizedSaleAttribution:
 
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=2, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 100.0}],
             type_id=12345, realized_profit=500.0, allocated_cost=100.0,
             date="2026-09-12T09:11:27Z",
         ))
@@ -547,28 +741,33 @@ class TestFindRealizedSaleAttribution:
         action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
         found = processor._find_realized_sale(12345, action=action)
         assert found is not None
-        assert found["material_cost"] == 100.0
+        assert found["allocation_details"][0]["total_cost"] == 100.0
         assert found["sell_days"] == 2.0
 
-    def test_the_sale_carries_its_priced_quantity(self, planner_repo, app_session):
-        """allocated_cost covers only the priced units of THIS sale, so the
-        per-unit actual cost needs priced_quantity alongside it (F1)."""
+    def test_the_sale_carries_its_allocation_details(self, planner_repo, app_session):
+        """The actual unit cost is read from the sale's per-lot allocations,
+        so only industry-built lots are compared with the predicted build cost."""
         from eve_online_industry_tracker.infrastructure.models import (
             CorporationRealizedSalesLedgerModel,
         )
 
+        allocations = [
+            {"source": "industry_build", "quantity": 6, "unit_cost": 500.0, "total_cost": 3_000.0},
+            {"source": "market_buy", "quantity": 4, "unit_cost": 750.0, "total_cost": 3_000.0},
+        ]
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=7, quantity=12, priced_quantity=10,
             unpriced_quantity=2, type_id=12345, realized_profit=500.0,
-            allocated_cost=6_000.0, date="2026-09-12T09:11:27Z",
+            allocated_cost=6_000.0, allocation_details=allocations,
+            date="2026-09-12T09:11:27Z",
         ))
         app_session.commit()
 
         processor = _processor(app_session, planner_repo)
         action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
         found = processor._find_realized_sale(12345, action=action)
-        assert found["priced_quantity"] == 10
-        assert found["material_cost"] == 6_000.0
+        assert found["allocation_details"] == allocations
+        assert "material_cost" not in found
 
     def test_a_sale_on_the_same_day_after_the_action_is_credited(self, planner_repo, app_session):
         """Same calendar day, later time-of-day: credited. The filter compares
@@ -583,6 +782,7 @@ class TestFindRealizedSaleAttribution:
 
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=3, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 40.0}],
             type_id=12345, realized_profit=240.0, allocated_cost=40.0,
             date="2026-09-10T23:59:00Z",
         ))
@@ -593,7 +793,7 @@ class TestFindRealizedSaleAttribution:
         found = processor._find_realized_sale(12345, action=action)
         assert found is not None
         assert found["sell_days"] == 1.0
-        assert found["material_cost"] == 40.0
+        assert found["allocation_details"][0]["total_cost"] == 40.0
 
     def test_a_sale_on_the_same_day_before_the_action_is_not_credited(self, planner_repo, app_session):
         """Same calendar date, earlier time-of-day: must NOT be credited.
@@ -637,11 +837,13 @@ class TestFindRealizedSaleAttribution:
 
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=5, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 10.0}],
             type_id=12345, realized_profit=100.0, allocated_cost=10.0,
             date="2026-09-11T00:00:00Z",  # earliest qualifying sale
         ))
         app_session.add(CorporationRealizedSalesLedgerModel(
             corporation_id=1, transaction_id=6, quantity=1,
+            allocation_details=[{"source": "industry_build", "quantity": 1, "total_cost": 999.0}],
             type_id=12345, realized_profit=999.0, allocated_cost=999.0,
             date="2026-09-20T00:00:00Z",  # latest -- must NOT be picked
         ))
@@ -651,7 +853,7 @@ class TestFindRealizedSaleAttribution:
         action = SimpleNamespace(type_id=12345, generated_at=datetime(2026, 9, 10))
         found = processor._find_realized_sale(12345, action=action)
         assert found is not None
-        assert found["material_cost"] == 10.0
+        assert found["allocation_details"][0]["total_cost"] == 10.0
         assert found["sell_days"] == 1.0
 
     def test_without_an_action_date_no_sale_is_credited(self, planner_repo, app_session):

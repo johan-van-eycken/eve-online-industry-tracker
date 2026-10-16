@@ -109,15 +109,47 @@ def test_broad_excepts_are_only_where_deliberately_allowed():
     assert not offenders, f"unexpected broad except handlers (lines, allowed): {offenders}"
 
 
+def _logs_traceback(handler: ast.ExceptHandler) -> bool:
+    """True when the handler body calls logger.exception(...) or logger.<x>(..., exc_info=True)."""
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id == "logger"):
+            continue
+        if func.attr == "exception":
+            return True
+        if any(kw.arg == "exc_info" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+               for kw in node.keywords):
+            return True
+    return False
+
+
 def test_every_allowed_broad_except_logs_with_a_traceback():
     for name, path in _module_files():
         if ALLOWED_BROAD_EXCEPT.get(name, 0) == 0:
             continue
-        for handler in _broad_handlers(_parse(path)):
-            body = ast.dump(ast.Module(body=handler.body, type_ignores=[]))
-            assert "logger" in body and ("exception" in body or "exc_info" in body), (
+        handlers = _broad_handlers(_parse(path))
+        assert len(handlers) == ALLOWED_BROAD_EXCEPT[name], (
+            f"{name}: expected {ALLOWED_BROAD_EXCEPT[name]} allowed broad handler(s), "
+            f"found {len(handlers)}"
+        )
+        for handler in handlers:
+            assert _logs_traceback(handler), (
                 f"{name}:{handler.lineno}: a broad except must log the traceback"
             )
+
+
+def test_the_traceback_check_needs_a_real_logging_call():
+    def handler(src):
+        return _broad_handlers(ast.parse(src))[0]
+
+    assert _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.exception('boom')\n"))
+    assert _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.error('b', exc_info=True)\n"))
+    assert not _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    s = 'logger.exception'\n"))
+    assert not _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.error('exc_info')\n"))
+    assert not _logs_traceback(handler("try:\n    x()\nexcept Exception:\n    logger.error('b', exc_info=False)\n"))
 
 
 def test_no_phantom_overview_row_keys_remain():
@@ -233,13 +265,14 @@ def _decision(row, **overrides):
 
 # --- ChainPlanner: optimal ME/TE no longer swallow to 0 --------------------------
 
-def test_an_sde_failure_makes_optimal_me_and_te_unknown_not_zero(caplog):
+def test_an_sde_failure_makes_optimal_me_unknown_not_zero(caplog):
+    # TE has no SDE lookup: it is always researched to the max TE setting
+    # (Task 8c fix round 1).
     planner = ChainPlanner(None, _BrokenSdeProvider(_sde_error()), _AdminKeyError())
     with caplog.at_level(logging.WARNING):
         assert planner._compute_optimal_me(999) is None
-        assert planner._compute_optimal_te(999, 1.0) is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 2
+    assert len(warnings) == 1
     assert all("999" in r.getMessage() for r in warnings)
 
 
@@ -249,20 +282,20 @@ def test_a_non_database_error_in_optimal_me_propagates():
         planner._compute_optimal_me(999)
 
 
-def test_an_unknown_optimal_level_schedules_no_research_and_says_why(caplog):
+def test_an_unknown_optimal_me_schedules_no_me_research_and_says_why(caplog):
     row = {"type_id": 12345, "type_name": "Thing", "quantity": 1,
            "manufacturing_job": {"runs": 1, "blueprint_sde": {"blueprint_type_id": 999}}}
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
                           blueprint_material_efficiency=0, blueprint_time_efficiency=0)
     planner = ChainPlanner(None, None, _AdminKeyError())
-    planner._compute_optimal_me = lambda bp_type_id: None
-    planner._compute_optimal_te = lambda bp_type_id, threshold: None
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: None
 
     with caplog.at_level(logging.WARNING):
         planner.plan_chain([_decision(row)], {"bpo_assets_by_type_id": {999: [bpo]}})
 
     assert "needs_me_research" not in row
-    assert "needs_te_research" not in row
+    # The TE target is the max TE setting, never unknown: TE 0 -> 20.
+    assert row["te_research_target"] == 20
     assert any("optimal" in r.getMessage() and r.levelno == logging.WARNING
                for r in caplog.records)
 
@@ -326,6 +359,24 @@ def test_a_manufacture_action_carries_the_batch_unit_total():
     assert action.quantity == 200
 
 
+def test_a_manufacture_action_carries_the_batch_build_cost():
+    """Feedback compares like for like: the producer's total_cost is
+    materials plus job install cost, the basis of the realized unit cost."""
+    row = {"type_id": 12345, "quantity": 200,
+           "manufacturing_job": {"runs": 20, "material_cost": 50_000_000.0,
+                                 "total_cost": 55_000_000.0}}
+    (action,) = _assign(row)
+    assert action.estimated_cost_isk == 50_000_000.0
+    assert action.estimated_build_cost_isk == 55_000_000.0
+
+
+def test_a_manufacture_action_without_a_total_cost_has_an_unknown_build_cost():
+    row = {"type_id": 12345, "quantity": 200,
+           "manufacturing_job": {"runs": 20, "material_cost": 50_000_000.0}}
+    (action,) = _assign(row)
+    assert action.estimated_build_cost_isk is None
+
+
 def test_a_manufacture_action_carries_the_producers_batch_materials():
     """F4: the shopping list buys these as-is (already scaled by runs and
     ME/structure) and subtracts what sub-manufacture builds."""
@@ -375,7 +426,7 @@ def test_corp_id_is_read_from_an_object_shaped_corporation_too():
 
 def test_no_corporation_means_no_sales_history_lookups():
     svc = _bare_service()  # sales_history_service has no get_sold_history at all
-    assert svc._get_sell_velocities([12345]) == {}
+    assert svc._get_sell_velocities([12345]) == ({}, {12345: "no corporation to read sell history for"})
 
 
 def test_an_industry_jobs_query_failure_fails_the_compute_not_frees_every_slot():
@@ -427,3 +478,57 @@ def test_a_failed_input_query_fails_the_compute_with_a_message(method):
     status = svc.get_compute_status()
     assert status["status"] == "failed"
     assert "database is locked" in status["error"]
+
+
+def test_a_failed_sell_history_query_is_recorded_per_item():
+    svc = _bare_service()
+    svc._corporations = SimpleNamespace(list_corporations=lambda: [{"corporation_id": 98000001}])
+
+    def history(*, character_id, corporation_id, type_id, days):
+        if type_id == 2:
+            raise _sde_error()
+        return [{"quantity": 30}]
+
+    svc._sales_history = SimpleNamespace(get_sold_history=history)
+    assert svc._get_sell_velocities([1, 2]) == (
+        {1: 1.0}, {2: "sell history query failed (OperationalError)"}
+    )
+
+
+def test_a_failed_input_is_named_in_the_compute_banner():
+    svc = _svc_with_broken_db()
+    svc._feedback_processor = SimpleNamespace(process_pending_feedback=lambda: 0)
+    svc._get_corp_wallet = lambda: None
+    svc._get_overview_rows = lambda: [{"type_id": 1}]
+    svc._build_input_rows = lambda rows: [SimpleNamespace(type_id=1, raw={"type_id": 1})]
+    svc._get_industry_jobs = lambda: []
+    svc._run_compute()  # _get_corp_assets hits the broken DB
+    status = svc.get_compute_status()
+    assert status["status"] == "failed"
+    assert status["error"].startswith("Plan computation failed while reading corp assets: ")
+    assert "database is locked" in status["error"]
+
+
+def test_every_shared_admin_setting_read_exists_in_the_admin_schema():
+    """admin_setting(admin, "<section>", "<key>", fallback): the shared reader
+    behind every _adm. A literal section/key it is called with must exist."""
+    from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+
+    used = set()
+    for name, path in _module_files():
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if fname != "admin_setting":
+                continue
+            literals = [a.value for a in node.args[1:3] if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+            if len(literals) == 2:
+                used.add((name, literals[0], literals[1]))
+    assert used, "found no literal admin_setting(...) reads -- the scan is broken"
+    unknown = sorted(
+        (n, s, k) for n, s, k in used
+        if k not in ADMIN_SETTINGS_SCHEMA.get(s, {}).get("settings", {})
+    )
+    assert not unknown, f"settings read but missing from the schema: {unknown}"

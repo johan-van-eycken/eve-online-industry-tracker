@@ -33,6 +33,7 @@ from eve_online_industry_tracker.application.daily_planner.character_assigner im
     ACTIVITY_MANUFACTURING,
 )
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
+from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class PipelineAnalyzer:
         weights: dict[int, Any],              # keyed by type_id; values are PlanLearningWeightsModel
         sell_velocities: dict[int, float],    # type_id → sell_velocity_per_day (from SalesHistoryService)
         meta_resolver: BlueprintCategorySource,
+        sell_velocity_unavailable: dict[int, str] | None = None,  # type_id → why its sell history could not be read
     ) -> list[PipelineState]:
         """Return one PipelineState for each input row."""
         now = _now()
@@ -94,7 +96,7 @@ class PipelineAnalyzer:
         # Pre-warm the resolver's cache with every distinct asset type_id in one
         # batched SDE query before the per-asset is_blueprint() loop below --
         # mirrors the same fix already applied to index_blueprint_assets (service.py)
-        # and _build_corp_stock_map. Without this, TypeMetadataResolver._entry()
+        # and build_corp_stock_map. Without this, TypeMetadataResolver._entry()
         # self-heals a cache miss by calling prefetch() for a single id, so
         # is_blueprint() here would otherwise open one SDE session (with its
         # metaGroups table reflection) per distinct type_id -- measured as hundreds of
@@ -131,6 +133,7 @@ class PipelineAnalyzer:
                     market_depth_cache=market_depth_cache,
                     weights=weights,
                     sell_velocities=sell_velocities,
+                    sell_velocity_unavailable=sell_velocity_unavailable or {},
                     now=now,
                 )
                 result.append(state)
@@ -149,27 +152,34 @@ class PipelineAnalyzer:
         market_depth_cache: dict[int, Any],
         weights: dict[int, Any],
         sell_velocities: dict[int, float],
+        sell_velocity_unavailable: dict[int, str],
         now: datetime,
     ) -> PipelineState:
         # ── Velocity ──────────────────────────────────────────────────────────
         sell_velocity_per_day = float(sell_velocities.get(type_id, 0.0))
-        velocity_multiplier = 1.0
-        w = weights.get(type_id)
-        if w is not None:
-            velocity_multiplier = float(getattr(w, "velocity_multiplier", 1.0))
+        velocity_multiplier = read_weight(weights.get(type_id), "velocity_multiplier")
 
-        # See module docstring: 0.0 here is safe only because of the `> 0.0` guard
-        # below, which floors it at 0.01 same as any other non-positive value.
+        # See module docstring: an unknown days_of_supply is 0.0 here, which
+        # the `> 0.0` test below routes to "no signal".
         days_of_supply_for_velocity = row.days_of_supply if row.days_of_supply is not None else 0.0
 
+        velocity_unknown_reason: str | None = None
         if sell_velocity_per_day > 0.0:
             effective_velocity = max(0.01, sell_velocity_per_day * velocity_multiplier)
+        elif days_of_supply_for_velocity > 0.0:
+            effective_velocity = max(0.01, 1.0 / days_of_supply_for_velocity)
+            if type_id in sell_velocity_unavailable:
+                logger.warning(
+                    "PipelineAnalyzer: type_id=%s %s; velocity estimated from days of supply",
+                    type_id, sell_velocity_unavailable[type_id],
+                )
         else:
-            # Fallback: 1/days_of_supply, floored at 0.01
-            fallback = (
-                (1.0 / days_of_supply_for_velocity) if days_of_supply_for_velocity > 0.0 else 0.01
-            )
-            effective_velocity = max(0.01, fallback)
+            # No signal at all. 0.01 keeps the pipeline-days division finite;
+            # the reason marks it as a floor so nothing downstream reads it as
+            # a measured sell rate.
+            effective_velocity = 0.01
+            why_no_sales = sell_velocity_unavailable.get(type_id, "no corp sales in 30 days")
+            velocity_unknown_reason = f"{why_no_sales} and no days-of-supply estimate"
 
         # ── Pipeline days ─────────────────────────────────────────────────────
         # The producer already computes this (industry/service.py:2004-2012) as
@@ -229,6 +239,7 @@ class PipelineAnalyzer:
             price_trend_7d_pct=price_trend_7d,
             price_trend_30d_pct=price_trend_30d,
             has_active_manufacturing_jobs=has_active_manufacturing_jobs,
+            velocity_unknown_reason=velocity_unknown_reason,
         )
 
 

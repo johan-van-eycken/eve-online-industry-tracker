@@ -186,7 +186,7 @@ def _market_depth(rows, blueprint_data):
     return cache
 
 
-def _run_phases(overview_rows, input_rows, meta, admin):
+def _run_phases(overview_rows, input_rows, meta, admin, *, own_bpos=True):
     """Phases 2-7, wired the way DailyPlannerService wires them."""
     blueprint_data = _blueprint_data_from_rows(overview_rows)
     market_depth = _market_depth(overview_rows, blueprint_data)
@@ -221,13 +221,27 @@ def _run_phases(overview_rows, input_rows, meta, admin):
     # tests in test_daily_planner_decisions.py).
     promoted = [dataclasses.replace(d, decision="build") for d in decisions]
 
-    chain = ChainPlanner(
+    # The corp owns a fully researched BPO of every T1 row's blueprint: a
+    # row with no owned blueprint is not built (Task 14 I3), and Phase 5
+    # onwards is what this test is about.
+    owned_bpos = {
+        bp: [SimpleNamespace(item_id=900_000 + i, type_id=bp, is_blueprint_copy=False,
+                             blueprint_material_efficiency=10, blueprint_time_efficiency=20)]
+        for i, bp in enumerate(sorted({
+            int(d.overview_row["manufacturing_job"]["blueprint_sde"]["blueprint_type_id"])
+            for d in promoted if own_bpos and d.meta_group_id == 1
+            and (d.overview_row.get("manufacturing_job") or {}).get("blueprint_sde")
+        }))
+    }
+    planner = ChainPlanner(
         industry_service=SimpleNamespace(), session_provider=None, admin_settings=admin,
-    ).plan_chain(
+    )
+    planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
+    chain = planner.plan_chain(
         top_level_decisions=promoted,
         phase1_data={
             "corp_assets": [], "industry_jobs": [], "market_depth_cache": market_depth,
-            "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {},
+            "bpo_assets_by_type_id": owned_bpos, "bpc_assets_by_type_id": {},
             "blueprint_data": blueprint_data, "invention_success_rates": {},
         },
     )
@@ -247,6 +261,12 @@ def _run_phases(overview_rows, input_rows, meta, admin):
 @pytest.fixture()
 def run(planner_rows, meta, admin):
     return _run_phases([r.raw for r in planner_rows], planner_rows, meta, admin)
+
+
+@pytest.fixture()
+def run_unowned(planner_rows, meta, admin):
+    """The same plan with no blueprint owned: every row is a BPO prospect."""
+    return _run_phases([r.raw for r in planner_rows], planner_rows, meta, admin, own_bpos=False)
 
 
 # ── Phase 1: the input contract over real rows ──────────────────────────────
@@ -277,14 +297,15 @@ def test_manufacturing_runs_come_from_the_nested_job(input_rows):
 
 
 @pytest.mark.parametrize(
-    "pipeline_days_supply",
+    "pipeline_days_supply, expected_days",
     [
-        pytest.param(4.0, id="producer-days"),
-        pytest.param(None, id="fallback-units-over-velocity"),
+        pytest.param(4.0, 4.0, id="producer-days"),
+        # (50 in jobs + 30 on market) / 5.0 units/day
+        pytest.param(None, 16.0, id="fallback-units-over-velocity"),
     ],
 )
 def test_pipeline_supply_on_a_real_row_yields_non_zero_pipeline_days(
-    overview_rows, meta, pipeline_days_supply
+    overview_rows, meta, pipeline_days_supply, expected_days
 ):
     """A real row with this test's own pipeline supply must show pipeline days.
 
@@ -309,23 +330,28 @@ def test_pipeline_supply_on_a_real_row_yields_non_zero_pipeline_days(
         market_depth_cache={}, weights={},
         sell_velocities={row.type_id: 5.0}, meta_resolver=meta,
     )
-    assert states[0].total_pipeline_days > 0
+    assert states[0].total_pipeline_days == expected_days
 
 
 def _first_scoreable_costed_row(input_rows):
-    """A row with an isk/hour and a material cost.
+    """A multi-run row with an isk/hour and a material cost.
 
     A row with no isk/hour is unscoreable by design, so it cannot show cost
-    subtraction.
+    subtraction. More than one run is needed to tell `x quantity` from the
+    old `x quantity x runs` double count.
     """
     for row in input_rows:
         if (
             row.isk_per_hour is not None
             and row.material_cost_per_unit is not None
             and row.material_cost_per_unit > 0
+            and row.runs > 1
         ):
             return row
-    pytest.skip("the captured fixture has no row with both an isk/hour and a material cost")
+    pytest.fail(
+        "the captured fixture has no multi-run row with both an isk/hour and a "
+        "material cost; re-capture it (spec: T1 and T2 rows, with and without BPC)"
+    )
 
 
 def _score_at_price(row, meta, price):
@@ -347,11 +373,16 @@ def test_selling_at_material_cost_scores_zero_batch_profit(input_rows, meta):
     assert scored.absolute_profit_per_batch == pytest.approx(0.0, abs=1e-6)
 
 
-def test_selling_above_material_cost_scores_positive_batch_profit(input_rows, meta):
+def test_selling_at_twice_material_cost_earns_cost_times_batch_units(input_rows, meta):
+    """(2c - c) x quantity, where quantity is already units per run x runs.
+    The old double count multiplied by runs again, and runs > 1 here."""
     row = _first_scoreable_costed_row(input_rows)
     scored = _score_at_price(row, meta, row.material_cost_per_unit * 2.0)
     assert scored.unscoreable_reason is None
-    assert scored.absolute_profit_per_batch > 0
+    assert scored.absolute_profit_per_batch == pytest.approx(row.material_cost_per_unit * row.quantity)
+    assert scored.absolute_profit_per_batch != pytest.approx(
+        row.material_cost_per_unit * row.quantity * row.runs
+    )
 
 
 def test_manufacturing_jobs_are_indexed_from_the_activity_id_column(
@@ -392,13 +423,14 @@ def test_the_planner_makes_one_decision_per_distinct_product(run, overview_rows)
 # ── Phase 5: chain planning ─────────────────────────────────────────────────
 
 
-def test_bpo_analysis_records_a_value_or_a_skip_reason_never_a_silent_hold(run):
+def test_bpo_analysis_records_a_value_or_a_skip_reason_never_a_silent_hold(run_unowned):
     """With no BPO or BPC owned, every build goes through BPO analysis.
 
     Before the remediation, the T1 path read a top-level blueprint_type_id that
     no producer writes, so the analysis ran on bp_type_id=0. It then reported
     a confident 'hold' built on zeros.
     """
+    run = run_unowned
     top_level = [d for d in run.chain.decisions if not d.is_sub_component]
     assert len(top_level) == len(run.promoted)
     silent = [
@@ -408,12 +440,12 @@ def test_bpo_analysis_records_a_value_or_a_skip_reason_never_a_silent_hold(run):
     assert not silent, f"BPO analysis neither ran nor recorded why not for {silent}"
 
 
-def test_t1_bpo_analysis_gets_past_the_blueprint_price_lookup(run):
+def test_t1_bpo_analysis_gets_past_the_blueprint_price_lookup(run_unowned):
     """The spot price is keyed by the real nested blueprint id. Reaching any
     later step proves the chain planner looked up that id, not 0."""
+    run = run_unowned
     t1 = [d for d in run.chain.decisions if not d.is_sub_component and d.meta_group_id == 1]
-    if not t1:
-        pytest.skip("the captured fixture has no Tech I rows")
+    assert t1, "the captured fixture has no Tech I rows; re-capture it (spec: T1 and T2 rows)"
     stuck = [
         d.type_id for d in t1
         if (d.bpo_analysis_skip_reason or "").startswith("no BPO market price")

@@ -77,8 +77,15 @@ from eve_online_industry_tracker.application.industry import overview_row as oro
 logger = logging.getLogger(__name__)
 
 
-class PlannerInputError(ValueError):
-    """An overview row does not satisfy the planner's input contract."""
+class PlannerInputError(Exception):
+    """An overview row does not satisfy the planner's input contract.
+
+    Deliberately NOT a ValueError subclass. Phases 2-5 and feedback isolate
+    one bad item with `except (TypeError, ValueError)` (a malformed SDE or
+    market number). A contract violation raised beneath one of those handlers
+    must not be logged and skipped like a bad number: it has to reach
+    DailyPlannerService._run_compute, which turns it into the red banner.
+    """
 
     def __init__(self, *, type_id: Any, field: str, detail: str) -> None:
         self.type_id = type_id
@@ -125,6 +132,19 @@ def _require_key_optional_float(type_id: Any, name: str, row: dict[str, Any]) ->
         raise PlannerInputError(
             type_id=type_id, field=name, detail=f"is not a number: {value!r}"
         ) from None
+
+
+def require_batch_runs(type_id: int, manufacturing_job: dict[str, Any]) -> int:
+    """Blueprint runs for one batch, from manufacturing_job.runs. The single
+    validation used by PlannerInputRow and CharacterAssigner.
+
+    Required with NO fallback to `quantity` (a units total, not a run count).
+    """
+    if "runs" not in manufacturing_job:
+        raise PlannerInputError(type_id=type_id, field="manufacturing_job.runs", detail="is missing")
+    return _require_int(
+        type_id, "manufacturing_job.runs", manufacturing_job.get("runs"), positive=True
+    )
 
 
 @dataclass(frozen=True)
@@ -191,13 +211,7 @@ class PlannerInputRow:
         # would silently multiply material quantities by the wrong factor
         # downstream. overview_row.get_effective_runs's quantity fallback is
         # correct for the UI's own use and is intentionally not reused here.
-        if "runs" not in manufacturing_job:
-            raise PlannerInputError(
-                type_id=type_id, field="manufacturing_job.runs", detail="is missing"
-            )
-        runs = _require_int(
-            type_id, "manufacturing_job.runs", manufacturing_job.get("runs"), positive=True
-        )
+        runs = require_batch_runs(type_id, manufacturing_job)
 
         # material_cost: absent key or an explicit None both mean "pricing
         # could not be computed yet" (industry/service.py:7413, :7432, :7454,

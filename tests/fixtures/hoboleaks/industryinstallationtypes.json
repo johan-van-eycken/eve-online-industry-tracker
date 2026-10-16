@@ -1,0 +1,1643 @@
+{
+    "28077": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28077
+    }, 
+    "28183": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28183
+    }, 
+    "28184": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28184
+    }, 
+    "28185": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28185
+    }, 
+    "35877": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 176
+            }, 
+            {
+                "assemblyLine": 177
+            }
+        ], 
+        "type_id": 35877
+    }, 
+    "35878": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 175
+            }
+        ], 
+        "type_id": 35878
+    }, 
+    "35880": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 35880
+    }, 
+    "35881": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 176
+            }
+        ], 
+        "type_id": 35881
+    }, 
+    "35886": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 181
+            }
+        ], 
+        "type_id": 35886
+    }, 
+    "35891": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 179
+            }, 
+            {
+                "assemblyLine": 178
+            }, 
+            {
+                "assemblyLine": 180
+            }
+        ], 
+        "type_id": 35891
+    }, 
+    "33867": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 171
+            }
+        ], 
+        "type_id": 33867
+    }, 
+    "24653": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 18
+            }
+        ], 
+        "type_id": 24653
+    }, 
+    "24654": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 19
+            }
+        ], 
+        "type_id": 24654
+    }, 
+    "24655": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 20
+            }
+        ], 
+        "type_id": 24655
+    }, 
+    "24656": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 21
+            }
+        ], 
+        "type_id": 24656
+    }, 
+    "24657": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 22
+            }
+        ], 
+        "type_id": 24657
+    }, 
+    "24658": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 25
+            }
+        ], 
+        "type_id": 24658
+    }, 
+    "24659": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 26
+            }
+        ], 
+        "type_id": 24659
+    }, 
+    "24660": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 27
+            }
+        ], 
+        "type_id": 24660
+    }, 
+    "28606": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 145
+            }
+        ], 
+        "type_id": 28606
+    }, 
+    "21642": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 37
+            }, 
+            {
+                "assemblyLine": 3
+            }, 
+            {
+                "assemblyLine": 6
+            }, 
+            {
+                "assemblyLine": 32
+            }, 
+            {
+                "assemblyLine": 33
+            }, 
+            {
+                "assemblyLine": 34
+            }, 
+            {
+                "assemblyLine": 40
+            }
+        ], 
+        "type_id": 21642
+    }, 
+    "21644": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 37
+            }, 
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }
+        ], 
+        "type_id": 21644
+    }, 
+    "21645": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 37
+            }, 
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 6
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 38
+            }
+        ], 
+        "type_id": 21645
+    }, 
+    "21646": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 6
+            }
+        ], 
+        "type_id": 21646
+    }, 
+    "30389": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 159
+            }
+        ], 
+        "type_id": 30389
+    }, 
+    "28351": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 146
+            }, 
+            {
+                "assemblyLine": 149
+            }
+        ], 
+        "type_id": 28351
+    }, 
+    "28352": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 145
+            }
+        ], 
+        "type_id": 28352
+    }, 
+    "25305": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 25305
+    }, 
+    "28116": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28116
+    }, 
+    "45537": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 182
+            }
+        ], 
+        "type_id": 45537
+    }, 
+    "28130": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28130
+    }, 
+    "45539": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 184
+            }
+        ], 
+        "type_id": 45539
+    }, 
+    "16216": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 28
+            }, 
+            {
+                "assemblyLine": 29
+            }
+        ], 
+        "type_id": 16216
+    }, 
+    "16220": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 23
+            }
+        ], 
+        "type_id": 16220
+    }, 
+    "3962": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 22
+            }
+        ], 
+        "type_id": 3962
+    }, 
+    "33685": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 145
+            }
+        ], 
+        "type_id": 33685
+    }, 
+    "33687": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 145
+            }
+        ], 
+        "type_id": 33687
+    }, 
+    "28076": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28076
+    }, 
+    "29613": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 155
+            }
+        ], 
+        "type_id": 29613
+    }, 
+    "28078": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28078
+    }, 
+    "28079": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28079
+    }, 
+    "28080": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28080
+    }, 
+    "28081": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28081
+    }, 
+    "28082": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28082
+    }, 
+    "28083": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28083
+    }, 
+    "28084": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28084
+    }, 
+    "28085": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28085
+    }, 
+    "28086": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28086
+    }, 
+    "28087": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28087
+    }, 
+    "28088": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28088
+    }, 
+    "28089": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28089
+    }, 
+    "28090": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28090
+    }, 
+    "28091": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28091
+    }, 
+    "28092": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28092
+    }, 
+    "28093": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28093
+    }, 
+    "28094": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28094
+    }, 
+    "28095": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28095
+    }, 
+    "28096": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28096
+    }, 
+    "28097": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28097
+    }, 
+    "28098": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28098
+    }, 
+    "28099": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28099
+    }, 
+    "28100": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28100
+    }, 
+    "28101": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28101
+    }, 
+    "28102": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28102
+    }, 
+    "28103": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28103
+    }, 
+    "28104": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28104
+    }, 
+    "28105": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28105
+    }, 
+    "28106": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28106
+    }, 
+    "28107": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28107
+    }, 
+    "28108": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28108
+    }, 
+    "28109": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28109
+    }, 
+    "28110": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28110
+    }, 
+    "28111": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28111
+    }, 
+    "28112": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28112
+    }, 
+    "28113": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28113
+    }, 
+    "28114": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28114
+    }, 
+    "28115": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28115
+    }, 
+    "13780": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 24
+            }
+        ], 
+        "type_id": 13780
+    }, 
+    "28117": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28117
+    }, 
+    "28118": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28118
+    }, 
+    "28119": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28119
+    }, 
+    "28120": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28120
+    }, 
+    "28121": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28121
+    }, 
+    "28122": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28122
+    }, 
+    "28123": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28123
+    }, 
+    "28124": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28124
+    }, 
+    "28125": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28125
+    }, 
+    "28126": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28126
+    }, 
+    "28127": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28127
+    }, 
+    "28128": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28128
+    }, 
+    "28129": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28129
+    }, 
+    "45538": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 183
+            }
+        ], 
+        "type_id": 45538
+    }, 
+    "28131": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28131
+    }, 
+    "28132": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28132
+    }, 
+    "28133": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28133
+    }, 
+    "28134": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28134
+    }, 
+    "28135": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 5
+            }, 
+            {
+                "assemblyLine": 7
+            }, 
+            {
+                "assemblyLine": 8
+            }, 
+            {
+                "assemblyLine": 31
+            }, 
+            {
+                "assemblyLine": 37
+            }
+        ], 
+        "type_id": 28135
+    }, 
+    "45550": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 178
+            }, 
+            {
+                "assemblyLine": 179
+            }, 
+            {
+                "assemblyLine": 180
+            }
+        ], 
+        "type_id": 45550
+    }, 
+    "32245": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 168
+            }, 
+            {
+                "assemblyLine": 169
+            }
+        ], 
+        "type_id": 32245
+    }, 
+    "24567": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 158
+            }
+        ], 
+        "type_id": 24567
+    }, 
+    "24574": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 17
+            }
+        ], 
+        "type_id": 24574
+    }, 
+    "24575": {
+        "assembly_lines": [
+            {
+                "assemblyLine": 10
+            }
+        ], 
+        "type_id": 24575
+    }
+}

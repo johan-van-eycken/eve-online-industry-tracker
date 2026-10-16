@@ -687,7 +687,9 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "break_even_days REAL NULL,"
             "projected_annual_savings REAL NULL,"
             "effective_velocity REAL NULL,"
-            "snapshot_sell_price REAL NULL"
+            "snapshot_sell_price REAL NULL,"
+            "bpo_analysis_skip_reason TEXT NULL,"
+            "isk_per_hour_is_upper_bound INTEGER NULL"
             ")"
         ),
     )
@@ -709,11 +711,20 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "quantity INTEGER NULL,"
             "runs INTEGER NULL,"
             "estimated_cost_isk REAL NULL,"
+            "estimated_build_cost_isk REAL NULL,"
             "estimated_profit_isk REAL NULL,"
             "estimated_completion DATETIME NULL,"
             "status TEXT NOT NULL DEFAULT 'pending',"
             "processed_for_feedback INTEGER NOT NULL DEFAULT 0,"
-            "notes TEXT NULL"
+            "notes TEXT NULL,"
+            "invention_probability REAL NULL,"
+            "invention_best_probability REAL NULL,"
+            "invention_expected_attempts REAL NULL,"
+            "decryptor_type_id INTEGER NULL,"
+            "decryptor_type_name TEXT NULL,"
+            "estimated_job_fee_isk REAL NULL,"
+            "estimated_job_fee_unknown_reason TEXT NULL,"
+            "queued_after_me INTEGER NOT NULL DEFAULT 0"
             ")"
         ),
     )
@@ -733,6 +744,10 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "predicted_sell_days REAL NULL,"
             "actual_sell_days REAL NULL,"
             "slow_mover INTEGER NOT NULL DEFAULT 0,"
+            # predicted_/actual_material_cost hold a per-unit BUILD cost
+            # (materials + job fees), not materials only; the names predate
+            # that and are kept (see PlanItemOutcomeModel for what each side
+            # includes).
             "predicted_material_cost REAL NULL,"
             "actual_material_cost REAL NULL"
             ")"
@@ -866,9 +881,24 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="build_plan_item", column="bpo_market_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="break_even_days", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="projected_annual_savings", ddl_type="REAL")
+    # Task 15 fix round 2: an upper-bound isk_per_hour (job fees unknown).
+    _ensure_column(db_app, table="build_plan_item", column="isk_per_hour_is_upper_bound", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
+    _ensure_column(db_app, table="daily_action_log", column="estimated_build_cost_isk", ddl_type="REAL")
+    # A4: the invent action's chance figures and Task 3's decryptor.
+    _ensure_column(db_app, table="daily_action_log", column="invention_probability", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="invention_best_probability", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="invention_expected_attempts", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="decryptor_type_id", ddl_type="INTEGER")
+    _ensure_column(db_app, table="daily_action_log", column="decryptor_type_name", ddl_type="TEXT")
+    # D4 / A2: the job action's estimated install fee (Capital Reserved).
+    _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_isk", ddl_type="REAL")
+    _ensure_column(db_app, table="daily_action_log", column="estimated_job_fee_unknown_reason", ddl_type="TEXT")
+    # Task 8c fix round 4: a TE research queued behind the ME job on its BPO.
+    _ensure_column(db_app, table="daily_action_log", column="queued_after_me", ddl_type="INTEGER NOT NULL DEFAULT 0")
     _ensure_column(db_app, table="build_plan_item", column="snapshot_sell_price", ddl_type="REAL")
+    _ensure_column(db_app, table="build_plan_item", column="bpo_analysis_skip_reason", ddl_type="TEXT")
 
     # Belt-and-braces normalization for existing corporations.wallets/standings
     # rows written by the pre-fix double-JSON-encoding bug in corporation.py

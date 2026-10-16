@@ -225,3 +225,17 @@ def test_producer_null_for_isk_per_hour_is_preserved_as_none_not_an_error():
     assert got.isk_per_hour is None
     assert got.profit_amount is None
     assert got.profit_margin_fraction is None
+
+
+@pytest.mark.parametrize("job, detail", [
+    ({}, "is missing"),
+    ({"runs": None}, "is missing"),
+    ({"runs": "x"}, "is not an integer: 'x'"),
+    ({"runs": 0}, "must be > 0, got 0"),
+])
+def test_batch_runs_have_one_validation(job, detail):
+    from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
+    with pytest.raises(PlannerInputError) as exc:
+        require_batch_runs(12345, job)
+    assert (exc.value.field, exc.value.detail) == ("manufacturing_job.runs", detail)
+    assert require_batch_runs(12345, {"runs": 20}) == 20

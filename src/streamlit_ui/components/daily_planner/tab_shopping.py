@@ -1,12 +1,141 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import streamlit as st
 
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.aggrid_import import import_aggrid
-from streamlit_ui.components.daily_planner.status_bar import _fmt_isk
+from streamlit_ui.components.daily_planner.status_bar import (
+    _JOB_ACTION_TYPES,
+    _fmt_isk,
+    wallet_snapshot,
+)
+
+
+@dataclass(frozen=True)
+class ShoppingBudget:
+    """What the Shopping tab compares the wallet with (Task 14 minor 1, fix
+    round 1 M5): the pending material lines, the pending BPO purchases and
+    the pending jobs' install fees, the total Capital Reserved counts.
+    unpriced_lines / unknown_fee_jobs are not in the sums, so with either
+    the total is a lower bound."""
+
+    purchases: float
+    install_fees: float
+    unpriced_lines: int
+    unknown_fee_jobs: int
+    bpo_purchases: float = 0.0
+
+    @property
+    def total(self) -> float:
+        return self.purchases + self.bpo_purchases + self.install_fees
+
+    @property
+    def materials_and_fees(self) -> float:
+        """What a BPO's "Fits Budget?" is checked after: the BPO rows are the
+        purchases being fitted, so they are not in it."""
+        return self.purchases + self.install_fees
+
+    @property
+    def unknown_lines(self) -> int:
+        return self.unpriced_lines + self.unknown_fee_jobs
+
+
+def _pending(action: dict[str, Any]) -> bool:
+    return str(action.get("status") or "pending") == "pending"
+
+
+def shopping_budget(actions: list[dict[str, Any]]) -> ShoppingBudget:
+    """The pending buy_materials lines and the pending jobs' install fees.
+    A done or skipped line is no longer to be paid, so it is not counted."""
+    purchases, bpos, fees, unpriced, unknown_fees = 0.0, 0.0, 0.0, 0, 0
+    for action in actions:
+        if not _pending(action):
+            continue
+        action_type = str(action.get("action_type") or "")
+        if action_type in ("buy_materials", "buy_bpo"):
+            cost = action.get("estimated_cost_isk")
+            if cost is None:
+                unpriced += 1
+            elif action_type == "buy_bpo":
+                bpos += float(cost)
+            else:
+                purchases += float(cost)
+        elif action_type in _JOB_ACTION_TYPES:
+            fee = action.get("estimated_job_fee_isk")
+            if fee is None:
+                unknown_fees += 1
+            else:
+                fees += float(fee)
+    return ShoppingBudget(purchases, fees, unpriced, unknown_fees, bpo_purchases=bpos)
+
+
+def section_subtotal(rows: list[dict[str, Any]]) -> float:
+    """A materials section's subtotal: its pending lines only (M5)."""
+    return sum(r["Est. Total"] or 0.0 for r in rows if r.get("_status", "pending") == "pending")
+
+
+def budget_fit(corp_wallet: float | None, total_isk: float, cumul_isk: float) -> str:
+    """Whether a BPO fits what the wallet has left after the shopping list."""
+    if corp_wallet is None:
+        return "Unknown"
+    return "Yes" if (corp_wallet - total_isk) >= cumul_isk else "No"
+
+
+def remaining_after_shopping(corp_wallet: float | None, total_isk: float, *, unpriced_lines: int = 0) -> float | None:
+    """What the wallet has left after the shopping list; negative is a deficit.
+
+    None when the wallet is unknown, or when a line has no price (the real
+    total is higher, so the exact remainder is unknown; see budget_metric).
+    A genuine 0.0 wallet is a real balance, so it yields -total_isk, not an
+    unknown.
+    """
+    if corp_wallet is None or unpriced_lines > 0:
+        return None
+    return corp_wallet - total_isk
+
+
+def wallet_is_short(corp_wallet: float | None, total_isk: float, *, unpriced_lines: int = 0) -> bool | None:
+    """True when a known wallet (0.0 included) cannot cover the shopping list.
+    With unpriced lines the priced total is a lower bound: True when even it
+    exceeds the wallet, else None (unknown, not "not short"). An unknown
+    wallet is False (nothing to compare)."""
+    if corp_wallet is None:
+        return False
+    if corp_wallet - total_isk < 0:
+        return True
+    return None if unpriced_lines > 0 else False
+
+
+def budget_metric(
+    corp_wallet: float | None, total_isk: float, unpriced_lines: int, *, unknown_fee_jobs: int = 0,
+) -> tuple[str, str, str | None]:
+    """(label, value, caption) of the budget metric: an exact Remaining or
+    Deficit when every line is priced and every fee known; otherwise a
+    deficit is a lower bound ("at least") and a remainder is unknown, both
+    captioned. Unpriced lines and unknown install fees are named apart (M5)."""
+    if corp_wallet is None:
+        return "Remaining", _fmt_isk(None), None
+    remaining = corp_wallet - total_isk
+    missing = [
+        *([f"{unpriced_lines} unpriced line(s)"] if unpriced_lines > 0 else []),
+        *([f"{unknown_fee_jobs} job(s) with an unknown install fee"] if unknown_fee_jobs > 0 else []),
+    ]
+    if not missing:
+        return ("Deficit", _fmt_isk(abs(remaining)), None) if remaining < 0 else ("Remaining", _fmt_isk(remaining), None)
+    what = " and ".join(missing)
+    if remaining < 0:
+        return (
+            "Deficit", f"at least {_fmt_isk(abs(remaining))}",
+            f"{what} are not counted: the real deficit is larger.",
+        )
+    return (
+        "Remaining", "unknown",
+        f"At most {_fmt_isk(remaining)}: {what} are not counted, "
+        "so the wallet may not cover the list.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +168,15 @@ def _build_shopping_rows(
             "_status": str(a.get("status") or "pending"),
         })
     return rows
+
+
+def unpriced_total_caption(rows: list[dict[str, Any]]) -> str | None:
+    """A caption for a total over `rows` when some lines have no price: they
+    are still bought, but the total cannot include them (Task 8 fix round 1)."""
+    unpriced = sum(1 for r in rows if r.get("Est. Total") is None)
+    if not unpriced:
+        return None
+    return f"{unpriced} line(s) have no price: the total excludes them, so the real cost is higher."
 
 
 def _build_bpo_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -95,6 +233,7 @@ def _build_clipboard_text(
             a for a in actions
             if str(a.get("action_type") or "") == "buy_materials"
             and str(a.get("shopping_category") or "") == cat
+            and _pending(a)  # done / skipped lines are not to be bought (M5)
         ]
         if not cat_actions:
             continue
@@ -125,9 +264,9 @@ def _render_materials_section(
 
     import pandas as pd
 
-    subtotal = sum(r["Est. Total"] or 0.0 for r in rows)
+    subtotal = section_subtotal(rows)
 
-    st.markdown(f"**{title}** — Subtotal: {_fmt_isk(subtotal)}")
+    st.markdown(f"**{title}** — Subtotal (pending): {_fmt_isk(subtotal)}")
 
     if deemphasise:
         st.caption("Optional — can defer if wallet is short.")
@@ -183,7 +322,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     actions: list[dict[str, Any]] = page_state.plan.get("actions") or []
     items: list[dict[str, Any]] = page_state.plan.get("items") or []
     plan_meta: dict[str, Any] = page_state.plan.get("plan") or {}
-    corp_wallet = float(plan_meta.get("corp_wallet_snapshot") or 0.0)
+    corp_wallet = wallet_snapshot(plan_meta)
 
     ag = import_aggrid()
 
@@ -195,13 +334,14 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     future_rows = _build_shopping_rows(actions, "future_stock")
     invention_rows = _build_shopping_rows(actions, "invention_input")
 
-    total_isk = (
-        sum(r["Est. Total"] or 0.0 for r in current_rows)
-        + sum(r["Est. Total"] or 0.0 for r in future_rows)
-        + sum(r["Est. Total"] or 0.0 for r in invention_rows)
-    )
-
-    wallet_short = total_isk > corp_wallet and corp_wallet > 0
+    # Pending lines only, plus the pending jobs' install fees (Task 14 minor
+    # 1): the same total Capital Reserved counts for them.
+    budget = shopping_budget(actions)
+    total_isk = budget.purchases
+    all_rows = [r for r in (*current_rows, *future_rows, *invention_rows) if r["_status"] == "pending"]
+    unpriced_lines = budget.unknown_lines
+    # None = unknown (unpriced lines or fees, priced total within the wallet).
+    wallet_short = wallet_is_short(corp_wallet, budget.total, unpriced_lines=unpriced_lines)
 
     # Current job materials (highest priority)
     _render_materials_section("Current Job Materials", current_rows, deemphasise=False, ag_imports=ag)
@@ -209,7 +349,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     st.markdown("")
 
     # Future stock (optional if wallet is short)
-    _render_materials_section("Future Build Stock", future_rows, deemphasise=wallet_short, ag_imports=ag)
+    _render_materials_section("Future Build Stock", future_rows, deemphasise=bool(wallet_short), ag_imports=ag)
 
     st.markdown("")
 
@@ -219,18 +359,38 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     st.markdown("---")
 
     # Budget summary
-    remaining = corp_wallet - total_isk
-    budget_cols = st.columns(3)
+    budget_label, budget_value, budget_caption = budget_metric(
+        corp_wallet, budget.total, budget.unpriced_lines, unknown_fee_jobs=budget.unknown_fee_jobs,
+    )
+    remaining = remaining_after_shopping(corp_wallet, budget.total, unpriced_lines=unpriced_lines)
+    budget_cols = st.columns(4)
     with budget_cols[0]:
         st.metric("Total to Spend", _fmt_isk(total_isk))
+        st.caption("Pending lines only.")
+        unpriced_caption = unpriced_total_caption(all_rows)
+        if unpriced_caption:
+            st.caption(unpriced_caption)
     with budget_cols[1]:
-        st.metric("Corp Wallet", _fmt_isk(corp_wallet))
+        st.metric("Install Fees", _fmt_isk(budget.install_fees))
+        if budget.unknown_fee_jobs:
+            st.caption(f"{budget.unknown_fee_jobs} job(s) have an unknown fee: not counted.")
     with budget_cols[2]:
-        if wallet_short:
-            st.metric("Deficit", _fmt_isk(abs(remaining)), delta=f"-{_fmt_isk(abs(remaining))}", delta_color="inverse")
+        st.metric("Corp Wallet", _fmt_isk(corp_wallet))
+    with budget_cols[3]:
+        st.caption("Wallet less purchases (materials and BPOs), incl. install fees (as Capital Reserved).")
+        if remaining is not None and remaining < 0:
+            # Exact deficit (every line priced).
+            st.metric("Deficit", budget_value, delta=f"-{_fmt_isk(abs(remaining))}", delta_color="inverse")
         else:
-            st.metric("Remaining", _fmt_isk(remaining) if corp_wallet > 0 else "—")
+            # An unknown wallet renders "—"; unpriced lines "unknown" / "at least".
+            st.metric(budget_label, budget_value)
+        if budget_caption:
+            st.caption(budget_caption)
 
+    if wallet_short is None:
+        st.info(
+            "Some lines have no price, so whether the corp wallet covers the list is unknown."
+        )
     if wallet_short:
         st.warning(
             "Total shopping cost exceeds corp wallet. "
@@ -264,8 +424,8 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
         for row in bpo_rows:
             cumul_isk += row["Market Price"]
             row["Cumul. ISK Needed"] = cumul_isk
-            fits = (corp_wallet - total_isk) >= cumul_isk
-            row["Fits Budget?"] = "Yes" if fits else "No"
+            # After the materials and the install fees (M5), not materials alone.
+            row["Fits Budget?"] = budget_fit(corp_wallet, budget.materials_and_fees, cumul_isk)
 
         bpo_display = pd.DataFrame([
             {

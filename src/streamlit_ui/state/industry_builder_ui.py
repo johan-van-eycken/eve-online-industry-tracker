@@ -119,9 +119,9 @@ def tree_node_activity_label(node: dict[str, Any]) -> str:
     activity = str(node.get("activity") or "").strip().lower()
     recommendation_action = str(node.get("recommendation_action") or "").strip().lower()
     sourcing_strategy = str(node.get("sourcing_strategy") or "").strip().lower()
-    runs = int(node.get("runs") or 0)
+    runs = float(node.get("runs") or 0)  # invention runs are fractional expected attempts
 
-    if recommendation_action in {"build", "take", "buy", "copy", "invent", "research"}:
+    if recommendation_action in {"build", "take", "buy", "copy", "invent", "research", "unknown"}:
         return recommendation_action
 
     if node_type == "product" or activity in {"manufacturing", "reaction"}:
@@ -179,6 +179,78 @@ def tree_node_icon_url(source_row: dict[str, Any], node: dict[str, Any]) -> str:
     return ""
 
 
+ASSUMES_T2_BPO_MARKER = "assumes T2 BPO"
+#: The row's total cost leaves out job fees the producer could not price.
+JOB_FEES_UNKNOWN_MARKER = "job fees unknown"
+
+
+def row_assumes_owned_t2_bpo(row: dict[str, Any]) -> bool:
+    """True when the overview row's manufacturing_job carries the flag (the
+    producer sets it there, never at the row's top level)."""
+    return bool(get_manufacturing_job(row).get("assumes_owned_t2_bpo"))
+
+
+def invention_summary_lines(row: dict[str, Any]) -> list[str]:
+    """Drilldown captions: which decryptor the producer chose and why, and the
+    invention chance it assumed. [] for a row that does not invent."""
+    manufacturing_job = get_manufacturing_job(row)
+    lines: list[str] = []
+    decryptor = manufacturing_job.get("invention_decryptor")
+    if isinstance(decryptor, dict) and decryptor.get("reason"):
+        lines.append(f"Decryptor: {decryptor['reason']}")
+    chance = manufacturing_job.get("invention_chance")
+    if isinstance(chance, dict) and chance.get("effective_probability") is not None:
+        head = (
+            f"Invention chance {float(chance['effective_probability']):.1%}: "
+            f"SDE base {float(chance.get('base_probability') or 0.0):.1%}"
+        )
+        multiplier = f"{float(chance.get('decryptor_multiplier') or 1.0):g}"
+        if chance.get("skill_factor") is None:
+            lines.append(f"{head} × decryptor {multiplier} (skills unknown: {chance.get('skills_unknown_reason')})")
+        else:
+            lines.append(f"{head} × skills {float(chance['skill_factor']):.3f} (best inventor) × decryptor {multiplier}")
+    return lines
+
+
+def estimated_item_value_cell(activity_payload: dict[str, Any]) -> str:
+    """The activity breakdown's EIV cell. The producer leaves the EIV None
+    when any material is unpriced, so a partial EIV reads "unknown (N of M
+    priced)" rather than a blank cell."""
+    value = activity_payload.get("estimated_item_value")
+    if value is not None:
+        return f"{float(value):,.0f}"
+    priced = activity_payload.get("estimated_item_value_priced_material_count")
+    total = activity_payload.get("estimated_item_value_material_count")
+    if isinstance(priced, int) and isinstance(total, int) and total > 0:
+        return f"unknown ({priced} of {total} priced)"
+    return "unknown"
+
+
+def pricing_confidence_cell(pricing_confidence: Any, manufacturing_job: dict[str, Any]) -> Any:
+    """The grid's Pricing Confidence cell; flagged rows get a visible marker."""
+    if not pricing_confidence:
+        return pricing_confidence
+    markers = [
+        marker for marker, flagged in (
+            (ASSUMES_T2_BPO_MARKER, manufacturing_job.get("assumes_owned_t2_bpo")),
+            (JOB_FEES_UNKNOWN_MARKER, manufacturing_job.get("job_fee_unknown_reasons")),
+        ) if flagged
+    ]
+    return " · ".join([str(pricing_confidence), *markers]) if markers else pricing_confidence
+
+
+def total_cost_label(manufacturing_job: dict[str, Any]) -> str:
+    """The drilldown's Total Cost: "N/A" when unknown, and "≥ X (job fees
+    unknown)" when the producer left unpriced job fees out (a lower bound,
+    never shown as exact)."""
+    total = manufacturing_job.get("total_cost")
+    if total is None:
+        return "N/A"
+    if manufacturing_job.get("total_cost_excludes_unknown_job_fees"):
+        return f"≥ {float(total):,.2f} ({JOB_FEES_UNKNOWN_MARKER})"
+    return f"{float(total):,.2f}"
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     flattened_rows: list[dict[str, Any]] = []
@@ -204,6 +276,9 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         total_cost = node.get("total_cost")
         if total_cost is None:
             total_cost = job_cost
+        # The row's own total_cost leaves unknown job fees out (Task 15): the
+        # grid's formatter shows it as "≥".
+        total_cost_lower_bound = False
         market_unit_price = node.get("unit_price")
         market_price_source = node.get("price_source")
         market_volume = node.get("price_volume_total") or node.get("volume_total")
@@ -293,6 +368,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             material_cost = manufacturing_job.get("material_cost")
             job_cost = manufacturing_job.get("total_job_cost")
             total_cost = manufacturing_job.get("total_cost")
+            total_cost_lower_bound = bool(manufacturing_job.get("total_cost_excludes_unknown_job_fees"))
             market_unit_price = source_row.get("market_unit_price")
             market_price_source = source_row.get("market_price_source")
             market_volume = source_row.get("market_volume_total")
@@ -363,6 +439,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             if int(node.get("type_id") or 0) == int(source_row.get("type_id") or 0):
                 material_cost = manufacturing_job.get("material_cost")
                 total_cost = manufacturing_job.get("total_cost")
+                total_cost_lower_bound = bool(manufacturing_job.get("total_cost_excludes_unknown_job_fees"))
                 market_unit_price = source_row.get("market_unit_price")
                 market_price_source = source_row.get("market_price_source")
                 market_volume = source_row.get("market_volume_total")
@@ -415,7 +492,13 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Runs": node.get("runs"),
                 "Job Duration": (
                     format_duration(int(duration_seconds or 0))
+                    + (" (expected slot time, amortized)" if node.get("duration_is_amortized") else "")
                     if duration_seconds is not None and int(duration_seconds or 0) > 0
+                    else ""
+                ),
+                "Per-Job Duration": (
+                    format_duration(int(node.get("job_duration_seconds") or 0))
+                    if int(node.get("job_duration_seconds") or 0) > 0
                     else ""
                 ),
                 "Profit": profit_amount,
@@ -423,6 +506,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "ISK/Hour": isk_per_hour,
                 "Net Proceeds": net_proceeds,
                 "Total Cost": total_cost,
+                "_total_cost_lower_bound": bool(total_cost_lower_bound and total_cost is not None),
                 "Material Cost": material_cost,
                 "Job Cost": job_cost,
                 "Broker Fee": broker_fee_amount,
@@ -430,7 +514,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Market Unit Price": market_unit_price,
                 "Gross Sale Value": gross_sale_value,
                 "Type": tree_node_type_label(node),
-                "Pricing Confidence": pricing_confidence,
+                "Pricing Confidence": pricing_confidence_cell(pricing_confidence, manufacturing_job),
                 "Market Price Source": market_price_source,
                 "Market Volume": market_volume,
                 "Region Daily Volume": region_daily_volume,
@@ -568,6 +652,7 @@ def build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
             "hub_sell_liquidity": manufacturing_job.get("hub_sell_liquidity"),
             "hub_buy_order_count": manufacturing_job.get("hub_buy_order_count"),
             "hub_sell_order_count": manufacturing_job.get("hub_sell_order_count"),
+            "assumes_owned_t2_bpo": bool(manufacturing_job.get("assumes_owned_t2_bpo")),
             "pricing_confidence": manufacturing_job.get("pricing_confidence"),
             "pricing_confidence_reasons": manufacturing_job.get("pricing_confidence_reasons"),
             "market_price_age_minutes": manufacturing_job.get("market_price_age_minutes"),

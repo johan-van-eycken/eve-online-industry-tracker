@@ -1,8 +1,11 @@
 # tests/test_daily_planner_assignment.py
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import pytest
 
 from eve_online_industry_tracker.application.daily_planner.character_assigner import (
     CharacterAssigner,
@@ -138,15 +141,21 @@ def test_me_and_te_research_take_two_separate_slots():
     assert kinds == ["me_research", "te_research"]
 
 
-def test_a_single_research_slot_yields_only_one_research_action():
+def test_a_single_research_slot_yields_only_one_running_research_job():
+    """One research slot: the ME job takes it. The TE job on the same BPO is
+    queued behind the ME job (one job per blueprint, Task 8c fix round 3),
+    so it takes no slot in this plan; a second item's research gets none."""
     chars = [_char(1, "Pilot", [])]  # 1 + 0 = 1 research slot only
-    plan = ChainPlan(decisions=[_decision(
-        overview_row={"type_id": 12345, "needs_me_research": True,
-                      "needs_te_research": True, "blueprint_type_id": 999},
-    )])
+    plan = ChainPlan(decisions=[
+        _decision(overview_row={"type_id": 12345, "needs_me_research": True,
+                                "needs_te_research": True, "blueprint_type_id": 999}),
+        _decision(type_id=22222, overview_row={"type_id": 22222, "needs_me_research": True,
+                                               "blueprint_type_id": 888}),
+    ])
     actions = CharacterAssigner().assign(plan, [], _Chars(chars), _AdminStub())
     research = [a for a in actions if a.action_type.endswith("_research")]
-    assert len(research) == 1
+    assert [(a.action_type, a.type_id) for a in research] == [("me_research", 999), ("te_research", 999)]
+    assert "no research slot taken in this plan" in research[1].notes
 
 
 def test_invention_prefers_the_higher_science_skilled_pilot():
@@ -251,3 +260,157 @@ def test_research_actions_carry_the_nested_blueprint_type_id():
     actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
     research = [a for a in actions if a.action_type.endswith("_research")]
     assert sorted(a.type_id for a in research) == [999, 999]
+
+
+def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
+    """D2: rank by the item's own science + encryption skills (the producer's
+    invention_chance), not by a generic Science sum."""
+    chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}
+    generalist = _char(1, "Generalist", [_skill("Laboratory Operation", 5), _skill("Science", 5, 3402)])
+    specialist = _char(2, "Specialist", [
+        _skill("Laboratory Operation", 5), _skill("High Energy Physics", 5, 11433),
+        _skill("Caldari Starship Engineering", 4, 11454), _skill("Caldari Encryption Methods", 4, 21790),
+    ])
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_chance": chance},
+    })])
+    actions = CharacterAssigner().assign(plan, [], _Chars([generalist, specialist]), _AdminStub())
+    assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
+
+
+def test_invention_ranking_without_an_encryption_skill_uses_the_science_skills():
+    """A3: an item whose SDE entry has no encryption skill still ranks by its
+    two science skills. Both pilots train both science skills, so both can run it."""
+    chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": None}
+    encryptor = _char(1, "Encryptor", [_skill("Laboratory Operation", 5), _skill("Caldari Encryption Methods", 5, 21790),
+                                        _skill("High Energy Physics", 1, 11433),
+                                        _skill("Caldari Starship Engineering", 1, 11454)])
+    physicist = _char(2, "Physicist", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 3, 11433),
+                                        _skill("Caldari Starship Engineering", 1, 11454)])
+    row = {"type_id": 12345, "needs_invention": True, "manufacturing_job": {"invention_chance": chance}}
+    # Both qualify, so the full plan would split over their lanes: rank directly.
+    assigner = CharacterAssigner()
+    from datetime import datetime as _dt, timezone as _tz
+    slots = assigner._compute_available_slots([encryptor, physicist], [], _dt.now(tz=_tz.utc).replace(tzinfo=None))
+    assert assigner._best_invention_char(slots, [encryptor, physicist], row)[0] == 2
+
+
+def test_skill_levels_by_id_reads_the_enriched_list():
+    from eve_online_industry_tracker.application.daily_planner.character_assigner import skill_levels_by_id
+
+    char = _char(1, "Pilot", [_skill("High Energy Physics", 3, 11433), _skill("Science", 5, 3402)])
+    assert skill_levels_by_id(char) == {11433: 3, 3402: 5}
+    assert skill_levels_by_id({"character_id": 1}) == {}
+
+
+@pytest.mark.parametrize(("chance", "expected"), [
+    ({"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}, ((11433, 11454), 21790)),
+    ({"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": None}, ((11433, 11454), None)),  # A3
+    ({"science_skill_type_ids": None, "encryption_skill_type_id": None}, None),  # skills not identified
+    ({"science_skill_type_ids": [11433], "encryption_skill_type_id": 21790}, None),
+    ({"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 0}, None),
+    (None, None),
+])
+def test_get_invention_skill_set_reads_the_producers_chance(chance, expected):
+    from eve_online_industry_tracker.application.industry import overview_row as orow
+
+    row = {"manufacturing_job": {"invention_chance": chance}} if chance is not None else {}
+    assert orow.get_invention_skill_set(row) == expected
+
+
+def test_invention_skips_a_pilot_excluded_from_industry():
+    """Ruling: industry_enabled=False pilots are out of the invent ranking."""
+    chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}
+    excluded = {**_char(1, "Excluded", [
+        _skill("Laboratory Operation", 5), _skill("High Energy Physics", 5, 11433),
+        _skill("Caldari Starship Engineering", 5, 11454), _skill("Caldari Encryption Methods", 5, 21790),
+    ]), "industry_enabled": False}
+    weaker = {**_char(2, "Weaker", [_skill("Laboratory Operation", 5), _skill("High Energy Physics", 1, 11433),
+                                    _skill("Caldari Starship Engineering", 1, 11454),
+                                    _skill("Caldari Encryption Methods", 1, 21790)]),
+              "industry_enabled": True}
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_chance": chance},
+    })])
+    actions = CharacterAssigner().assign(plan, [], _Chars([excluded, weaker]), _AdminStub())
+    assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
+
+
+def test_the_generic_inventor_ranking_is_logged_at_info(caplog):
+    plan = ChainPlan(decisions=[_decision(overview_row={"type_id": 12345, "needs_invention": True})])
+    pilot = _char(1, "Pilot", [_skill("Laboratory Operation", 5), _skill("Science", 5, 3402)])
+    with caplog.at_level(logging.INFO, logger="eve_online_industry_tracker.application.daily_planner.character_assigner"):
+        actions = CharacterAssigner().assign(plan, [], _Chars([pilot]), _AdminStub())
+    assert [a.character_id for a in actions if a.action_type == "invent"] == [1]
+    assert any(r.levelno == logging.INFO and "generic" in r.getMessage() and "12345" in r.getMessage()
+               for r in caplog.records)
+
+
+def _every_assignment_plan():
+    """One item that needs every assignment type, plus a sub-component."""
+    return ChainPlan(decisions=[
+        _decision(overview_row={
+            "type_id": 12345, "needs_invention": True, "has_t1_bpo": True, "t1_blueprint_type_id": 999,
+            # One T1 BPC run on hand: invent today and copy for the rest.
+            "t1_bpc_runs_on_hand": 1,
+            "needs_me_research": True, "needs_te_research": True,
+            # Built from an owned BPC, so the BPO's research does not block
+            # the manufacture (research first, Task 8c fix round 1).
+            "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999},
+                                  "blueprint_source_kind": "owned_blueprint_copy"},
+        }),
+        _decision(type_id=777, type_name="Component", is_sub_component=True, overview_row={
+            "type_id": 777,
+            "sub_job_batches": [{"quantity": 10, "output": 10, "runs": 10, "cost": 100.0, "materials": []}],
+        }),
+    ])
+
+
+def _excluded_strong_pilot():
+    return {**_char(1, "Excluded", [
+        _skill("Mass Production", 5), _skill("Advanced Mass Production", 5),
+        _skill("Laboratory Operation", 5), _skill("Advanced Laboratory Operation", 5), _skill("Science", 5, 3402),
+    ]), "industry_enabled": False}
+
+
+def test_an_excluded_pilot_gets_no_job_of_any_type():
+    """Ruling: industry_enabled=False pilots are out of every assignment."""
+    enabled = {**_char(2, "Enabled", [_skill("Mass Production", 1), _skill("Laboratory Operation", 5)]),
+               "industry_enabled": True}
+    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot(), enabled]), _AdminStub())
+
+    assert {a.action_type for a in actions} == {
+        "manufacture", "sub_manufacture", "copy", "me_research", "te_research", "invent",
+    }
+    assert {a.character_id for a in actions} == {2}
+
+
+def test_work_stays_unassigned_when_every_pilot_is_excluded():
+    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot()]), _AdminStub())
+    assert actions == []
+
+
+def test_the_invent_action_names_the_producers_decryptor():
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_decryptor": {"type_id": 34201, "type_name": "Accelerant Decryptor"}},
+    })])
+    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+                 if a.action_type == "invent"]
+    assert (invent.decryptor_type_id, invent.decryptor_type_name) == (34201, "Accelerant Decryptor")
+    assert "Accelerant Decryptor" in invent.notes
+
+
+def test_an_invent_action_without_a_decryptor_names_none():
+    plan = ChainPlan(decisions=[_decision(overview_row={
+        "type_id": 12345, "needs_invention": True,
+        "manufacturing_job": {"invention_decryptor": {"type_id": None, "type_name": "No decryptor"}},
+    })])
+    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+                 if a.action_type == "invent"]
+    assert invent.decryptor_type_id is None and invent.decryptor_type_name is None
+    # The row carries no sized invention plan, so the note says so (A4); no decryptor is named.
+    assert invent.notes.startswith("Invention: BPC stock below pipeline threshold; datacore need unknown")
+    assert "use " not in invent.notes

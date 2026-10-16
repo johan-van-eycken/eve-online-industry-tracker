@@ -65,6 +65,25 @@ def _fmt_num(v: Any, decimals: int = 1) -> str:
 # Score breakdown drill-down
 # ---------------------------------------------------------------------------
 
+def bpo_analysis_caption(item: dict[str, Any]) -> str | None:
+    """One line on the BPO investment analysis for the score breakdown, or None.
+
+    A completed analysis shows its result, and a skipped one shows why, so
+    blank BPO fields are never ambiguous between "skipped" and "not attempted".
+    """
+    reason = item.get("bpo_analysis_skip_reason")
+    if reason:
+        return f"BPO analysis skipped: {reason}"
+    if item.get("bpo_market_price") is None:
+        return None
+    break_even = item.get("break_even_days")
+    break_even_text = f"{float(break_even):.0f}d break-even" if break_even is not None else "no break-even"
+    return (
+        f"BPO {_fmt_isk(item.get('bpo_market_price'))}: {break_even_text}, "
+        f"saves {_fmt_isk(item.get('projected_annual_savings'))}/yr"
+    )
+
+
 def _render_score_breakdown(item: dict[str, Any]) -> None:
     """Render the scoring component breakdown for a single build plan item."""
     st.markdown("**Score Breakdown**")
@@ -90,6 +109,10 @@ def _render_score_breakdown(item: dict[str, Any]) -> None:
     decision_reason = item.get("decision_reason")
     if decision_reason:
         st.caption(f"Reason: {decision_reason}")
+
+    bpo_caption = bpo_analysis_caption(item)
+    if bpo_caption:
+        st.caption(bpo_caption)
 
 
 # ---------------------------------------------------------------------------

@@ -6,32 +6,25 @@ Each processed action is marked processed_for_feedback=True to prevent re-proces
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.infrastructure.models import (
     PlanItemOutcomeModel,
     PlanLearningWeightsModel,
 )
+from eve_online_industry_tracker.application.daily_planner.learning_weights import (  # noqa: F401 -- MIN/MAX re-exported for callers
+    LEARNING_WEIGHT_MAX,
+    LEARNING_WEIGHT_MIN,
+    clamp_weight,
+    read_weight,
+)
 
 logger = logging.getLogger(__name__)
-
-# Band every learned weight (accuracy_ema, velocity_multiplier,
-# cost_multiplier) is clamped to after an EMA update. Each one multiplies a
-# product's adjusted_score directly (profitability_scorer), so an unbounded
-# value lets one odd sale move a product's rank by orders of magnitude -- and
-# it is persisted in plan_learning_weights, so it sticks. The admin settings
-# schema defines no bounds for learning weights, hence this named constant:
-# a factor of 4 either way from neutral (1.0).
-LEARNING_WEIGHT_MIN = 0.25
-LEARNING_WEIGHT_MAX = 4.0
-
-
-def _clamp_weight(value: float) -> float:
-    return max(LEARNING_WEIGHT_MIN, min(LEARNING_WEIGHT_MAX, value))
-
 
 def _positive_number(value: Any) -> float | None:
     """`value` as a float when it is a real, positive number; else None.
@@ -51,6 +44,54 @@ def _per_unit(total: Any, units: Any) -> float | None:
     if total_f is None or units_f is None:
         return None
     return total_f / units_f
+
+
+#: Allocation sources whose unit_cost is a manufacturing job's build cost.
+#: industry_build: the corp's own job (realized_profit re-snapshots it with
+#: asset_provenance.resolve_industry_job_cost_snapshot; the persisted
+#: unit_build_cost wins), also via corp asset history.
+#: industry_build_transferred(_avg): a character job's unit_build_cost, FIFO
+#: matched or quantity-weighted (realized_profit._load_character_source_lots,
+#: scripts/backfill_corp_transfer_costs.py). Market buys, opening inventory
+#: and untracked units are not build costs and are left out.
+_INDUSTRY_BUILD_SOURCES = frozenset({
+    "industry_build", "industry_build_transferred", "industry_build_transferred_avg",
+})
+
+
+def _industry_build_unit_cost(allocation_details: Any) -> tuple[float | None, str | None]:
+    """(per-unit build cost of the sale's industry-built units, why unknown).
+
+    Market-bought and untracked lots are excluded: their unit price is not a
+    build cost, so mixing them in would compare unlike things. The value is
+    None when there is nothing to compare, and the reason then says which
+    case it was, for the skip log; the reason is None when the value is known.
+    """
+    if not isinstance(allocation_details, list):
+        return None, "allocation_details missing or not a list"
+    total = 0.0
+    units = 0
+    build_lots = 0
+    sources: set[str] = set()
+    for entry in allocation_details:
+        if not isinstance(entry, dict):
+            continue
+        source = entry.get("source")
+        sources.add(str(source))
+        if source not in _INDUSTRY_BUILD_SOURCES:
+            continue
+        build_lots += 1
+        quantity = _positive_number(entry.get("quantity"))
+        cost = _positive_number(entry.get("total_cost"))
+        if quantity is None or cost is None:
+            continue
+        total += cost
+        units += int(quantity)
+    if units > 0:
+        return total / units, None
+    if build_lots == 0:
+        return None, f"no industry-built lots in this sale (sources: {sorted(sources)})"
+    return None, "industry-built lots have no positive cost and quantity"
 
 
 def _now() -> datetime:
@@ -90,10 +131,7 @@ class FeedbackProcessor:
         AdminSettingsManager.get raises for an unknown key (every key read
         here is pinned to the schema by tests/test_daily_planner_fail_loud.py).
         """
-        try:
-            return self._admin.get("daily_planner", key)
-        except (AttributeError, KeyError):
-            return fallback
+        return admin_setting(self._admin, "daily_planner", key, fallback)
 
     def process_pending_feedback(self) -> int:
         """Match done actions to realized sales, write outcomes, update EMA weights.
@@ -169,46 +207,106 @@ class FeedbackProcessor:
         predicted_isk_per_hour: float | None = None
         if matching_item is not None:
             predicted_isk_per_hour = matching_item.isk_per_hour
-        # Predicted material cost PER UNIT: estimated_cost_isk is the whole
-        # batch's material cost and quantity the batch's unit total. The
-        # realized side is one sale's allocated cost over its priced units,
-        # so both must be per unit to be comparable at all.
+        # Predicted BUILD cost per unit: materials + job costs for the batch
+        # (estimated_build_cost_isk, the producer's manufacturing_job.total_cost)
+        # over the batch's units. A sale's industry-build allocated cost
+        # includes the manufacturing install fee, so materials only against it
+        # biased cost_multiplier below 1 by construction. The outcome columns
+        # keep their *_material_cost names but hold this build cost per unit.
+        #
+        # The two sides are closer, not identical. Accepted residual biases:
+        #
+        # Realized = materials + the manufacturing install fee (job.cost)
+        #   + for an invented T2 item, the invention cost: the matched actual
+        #     invention job's materials + install fee when the job snapshot was
+        #     persisted at refresh (corporation.py / character.py pass
+        #     invention_unit_cost_per_run), otherwise the expected invention
+        #     MATERIALS only (asset_provenance, the expected-invention estimate).
+        #   Copy cost is always 0: nothing writes copy_cost; asset_provenance
+        #   only reads it back.
+        # Predicted = materials + the producer's total_job_cost, which adds the
+        #   copy fee, invention fee, source-copy fee and (SDE fallback)
+        #   research-chain fees (industry/service.py). For an invented T2 row
+        #   the invention inputs, invention fee and source-copy fee are all
+        #   sized by the same expected attempts, runs / (success probability x
+        #   SDE runs per invented BPC), amortized over the batch
+        #   (manufacturing_job.invention_material_cost holds the inputs).
+        #
+        # 1. T2: the producer used to drop the invention inputs from
+        #    material_cost, which biased T2 towards < 1; that is fixed. What
+        #    still differs:
+        #    - predicted uses the base SDE success chance (no skill or
+        #      decryptor bonus), so it expects more attempts than a skilled
+        #      inventor needs: towards > 1;
+        #    - without a persisted invention-job snapshot the realized side
+        #      carries the expected invention MATERIALS only, no invention
+        #      install fee and no source-copy fee, while predicted carries
+        #      both: towards > 1 (small, fees are a few % of the datacores);
+        #    - with a snapshot the realized side carries the attempts actually
+        #      made, so one lucky or unlucky streak moves a single outcome
+        #      either way.
+        # 2. BPC-copied T1 and SDE-fallback rows, towards > 1: predicted
+        #    includes copy/research job fees that the realized side never has.
+        #    Probably small (job fees are a few % of materials).
         predicted_material_cost: float | None = _per_unit(
-            getattr(action, "estimated_cost_isk", None), getattr(action, "quantity", None)
+            getattr(action, "estimated_build_cost_isk", None), getattr(action, "quantity", None)
         )
 
         # Retrieve existing weights (or defaults)
         weights_map = self._repo.get_weights([type_id])
         existing = weights_map.get(type_id)
 
-        old_accuracy_ema: float = float(getattr(existing, "accuracy_ema", 1.0))
-        old_velocity: float = float(getattr(existing, "velocity_multiplier", 1.0))
-        old_cost: float = float(getattr(existing, "cost_multiplier", 1.0))
+        old_accuracy_ema: float = read_weight(existing, "accuracy_ema")
+        old_velocity: float = read_weight(existing, "velocity_multiplier")
+        old_cost: float = read_weight(existing, "cost_multiplier")
         sample_count: int = int(getattr(existing, "sample_count", 0))
 
         if realized is not None:
             # Normal outcome — realized sale found
             actual_isk_per_hour: float | None = realized.get("isk_per_hour")
-            actual_material_cost: float | None = _per_unit(
-                realized.get("material_cost"), realized.get("priced_quantity")
+            # Actual BUILD cost per unit, from the sale's industry-built lots
+            # only (see _industry_build_unit_cost).
+            actual_material_cost, actual_unknown_reason = _industry_build_unit_cost(
+                realized.get("allocation_details")
             )
             actual_sell_days: float = float(realized.get("sell_days", 1.0))
 
             # Guard denominators
             safe_actual_days = max(0.01, actual_sell_days)
-            safe_predicted_isk_per_hr = max(0.01, float(predicted_isk_per_hour or 1.0))
 
-            # EMA updates
-            new_accuracy_ema = _clamp_weight((1.0 - alpha) * old_accuracy_ema + alpha * (
-                float(actual_isk_per_hour or 0.0) / safe_predicted_isk_per_hr
-            ))
-            # velocity: predicted_days / actual_days  (higher = sold faster than predicted → bonus)
+            # accuracy: realized / predicted ISK/h. Either side unknown (or an
+            # unusable predicted denominator) means there is nothing to compare:
+            # keep the old weight. Substituting 1 ISK/h for a missing prediction
+            # or 0 for a missing realization moved the EMA from a constant.
+            accuracy_unknown_reason = _isk_per_hour_unknown_reason(
+                predicted_isk_per_hour, actual_isk_per_hour
+            )
+            # Task 15 fix round 2: an upper-bound prediction (job fees unknown)
+            # is no ISK/h to learn accuracy from. `is True`: a plan item from
+            # before the column has NULL.
+            if accuracy_unknown_reason is None and getattr(matching_item, "isk_per_hour_is_upper_bound", None) is True:
+                accuracy_unknown_reason = "predicted ISK/h is an upper bound (job fees unknown)"
+            if accuracy_unknown_reason is not None:
+                _log_weight_skip(action, type_id, "accuracy", "accuracy_ema", accuracy_unknown_reason)
+                new_accuracy_ema = old_accuracy_ema
+                accuracy_ratio: float | None = None
+                if not _is_finite_number(actual_isk_per_hour):
+                    actual_isk_per_hour = None  # never persist NaN/inf/garbage
+            else:
+                accuracy_ratio = float(actual_isk_per_hour) / float(predicted_isk_per_hour)
+                new_accuracy_ema = clamp_weight((1.0 - alpha) * old_accuracy_ema + alpha * accuracy_ratio)
+            # velocity: predicted_days / actual_days  (higher = sold faster than predicted → bonus).
+            # No predicted velocity means nothing to compare: keep the old weight.
             predicted_days = _estimate_predicted_sell_days(matching_item)
-            new_velocity = _clamp_weight((1.0 - alpha) * old_velocity + alpha * (
-                float(predicted_days) / safe_actual_days
-            ))
-            # cost: predicted / actual per unit (< 1 = materials cost more
-            # than predicted → penalty). Either side unknown or zero means
+            if predicted_days is None:
+                _log_velocity_skip(action, type_id, matching_item)
+                new_velocity = old_velocity
+            else:
+                new_velocity = clamp_weight((1.0 - alpha) * old_velocity + alpha * (
+                    predicted_days / safe_actual_days
+                ))
+            # cost: predicted / actual build cost per unit (< 1 = building
+            # cost more than predicted → penalty). Either side unknown or zero means
             # there is nothing to compare: keep the old weight. Substituting
             # 1 ISK (the old fallback) turned a 0 allocated cost into a
             # ratio in the millions.
@@ -216,16 +314,16 @@ class FeedbackProcessor:
                 logger.info(
                     "FeedbackProcessor: cost update skipped for action_id=%s type_id=%s: "
                     "predicted per-unit cost %s, actual per-unit cost %s "
-                    "(batch cost=%r units=%r; sale allocated_cost=%r priced_quantity=%r)",
+                    "(batch build cost=%r units=%r; actual: %s)",
                     getattr(action, "id", None), type_id,
                     "unknown" if predicted_material_cost is None else predicted_material_cost,
                     "unknown" if actual_material_cost is None else actual_material_cost,
-                    getattr(action, "estimated_cost_isk", None), getattr(action, "quantity", None),
-                    realized.get("material_cost"), realized.get("priced_quantity"),
+                    getattr(action, "estimated_build_cost_isk", None), getattr(action, "quantity", None),
+                    actual_unknown_reason or "known",
                 )
                 new_cost = old_cost
             else:
-                new_cost = _clamp_weight((1.0 - alpha) * old_cost + alpha * (
+                new_cost = clamp_weight((1.0 - alpha) * old_cost + alpha * (
                     predicted_material_cost / actual_material_cost
                 ))
 
@@ -233,11 +331,6 @@ class FeedbackProcessor:
             confidence_tier = _confidence_tier(sample_count)
 
             # Write plan_item_outcome
-            accuracy_ratio = (
-                float(actual_isk_per_hour) / safe_predicted_isk_per_hr
-                if actual_isk_per_hour is not None
-                else None
-            )
             outcome = PlanItemOutcomeModel(
                 plan_item_id=plan_item_id,
                 type_id=type_id,
@@ -260,10 +353,15 @@ class FeedbackProcessor:
 
             # Slow-mover outcome — write timeout record, only update velocity
             predicted_days = _estimate_predicted_sell_days(matching_item)
-            # velocity penalty: predicted / slow_mover_timeout (worse than predicted)
-            new_velocity = _clamp_weight((1.0 - alpha) * old_velocity + alpha * (
-                float(predicted_days) / slow_mover_timeout
-            ))
+            if predicted_days is None:
+                # No predicted velocity: no penalty to compute, keep the old weight.
+                _log_velocity_skip(action, type_id, matching_item)
+                new_velocity = old_velocity
+            else:
+                # velocity penalty: predicted / slow_mover_timeout (worse than predicted)
+                new_velocity = clamp_weight((1.0 - alpha) * old_velocity + alpha * (
+                    predicted_days / slow_mover_timeout
+                ))
             new_accuracy_ema = old_accuracy_ema  # not updated for slow movers
             new_cost = old_cost                  # not updated for slow movers
             sample_count += 1
@@ -386,10 +484,10 @@ class FeedbackProcessor:
         sell_days = max(0.1, float(diff)) if diff > 0 else 1.0
         return {
             "isk_per_hour": realized_profit / max(0.01, sell_days * 24.0),
-            # allocated_cost covers only this sale's priced units; None stays
-            # None (unknown), the caller turns it into a per-unit cost.
-            "material_cost": row.allocated_cost,
-            "priced_quantity": row.priced_quantity,
+            # allocation_details carries each consumed lot's source, quantity
+            # and cost; the caller keeps the industry-built lots only, so the
+            # actual cost is a build cost like the predicted one.
+            "allocation_details": row.allocation_details,
             "sell_days": sell_days,
         }
 
@@ -411,22 +509,67 @@ def _parse_ledger_date(value: Any) -> date | None:
         return None
 
 
-def _estimate_predicted_sell_days(plan_item: Any) -> float:
-    """Estimate predicted sell days from the plan_item's effective_velocity.
+def _predicted_velocity_unknown_reason(plan_item: Any) -> str | None:
+    """Why `plan_item` gives no predicted sell time, or None when it does."""
+    if plan_item is None:
+        return "no plan item for this type in the action's plan"
+    vel = getattr(plan_item, "effective_velocity", None)
+    if vel is None:
+        # Task 4: an unknown velocity is persisted as NULL.
+        return "effective_velocity is unknown (NULL)"
+    if isinstance(vel, bool) or not isinstance(vel, (int, float)):
+        return f"effective_velocity is not a number: {vel!r}"
+    if not math.isfinite(vel) or vel <= 0:
+        return f"effective_velocity is not a positive finite number: {vel!r}"
+    return None
+
+
+def _estimate_predicted_sell_days(plan_item: Any) -> float | None:
+    """Predicted sell days from the plan_item's effective_velocity.
 
     Returns 1 / effective_velocity (days per unit) clamped to [0.1, 30].
-    Falls back to 7 days when velocity is unavailable or zero.
+    Returns None when there is no plan item or its velocity is unknown or
+    unusable: there is then no prediction, and no constant stands in for one.
     """
-    if plan_item is not None:
-        vel = getattr(plan_item, "effective_velocity", None)
-        if vel is not None:
-            try:
-                v = float(vel)
-                if v > 0:
-                    return max(0.1, min(30.0, 1.0 / v))
-            except (TypeError, ValueError):
-                pass
-    return 7.0
+    if _predicted_velocity_unknown_reason(plan_item) is not None:
+        return None
+    return max(0.1, min(30.0, 1.0 / float(plan_item.effective_velocity)))
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _isk_per_hour_unknown_reason(predicted: Any, actual: Any) -> str | None:
+    """Why predicted/realized ISK/h give no accuracy ratio, or None when they do."""
+    if predicted is None:
+        return "predicted ISK/h is unknown (no plan item or NULL)"
+    if not _is_finite_number(predicted) or predicted <= 0:
+        return f"predicted ISK/h is not a positive finite number: {predicted!r}"
+    if actual is None:
+        return "realized ISK/h is unknown"
+    if not _is_finite_number(actual):
+        return f"realized ISK/h is not a finite number: {actual!r}"
+    return None
+
+
+def _log_weight_skip(action: Any, type_id: int, what: str, weight: str, reason: Any) -> None:
+    logger.info(
+        "FeedbackProcessor: %s update skipped for action_id=%s type_id=%s: "
+        "%s; keeping the old %s",
+        what, getattr(action, "id", None), type_id, reason, weight,
+    )
+
+
+def _log_velocity_skip(action: Any, type_id: int, plan_item: Any) -> None:
+    _log_weight_skip(
+        action, type_id, "velocity", "velocity_multiplier",
+        f"no predicted sell time ({_predicted_velocity_unknown_reason(plan_item)})",
+    )
 
 
 def _action_age_days(action: Any) -> float:

@@ -212,11 +212,20 @@ class ActionPlanBuilder:
                 quantity=action.quantity,
                 runs=action.runs,
                 estimated_cost_isk=action.estimated_cost_isk,
+                estimated_build_cost_isk=action.estimated_build_cost_isk,
                 estimated_profit_isk=action.estimated_profit_isk,
                 estimated_completion=action.estimated_completion,
                 status="pending",
                 processed_for_feedback=False,
                 notes=action.notes,
+                invention_probability=action.invention_probability,
+                invention_best_probability=action.invention_best_probability,
+                invention_expected_attempts=action.invention_expected_attempts,
+                decryptor_type_id=action.decryptor_type_id,
+                decryptor_type_name=action.decryptor_type_name,
+                estimated_job_fee_isk=action.estimated_job_fee_isk,
+                estimated_job_fee_unknown_reason=action.estimated_job_fee_unknown_reason,
+                queued_after_me=action.queued_after_me,
             ))
         return rows
 

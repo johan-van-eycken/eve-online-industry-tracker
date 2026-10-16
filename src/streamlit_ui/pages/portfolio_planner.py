@@ -21,12 +21,20 @@ from streamlit_ui.state.industry_builder_page import (
     start_overview_refresh_job,
 )
 from streamlit_ui.state.industry_builder_ui import filter_overview_rows
-from streamlit_ui.shopping_list import aggregate_shopping_list
+from streamlit_ui.shopping_list import (
+    DIFFERENT_REFRESHES_WARNING,
+    aggregate_shopping_list_with_stale,
+    invention_need_unknown_rows,
+    rows_built_by_an_older_version,
+    rows_from_different_stock_pools,
+    shared_nested_bpc_shortfall_rows,
+)
 from streamlit_ui.state.industry_snapshot_page import (
     _refresh_status_fragment,
     load_character_context,
 )
 from streamlit_ui.eve_constants import ACTIVITY_LAB_IDS, ACTIVITY_REACTION_IDS
+from eve_online_industry_tracker.application.industry.overview_row import get_profit_upper_bound_reason
 
 _ALL_META_GROUPS = {"Tech I", "Tech II", "Tech III", "Faction", "Storyline", "Other"}
 _DEFAULT_META_GROUPS_ON = {"Tech I", "Tech II", "Faction", "Storyline", "Other"}
@@ -295,6 +303,10 @@ def _warnings(row: dict[str, Any]) -> list[str]:
     prep_pct = row.get("prep_time_fraction_pct")
     margin = sf(row.get("profit_margin_fraction"))
 
+    upper_bound = get_profit_upper_bound_reason(row)
+    if upper_bound is not None:
+        # Task 15 fix round 1 (I2): the ranking stays on this bound, labelled.
+        warns.append(upper_bound)
     if anomaly == "Medium":
         reasons = row.get("price_anomaly_reasons")
         detail = ""
@@ -758,14 +770,20 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
 
             with metrics_col:
                 mj = cast(dict[str, Any], row.get("manufacturing_job") or {})
-                time_secs = sf(mj.get("time_seconds"))
+                # Elapsed (whole-job) build time; time_seconds is the amortized slot time.
+                time_secs = sf(mj.get("elapsed_time_seconds") if "elapsed_time_seconds" in mj else mj.get("time_seconds"))
                 prep_pct = row.get("prep_time_fraction_pct")
                 me = row.get("blueprint_me")
                 ci = row.get("manufacturing_cost_index")
                 anomaly_reasons = row.get("price_anomaly_reasons")
 
                 st.caption(f"**Score:** {score}")
-                st.caption(f"**Build time:** {time_secs / 3600:.1f}h" if time_secs > 0 else "**Build time:** —")
+                # Task 12: the parallel invention/copy lanes the build time assumes.
+                lane_notes = [str(n) for n in (mj.get("elapsed_lane_notes") or []) if n]
+                st.caption(
+                    f"**Build time:** {time_secs / 3600:.1f}h" if time_secs > 0 else "**Build time:** —",
+                    help="; ".join(lane_notes) if lane_notes else None,
+                )
                 if me is not None:
                     st.caption(f"**Blueprint ME:** {me}")
                 if prep_pct is not None:
@@ -819,12 +837,25 @@ def _render_page_about() -> None:
 # Shopping List tab
 # ---------------------------------------------------------------------------
 
+STALE_OVERVIEW_CAPTION = "Some lines came from an older overview \u2014 refresh for exact stock use"
+ALL_ROWS_REFUSED_INFO = (
+    "No quantities to show: every selected item comes from an older overview. "
+    "Refresh the overview, then select the items again."
+)
+
+
+def _shopping_row_name(row: dict[str, Any]) -> str:
+    """The name rows_built_by_an_older_version keys a row by."""
+    return str(row.get("type_name") or row.get("type_id") or "?")
+
+
 def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
     st.markdown("### Jita Shopping List")
     st.caption(
         "Select the items you plan to build. "
-        "Quantities reflect what the Industry Builder has already computed "
-        "(owned stock in the Industry hangar is already subtracted via the sourcing strategy)."
+        "Quantities are the gross need minus the owned stock in the Industry hangar, "
+        "subtracted once across all selected items. "
+        "Lines with incomplete stock data count nothing as owned."
     )
 
     if not overview_rows:
@@ -860,10 +891,38 @@ def _render_shopping_list_tab(overview_rows: list[dict[str, Any]]) -> None:
         return
 
     selected_rows = [label_to_row[lbl] for lbl in selected_labels]
-    shopping_items = aggregate_shopping_list(selected_rows)
+    older_rows = rows_built_by_an_older_version(selected_rows)
+    if older_rows:
+        # Their later batches may be short, so the list leaves them out.
+        st.warning(
+            "Not in this list: " + ", ".join(sorted(older_rows)) + f" \u2014 {next(iter(older_rows.values()))}."
+        )
+    if rows_from_different_stock_pools(selected_rows):
+        # The list nets the smallest stock any of them saw (never an under-buy).
+        st.warning(DIFFERENT_REFRESHES_WARNING)
+    shopping_items, stale_types = aggregate_shopping_list_with_stale(selected_rows)
+    if stale_types:
+        st.caption(STALE_OVERVIEW_CAPTION)
+    shared_shortfall = shared_nested_bpc_shortfall_rows(selected_rows)
+    if shared_shortfall:
+        st.warning(
+            "Not fully in this list: " + ", ".join(sorted(shared_shortfall))
+            + f" \u2014 {next(iter(shared_shortfall.values()))}."
+        )
+    unknown_need = invention_need_unknown_rows(selected_rows)
+    if unknown_need:
+        st.warning(
+            "Datacore need unknown (no invention success probability) for: "
+            + ", ".join(sorted(unknown_need))
+            + ". Their invention batches are not in this list; buy those datacores separately."
+        )
 
     if not shopping_items:
-        st.info("No buy-sourced materials found for the selected items.")
+        if older_rows and all(_shopping_row_name(r) in older_rows for r in selected_rows):
+            # Every selected row was left out: "nothing to buy" would be wrong.
+            st.info(ALL_ROWS_REFUSED_INFO)
+        else:
+            st.info("No buy-sourced materials found for the selected items.")
         return
 
     # Build display DataFrame
