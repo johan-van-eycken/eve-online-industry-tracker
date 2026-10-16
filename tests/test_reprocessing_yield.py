@@ -512,3 +512,40 @@ def test_the_ore_page_shows_why_there_is_no_facility(monkeypatch):
         api.fetch_all_facilities()
     monkeypatch.setattr(api, "api_get_or_error", lambda path: ({"data": [{"id": 1, "name": "Tatara"}]}, None))
     assert api.fetch_all_facilities() == [{"id": 1, "name": "Tatara"}]
+
+
+# --- the tax bounds: refused, not clamped ------------------------------------------------
+
+@pytest.mark.parametrize("value", [0.6, -0.01, "0.51"])
+def test_a_tax_outside_its_bounds_is_refused_naming_the_setting(tmp_path, value):
+    mgr = AdminSettingsManager(tmp_path / "admin_settings.json")
+    with pytest.raises(ValueError, match="reprocessing/tax"):
+        mgr.set("reprocessing", "tax", value)
+    with pytest.raises(ValueError, match="reprocessing/tax"):
+        mgr.set_bulk({"reprocessing": {"tax": value}})
+    assert mgr.get("reprocessing", "tax") is None
+    mgr.set("reprocessing", "tax", 0.5)
+    assert mgr.get("reprocessing", "tax") == 0.5
+
+
+def test_a_stored_tax_outside_its_bounds_is_kept_and_fails_loudly_at_use(tmp_path, caplog):
+    path = tmp_path / "admin_settings.json"
+    path.write_text(json.dumps({"reprocessing": {"facility_type": "athanor", "tax": 0.7}}), encoding="utf-8")
+    with caplog.at_level(logging.ERROR):
+        mgr = AdminSettingsManager(path)
+    assert mgr.get("reprocessing", "tax") == 0.7
+    assert any("reprocessing/tax" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+    with pytest.raises(facility_repo.ReprocessingSettingsInvalid, match="reprocessing/tax=0.7"):
+        facility_repo.configured_facility(mgr, None, fakes.fake_ore_data())
+
+
+def test_the_facility_tax_bound_is_the_settings_bound():
+    with pytest.raises(facility_repo.ReprocessingSettingsInvalid, match="reprocessing/tax"):
+        _facility("athanor", tax=0.51)
+    assert _facility("athanor", tax=0.5).tax == 0.5
+
+
+def test_other_float_settings_still_clamp(tmp_path):
+    mgr = AdminSettingsManager(tmp_path / "admin_settings.json")
+    mgr.set("market_defaults", "default_sales_tax", 0.9)
+    assert mgr.get("market_defaults", "default_sales_tax") == 0.20

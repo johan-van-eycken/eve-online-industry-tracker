@@ -25,6 +25,7 @@ from typing import Any, Callable
 from sqlalchemy import inspect, text
 
 from eve_online_industry_tracker.application.errors import ServiceError
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.domain import reprocessing as _r
 from eve_online_industry_tracker.infrastructure.sde import ore as _ore
 from eve_online_industry_tracker.infrastructure.sde.industry import REIMPORT_HINT, SdeIndustryDataMissing
@@ -89,8 +90,13 @@ def npc_station_reprocessing(session: Any, station_id: int) -> tuple[float, floa
 
 
 def _tax(tax: Any) -> float:
-    if not isinstance(tax, (int, float)) or isinstance(tax, bool) or not 0.0 <= float(tax) <= 1.0:
-        raise ReprocessingSettingsInvalid(f"admin setting {SETTINGS_CATEGORY}/tax={tax!r} is not a fraction 0-1")
+    """The tax setting, within its schema bounds (a stored value outside them
+    is kept by the settings manager so that this fails)."""
+    spec = ADMIN_SETTINGS_SCHEMA[SETTINGS_CATEGORY]["settings"]["tax"]
+    low, high = float(spec["min"]), float(spec["max"])
+    if not isinstance(tax, (int, float)) or isinstance(tax, bool) or not low <= float(tax) <= high:
+        raise ReprocessingSettingsInvalid(
+            f"admin setting {SETTINGS_CATEGORY}/tax={tax!r} is not a fraction {low:g}-{high:g}")
     return float(tax)
 
 

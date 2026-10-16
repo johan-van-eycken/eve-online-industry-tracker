@@ -651,6 +651,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "tax": {
                 "type": "float",
                 "optional": True,
+                "strict": True,  # outside min/max is an error, not clamped
                 "default": None,
                 "min": 0.0,
                 "max": 0.5,
@@ -754,7 +755,7 @@ class AdminSettingsManager:
     def set(self, category: str, key: str, value: Any) -> None:
         """Update a single setting and persist to disk."""
         spec = self._spec(category, key)
-        coerced = self._coerce(value, spec)
+        coerced = self._coerce_named(category, key, value, spec)
         with self._lock:
             self._data.setdefault(category, {})[key] = coerced
             self._persist()
@@ -764,7 +765,7 @@ class AdminSettingsManager:
         for category, values in updates.items():
             for key, value in values.items():
                 spec = self._spec(category, key)
-                coerced = self._coerce(value, spec)
+                coerced = self._coerce_named(category, key, value, spec)
                 self._data.setdefault(category, {})[key] = coerced
         with self._lock:
             self._persist()
@@ -787,6 +788,14 @@ class AdminSettingsManager:
             raise KeyError(f"Unknown setting: {category!r}/{key!r}")
         return spec
 
+    @classmethod
+    def _coerce_named(cls, category: str, key: str, value: Any, spec: dict[str, Any]) -> Any:
+        """_coerce, with the setting named in a ValueError (the 400 the settings route returns)."""
+        try:
+            return cls._coerce(value, spec)
+        except ValueError as exc:
+            raise ValueError(f"{category}/{key}: {exc}") from exc
+
     @staticmethod
     def _coerce(value: Any, spec: dict[str, Any]) -> Any:
         typ = spec["type"]
@@ -807,6 +816,8 @@ class AdminSettingsManager:
             return coerced
         if typ == "float":
             coerced = float(value)
+            if spec.get("strict") and not (spec.get("min", coerced) <= coerced <= spec.get("max", coerced)):
+                raise ValueError(f"{coerced!r} is outside {spec.get('min')}-{spec.get('max')}")
             if "min" in spec:
                 coerced = max(spec["min"], coerced)
             if "max" in spec:
