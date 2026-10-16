@@ -129,6 +129,7 @@ from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_inv
 from eve_online_industry_tracker.domain import rig_groups as _rig_groups
 from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.domain import industry_facility as _industry_facility
+from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
@@ -521,14 +522,15 @@ class IndustryService:
             gid = int(group_id or 0)
         except (TypeError, ValueError):
             gid = 0
-        required = _industry_facility.required_shipyard(gid) if gid > 0 else (
+        required = _industry_facility.required_shipyard(gid, _sde_industry.shipyard_lines()) if gid > 0 else (
             _industry_facility.CAPITAL_SHIPYARD if manufacturing_group == "Capital Ships" else None)
         if required is None or profile_payload is None:
             return _industry_facility.Decision(True)
         label = _industry_facility.SERVICE_LABELS[required]
         if cls._profile_is_npc_station(profile_payload):
             return _industry_facility.Decision(False, f"needs {label}: an NPC station has none")
-        decision = cls._profile_service_decision(profile_payload, _industry_facility.services_providing(required))
+        decision = cls._profile_service_decision(
+            profile_payload, _industry_facility.services_providing(required, _sde_industry.shipyard_lines()))
         if not decision.allowed and label not in str(decision.reason):
             decision = _industry_facility.Decision(False, f"needs {label}: {decision.reason}", decision.uncertain)
         return decision
@@ -3698,7 +3700,7 @@ class IndustryService:
         its most specific engineering-rig group by SDE category/group, used for
         the facility gate and shown on the row. Rig coverage itself is
         _manufacturing_rig_groups (a product can be in several groups)."""
-        return _rig_groups.primary_group(product_entry)
+        return _rig_groups.primary_group(product_entry, catalog=_sde_industry.rig_catalog())
 
     @staticmethod
     def _manufacturing_rig_groups(product_entry: Any, activity: str = "manufacturing") -> frozenset[str]:
@@ -3708,7 +3710,8 @@ class IndustryService:
         groups for a reaction (activity="reaction"). A product whose entry
         has too little to classify gets no group (only "All" rigs apply, an
         over-buy rather than an under-buy) and a WARNING, once per product."""
-        groups = _rig_groups.rig_groups_for_entry(product_entry, activity=activity)
+        groups = _rig_groups.rig_groups_for_entry(product_entry, activity=activity,
+                                                  catalog=_sde_industry.rig_catalog())
         if groups is not None:
             return groups
         entry = product_entry if isinstance(product_entry, dict) else {}

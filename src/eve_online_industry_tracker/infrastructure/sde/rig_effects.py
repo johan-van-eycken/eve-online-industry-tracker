@@ -9,9 +9,9 @@ capital-component material bonus, 2714/2713 for the reactor rigs. Reading
 it from the effect, not from a fixed list, gives every rig its own value.
 
 The modified structure attribute decides what the effect reduces
-(domain.rig_groups.ATTRIBUTE_BINDINGS: activity, metric and the CCP target
-filter, cross-checked against the Hoboleaks industrymodifiersources
-snapshot in tests/fixtures/hoboleaks/).
+(domain.rig_groups.RigCatalog.attribute_bindings: activity, metric and the
+CCP target filter, read from the SDE's industryTargetFilters and
+industryModifierSources by infrastructure/sde/industry).
 
 The rig's security effect (e.g. 6842) scales its value attributes by the
 system's security band (domain.security_band); each effect records whether
@@ -27,6 +27,7 @@ from sqlalchemy import bindparam, text
 
 from eve_online_industry_tracker.domain import rig_groups as _rig_groups
 from eve_online_industry_tracker.domain import security_band as _security
+from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +83,14 @@ def _item_modifiers(modifier_info: Any) -> list[dict[str, Any]]:
     return [m for m in (_safe_json_loads(modifier_info) or []) if isinstance(m, dict)]
 
 
-def get_rig_effects_for_type_ids(sde_session: Any, rig_type_ids: Iterable[int]) -> list[dict]:
+def get_rig_effects_for_type_ids(
+    sde_session: Any, rig_type_ids: Iterable[int], *, catalog: _rig_groups.RigCatalog | None = None,
+) -> list[dict]:
     """One entry per rig type: its industry effects and security multipliers.
+
+    Each effect is labelled by `catalog` (default: the SDE's, from
+    infrastructure/sde/industry; SdeIndustryDataMissing when the SDE lacks
+    the industry tables).
 
     effects: [{effect_id, effect_name, activity, group, metric, value,
     modified_attribute_id, modifying_attribute_id, security_scaled}], value a
@@ -94,6 +101,7 @@ def get_rig_effects_for_type_ids(sde_session: Any, rig_type_ids: Iterable[int]) 
     ids = sorted({int(x) for x in rig_type_ids if x is not None and int(x) != 0})
     if not ids:
         return []
+    bindings = (catalog if catalog is not None else _sde_industry.rig_catalog()).attribute_bindings
 
     dogma_by_type_id = {
         int(tid): (_attribute_map(attrs_raw), _effect_ids(effects_raw))
@@ -164,7 +172,7 @@ def get_rig_effects_for_type_ids(sde_session: Any, rig_type_ids: Iterable[int]) 
                     modifying = int(m["modifyingAttributeID"])
                 except (KeyError, TypeError, ValueError):
                     continue
-                binding = _rig_groups.ATTRIBUTE_BINDINGS.get(modified)
+                binding = bindings.get(modified)
                 if binding is None:
                     continue
                 value = max(0.0, -float(attr(attr_map, modifying) or 0.0) / 100.0)
