@@ -50,6 +50,9 @@ def _write_fake_sde(directory):
                        for cid, name in fakes.CATEGORIES.items()},
         "types": {900001: {"groupID": 25, "name": {"en": "Fake Frigate"}, "packagedVolume": 2500.0,
                            "volume": 16500.0}},
+        "compressibleTypes": fakes.COMPRESSIBLE_TYPES,
+        "typeDogma": fakes.TYPE_DOGMA,
+        "industryActivities": fakes.INDUSTRY_ACTIVITIES,
     }
     for name, rows in tables.items():
         (directory / f"{name}.yaml").write_text(yaml.safe_dump(rows), encoding="utf-8")

@@ -10575,15 +10575,6 @@ class IndustryService:
         session: Any = self._sessions.app_session()
         industry_profile_delete(session, profile_id)
 
-    _ACTIVITY_ID_TO_NAME = {
-        1: "Manufacturing",
-        3: "TE Research",
-        4: "ME Research",
-        5: "Copying",
-        8: "Invention",
-        9: "Reaction",
-    }
-
     # EVE skill IDs that grant additional industry slots
     _SKILL_MASS_PRODUCTION = 3387          # +1 manufacturing slot per level
     _SKILL_ADV_MASS_PRODUCTION = 24625     # +1 manufacturing slot per level
@@ -10665,6 +10656,7 @@ class IndustryService:
         attributed to the character who installed them via installer_id so that
         per-character slot counting works correctly.
         """
+        from eve_online_industry_tracker.infrastructure.sde.activities import activity_label
         from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
         session: Any = self._sessions.app_session()
@@ -10743,7 +10735,7 @@ class IndustryService:
         for job in char_jobs:
             raw = getattr(job, "raw", None) or {}
             activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
-            activity_name = self._ACTIVITY_ID_TO_NAME.get(activity_id, f"Unknown ({activity_id})")
+            activity_name = activity_label(activity_id)
 
             bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
             prod_type_id = int(getattr(job, "product_type_id", 0) or 0)
@@ -10783,7 +10775,7 @@ class IndustryService:
         for job in corp_jobs:
             raw = getattr(job, "raw", None) or {}
             activity_id = raw.get("activity_id") if isinstance(raw, dict) else None
-            activity_name = self._ACTIVITY_ID_TO_NAME.get(activity_id, f"Unknown ({activity_id})")
+            activity_name = activity_label(activity_id)
 
             bp_type_id = int(getattr(job, "blueprint_type_id", 0) or 0)
             prod_type_id = int(getattr(job, "product_type_id", 0) or 0)

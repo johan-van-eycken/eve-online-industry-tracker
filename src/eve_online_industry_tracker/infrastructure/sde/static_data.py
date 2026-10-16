@@ -3,10 +3,18 @@ from __future__ import annotations
 from typing import Any
 
 from eve_online_industry_tracker.infrastructure.persistence import sde_static_repo
+from eve_online_industry_tracker.infrastructure.sde import ore as sde_ore
 from eve_online_industry_tracker.infrastructure.sde.localization import parse_localized
 
 
 def build_all_ores(session: Any, language: str) -> list[dict]:
+    """The published asteroid-category types with their reprocessing
+    materials, their compression (compressibleTypes: "compressed",
+    "compressedFromTypeID", "compressedTypeID") and their reprocessing skill
+    (typeDogma attribute 790: "reprocessingSkillTypeID" and the skill's name
+    in `language`, "reprocessingSkill"; None when the SDE names none).
+    Raises SdeIndustryDataMissing when the SDE lacks the ore tables."""
+    ore_data = sde_ore.ore_data()
     groups = sde_static_repo.get_ore_groups(session)
     if not groups:
         return []
@@ -34,6 +42,12 @@ def build_all_ores(session: Any, language: str) -> list[dict]:
             if "materialTypeID" in mat:
                 material_type_ids.add(mat["materialTypeID"])
 
+    skill_type_ids = {s for s in (ore_data.reprocessing_skill(t.id) for t in ore_types) if s is not None}
+    skill_names = {
+        t.id: parse_localized(t.name, language) or str(t.id)
+        for t in sde_static_repo.get_types_by_ids(session, skill_type_ids)
+    }
+
     material_types = sde_static_repo.get_types_by_ids(session, material_type_ids)
     material_type_map = {t.id: t for t in material_types}
 
@@ -52,6 +66,7 @@ def build_all_ores(session: Any, language: str) -> list[dict]:
         type_group = group_map.get(t.groupID)
         type_category = category_map.get(getattr(type_group, "categoryID", None))
         type_mat_row = type_materials_map.get(t.id)
+        skill_type_id = ore_data.reprocessing_skill(t.id)
 
         ore = {
             "id": t.id,
@@ -64,6 +79,11 @@ def build_all_ores(session: Any, language: str) -> list[dict]:
             "groupName": parse_localized(getattr(type_group, "name", ""), language),
             "categoryID": getattr(type_group, "categoryID", None),
             "categoryName": parse_localized(getattr(type_category, "name", ""), language),
+            "compressed": ore_data.is_compressed(t.id),
+            "compressedFromTypeID": ore_data.base_of(t.id),
+            "compressedTypeID": ore_data.compressed_form_of(t.id),
+            "reprocessingSkillTypeID": skill_type_id,
+            "reprocessingSkill": skill_names.get(skill_type_id) if skill_type_id is not None else None,
             "materials": [],
         }
 

@@ -15,19 +15,25 @@ none of them: every use raises SdeIndustryDataMissing, whose message says to
 re-run the importer, and the first failure is logged as an ERROR. A failed
 load is retried on the next use, so a re-import is picked up without a
 restart. There is no constant fallback.
+
+The same mechanism serves the ore compression and reprocessing skills
+(infrastructure.sde.ore) and the industry activities
+(infrastructure.sde.activities): sde_schema_problems and sde_health_problems
+name every table the app reads, each dataset failing on its own, and every
+failure is an SdeIndustryDataMissing (a 503 sde_reimport_required).
 """
 from __future__ import annotations
 
 import json
 import logging
-import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from sqlalchemy import inspect, text
 
 from eve_online_industry_tracker.domain import industry_facility as _industry_facility
 from eve_online_industry_tracker.domain import rig_groups as _rig_groups
+from eve_online_industry_tracker.infrastructure.sde.data_cache import SdeDataCache
 from eve_online_industry_tracker.infrastructure.sde.localization import parse_localized
 
 logger = logging.getLogger(__name__)
@@ -77,16 +83,27 @@ def _table_names(session: Any) -> set[str]:
     return set(inspect(session.get_bind()).get_table_names())
 
 
-def missing_industry_tables(session: Any) -> list[str]:
-    """The industry tables this SDE lacks or has empty (an import in
-    progress, or one that failed), in INDUSTRY_TABLES order. The load is
-    tried only when this is empty."""
+def missing_tables(session: Any, tables: Iterable[str]) -> list[str]:
+    """The tables (of `tables`) this SDE lacks or has empty (an import in
+    progress, or one that failed), in the given order."""
     present = _table_names(session)
     missing: list[str] = []
-    for table in INDUSTRY_TABLES:
+    for table in tables:
         if table not in present or session.execute(text(f'SELECT 1 FROM "{table}" LIMIT 1')).first() is None:
             missing.append(table)
     return missing
+
+
+def missing_industry_tables(session: Any) -> list[str]:
+    """The industry tables this SDE lacks or has empty, in INDUSTRY_TABLES
+    order. The load is tried only when this is empty."""
+    return missing_tables(session, INDUSTRY_TABLES)
+
+
+def tables_missing_message(missing: list[str], purpose: str) -> str:
+    """The problem for tables a dataset other than the industry tables needs."""
+    return (f"SDE tables missing: {', '.join(missing)} (missing or empty: an SDE imported with an older importer "
+            f"config, or an import still running); {purpose}: {REIMPORT_HINT}")
 
 
 def _missing_message(missing: list[str]) -> str:
@@ -103,7 +120,9 @@ def _decode(value: Any) -> Any:
     return value
 
 
-def _read_table(session: Any, table: str) -> dict[int, dict[str, Any]]:
+def read_table(session: Any, table: str) -> dict[int, dict[str, Any]]:
+    """{id: row} for an SDE table as the importer stores it (flatten_row):
+    nested lists and dicts decoded from JSON, NULL columns left out."""
     rows = session.execute(text(f'SELECT * FROM "{table}"')).mappings().all()
     out: dict[int, dict[str, Any]] = {}
     for row in rows:
@@ -118,7 +137,7 @@ def read_industry_tables(session: Any) -> dict[str, dict[int, dict[str, Any]]]:
     missing = missing_industry_tables(session)
     if missing:
         raise SdeIndustryDataMissing(_missing_message(missing))
-    return {table: _read_table(session, table) for table in INDUSTRY_TABLES}
+    return {table: read_table(session, table) for table in INDUSTRY_TABLES}
 
 
 def _english_names(session: Any) -> tuple[dict[int, tuple[int, str]], dict[int, str]]:
@@ -152,29 +171,56 @@ def load_industry_data(session: Any) -> IndustryData:
         raise SdeIndustryDataMissing(f"SDE industry tables unreadable ({exc}); {REIMPORT_HINT}") from exc
 
 
+def _datasets() -> list[tuple[tuple[str, ...], Callable[[list[str]], str], Callable[[], Any]]]:
+    """(tables, problem for the missing ones, the cached data) per dataset the
+    app reads from the SDE through a process-wide cache."""
+    from eve_online_industry_tracker.infrastructure.sde import activities, ore
+
+    return [
+        (INDUSTRY_TABLES, _missing_message, industry_data),
+        (ore.ORE_TABLES, lambda missing: tables_missing_message(missing, ore.PURPOSE), ore.ore_data),
+        (activities.ACTIVITY_TABLES, lambda missing: tables_missing_message(missing, activities.PURPOSE),
+         activities.industry_activities),
+    ]
+
+
+def _missing_table_problems(session: Any) -> list[tuple[str | None, Callable[[], Any]]]:
+    """(problem or None, the cached data) per dataset."""
+    out: list[tuple[str | None, Callable[[], Any]]] = []
+    for tables, message, data in _datasets():
+        missing = missing_tables(session, tables)
+        out.append((message(missing) if missing else None, data))
+    return out
+
+
+def _column_problems(session: Any) -> list[str]:
+    if "types" not in _table_names(session):
+        return []
+    columns = {c["name"] for c in inspect(session.get_bind()).get_columns("types")}
+    if "packagedVolume" in columns:
+        return []
+    return ["SDE column types.packagedVolume missing (an SDE before build 3607705); every type "
+            f"lookup fails: {REIMPORT_HINT}"]
+
+
 def sde_schema_problems(session: Any) -> list[str]:
     """What this SDE lacks that the app reads, each with the re-import hint:
-    the industry tables and types.packagedVolume (build 3607705 on)."""
-    problems: list[str] = []
-    present = _table_names(session)
-    if "types" in present:
-        columns = {c["name"] for c in inspect(session.get_bind()).get_columns("types")}
-        if "packagedVolume" not in columns:
-            problems.append("SDE column types.packagedVolume missing (an SDE before build 3607705); every type "
-                            f"lookup fails: {REIMPORT_HINT}")
-    missing = missing_industry_tables(session)
-    if missing:
-        problems.append(_missing_message(missing))
-    return problems
+    types.packagedVolume (build 3607705 on), the industry tables, the ore
+    tables (compressibleTypes, typeDogma) and industryActivities."""
+    return _column_problems(session) + [problem for problem, _ in _missing_table_problems(session) if problem]
 
 
 def sde_health_problems(session: Any) -> list[str]:
-    """sde_schema_problems now, and, when the tables are there, whether the
-    industry data loads (the /health re-check after a live re-import)."""
-    problems = sde_schema_problems(session)
-    if not any(p.startswith("SDE industry tables") for p in problems):
+    """sde_schema_problems now, and, for each dataset whose tables are there,
+    whether it loads (the /health re-check after a live re-import). Each
+    dataset fails on its own: a missing ore table leaves the rig data alone."""
+    problems = _column_problems(session)
+    for problem, data in _missing_table_problems(session):
+        if problem is not None:
+            problems.append(problem)
+            continue
         try:
-            industry_data()
+            data()
         except SdeIndustryDataMissing as exc:
             problems.append(str(exc))
     return problems
@@ -182,53 +228,31 @@ def sde_health_problems(session: Any) -> list[str]:
 
 # --- the process-wide data ---------------------------------------------------------
 
-_lock = threading.Lock()
-_data: IndustryData | None = None
-_loader: Callable[[], IndustryData] | None = None
-_logged_failures: set[str] = set()
+_cache: SdeDataCache[IndustryData] = SdeDataCache(
+    missing=lambda: SdeIndustryDataMissing(f"SDE industry data not loaded (no SDE configured); {REIMPORT_HINT}"),
+    logger=logger,
+)
 
 
 def install_industry_data(data: IndustryData) -> None:
     """Use `data` from now on (tests; or a loader's result)."""
-    global _data
-    with _lock:
-        _data = data
+    _cache.install(data)
 
 
 def configure_industry_data_loader(loader: Callable[[], IndustryData] | None) -> None:
     """The loader the first use calls (and a later use, while it fails)."""
-    global _loader
-    with _lock:
-        _loader = loader
+    _cache.configure_loader(loader)
 
 
 def reset_industry_data() -> None:
     """Forget the data, the loader and the logged failures."""
-    global _data, _loader
-    with _lock:
-        _data, _loader = None, None
-        _logged_failures.clear()
+    _cache.reset()
 
 
 def industry_data() -> IndustryData:
     """The cached IndustryData, loading it on first use. Raises
     SdeIndustryDataMissing (logged once as an ERROR) when there is none."""
-    global _data
-    with _lock:
-        if _data is not None:
-            return _data
-        loader = _loader
-        try:
-            if loader is None:
-                raise SdeIndustryDataMissing(f"SDE industry data not loaded (no SDE configured); {REIMPORT_HINT}")
-            _data = loader()
-            return _data
-        except SdeIndustryDataMissing as exc:
-            message = str(exc)
-            if message not in _logged_failures:
-                _logged_failures.add(message)
-                logger.error("%s", message)
-            raise
+    return _cache.get(SdeIndustryDataMissing)
 
 
 def rig_catalog() -> _rig_groups.RigCatalog:

@@ -37,32 +37,40 @@ def _register_thread(app_state: AppState, name: str, thread: threading.Thread) -
 
 
 def check_sde_industry_data(state) -> None:
-    """Check the SDE for what the app reads (types.packagedVolume and CCP's
-    industry tables, build 3607705 on) and configure the industry-data
-    loader (infrastructure.sde.industry), then load it.
+    """Check the SDE for what the app reads (types.packagedVolume, CCP's
+    industry tables, compressibleTypes and typeDogma for the ore calculator,
+    industryActivities for the activity names) and configure the loaders of
+    the cached SDE data (infrastructure.sde.industry, .ore, .activities),
+    then load them.
 
-    An SDE imported before them is not fatal for startup (characters and
+    An SDE imported without them is not fatal for startup (characters and
     assets still load), but every problem is logged as an ERROR and kept in
     state.sde_warnings, which /health lists and re-checks (the warning goes
     once a live re-import makes the data load), each naming the re-import.
-    The rig and shipyard calculations raise until then."""
+    The calculations that need the missing data raise until then."""
+    from eve_online_industry_tracker.infrastructure.sde import activities as sde_activities
     from eve_online_industry_tracker.infrastructure.sde import industry as sde_industry
+    from eve_online_industry_tracker.infrastructure.sde import ore as sde_ore
 
-    def load():
-        session = state.db_sde.Session()
-        try:
-            return sde_industry.load_industry_data(session)
-        finally:
-            session.close()
+    def loader(load):
+        def run():
+            session = state.db_sde.Session()
+            try:
+                return load(session)
+            finally:
+                session.close()
+        return run
 
-    sde_industry.configure_industry_data_loader(load)
+    sde_industry.configure_industry_data_loader(loader(sde_industry.load_industry_data))
+    sde_ore.configure_ore_data_loader(loader(sde_ore.load_ore_data))
+    sde_activities.configure_industry_activities_loader(loader(sde_activities.load_industry_activities))
     session = state.db_sde.Session()
     try:
         problems = sde_industry.sde_schema_problems(session)
         for problem in problems:
             logging.error("SDE check: %s", problem)
-        if not problems:
-            problems = sde_industry.sde_health_problems(session)  # loads it; a failure is logged as an ERROR
+        # Loads every dataset whose tables are there; a failure is logged as an ERROR.
+        problems = sde_industry.sde_health_problems(session)
     finally:
         session.close()
     state.sde_warnings = list(problems)

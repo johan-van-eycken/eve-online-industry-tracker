@@ -207,6 +207,9 @@ The SDE was imported before build 3607705 or with an older importer, so it lacks
 ```bash
 python scripts/import_sde.py --download --import --force
 ```
+**`SDE tables missing: compressibleTypes`** or **`industryActivities`** (the same ERROR, `/health` warning and 503)
+The SDE was imported with an older `config/import_sde.json`, so it lacks the ore compression table (the ore calculator reads it, with each ore's reprocessing skill from `typeDogma`) or the industry activity names (the industry jobs page). Re-import as above; the rig groups and the shipyard gate keep working meanwhile.
+
 `--force` is needed when the recorded build is already current. The importer records the build of the files it imported (their `_sde.yaml`) and warns when they are older than the latest online build.
 
 **`SSL certificate verification failed`**

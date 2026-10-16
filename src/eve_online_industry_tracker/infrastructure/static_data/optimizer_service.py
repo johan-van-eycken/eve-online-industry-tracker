@@ -202,7 +202,8 @@ def run_optimize(
         if any(m in req_mats for m in o["batch_yields"].keys()) and len(o["batch_yields"].keys()) > 0
     ]
     if opt_only_compressed:
-        viable_ores = [o for o in viable_ores if "Compressed" in o["name"]]
+        # The SDE's compressibleTypes decides (build_all_ores "compressed"), not the name.
+        viable_ores = [o for o in viable_ores if o.get("compressed")]
 
     ore_ids = [o["id"] for o in viable_ores]
     processed_ore_prices = esi_service.get_ore_prices(ore_ids)
