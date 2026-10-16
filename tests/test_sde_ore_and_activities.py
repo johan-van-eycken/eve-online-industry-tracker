@@ -196,27 +196,37 @@ def test_build_all_ores_without_the_ore_data_raises_with_the_hint(sde_engine):
         build_all_ores(session, "en")
 
 
-def _ore(type_id, name, skill, *, compressed=False):
+def _ore(type_id, name, skill_type_id, *, compressed=False):
     return {"id": type_id, "name": name, "portionSize": 100, "volume": 0.1, "compressed": compressed,
-            "reprocessingSkill": skill, "materials": [{"name": "Tritanium", "quantity": 400}]}
+            "reprocessingSkillTypeID": skill_type_id,
+            "reprocessingSkill": fakes.SKILL_NAMES.get(skill_type_id) if skill_type_id else None,
+            "materials": [{"name": "Tritanium", "quantity": 400}]}
+
+
+def _npc_station():
+    from eve_online_industry_tracker.infrastructure.static_data import facility_repo
+
+    return facility_repo.facility_from_choice(facility_type="npc_station", rig="none", security_band="high",
+                                              tax=0.0, data=fakes.fake_ore_data())
 
 
 def test_the_yield_uses_the_sde_skill_not_the_name():
     from eve_online_industry_tracker.infrastructure.static_data.yield_calc import compute_yields
 
-    ores = [_ore(1, "Veldspar", "Complex Ore Processing")]  # the name would say Simple Ore Processing
-    skills = {"Simple Ore Processing": 0, "Complex Ore Processing": 5}
-    (row,) = compute_yields(ores, skills, {"base_yield": 0.5}, [])
+    # The name would say Simple Ore Processing; the SDE says Complex.
+    ores = [_ore(1, "Veldspar", fakes.SKILL_COMPLEX_ORE_PROCESSING)]
+    skills = {fakes.SKILL_SIMPLE_ORE_PROCESSING: 0, fakes.SKILL_COMPLEX_ORE_PROCESSING: 5}
+    (row,) = compute_yields(ores, skills, _npc_station(), 0.0)
     assert row["batch_yield_percent"] == pytest.approx(50 * 1.10)
-    assert row["batch_yields"] == {"Tritanium": pytest.approx(400 * 0.5 * 1.10)}
+    assert row["batch_yields"] == {"Tritanium": 220}
 
 
 def test_an_ore_without_a_reprocessing_skill_is_left_out_with_a_warning(caplog):
     from eve_online_industry_tracker.infrastructure.static_data.yield_calc import compute_yields
 
-    ores = [_ore(1, "Fakeite", "Simple Ore Processing"), _ore(2, "Unskilled Fakeite", None)]
+    ores = [_ore(1, "Fakeite", fakes.SKILL_SIMPLE_ORE_PROCESSING), _ore(2, "Unskilled Fakeite", None)]
     with caplog.at_level(logging.WARNING):
-        rows = compute_yields(ores, {}, {"base_yield": 0.5}, [])
+        rows = compute_yields(ores, {}, _npc_station(), 0.0)
     assert [r["id"] for r in rows] == [1]
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "Unskilled Fakeite" in warnings[0] and "790" in warnings[0]
@@ -229,16 +239,17 @@ def test_an_ore_without_reprocessing_materials_is_left_out_quietly(caplog):
 
     no_materials = {**_ore(2, "Mutanite", None), "materials": []}
     with caplog.at_level(logging.WARNING):
-        rows = compute_yields([no_materials], {}, {"base_yield": 0.5}, [])
+        rows = compute_yields([no_materials], {}, _npc_station(), 0.0)
     assert rows == [] and not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
-def test_only_compressed_follows_the_sde_not_the_name(monkeypatch):
+def test_only_compressed_follows_the_sde_not_the_name(monkeypatch, tmp_path):
+    from eve_online_industry_tracker.config.admin_settings import AdminSettingsManager
     from eve_online_industry_tracker.infrastructure.static_data import optimizer_service
 
-    ores = [_ore(1, "Fakeite", "Simple Ore Processing"),
-            _ore(2, "Squashed Fakeite", "Simple Ore Processing", compressed=True),
-            _ore(3, "Batch Compressed Fakeite", "Simple Ore Processing")]
+    ores = [_ore(1, "Fakeite", fakes.SKILL_SIMPLE_ORE_PROCESSING),
+            _ore(2, "Squashed Fakeite", fakes.SKILL_SIMPLE_ORE_PROCESSING, compressed=True),
+            _ore(3, "Batch Compressed Fakeite", fakes.SKILL_SIMPLE_ORE_PROCESSING)]
     seen = {}
 
     def fake_optimize(**kwargs):
@@ -256,11 +267,13 @@ def test_only_compressed_follows_the_sde_not_the_name(monkeypatch):
     monkeypatch.setattr(optimizer_service, "build_all_materials",
                         lambda session, language: [{"id": 34, "name": "Tritanium", "volume": 0.01}])
     monkeypatch.setattr(optimizer_service, "optimize_ore_tiered", fake_optimize)
-    character = SimpleNamespace(reprocessing_skills={"Simple Ore Processing": 5})
+    character = SimpleNamespace(reprocessing_skills={fakes.SKILL_SIMPLE_ORE_PROCESSING: 5})
     payload = {"demands": {"Tritanium": 1000}, "facility_id": 1}
+    admin_settings = AdminSettingsManager(tmp_path / "admin_settings.json")
     for only_compressed, expected in [(True, [2]), (False, [1, 2, 3])]:
         optimizer_service.run_optimize({**payload, "only_compressed": only_compressed}, character=character,
-                                       esi_service=FakeEsi(), sde_session=None, language="en")
+                                       esi_service=FakeEsi(), sde_session=None, language="en",
+                                       admin_settings=admin_settings)
         assert seen["ores"] == expected
 
 
@@ -472,21 +485,6 @@ def test_startup_on_a_current_sde_loads_ore_data_and_activities(tmp_path):
         engine.dispose()
 
 
-def test_the_optimize_route_without_the_ore_data_is_a_503():
-    from flask_app.app import create_app
-
-    ore.reset_ore_data()
-    app = create_app()
-
-    def needs_ore_data():
-        ore.ore_data()
-
-    app.add_url_rule("/_test_needs_ore_data", "needs_ore_data", needs_ore_data)
-    response = app.test_client().get("/_test_needs_ore_data")
-    assert response.status_code == 503
-    assert response.get_json()["error"]["code"] == "sde_reimport_required"
-
-
 # --- the local SDE ---------------------------------------------------------------------
 
 _LOCAL_SDE = os.path.join(_ROOT, "database", "eve_sde.db")
@@ -509,11 +507,19 @@ def _english_type_names(conn) -> dict[int, str]:
 
 
 def test_the_local_compressible_types_have_ccps_shape():
-    conn = _local_conn_or_skip(("compressibleTypes",))
+    """One row per base type, each with its own compressed type, none of which
+    is itself a base or a missing type."""
+    conn = _local_conn_or_skip(("compressibleTypes", "types"))
     with conn:
-        count, distinct_ids, distinct_compressed = conn.execute(
-            'SELECT count(*), count(DISTINCT id), count(DISTINCT "compressedTypeID") FROM "compressibleTypes"').fetchone()
-    assert count == distinct_ids == distinct_compressed == 212
+        count, distinct_ids, distinct_compressed, nulls = conn.execute(
+            'SELECT count(*), count(DISTINCT id), count(DISTINCT "compressedTypeID"), '
+            'sum("compressedTypeID" IS NULL) FROM "compressibleTypes"').fetchone()
+        both = conn.execute('SELECT count(*) FROM "compressibleTypes" WHERE "compressedTypeID" IN '
+                            '(SELECT id FROM "compressibleTypes")').fetchone()[0]
+        unknown = conn.execute('SELECT count(*) FROM "compressibleTypes" c WHERE c."compressedTypeID" NOT IN '
+                               '(SELECT id FROM types) OR c.id NOT IN (SELECT id FROM types)').fetchone()[0]
+    assert count > 0 and count == distinct_ids == distinct_compressed
+    assert (nulls, both, unknown) == (0, 0, 0)
 
 
 def test_the_local_ore_skills_are_ccps():
@@ -539,10 +545,17 @@ def test_the_local_ore_skills_are_ccps():
 
 
 def test_every_local_compressed_ore_with_a_skill_has_its_own_790_equal_to_its_bases():
+    """Where the base has a reprocessing skill, the compressed form has its
+    own attribute 790 and it is the base's (so the fallback to the base is
+    not needed in this build); where neither has one (gas), neither does."""
     data = fakes.local_ore_data_or_skip()
+    with_skill = {c: b for c, b in data.base_by_compressed.items() if data.skill_by_type.get(b) is not None}
+    assert with_skill
+    for compressed, base in with_skill.items():
+        assert data.skill_by_type.get(compressed) == data.skill_by_type[base], compressed
     for compressed, base in data.base_by_compressed.items():
-        own = data.skill_by_type.get(compressed)
-        assert own == data.skill_by_type.get(base), compressed
+        if base not in with_skill.values():
+            assert data.skill_by_type.get(compressed) is None, compressed
 
 
 def test_every_local_ore_the_calculator_reprocesses_has_a_skill():

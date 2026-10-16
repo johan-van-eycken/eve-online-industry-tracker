@@ -193,6 +193,20 @@ TYPE_DOGMA: dict[int, dict[str, Any]] = {
     FAKE_ORE_LEGACY_COMPRESSED: _dogma((790, float(SKILL_COMPLEX_ORE_PROCESSING)),
                                        (2711, float(FAKE_ORE_BASE_ONLY_SKILL))),
     FAKE_GAS: _dogma((1980, 0.5)),
+    # The reprocessing formula's attributes, with CCP's ids and values (build 3607705):
+    # 379 refiningYieldMutator on the skills, 2722 strRefiningYieldBonus on the
+    # refineries, 717 refiningYieldMultiplier and 2355-2357 the security modifiers on
+    # the rigs, 717 on the Standup Reprocessing Facility service.
+    3385: _dogma((181, 165.0), (379, 3.0)),                 # Reprocessing
+    3389: _dogma((181, 165.0), (379, 2.0)),                 # Reprocessing Efficiency
+    SKILL_SIMPLE_ORE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
+    SKILL_COMPLEX_ORE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
+    27174: _dogma((331, 8.0), (379, 4.0)),                  # Zainou 'Beancounter' Reprocessing RX-804
+    35835: _dogma((2339, -20.0), (2722, 2.0)),              # Athanor
+    35836: _dogma((2339, -25.0), (2722, 5.5)),              # Tatara
+    35899: _dogma((717, 0.5), (2444, 0.5)),                 # Standup Reprocessing Facility I
+    **{rig: _dogma((717, base), (2355, 1.0), (2356, 1.06), (2357, 1.12), (2358, 1.0))
+       for rig, base in [(46633, 0.51), (46634, 0.53), (46639, 0.51), (46640, 0.53)]},
 }
 
 INDUSTRY_ACTIVITIES: dict[int, dict[str, Any]] = {

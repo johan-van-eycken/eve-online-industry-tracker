@@ -18,9 +18,13 @@ without the tables raises SdeIndustryDataMissing naming the re-import.
 """
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+
+from sqlalchemy import text
 
 from eve_online_industry_tracker.infrastructure.sde.data_cache import SdeDataCache
 from eve_online_industry_tracker.infrastructure.sde.industry import (
@@ -37,12 +41,41 @@ ORE_TABLES: tuple[str, ...] = ("compressibleTypes", "typeDogma")
 PURPOSE = "ore compression and the ore reprocessing skills (the ore calculator) cannot be computed"
 REPROCESSING_SKILL_ATTRIBUTE_ID = 790  # reprocessingSkillType
 
+# The reprocessing formula's SDE attributes (domain.reprocessing).
+REFINING_YIELD_MUTATOR_ATTRIBUTE_ID = 379      # a skill's or implant's bonus, percent per level
+REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID = 717   # a rig's or the reprocessing service's base yield
+STR_REFINING_YIELD_BONUS_ATTRIBUTE_ID = 2722   # a structure's own bonus, percent
+HISEC_MODIFIER_ATTRIBUTE_ID = 2355             # a rig's security modifiers
+LOWSEC_MODIFIER_ATTRIBUTE_ID = 2356
+NULLSEC_MODIFIER_ATTRIBUTE_ID = 2357
+
+REPROCESSING_SKILL_TYPE_ID = 3385              # Reprocessing
+REPROCESSING_EFFICIENCY_SKILL_TYPE_ID = 3389   # Reprocessing Efficiency
+
+ATHANOR_TYPE_ID = 35835
+TATARA_TYPE_ID = 35836
+STANDUP_REPROCESSING_FACILITY_TYPE_ID = 35899  # the service module: an unrigged structure's base yield
+# The rigs of each refinery's size; their values equal the moon-ore and ice
+# variants of the same size (M-Set rigs on an Athanor, L-Set on a Tatara).
+RIG_TYPE_IDS: Mapping[tuple[int, str], int] = {
+    (ATHANOR_TYPE_ID, "t1"): 46633,   # Standup M-Set Asteroid Ore Grading Processor I
+    (ATHANOR_TYPE_ID, "t2"): 46634,   # Standup M-Set Asteroid Ore Grading Processor II
+    (TATARA_TYPE_ID, "t1"): 46639,    # Standup L-Set Reprocessing Monitor I
+    (TATARA_TYPE_ID, "t2"): 46640,    # Standup L-Set Reprocessing Monitor II
+}
+FACILITY_TYPE_IDS: frozenset[int] = frozenset(
+    {ATHANOR_TYPE_ID, TATARA_TYPE_ID, STANDUP_REPROCESSING_FACILITY_TYPE_ID, *RIG_TYPE_IDS.values()})
+
 
 @dataclass(frozen=True)
 class OreData:
     compressed_by_base: Mapping[int, int]   # base type id -> its compressed form
     base_by_compressed: Mapping[int, int]   # compressed type id -> its base type
     skill_by_type: Mapping[int, int]        # type id -> attribute 790 (a skill type id)
+    # type id -> attribute 379 refiningYieldMutator (percent per level), for skills and implants
+    refining_yield_bonus: Mapping[int, float] = dataclasses.field(default_factory=dict)
+    # FACILITY_TYPE_IDS -> {attribute id: value}: the structures, rigs and service module
+    facility_attributes: Mapping[int, Mapping[int, float]] = dataclasses.field(default_factory=dict)
 
     def is_compressed(self, type_id: int) -> bool:
         return int(type_id) in self.base_by_compressed
@@ -85,12 +118,42 @@ def ore_data_from_tables(*, compressible_types: Mapping[int, Mapping[str, Any]],
         base_by_compressed[compressed] = base
 
     skill_by_type: dict[int, int] = {}
+    refining_yield_bonus: dict[int, float] = {}
+    facility_attributes: dict[int, dict[int, float]] = {}
     for type_id, row in type_dogma.items():
+        type_id = int(type_id)
         for attribute in row.get("dogmaAttributes") or []:
-            if attribute.get("attributeID") == REPROCESSING_SKILL_ATTRIBUTE_ID:
-                skill_by_type[int(type_id)] = int(attribute["value"])
+            attribute_id = attribute.get("attributeID")
+            if attribute_id == REPROCESSING_SKILL_ATTRIBUTE_ID:
+                skill_by_type[type_id] = int(attribute["value"])
+            elif attribute_id == REFINING_YIELD_MUTATOR_ATTRIBUTE_ID:
+                refining_yield_bonus[type_id] = float(attribute["value"])
+            if type_id in FACILITY_TYPE_IDS:
+                facility_attributes.setdefault(type_id, {})[int(attribute_id)] = float(attribute["value"])
     return OreData(compressed_by_base=compressed_by_base, base_by_compressed=base_by_compressed,
-                   skill_by_type=skill_by_type)
+                   skill_by_type=skill_by_type, refining_yield_bonus=refining_yield_bonus,
+                   facility_attributes=facility_attributes)
+
+
+def refining_skill_levels(session: Any, trained_skills: list[Mapping[str, Any]]) -> dict[int, int]:
+    """{skill type id: trained level} for the trained skills (ESI's
+    skill_id/trained_skill_level rows) that carry a reprocessing bonus in the
+    SDE (typeDogma attribute 379): Reprocessing, Reprocessing Efficiency and
+    the ore, ice and moon processing skills. Keyed by id, so the language of
+    the SDE names plays no part. Reads typeDogma directly (not the cached
+    OreData), so a character refresh works on an SDE without the ore tables."""
+    levels = {int(s["skill_id"]): int(s.get("trained_skill_level") or 0)
+              for s in trained_skills if s.get("skill_id") is not None}
+    if not levels:
+        return {}
+    ids = ", ".join(str(i) for i in sorted(levels))
+    rows = session.execute(text(f'SELECT id, "dogmaAttributes" FROM "typeDogma" WHERE id IN ({ids})')).fetchall()
+    with_bonus: set[int] = set()
+    for type_id, raw in rows:
+        attributes = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        if any(a.get("attributeID") == REFINING_YIELD_MUTATOR_ATTRIBUTE_ID for a in attributes):
+            with_bonus.add(int(type_id))
+    return {skill_id: level for skill_id, level in levels.items() if skill_id in with_bonus}
 
 
 def load_ore_data(session: Any) -> OreData:

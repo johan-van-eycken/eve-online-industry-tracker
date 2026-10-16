@@ -3,9 +3,13 @@ from __future__ import annotations
 from typing import Any
 import time
 
+from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 
-from eve_online_industry_tracker.infrastructure.static_data.facility_repo import get_facility
+from eve_online_industry_tracker.infrastructure.static_data.facility_repo import (
+    CONFIGURED_FACILITY_ID,
+    configured_facility,
+)
 from eve_online_industry_tracker.infrastructure.sde.static_data import build_all_materials, build_all_ores
 from eve_online_industry_tracker.infrastructure.static_data.yield_calc import compute_yields
 from eve_online_industry_tracker.infrastructure.static_data.optimizer import optimize_ore_tiered
@@ -145,6 +149,25 @@ def _build_price_provenance(
     }
 
 
+def _reprocessing_fee(
+    *,
+    tax: float,
+    demand_coverage: dict[str, dict[str, float]],
+    material_prices: dict[str, float | None],
+) -> tuple[float | None, str | None]:
+    """The facility's tax on the estimated value of the minerals produced
+    (every yielded unit, surplus included), valued at the optimizer's
+    mineral prices (ESI sell orders). (None, reason) when a produced
+    mineral has no price."""
+    unpriced = sorted(m for m, c in demand_coverage.items()
+                      if float(c.get("yielded") or 0.0) > 0 and material_prices.get(m) is None)
+    if unpriced:
+        return None, f"no mineral price for {', '.join(unpriced)}: the reprocessing fee is unknown"
+    value = sum(float(c.get("yielded") or 0.0) * float(material_prices[m] or 0.0)
+                for m, c in demand_coverage.items() if float(c.get("yielded") or 0.0) > 0)
+    return value * tax, None
+
+
 def run_optimize(
     payload: dict,
     *,
@@ -152,6 +175,7 @@ def run_optimize(
     esi_service: ESIService,
     sde_session: Any,
     language: str,
+    admin_settings: Any,
 ) -> dict:
     demands = payload["demands"]
     implant_pct = payload.get("implant_pct", 0)
@@ -159,13 +183,16 @@ def run_optimize(
     opt_only_compressed = payload.get("only_compressed", False)
     optimization_mode = str(payload.get("mode") or "min_cost")
 
-    skills = getattr(character, "reprocessing_skills", None) or character.extract_reprocessing_skills()
-    implants = [{"slot": 7, "group": "reprocessing", "bonus": (implant_pct / 100)}]
+    if facility_id != CONFIGURED_FACILITY_ID:
+        raise ServiceError(f"Unknown facility_id {facility_id!r}: the ore calculator has one facility "
+                           f"({CONFIGURED_FACILITY_ID}), configured in the admin settings", status_code=400)
+    facility = configured_facility(admin_settings)
 
-    facility = get_facility(facility_id)
+    # {skill type id: level} (ore.refining_skill_levels).
+    skills = getattr(character, "reprocessing_skills", None) or character.extract_reprocessing_skills()
 
     ores = build_all_ores(sde_session, language)
-    ore_yields = compute_yields(ores, skills, facility, implants)
+    ore_yields = compute_yields(ores, skills, facility, float(implant_pct) / 100.0)
 
     req_mats = set(demands.keys())
     ore_yields = [
@@ -247,7 +274,13 @@ def run_optimize(
     result["demand_coverage"] = demand_coverage
     result["raw_total_volume"] = raw_total_volume
     result["total_raw_volume"] = raw_total_volume
-    result["reprocessing_fee"] = float(result.get("total_cost") or 0.0) * float(facility.get("tax") or 0.0)
+    fee, fee_unknown_reason = _reprocessing_fee(tax=facility.tax, demand_coverage=demand_coverage,
+                                                material_prices=mat_name_to_price)
+    result["reprocessing_fee"] = fee
+    result["reprocessing_fee_unknown_reason"] = fee_unknown_reason
+    result["total_cost_with_reprocessing"] = (
+        float(result.get("total_cost") or 0.0) + fee if fee is not None else None)
+    result["facility"] = {"name": facility.name, "multiplier": facility.multiplier, "tax": facility.tax}
     result["resale"] = resale
     result["resale_toggle"] = True
     result["price_provenance"] = _build_price_provenance(
