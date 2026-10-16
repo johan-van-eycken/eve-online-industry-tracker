@@ -375,7 +375,7 @@ def test_loaded_skills_without_the_items_skills_cannot_invent(skills, caplog):
         plan, [_busy(BEST_ID)], _Chars([_best_inventor(), _weaker_pilot(skills=skills)]), _Admin(), price_map=PRICES,
     )
     assert [a for a in actions if a.action_type == "invent"] == []
-    assert "no invention today: no free pilot can run this invention today" in plan.decisions[0].decision_reason
+    assert "no invention today: no free pilot with the invention skills" in plan.decisions[0].decision_reason
 
 
 def test_the_pilots_chance_is_computed_when_the_producer_had_no_skills_loaded():

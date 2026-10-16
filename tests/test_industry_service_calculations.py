@@ -1405,7 +1405,8 @@ def test_activity_breakdown_fees_sum_to_total_job_cost(monkeypatch) -> None:
 
 
 def test_elapsed_time_uses_whole_invention_jobs(monkeypatch) -> None:
-    # No profile, no skills: no time reductions. 1 run, p = 0.5, 10 runs per BPC.
+    # The harness profile (fees priced, no bonuses), no skills: no time
+    # reductions. 1 run, p = 0.5, 10 runs per BPC.
     mj = _invention_overview(monkeypatch)[5002]["manufacturing_job"]
     invention = mj["activity_breakdown"]["invention"]
     source_copy = mj["activity_breakdown"]["invention_source_copying"]
@@ -1577,15 +1578,26 @@ def test_nested_t2_zero_probability_and_zero_floor_never_divides(monkeypatch, ca
 def test_nested_sub_build_with_unknown_invention_cost_is_bought(monkeypatch) -> None:
     # Unknown odds leave the sub-build's estimated_total_cost without the
     # invention, so it looked cheaper than its 10,000 ISK market price and
-    # was built with no datacores bought. It is bought instead.
+    # was built with no datacores bought. It is bought instead. Every other
+    # fee is priced (_NESTED_FEES_PROFILE), so only the unknown invention cost
+    # can make it a buy (Task 15 fix round 2).
     rows = _invention_overview(
         monkeypatch, blueprint_rows=_nested_invention_blueprint_rows(probability_pct=0.0),
-        prices=_NESTED_FAKE_PRICES, profile=_INVENTION_ONLY_PROFILE,
+        prices=_NESTED_FAKE_PRICES, profile=_NESTED_FEES_PROFILE,
         adm_overrides={"invention_probability_floor": 0.0},
     )
     mj = rows[7100]["manufacturing_job"]
 
     assert "manufacturing:5002" not in mj["recursive_activity_breakdown"]
+
+    def nodes(node):
+        yield node
+        for child in node.get("children") or []:
+            yield from nodes(child)
+
+    (bought,) = [n for n in nodes(mj["job_tree"]) if n.get("type_id") == 5002 and n.get("node_type") == "material"]
+    assert bought["recommendation_action"] == "buy"
+    assert bought["build_cost_unknown_reason"].startswith("build cost unknown: invention cost unknown")
     assert mj["procurement_materials"]["5002"]["quantity"] == 1
     assert mj["material_cost"] == pytest.approx(10_000.0)
     assert "invention_cost_unknown_reason" not in mj

@@ -36,8 +36,10 @@ class ItemDecisionEngine:
         stay on that bound, labelled."""
         decision = self._decide(scored, pipeline, overview_row, admin_settings, meta_group_id)
         upper_bound = orow.get_profit_upper_bound_reason(overview_row)
-        if upper_bound is not None and upper_bound not in (decision.decision_reason or ""):
-            decision.decision_reason = f"{decision.decision_reason}; {upper_bound}"
+        if upper_bound is not None:
+            decision.profit_is_upper_bound = True
+            if upper_bound not in (decision.decision_reason or ""):
+                decision.decision_reason = f"{decision.decision_reason}; {upper_bound}"
         return decision
 
     def _decide(

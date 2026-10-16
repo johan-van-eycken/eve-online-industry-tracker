@@ -47,8 +47,9 @@ logger = logging.getLogger(__name__)
 
 #: On the copy / invent actions of a row that cannot manufacture yet.
 NO_MANUFACTURE_NOTE = "no manufacture until a T2 BPC exists"
-#: Task 15 fix round 1 (I1): nobody free today has the invention's skills.
-NO_FREE_INVENTOR_REASON = "no free pilot can run this invention today"
+#: Task 15 fix rounds 1-2 (I1, B): why a row gets no invent action today.
+NO_FREE_RESEARCH_SLOT_REASON = "no free research slot today"
+NO_FREE_SKILLED_INVENTOR_REASON = "no free pilot with the invention skills"
 
 # EVE activity IDs
 ACTIVITY_MANUFACTURING = 1
@@ -369,11 +370,16 @@ class CharacterAssigner:
                 if not results:
                     # I1 (Task 15 fix round 1): never an unqualified pilot,
                     # whose chance and attempts would be another pilot's.
-                    logger.info("CharacterAssigner: type_id=%s: %s", type_id, NO_FREE_INVENTOR_REASON)
-                    if NO_FREE_INVENTOR_REASON not in (decision.decision_reason or ""):
-                        decision.decision_reason = (
-                            f"{decision.decision_reason}; no invention today: {NO_FREE_INVENTOR_REASON}"
-                        )
+                    # Fix round 2 (B): no research slot free at all, or free
+                    # slots only on pilots without the skills.
+                    why = (
+                        NO_FREE_SKILLED_INVENTOR_REASON
+                        if any(int(s.get("free_research", 0)) > 0 for s in char_slots.values())
+                        else NO_FREE_RESEARCH_SLOT_REASON
+                    )
+                    logger.info("CharacterAssigner: type_id=%s: no invention today: %s", type_id, why)
+                    if "no invention today:" not in (decision.decision_reason or ""):
+                        decision.decision_reason = f"{decision.decision_reason}; no invention today: {why}"
                 # The producer's choice: bought one per attempt by the shopping list.
                 decryptor = orow.get_invention_decryptor(row)
                 for char_id, invention, bpc in lanes:

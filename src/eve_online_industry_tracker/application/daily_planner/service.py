@@ -1409,6 +1409,7 @@ class DailyPlannerService:
                     None if d.velocity_unknown_reason is not None else d.effective_velocity
                 ),
                 snapshot_sell_price=_spot_sell_price(market_depth_cache.get(d.type_id)),
+                isk_per_hour_is_upper_bound=bool(getattr(d, "profit_is_upper_bound", False)),
             ))
         return items
 

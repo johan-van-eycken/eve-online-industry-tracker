@@ -77,6 +77,10 @@ class ItemDecision:
     bpo_analysis_skip_reason: str | None = None
     # Copied from PipelineState.velocity_unknown_reason (see there).
     velocity_unknown_reason: str | None = None
+    # Task 15 fix round 2: isk_per_hour / profit are upper bounds (job fees
+    # unknown, orow.get_profit_upper_bound_reason); persisted so feedback
+    # does not learn accuracy from them.
+    profit_is_upper_bound: bool = False
     # Chain context flag — True for sub-components added in Phase 5 Pass 2
     is_sub_component: bool = False
     # overview row snapshot for downstream phases

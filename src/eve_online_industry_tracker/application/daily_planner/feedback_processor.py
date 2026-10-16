@@ -281,6 +281,11 @@ class FeedbackProcessor:
             accuracy_unknown_reason = _isk_per_hour_unknown_reason(
                 predicted_isk_per_hour, actual_isk_per_hour
             )
+            # Task 15 fix round 2: an upper-bound prediction (job fees unknown)
+            # is no ISK/h to learn accuracy from. `is True`: a plan item from
+            # before the column has NULL.
+            if accuracy_unknown_reason is None and getattr(matching_item, "isk_per_hour_is_upper_bound", None) is True:
+                accuracy_unknown_reason = "predicted ISK/h is an upper bound (job fees unknown)"
             if accuracy_unknown_reason is not None:
                 _log_weight_skip(action, type_id, "accuracy", "accuracy_ema", accuracy_unknown_reason)
                 new_accuracy_ema = old_accuracy_ema

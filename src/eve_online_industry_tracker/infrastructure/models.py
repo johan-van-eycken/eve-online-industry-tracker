@@ -1087,6 +1087,9 @@ class BuildPlanItemModel(BaseApp):
     effective_velocity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     snapshot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bpo_analysis_skip_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Task 15 fix round 2: isk_per_hour is an upper bound (job fees unknown):
+    # FeedbackProcessor learns no accuracy from it. NULL on older rows.
+    isk_per_hour_is_upper_bound: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
 
 class DailyActionLogModel(BaseApp):

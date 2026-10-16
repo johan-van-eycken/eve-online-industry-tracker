@@ -22,7 +22,6 @@ from eve_online_industry_tracker.application.industry.portfolio_service import (
 from eve_online_industry_tracker.application.industry.service import IndustryService
 
 _F2 = 1 + 6 / 30 + 3 / 40  # pilot "Qual" 3/3/3: 0.30 x 1.275 = 0.3825
-NO_FREE_INVENTOR_REASON = "no free pilot can run this invention today"
 _UPPER = "profit is an upper bound: job fees unknown for: invention (x)"
 
 
@@ -60,8 +59,7 @@ def test_probe_g_qualifying_pilot_busy_means_no_invent_and_a_reason():
     actions = a4.CharacterAssigner().assign(plan, [a4._busy(2)], a4._Chars([_NO_ENC, _QUAL]), a4._Admin(),
                                             price_map=a4.PRICES)
     assert [a for a in actions if a.action_type == "invent"] == []
-    assert ca.NO_FREE_INVENTOR_REASON == NO_FREE_INVENTOR_REASON
-    assert NO_FREE_INVENTOR_REASON in plan.decisions[0].decision_reason
+    assert "no invention today: no free pilot with the invention skills" in plan.decisions[0].decision_reason
 
 
 def test_g_case_a_bpc_plan_the_assigner_picks_the_qualifying_pilot():
@@ -347,3 +345,79 @@ def test_first_warning_is_thread_safe():
     assert hits.count(True) == 1
     assert isinstance(IndustryService._ONCE_WARNING_LOCK, type(threading.Lock()))
 
+
+
+# --- Fix round 2 ---------------------------------------------------------------------
+
+def _actions_with_jobs(row, chars, jobs):
+    plan = a4._plan(row)
+    actions = a4.CharacterAssigner().assign(plan, list(jobs), a4._Chars(chars), a4._Admin(), price_map=a4.PRICES)
+    return plan.decisions[0], actions
+
+
+def test_b_no_free_skilled_inventor_and_no_free_slot_are_told_apart():
+    row = a4._row(inventor=2, best_factor=_F2, decryptor=False, multiplier=1.0)
+    decision, actions = _actions_with_jobs(row, [_NO_ENC, _QUAL], [a4._busy(2)])
+    assert not [a for a in actions if a.action_type == "invent"]
+    assert "no invention today: no free pilot with the invention skills" in decision.decision_reason
+    assert ca.NO_FREE_SKILLED_INVENTOR_REASON == "no free pilot with the invention skills"
+
+    row = a4._row(inventor=2, best_factor=_F2, decryptor=False, multiplier=1.0)
+    decision, actions = _actions_with_jobs(row, [_NO_ENC, _QUAL], [a4._busy(1), a4._busy(2)])
+    assert not [a for a in actions if a.action_type == "invent"]
+    assert "no invention today: no free research slot today" in decision.decision_reason
+    assert ca.NO_FREE_RESEARCH_SLOT_REASON == "no free research slot today"
+
+
+def test_c_a_sub_component_built_on_an_unknown_fee_carries_the_upper_bound_note():
+    import test_chain_planner_keying as ck
+
+    materials = ck._batch_materials(**{"54321": 200})
+    materials["54321"]["component_job_fee_per_run_unknown_reason"] = "the industry profile has no manufacturing cost index"
+    plan = ck._planner().plan_chain([ck._decision(ck._row(materials=materials))], ck._limited_sub_phase1(7))
+    (sub,) = [d for d in plan.decisions if d.is_sub_component]
+    assert sub.profit_is_upper_bound is True
+    assert sub.decision_reason == (
+        "Sub-manufacture: cheaper than market buy; build cost is a lower bound: job fees unknown for: "
+        "manufacturing (the industry profile has no manufacturing cost index)"
+    )
+
+
+def test_a_the_decision_and_the_plan_item_carry_the_upper_bound_flag(app_session, session_provider):
+    import test_daily_planner_repo as rp
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanItemModel
+
+    row = {**dec._make_overview_row(), "manufacturing_job": {"job_fee_unknown_reasons": ["invention (x)"]}}
+    decision = ItemDecisionEngine().decide(
+        scored=dec._make_scored(), pipeline=dec._make_pipeline(), overview_row=row, admin_settings=dec._make_admin(),
+    )
+    assert decision.profit_is_upper_bound is True
+    service = rp._service(session_provider)
+    service._persist_plan_items(plan_id=1, decisions=[decision, rp._decision()], market_depth_cache={})
+    flags = sorted(bool(i.isk_per_hour_is_upper_bound) for i in app_session.query(BuildPlanItemModel).all())
+    assert flags == [False, True]
+
+
+def test_a_feedback_skips_the_accuracy_update_on_an_upper_bound_isk_per_hour(caplog):
+    from unittest.mock import MagicMock
+
+    import test_daily_planner_feedback as fb
+    from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
+
+    repo = MagicMock()
+    processor = FeedbackProcessor(repo, fb._make_admin(alpha=0.2, slow_mover_timeout=60.0))
+    processor._find_realized_sale = MagicMock(return_value={
+        "isk_per_hour": 8_000_000.0, "sell_days": 4.0,
+        "allocation_details": [{"source": "industry_build", "quantity": 10, "total_cost": 6_000_000.0}],
+    })
+    item = fb._make_plan_item(type_id=320)
+    item.isk_per_hour_is_upper_bound = True
+    repo.get_unprocessed_done_actions.return_value = [fb._make_action(type_id=320, quantity=100)]
+    repo.get_weights.return_value = {320: fb._make_weights(accuracy_ema=1.3)}
+    repo.get_plan_items.return_value = [item]
+    with caplog.at_level("INFO"):
+        assert processor.process_pending_feedback() == 1
+    assert repo.upsert_weights.call_args[0][0].accuracy_ema == 1.3
+    assert repo.insert_outcome.call_args[0][0].accuracy_ratio is None
+    assert any("accuracy update skipped" in r.getMessage() and "upper bound" in r.getMessage()
+               for r in caplog.records)

@@ -1571,11 +1571,19 @@ class ChainPlanner:
         ]
 
         mat_name = request["type_name"]
+        # Task 15 fix round 2 (C): this decision bypasses ItemDecisionEngine,
+        # so it names its own lower bound: build vs buy left the fee out.
+        upper_bound_note = (
+            "build cost is a lower bound: job fees unknown for: manufacturing "
+            f"({fee_unknown_reason or 'no fee published; refresh the product overview'})"
+            if install_fee is None else None
+        )
         return ItemDecision(
             type_id=mat_type_id,
             type_name=mat_name,
             decision="build",
-            decision_reason="Sub-manufacture: cheaper than market buy",
+            decision_reason="; ".join(["Sub-manufacture: cheaper than market buy", *filter(None, [upper_bound_note])]),
+            profit_is_upper_bound=upper_bound_note is not None,
             adjusted_score=0.0,
             absolute_profit_per_batch=0.0,
             isk_per_hour=0.0,

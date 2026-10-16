@@ -688,7 +688,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "projected_annual_savings REAL NULL,"
             "effective_velocity REAL NULL,"
             "snapshot_sell_price REAL NULL,"
-            "bpo_analysis_skip_reason TEXT NULL"
+            "bpo_analysis_skip_reason TEXT NULL,"
+            "isk_per_hour_is_upper_bound INTEGER NULL"
             ")"
         ),
     )
@@ -880,6 +881,8 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
     _ensure_column(db_app, table="build_plan_item", column="bpo_market_price", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="break_even_days", ddl_type="REAL")
     _ensure_column(db_app, table="build_plan_item", column="projected_annual_savings", ddl_type="REAL")
+    # Task 15 fix round 2: an upper-bound isk_per_hour (job fees unknown).
+    _ensure_column(db_app, table="build_plan_item", column="isk_per_hour_is_upper_bound", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="shopping_category", ddl_type="TEXT")
     _ensure_column(db_app, table="daily_action_log", column="processed_for_feedback", ddl_type="INTEGER")
     _ensure_column(db_app, table="daily_action_log", column="estimated_build_cost_isk", ddl_type="REAL")
