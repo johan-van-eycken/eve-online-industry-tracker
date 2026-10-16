@@ -202,6 +202,13 @@ The SDE hasn't been imported yet. Run:
 python scripts/import_sde.py --download --import --force
 ```
 
+**`SDE industry tables missing`** (an ERROR at startup, a `/health` warning, industry pages answering 503 `sde_reimport_required`)
+The SDE was imported before build 3607705 or with an older importer, so it lacks CCP's industry tables (`industryTargetFilters`, `industryModifierSources`, `industryAssemblyLines`, `industryInstallationTypes`) that the rig groups and the shipyard gate are read from. Stop the app, re-import, then restart the app:
+```bash
+python scripts/import_sde.py --download --import --force
+```
+`--force` is needed when the recorded build is already current. The importer records the build of the files it imported (their `_sde.yaml`) and warns when they are older than the latest online build.
+
 **`SSL certificate verification failed`**
 You are likely behind a corporate proxy (e.g. Zscaler). Install truststore so Python uses your system certificate store:
 ```bash
@@ -218,5 +225,4 @@ A character is already registered in the OAuth database. Safe to ignore on start
 
 ## Credits
 
-- **CCP Games**: EVE Online and all EVE-related materials, including the Static Data Export and the game data in `tests/fixtures/hoboleaks/`, are the intellectual property of CCP hf. and are used under the [EVE Online Developer License Agreement](https://developers.eveonline.com/license-agreement). EVE Online and the EVE logo are trademarks of CCP hf. This project is not affiliated with or endorsed by CCP hf.
-- **[Hoboleaks](https://sde.hoboleaks.space/)**: the source of the rig filter data: the engineering- and reactor-rig industry target filters and modifier sources (`industrytargetfilters.json`, `industrymodifiersources.json`, extracted from the TQ client) behind `domain/rig_groups.py`, and the cross-check for every rig's effects and values read from the SDE.
+- **CCP Games**: EVE Online and all EVE-related materials, including the Static Data Export, are the intellectual property of CCP hf. and are used under the [EVE Online Developer License Agreement](https://developers.eveonline.com/license-agreement). From the SDE come, among others, the types' packaged volumes and the industry tables (`industryTargetFilters`, `industryModifierSources`, `industryAssemblyLines`, `industryInstallationTypes`) behind the engineering- and reactor-rig groups and the shipyard gate. EVE Online and the EVE logo are trademarks of CCP hf. This project is not affiliated with or endorsed by CCP hf.

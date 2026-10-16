@@ -106,6 +106,8 @@ class AppState:
     init_state: str = "Not Started"
     init_error: Optional[str] = None
     init_warnings: list[str] = field(default_factory=list)
+    # SDE problems (infrastructure.sde.industry); /health re-checks them.
+    sde_warnings: list[str] = field(default_factory=list)
     init_lock: threading.Lock = field(default_factory=threading.Lock)
     init_started: bool = False
 

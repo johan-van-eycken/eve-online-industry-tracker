@@ -11,6 +11,7 @@ from flask_app.http import error
 from flask_app.state import state
 
 from eve_online_industry_tracker.application.errors import ServiceError
+from eve_online_industry_tracker.infrastructure.sde.industry import REIMPORT_HINT, SdeIndustryDataMissing
 
 from flask_app.routes.admin import admin_bp
 from flask_app.routes.characters import characters_bp
@@ -44,6 +45,11 @@ def create_app() -> Flask:
         if e.meta is not None:
             extra["meta"] = e.meta
         return error(message=e.message, status_code=e.status_code, **extra)
+
+    @app.errorhandler(SdeIndustryDataMissing)
+    def _handle_sde_reimport_required(e: SdeIndustryDataMissing):
+        # Logged once as an ERROR by infrastructure.sde.industry; no traceback per request.
+        return error(message=str(e), status_code=503, code="sde_reimport_required", hint=REIMPORT_HINT)
 
     @app.errorhandler(RuntimeError)
     def _handle_runtime_error(e: RuntimeError):

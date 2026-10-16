@@ -8,11 +8,30 @@ from sqlalchemy import Column, Integer, JSON, MetaData, String, Table, create_en
 from sqlalchemy.orm import Session, sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from eve_online_industry_tracker.infrastructure.models import BaseApp, BaseSde  # noqa: E402
 from eve_online_industry_tracker.infrastructure.persistence.daily_planner_repo import (  # noqa: E402
     DailyPlannerRepository,
 )
+
+
+@pytest.fixture(autouse=True)
+def fake_sde_industry_data():
+    """The SDE industry tables (rig target filters, assembly lines) the
+    producer and planner read through infrastructure.sde.industry: the small
+    fake tables in tests/sde_industry_fakes.py, installed for every test.
+    A test that needs them missing calls industry.reset_industry_data()."""
+    from sde_industry_fakes import fake_industry_data
+
+    from eve_online_industry_tracker.infrastructure.sde import industry
+
+    data = fake_industry_data()
+    industry.install_industry_data(data)
+    try:
+        yield data
+    finally:
+        industry.reset_industry_data()
 
 
 @pytest.fixture()

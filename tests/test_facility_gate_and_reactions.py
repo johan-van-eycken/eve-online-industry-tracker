@@ -1,31 +1,34 @@
 """The facility gate and the reaction gate, from CCP's data (Task 11b fix round 1).
 
-Which hulls need a shipyard comes from CCP's assembly lines (Hoboleaks
-industryassemblylines / industryinstallationtypes, snapshot in
-tests/fixtures/hoboleaks/): Standup Manufacturing Plant I runs line 175
-"Structure Basic Manufacturing" (Freighters and Jump Freighters included),
-Standup Capital Shipyard I line 176 (the capital hulls), Standup Supercapital
-Shipyard I lines 176 and 177 (plus Titans and Supercarriers). Which structures
-fit a service module, and where it may be onlined, comes from the SDE.
+Which hulls need a shipyard comes from CCP's assembly lines (the SDE's
+industryAssemblyLines / industryInstallationTypes, read into a
+domain.industry_facility.ShipyardLines): Standup Manufacturing Plant I runs
+line 175 "Structure Basic Manufacturing" (Freighters and Jump Freighters
+included), Standup Capital Shipyard I line 176 (the capital hulls), Standup
+Supercapital Shipyard I lines 176 and 177 (plus Titans and Supercarriers).
+Which structures fit a service module, and where it may be onlined, comes
+from the SDE.
 
-Public SDE ids only, no real profile or system. The SDE tests read the local
-database/eve_sde.db read-only and skip when it is absent.
+Public SDE ids only, no real profile or system. The unit tests use the
+small fake SDE tables (tests/sde_industry_fakes.py); the SDE tests read the
+local database/eve_sde.db read-only and skip when it or its industry
+tables are absent.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from types import SimpleNamespace
 
 import pytest
 
+import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import industry_facility as fac
 from eve_online_industry_tracker.domain import security_band as sb
+from eve_online_industry_tracker.infrastructure.sde import industry
 
 _LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
 _needs_sde = pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
-_HOBOLEAKS = os.path.join(os.path.dirname(__file__), "fixtures", "hoboleaks")
 
 
 def _producer():
@@ -41,11 +44,6 @@ def _fresh_warnings():
                  "_aggregate_rig_warned"):
         getattr(S, name, set()).clear()
     yield
-
-
-def _hobo(name):
-    with open(os.path.join(_HOBOLEAKS, name), encoding="utf-8") as fh:
-        return json.load(fh)
 
 
 # The service modules' fitting data as the SDE has it (checked by
@@ -106,55 +104,112 @@ def _can(hull, profile, category=(6, "Ship")):
 
 # --- I1: the hull groups come from CCP's assembly lines ------------------------------
 
-def test_the_shipyard_hull_groups_are_ccps_assembly_lines():
-    lines = _hobo("industryassemblylines.json")
-    installations = _hobo("industryinstallationtypes.json")
+_CAPITAL_HULLS = {485, 547, 883, 1538, 4594, 5120}
+_GROUP_CATEGORIES = {gid: cat for gid, (cat, _) in fakes.GROUPS.items()}
 
-    def groups(line_id):
-        return set(lines[str(line_id)]["group_ids"])
 
-    def line_ids(type_id):
-        return {entry["assemblyLine"] for entry in installations[str(type_id)]["assembly_lines"]}
+@pytest.fixture(params=["fake_sde", "local_sde"])
+def lines(request):
+    """The shipyard lines the gate reads: the fake tables', then the local
+    SDE's (installed for the test, so the producer reads them too)."""
+    if request.param == "local_sde":
+        industry.install_industry_data(fakes.local_industry_data_or_skip())
+    return industry.shipyard_lines()
 
-    assert lines["175"]["name"] == "Structure Basic Manufacturing"
-    assert lines["176"]["name"] == "Structure Capital Shipyard"
-    assert lines["177"]["name"] == "Structure Supercapital Shipyard"
-    assert fac.CAPITAL_SHIPYARD_GROUP_IDS == groups(176)
-    assert fac.SUPERCAPITAL_SHIPYARD_GROUP_IDS == groups(177)
-    for service, type_ids in fac.SERVICE_MODULE_TYPE_IDS.items():
-        if service in fac.SERVICE_ASSEMBLY_LINES:
-            for type_id in type_ids:
-                assert line_ids(type_id) == set(fac.SERVICE_ASSEMBLY_LINES[service]), service
+
+def test_the_shipyard_hull_groups_are_ccps_assembly_lines(lines):
+    assert lines.service_lines == {fac.MANUFACTURING_PLANT: {175}, fac.CAPITAL_SHIPYARD: {176},
+                                   fac.SUPERCAPITAL_SHIPYARD: {176, 177}}
+    assert lines.capital_group_ids == _CAPITAL_HULLS
+    assert lines.supercapital_group_ids == _CAPITAL_HULLS | {30, 659}
     # The basic line builds Freighters and Jump Freighters and no shipyard hull.
-    assert {513, 902} <= groups(175)
-    assert not groups(175) & (groups(176) | groups(177))
-    # NPC station manufacturing builds Freighters and Jump Freighters but no capital hull.
-    station = groups(35)
-    assert lines["35"]["name"] == "STATION 0.5+ Manufacturing"
-    assert {513, 902} <= station and not station & (groups(176) | groups(177))
+    assert {513, 902} <= lines.line_groups[175]
+    assert not lines.line_groups[175] & lines.supercapital_group_ids
+
+
+def test_a_service_module_the_sde_does_not_list_is_an_error():
+    installation_types = {k: v for k, v in fakes.INSTALLATION_TYPES.items() if k != 35881}
+    with pytest.raises(ValueError, match="35881"):
+        fac.build_shipyard_lines(fakes.ASSEMBLY_LINES, installation_types, group_categories=_GROUP_CATEGORIES)
+
+
+def test_a_line_the_sde_does_not_have_is_an_error():
+    assembly_lines = {k: v for k, v in fakes.ASSEMBLY_LINES.items() if k != 177}
+    with pytest.raises(ValueError, match="177"):
+        fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
+
+
+def test_the_lines_follow_the_sde_not_a_constant():
+    """A made-up SDE where the capital shipyard also builds Freighters: the
+    gate follows it (Freighters are then only gated if the basic line drops
+    them)."""
+    assembly_lines = {**fakes.ASSEMBLY_LINES}
+    assembly_lines[175] = {**assembly_lines[175], "detailsPerGroup": [
+        d for d in assembly_lines[175]["detailsPerGroup"] if d["groupID"] != 513]}
+    assembly_lines[176] = {**assembly_lines[176], "detailsPerGroup": [
+        *assembly_lines[176]["detailsPerGroup"], {"groupID": 513}]}
+    lines = fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
+    assert fac.required_shipyard(513, lines) == fac.CAPITAL_SHIPYARD
+
+
+def test_a_category_on_the_basic_line_builds_every_hull_in_it():
+    """M4: detailsPerCategory counts. A made-up SDE whose basic line lists
+    category 6 (Ship) builds every hull there: no shipyard is required."""
+    assembly_lines = {**fakes.ASSEMBLY_LINES}
+    assembly_lines[175] = {**assembly_lines[175], "detailsPerCategory": [{"categoryID": 6}]}
+    lines = fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
+    assert fac.required_shipyard(485, lines) is None
+    assert lines.capital_group_ids == set()
+
+
+def test_a_category_on_a_shipyard_line_adds_its_groups():
+    assembly_lines = {**fakes.ASSEMBLY_LINES}
+    assembly_lines[176] = {**assembly_lines[176], "detailsPerCategory": [{"categoryID": 87}]}
+    group_categories = {**_GROUP_CATEGORIES, 1652: 87}  # Light Fighter, not on the basic line
+    lines = fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=group_categories)
+    assert fac.required_shipyard(1652, lines) == fac.CAPITAL_SHIPYARD
+
+
+def test_a_type_list_on_a_service_line_is_an_error():
+    """M4: detailsPerTypeList names types, which the hull-group gate cannot
+    read: the data is unreadable, not silently ignored."""
+    assembly_lines = {**fakes.ASSEMBLY_LINES}
+    assembly_lines[176] = {**assembly_lines[176], "detailsPerTypeList": [{"typeListID": 583}]}
+    with pytest.raises(ValueError, match="detailsPerTypeList"):
+        fac.build_shipyard_lines(assembly_lines, fakes.INSTALLATION_TYPES, group_categories=_GROUP_CATEGORIES)
 
 
 def test_no_installation_type_uses_line_35_so_the_npc_station_assumption_is_checked():
-    """Which line NPC stations use is in neither the SDE nor the installation
-    types: line 35 "STATION 0.5+ Manufacturing" is the one manufacturing
-    station line no installation (outpost, array, Upwell module) claims, so
-    it is the NPC stations'. Line 6 "STATION manufacturing" lists capital
-    hulls, but only the old outposts use it."""
-    lines = _hobo("industryassemblylines.json")
-    installations = _hobo("industryinstallationtypes.json")
-    used = {entry["assemblyLine"] for v in installations.values() for entry in v["assembly_lines"]}
+    """Which line NPC stations use is in neither the SDE's types nor the
+    installation types: line 35 "STATION 0.5+ Manufacturing" is the one
+    manufacturing station line no installation (outpost, array, Upwell
+    module) claims, so it is the NPC stations'. It builds Freighters and Jump
+    Freighters but no shipyard hull, which is why an NPC station builds no
+    capital (IndustryService._facility_gate). Line 6 "STATION manufacturing"
+    lists capital hulls, but only the old outposts use it."""
+    data = fakes.local_industry_data_or_skip()
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    engine = create_engine(f"sqlite:///file:{fakes.LOCAL_SDE}?mode=ro&uri=true")
+    try:
+        with Session(engine) as session:
+            tables = industry.read_industry_tables(session)
+    finally:
+        engine.dispose()
+    lines, installations = tables["industryAssemblyLines"], tables["industryInstallationTypes"]
+    used = {e["assemblyLineID"] for v in installations.values() for e in v["assemblyLines"]}
     assert 35 not in used
-    assert {int(t) for t, v in installations.items() if any(e["assemblyLine"] == 6 for e in v["assembly_lines"])} == {
+    assert {t for t, v in installations.items() if any(e["assemblyLineID"] == 6 for e in v["assemblyLines"])} == {
         21642, 21645, 21646}
-    assert lines["35"]["activity"] == 1 and lines["6"]["activity"] == 1
-
-
-def test_the_trimmed_assembly_line_snapshot_keeps_every_line():
-    lines = _hobo("industryassemblylines.json")
+    assert lines[35]["name"] == "STATION 0.5+ Manufacturing" and lines[35]["activityID"] == 1
+    assert lines[6]["activityID"] == 1
+    station = {d["groupID"] for d in lines[35]["detailsPerGroup"]}
+    assert {513, 902} <= station and not station & data.shipyard_lines.supercapital_group_ids
+    assert lines[175]["name"] == "Structure Basic Manufacturing"
+    assert lines[176]["name"] == "Structure Capital Shipyard"
+    assert lines[177]["name"] == "Structure Supercapital Shipyard"
     assert len(lines) == 146
-    for key, line in lines.items():
-        assert set(line) == {"id", "name", "activity", "group_ids", "category_ids"}
-        assert line["id"] == int(key)
 
 
 @pytest.mark.parametrize("group_id, required", [
@@ -163,8 +218,16 @@ def test_the_trimmed_assembly_line_snapshot_keeps_every_line():
     (30, fac.SUPERCAPITAL_SHIPYARD), (659, fac.SUPERCAPITAL_SHIPYARD),
     (513, None), (902, None), (27, None), (25, None), (873, None),
 ])
-def test_the_required_shipyard_per_hull_group(group_id, required):
-    assert fac.required_shipyard(group_id) == required
+def test_the_required_shipyard_per_hull_group(group_id, required, lines):
+    assert fac.required_shipyard(group_id, lines) == required
+
+
+@pytest.mark.parametrize("required, providing", [
+    (fac.CAPITAL_SHIPYARD, (fac.CAPITAL_SHIPYARD, fac.SUPERCAPITAL_SHIPYARD)),
+    (fac.SUPERCAPITAL_SHIPYARD, (fac.SUPERCAPITAL_SHIPYARD,)),
+])
+def test_a_supercapital_shipyard_also_runs_the_capital_line(required, providing, lines):
+    assert fac.services_providing(required, lines) == providing
 
 
 @pytest.mark.parametrize("structure", ["Raitaru", "Astrahus", "Athanor", "Azbel", "Fortizar"])

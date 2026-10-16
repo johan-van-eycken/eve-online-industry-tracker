@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
+from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
 from eve_online_industry_tracker.infrastructure.models import CorporationModel, CorporationStructuresModel \
     , CorporationMemberModel, CorporationAssetsModel
 from eve_online_industry_tracker.infrastructure.models import Types, Groups, Categories, Factions, Races, NpcCorporations
@@ -1362,22 +1363,9 @@ class Corporation:
                 faction_data = faction_data_map.get(type_data.factionID) if type_data and hasattr(type_data, "factionID") else None
                 blueprint_data = blueprint_data_map.get(asset.get("item_id"))
 
-                # --- Calculate actual volume ---
-                sde_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
-                repackaged_volume = None
-
-                # Check type repackaged_volume
-                if type_data and hasattr(type_data, "repackaged_volume") and type_data.repackaged_volume:
-                    repackaged_volume = type_data.repackaged_volume
-                # If not, check group repackaged_volume
-                elif group_data and hasattr(group_data, "repackaged_volume") and group_data.repackaged_volume:
-                    repackaged_volume = group_data.repackaged_volume
-
-                # Use repackaged_volume if repackaged, else normal volume
-                if asset.get("is_singleton", False) == False and repackaged_volume is not None:
-                    actual_volume = repackaged_volume
-                else:
-                    actual_volume = getattr(type_data, "volume", 0.0) if type_data else 0.0
+                # --- Calculate actual volume (SDE packagedVolume for a packaged item) ---
+                sde_volume, repackaged_volume, actual_volume = asset_volumes(
+                    type_data, is_singleton=bool(asset.get("is_singleton", False)))
 
                 asset_entry = {
                     "corporation_id": self.corporation_id,

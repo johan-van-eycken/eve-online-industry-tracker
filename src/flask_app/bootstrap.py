@@ -36,6 +36,38 @@ def _register_thread(app_state: AppState, name: str, thread: threading.Thread) -
     register_thread(app_state, name, thread)
 
 
+def check_sde_industry_data(state) -> None:
+    """Check the SDE for what the app reads (types.packagedVolume and CCP's
+    industry tables, build 3607705 on) and configure the industry-data
+    loader (infrastructure.sde.industry), then load it.
+
+    An SDE imported before them is not fatal for startup (characters and
+    assets still load), but every problem is logged as an ERROR and kept in
+    state.sde_warnings, which /health lists and re-checks (the warning goes
+    once a live re-import makes the data load), each naming the re-import.
+    The rig and shipyard calculations raise until then."""
+    from eve_online_industry_tracker.infrastructure.sde import industry as sde_industry
+
+    def load():
+        session = state.db_sde.Session()
+        try:
+            return sde_industry.load_industry_data(session)
+        finally:
+            session.close()
+
+    sde_industry.configure_industry_data_loader(load)
+    session = state.db_sde.Session()
+    try:
+        problems = sde_industry.sde_schema_problems(session)
+        for problem in problems:
+            logging.error("SDE check: %s", problem)
+        if not problems:
+            problems = sde_industry.sde_health_problems(session)  # loads it; a failure is logged as an ERROR
+    finally:
+        session.close()
+    state.sde_warnings = list(problems)
+
+
 def initialize_application(app_state: AppState | None = None, *, refresh_metadata: bool = True) -> None:
     """Perform heavy initialization.
 
@@ -67,6 +99,7 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
             state.cfg_manager,
             refresh_metadata=refresh_metadata,
         )
+        check_sde_industry_data(state)
 
         if getattr(state, "shutdown_event", None) is not None and state.shutdown_event.is_set():
             state.init_state = "Shutdown"

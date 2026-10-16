@@ -21,12 +21,12 @@ import os
 
 import pytest
 
+import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import rig_groups as rg
 from eve_online_industry_tracker.domain import security_band as sb
 
 _LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
 _needs_sde = pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
-_HOBOLEAKS = os.path.join(os.path.dirname(__file__), "fixtures", "hoboleaks")
 
 # Public SDE rig type ids.
 _REACTOR_EFFICIENCY_I, _REACTOR_EFFICIENCY_II = 46496, 46497
@@ -83,10 +83,12 @@ def sde_session():
     engine.dispose()
 
 
-def _rigs(session, *type_ids):
+def _rigs(session, *type_ids, catalog=None):
+    """The rigs' effects from the SDE's dogma, labelled by `catalog` (default:
+    the installed one, the fake tables' in the tests)."""
     from eve_online_industry_tracker.infrastructure.sde.rig_effects import get_rig_effects_for_type_ids
 
-    return {r["type_id"]: r for r in get_rig_effects_for_type_ids(session, type_ids)}
+    return {r["type_id"]: r for r in get_rig_effects_for_type_ids(session, type_ids, catalog=catalog)}
 
 
 def _values(rig):
@@ -121,7 +123,7 @@ def test_a_reaction_rig_reduces_the_reaction_by_its_target_filter(group_id, grou
     groups = S._manufacturing_rig_groups(product, activity="reaction")
     assert groups == {label}
     profile = _profile(*(_rig(g, 0.024, _REACTOR, activity="reaction", metric=m, type_id=i)
-                         for i, (g, m) in enumerate((g, m) for g in rg.REACTION_LABELS for m in ("material", "time"))),
+                         for i, (g, m) in enumerate((g, m) for g in fakes.fake_industry_data().rig_catalog.reaction_labels for m in ("material", "time"))),
                        band="low")
     for metric in ("material", "time"):
         assert S._profile_rig_reduction(profile_payload=profile, activity="reaction", metric=metric,
@@ -225,34 +227,37 @@ def test_every_rig_effect_value_is_the_attribute_its_effect_modifies_with(sde_se
 
 # --- the attribute bindings against CCP's per-type modifier sources ---------------
 
-_ACTIVITY_FROM_CCP = {"research_material": "research", "research_time": "research"}
+_ACTIVITY_FROM_CCP = {"researchMaterial": "research", "researchTime": "research"}
 _ACTIVITY_OURS = {"research_me": "research", "research_te": "research"}
 
 
 @_needs_sde
-def test_every_rig_effect_matches_the_hoboleaks_modifier_sources(sde_session):
+def test_every_rig_effect_matches_the_sde_modifier_sources(sde_session):
     """Each rig's (activity, metric, structure attribute, filter) is CCP's
-    (industrymodifiersources), for every engineering and reactor rig in the
-    snapshot. CCP's lab rigs swap the ME/TE research entries (37182/37183
-    list 2565 under research_time); the SDE attribute descriptions say 2565
-    is ME research, so the two research activities are compared together."""
-    with open(os.path.join(_HOBOLEAKS, "industrymodifiersources.json"), encoding="utf-8") as fh:
-        sources = json.load(fh)
+    (the SDE's industryModifierSources), for every engineering and reactor
+    rig in it, with the catalog read from the same SDE. CCP's lab rigs swap
+    the ME/TE research entries (37182/37183 list 2565 under researchTime);
+    the SDE attribute descriptions say 2565 is ME research, so the two
+    research activities are compared together."""
     from sqlalchemy import text
 
+    from eve_online_industry_tracker.infrastructure.sde import industry
+
+    catalog = fakes.local_industry_data_or_skip().rig_catalog
+    sources = industry.read_industry_tables(sde_session)["industryModifierSources"]
     rig_ids = {
         r[0] for r in sde_session.execute(text(
             "SELECT t.id FROM types t JOIN groups g ON g.id = t.groupID WHERE g.categoryID = 66 "
             "AND (json_extract(g.name, '$.en') LIKE 'Structure Engineering Rig%' "
             "OR json_extract(g.name, '$.en') LIKE 'Structure %Reactor Rig%')")).fetchall()
     }
-    snapshot_rigs = sorted(int(k) for k in sources if int(k) in rig_ids)
-    filter_by_label = {f.label: f.filter_id for f in (*rg.RIG_TARGET_FILTERS, *rg.REACTION_TARGET_FILTERS)}
-    rigs = _rigs(sde_session, *snapshot_rigs)
-    for type_id in snapshot_rigs:
+    sde_rigs = sorted(type_id for type_id in sources if type_id in rig_ids)
+    filter_by_label = {f.label: f.filter_id for f in (*catalog.manufacturing_filters, *catalog.reaction_filters)}
+    rigs = _rigs(sde_session, *sde_rigs, catalog=catalog)
+    for type_id in sde_rigs:
         ccp = {
             (_ACTIVITY_FROM_CCP.get(activity, activity), metric, int(e["dogmaAttributeID"]), e.get("filterID"))
-            for activity, metrics in sources[str(type_id)].items()
+            for activity, metrics in sources[type_id].items()
             for metric, entries in metrics.items() for e in entries
         }
         ours = {
@@ -261,7 +266,7 @@ def test_every_rig_effect_matches_the_hoboleaks_modifier_sources(sde_session):
             for e in rigs[type_id]["effects"]
         }
         assert ours == ccp, type_id
-    assert len(snapshot_rigs) > 100
+    assert len(sde_rigs) > 100
 
 
 @_needs_sde

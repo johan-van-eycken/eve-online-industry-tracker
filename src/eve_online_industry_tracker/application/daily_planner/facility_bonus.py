@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from eve_online_industry_tracker.domain import rig_groups as _rig_groups
+from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
 
 FACILITY_KEYS = ("structure_material_reduction", "rig_material_reduction", "rig_applicability")
 
@@ -47,7 +48,7 @@ def structure_material_reduction(profile: Any) -> float:
 def component_rig_groups(entry: Any) -> frozenset[str] | None:
     """The rig groups that cover a component (IndustryService._manufacturing_rig_groups's
     classification), or None when its entry lacks the SDE group/category to tell."""
-    return _rig_groups.rig_groups_for_entry(entry)
+    return _rig_groups.rig_groups_for_entry(entry, catalog=_sde_industry.rig_catalog())
 
 
 def _material_rig_effects(profile: dict[str, Any]) -> list[dict[str, Any]]:

@@ -49,20 +49,6 @@ def sanitize_column_name(name: str) -> str:
     return name.replace("-", "_").replace(" ", "_")
 
 
-def load_repackaged_volumes(json_path):
-    """Load repackaged volumes from JSON file."""
-    if not os.path.exists(json_path):
-        return {}, {}
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    repackaged = data.get("repackaged_volumes", {})
-    groups = repackaged.get("groups", {})
-    items = repackaged.get("items", {})
-    groups = {int(k): v.get("repackaged_volume") for k, v in groups.items()}
-    items = {int(k): v.get("repackaged_volume") for k, v in items.items()}
-    return groups, items
-
-
 # ----------------------------
 # SDE Version Management
 # ----------------------------
@@ -93,6 +79,41 @@ def get_latest_sde_version(version_url: str) -> dict:
     except Exception as e:
         print(f"!!! Failed to fetch SDE version: {e}")
         return None
+
+
+def read_extracted_sde_version(sde_dir: str) -> dict | None:
+    """The build of the extracted SDE files, from their _sde.yaml
+    (sde: buildNumber, releaseDate); None when the folder has none."""
+    path = os.path.join(sde_dir, "_sde.yaml")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    sde = data.get("sde") if isinstance(data, dict) else None
+    if not isinstance(sde, dict) or sde.get("buildNumber") is None:
+        return None
+    return {"buildNumber": int(sde["buildNumber"]), "releaseDate": str(sde.get("releaseDate") or "")}
+
+
+def version_to_record(extracted: dict | None, latest: dict | None) -> tuple[dict | None, str | None]:
+    """(the version to record for an import, a warning or None).
+
+    The extracted files' own build is recorded; the online latest version is
+    only a fallback for files without _sde.yaml. A warning says when the
+    extracted files are older than the latest, or when the build is unknown."""
+    if extracted is not None:
+        if latest is not None and int(latest["buildNumber"]) > int(extracted["buildNumber"]):
+            return extracted, (
+                f"extracted SDE is older than the latest; add --download "
+                f"(extracted build {extracted['buildNumber']}, latest {latest['buildNumber']})"
+            )
+        return extracted, None
+    if latest is not None:
+        return latest, (
+            f"the extracted SDE has no _sde.yaml; recording the latest online build {latest['buildNumber']}, "
+            "which may not be the one imported"
+        )
+    return None, "the extracted SDE has no _sde.yaml and the latest version is unknown; no version recorded"
 
 
 def get_current_sde_version(db: DatabaseManager) -> dict:
@@ -209,11 +230,10 @@ def download_sde(url: str, dest_dir: str) -> str:
 # ----------------------------
 # Import YAML SDE tables to SQLite
 # ----------------------------
-def import_sde_to_sqlite(
-    sde_dir: str, db_uri: str, tables_to_import: list, repackaged_json_path: str
-):
+def import_sde_to_sqlite(sde_dir: str, db_uri: str, tables_to_import: list) -> list[str]:
+    """Import the tables; return the ones that failed (an error, or no YAML
+    file in sde_dir), in tables_to_import order. Tables that imported stay."""
     db = DatabaseManager(db_uri)
-    repackaged_groups, repackaged_items = load_repackaged_volumes(repackaged_json_path)
 
     table_files = []
     for root, _, files in os.walk(sde_dir):
@@ -226,6 +246,12 @@ def import_sde_to_sqlite(
     tqdm.write(f"Importing {len(table_files)} tables...\n")
 
     import_summary = []
+    errors: dict[str, str] = {}
+    found = {name for name, _ in table_files}
+    for table_name in tables_to_import:
+        if table_name not in found:
+            errors[table_name] = f"no {table_name}.yaml in {sde_dir}"
+            import_summary.append((table_name, "MISSING"))
 
     with tqdm(total=len(table_files), desc="Overall Progress", unit="table") as overall_pbar:
         for table_name, yaml_path in table_files:
@@ -252,17 +278,13 @@ def import_sde_to_sqlite(
                 df = df.loc[:, ~df.columns.duplicated()]
                 df.columns = [sanitize_column_name(c) for c in df.columns]
 
-                if table_name == "types" and "id" in df.columns:
-                    df["repackaged_volume"] = df["id"].map(repackaged_items)
-                elif table_name == "groups" and "id" in df.columns:
-                    df["repackaged_volume"] = df["id"].map(repackaged_groups)
-
                 db.save_df(df, table_name)
                 tqdm.write(f"{table_name:<25} | {len(df):>8} rows imported")
                 import_summary.append((table_name, len(df)))
             except Exception as e:
                 tqdm.write(f"{table_name:<25} | ERROR: {e}")
                 import_summary.append((table_name, "ERROR"))
+                errors[table_name] = str(e)
             overall_pbar.update(1)
 
     tqdm.write("\n=== Import Summary ===")
@@ -271,7 +293,15 @@ def import_sde_to_sqlite(
     for name, count in import_summary:
         tqdm.write(f"{name:<25} | {str(count):>12}")
 
-    tqdm.write(f"\nAll selected SDE tables imported to {db_uri}\n")
+    failed = [t for t in tables_to_import if t in errors]
+    if failed:
+        tqdm.write(f"\n{len(failed)} of {len(tables_to_import)} SDE tables NOT imported to {db_uri}:")
+        for table_name in failed:
+            tqdm.write(f"  {table_name:<25} | {errors[table_name]}")
+        tqdm.write("")
+    else:
+        tqdm.write(f"\nAll selected SDE tables imported to {db_uri}\n")
+    return failed
 
 
 # ----------------------------
@@ -402,13 +432,18 @@ def main():
             print("No SDE version history found.")
         return
 
-    # Check version
+    # Check version. The online latest version is needed only for
+    # --check-version and the "up to date" short-circuit; --import --force
+    # works offline (the import records the extracted files' own build).
     version_url = cfg.get("SDE_VERSION")
     latest_version = get_latest_sde_version(version_url)
+    needs_online = args.check_version or not args.force
 
-    if not latest_version:
+    if not latest_version and needs_online:
         print("!!! Could not fetch latest SDE version. Exiting.")
         return
+    if not latest_version:
+        print("!!! Could not fetch latest SDE version; continuing (--force).")
 
     current_version = get_current_sde_version(db)
 
@@ -473,10 +508,6 @@ def main():
             )
             sde_path = download_sde(cfg.get("SDE_URL"), sde_path)
 
-        repackaged_json_path = cfg.get("REPACKAGED_JSON_PATH")
-        if not os.path.exists(repackaged_json_path):
-            raise FileNotFoundError(f"Data file '{repackaged_json_path}' not found.")
-
         # Either CLI tables or config tables
         if args.tables:
             tables_to_import = args.tables
@@ -486,17 +517,30 @@ def main():
         if not tables_to_import:
             raise ValueError("No tables specified for import (check config or CLI args).")
 
-        import_sde_to_sqlite(
+        version, version_warning = version_to_record(read_extracted_sde_version(sde_path), latest_version)
+        if version_warning:
+            print(f"\n⚠ WARNING: {version_warning}")
+
+        failed_tables = import_sde_to_sqlite(
             sde_path,
             db_uri=args.db,
             tables_to_import=tables_to_import,
-            repackaged_json_path=repackaged_json_path,
         )
+        if failed_tables:
+            # A partial import must never look current: no version recorded,
+            # and no cleanup, so the extracted files stay for the retry.
+            print(
+                f"\n!!! SDE import incomplete: {len(failed_tables)} table(s) failed: {', '.join(failed_tables)}.\n"
+                "    The SDE version was not recorded and the extracted files were kept (no --cleanup).\n"
+                "    The tables that imported stay as they are. Fix the cause shown above, then re-run\n"
+                "    scripts/import_sde.py --import --force (add --download when the extracted SDE is old\n"
+                "    or a table's YAML file is missing)."
+            )
+            sys.exit(1)
 
-        # Record the new version
-        record_sde_version(
-            db, latest_version["buildNumber"], latest_version["releaseDate"]
-        )
+        # Record the imported files' version
+        if version is not None:
+            record_sde_version(db, version["buildNumber"], version["releaseDate"])
 
     if args.cleanup:
         cleanup_temp(sde_path)
