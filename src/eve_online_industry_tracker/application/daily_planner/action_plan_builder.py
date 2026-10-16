@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
+from eve_online_industry_tracker.domain import industry_activities as _activities
 from eve_online_industry_tracker.infrastructure.models import DailyActionLogModel
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,13 @@ class ActionPlanBuilder:
             # no product_quantity column to fall back to.
             output_qty = int(_job_attr(job, "output_quantity") or runs)
 
-            activity_map = {1: "manufacture", 3: "te_research", 4: "me_research", 5: "copy", 8: "invent"}
+            activity_map = {
+                _activities.ACTIVITY_MANUFACTURING: "manufacture",
+                _activities.ACTIVITY_TE_RESEARCH: "te_research",
+                _activities.ACTIVITY_ME_RESEARCH: "me_research",
+                _activities.ACTIVITY_COPYING: "copy",
+                _activities.ACTIVITY_INVENTION: "invent",
+            }
             activity_id = int(_job_attr(job, "activity_id") or 1)
             action_type = activity_map.get(activity_id, "manufacture")
 

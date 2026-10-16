@@ -209,6 +209,21 @@ TYPE_DOGMA: dict[int, dict[str, Any]] = {
        for rig, base in [(46633, 0.51), (46634, 0.53), (46639, 0.51), (46640, 0.53)]},
 }
 
+# npcStations: made-up station ids with the SDE's reprocessing columns
+# (reprocessingEfficiency, reprocessingStationsTake): a standard 50% station and
+# a poor 30% one.
+FAKE_NPC_STATION_ID = 60999901
+FAKE_POOR_NPC_STATION_ID = 60999902
+NPC_STATIONS: dict[int, tuple[float, float]] = {FAKE_NPC_STATION_ID: (0.5, 0.05),
+                                                FAKE_POOR_NPC_STATION_ID: (0.3, 0.05)}
+
+
+def fake_npc_station(station_id: int) -> tuple[float, float] | None:
+    """The (base yield, base tax) of a fake station, the shape
+    facility_repo.npc_station_reprocessing returns; None when unknown."""
+    return NPC_STATIONS.get(int(station_id))
+
+
 INDUSTRY_ACTIVITIES: dict[int, dict[str, Any]] = {
     1: {"description": "Manufacturing of things", "name": "Manufacturing"},
     3: {"description": "Researching time efficiency", "name": "Time Efficiency Research"},

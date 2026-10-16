@@ -3,7 +3,8 @@
     yield = (50 + Rm)/100 x (1 + Sec) x (1 + Sm)
             x (1 + 0.03 R) x (1 + 0.02 Re) x (1 + 0.02 Op) x (1 + Im)
 
-- (50 + Rm)/100, the base yield: 0.50 at an NPC station or a structure
+- (50 + Rm)/100, the base yield: an NPC station's own reprocessingEfficiency
+  (npcStations; 0.50 at most stations, 0.25-0.40 at some); 0.50 at a structure
   without a reprocessing rig (the Standup Reprocessing Facility service);
   a T1 rig makes it 0.51, a T2 rig 0.53 (the rig's refiningYieldMultiplier).
 - 1 + Sec, the rig's security modifier (hiSec/lowSec/nullSecModifier: 1.00,
@@ -40,11 +41,10 @@ SECURITY_LOW = "low"
 SECURITY_NULL = "null"  # nullsec and wormhole space
 SECURITY_BANDS = (SECURITY_HIGH, SECURITY_LOW, SECURITY_NULL)
 
-# The SDE has no NPC-station type with a reprocessing attribute; npcStations
-# carries a reprocessingEfficiency per station (0.50 at 4649 of its 5210
-# stations in build 3607705, 0.25-0.40 at the rest). 0.50 is the base of a
-# standard station, pinned by tests.
-NPC_STATION_BASE_YIELD = 0.50
+# Where a facility's tax comes from.
+TAX_SDE_STATION_BASE = "sde_station_base"            # npcStations.reprocessingStationsTake, before standings
+TAX_SETTING_AFTER_STANDINGS = "setting_after_standings"  # an NPC station's rate the user set
+TAX_SETTING = "setting"                              # a player structure's rate the user set
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,7 @@ class ReprocessingFacility:
     security_multiplier: float   # 1 + Sec (1.0 without a rig)
     structure_bonus: float       # Sm, a fraction
     tax: float                   # the facility's reprocessing tax, a fraction
+    tax_source: str              # TAX_SDE_STATION_BASE, TAX_SETTING_AFTER_STANDINGS or TAX_SETTING
 
     @property
     def multiplier(self) -> float:

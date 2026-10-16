@@ -41,6 +41,28 @@ def _request(method, path, *, payload=None, timeout_seconds=None):
         return None
 
 
+def api_get_or_error(path, timeout_seconds=None):
+    """(body, None) on success; (None, the API's error message) on failure,
+    so a page can show why instead of an empty result."""
+    timeout = api_request_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    try:
+        response = requests.get(f"{api_base()}{path}", timeout=timeout)
+    except requests_exceptions.RequestException as exc:
+        logging.error("%s request failed: %s", path, exc)
+        return None, f"request failed: {exc}"
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not (200 <= response.status_code < 300):
+        _handle_failure(path, response)
+        message = (body or {}).get("message") if isinstance(body, dict) else None
+        return None, message or f"HTTP {response.status_code}"
+    if body is None:
+        return None, "invalid JSON"
+    return body, None
+
+
 def api_post(path, payload):
     return _request("POST", path, payload=payload)
 

@@ -207,7 +207,8 @@ def _npc_station():
     from eve_online_industry_tracker.infrastructure.static_data import facility_repo
 
     return facility_repo.facility_from_choice(facility_type="npc_station", rig="none", security_band="high",
-                                              tax=0.0, data=fakes.fake_ore_data())
+                                              tax=None, npc_station_id=fakes.FAKE_NPC_STATION_ID,
+                                              npc_station=fakes.fake_npc_station, data=fakes.fake_ore_data())
 
 
 def test_the_yield_uses_the_sde_skill_not_the_name():
@@ -270,6 +271,7 @@ def test_only_compressed_follows_the_sde_not_the_name(monkeypatch, tmp_path):
     character = SimpleNamespace(reprocessing_skills={fakes.SKILL_SIMPLE_ORE_PROCESSING: 5})
     payload = {"demands": {"Tritanium": 1000}, "facility_id": 1}
     admin_settings = AdminSettingsManager(tmp_path / "admin_settings.json")
+    admin_settings.set_bulk({"reprocessing": {"facility_type": "athanor", "tax": 0.01}})
     for only_compressed, expected in [(True, [2]), (False, [1, 2, 3])]:
         optimizer_service.run_optimize({**payload, "only_compressed": only_compressed}, character=character,
                                        esi_service=FakeEsi(), sde_session=None, language="en",

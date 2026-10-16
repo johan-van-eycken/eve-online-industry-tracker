@@ -638,16 +638,29 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Ore calculator: security band",
                 "help": "The facility's security band; the rig's security modifier only applies with a rig.",
             },
+            "npc_station_id": {
+                "type": "int",
+                "optional": True,
+                "default": None,
+                # No min/max: the int coercion would clamp a wrong id into another station's; the SDE
+                # lookup rejects an id it does not have instead.
+                "label": "Ore calculator: NPC station id",
+                "help": "The NPC station (its id, e.g. 60003760 for Jita IV - Moon 4) whose SDE reprocessing "
+                        "yield and base tax the ore calculator uses. Required for an NPC station.",
+            },
             "tax": {
                 "type": "float",
-                "default": 0.015,
+                "optional": True,
+                "default": None,
                 "min": 0.0,
                 "max": 0.5,
-                "step": 0.005,
-                "format": "%.3f",
-                "label": "Ore calculator: reprocessing tax",
-                "help": "The facility's reprocessing tax (a fraction), charged on the estimated value of the "
-                        "minerals produced.",
+                "step": 0.0005,
+                "format": "%.4f",
+                "label": "Ore calculator: reprocessing tax (effective rate)",
+                "help": "The effective reprocessing tax (a fraction), charged on the estimated value of the "
+                        "minerals produced. At an NPC station, empty uses the station's SDE base tax; your "
+                        "standings lower it, so set the rate you actually pay here (after standings). At a player "
+                        "structure the owner sets it, so it is required.",
             },
         },
     },
@@ -777,6 +790,8 @@ class AdminSettingsManager:
     @staticmethod
     def _coerce(value: Any, spec: dict[str, Any]) -> Any:
         typ = spec["type"]
+        if spec.get("optional") and (value is None or (isinstance(value, str) and not value.strip())):
+            return None  # an optional setting that is not set
         if typ == "int":
             if isinstance(value, str):
                 value = value.strip()
