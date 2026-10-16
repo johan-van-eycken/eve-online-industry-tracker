@@ -11,11 +11,10 @@ group). The rig's security multiplier for the profile's band
 (domain.security_band) is applied inside the producer's
 _profile_rig_reduction, so the planner gets it with no code of its own.
 
-Where the producer would over-apply a rig bonus to a sub-component (the
-aggregate structure_rig_material_bonus of a profile with no per-effect rig
-entries, which names no group), this module is stricter.
-When the component cannot be classified, only "All" rigs apply: an over-buy
-is recoverable, an under-buy stalls the job.
+A profile with only the aggregate structure_rig_material_bonus (no
+per-effect rig entries) names no rig: neither the producer nor this module
+applies it (Task 15 M1). When the component cannot be classified, only "All"
+rigs apply: an over-buy is recoverable, an under-buy stalls the job.
 """
 from __future__ import annotations
 
@@ -86,9 +85,8 @@ def sub_job_facility_reductions(profile: Any, component_entry: Any) -> dict[str,
     - structure: the producer's _profile_base_reduction.
     - rig: the producer's _profile_rig_reduction for the component's rig
       groups, called only when a per-effect rig entry covers one of them or "All".
-      The producer's helper alone would over-apply: with no group it accepts
-      every rig, and a profile with no per-effect entries falls back to the
-      aggregate structure_rig_material_bonus, which names no group.
+      The producer's helper alone would over-apply with no group (it then
+      accepts every rig).
 
     rig_applicability: "applies", "not_covered" (rigs exist, none for this
     group), "no_rigs", "no_profile", or "unknown" (the component's group is

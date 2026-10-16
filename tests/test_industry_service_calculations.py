@@ -76,10 +76,10 @@ def _build_service(
     service._load_decryptor_options = MethodType(  # type: ignore[attr-defined]
         lambda self: (NO_DECRYPTOR,), service,
     )
-    # Invention chance: one loaded, untrained pilot (factor exactly 1.0, so
-    # every chance is the SDE base chance and no number moves) and identifiable
-    # invention skills, like real SDE rows. No skills-unknown WARNING on every
-    # refresh; the fallback branches have their own tests, which override these.
+    # Invention chance: one loaded, untrained pilot and identifiable invention
+    # skills, like real SDE rows. The pilot cannot run the invention (Task 15
+    # I3), so every chance is the SDE base chance and no number moves; the
+    # skilled branches have their own tests, which override these.
     for row in blueprint_rows:
         invention_job = row.get("invention_job") if isinstance(row, dict) else None
         if isinstance(invention_job, dict) and not invention_job.get("skill_entries"):
@@ -2208,12 +2208,15 @@ def test_the_best_inventors_skills_raise_the_chance(monkeypatch) -> None:
     assert chance["note"] is None
 
 
-def test_an_untrained_corp_is_a_known_factor_of_one(monkeypatch) -> None:
+def test_an_untrained_corp_cannot_run_the_invention_so_the_base_chance_is_used(monkeypatch) -> None:
+    """Task 15 I3: a pilot with none of the invention skills cannot run it, so
+    it is never the inventor: the SDE base chance, with the reason."""
     mj = _skilled_overview(monkeypatch, levels={1: {}})[5002]["manufacturing_job"]
 
-    assert mj["invention_chance"]["skill_factor"] == 1.0
-    assert mj["invention_chance"]["skills_unknown_reason"] is None
-    assert mj["invention_material_cost"] == pytest.approx(40.0)
+    assert mj["invention_chance"]["skill_factor"] is None
+    assert mj["invention_chance"]["inventor_character_id"] is None
+    assert mj["invention_chance"]["skills_unknown_reason"] == NO_QUALIFYING_INVENTOR_REASON
+    assert mj["invention_material_cost"] == pytest.approx(40.0)  # base 0.5
 
 
 def test_unloaded_skills_fall_back_to_the_base_chance_with_a_reason(monkeypatch, caplog) -> None:
@@ -2575,7 +2578,7 @@ def test_an_unknown_sell_price_picks_the_cheapest_per_unit_and_says_so(monkeypat
     assert choice["type_id"] == 34201
     assert choice["criterion"] == "cost_per_unit"
     assert choice["fallback_reason"] == "sell price unknown: chose lowest cost per unit"
-    assert choice["reason"].endswith("; sell price unknown: chose lowest cost per unit")
+    assert "; sell price unknown: chose lowest cost per unit" in choice["reason"]
     assert choice["cost_per_unit"] == pytest.approx(_ACC_CYCLE_COST / 11)
     assert choice["baseline_cost_per_unit"] == pytest.approx(89.0)
     costs = {c["type_id"]: c["cost_per_unit"] for c in choice["candidates"]}

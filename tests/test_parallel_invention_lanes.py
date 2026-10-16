@@ -126,7 +126,8 @@ def test_weaker_lanes_count_at_their_own_chance():
     p_best, p_alt = 0.34 * (1 + 10 / 30 + 5 / 40), 0.34 * (1 + 2 / 30 + 1 / 40)
     assert costs["best_inventor_whole_attempts"] == 61
     assert costs["best_inventor_expected_attempts"] == pytest.approx(30 / p_best)  # 60.50
-    assert costs["whole_attempts"] == costs["lane_whole_attempts"] == parallel["lane_whole_jobs"] == 80
+    assert costs["whole_attempts"] == parallel["lane_whole_jobs"] == 80
+    assert "lane_whole_attempts" not in costs
     # Expected: 30 BPCs x 80 / (4 x p_best + 76 x p_alt) = 79.49.
     assert costs["runs"] == pytest.approx(30 * 80 / (4 * p_best + 76 * p_alt))
     assert costs["runs"] == pytest.approx(79.49, abs=0.01)
@@ -213,7 +214,6 @@ def test_a_dc_ii_style_example_with_a_known_whole_attempt_count():
     assert costs["success_probability"] == pytest.approx(0.34 * (1 + 8 / 30 + 4 / 40))
     assert costs["whole_attempts"] == 7
     assert costs["elapsed_parallel"]["lanes"] == 5
-    assert costs["lane_whole_attempts"] == 7
     # Every lane at the same chance: the lane expected attempts equal the
     # best inventor's, 3 / 0.4647 = 6.456 (fix round 2: unchanged).
     assert costs["runs"] == pytest.approx(costs["best_inventor_expected_attempts"])

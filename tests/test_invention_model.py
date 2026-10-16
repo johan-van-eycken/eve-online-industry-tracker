@@ -228,7 +228,7 @@ def test_warn_once_is_safe_across_worker_threads(caplog):
 
 
 def test_the_chance_payload_names_skills_and_the_floored_chance():
-    context = _context({5: {_HEP: 1}})
+    context = _context({5: {_HEP: 1, _CSE: 1, _CALDARI_ENC: 1}})
     chance = im.resolve_invention_chance(context, blueprint_type_id=9002, skill_entries=_BANTAM_LIKE,
                                          base_probability=0.3, decryptor=im.NO_DECRYPTOR)
     payload = im.invention_chance_payload(chance, effective_probability=0.31)

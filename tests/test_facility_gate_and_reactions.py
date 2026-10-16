@@ -378,36 +378,20 @@ def test_the_separate_security_reader_is_gone():
     assert not hasattr(_producer(), "_profile_system_security_status")
 
 
-# --- M2: the aggregate rig bonus fallback ---------------------------------------------
+# --- M2 (superseded by Task 15 M1): the aggregate rig bonus is never applied ---------
 
-@pytest.mark.parametrize("band, multiplier", [
-    ("high", 0.1), ("low", 1.9), ("null", 0.1), ("wormhole", 0.1), (None, 0.1),
-])
-def test_the_aggregate_fallback_takes_the_smallest_multiplier_and_warns(band, multiplier, caplog):
+@pytest.mark.parametrize("band", ["high", "low", "null", "wormhole", None])
+def test_an_aggregate_only_profile_gets_no_rig_bonus_and_warns(band, caplog):
+    """Task 15 M1: the aggregate names no rig, so neither its groups nor its
+    security multiplier is known: no rig bonus in any band, with a WARNING."""
     S = _producer()
     profile = {"structure_rig_material_bonus": 0.037}
     if band is not None:
         profile["system_security_band"] = band
     with caplog.at_level(logging.WARNING):
         got = S._profile_rig_reduction(profile_payload=profile, activity="manufacturing", metric="material")
-    assert got == pytest.approx(0.037 * multiplier)
-    assert any("aggregate" in r.getMessage() for r in caplog.records)
-
-
-@_needs_sde
-def test_the_smallest_engineering_rig_multiplier_per_band_is_the_sdes(sde_session):
-    from sqlalchemy import text
-
-    from eve_online_industry_tracker.infrastructure.sde.rig_effects import get_rig_effects_for_type_ids
-
-    ids = [r[0] for r in sde_session.execute(text(
-        "SELECT t.id FROM types t JOIN groups g ON g.id = t.groupID WHERE t.published = 1 AND g.categoryID = 66 "
-        "AND json_extract(g.name, '$.en') LIKE 'Structure Engineering Rig%'")).fetchall()]
-    rigs = get_rig_effects_for_type_ids(sde_session, ids)
-    for band in sb.BANDS:
-        assert sb.ENGINEERING_RIG_MIN_MULTIPLIER[band] == min(
-            r["security_multipliers"][band] for r in rigs if r["security_multipliers"][band] is not None)
-    assert sb.ENGINEERING_RIG_MIN_MULTIPLIER_ANY_BAND == min(sb.ENGINEERING_RIG_MIN_MULTIPLIER.values())
+    assert got == 0.0
+    assert any("no rig ids" in r.getMessage() for r in caplog.records)
 
 
 def test_the_ui_rig_totals_are_scaled_for_the_band():
@@ -436,8 +420,8 @@ def test_the_ui_rig_totals_are_scaled_for_the_band():
 
 
 def test_the_ui_saves_the_raw_aggregate_and_the_producer_scales_it_once():
-    """The saved structure_rig_*_bonus is unscaled (the convention the producer's
-    aggregate fallback expects); only the displayed totals are band-scaled."""
+    """The saved structure_rig_*_bonus is unscaled; only the displayed totals
+    are band-scaled. The producer never applies the aggregate (Task 15 M1)."""
     from streamlit_ui.pages import industry_profiles as page
 
     rig_bonus_map = {45544: {"type_id": 45544, "material_reduction": 0.037, "time_reduction": 0.0,
@@ -450,14 +434,13 @@ def test_the_ui_saves_the_raw_aggregate_and_the_producer_scales_it_once():
                      "structure_rig_cost_bonus": 0.0}
     # Displayed in lowsec: 3.7 % x 1.9.
     assert page._compute_rig_bonuses([45544], rig_bonus_map, security_band="low")[0] == pytest.approx(0.0703)
-    # The producer reads the raw aggregate and applies the band minimum once.
+    # A profile with only the saved aggregate (no rig ids): no rig bonus.
     S = _producer()
-    for band, expected in (("low", 0.037 * 1.9), ("high", 0.0037), (None, 0.0037)):
+    for band in ("low", "high", None):
         profile = {**saved}
         if band:
             profile["system_security_band"] = band
-        assert S._profile_rig_reduction(profile_payload=profile, activity="manufacturing", metric="material") == (
-            pytest.approx(expected))
+        assert S._profile_rig_reduction(profile_payload=profile, activity="manufacturing", metric="material") == 0.0
 
 
 def test_the_ui_profile_context_keeps_cost_indices_when_solar_systems_fail(monkeypatch, caplog):

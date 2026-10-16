@@ -13,7 +13,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     prepare_shared_industry_snapshot_page,
     render_pricing_batch_panel,
 )
-from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, invention_summary_lines, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name
+from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, invention_summary_lines, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name, total_cost_label
 from streamlit_ui.components.webpage_ui import require_aggrid
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
@@ -89,7 +89,7 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
     with st.expander("Why profitable", expanded=False):
         metric_col_1, metric_col_2, metric_col_3, metric_col_4 = st.columns(4)
         metric_col_1.metric("Net Proceeds", f"{float(selected_row.get('net_proceeds') or 0.0):,.2f}" if selected_row.get("net_proceeds") is not None else "N/A")
-        metric_col_2.metric("Total Cost", f"{float((manufacturing_job or {}).get('total_cost') or 0.0):,.2f}" if manufacturing_job.get("total_cost") is not None else "N/A")
+        metric_col_2.metric("Total Cost", total_cost_label(manufacturing_job))
         metric_col_3.metric("Profit", f"{float(selected_row.get('profit_amount') or 0.0):,.2f}" if selected_row.get("profit_amount") is not None else "N/A")
         metric_col_4.metric("Confidence", str(selected_row.get("pricing_confidence") or "N/A"))
 

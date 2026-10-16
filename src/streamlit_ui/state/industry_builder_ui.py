@@ -180,6 +180,8 @@ def tree_node_icon_url(source_row: dict[str, Any], node: dict[str, Any]) -> str:
 
 
 ASSUMES_T2_BPO_MARKER = "assumes T2 BPO"
+#: The row's total cost leaves out job fees the producer could not price.
+JOB_FEES_UNKNOWN_MARKER = "job fees unknown"
 
 
 def row_assumes_owned_t2_bpo(row: dict[str, Any]) -> bool:
@@ -226,9 +228,27 @@ def estimated_item_value_cell(activity_payload: dict[str, Any]) -> str:
 
 def pricing_confidence_cell(pricing_confidence: Any, manufacturing_job: dict[str, Any]) -> Any:
     """The grid's Pricing Confidence cell; flagged rows get a visible marker."""
-    if pricing_confidence and manufacturing_job.get("assumes_owned_t2_bpo"):
-        return f"{pricing_confidence} · {ASSUMES_T2_BPO_MARKER}"
-    return pricing_confidence
+    if not pricing_confidence:
+        return pricing_confidence
+    markers = [
+        marker for marker, flagged in (
+            (ASSUMES_T2_BPO_MARKER, manufacturing_job.get("assumes_owned_t2_bpo")),
+            (JOB_FEES_UNKNOWN_MARKER, manufacturing_job.get("job_fee_unknown_reasons")),
+        ) if flagged
+    ]
+    return " · ".join([str(pricing_confidence), *markers]) if markers else pricing_confidence
+
+
+def total_cost_label(manufacturing_job: dict[str, Any]) -> str:
+    """The drilldown's Total Cost: "N/A" when unknown, and "≥ X (job fees
+    unknown)" when the producer left unpriced job fees out (a lower bound,
+    never shown as exact)."""
+    total = manufacturing_job.get("total_cost")
+    if total is None:
+        return "N/A"
+    if manufacturing_job.get("total_cost_excludes_unknown_job_fees"):
+        return f"≥ {float(total):,.2f} ({JOB_FEES_UNKNOWN_MARKER})"
+    return f"{float(total):,.2f}"
 
 
 @st.cache_data(ttl=300, show_spinner=False)

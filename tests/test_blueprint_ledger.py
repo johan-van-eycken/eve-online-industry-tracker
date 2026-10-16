@@ -769,13 +769,12 @@ def test_the_used_by_wording_is_never_built_from_an_empty_holder_list():
 
 
 def test_p2_the_copy_decision_uses_the_lanes_whole_attempts_when_known():
-    """The producer's lanes need 6 attempts (lane_whole_attempts), the best
-    inventor alone 4: a 4-run BPC does not cover the lanes, so it copies."""
+    """The producer's lanes need 6 attempts (whole_attempts, the lanes' total
+    when they run), the best inventor alone 4: a 4-run BPC does not cover
+    the lanes, so it copies."""
     row = _t2_row()
     row["manufacturing_job"]["activity_breakdown"]["invention"].update({
-        # whole_attempts as an older row wrote it (the best inventor's): the
-        # lanes' figure wins when present.
-        "lane_whole_attempts": 6, "whole_attempts": 4, "best_inventor_whole_attempts": 4,
+        "whole_attempts": 6, "best_inventor_whole_attempts": 4,
         "elapsed_parallel": {"lanes": 2, "lanes_used": 2, "pilots_used": 2, "sequential_reason": None},
     })
     t2 = _dec(row, 12345, "Widget II", 2.0, 2, "invention")

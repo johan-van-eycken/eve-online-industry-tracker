@@ -30,13 +30,6 @@ HIGHSEC_MIN_SECURITY = 0.45
 _J_SPACE_REGION_IDS = range(11_000_000, 12_000_000)
 
 
-# The smallest multiplier any engineering rig (not reactor) has per band, from
-# the SDE (test_the_smallest_engineering_rig_multiplier_per_band_is_the_sdes):
-# the Thukker rigs' 0.1 in highsec, nullsec and wormhole space, 1.9 in lowsec.
-# For a rig bonus whose rigs are unknown (the aggregate structure_rig_*_bonus).
-ENGINEERING_RIG_MIN_MULTIPLIER: dict[str, float] = {HIGH: 0.1, LOW: 1.9, NULL: 0.1, WORMHOLE: 0.1}
-ENGINEERING_RIG_MIN_MULTIPLIER_ANY_BAND: float = 0.1
-
 
 def _float(value: Any) -> float | None:
     try:

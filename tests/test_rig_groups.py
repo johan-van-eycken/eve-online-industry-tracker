@@ -271,18 +271,17 @@ def test_two_rigs_covering_the_product_both_apply():
                                     manufacturing_group=frigate) == pytest.approx(1 - 0.98 * 0.98)
 
 
-def test_the_aggregate_applies_only_to_a_profile_without_per_effect_rigs():
-    """The aggregate names no rig: it takes the smallest engineering-rig
-    security multiplier for the band (lowsec 1.9; 0.1 when the band is
-    unknown), tests/test_facility_gate_and_reactions.py."""
+def test_the_aggregate_is_never_applied():
+    """Task 15 M1 (supersedes Task 11 I1 / 11b M2): the aggregate names no
+    rig, so a profile with no per-effect rigs gets no rig bonus, in any band."""
     S = _producer()
     groups = S._manufacturing_rig_groups(_entry(508, "Missile Launcher Heavy", 7, "Module"))
     aggregate_only = {"structure_rig_material_bonus": 0.05, "system_security_band": "low"}
     assert S._profile_rig_reduction(profile_payload=aggregate_only, activity="manufacturing", metric="material",
-                                    manufacturing_group=groups) == pytest.approx(0.05 * 1.9)
+                                    manufacturing_group=groups) == 0.0
     no_effects = {"structure_rig_material_bonus": 0.05, "structure_rigs": [{"type_id": 1, "effects": []}]}
     assert S._profile_rig_reduction(profile_payload=no_effects, activity="manufacturing", metric="material",
-                                    manufacturing_group=groups) == pytest.approx(0.005)
+                                    manufacturing_group=groups) == 0.0
 
 
 # --- the table against CCP's filters (Hoboleaks snapshot) -------------------------

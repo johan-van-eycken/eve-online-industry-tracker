@@ -313,15 +313,26 @@ def resolve_invention_chance(
 ) -> InventionChance:
     """EVE's invention chance for the corp's best inventor of this blueprint:
     base x (1 + (sci1 + sci2)/30 + enc/40) x decryptor multiplier, capped at 1.
+    Only a pilot who can run the invention (can_run_invention: every
+    required science and encryption skill trained) is ranked: the same
+    pilots the parallel lanes count.
 
-    Skills unknown: the base chance (times the decryptor), one WARNING per
-    reason per refresh, and the reason on the result. Never a guessed level."""
+    Skills unknown, or no pilot can run it (NO_QUALIFYING_INVENTOR_REASON):
+    the base chance (times the decryptor), one WARNING per reason per
+    refresh, and the reason on the result. Never a guessed level."""
     multiplier = float(decryptor.probability_multiplier)
+    skill_entries = [e for e in (skill_entries or []) if isinstance(e, Mapping)]
     skill_set, reason = invention_skill_set(skill_entries, context.encryption_skill_type_ids)
     choice: InventorChoice | None = None
     if skill_set is not None:
+        levels_by_character = context.inventor_skill_levels_by_character_id
+        required = required_invention_skill_levels(skill_set, skill_entries)
+        qualifying = {
+            cid: levels for cid, levels in levels_by_character.items() if can_run_invention(required, levels)
+        }
         choice = best_inventor(
-            skill_set, context.inventor_skill_levels_by_character_id, empty_reason=context.no_inventor_reason,
+            skill_set, qualifying,
+            empty_reason=(NO_QUALIFYING_INVENTOR_REASON if levels_by_character else context.no_inventor_reason),
         )
         reason = choice.unknown_reason
     if reason is not None or choice is None or choice.skill_factor is None:
@@ -512,6 +523,8 @@ def invention_lanes(
     Unknown slot data or skills: sequential, with the reason."""
     if context.slot_capacity_by_character_id is None:
         return _sequential(NO_SLOT_DATA_REASON)
+    if chance is not None and chance.skills_unknown_reason == NO_QUALIFYING_INVENTOR_REASON:
+        return _sequential(NO_QUALIFYING_INVENTOR_REASON)
     if chance is None or chance.skill_set is None or chance.skills_unknown_reason is not None:
         why = (chance.skills_unknown_reason if chance is not None else None) or "the invention skills are unknown"
         return _sequential(f"invention skills unknown ({why})")

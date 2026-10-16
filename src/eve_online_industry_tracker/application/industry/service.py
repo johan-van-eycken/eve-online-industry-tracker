@@ -77,6 +77,7 @@ from eve_online_industry_tracker.application.industry.job_cost import (
     job_install_cost,
     profile_facility_tax,
     research_level_multiplier,
+    RESEARCH_RANK1_LEVEL_SECONDS,
 )
 from eve_online_industry_tracker.application.industry.research_time import (
     research_skill_reductions,
@@ -114,6 +115,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     invention_probability,
     quiet_warnings,
     resolve_invention_chance,
+    warnings_are_quiet,
     # Aliased: _expected_invention_costs has a local named invention_attempts.
     invention_attempts as expected_and_whole_invention_attempts,
     select_best_decryptor,
@@ -323,18 +325,6 @@ class IndustryService:
         "Mass Production",
         "Advanced Mass Production",
     )
-    _RESEARCH_RANK1_TARGET_DURATION_SECONDS: dict[int, int] = {
-        1: 105,
-        2: 250,
-        3: 595,
-        4: 1414,
-        5: 3360,
-        6: 8000,
-        7: 19000,
-        8: 45255,
-        9: 107700,
-        10: 256000,
-    }
     _ACTIVITY_COST_INDEX_ALIASES: dict[str, tuple[str, ...]] = {
         "manufacturing": ("manufacturing",),
         "reaction": ("reaction",),
@@ -545,9 +535,31 @@ class IndustryService:
 
     @staticmethod
     def _warn_gate_once(warned: set[str], prefix: str, decision: Any) -> None:
-        if decision.uncertain and decision.reason and decision.reason not in warned:
-            warned.add(decision.reason)
+        if decision.uncertain and decision.reason and IndustryService._first_warning(warned, decision.reason):
             logger.warning("%s: %s", prefix, decision.reason)
+
+    @staticmethod
+    def _first_warning(warned: set[Any], key: Any) -> bool:
+        """True the first time `key` is met in this refresh (log it now).
+        While warnings are quiet (a thrown-away plan, quiet_warnings) nothing
+        is registered, so the plan that is kept still logs it, as
+        InventionContext.warn_once does."""
+        if warnings_are_quiet() or key in warned:
+            return False
+        warned.add(key)
+        return True
+
+    @classmethod
+    def _reset_once_warnings(cls) -> None:
+        """Scope the once-only WARNING sets to one refresh: cleared when an
+        overview is computed (industry_manufacturing_product_overview), so a
+        long-running process logs a still-missing input again each refresh."""
+        for warned in (
+            IndustryService._facility_gate_warned, IndustryService._reaction_gate_warned,
+            IndustryService._unclassified_rig_group_warned, IndustryService._rig_security_warned,
+            IndustryService._aggregate_rig_warned,
+        ):
+            warned.clear()
 
     @classmethod
     def _reaction_gate(cls, profile_payload: dict[str, Any] | None) -> Any:
@@ -1953,11 +1965,6 @@ class IndustryService:
                 market_hub=market_hub,
                 product_price_side=product_price_side,
             )
-        fee_rates = fee_context.get("rates") or {}
-        sales_tax_fraction = self._as_float(fee_rates.get("sales_tax_fraction"))
-        broker_fee_fraction = self._as_float(fee_rates.get("broker_fee_fraction"))
-        broker_fee_applies = bool(fee_context.get("broker_fee_applies"))
-
         for row in product_rows:
             if not isinstance(row, dict):
                 continue
@@ -1980,28 +1987,22 @@ class IndustryService:
                 continue
 
             gross_sale_value = float(market_unit_price) * float(product_quantity)
-            broker_fee_amount = (
-                float(gross_sale_value) * float(broker_fee_fraction)
-                if broker_fee_applies and broker_fee_fraction is not None
-                else 0.0
+            broker_fee_amount, sales_tax_amount, net_proceeds, net_unknown_reason = self._sale_fee_amounts(
+                gross_sale_value, fee_context,
             )
-            sales_tax_amount = (
-                float(gross_sale_value) * float(sales_tax_fraction)
-                if sales_tax_fraction is not None
-                else None
-            )
-            net_proceeds = None
-            if sales_tax_amount is not None:
-                net_proceeds = float(gross_sale_value) - float(broker_fee_amount or 0.0) - float(sales_tax_amount)
 
             manufacturing_job["gross_sale_value"] = gross_sale_value
-            manufacturing_job["broker_fee_amount"] = broker_fee_amount if broker_fee_fraction is not None else None
+            manufacturing_job["broker_fee_amount"] = broker_fee_amount
             manufacturing_job["sales_tax_amount"] = sales_tax_amount
             manufacturing_job["net_proceeds"] = net_proceeds
             manufacturing_job["market_fee_context"] = fee_context
+            if net_unknown_reason is not None:
+                manufacturing_job["net_proceeds_unknown_reason"] = net_unknown_reason
+            else:
+                manufacturing_job.pop("net_proceeds_unknown_reason", None)
 
             row["gross_sale_value"] = gross_sale_value
-            row["broker_fee_amount"] = broker_fee_amount if broker_fee_fraction is not None else None
+            row["broker_fee_amount"] = broker_fee_amount
             row["sales_tax_amount"] = sales_tax_amount
             row["net_proceeds"] = net_proceeds
 
@@ -2624,6 +2625,26 @@ class IndustryService:
 
             if manufacturing_job.get("assumes_owned_t2_bpo"):
                 reasons.append(self._ASSUMES_OWNED_T2_BPO_REASON)
+
+            job_fee_unknown_reasons = manufacturing_job.get("job_fee_unknown_reasons") or []
+            if job_fee_unknown_reasons:
+                # I1: the cost leaves these fees out, so the profit is
+                # overstated: never High, whatever the market says.
+                if confidence == "High":
+                    confidence = "Medium"
+                reasons.append(
+                    f"Job fees unknown for: {'; '.join(str(r) for r in job_fee_unknown_reasons)} — "
+                    f"left out of the total cost, so the cost is understated."
+                )
+            rig_bonus_unknown_reason = manufacturing_job.get("rig_bonus_unknown_reason")
+            if rig_bonus_unknown_reason:
+                reasons.append(
+                    f"{str(rig_bonus_unknown_reason)[:1].upper()}{str(rig_bonus_unknown_reason)[1:]} — "
+                    f"the material cost is overstated, never an under-buy."
+                )
+            net_proceeds_unknown_reason = manufacturing_job.get("net_proceeds_unknown_reason")
+            if net_proceeds_unknown_reason:
+                reasons.append(f"Net proceeds unknown: {net_proceeds_unknown_reason}.")
 
             manufacturing_job["pricing_confidence"] = confidence
             manufacturing_job["pricing_confidence_reasons"] = reasons
@@ -3637,8 +3658,7 @@ class IndustryService:
         facility_tax, reason = profile_facility_tax(profile_payload, scc=scc)
         if reason is not None and isinstance(profile_payload, dict):
             warned = self.__dict__.setdefault("_facility_tax_warned", set())
-            if reason not in warned:
-                warned.add(reason)
+            if self._first_warning(warned, reason):
                 logger.warning("Job install fees unknown: %s", reason)
         return JobSurchargeRates(facility_tax=facility_tax, scc=scc, research_scc=research_scc, unknown_reason=reason)
 
@@ -3667,8 +3687,7 @@ class IndustryService:
         entry = product_entry if isinstance(product_entry, dict) else {}
         key = (activity, entry.get("type_id"), entry.get("group_id"), entry.get("group_name"),
                entry.get("category_id"), entry.get("category_name"))
-        if key not in IndustryService._unclassified_rig_group_warned:
-            IndustryService._unclassified_rig_group_warned.add(key)
+        if IndustryService._first_warning(IndustryService._unclassified_rig_group_warned, key):
             logger.warning(
                 "No rig group for type %s (%s): its SDE group/category is unknown; only \"All\" rigs apply",
                 entry.get("type_id"), entry.get("type_name") or "unnamed",
@@ -3698,9 +3717,9 @@ class IndustryService:
         and a WARNING. The one reduction path of the producer and the daily
         planner (facility_bonus).
 
-        The aggregate structure_rig_*_bonus is read only for a profile with
-        no per-effect rig entries at all, times the smallest engineering-rig
-        multiplier for the band, with a WARNING."""
+        The aggregate structure_rig_*_bonus is never applied: it names no
+        rig, so a profile with only the aggregate gets no rig bonus, with a
+        once-per-refresh WARNING (_aggregate_only_rig_reason)."""
         if not isinstance(profile_payload, dict):
             return 0.0
         valid_activities = set(cls._ACTIVITY_EFFECT_ALIASES.get(activity, (activity,)))
@@ -3745,41 +3764,49 @@ class IndustryService:
 
         if reductions:
             return cls._combine_reductions(reductions)
-        has_per_effect_rigs = any(
+        # No per-effect rig covers this product: no rig bonus. The aggregate
+        # structure_rig_*_bonus is no fallback. With per-effect rigs it
+        # combines those same rigs (an under-buy); alone it names no rig, so
+        # neither its groups nor its security multiplier is known (Task 15 M1,
+        # superseding Task 11 I1 / 11b M2): no rig bonus, the same as the
+        # daily planner's facility_bonus (an over-buy, never an under-buy),
+        # with a WARNING here and a row reason (_aggregate_only_rig_reason).
+        if (
+            activity == "manufacturing"
+            and cls._normalize_fraction(profile_payload.get(f"structure_rig_{metric}_bonus")) > 0.0
+            and cls._aggregate_only_rig_reason(profile_payload) is not None
+        ):
+            if IndustryService._first_warning(IndustryService._aggregate_rig_warned, metric):
+                logger.warning(
+                    "Rig bonus: %s (aggregate structure_rig_%s_bonus %s ignored)",
+                    cls._AGGREGATE_ONLY_RIG_REASON, metric,
+                    profile_payload.get(f"structure_rig_{metric}_bonus"),
+                )
+        return 0.0
+
+    _AGGREGATE_ONLY_RIG_REASON = (
+        "rig bonus unknown: profile has no rig ids, only the aggregate structure rig bonus, "
+        "so no rig bonus applies (re-save the profile with its rigs)"
+    )
+
+    @classmethod
+    def _aggregate_only_rig_reason(cls, profile_payload: dict[str, Any] | None) -> str | None:
+        """_AGGREGATE_ONLY_RIG_REASON when the profile has a positive
+        aggregate structure_rig_*_bonus but no per-effect rig entries (the
+        producer then applies no rig bonus); None otherwise."""
+        if not isinstance(profile_payload, dict):
+            return None
+        if any(
             isinstance(rig, dict) and any(isinstance(effect, dict) for effect in (rig.get("effects") or []))
             for rig in profile_payload.get("structure_rigs") or []
-        )
-        if has_per_effect_rigs:
-            # The per-effect rigs say which groups they cover and none covers
-            # this product. The aggregate structure_rig_*_bonus the UI saves
-            # combines those same rigs, so it is no fallback (an under-buy).
-            return 0.0
-
-        aggregate_key_by_metric = {
-            "material": "structure_rig_material_bonus",
-            "time": "structure_rig_time_bonus",
-            "cost": "structure_rig_cost_bonus",
-        }
-        if activity != "manufacturing":
-            return 0.0
-        aggregate = cls._normalize_fraction(profile_payload.get(aggregate_key_by_metric.get(metric, "")))
-        if aggregate <= 0.0:
-            return 0.0
-        # The aggregate names no rig, so its security multiplier is unknown:
-        # the smallest any engineering rig has in the band (in any band when
-        # the band is unknown), so the bonus is never over-stated.
-        band, band_reason = _security_band.profile_security_band(profile_payload)
-        multiplier = (_security_band.ENGINEERING_RIG_MIN_MULTIPLIER[band] if band is not None
-                      else _security_band.ENGINEERING_RIG_MIN_MULTIPLIER_ANY_BAND)
-        reason = (
-            f"the profile has no per-rig data, only the aggregate structure_rig_{metric}_bonus; "
-            f"its rigs' security multiplier is unknown, so the smallest an engineering rig has "
-            f"{'in ' + band + ' space' if band else 'in any band (' + str(band_reason) + ')'} ({multiplier:g}) applies"
-        )
-        if reason not in IndustryService._aggregate_rig_warned:
-            IndustryService._aggregate_rig_warned.add(reason)
-            logger.warning("Rig bonus: %s", reason)
-        return min(aggregate * multiplier, 0.99)
+        ):
+            return None
+        if any(
+            cls._normalize_fraction(profile_payload.get(f"structure_rig_{metric}_bonus")) > 0.0
+            for metric in ("material", "time", "cost")
+        ):
+            return cls._AGGREGATE_ONLY_RIG_REASON
+        return None
 
     # Rig security-multiplier / aggregate-fallback reasons already logged.
     _rig_security_warned: set[str] = set()
@@ -3787,8 +3814,7 @@ class IndustryService:
 
     @classmethod
     def _warn_rig_security_once(cls, reason: str) -> None:
-        if reason not in IndustryService._rig_security_warned:
-            IndustryService._rig_security_warned.add(reason)
+        if IndustryService._first_warning(IndustryService._rig_security_warned, reason):
             logger.warning("Rig bonus security multiplier: %s", reason)
 
     @classmethod
@@ -4305,12 +4331,34 @@ class IndustryService:
             structure_cost_reduction=structure_cost_reduction, surcharge_rates=surcharge_rates,
         )
 
+    #: Row labels of the activities whose fee can be unknown (I1).
+    _FEE_LABELS: dict[str, str] = {"research_material": "ME research", "research_time": "TE research"}
+
+    @staticmethod
+    def _job_fee_unknown_entries(*fees: tuple[str, dict[str, Any] | None, bool | None]) -> list[str]:
+        """"<label> (<why>)" for each (label, fee payload, has work) whose
+        fee is unknown (total_job_cost None). `has work` None reads it off the
+        payload: a job with no base duration (0 runs or attempts) charges no
+        fee, so its None is not unknown. An activity whose attempt count is
+        unknown (cost_unknown_reason) is named by that reason elsewhere."""
+        out: list[str] = []
+        for label, fee, has_work in fees:
+            if not isinstance(fee, dict) or fee.get("total_job_cost") is not None:
+                continue
+            if fee.get("cost_unknown_reason"):
+                continue
+            work = has_work if has_work is not None else float(fee.get("base_duration_seconds") or 0) > 0
+            if work:
+                out.append(f"{label} ({fee.get('fee_unknown_reason') or 'the fee could not be priced'})")
+        return out
+
     @classmethod
     def _research_target_duration_seconds(cls, *, level_one_duration_seconds: int, target_level: int) -> int:
         if level_one_duration_seconds <= 0 or target_level <= 0:
             return 0
-        rank = float(level_one_duration_seconds) / float(cls._RESEARCH_RANK1_TARGET_DURATION_SECONDS[1])
-        rank1_target_seconds = cls._RESEARCH_RANK1_TARGET_DURATION_SECONDS.get(int(target_level), 0)
+        # EVE's rank-1 level table, kept once in job_cost (it also sets the fee).
+        rank = float(level_one_duration_seconds) / float(RESEARCH_RANK1_LEVEL_SECONDS[1])
+        rank1_target_seconds = RESEARCH_RANK1_LEVEL_SECONDS.get(int(target_level), 0)
         return cls._round_duration_seconds(rank * float(rank1_target_seconds))
 
     @classmethod
@@ -4855,6 +4903,11 @@ class IndustryService:
         total_time_seconds = direct_duration_seconds
         total_job_cost = float(job_cost.get("total_job_cost") or 0.0)
         priced_job_count = 1 if job_cost.get("total_job_cost") is not None else 0
+        # Every fee of this plan (and its built children) that is unknown,
+        # carried up to the product row (I1): never read as 0 silently.
+        job_fee_unknown_reasons: list[str] = self._job_fee_unknown_entries(
+            (activity, job_cost, runs > 0),
+        )
         leaf_materials: list[dict[str, Any]] = []
         recursive_activity_breakdown: dict[str, Any] = {}
         prerequisite_nodes: list[dict[str, Any]] = []
@@ -4934,11 +4987,7 @@ class IndustryService:
 
         if include_copying_job and missing_blueprint_copy_runs > 0:
             base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0))
-            copy_process_value = (
-                float(per_run_material_eiv or 0.0) * missing_blueprint_copy_runs * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER))
-                if per_run_material_eiv is not None
-                else None
-            )
+            copy_process_value = self._copy_process_value(per_run_material_eiv, missing_blueprint_copy_runs)
             _copy_act = self._compute_activity_job(
                 activity="copying",
                 base_time_seconds=base_copy_time_seconds,
@@ -4955,6 +5004,7 @@ class IndustryService:
             if copying_job_cost.get("total_job_cost") is not None:
                 total_job_cost += float(copying_job_cost.get("total_job_cost") or 0.0)
                 priced_job_count += 1
+            job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(("copying", copying_job_cost, None)))
             recursive_activity_breakdown["copying"] = {
                 "activity": "copying",
                 "duration_seconds": copying_duration_seconds,
@@ -5009,6 +5059,9 @@ class IndustryService:
                 if research_job_cost.get("total_job_cost") is not None:
                     total_job_cost += float(research_job_cost.get("total_job_cost") or 0.0)
                     priced_job_count += 1
+                job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(
+                    (self._FEE_LABELS.get(activity_name, activity_name), research_job_cost, None),
+                ))
                 recursive_activity_breakdown[activity_name] = {
                     "activity": activity_name,
                     "duration_seconds": research_duration_seconds,
@@ -5164,6 +5217,7 @@ class IndustryService:
                     if child_plan.get("total_job_cost") is not None:
                         total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
                         priced_job_count += int(child_plan.get("priced_job_count") or 0)
+                    job_fee_unknown_reasons.extend(str(r) for r in (child_plan.get("job_fee_unknown_reasons") or []))
                     leaf_materials.extend([dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)])
                     elapsed_time_adjustment = self._absorb_nested_invention(
                         child_plan, expected_invention_materials=expected_invention_materials,
@@ -5376,6 +5430,7 @@ class IndustryService:
                 if invention_job_cost.get("total_job_cost") is not None:
                     total_job_cost += float(invention_job_cost.get("total_job_cost") or 0.0)
                     priced_job_count += 1
+                job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(("invention", invention_job_cost, None)))
                 recursive_activity_breakdown[f"invention:{blueprint_type_id}"] = nested_invention["breakdown"]
                 expected_invention_materials.extend(nested_invention["expected_invention_materials"])
                 invention_requirements.extend(nested_invention["invention_requirements"])
@@ -5424,6 +5479,9 @@ class IndustryService:
                     if source_copy_job_cost.get("total_job_cost") is not None:
                         total_job_cost += float(source_copy_job_cost.get("total_job_cost") or 0.0)
                         priced_job_count += 1
+                    job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(
+                        ("invention source copying", source_copy_job_cost, None),
+                    ))
                     recursive_activity_breakdown[f"copying:{source_blueprint_type_id}"] = nested_invention["source_copy_breakdown"]
                     prerequisite_nodes.append(
                         self._job_tree_node(
@@ -5511,6 +5569,7 @@ class IndustryService:
             "direct_job_cost": job_cost.get("total_job_cost"),
             "total_job_cost": (total_job_cost if priced_job_count > 0 else None),
             "priced_job_count": priced_job_count,
+            "job_fee_unknown_reasons": list(dict.fromkeys(job_fee_unknown_reasons)),
             "estimated_item_value": process_value,
             "estimated_item_value_priced_material_count": priced_material_count,
             "estimated_item_value_material_count": eiv_material_count,
@@ -5557,6 +5616,7 @@ class IndustryService:
         total_time_seconds = 0
         total_job_cost = 0.0
         priced_job_count = 0
+        job_fee_unknown_reasons: list[str] = []
         procurement_materials: list[dict[str, Any]] = []
         recursive_activity_breakdown: dict[str, Any] = {}
         tree_children: list[dict[str, Any]] = []
@@ -5799,6 +5859,7 @@ class IndustryService:
                 if child_plan.get("total_job_cost") is not None:
                     total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
                     priced_job_count += int(child_plan.get("priced_job_count") or 0)
+                job_fee_unknown_reasons.extend(str(r) for r in (child_plan.get("job_fee_unknown_reasons") or []))
                 procurement_materials.extend(
                     [dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)]
                 )
@@ -5938,6 +5999,7 @@ class IndustryService:
             "time_seconds": total_time_seconds,
             "job_cost": (total_job_cost if priced_job_count > 0 else None),
             "priced_job_count": priced_job_count,
+            "job_fee_unknown_reasons": list(dict.fromkeys(job_fee_unknown_reasons)),
             "procurement_materials": self._aggregate_material_entries(procurement_materials),
             "activity_breakdown": recursive_activity_breakdown,
             "tree_children": tree_children,
@@ -7551,7 +7613,7 @@ class IndustryService:
         if base_copy_time <= 0 or (has_invention_path and not matched_blueprint_originals):
             return None, []
 
-        costs = self._plan_activity_costs(ctx, activity="copying", base_time_seconds=base_copy_time, runs=max(0, missing_copy_runs), process_value=(float(per_run_material_eiv or 0.0) * max(0, missing_copy_runs) * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER)) if per_run_material_eiv is not None else None))
+        costs = self._plan_activity_costs(ctx, activity="copying", base_time_seconds=base_copy_time, runs=max(0, missing_copy_runs), process_value=self._copy_process_value(per_run_material_eiv, missing_copy_runs))
         bp_name = str(((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("type_name") or ((row.get("blueprint") or {}) if isinstance(row.get("blueprint"), dict) else {}).get("name") or blueprint_type_id or "Blueprint")
         costs["runs"] = max(0, missing_copy_runs)
         costs["estimated_item_value"] = per_run_material_eiv
@@ -7773,8 +7835,6 @@ class IndustryService:
             jobs_per_lane=lane_attempts, activity="invention", base_time_seconds=invention_base_time,
             whole_jobs=whole_attempts,
         )
-        # Kept for readers of round 1: the row's whole attempts.
-        costs["lane_whole_attempts"] = whole_attempts
         costs["duration_is_amortized"] = invention_attempts > 0
         if cost_unknown_reason is not None:
             costs["cost_unknown_reason"] = cost_unknown_reason
@@ -7840,7 +7900,7 @@ class IndustryService:
         source_copy_costs = compute_activity(
             activity="copying", base_time_seconds=source_base_time,
             runs=max(0, missing_source_runs),
-            process_value=(float(source_pv) * float(max(0, missing_source_runs)) * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER)) if source_pv is not None else None),
+            process_value=self._copy_process_value(source_pv, missing_source_runs),
         )
         source_copy_costs["job_duration_seconds"] = compute_activity(activity="copying", base_time_seconds=source_base_time, runs=1, process_value=None)["duration_seconds"]
         # The install fee of ONE source-copy run (D4): the planner's copy
@@ -7895,7 +7955,7 @@ class IndustryService:
             return None, "no priced EIV for the source copy (a material has no adjusted price)"
         fee = compute_activity(
             activity="copying", base_time_seconds=source_base_time, runs=1,
-            process_value=float(source_pv) * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER)),
+            process_value=self._copy_process_value(source_pv, 1),
         )
         total = fee.get("total_job_cost")
         return total, (None if total is not None else (fee.get("fee_unknown_reason") or "the copy fee could not be priced"))
@@ -8706,6 +8766,17 @@ class IndustryService:
         total = fee.get("total_job_cost")
         return total, (None if total is not None else (fee.get("fee_unknown_reason") or "the component fee could not be priced"))
 
+    def _copy_process_value(self, per_run_material_eiv: float | None, copied_runs: float) -> float | None:
+        """The job value of a copy job (job_cost.py): the blueprint's per-run
+        manufacturing EIV x the total copied runs x copy_cost_eiv_multiplier
+        (0.02). None when the EIV is unknown; 0 runs (or fewer) is 0."""
+        if per_run_material_eiv is None:
+            return None
+        return (
+            float(per_run_material_eiv) * max(0.0, float(copied_runs))
+            * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER))
+        )
+
     def _research_process_value(self, per_run_material_eiv: float | None, target_level: int) -> float | None:
         """The job value of a research job from level 0 to `target_level`:
         per-run material EIV x research_cost_eiv_multiplier (0.02) x EVE's
@@ -8897,12 +8968,12 @@ class IndustryService:
         invention_job = source.get("invention_job") if isinstance(source.get("invention_job"), dict) else {}
         target_entry = self._invention_target_entry(invention_job, blueprint_type_id)
         max_production_limit = int(manufacturing_job.get("max_production_limit") or 0)
-        evaluations: list[DecryptorEvaluation] = []
+        candidates: list[tuple[DecryptorOption, dict[str, Any] | None, str | None]] = []
         with quiet_warnings():
             for option in ctx.decryptor_options:
                 skip_reason = self._decryptor_price_skip_reason(ctx, option)
                 if skip_reason is not None:
-                    evaluations.append(DecryptorEvaluation(option, None, skip_reason))
+                    candidates.append((option, None, skip_reason))
                     continue
                 candidate = self._build_single_product_row(
                     ctx, row=row, raw_product=products[0], row_index=0, product_index=0,
@@ -8912,8 +8983,40 @@ class IndustryService:
                     ),
                     decryptor=option, fully_invented=True,
                 )
-                evaluations.append(self._cycle_evaluation(ctx, option, candidate))
-        return select_best_decryptor(evaluations)
+                candidates.append((option, candidate, None))
+        include_known_fees, fee_note = self._decryptor_fee_basis([c for _, c, skip in candidates if skip is None])
+        evaluations = [
+            DecryptorEvaluation(option, None, skip) if skip is not None
+            else self._cycle_evaluation(ctx, option, candidate, fees=("known" if include_known_fees else "none"))
+            for option, candidate, skip in candidates
+        ]
+        choice = select_best_decryptor(evaluations)
+        if fee_note is not None:
+            choice = dataclasses.replace(choice, reason=f"{choice.reason}; {fee_note}")
+        return choice
+
+    @staticmethod
+    def _decryptor_fee_basis(candidate_rows: list[dict[str, Any] | None]) -> tuple[bool, str | None]:
+        """How the decryptor candidates' job fees enter the comparison (I1):
+        (True, None) every fee is known; (True, note) the same fees are unknown
+        in every candidate (a profile-wide gap: the decryptor changes runs and
+        attempts, not which activity has an index), so the candidates compare
+        on their priced fees and the note says which were left out;
+        (False, note) the candidates lack different fees, so no fee is
+        compared at all (a like-for-like comparison of the rest)."""
+        sets = [
+            tuple((row.get("manufacturing_job") or {}).get("job_fee_unknown_reasons") or [])
+            for row in candidate_rows if isinstance(row, dict)
+        ]
+        if not any(sets):
+            return True, None
+        if len(set(sets)) == 1:
+            return True, f"job fees unknown for: {'; '.join(sets[0])} — left out of every candidate's cost"
+        union = list(dict.fromkeys(r for reasons in sets for r in reasons))
+        return False, (
+            f"job fees unknown for some candidates ({'; '.join(union)}) — "
+            f"every job fee left out of the comparison"
+        )
 
     @classmethod
     def _decryptor_price_skip_reason(cls, ctx: _ProductPlanningContext, option: DecryptorOption) -> str | None:
@@ -8926,28 +9029,51 @@ class IndustryService:
             return f"no market price for {option.type_name}"
         return None
 
-    _MARKET_FEES_UNKNOWN_FALLBACK_REASON = (
-        "sales tax unknown (no character to read Accounting from), so net proceeds are unknown: "
-        "chose lowest cost per unit"
-    )
+    _SALES_TAX_UNKNOWN_REASON = "sales tax unknown (no character to read Accounting from)"
+    _BROKER_FEE_UNKNOWN_REASON = "broker fee unknown (no character to read Broker Relations and standings from)"
+
+    @classmethod
+    def _sale_fee_amounts(
+        cls, gross_sale_value: float, fee_context: dict[str, Any] | None,
+    ) -> tuple[float | None, float | None, float | None, str | None]:
+        """(broker fee, sales tax, net proceeds, why net is unknown) of a
+        gross sale: the one sale-proceeds formula (the rows' net_proceeds and
+        the decryptor comparison's _net_sale_fraction).
+
+        net = gross - broker fee (when it applies: a sell order) - sales tax.
+        An unknown sales tax, or an unknown broker fee that applies, leaves
+        net unknown with the reason: never priced at 0. A broker fee that
+        does not apply is 0 whether or not its rate is known; the broker fee
+        amount is shown only when its rate is known.
+
+        What the fee context cannot tell: an Accounting / Broker Relations
+        skill or a standing it does not find reads as 0, the highest tax and
+        fee, so profit is understated, never overstated."""
+        context = fee_context or {}
+        rates = context.get("rates") or {}
+        tax = cls._as_float(rates.get("sales_tax_fraction"))
+        broker = cls._as_float(rates.get("broker_fee_fraction"))
+        applies = bool(context.get("broker_fee_applies"))
+        gross = float(gross_sale_value)
+        broker_amount = (gross * float(broker) if applies else 0.0) if broker is not None else None
+        tax_amount = gross * float(tax) if tax is not None else None
+        if tax_amount is None:
+            return broker_amount, None, None, cls._SALES_TAX_UNKNOWN_REASON
+        if applies and broker_amount is None:
+            return None, tax_amount, None, cls._BROKER_FEE_UNKNOWN_REASON
+        return broker_amount, tax_amount, gross - float(broker_amount or 0.0) - tax_amount, None
 
     @classmethod
     def _net_sale_fraction(cls, fee_context: dict[str, Any]) -> float | None:
         """The share of the gross sale value the corp keeps, as
-        _enrich_product_rows_with_sale_proceeds computes net_proceeds:
-        1 - broker fee (when it applies) - sales tax. None when the sales tax
-        is unknown (that step then leaves net_proceeds None too)."""
-        rates = (fee_context or {}).get("rates") or {}
-        tax = cls._as_float(rates.get("sales_tax_fraction"))
-        if tax is None:
-            return None
-        broker = cls._as_float(rates.get("broker_fee_fraction"))
-        applies = bool((fee_context or {}).get("broker_fee_applies"))
-        return 1.0 - (float(broker) if applies and broker is not None else 0.0) - float(tax)
+        _enrich_product_rows_with_sale_proceeds computes net_proceeds
+        (_sale_fee_amounts); None when net proceeds are unknown."""
+        return cls._sale_fee_amounts(1.0, fee_context)[2]
 
     @classmethod
     def _cycle_evaluation(
         cls, ctx: _ProductPlanningContext, option: DecryptorOption, row_out: dict[str, Any] | None,
+        *, fees: str = "all",
     ) -> DecryptorEvaluation:
         """A candidate cycle row's cost per unit and profit per cycle.
 
@@ -8958,7 +9084,7 @@ class IndustryService:
         select_best_decryptor then falls back to cost per unit with that
         reason. A candidate without a comparable cost gets a skip_reason."""
         quantity = int((row_out or {}).get("quantity") or 0)
-        total_cost, why = cls._row_total_cost_estimate(ctx, row_out)
+        total_cost, why = cls._row_total_cost_estimate(ctx, row_out, fees=fees)
         if total_cost is None or quantity <= 0:
             return DecryptorEvaluation(
                 option, None, why or "the candidate build made no units", units_per_cycle=quantity or None,
@@ -8970,7 +9096,8 @@ class IndustryService:
         if sell_price is None or sell_price <= 0:
             profit_unknown_reason = None  # the default SELL_PRICE_UNKNOWN_FALLBACK_REASON
         elif net_fraction is None:
-            profit_unknown_reason = cls._MARKET_FEES_UNKNOWN_FALLBACK_REASON
+            why = cls._sale_fee_amounts(1.0, ctx.market_fee_context)[3] or cls._SALES_TAX_UNKNOWN_REASON
+            profit_unknown_reason = f"{why}, so net proceeds are unknown: chose lowest cost per unit"
         else:
             profit = float(sell_price) * quantity * net_fraction - total_cost
         return DecryptorEvaluation(
@@ -8980,21 +9107,24 @@ class IndustryService:
 
     @classmethod
     def _row_total_cost_estimate(
-        cls, ctx: _ProductPlanningContext, row_out: dict[str, Any] | None,
+        cls, ctx: _ProductPlanningContext, row_out: dict[str, Any] | None, *, fees: str = "all",
     ) -> tuple[float | None, str | None]:
         """(a row's total cost before the pricing step, None) or (None, why).
 
         Priced the way _enrich_product_rows_with_material_prices prices it:
         each procurement and amortized invention line at its own unit price,
-        else the hub price (ctx.material_price_map), plus the job fees (no fee
-        priced at all reads as 0, the same for every candidate of one row).
-        Unknown when any line is unpriced or the invention cost is unknown: a
-        partial cost cannot be compared."""
+        else the hub price (ctx.material_price_map), plus the job fees.
+        Unknown when any line is unpriced, the invention cost is unknown, or
+        (fees="all") any job fee is unknown: a partial cost is not a cost.
+        fees="known" adds only the priced fees and fees="none" none (the
+        decryptor comparison, _decryptor_fee_basis, which says so)."""
         if not isinstance(row_out, dict):
             return None, "the candidate row could not be built"
         mj = row_out.get("manufacturing_job") or {}
         if mj.get("invention_cost_unknown_reason"):
             return None, f"invention cost unknown: {mj['invention_cost_unknown_reason']}"
+        if fees == "all" and mj.get("job_fee_unknown_reasons"):
+            return None, f"job fees unknown for: {'; '.join(str(r) for r in mj['job_fee_unknown_reasons'])}"
 
         def unit_price(entry: dict[str, Any]) -> float | None:
             own = cls._as_float(entry.get("unit_price"))
@@ -9018,7 +9148,7 @@ class IndustryService:
             total += price * (float(entry.get("quantity") or 0.0) if fractional else int(entry.get("quantity") or 0))
         if unpriced:
             return None, f"an input has no price: {', '.join(dict.fromkeys(unpriced))}"
-        return total + float(mj.get("total_job_cost") or 0.0), None
+        return total + (0.0 if fees == "none" else float(mj.get("total_job_cost") or 0.0)), None
 
     def _build_single_product_row(
         self,
@@ -9212,6 +9342,11 @@ class IndustryService:
         total_time_seconds = direct_manufacturing_time_seconds
         total_job_cost = float(manufacturing_job_cost.get("total_job_cost") or 0.0)
         priced_job_count = 1 if manufacturing_job_cost.get("total_job_cost") is not None else 0
+        # I1: every fee of the row (its own activities and the built
+        # sub-components) that could not be priced; never counted as 0 silently.
+        job_fee_unknown_reasons: list[str] = self._job_fee_unknown_entries(
+            ("manufacturing", manufacturing_job_cost, effective_runs > 0),
+        )
         prerequisite_tree_nodes: list[dict[str, Any]] = []
         top_level_procurement_materials = cast(list[dict[str, Any]], [*adjusted_material_entries])
 
@@ -9249,6 +9384,7 @@ class IndustryService:
                 if copying_costs.get("total_job_cost") is not None:
                     total_job_cost += float(copying_costs.get("total_job_cost") or 0.0)
                     priced_job_count += 1
+                job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(("copying", copying_costs, None)))
             else:
                 activity_breakdown.pop("copying", None)
         prerequisite_tree_nodes.extend(copying_tree)
@@ -9286,6 +9422,7 @@ class IndustryService:
                 if inv_costs.get("total_job_cost") is not None:
                     total_job_cost += float(inv_costs.get("total_job_cost") or 0.0)
                     priced_job_count += 1
+                job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(("invention", inv_costs, None)))
                 # The invented runs exactly cover the missing runs in the
                 # expected-value model, so no surplus BPC runs are left over.
             else:
@@ -9303,6 +9440,9 @@ class IndustryService:
             if source_copy_costs.get("total_job_cost") is not None:
                 total_job_cost += float(source_copy_costs.get("total_job_cost") or 0.0)
                 priced_job_count += 1
+            job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(
+                ("invention source copying", source_copy_costs, None),
+            ))
 
         # Research (Step 4)
         if include_sde_research_chain:
@@ -9312,6 +9452,9 @@ class IndustryService:
                 if res_costs.get("total_job_cost") is not None:
                     total_job_cost += float(res_costs.get("total_job_cost") or 0.0)
                     priced_job_count += 1
+                job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(
+                    (self._FEE_LABELS.get(act_name, act_name), res_costs, None),
+                ))
                 prerequisite_tree_nodes.append(res_node)
 
         # Blueprint metadata
@@ -9570,6 +9713,9 @@ class IndustryService:
         if recursive_prerequisite_plan.get("job_cost") is not None:
             total_job_cost += float(recursive_prerequisite_plan.get("job_cost") or 0.0)
             priced_job_count += int(recursive_prerequisite_plan.get("priced_job_count") or 0)
+        job_fee_unknown_reasons.extend(
+            str(r) for r in (recursive_prerequisite_plan.get("job_fee_unknown_reasons") or [])
+        )
         if recursive_prerequisite_plan.get("enabled"):
             activity_breakdown["recursive_prerequisites"] = {
                 "activity": "recursive_prerequisites",
@@ -9694,6 +9840,13 @@ class IndustryService:
         }
         if invention_cost_unknown_reason is not None:
             row_out["manufacturing_job"]["invention_cost_unknown_reason"] = invention_cost_unknown_reason
+        if job_fee_unknown_reasons:
+            # total_job_cost (and total_cost) then hold the priced fees only:
+            # a lower bound, flagged by the pricing step and the UI.
+            row_out["manufacturing_job"]["job_fee_unknown_reasons"] = list(dict.fromkeys(job_fee_unknown_reasons))
+        rig_reason = self._aggregate_only_rig_reason(ctx.selected_industry_profile)
+        if rig_reason is not None:
+            row_out["manufacturing_job"]["rig_bonus_unknown_reason"] = rig_reason
         if matched_blueprint_originals:
             # An owned BPO, the only blueprint the daily planner researches:
             # its ME/TE research fee per level (A2, Capital Reserved). Also on
@@ -9981,6 +10134,10 @@ class IndustryService:
                         progress_callback(1.0, "Returned cached overview (no input changes)", {"stage": "cached"})
                     return [dict(row) for row in cached_rows]
 
+        # One refresh = one scope for the once-only WARNINGs (I2): a missing
+        # input still missing is logged again by the next refresh.
+        self._reset_once_warnings()
+        self.__dict__.pop("_facility_tax_warned", None)
         # Step 1: Build immutable planning context
         ctx = self._build_planning_context(
             force_refresh=force_refresh, build_from_bpc=build_from_bpc,
@@ -10224,6 +10381,12 @@ class IndustryService:
             manufacturing_job["priced_material_count"] = priced_material_count + invention_priced_count
             manufacturing_job["material_type_count"] = len(procurement_materials) + invention_line_count
             total_job_cost = manufacturing_job.get("total_job_cost")
+            # I1: with a fee unknown, total_job_cost / total_cost hold the
+            # priced parts only. Kept (not None) so the row still ranks, but
+            # flagged: the UI marks it and the confidence is capped.
+            manufacturing_job["total_cost_excludes_unknown_job_fees"] = bool(
+                manufacturing_job.get("job_fee_unknown_reasons")
+            )
             if total_job_cost is not None or any_priced:
                 manufacturing_job["total_cost"] = float(total_job_cost or 0.0) + float(material_cost or 0.0)
                 manufacturing_job["certain_cost"] = float(total_job_cost or 0.0) + float(certain_material_cost or 0.0)

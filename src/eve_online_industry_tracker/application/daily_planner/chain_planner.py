@@ -2020,14 +2020,12 @@ class _NoMetaGroups:
 
 
 def _whole_attempts(row: dict[str, Any]) -> int | None:
-    """The producer's whole invention attempts for the row: its parallel
-    lanes' total (lane_whole_attempts) when it published one, else
-    whole_attempts (the best inventor's on an older row); None unknown."""
-    costs = orow.get_invention_costs(row) or {}
-    for key in ("lane_whole_attempts", "whole_attempts"):
-        value = costs.get(key)
-        if not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0:
-            return int(value)
+    """The producer's whole invention attempts for the row: whole_attempts,
+    its parallel lanes' total when they run (Task 12 fix round 2), else the
+    best inventor's; None unknown."""
+    value = (orow.get_invention_costs(row) or {}).get("whole_attempts")
+    if not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0:
+        return int(value)
     return None
 
 
