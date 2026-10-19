@@ -128,3 +128,147 @@ def test_save_rigs_still_saves_when_every_rig_is_known(monkeypatch, st_messages)
         rig_option_ids=[0, GOOD_RIG, LOST_RIG], rigs_load_problem=None)
     assert not buttons["save_rigs_7"].get("disabled")
     assert puts and puts[0]["rig_slot0_type_id"] == GOOD_RIG and puts[0]["rig_slot1_type_id"] == LOST_RIG
+
+
+# =============================================================================================
+# 2. Realized profit: a failed ledger read is an error, not "no sales", and is not cached
+# =============================================================================================
+
+
+@pytest.fixture
+def realized_profit_api():
+    from streamlit_ui.api import realized_profit as api
+
+    api.fetch_realized_profit.clear()
+    yield api
+    api.fetch_realized_profit.clear()
+
+
+def test_a_failing_realized_profit_api_raises_with_the_reason(monkeypatch, realized_profit_api):
+    api = realized_profit_api
+    monkeypatch.setattr(api, "api_get_or_error", lambda path, timeout_seconds=None: (None, "request failed: read timed out"))
+    with pytest.raises(RuntimeError, match="read timed out"):
+        api.fetch_realized_profit(owner_scope="character", owner_id=None)
+
+
+def test_an_http_500_body_raises_its_message_and_is_not_cached(monkeypatch, realized_profit_api):
+    api = realized_profit_api
+    calls = []
+    responses = [(None, "ledger build failed: fake DB lock"),
+                 ({"status": "error", "message": "fake 200 error body"}, None),
+                 ({"status": "success", "data": {"rows": []}}, None)]
+    monkeypatch.setattr(api, "api_get_or_error", lambda path, timeout_seconds=None: calls.append(path) or responses.pop(0))
+    with pytest.raises(RuntimeError, match="fake DB lock"):
+        api.fetch_realized_profit(owner_scope="corporation", owner_id=None)
+    with pytest.raises(RuntimeError, match="fake 200 error body"):
+        api.fetch_realized_profit(owner_scope="corporation", owner_id=None)
+    assert api.fetch_realized_profit(owner_scope="corporation", owner_id=None)["status"] == "success"
+    assert len(calls) == 3  # the failures were not cached
+
+
+def _render_realized_profit(monkeypatch, *, owner_option, fetch):
+    import streamlit as st
+    from streamlit_ui.pages import realized_profit as page
+
+    monkeypatch.setattr(page, "require_aggrid", lambda: SimpleNamespace(js_code=lambda s: s))
+    monkeypatch.setattr(page, "_character_name_map", lambda: {90000001: "Fake Pilot"})
+    monkeypatch.setattr(page, "_owner_selector_options", lambda: [owner_option])
+    monkeypatch.setattr(page, "fetch_realized_profit", fetch)
+    monkeypatch.setattr(st, "button", lambda *a, **k: False)
+    page.render()
+
+
+@pytest.mark.parametrize("owner_option", [("all", 0, "All"), ("character", 90000001, "Fake Pilot")])
+def test_realized_profit_render_stops_with_an_error_when_the_ledger_fails(monkeypatch, st_messages, owner_option):
+    def fails(**kwargs):
+        raise RuntimeError("HTTP 500")
+
+    _render_realized_profit(monkeypatch, owner_option=owner_option, fetch=fails)
+    errors = [body for kind, body in st_messages if kind == "error"]
+    assert len(errors) == 1 and "HTTP 500" in errors[0]
+    assert not any("No realized sales" in body for _kind, body in st_messages)
+
+
+def test_the_assumed_fee_modes_are_the_backend_tuple():
+    from eve_online_industry_tracker.application.characters import realized_profit as backend
+    from streamlit_ui.pages import realized_profit as page
+
+    assert page._ASSUMED_FEE_CAPTURE_MODES is backend.ASSUMED_FEE_CAPTURE_MODES
+
+
+# =============================================================================================
+# 3. Ore calculator: the facility's NPC station name note and problem are shown
+# =============================================================================================
+
+
+def test_the_station_name_problem_is_a_warning_and_the_note_a_caption():
+    from streamlit_ui.pages import ore_calculator as page
+
+    facility = {"id": 1, "name": "NPC station 60000001", "npc_station_name_problem": "no NPC station 60000001 in the SDE",
+                "npc_station_name_note": None}
+    assert page._facility_station_name_messages(facility) == [
+        ("warning", "NPC station name: no NPC station 60000001 in the SDE")]
+    facility = {"id": 1, "name": "Fakeburg VIII", "npc_station_name_problem": None,
+                "npc_station_name_note": "the SDE name may lack the unique name; ESI unreachable"}
+    assert page._facility_station_name_messages(facility) == [
+        ("caption", "NPC station name: the SDE name may lack the unique name; ESI unreachable")]
+
+
+@pytest.mark.parametrize("facility", [{}, {"id": 1, "name": "Fake"}, None,
+                                      {"npc_station_name_problem": None, "npc_station_name_note": ""}])
+def test_no_station_name_message_without_the_keys(facility):
+    from streamlit_ui.pages import ore_calculator as page
+
+    assert page._facility_station_name_messages(facility) == []
+
+
+def test_the_ore_calculator_renders_the_station_name_messages():
+    from streamlit_ui.pages import ore_calculator as page
+
+    assert "_facility_station_name_messages(" in inspect.getsource(page.render)
+
+
+# =============================================================================================
+# 4 and 8. Daily planner status bar: unavailable inputs and a market data job that never started warn
+# =============================================================================================
+
+
+def _status_bar(monkeypatch, *, plan, market_status):
+    import tests.test_daily_planner_status_bar_freshness as freshness
+    from streamlit_ui.components.daily_planner import status_bar
+    from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
+
+    fake = freshness._FakeSt()
+    monkeypatch.setattr(status_bar, "st", fake)
+    monkeypatch.setattr(status_bar, "get_status", lambda: {"status": "idle"})
+    monkeypatch.setattr(status_bar, "get_plan", lambda: plan)
+    monkeypatch.setattr(status_bar, "get_market_intel_status", lambda: market_status)
+    status_bar.render_status_bar(DailyPlannerPageState(plan=plan))
+    return fake
+
+
+def test_unavailable_inputs_are_a_warning_not_a_caption(monkeypatch):
+    import tests.test_daily_planner_status_bar_freshness as freshness
+
+    plan = {**freshness._plan(0.95), "unavailable_inputs": {"margin_correlation": "fake margin read failed"}}
+    fake = _status_bar(monkeypatch, plan=plan, market_status={})
+    assert any("fake margin read failed" in w for w in fake.warnings)
+    assert not any("fake margin read failed" in c for c in fake.captions)
+
+
+def test_a_market_data_job_that_never_started_warns():
+    from streamlit_ui.components.daily_planner import status_bar
+
+    warning = status_bar.market_intel_warning({"running": False, "not_started": True, "last_error": None})
+    assert warning and "Market data job not started" in warning
+    assert status_bar.market_intel_warning({"running": True, "last_error": None}) is None
+    assert status_bar.market_intel_warning({}) is None
+    assert "fake 502" in status_bar.market_intel_warning({"last_error": "fake 502"})
+
+
+def test_the_not_started_warning_reaches_the_status_bar(monkeypatch):
+    import tests.test_daily_planner_status_bar_freshness as freshness
+
+    fake = _status_bar(monkeypatch, plan=freshness._plan(0.95),
+                       market_status={"running": False, "not_started": True, "last_error": None})
+    assert any("Market data job not started" in w for w in fake.warnings)

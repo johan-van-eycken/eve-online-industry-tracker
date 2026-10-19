@@ -414,9 +414,13 @@ def _render_plan_diff(
 
 def market_intel_warning(market_status: dict) -> str | None:
     """The warning for the market intelligence job's last_error
-    (/planner/market_intel/status), or None when its last cycle was clean."""
+    (/planner/market_intel/status), or for a job the backend never started
+    (not_started), or None when its last cycle was clean."""
     last_error = (market_status or {}).get("last_error")
     if not last_error:
+        if (market_status or {}).get("not_started"):
+            return ("Market data job not started: the market depth and margin data are not refreshed "
+                    "(see the backend logs).")
         return None
     return (f"Market data refresh failed: {last_error}. The market depth and margin data may be stale "
             "until the next successful cycle.")
@@ -613,7 +617,8 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
 
     unavailable_caption = unavailable_inputs_caption(page_state.plan)
     if unavailable_caption:
-        st.caption(unavailable_caption)
+        # The plan was scored without these inputs: a warning, not a footnote.
+        st.warning(unavailable_caption)
 
     # Freshness warning
     if page_state.plan and freshness_score is not None and freshness_score < 0.75:

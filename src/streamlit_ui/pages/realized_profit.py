@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from eve_online_industry_tracker.application.characters.realized_profit import ASSUMED_FEE_CAPTURE_MODES
 from streamlit_ui.components.aggrid_formatters import js_flag_text_style, js_icon_cell_renderer
 from streamlit_ui.api.characters import build_character_options, fetch_characters, filter_industry_characters
 from streamlit_ui.components.formatters import format_isk_eu, format_isk_short, format_pct_eu, type_icon_url
@@ -674,8 +675,24 @@ def _overview_payload(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-#: The backend's fee capture modes of a sale whose fees were assumed (realized_profit.ASSUMED_FEE_CAPTURE_MODES).
-_ASSUMED_FEE_CAPTURE_MODES = ("assumed_market_fees", "journal_plus_assumed_broker_fee")
+#: The backend's fee capture modes of a sale whose fees were assumed (one definition, the backend's).
+_ASSUMED_FEE_CAPTURE_MODES = ASSUMED_FEE_CAPTURE_MODES
+
+
+def _ledger_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ledger's rows; a malformed payload raises with the reason
+    (an empty list is "no sales", a malformed one is not)."""
+    payload = response.get("data")
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        raise RuntimeError("The realized profit ledger response is malformed (data is not an object)")
+    rows = payload.get("rows")
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise RuntimeError("The realized profit ledger response is malformed (rows is not a list)")
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def _assumed_fee_warnings(rows: list[dict[str, Any]], owner_name_by_id: dict[int, str]) -> list[str]:
@@ -809,16 +826,23 @@ def render() -> None:
         st.write("")
         st.write("")
         if st.button("Refresh Ledger", type="primary", width="stretch"):
+            refresh_failure = None
             with st.spinner("Rebuilding realized profit ledger..."):
-                if selected_owner_type == "all":
-                    refresh_realized_profit(owner_scope="character", owner_id=None)
-                    refresh_realized_profit(owner_scope="corporation", owner_id=None)
-                else:
-                    refresh_realized_profit(
-                        owner_scope=selected_owner_type,
-                        owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
-                    )
+                try:
+                    if selected_owner_type == "all":
+                        refresh_realized_profit(owner_scope="character", owner_id=None)
+                        refresh_realized_profit(owner_scope="corporation", owner_id=None)
+                    else:
+                        refresh_realized_profit(
+                            owner_scope=selected_owner_type,
+                            owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
+                        )
+                except RuntimeError as exc:
+                    refresh_failure = str(exc)
             clear_realized_profit_cache()
+            if refresh_failure:
+                st.error(refresh_failure)
+                return
             st.rerun()
     with controls_about:
         st.write("")
@@ -854,28 +878,26 @@ def render() -> None:
                 )
                 st.caption("Coverage excludes rows with missing historical cost basis.")
 
-    if selected_owner_type == "all":
-        char_response = fetch_realized_profit(owner_scope="character", owner_id=None)
-        corp_response = fetch_realized_profit(owner_scope="corporation", owner_id=None)
-        char_rows = [{**row, "owner_id": row.get("character_id")} for row in ((char_response.get("data") or {}).get("rows") or [])]
-        corp_rows = [{**row, "owner_id": row.get("corporation_id")} for row in ((corp_response.get("data") or {}).get("rows") or [])]
-        rows = char_rows + corp_rows
-        if not rows:
-            st.info("No realized sales have been recorded yet for the selected scope.")
-            return
-    else:
-        response = fetch_realized_profit(
-            owner_scope=selected_owner_type,
-            owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
-        )
-        if response.get("status") not in {None, "success"}:
-            st.error(response.get("message") or "Failed to load realized profit data")
-            return
-        payload = response.get("data") or {}
-        rows = payload.get("rows") or []
-        if not isinstance(rows, list) or not rows:
-            st.info("No realized sales have been recorded yet for the selected scope.")
-            return
+    # A failed ledger read (either scope of "All") stops the page with the
+    # reason: it is not "no realized sales".
+    try:
+        if selected_owner_type == "all":
+            char_rows = [{**row, "owner_id": row.get("character_id")}
+                         for row in _ledger_rows(fetch_realized_profit(owner_scope="character", owner_id=None))]
+            corp_rows = [{**row, "owner_id": row.get("corporation_id")}
+                         for row in _ledger_rows(fetch_realized_profit(owner_scope="corporation", owner_id=None))]
+            rows = char_rows + corp_rows
+        else:
+            rows = _ledger_rows(fetch_realized_profit(
+                owner_scope=selected_owner_type,
+                owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
+            ))
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return
+    if not rows:
+        st.info("No realized sales have been recorded yet for the selected scope.")
+        return
 
     for fee_warning in _assumed_fee_warnings(rows, owner_name_by_id):
         st.warning(fee_warning)

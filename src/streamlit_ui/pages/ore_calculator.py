@@ -25,6 +25,22 @@ def _fee_unknown_warning(opt_display: dict) -> str | None:
     return f"Reprocessing fee unknown: {reason}. The total cost and the savings are unknown too."
 
 
+def _facility_station_name_messages(facility: dict | None) -> list[tuple[str, str]]:
+    """[(kind, text)] for the facility's NPC station name (/facilities):
+    npc_station_name_problem (no name could be read) as a warning,
+    npc_station_name_note (e.g. the SDE name stands in for ESI's) as a
+    caption; [] when neither is set."""
+    facility = facility if isinstance(facility, dict) else {}
+    messages: list[tuple[str, str]] = []
+    problem = facility.get("npc_station_name_problem")
+    if problem:
+        messages.append(("warning", f"NPC station name: {problem}"))
+    note = facility.get("npc_station_name_note")
+    if note:
+        messages.append(("caption", f"NPC station name: {note}"))
+    return messages
+
+
 def _format_timestamp(ts: float | int | None) -> str:
     if ts is None:
         return "N/A"
@@ -109,6 +125,9 @@ def render():
             format_func=lambda fid: facility_options[fid],
             key="opt_facility_id"
         )
+        selected_facility = next((f for f in all_facilities if f.get("id") == facility_id), None)
+        for kind, text in _facility_station_name_messages(selected_facility):
+            (st.warning if kind == "warning" else st.caption)(text)
 
         mode = st.selectbox(
             "Mode",
