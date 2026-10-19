@@ -7,6 +7,7 @@ from streamlit_ui.state.industry_builder_ui import (
     build_overview_grid_frame,
     build_debug_payload_preview,
     filter_overview_rows,
+    unknown_region_volume_hidden_note,
 )
 from streamlit_ui.state.industry_snapshot_page import (
     format_scope_refreshed_at,
@@ -1227,7 +1228,7 @@ def render() -> None:
         st.rerun()
 
     enabled_meta_groups = {k for k, v in meta_group_selections.items() if v}
-    filtered_overview_rows = filter_overview_rows(
+    filter_args = (
         page_context.overview_rows,
         tuple(sorted(enabled_meta_groups)),
         have_skills,
@@ -1238,6 +1239,10 @@ def render() -> None:
         tuple(sorted(liquidity_exclude)) if liquidity_exclude else (),
         tuple(sorted(anomaly_exclude)) if anomaly_exclude else (),
     )
+    filtered_overview_rows = filter_overview_rows(*filter_args)
+    hidden_volume_note = unknown_region_volume_hidden_note(*filter_args)
+    if hidden_volume_note:
+        st.info(hidden_volume_note)
 
     if not filtered_overview_rows:
         st.info("No manufacturable product rows match the current filters.")

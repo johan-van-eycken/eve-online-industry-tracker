@@ -50,3 +50,53 @@ def test_the_drilldown_and_debug_payload_show_the_reason():
     assert "region_volume_note(selected_row)" in inspect.getsource(industry_builder)
     preview = ui.build_debug_payload_preview(_row(REASON))
     assert preview["manufacturing_job"]["region_daily_volume_unavailable_reason"] == REASON
+
+
+# --- the minimum region daily volume filter ---------------------------------------------------------
+
+def _filter_row(type_id, volume, reason=None):
+    return {"type_id": type_id, "type_name": f"Fake {type_id}", "meta_group_name": "Tech I",
+            "profit_amount": 10.0, "profit_margin_fraction": 0.5, "isk_per_hour": 100.0,
+            "region_daily_volume": volume, "region_daily_volume_unavailable_reason": reason,
+            "manufacturing_job": {}}
+
+
+def _args(rows, min_volume, meta_group=None):
+    meta_group = meta_group or ui.get_meta_group_name(rows[0])
+    return (rows, (meta_group,), False, False, 0.0, 0.0, min_volume, (), ())
+
+
+def test_unknown_volume_rows_stay_hidden_but_are_counted_with_their_reason():
+    rows = [_filter_row(1, 500), _filter_row(2, None, REASON), _filter_row(3, None, REASON),
+            _filter_row(4, None), _filter_row(5, 3)]
+    kept = ui.filter_overview_rows(*_args(rows, 10))
+    assert [r["type_id"] for r in kept] == [1]           # conservative: unknown is left out
+    note = ui.unknown_region_volume_hidden_note(*_args(rows, 10))
+    assert note.startswith("3 rows hidden: region daily volume unknown (")
+    assert REASON in note and "no reason given" in note
+    assert "Fake 5" not in note                          # a known low volume is not counted
+
+
+def test_no_note_without_a_minimum_or_without_unknown_rows():
+    rows = [_filter_row(1, 500), _filter_row(2, None, REASON)]
+    assert ui.unknown_region_volume_hidden_note(*_args(rows, 0)) is None
+    assert ui.unknown_region_volume_hidden_note(*_args([_filter_row(1, 500), _filter_row(5, 3)], 10)) is None
+
+
+def test_a_row_hidden_by_another_filter_is_not_counted():
+    rows = [_filter_row(1, 500), _filter_row(2, None, REASON)]
+    rows[1]["meta_group_name"] = "Tech II"
+    assert ui.unknown_region_volume_hidden_note(*_args(rows, 10, meta_group=ui.get_meta_group_name(rows[0]))) is None
+
+
+def test_one_row_is_singular():
+    rows = [_filter_row(1, 500), _filter_row(2, None, REASON)]
+    assert ui.unknown_region_volume_hidden_note(*_args(rows, 10)) == (
+        f"1 row hidden: region daily volume unknown ({REASON})")
+
+
+def test_the_builder_and_portfolio_pages_show_the_note():
+    from streamlit_ui.pages import portfolio_planner
+
+    for page in (industry_builder, portfolio_planner):
+        assert "unknown_region_volume_hidden_note(" in inspect.getsource(page)

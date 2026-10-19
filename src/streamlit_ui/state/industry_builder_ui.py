@@ -726,6 +726,43 @@ def filter_overview_rows(
     ]
 
 
+def unknown_region_volume_hidden_note(
+    overview_rows: list[dict[str, Any]],
+    enabled_meta_groups: tuple[str, ...],
+    have_skills_only: bool,
+    positive_profit_only: bool,
+    min_margin_pct: float,
+    min_isk_per_hour: float,
+    min_region_daily_volume: int,
+    excluded_liquidity_indicators: tuple[str, ...] = (),
+    excluded_anomaly_risks: tuple[str, ...] = (),
+) -> str | None:
+    """With a minimum region daily volume above 0, filter_overview_rows leaves
+    a row whose volume is unknown out (conservative). This says so: "N rows
+    hidden: region daily volume unknown (reasons)", counting the rows every
+    other filter keeps; None without a minimum or without such rows."""
+    if int(min_region_daily_volume or 0) <= 0:
+        return None
+    candidates = filter_overview_rows(
+        overview_rows, enabled_meta_groups, have_skills_only, positive_profit_only,
+        min_margin_pct, min_isk_per_hour, 0, excluded_liquidity_indicators, excluded_anomaly_risks,
+    )
+    hidden = [row for row in candidates if row.get("region_daily_volume") is None]
+    if not hidden:
+        return None
+    reasons: list[str] = []
+    for row in hidden:
+        reason = str(
+            row.get("region_daily_volume_unavailable_reason")
+            or get_manufacturing_job(row).get("region_daily_volume_unavailable_reason")
+            or "no reason given"
+        )
+        if reason not in reasons:
+            reasons.append(reason)
+    noun = "row" if len(hidden) == 1 else "rows"
+    return f"{len(hidden)} {noun} hidden: region daily volume unknown ({'; '.join(reasons)})"
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def build_overview_grid_frame(
     filtered_overview_rows: list[dict[str, Any]],

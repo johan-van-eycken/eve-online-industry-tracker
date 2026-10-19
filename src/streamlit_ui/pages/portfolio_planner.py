@@ -21,7 +21,7 @@ from streamlit_ui.state.industry_builder_page import (
     overview_refresh_is_active,
     start_overview_refresh_job,
 )
-from streamlit_ui.state.industry_builder_ui import filter_overview_rows
+from streamlit_ui.state.industry_builder_ui import filter_overview_rows, unknown_region_volume_hidden_note
 from streamlit_ui.shopping_list import (
     DIFFERENT_REFRESHES_WARNING,
     aggregate_shopping_list_with_stale,
@@ -1087,7 +1087,7 @@ def render() -> None:
         return
 
     fs = _read_industry_builder_filter_state()
-    filtered_rows = filter_overview_rows(
+    filter_args = (
         overview_rows,
         tuple(sorted(fs["enabled_meta_groups"])),
         fs["have_skills_only"],
@@ -1098,6 +1098,10 @@ def render() -> None:
         tuple(sorted(fs["excluded_liquidity_indicators"])),
         tuple(sorted(fs["excluded_anomaly_risks"])),
     )
+    filtered_rows = filter_overview_rows(*filter_args)
+    hidden_volume_note = unknown_region_volume_hidden_note(*filter_args)
+    if hidden_volume_note:
+        st.info(hidden_volume_note)
 
     eligible_rows, disqualified = _apply_hard_disqualifiers(filtered_rows)
 
