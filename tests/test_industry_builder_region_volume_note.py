@@ -98,5 +98,6 @@ def test_one_row_is_singular():
 def test_the_builder_and_portfolio_pages_show_the_note():
     from streamlit_ui.pages import portfolio_planner
 
+    # Round H3: the pages show every hidden note (unknown_value_hidden_notes, the volume one included).
     for page in (industry_builder, portfolio_planner):
-        assert "unknown_region_volume_hidden_note(" in inspect.getsource(page)
+        assert "unknown_value_hidden_notes(" in inspect.getsource(page)

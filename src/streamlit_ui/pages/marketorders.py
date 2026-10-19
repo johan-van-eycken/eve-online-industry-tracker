@@ -131,6 +131,15 @@ def _isk_total_label(known_total: float, unknown_count: int) -> str:
     return f"{label} + {unknown_count} unknown" if unknown_count else label
 
 
+def _with_unknown(label: str | None, unknown_count: int) -> str:
+    """A stat card's value that names the orders it could not include
+    (their price, margin or cost basis unknown): "X + N unknown",
+    "unknown (N)" when none is known, "—" without orders."""
+    if label is None:
+        return f"unknown ({unknown_count})" if unknown_count else "—"
+    return f"{label} + {unknown_count} unknown" if unknown_count else label
+
+
 def _order_price_label(price) -> str:
     """The order price, or "unknown" when the backend could not read it (never 0)."""
     return "unknown" if price is None else format_isk_short(price)
@@ -214,15 +223,22 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
         and float(o["hub_price"]) < float(o["cost_basis"])
     )
 
+    # The orders each estimate leaves out: an unknown price, margin or ISK/day,
+    # or no real cost basis (their profit is unknown, not 0).
     return {
         "count": count,
         "total_listed": total_listed,
         "total_listed_unknown": total_listed_unknown,
         "est_profit_current": est_profit_current,
+        "est_profit_current_unknown": count - len(profit_cur_parts),
         "est_profit_advised": est_profit_advised,
+        "est_profit_advised_unknown": count - len(profit_adv_parts),
         "total_isk_day_current": total_isk_day_current,
+        "total_isk_day_current_unknown": count - len(isk_day_cur),
         "total_isk_day_advised": total_isk_day_advised,
+        "total_isk_day_advised_unknown": count - len(isk_day_adv),
         "avg_margin_current": avg_margin_current,
+        "avg_margin_current_unknown": count - len(margin_w) if avg_margin_current is not None else count,
         "below_breakeven": below_breakeven,
         "below_cost_count": below_cost_count,
         "below_cost_isk": below_cost_isk,
@@ -246,8 +262,11 @@ def _render_sell_stats_box(stats: dict) -> None:
         ("Total Listed ISK", _isk_total_label(stats["total_listed"], stats.get("total_listed_unknown", 0))),
         (
             "Avg Margin % (Current)",
-            _colored(f"{stats['avg_margin_current']:.1f}%", color=margin_color)
-            if stats["avg_margin_current"] is not None else "—",
+            _with_unknown(
+                _colored(f"{stats['avg_margin_current']:.1f}%", color=margin_color)
+                if stats["avg_margin_current"] is not None else None,
+                stats.get("avg_margin_current_unknown", 0),
+            ),
         ),
         (
             "Orders at Risk",
@@ -264,23 +283,35 @@ def _render_sell_stats_box(stats: dict) -> None:
     right_cards = [
         (
             "Est. Profit (Current)",
-            _colored(format_isk_short(stats["est_profit_current"]), color=profit_color_cur)
-            if stats["est_profit_current"] is not None else "—",
+            _with_unknown(
+                _colored(format_isk_short(stats["est_profit_current"]), color=profit_color_cur)
+                if stats["est_profit_current"] is not None else None,
+                stats.get("est_profit_current_unknown", 0),
+            ),
         ),
         (
             "Est. Profit (Advised)",
-            _colored(format_isk_short(stats["est_profit_advised"]), color=profit_color_adv)
-            if stats["est_profit_advised"] is not None else "—",
+            _with_unknown(
+                _colored(format_isk_short(stats["est_profit_advised"]), color=profit_color_adv)
+                if stats["est_profit_advised"] is not None else None,
+                stats.get("est_profit_advised_unknown", 0),
+            ),
         ),
         (
             "Est. ISK/day (Current)",
-            format_isk_short(stats["total_isk_day_current"])
-            if stats["total_isk_day_current"] is not None else "—",
+            _with_unknown(
+                format_isk_short(stats["total_isk_day_current"])
+                if stats["total_isk_day_current"] is not None else None,
+                stats.get("total_isk_day_current_unknown", 0),
+            ),
         ),
         (
             "Est. ISK/day (Advised)",
-            format_isk_short(stats["total_isk_day_advised"])
-            if stats["total_isk_day_advised"] is not None else "—",
+            _with_unknown(
+                format_isk_short(stats["total_isk_day_advised"])
+                if stats["total_isk_day_advised"] is not None else None,
+                stats.get("total_isk_day_advised_unknown", 0),
+            ),
         ),
     ]
 
@@ -399,7 +430,12 @@ def _render_orders_grid(
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                # An order whose price the backend could not read has None
+                # there (price_unknown_reason): shown "unknown", not blank.
+                valueFormatter=js_eu_isk_formatter(
+                    JsCode=runtime.js_code, locale=runtime.locale, decimals=2,
+                    null_text=("unknown" if col in ("Price", "Total Price") else None),
+                ),
                 cellStyle=right,
                 minWidth=160,
             )

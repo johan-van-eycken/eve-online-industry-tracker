@@ -272,3 +272,313 @@ def test_the_not_started_warning_reaches_the_status_bar(monkeypatch):
     fake = _status_bar(monkeypatch, plan=freshness._plan(0.95),
                        market_status={"running": False, "not_started": True, "last_error": None})
     assert any("Market data job not started" in w for w in fake.warnings)
+
+
+# =============================================================================================
+# 5. Grid JS formatters: an optional null_text ("unknown") where None means unknown
+# =============================================================================================
+
+
+def _js(code):
+    return code  # JsCode stand-in: the formatter's source
+
+
+@pytest.mark.parametrize("name", ["js_eu_number_formatter", "js_eu_isk_formatter", "js_eu_pct_formatter"])
+def test_a_formatter_shows_the_null_text_for_a_missing_value(name):
+    from streamlit_ui.components import aggrid_formatters as fmt
+
+    plain = getattr(fmt, name)(JsCode=_js, locale="en-US", decimals=2)
+    assert "unknown" not in plain
+    with_text = getattr(fmt, name)(JsCode=_js, locale="en-US", decimals=2, null_text="unknown")
+    assert '"unknown"' in with_text
+    flagged = getattr(fmt, name)(JsCode=_js, locale="en-US", decimals=2, null_text="unknown",
+                                 null_text_flag_field="_is_product_row")
+    assert "params.data._is_product_row" in flagged and '"unknown"' in flagged
+
+
+def test_the_null_text_is_a_safe_js_string():
+    from streamlit_ui.components import aggrid_formatters as fmt
+
+    code = fmt.js_eu_number_formatter(JsCode=_js, locale="en-US", decimals=0, null_text="it's \"odd\"")
+    assert '"it\'s \\"odd\\""' in code
+
+
+class _RecordingBuilder:
+    def __init__(self):
+        self.columns: dict[str, dict] = {}
+
+    def from_dataframe(self, df):
+        return self
+
+    def configure_column(self, col, **kwargs):
+        self.columns.setdefault(col, {}).update(kwargs)
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def test_the_industry_builder_shows_unknown_for_its_unknown_columns(monkeypatch):
+    from streamlit_ui.pages import industry_builder as page
+
+    builder = _RecordingBuilder()
+    runtime = SimpleNamespace(js_code=_js, locale="en-US", grid_options_builder=builder,
+                              aggrid=lambda *a, **k: {"selected_rows": []})
+    monkeypatch.setattr(page, "render_aggrid_table", lambda *a, **k: {"selected_rows": []}, raising=False)
+    try:
+        page._render_overview_grid(runtime=runtime, filtered_overview_rows=[_product_row()])
+    except Exception:  # the grid call itself is not under test; the column setup ran before it
+        pass
+    for col in ("Material Cost", "Job Cost", "Profit", "Region Daily Volume", "Market Unit Price",
+                "Hub Buy Liquidity", "Hub Sell Liquidity"):
+        formatter = builder.columns[col]["valueFormatter"]
+        assert '"unknown"' in formatter and "_is_product_row" in formatter, col
+    assert '"unknown"' not in builder.columns["Gross Sale Value"]["valueFormatter"]
+
+
+def test_the_market_orders_grid_shows_unknown_for_price_and_total():
+    from streamlit_ui.pages import marketorders as page
+
+    import pandas as pd
+
+    builder = _RecordingBuilder()
+    runtime = SimpleNamespace(js_code=_js, locale="en-US", grid_options_builder=builder)
+    df = pd.DataFrame([{"Icon": "", "Type": "Fake", "Price": None, "Total Price": None, "Escrow Remaining": 1.0}])
+    try:
+        page._render_orders_grid(df, runtime=runtime, img_renderer=None,
+                                 isk_cols=["Price", "Total Price", "Escrow Remaining"], min_volume=False, key="k")
+    except Exception:  # the grid call itself is not under test
+        pass
+    assert '"unknown"' in builder.columns["Price"]["valueFormatter"]
+    assert '"unknown"' in builder.columns["Total Price"]["valueFormatter"]
+    assert '"unknown"' not in builder.columns["Escrow Remaining"]["valueFormatter"]
+
+
+# =============================================================================================
+# H1 interface: liquidity_unavailable_reason / price_unavailable_reason in the Industry Builder
+# =============================================================================================
+
+LIQ_REASON = "order book for 10000002 unavailable: fake 503"
+PRICE_REASON = "hub price unknown: fake order book fetch failed"
+
+
+def _product_row(*, liquidity_reason=None, price_reason=None, on_job=False):
+    job = {"job_tree": {"node_type": "product", "activity": "product", "type_id": 5002, "children": [
+        {"node_type": "material", "label": "Tritanium", "type_id": 34}]},
+        "material_cost": None, "total_job_cost": None}
+    row = {"overview_row_id": "r1", "type_id": 5002, "type_name": "Fake Module", "pricing_confidence": "Low",
+           "hub_buy_liquidity": None if liquidity_reason else 10.0,
+           "hub_sell_liquidity": None if liquidity_reason else 20.0,
+           "market_unit_price": None if price_reason else 1000.0,
+           "profit_amount": None, "region_daily_volume": None, "manufacturing_job": job}
+    target = job if on_job else row
+    if liquidity_reason:
+        target["liquidity_unavailable_reason"] = liquidity_reason
+    if price_reason:
+        target["price_unavailable_reason"] = price_reason
+    return row
+
+
+def test_the_hub_liquidity_and_price_notes_name_their_reason():
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    row = _product_row(liquidity_reason=LIQ_REASON, price_reason=PRICE_REASON)
+    assert ui.hub_liquidity_note(row) == f"hub liquidity unknown: {LIQ_REASON}"
+    assert ui.hub_price_note(row) == f"hub price unknown: {PRICE_REASON}"
+    on_job = _product_row(liquidity_reason=LIQ_REASON, price_reason=PRICE_REASON, on_job=True)
+    assert LIQ_REASON in ui.hub_liquidity_note(on_job) and PRICE_REASON in ui.hub_price_note(on_job)
+
+
+def test_the_notes_are_empty_without_the_keys():
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    row = _product_row()
+    assert ui.hub_liquidity_note(row) == "" and ui.hub_price_note(row) == ""
+    assert ui.hub_liquidity_note({}) == "" and ui.hub_price_note({"manufacturing_job": None}) == ""
+
+
+def test_the_product_grid_row_carries_the_notes_next_to_their_columns():
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    product, material = ui.flatten_overview_job_tree_rows(
+        [_product_row(liquidity_reason=LIQ_REASON, price_reason=PRICE_REASON)])
+    assert product["Hub Buy Liquidity"] is None and product["Market Unit Price"] is None
+    assert product["Hub Liquidity Note"] == f"hub liquidity unknown: {LIQ_REASON}"
+    assert product["Price Note"] == f"hub price unknown: {PRICE_REASON}"
+    assert product["_is_product_row"] is True and material["_is_product_row"] is False
+    assert material["Hub Liquidity Note"] == "" and material["Price Note"] == ""
+    keys = list(product)
+    assert keys.index("Hub Liquidity Note") == keys.index("Hub Sell Orders") + 1
+    assert keys.index("Price Note") == keys.index("Market Unit Price") + 1
+    plain, _ = ui.flatten_overview_job_tree_rows([_product_row()])
+    assert plain["Hub Liquidity Note"] == "" and plain["Price Note"] == "" and plain["Hub Buy Liquidity"] == 10.0
+
+
+def test_the_drilldown_and_debug_payload_show_the_hub_reasons():
+    from streamlit_ui.pages import industry_builder as page
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    source = inspect.getsource(page)
+    assert "hub_liquidity_note(selected_row)" in source and "hub_price_note(selected_row)" in source
+    preview = ui.build_debug_payload_preview(
+        _product_row(liquidity_reason=LIQ_REASON, price_reason=PRICE_REASON, on_job=True))
+    assert preview["manufacturing_job"]["liquidity_unavailable_reason"] == LIQ_REASON
+    assert preview["manufacturing_job"]["price_unavailable_reason"] == PRICE_REASON
+
+
+def test_the_hidden_columns_include_the_product_row_flag():
+    from streamlit_ui.pages import industry_builder as page
+
+    assert '"_is_product_row"' in inspect.getsource(page._render_overview_grid)
+
+
+# =============================================================================================
+# 6. Portfolio and the overview filters: unknown is not unprofitable, not 0, and never hidden silently
+# =============================================================================================
+
+
+def _candidate(type_id, *, profit=1_000_000.0, isk=2_000_000.0, roc=0.5, margin=0.2, volume=500, **extra):
+    return {"type_id": type_id, "type_name": f"Fake {type_id}", "meta_group_name": "Tech I",
+            "profit_amount": profit, "isk_per_hour": isk, "return_on_capital": roc,
+            "profit_margin_fraction": margin, "region_daily_volume": volume,
+            "liquidity_indicator": "High", "pricing_confidence": "High", "manufacturing_job": {}, **extra}
+
+
+def test_an_unknown_profit_is_disqualified_as_unknown_not_unprofitable():
+    from streamlit_ui.pages import portfolio_planner as page
+
+    eligible, disqualified = page._apply_hard_disqualifiers(
+        [_candidate(1, profit=None), _candidate(2, profit=-5.0), _candidate(3)])
+    assert [r["type_id"] for r in eligible] == [3]
+    assert [(r["type_id"], reason) for r, reason in disqualified] == [(1, "Profit unknown"), (2, "Unprofitable")]
+
+
+def test_scoring_ignores_unknown_values_in_the_normalisation():
+    from streamlit_ui.pages import portfolio_planner as page
+
+    ctx = page._compute_normalization_context([_candidate(1, isk=None), _candidate(2, isk=5.0), _candidate(3, isk=9.0)])
+    assert ctx["isk_min"] == 5.0 and ctx["isk_max"] == 9.0
+
+
+def test_a_row_with_an_unknown_score_input_is_unknown_and_ranked_last():
+    from streamlit_ui.pages import portfolio_planner as page
+
+    rows = [_candidate(1, isk=None), _candidate(2, isk=1_000_000.0), _candidate(3, isk=3_000_000.0)]
+    ranked = page._rank_candidates(rows, objective="Balanced")
+    assert [r["type_id"] for r, _ in ranked] == [3, 2, 1]
+    assert ranked[-1][1] is None and all(isinstance(score, float) for _r, score in ranked[:2])
+    by_isk = page._rank_candidates(rows, objective="Max ISK/hr")
+    assert [r["type_id"] for r, _ in by_isk] == [3, 2, 1] and by_isk[-1][1] is None
+    assert page._apply_track_record_multiplier(None, rows[0], {"1": {"status": "proven"}}) is None
+    assert any("ISK/hour unknown" in w for w in page._warnings(rows[0]))
+
+
+def test_the_recommendations_table_does_not_show_an_unknown_as_zero(monkeypatch):
+    import streamlit as st
+    from streamlit_ui.pages import portfolio_planner as page
+
+    frames = []
+    monkeypatch.setattr(st, "dataframe", lambda df, *a, **k: frames.append(df))
+    monkeypatch.setattr(st, "expander", lambda *a, **k: _NullContext())
+    monkeypatch.setattr(st, "columns", lambda spec, *a, **k: [_NullContext() for _ in range(spec if isinstance(spec, int) else len(spec))])
+    page._render_recommendations_table([(_candidate(1, isk=None, roc=None), None)])
+    row = frames[0].iloc[0]
+    assert row["ISK/Hr (M)"] is None or row["ISK/Hr (M)"] != row["ISK/Hr (M)"]  # None or NaN, not 0
+    assert row["ROC %"] is None or row["ROC %"] != row["ROC %"]
+
+
+class _NullContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _filter_args(rows, *, positive=False, min_margin=0.0, min_isk=0.0, min_volume=0):
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    return (rows, (ui.get_meta_group_name(rows[0]),), False, positive, min_margin, min_isk, min_volume, (), ())
+
+
+def test_the_hidden_notes_name_each_unknown_minimum_filter():
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    rows = [_candidate(1), _candidate(2, isk=None), _candidate(3, margin=None), _candidate(4, profit=None),
+            _candidate(5, isk=None, volume=None, region_daily_volume_unavailable_reason="fake 502"),
+            _candidate(6, isk=1.0)]  # a known low ISK/h is not counted
+    args = _filter_args(rows, positive=True, min_margin=10.0, min_isk=1000.0, min_volume=10)
+    assert [r["type_id"] for r in ui.filter_overview_rows(*args)] == [1]
+    notes = ui.unknown_value_hidden_notes(*args)
+    assert "2 rows hidden: ISK/hour unknown" in notes
+    assert "1 row hidden: profit margin unknown" in notes
+    assert "1 row hidden: profit unknown" in notes
+    assert "1 row hidden: region daily volume unknown (fake 502)" in notes
+    assert ui.unknown_region_volume_hidden_note(*args) == "1 row hidden: region daily volume unknown (fake 502)"
+
+
+def test_no_hidden_notes_without_active_minimums():
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    rows = [_candidate(1), _candidate(2, isk=None, margin=None, volume=None)]
+    args = _filter_args(rows)
+    assert [r["type_id"] for r in ui.filter_overview_rows(*args)] == [1, 2]  # unknown passes a 0 minimum, as before
+    assert ui.unknown_value_hidden_notes(*args) == []
+
+
+def test_a_row_hidden_by_a_known_value_is_not_counted_for_its_unknown_one():
+    from streamlit_ui.state import industry_builder_ui as ui
+
+    rows = [_candidate(1), _candidate(2, isk=None, margin=0.01)]  # margin known and below the minimum
+    assert ui.unknown_value_hidden_notes(*_filter_args(rows, min_margin=10.0, min_isk=1000.0)) == []
+
+
+def test_the_market_orders_stat_cards_count_the_unknown_orders():
+    from streamlit_ui.pages import marketorders as page
+
+    real = {"cost_basis_source": "market_buy"}
+    orders = [
+        {**real, "price": 100.0, "total_price": 1000.0, "net_margin_pct_current": 10.0, "isk_per_day_current": 50.0,
+         "advised_price": 90.0, "net_margin_pct_advised": 5.0, "isk_per_day_advised": 40.0},
+        {**real, "price": None, "total_price": None, "net_margin_pct_current": None, "isk_per_day_current": None},
+        {"cost_basis_source": "market_order_fallback", "price": 50.0, "total_price": 500.0,
+         "net_margin_pct_current": 20.0, "isk_per_day_current": 10.0},  # no real cost: its profit is unknown
+    ]
+    stats = page._compute_sell_stats(orders)
+    assert stats["est_profit_current"] == pytest.approx(100.0) and stats["est_profit_current_unknown"] == 2
+    assert stats["est_profit_advised_unknown"] == 2
+    assert stats["total_isk_day_current"] == 50.0 and stats["total_isk_day_current_unknown"] == 2
+    assert stats["total_isk_day_advised_unknown"] == 2
+    assert stats["avg_margin_current"] == 10.0 and stats["avg_margin_current_unknown"] == 2
+
+
+def test_a_stat_card_value_names_its_unknown_count():
+    from streamlit_ui.pages import marketorders as page
+
+    assert page._with_unknown("10.0K ISK", 2) == "10.0K ISK + 2 unknown"
+    assert page._with_unknown("10.0K ISK", 0) == "10.0K ISK"
+    assert page._with_unknown(None, 3) == "unknown (3)"
+    assert page._with_unknown(None, 0) == "—"
+
+
+def test_the_sell_stats_box_renders_the_unknown_counts(monkeypatch):
+    from streamlit_ui.pages import marketorders as page
+
+    cards: list[tuple[str, str]] = []
+    monkeypatch.setattr(page, "_render_stat_card_grid", lambda c: cards.extend(c))
+    monkeypatch.setattr(page.st, "columns", lambda spec, *a, **k: [_NullContext(), _NullContext()])
+    stats = page._compute_sell_stats([
+        {"cost_basis_source": "market_buy", "price": 100.0, "total_price": 1000.0, "net_margin_pct_current": 10.0,
+         "isk_per_day_current": 50.0},
+        {"cost_basis_source": "market_buy", "price": None, "total_price": None}])
+    page._render_sell_stats_box(stats)
+    by_label = dict(cards)
+    for label in ("Est. Profit (Current)", "Est. ISK/day (Current)", "Avg Margin % (Current)"):
+        assert "+ 1 unknown" in by_label[label], label
+    assert by_label["Est. Profit (Advised)"] == "unknown (2)"
+
+
+def test_the_builder_and_portfolio_pages_show_every_hidden_note():
+    from streamlit_ui.pages import industry_builder, portfolio_planner
+
+    for page in (industry_builder, portfolio_planner):
+        assert "unknown_value_hidden_notes(" in inspect.getsource(page)

@@ -205,6 +205,29 @@ def region_volume_note(row: dict[str, Any]) -> str:
     return f"region daily volume unknown: {reason}" if reason else ""
 
 
+def _product_reason(row: dict[str, Any], key: str) -> Any:
+    """A product row's reason key, at the row's top level or on its manufacturing_job."""
+    if not isinstance(row, dict):
+        return None
+    return row.get(key) or get_manufacturing_job(row).get(key)
+
+
+def hub_liquidity_note(row: dict[str, Any]) -> str:
+    """Why the hub buy/sell liquidity is unknown (the hub's order book could
+    not be read: liquidity_unavailable_reason), shown next to the liquidity
+    columns and in the drilldown; "" when it is known or the key is absent."""
+    reason = _product_reason(row, "liquidity_unavailable_reason")
+    return f"hub liquidity unknown: {reason}" if reason else ""
+
+
+def hub_price_note(row: dict[str, Any]) -> str:
+    """Why the hub price is unknown (price_unavailable_reason), shown next to
+    the market unit price and in the drilldown; "" when it is known or the
+    key is absent."""
+    reason = _product_reason(row, "price_unavailable_reason")
+    return f"hub price unknown: {reason}" if reason else ""
+
+
 def invention_summary_lines(row: dict[str, Any]) -> list[str]:
     """Drilldown captions: which decryptor the producer chose and why, and the
     invention chance it assumed. [] for a row that does not invent."""
@@ -301,6 +324,11 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         region_daily_volume = node.get("region_daily_volume")
         region_daily_volume_7d_avg = node.get("region_daily_volume_7d_avg")
         region_daily_volume_note = ""
+        hub_liquidity_unknown_note = ""
+        price_unknown_note = ""
+        # The product's own rows (the overview row and its manufacturing
+        # step): an empty cost/price/volume cell there is "unknown".
+        is_product_row = False
         hub_buy_liquidity = node.get("hub_buy_liquidity")
         hub_sell_liquidity = node.get("hub_sell_liquidity")
         hub_buy_order_count = node.get("hub_buy_order_count")
@@ -392,6 +420,9 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             region_daily_volume = source_row.get("region_daily_volume")
             region_daily_volume_7d_avg = source_row.get("region_daily_volume_7d_avg")
             region_daily_volume_note = region_volume_note(source_row)
+            hub_liquidity_unknown_note = hub_liquidity_note(source_row)
+            price_unknown_note = hub_price_note(source_row)
+            is_product_row = True
             hub_buy_liquidity = source_row.get("hub_buy_liquidity")
             hub_sell_liquidity = source_row.get("hub_sell_liquidity")
             hub_buy_order_count = source_row.get("hub_buy_order_count")
@@ -464,6 +495,9 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 region_daily_volume = source_row.get("region_daily_volume")
                 region_daily_volume_7d_avg = source_row.get("region_daily_volume_7d_avg")
                 region_daily_volume_note = region_volume_note(source_row)
+                hub_liquidity_unknown_note = hub_liquidity_note(source_row)
+                price_unknown_note = hub_price_note(source_row)
+                is_product_row = True
                 hub_buy_liquidity = source_row.get("hub_buy_liquidity")
                 hub_sell_liquidity = source_row.get("hub_sell_liquidity")
                 hub_buy_order_count = source_row.get("hub_buy_order_count")
@@ -525,11 +559,13 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Net Proceeds": net_proceeds,
                 "Total Cost": total_cost,
                 "_total_cost_lower_bound": bool(total_cost_lower_bound and total_cost is not None),
+                "_is_product_row": is_product_row,
                 "Material Cost": material_cost,
                 "Job Cost": job_cost,
                 "Broker Fee": broker_fee_amount,
                 "Sales Tax": sales_tax_amount,
                 "Market Unit Price": market_unit_price,
+                "Price Note": price_unknown_note,
                 "Gross Sale Value": gross_sale_value,
                 "Type": tree_node_type_label(node),
                 "Pricing Confidence": pricing_confidence_cell(pricing_confidence, manufacturing_job),
@@ -542,6 +578,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Hub Sell Liquidity": hub_sell_liquidity,
                 "Hub Buy Orders": hub_buy_order_count,
                 "Hub Sell Orders": hub_sell_order_count,
+                "Hub Liquidity Note": hub_liquidity_unknown_note,
                 "Days of Supply": days_of_supply,
                 "Sell-Through Rate %": sell_through_rate,
                 "Liquidity Indicator": liquidity_indicator,
@@ -673,6 +710,8 @@ def build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
             "hub_sell_liquidity": manufacturing_job.get("hub_sell_liquidity"),
             "hub_buy_order_count": manufacturing_job.get("hub_buy_order_count"),
             "hub_sell_order_count": manufacturing_job.get("hub_sell_order_count"),
+            "liquidity_unavailable_reason": _product_reason(row, "liquidity_unavailable_reason"),
+            "price_unavailable_reason": _product_reason(row, "price_unavailable_reason"),
             "assumes_owned_t2_bpo": bool(manufacturing_job.get("assumes_owned_t2_bpo")),
             "pricing_confidence": manufacturing_job.get("pricing_confidence"),
             "pricing_confidence_reasons": manufacturing_job.get("pricing_confidence_reasons"),
@@ -690,6 +729,73 @@ def build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
             "job_tree_child_count": len(((manufacturing_job.get("job_tree") or {}).get("children") or [])),
         },
     }
+
+
+def _optional_number(value: Any) -> float | None:
+    """A numeric overview value, or None when it is missing or not a number (unknown)."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: The minimum filters whose value can be unknown: (label, row key).
+_MINIMUM_FILTERS: tuple[tuple[str, str], ...] = (
+    ("profit", "profit_amount"),
+    ("profit margin", "profit_margin_fraction"),
+    ("ISK/hour", "isk_per_hour"),
+    ("region daily volume", "region_daily_volume"),
+)
+
+
+def _minimum_filter_results(
+    row: dict[str, Any],
+    positive_profit_only: bool,
+    min_margin_pct: float,
+    min_isk_per_hour: float,
+    min_region_daily_volume: int,
+) -> dict[str, bool | None]:
+    """Per minimum filter: True (passes), False (a known value fails it) or
+    None (its value is unknown and the filter is active: the row is left out,
+    conservatively, and counted by unknown_value_hidden_notes). An unknown
+    value passes a filter that is not active (a minimum of 0 or below, as a
+    0 did before), so the default view still shows unknown rows."""
+    profit = _optional_number(row.get("profit_amount"))
+    margin = _optional_number(row.get("profit_margin_fraction"))
+    isk = _optional_number(row.get("isk_per_hour"))
+    volume = _optional_number(row.get("region_daily_volume"))
+    min_margin = float(min_margin_pct or 0.0) / 100.0
+    min_isk = float(min_isk_per_hour or 0.0)
+    min_volume = int(min_region_daily_volume or 0)
+
+    def check(value: float | None, minimum: float, active: bool) -> bool | None:
+        if value is None:
+            return None if active else True
+        return value >= minimum
+
+    return {
+        "profit": (True if not positive_profit_only else (None if profit is None else profit > 0.0)),
+        "profit margin": check(margin, min_margin, min_margin > 0.0),
+        "ISK/hour": check(isk, min_isk, min_isk > 0.0),
+        "region daily volume": check(volume, min_volume, min_volume > 0),
+    }
+
+
+def _passes_other_filters(
+    row: dict[str, Any],
+    enabled_meta_group_set: set[str],
+    have_skills_only: bool,
+    excluded_liq_set: set[str],
+    excluded_anomaly_set: set[str],
+) -> bool:
+    return (
+        get_meta_group_name(row) in enabled_meta_group_set
+        and (not have_skills_only or skill_requirements_met(row))
+        and str(row.get("liquidity_indicator") or "Unknown") not in excluded_liq_set
+        and str(row.get("price_anomaly_risk") or "None") not in excluded_anomaly_set
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -710,23 +816,13 @@ def filter_overview_rows(
     return [
         row
         for row in overview_rows
-        if get_meta_group_name(row) in enabled_meta_group_set
-        and (not have_skills_only or skill_requirements_met(row))
-        and (
-            not positive_profit_only
-            or ((row.get("profit_amount") is not None) and float(row.get("profit_amount") or 0.0) > 0.0)
-        )
-        and (
-            float(row.get("profit_margin_fraction") or 0.0) >= (float(min_margin_pct or 0.0) / 100.0)
-        )
-        and float(row.get("isk_per_hour") or 0.0) >= float(min_isk_per_hour or 0.0)
-        and int(row.get("region_daily_volume") or 0) >= int(min_region_daily_volume or 0)
-        and str(row.get("liquidity_indicator") or "Unknown") not in excluded_liq_set
-        and str(row.get("price_anomaly_risk") or "None") not in excluded_anomaly_set
+        if _passes_other_filters(row, enabled_meta_group_set, have_skills_only, excluded_liq_set, excluded_anomaly_set)
+        and all(result is True for result in _minimum_filter_results(
+            row, positive_profit_only, min_margin_pct, min_isk_per_hour, min_region_daily_volume).values())
     ]
 
 
-def unknown_region_volume_hidden_note(
+def unknown_value_hidden_notes(
     overview_rows: list[dict[str, Any]],
     enabled_meta_groups: tuple[str, ...],
     have_skills_only: bool,
@@ -736,31 +832,54 @@ def unknown_region_volume_hidden_note(
     min_region_daily_volume: int,
     excluded_liquidity_indicators: tuple[str, ...] = (),
     excluded_anomaly_risks: tuple[str, ...] = (),
-) -> str | None:
-    """With a minimum region daily volume above 0, filter_overview_rows leaves
-    a row whose volume is unknown out (conservative). This says so: "N rows
-    hidden: region daily volume unknown (reasons)", counting the rows every
-    other filter keeps; None without a minimum or without such rows."""
-    if int(min_region_daily_volume or 0) <= 0:
-        return None
-    candidates = filter_overview_rows(
-        overview_rows, enabled_meta_groups, have_skills_only, positive_profit_only,
-        min_margin_pct, min_isk_per_hour, 0, excluded_liquidity_indicators, excluded_anomaly_risks,
-    )
-    hidden = [row for row in candidates if row.get("region_daily_volume") is None]
-    if not hidden:
-        return None
-    reasons: list[str] = []
-    for row in hidden:
-        reason = str(
-            row.get("region_daily_volume_unavailable_reason")
-            or get_manufacturing_job(row).get("region_daily_volume_unavailable_reason")
-            or "no reason given"
-        )
-        if reason not in reasons:
-            reasons.append(reason)
-    noun = "row" if len(hidden) == 1 else "rows"
-    return f"{len(hidden)} {noun} hidden: region daily volume unknown ({'; '.join(reasons)})"
+) -> list[str]:
+    """One note per active minimum filter (positive profit only, minimum
+    margin, ISK/hour, region daily volume) that left rows out only because
+    their value is unknown: "N rows hidden: <value> unknown", with the
+    region volume's reasons. A row counts when every other filter keeps it
+    and none of its known values fails a minimum; a row unknown for two
+    filters is named under both. [] when nothing is hidden that way."""
+    enabled_meta_group_set = set(enabled_meta_groups)
+    excluded_liq_set = set(excluded_liquidity_indicators)
+    excluded_anomaly_set = set(excluded_anomaly_risks)
+    hidden_by: dict[str, list[dict[str, Any]]] = {label: [] for label, _key in _MINIMUM_FILTERS}
+    for row in overview_rows:
+        if not _passes_other_filters(row, enabled_meta_group_set, have_skills_only, excluded_liq_set,
+                                     excluded_anomaly_set):
+            continue
+        results = _minimum_filter_results(row, positive_profit_only, min_margin_pct, min_isk_per_hour,
+                                          min_region_daily_volume)
+        if any(result is False for result in results.values()):
+            continue
+        for label, result in results.items():
+            if result is None:
+                hidden_by[label].append(row)
+    notes: list[str] = []
+    for label, _key in _MINIMUM_FILTERS:
+        hidden = hidden_by[label]
+        if not hidden:
+            continue
+        noun = "row" if len(hidden) == 1 else "rows"
+        note = f"{len(hidden)} {noun} hidden: {label} unknown"
+        if label == "region daily volume":
+            reasons: list[str] = []
+            for row in hidden:
+                reason = str(
+                    row.get("region_daily_volume_unavailable_reason")
+                    or get_manufacturing_job(row).get("region_daily_volume_unavailable_reason")
+                    or "no reason given"
+                )
+                if reason not in reasons:
+                    reasons.append(reason)
+            note += f" ({'; '.join(reasons)})"
+        notes.append(note)
+    return notes
+
+
+def unknown_region_volume_hidden_note(*filter_args: Any) -> str | None:
+    """The region daily volume note of unknown_value_hidden_notes, or None."""
+    return next((note for note in unknown_value_hidden_notes(*filter_args)
+                 if " hidden: region daily volume unknown" in note), None)
 
 
 @st.cache_data(ttl=300, show_spinner=False)

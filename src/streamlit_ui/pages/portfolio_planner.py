@@ -21,7 +21,7 @@ from streamlit_ui.state.industry_builder_page import (
     overview_refresh_is_active,
     start_overview_refresh_job,
 )
-from streamlit_ui.state.industry_builder_ui import filter_overview_rows, unknown_region_volume_hidden_note
+from streamlit_ui.state.industry_builder_ui import filter_overview_rows, unknown_value_hidden_notes
 from streamlit_ui.shopping_list import (
     DIFFERENT_REFRESHES_WARNING,
     aggregate_shopping_list_with_stale,
@@ -45,7 +45,9 @@ _HARD_DISQUALIFIERS = [
     (lambda r: bool(r.get("blueprint_sde_fallback")), "No owned blueprint (SDE fallback)"),
     (lambda r: str(r.get("price_anomaly_risk") or "").strip() == "High", "High price anomaly risk"),
     (lambda r: str(r.get("pricing_confidence") or "").strip().lower() == "low", "Low pricing confidence"),
-    (lambda r: float(r.get("profit_amount") or 0.0) <= 0.0, "Unprofitable"),
+    # An unknown profit is not a loss: it is named as unknown (the user ruled).
+    (lambda r: _known_float(r.get("profit_amount")) is None, "Profit unknown"),
+    (lambda r: float(r.get("profit_amount")) <= 0.0, "Unprofitable"),
 ]
 
 _LIQUIDITY_SCORES: dict[str, float] = {
@@ -62,6 +64,36 @@ _CONFIDENCE_SCORES: dict[str, float] = {
     "Medium": 0.5,
     "Low": 0.0,
 }
+
+
+def _known_float(value: Any) -> float | None:
+    """A known numeric value, or None when it is missing or not a number (unknown, not 0)."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: The scoring inputs of the Balanced composite: (label, row key).
+_SCORE_INPUTS: tuple[tuple[str, str], ...] = (
+    ("ISK/hour", "isk_per_hour"),
+    ("return on capital", "return_on_capital"),
+    ("profit", "profit_amount"),
+)
+
+
+def _unknown_score_inputs(row: dict[str, Any], objective: str = "Balanced") -> list[str]:
+    """The labels of the row's unknown scoring inputs for `objective`; its
+    score is unknown when any is (not scored as 0)."""
+    if objective == "Max ISK/hr":
+        inputs: tuple[tuple[str, str], ...] = (("ISK/hour", "isk_per_hour"),)
+    elif objective == "Capital Turnover":
+        inputs = (("cycle ISK/day", "isk_per_cycle_day"),)
+    else:
+        inputs = _SCORE_INPUTS
+    return [label for label, key in inputs if _known_float(row.get(key)) is None]
 
 
 def _row_blueprint_type_id(row: dict) -> int:
@@ -125,15 +157,14 @@ def _apply_hard_disqualifiers(
 # ---------------------------------------------------------------------------
 
 def _compute_normalization_context(rows: list[dict[str, Any]]) -> dict[str, float]:
-    def safe_float(v: Any) -> float:
-        try:
-            return float(v or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+    """The min/max of each scoring input over the rows where it is known (an
+    unknown value is left out, not counted as 0)."""
+    def known(key: str) -> list[float]:
+        return [value for r in rows if (value := _known_float(r.get(key))) is not None]
 
-    isk_vals = [safe_float(r.get("isk_per_hour")) for r in rows]
-    profit_vals = [safe_float(r.get("profit_amount")) for r in rows]
-    roc_vals = [min(safe_float(r.get("return_on_capital")), 5.0) for r in rows]
+    isk_vals = known("isk_per_hour")
+    profit_vals = known("profit_amount")
+    roc_vals = [min(value, 5.0) for value in known("return_on_capital")]
     return {
         "isk_min": min(isk_vals, default=0.0),
         "isk_max": max(isk_vals, default=1.0),
@@ -151,16 +182,14 @@ def _normalize(value: float, lo: float, hi: float) -> float:
     return max(0.0, min(1.0, (value - lo) / span))
 
 
-def _score_row(row: dict[str, Any], ctx: dict[str, float]) -> float:
-    def sf(v: Any) -> float:
-        try:
-            return float(v or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    isk_score = _normalize(sf(row.get("isk_per_hour")), ctx["isk_min"], ctx["isk_max"])
-    roc_score = _normalize(min(sf(row.get("return_on_capital")), 5.0), ctx["roc_min"], ctx["roc_max"])
-    profit_score = _normalize(sf(row.get("profit_amount")), ctx["profit_min"], ctx["profit_max"])
+def _score_row(row: dict[str, Any], ctx: dict[str, float]) -> float | None:
+    """The Balanced composite, or None (unknown) when an input is unknown:
+    an unknown ISK/hour, return on capital or profit is not scored as 0."""
+    if _unknown_score_inputs(row):
+        return None
+    isk_score = _normalize(float(row["isk_per_hour"]), ctx["isk_min"], ctx["isk_max"])
+    roc_score = _normalize(min(float(row["return_on_capital"]), 5.0), ctx["roc_min"], ctx["roc_max"])
+    profit_score = _normalize(float(row["profit_amount"]), ctx["profit_min"], ctx["profit_max"])
     liq_score = _LIQUIDITY_SCORES.get(str(row.get("liquidity_indicator") or "Unknown").strip(), 0.0)
     conf_score = _CONFIDENCE_SCORES.get(str(row.get("pricing_confidence") or "Low").strip().title(), 0.0)
 
@@ -199,35 +228,29 @@ def _score_row(row: dict[str, Any], ctx: dict[str, float]) -> float:
 SCORING_OBJECTIVES = ["Balanced", "Max ISK/hr", "Capital Turnover"]
 
 
+def _sort_scored(scored: list[tuple[dict[str, Any], float | None]]) -> list[tuple[dict[str, Any], float | None]]:
+    """Highest score first; the unknown scores (None) last, never ranked as 0."""
+    return sorted(scored, key=lambda pair: (pair[1] is not None, pair[1] or 0.0), reverse=True)
+
+
+def _per_million(value: Any) -> float | None:
+    known = _known_float(value)
+    return None if known is None else round(known / 1_000_000, 1)
+
+
 def _rank_candidates(
     rows: list[dict[str, Any]],
     objective: str = "Balanced",
-) -> list[tuple[dict[str, Any], float]]:
+) -> list[tuple[dict[str, Any], float | None]]:
     if not rows:
         return []
     if objective == "Max ISK/hr":
-        def _isk_key(row: dict) -> float:
-            try:
-                return float(row.get("isk_per_hour") or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-        scored = [(row, round(_isk_key(row) / 1_000_000, 1)) for row in rows]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored
+        return _sort_scored([(row, _per_million(row.get("isk_per_hour"))) for row in rows])
     if objective == "Capital Turnover":
-        def _ct_key(row: dict) -> float:
-            try:
-                return float(row.get("isk_per_cycle_day") or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-        scored = [(row, round(_ct_key(row) / 1_000_000, 1)) for row in rows]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored
+        return _sort_scored([(row, _per_million(row.get("isk_per_cycle_day"))) for row in rows])
     # Default: Balanced composite
     ctx = _compute_normalization_context(rows)
-    scored = [(row, _score_row(row, ctx)) for row in rows]
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return scored
+    return _sort_scored([(row, _score_row(row, ctx)) for row in rows])
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +327,10 @@ def _warnings(row: dict[str, Any]) -> list[str]:
     me = row.get("blueprint_me")
     prep_pct = row.get("prep_time_fraction_pct")
     margin = sf(row.get("profit_margin_fraction"))
+
+    unknown_inputs = _unknown_score_inputs(row)
+    if unknown_inputs:
+        warns.append(f"Score unknown: {', '.join(f'{label} unknown' for label in unknown_inputs)}")
 
     upper_bound = get_profit_upper_bound_reason(row)
     if upper_bound is not None:
@@ -715,7 +742,9 @@ def _reorder_tag(row: dict, reorder_alerts: dict) -> str:
     return ""   # no_data or missing → don't show
 
 
-def _apply_track_record_multiplier(score: float, row: dict, track_record: dict) -> float:
+def _apply_track_record_multiplier(score: float | None, row: dict, track_record: dict) -> float | None:
+    if score is None:
+        return None  # unknown stays unknown
     type_id_str = str(int(row.get("type_id") or 0))
     rec = track_record.get(type_id_str) or {}
     status = rec.get("status")
@@ -743,7 +772,7 @@ _SCORE_COLUMN_LABELS: dict[str, str] = {
 }
 
 
-def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None, objective: str = "Balanced", track_record: dict | None = None) -> None:
+def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float | None]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None, objective: str = "Balanced", track_record: dict | None = None) -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
         return
@@ -783,10 +812,13 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
             "Product": str(row.get("type_name") or row.get("type_id") or "Unknown"),
             score_col_label: score,
             "Assign to": assigned_char,
-            "Profit (M)": round(sf(row.get("profit_amount")) / 1_000_000, 1),
-            "ISK/Hr (M)": round(sf(row.get("isk_per_hour")) / 1_000_000, 1),
-            "Margin %": round(sf(row.get("profit_margin_fraction")) * 100, 1),
-            "ROC %": round(sf(row.get("return_on_capital")) * 100, 0),
+            # None (an empty cell) where the value is unknown, never 0.
+            "Profit (M)": _per_million(row.get("profit_amount")),
+            "ISK/Hr (M)": _per_million(row.get("isk_per_hour")),
+            "Margin %": (None if (margin := _known_float(row.get("profit_margin_fraction"))) is None
+                         else round(margin * 100, 1)),
+            "ROC %": (None if (roc := _known_float(row.get("return_on_capital"))) is None
+                      else round(roc * 100, 0)),
             "Liquidity": str(row.get("liquidity_indicator") or "Unknown"),
             "DOS": round(dos, 1) if dos is not None else None,
             "BPC": _bpc_label(row),
@@ -827,7 +859,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
                 ci = row.get("manufacturing_cost_index")
                 anomaly_reasons = row.get("price_anomaly_reasons")
 
-                st.caption(f"**Score:** {score}")
+                st.caption(f"**Score:** {'unknown' if score is None else score}")
                 # Task 12: the parallel invention/copy lanes the build time assumes.
                 lane_notes = [str(n) for n in (mj.get("elapsed_lane_notes") or []) if n]
                 st.caption(
@@ -1099,9 +1131,8 @@ def render() -> None:
         tuple(sorted(fs["excluded_anomaly_risks"])),
     )
     filtered_rows = filter_overview_rows(*filter_args)
-    hidden_volume_note = unknown_region_volume_hidden_note(*filter_args)
-    if hidden_volume_note:
-        st.info(hidden_volume_note)
+    for hidden_note in unknown_value_hidden_notes(*filter_args):
+        st.info(hidden_note)
 
     eligible_rows, disqualified = _apply_hard_disqualifiers(filtered_rows)
 
@@ -1143,7 +1174,7 @@ def render() -> None:
         (row, _apply_track_record_multiplier(score, row, _track_record_pre))
         for row, score in ranked
     ]
-    ranked.sort(key=lambda pair: pair[1], reverse=True)
+    ranked = _sort_scored(ranked)
 
     _render_slot_summary_header(jobs_data)
     active_type_ids = _build_active_type_ids(jobs_data)
