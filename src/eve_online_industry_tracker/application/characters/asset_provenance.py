@@ -1836,10 +1836,14 @@ def _get_or_fetch_market_price_on_date(
     app_session: Any,
     esi_service: Any,
     region_id: int = 10000002,
+    unavailable: Optional[dict[int, str]] = None,
 ) -> Optional[float]:
     """Return the closest daily average price on or before target_date for type_id.
 
     Checks the market_history DB first; fetches from ESI and caches if missing.
+    None when no price is known; then `unavailable` (when given) gets why:
+    the ESI reason when the history fetch failed (market_history_unavailable_reason),
+    or that the history has no day on or before target_date.
     """
     row = (
         app_session.query(MarketHistoryModel)
@@ -1856,7 +1860,14 @@ def _get_or_fetch_market_price_on_date(
 
     try:
         history_rows = esi_service.get_market_history([type_id], region_id=region_id)
-        items = (history_rows or {}).get(int(type_id), [])
+        if not isinstance(history_rows, dict) or int(type_id) not in history_rows:
+            # ESIService leaves a type whose fetch failed out of the result.
+            reader = getattr(esi_service, "market_history_unavailable_reason", None)
+            fetch_failure = (reader(int(type_id), region_id=region_id) if reader is not None else None) or (
+                f"ESI returned no market history for type_id={type_id}")
+        else:
+            fetch_failure = None
+        items = (history_rows or {}).get(int(type_id), []) if isinstance(history_rows, dict) else []
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -1892,6 +1903,8 @@ def _get_or_fetch_market_price_on_date(
         app_session.flush()
     except Exception as e:
         logging.warning("Failed to fetch market history for type_id=%s: %s", type_id, e)
+        if unavailable is not None:
+            unavailable[int(type_id)] = f"market history fetch failed: {e}"
         return None
 
     row = (
@@ -1904,7 +1917,11 @@ def _get_or_fetch_market_price_on_date(
         .order_by(MarketHistoryModel.date.desc())
         .first()
     )
-    return float(row.close) if row and row.close and float(row.close) > 0 else None
+    price = float(row.close) if row and row.close and float(row.close) > 0 else None
+    if price is None and unavailable is not None:
+        unavailable[int(type_id)] = fetch_failure or (
+            f"no market history price on or before {target_date} for type_id={type_id}")
+    return price
 
 
 def backfill_historical_market_costs(
@@ -1922,6 +1939,12 @@ def backfill_historical_market_costs(
     job's start_date and stores a per-material breakdown in historical_input_costs.
     This makes cost estimates for jobs that completed while the tool was offline
     far more accurate than using current ESI prices.
+
+    A material without a historical price (its ESI history fetch failed, or no
+    day on or before start_date) is in historical_input_costs with unit_cost
+    None and its unknown_reason, never counted as 0 ISK: the materials cost is
+    then a lower bound, with a WARNING. A job with no priced material is left
+    as it was (retried at the next refresh), with a WARNING naming why.
     """
     jobs_to_fix = (
         app_session.query(job_model)
@@ -1973,6 +1996,7 @@ def backfill_historical_market_costs(
             input_cost_details: dict[str, Any] = {}
             priced_quantity = 0
             total_quantity = 0
+            unpriced: dict[int, str] = {}
 
             for m in materials:
                 if not isinstance(m, dict):
@@ -1994,8 +2018,19 @@ def backfill_historical_market_costs(
                     app_session=app_session,
                     esi_service=esi_service,
                     region_id=region_id,
+                    unavailable=unpriced,
                 )
                 if unit_price is None or unit_price <= 0:
+                    # Unknown, never 0 ISK: the material is named with why
+                    # (the ESI reason when the history fetch failed).
+                    input_cost_details[str(mat_type_id)] = {
+                        "unit_cost": None,
+                        "quantity": int(adjusted_qty),
+                        "source": "historical_market_daily_average",
+                        "reference_date": start_date,
+                        "unknown_reason": unpriced.get(int(mat_type_id))
+                        or f"no market history price on or before {start_date}",
+                    }
                     continue
 
                 line_cost = float(adjusted_qty) * float(unit_price)
@@ -2008,8 +2043,23 @@ def backfill_historical_market_costs(
                     "reference_date": start_date,
                 }
 
-            if not input_cost_details:
+            unknown_details = [d for d in input_cost_details.values() if d.get("unit_cost") is None]
+            unknown_reasons = sorted({str(d.get("unknown_reason")) for d in unknown_details})
+            if priced_quantity <= 0:
+                if unknown_reasons:
+                    # No material priced: the job keeps its estimate and is retried at the next refresh.
+                    logging.warning(
+                        "backfill_historical_market_costs: job_id=%s has no historical material price, "
+                        "its cost estimate is kept (%s)",
+                        getattr(job, "job_id", "?"), "; ".join(unknown_reasons),
+                    )
                 continue
+            if unknown_reasons:
+                logging.warning(
+                    "backfill_historical_market_costs: job_id=%s has %s material(s) without a historical "
+                    "price, its materials cost is a lower bound (%s)",
+                    getattr(job, "job_id", "?"), len(unknown_details), "; ".join(unknown_reasons),
+                )
 
             coverage = float(priced_quantity) / float(total_quantity) if total_quantity > 0 else 0.0
             job_cost = float(getattr(job, "cost", 0) or 0)
