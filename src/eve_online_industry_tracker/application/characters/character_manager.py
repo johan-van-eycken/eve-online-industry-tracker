@@ -1,10 +1,19 @@
 import logging
 from typing import Any, Optional, List, Dict
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.application.characters.character import Character
 from eve_online_industry_tracker.infrastructure.models import OAuthCharacter
+
+
+class CharacterDataError(Exception):
+    """A character's data could not be read (get_characters). Not a
+    RuntimeError, so the ESI catch sites do not take it for an ESI failure;
+    the cause is chained."""
+
 
 class CharacterManager:
     """Manages multiple Character objects and provides batch utilities."""
@@ -124,15 +133,18 @@ class CharacterManager:
         return self._char_by_id.get(character_id)
 
     def get_characters(self) -> Optional[List[Dict[str, object]]]:
+        """Every character, serialized. ValueError when there are none yet;
+        CharacterDataError when a character's data cannot be read (a DB
+        failure). A programming error propagates as is."""
         if not self._character_list:
             raise ValueError("No characters available in the manager.")
         try:
             characters_data = [c.get_character() for c in self._character_list]
             return characters_data
-        except Exception as e:
+        except SQLAlchemyError as e:
             error_message = f"Error retrieving characters: {str(e)}"
             logging.error(error_message)
-            raise Exception(error_message)
+            raise CharacterDataError(error_message) from e
 
     def get_wallet_balances(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> Optional[List[Dict[str, float]]]:
         balances = []

@@ -156,10 +156,12 @@ def test_slot_capacities_without_characters_are_empty():
 
 
 def test_slot_capacities_propagate_a_character_read_failure():
-    def _boom():
-        raise RuntimeError("Error retrieving characters: fake")
+    from eve_online_industry_tracker.application.characters.character_manager import CharacterDataError
 
-    with pytest.raises(RuntimeError):
+    def _boom():
+        raise CharacterDataError("Error retrieving characters: fake")   # what get_characters raises (F1 item 7)
+
+    with pytest.raises(CharacterDataError):
         _service(char_manager=SimpleNamespace(get_characters=_boom))._character_slot_capacities()
 
 

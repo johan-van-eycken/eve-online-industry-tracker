@@ -136,6 +136,7 @@ from eve_online_industry_tracker.domain import industry_facility as _industry_fa
 from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 from eve_online_industry_tracker.application.characters.asset_provenance import RealizedInventionInputs
+from eve_online_industry_tracker.application.characters.character_manager import CharacterDataError
 
 
 logger = logging.getLogger(__name__)
@@ -6519,6 +6520,22 @@ class IndustryService:
 
         return out
 
+    @staticmethod
+    def _scope_owner_id(owned_blueprints_scope: str, raw: str | None, kind: str) -> int:
+        """The positive {kind} ID of an owned_blueprints_scope part. A missing,
+        non-numeric or non-positive ID is the caller's error: a 400 naming
+        it, instead of a scope that silently selects no assets."""
+        try:
+            owner_id = int(str(raw).strip()) if raw is not None else 0
+        except ValueError:
+            owner_id = 0
+        if owner_id <= 0:
+            raise ServiceError(
+                f"owned_blueprints_scope {owned_blueprints_scope!r}: {raw!r} is not a valid {kind} ID",
+                status_code=400,
+            )
+        return owner_id
+
     def _get_owned_blueprint_assets(
         self,
         *,
@@ -6567,7 +6584,13 @@ class IndustryService:
                     character_name_by_id[character_id] = character_name
 
             corp_manager = getattr(self._state, "corp_manager", None)
-            corporations = (corp_manager.get_corporations() or []) if corp_manager is not None else []
+            try:
+                corporations = (corp_manager.get_corporations() or []) if corp_manager is not None else []
+            except SQLAlchemyError as exc:
+                # Cosmetic (the corporation names): the overview refresh must not fail on it.
+                logger.warning("Owned assets: the corporation names cannot be read (%s); the blueprints keep their "
+                               "corporation IDs", exc)
+                corporations = []
             for corporation in corporations:
                 if not isinstance(corporation, dict):
                     continue
@@ -6611,12 +6634,7 @@ class IndustryService:
 
             normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
             if normalized_scope.startswith("character:"):
-                try:
-                    selected_character_id = int(normalized_scope.split(":", 1)[1])
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_character_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
                 historical_character_assets, _ = self._load_historical_blueprint_assets(
                     app_session=session,
@@ -6636,18 +6654,8 @@ class IndustryService:
                 )
             if normalized_scope.startswith("character_and_corporation:"):
                 parts = normalized_scope.split(":")
-                try:
-                    selected_character_id = int(parts[1]) if len(parts) > 1 else 0
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_character_id = 0
-                try:
-                    selected_corporation_id = int(parts[2]) if len(parts) > 2 else 0
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_corporation_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
                 historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
@@ -6671,12 +6679,7 @@ class IndustryService:
                     top_location_name_by_id,
                 )
             if normalized_scope.startswith("corporation:"):
-                try:
-                    selected_corporation_id = int(normalized_scope.split(":", 1)[1])
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_corporation_id = 0
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
                 _, historical_corporation_assets = self._load_historical_blueprint_assets(
                     app_session=session,
@@ -6863,36 +6866,16 @@ class IndustryService:
             character_assets: list[CharacterAssetsModel] = []
             corporation_assets: list[CorporationAssetsModel] = []
             if normalized_scope.startswith("character:"):
-                try:
-                    selected_character_id = int(normalized_scope.split(":", 1)[1])
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_character_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
                 character_assets = query_character_assets([selected_character_id])
             elif normalized_scope.startswith("character_and_corporation:"):
                 parts = normalized_scope.split(":")
-                try:
-                    selected_character_id = int(parts[1]) if len(parts) > 1 else 0
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_character_id = 0
-                try:
-                    selected_corporation_id = int(parts[2]) if len(parts) > 2 else 0
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_corporation_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
                 character_assets = query_character_assets([selected_character_id])
                 corporation_assets = query_corporation_assets([selected_corporation_id])
             elif normalized_scope.startswith("corporation:"):
-                try:
-                    selected_corporation_id = int(normalized_scope.split(":", 1)[1])
-                except ValueError:
-                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
-                                   "assets", owned_blueprints_scope)
-                    selected_corporation_id = 0
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
                 corporation_assets = query_corporation_assets([selected_corporation_id])
             elif normalized_scope == "all_characters":
                 character_assets = query_character_assets(character_ids)
@@ -10753,6 +10736,7 @@ class IndustryService:
             characters = char_manager.get_characters() or []
         except ValueError:
             return {}  # get_characters: "No characters available in the manager."
+        # CharacterDataError (the characters cannot be read) propagates: the slots are planning input.
 
         slot_skill_ids = {
             self._SKILL_MASS_PRODUCTION,
@@ -10882,6 +10866,9 @@ class IndustryService:
                             char_name_map[int(cid)] = c.get("character_name") or str(cid)
                 except (TypeError, ValueError):
                     pass  # cosmetic: no characters (ValueError) or an odd ID leaves the job with its ID
+                except CharacterDataError as exc:
+                    logger.warning("Active jobs: the character names cannot be read (%s); the jobs keep their "
+                                   "character IDs", exc)
 
         rows: list[dict[str, Any]] = []
 
