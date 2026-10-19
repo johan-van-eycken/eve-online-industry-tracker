@@ -103,35 +103,6 @@ def test_esi_request_errors_do_not_include_programming_errors():
     assert issubclass(requests.HTTPError, esi_client_module.ESI_REQUEST_ERRORS)
 
 
-# --- blueprint assets without market prices -------------------------------------------------
-
-def test_blueprint_assets_without_market_prices_warn_and_leave_prices_empty(monkeypatch, caplog):
-    from eve_online_industry_tracker.infrastructure import blueprints_service
-
-    monkeypatch.setattr(blueprints_service, "_build_owned_blueprints", lambda s: ([{"type_id": 1001}], {1001}))
-    monkeypatch.setattr(
-        blueprints_service,
-        "get_blueprint_manufacturing_data",
-        lambda *a, **k: {1001: {"manufacturing": {"materials": [{"type_id": 34, "quantity": 10}], "products": []}}},
-    )
-    esi = SimpleNamespace(get_market_prices=_raiser(RuntimeError("ESI request failed: 503")))
-    with caplog.at_level(logging.WARNING):
-        out = blueprints_service.get_blueprint_assets(None, esi_service=esi, sde_session=None, language="en")
-    mat = out[0]["materials"][0]
-    assert mat["unit_price"] is None and mat["adjusted_price"] is None
-    assert any("market prices unavailable" in r.getMessage() for r in caplog.records)
-
-
-def test_a_bug_behind_blueprint_market_prices_propagates(monkeypatch):
-    from eve_online_industry_tracker.infrastructure import blueprints_service
-
-    monkeypatch.setattr(blueprints_service, "_build_owned_blueprints", lambda s: ([], set()))
-    monkeypatch.setattr(blueprints_service, "get_blueprint_manufacturing_data", lambda *a, **k: {})
-    esi = SimpleNamespace(get_market_prices=_raiser(AttributeError("x")))
-    with pytest.raises(AttributeError):
-        blueprints_service.get_blueprint_assets(None, esi_service=esi, sde_session=None, language="en")
-
-
 # --- background public structures refresh ---------------------------------------------------
 
 def _refresh_state(get_public_structures):

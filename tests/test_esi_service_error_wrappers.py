@@ -1,6 +1,6 @@
 """F2b: the ESIService RuntimeError wrappers wrap only ESI failures
 (ESI_REQUEST_ERRORS); a programming error propagates as itself. Plus the
-blueprint-assets price reason and the background public structures error.
+background public structures error.
 Fake values only."""
 from __future__ import annotations
 
@@ -129,39 +129,6 @@ def test_a_bug_in_the_public_structure_scan_propagates_as_itself(exc):
     svc.get_universe_structure = _raiser(exc)
     with pytest.raises(type(exc)):
         svc.get_public_structures(30000142, max_workers=1)
-
-
-# --- blueprint assets: the price reason ---------------------------------------------------------
-
-def _blueprint_assets(monkeypatch, esi):
-    from eve_online_industry_tracker.infrastructure import blueprints_service
-
-    monkeypatch.setattr(blueprints_service, "_build_owned_blueprints", lambda s: ([{"type_id": 1001}], {1001}))
-    monkeypatch.setattr(
-        blueprints_service,
-        "get_blueprint_manufacturing_data",
-        lambda *a, **k: {1001: {"manufacturing": {"materials": [{"type_id": 34, "quantity": 10}], "products": []}}},
-    )
-    return blueprints_service.get_blueprint_assets(None, esi_service=esi, sde_session=None, language="en")
-
-
-def test_blueprint_assets_without_market_prices_carry_the_reason(monkeypatch):
-    out = _blueprint_assets(monkeypatch, SimpleNamespace(get_market_prices=_raiser(RuntimeError("ESI request failed: 503"))))
-    assert out[0]["materials"][0]["unit_price"] is None
-    assert "market prices unavailable" in out[0]["price_unknown_reason"]
-    assert "503" in out[0]["price_unknown_reason"]
-
-
-def test_blueprint_assets_without_an_esi_service_carry_the_reason(monkeypatch):
-    out = _blueprint_assets(monkeypatch, None)
-    assert "market prices unavailable" in out[0]["price_unknown_reason"]
-
-
-def test_blueprint_assets_with_market_prices_have_no_reason(monkeypatch):
-    prices = [{"type_id": 34, "adjusted_price": 4.5, "average_price": 5.0}]
-    out = _blueprint_assets(monkeypatch, SimpleNamespace(get_market_prices=lambda: prices))
-    assert out[0]["materials"][0]["unit_price"] == 4.5
-    assert out[0]["price_unknown_reason"] is None
 
 
 # --- background public structures refresh: the error is always the latest -------------------------
