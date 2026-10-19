@@ -10965,6 +10965,17 @@ class IndustryService:
 
         return capacities
 
+    @classmethod
+    def _active_job_build_cost_fields(cls, job: Any) -> dict[str, Any]:
+        """The stored job's build cost (total and per unit) and why it is
+        partly unknown; each None when the row has none."""
+        return {
+            "total_build_cost": cls._as_float(getattr(job, "total_build_cost", None)),
+            "unit_build_cost": cls._as_float(getattr(job, "unit_build_cost", None)),
+            "invention_cost_unknown_reason": getattr(job, "invention_cost_unknown_reason", None) or None,
+            "materials_cost_lower_bound_reason": getattr(job, "materials_cost_lower_bound_reason", None) or None,
+        }
+
     def industry_active_jobs(self, *, character_id: int | None = None) -> dict[str, Any]:
         """Return active industry jobs and slot capacities, optionally filtered by character.
 
@@ -11086,6 +11097,7 @@ class IndustryService:
                 "location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
                 "is_corp_job": False,
+                **self._active_job_build_cost_fields(job),
             })
 
         # Build rows for corporation-scope jobs — attribute to installer_id
@@ -11131,6 +11143,7 @@ class IndustryService:
                 "location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
                 "is_corp_job": True,
+                **self._active_job_build_cost_fields(job),
             })
 
         rows.sort(key=lambda r: r.get("end_date") or "")
