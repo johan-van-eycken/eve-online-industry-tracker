@@ -1248,3 +1248,15 @@ class RealizedInventionDecryptorChoiceModel(BaseApp):
     #: The producer's DecryptorChoice.reason.
     choice_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     set_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RealizedInventionDecryptorPublishModel(BaseApp):
+    """The marker of the last decryptor-choice publish (one row, id 1), so an
+    overview that planned no invention (no choice rows) is told apart from no
+    overview yet (no marker), also after a restart."""
+
+    __tablename__ = "realized_invention_decryptor_publish"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    choice_count: Mapped[int] = mapped_column(Integer, nullable=False)

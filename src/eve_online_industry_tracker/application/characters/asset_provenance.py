@@ -27,6 +27,7 @@ from eve_online_industry_tracker.infrastructure.models import (
     CorporationIndustryJobsModel,
     MarketHistoryModel,
     RealizedInventionDecryptorChoiceModel,
+    RealizedInventionDecryptorPublishModel,
 )
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_blueprint_manufacturing_data,
@@ -364,8 +365,9 @@ class RealizedInventionInputs:
     for both: no choice known, so no estimate.
 
     `decryptor_choices_published`: an overview has published its choices
-    (in memory, or persisted before a restart), so a blueprint missing from
-    them is one the overview does not plan, not one it has not reached yet."""
+    (in memory, or persisted before a restart, the publish marker), so a
+    blueprint missing from them is one the overview does not plan, not one
+    it has not reached yet; published and empty: it planned no invention."""
 
     invention_context: InventionContext
     decryptor_by_blueprint_type_id: Mapping[int, DecryptorOption]
@@ -453,8 +455,11 @@ def save_published_decryptor_choices(
 ) -> None:
     """Replace the persisted decryptor choices with `choices` ({invented
     blueprint: (decryptor, the producer's reason)}), the last published
-    overview's. Commits; a database error propagates."""
+    overview's, and the publish marker (also for no choices: an overview
+    that planned no invention). Commits; a database error propagates."""
     app_session.query(RealizedInventionDecryptorChoiceModel).delete(synchronize_session=False)
+    app_session.query(RealizedInventionDecryptorPublishModel).delete(synchronize_session=False)
+    app_session.add(RealizedInventionDecryptorPublishModel(id=1, published_at=now, choice_count=len(choices)))
     for blueprint_type_id, (option, reason) in sorted(choices.items()):
         app_session.add(RealizedInventionDecryptorChoiceModel(
             blueprint_type_id=int(blueprint_type_id),
@@ -471,12 +476,15 @@ def save_published_decryptor_choices(
 
 
 def load_published_decryptor_choices(app_session: Any) -> dict[int, DecryptorOption] | None:
-    """The persisted decryptor choices, None when none were ever stored
-    (an overview that planned no invention cannot be told from no overview).
-    A database error propagates."""
+    """The persisted decryptor choices: {} after a publish that planned no
+    invention (the publish marker without rows), None when nothing was ever
+    published (no marker and no rows; rows without a marker were stored
+    before the marker existed and are a publish). A database error
+    propagates."""
     rows = app_session.query(RealizedInventionDecryptorChoiceModel).all()
     if not rows:
-        return None
+        published = app_session.query(RealizedInventionDecryptorPublishModel.id).first() is not None
+        return {} if published else None
     return {
         int(row.blueprint_type_id): (
             NO_DECRYPTOR if row.decryptor_type_id is None else DecryptorOption(
@@ -706,6 +714,10 @@ def estimate_invention_cost_per_run(
         return None, inputs_unknown_reason
     decryptor = invention_inputs.decryptor_for(target)
     if decryptor is None:
+        if invention_inputs.decryptor_choices_published and not invention_inputs.decryptor_by_blueprint_type_id:
+            return None, (
+                f"blueprint {target}: {NO_DECRYPTOR_CHOICE_REASON} (the last product overview planned no invention)"
+            )
         if invention_inputs.decryptor_choices_published:
             return None, f"blueprint {target}: {NO_DECRYPTOR_CHOICE_REASON} (this blueprint is not planned by the overview)"
         return None, f"{NO_DECRYPTOR_CHOICE_REASON} for blueprint {target} (no product overview has planned it yet)"

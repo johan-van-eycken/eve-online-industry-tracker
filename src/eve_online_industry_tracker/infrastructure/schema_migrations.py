@@ -524,6 +524,19 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             ")"
         ),
     )
+    # The marker of the last publish: no choice rows with a marker is an
+    # overview that planned no invention, without one no overview yet.
+    _ensure_table(
+        db_app,
+        table="realized_invention_decryptor_publish",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS realized_invention_decryptor_publish ("
+            "id INTEGER PRIMARY KEY,"
+            "published_at DATETIME NOT NULL,"
+            "choice_count INTEGER NOT NULL"
+            ")"
+        ),
+    )
 
     _ensure_index(
         db_app,

@@ -29,6 +29,7 @@ from eve_online_industry_tracker.infrastructure.models import (
     CharacterIndustryJobsModel,
     Groups,
     RealizedInventionDecryptorChoiceModel,
+    RealizedInventionDecryptorPublishModel,
     Types,
 )
 from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
@@ -361,6 +362,79 @@ def test_market_prices_unavailable_skips_the_re_snapshot_with_a_warning_and_retr
         assert session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one().invention_cost_unknown_reason is None
 
 
+def _reason_for(inputs, sde_engine, blueprint_type_id=_TARGET_BP) -> str:
+    with Session(sde_engine) as sde:
+        _, reason = ap.estimate_invention_cost_per_run(
+            sde_session=sde, target_blueprint_type_id=blueprint_type_id, market_price_map={}, invention_inputs=inputs,
+        )
+    return reason
+
+
+def test_an_overview_that_planned_no_invention_is_told_from_no_overview_after_a_restart(
+    session_provider, sde_engine,
+):
+    _seed_sde(sde_engine)
+    assert "no product overview has planned it yet" in _reason_for(
+        _service(_state(), session_provider).realized_invention_inputs(), sde_engine,
+    )
+    _service(_state(), session_provider).publish_decryptor_choices({})
+
+    restarted = _service(_state(), session_provider).realized_invention_inputs()
+    assert restarted.decryptor_choices_published is True
+    assert dict(restarted.decryptor_by_blueprint_type_id) == {}
+    reason = _reason_for(restarted, sde_engine)
+    assert "no decryptor choice (the last product overview planned no invention)" in reason
+    assert "no product overview has planned it yet" not in reason
+
+
+def test_an_empty_publish_in_memory_says_the_overview_planned_no_invention(session_provider, sde_engine):
+    _seed_sde(sde_engine)
+    service = _service(_state(), session_provider)
+    service.publish_decryptor_choices({})
+    assert "the last product overview planned no invention" in _reason_for(
+        service.realized_invention_inputs(), sde_engine,
+    )
+
+
+def test_each_publish_replaces_the_one_publish_marker(session_provider):
+    service = _service(_state(), session_provider)
+    service.publish_decryptor_choices({_TARGET_BP: DecryptorChoice(_DECRYPTOR, "chosen")})
+    with session_provider.app_session() as session:
+        [first] = session.query(RealizedInventionDecryptorPublishModel).all()
+        first_at, first_count = first.published_at, first.choice_count
+    service.publish_decryptor_choices({})
+    with session_provider.app_session() as session:
+        [marker] = session.query(RealizedInventionDecryptorPublishModel).all()
+        assert first_count == 1 and marker.choice_count == 0
+        assert marker.published_at >= first_at
+        assert session.query(RealizedInventionDecryptorChoiceModel).count() == 0
+
+
+def test_choices_stored_before_the_marker_existed_still_count_as_published(session_provider):
+    """A DB written before the publish marker: its rows are a publish."""
+    from datetime import datetime
+
+    with session_provider.app_session() as session:
+        session.add(RealizedInventionDecryptorChoiceModel(
+            blueprint_type_id=_TARGET_BP, decryptor_type_id=None, decryptor_type_name="No decryptor",
+            probability_multiplier=1.0, me_modifier=0, te_modifier=0, max_run_modifier=0,
+            choice_reason="old", set_at=datetime(2026, 10, 1),
+        ))
+        session.commit()
+    inputs = _service(_state(), session_provider).realized_invention_inputs()
+    assert inputs.decryptor_choices_published is True
+    assert inputs.decryptor_for(_TARGET_BP) == NO_DECRYPTOR
+
+
+def test_the_re_snapshot_after_an_empty_publish_names_that_case(session_provider, sde_engine):
+    _seed_sde(sde_engine)
+    _store_job_without_a_choice(session_provider)
+    _service(_state(), session_provider).publish_decryptor_choices({})
+    with session_provider.app_session() as session:
+        job = session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one()
+        assert "the last product overview planned no invention" in job.invention_cost_unknown_reason
+
+
 def test_the_migration_adds_the_reason_column_and_the_choices_table():
     conn = sqlite3.connect(":memory:")
     for table in ("character_industry_jobs", "corporation_industry_jobs"):
@@ -383,3 +457,5 @@ def test_the_migration_adds_the_reason_column_and_the_choices_table():
         "blueprint_type_id", "decryptor_type_id", "decryptor_type_name", "probability_multiplier",
         "me_modifier", "te_modifier", "max_run_modifier", "choice_reason", "set_at",
     }
+    marker_columns = {row[1] for row in conn.execute("PRAGMA table_info(realized_invention_decryptor_publish)")}
+    assert marker_columns == {"id", "published_at", "choice_count"}
