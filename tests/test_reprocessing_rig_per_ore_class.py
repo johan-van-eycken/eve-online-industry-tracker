@@ -152,6 +152,20 @@ def test_a_rig_the_sde_does_not_give_its_class_raises_with_the_hint():
                                            npc_station=fakes.fake_npc_station, data=broken)
 
 
+@pytest.mark.parametrize("covered", [frozenset(), frozenset({"asteroid", "ice"})])
+def test_a_tatara_monitor_the_sde_gives_not_every_class_raises_with_the_hint(covered):
+    """H1: the L-Set monitor covers all three classes; dogma that gives it
+    none, or not all, is missing SDE data, not an unrigged moon ore."""
+    data = fakes.fake_ore_data()
+    broken = ore.OreData(compressed_by_base={}, base_by_compressed={}, skill_by_type={},
+                         refining_yield_bonus=data.refining_yield_bonus, facility_attributes=data.facility_attributes,
+                         rig_ore_classes={**data.rig_ore_classes, 46639: covered})
+    match = "46639.*" + ("asteroid" if not covered else "moon") + ".*re-run scripts/import_sde.py"
+    with pytest.raises(industry.SdeIndustryDataMissing, match=match):
+        facility_repo.facility_from_choice(facility_type="tatara", rig="t1", security_band="high", tax=0.0,
+                                           npc_station_id=None, npc_station=fakes.fake_npc_station, data=broken)
+
+
 def test_the_unrigged_base_of_each_class_is_the_reprocessing_services_attribute():
     data = fakes.fake_ore_data()
     service = dict(data.facility_attributes[ore.STANDUP_REPROCESSING_FACILITY_TYPE_ID])

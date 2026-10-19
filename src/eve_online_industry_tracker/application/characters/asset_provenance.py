@@ -1034,9 +1034,14 @@ def build_invention_cost_per_run_by_blueprint_type(
         if per_attempt is None:
             _skip(target, job_id, f"invention input(s) {unpriced} have no price")
             continue
+        install_cost = _safe_float(job.get("cost") if job.get("cost") is not None else raw.get("cost"))
+        if install_cost is None:
+            # Never a free install: the job's attempts would be under-costed.
+            _skip(target, job_id, "the job has no readable install cost (ESI cost)")
+            continue
         runs = int(_safe_int(raw.get("runs")) or 0)
         successful_runs = int(_safe_int(raw.get("successful_runs")) or 0)
-        entry["cost"] += float(runs) * float(per_attempt) + float(_safe_float(job.get("cost")) or 0.0)
+        entry["cost"] += float(runs) * float(per_attempt) + float(install_cost)
         entry["attempts"] += runs
         entry["successful_runs"] += successful_runs
         entry["invented_runs"] += successful_runs * invented_runs_per_blueprint(base_runs, decryptor)

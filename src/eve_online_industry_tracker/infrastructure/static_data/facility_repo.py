@@ -223,10 +223,10 @@ def facility_from_choice(*, facility_type: Any, rig: Any, security_band: Any, ta
     for cls in _r.ORE_CLASSES:
         tier = rigs[cls]
         if facility_type == _r.FACILITY_TATARA and tier != _r.RIG_NONE:
-            rig_type = _ore.TATARA_RIG_TYPE_IDS[tier]
-            # The monitor's dogma decides which classes it covers; any other gets the unrigged base.
-            covered = cls in data.rig_ore_classes.get(rig_type, frozenset())
-            yields[cls] = _rigged(data, rig_type, cls, security_band, tier) if covered else _unrigged(data, cls)
+            # The L-Set monitor covers every ore class: SDE dogma that gives it
+            # none, or not all, of them is missing data (raised with the
+            # re-import hint, as on an Athanor), never an unrigged class.
+            yields[cls] = _rigged(data, _ore.TATARA_RIG_TYPE_IDS[tier], cls, security_band, tier)
         elif tier != _r.RIG_NONE:
             yields[cls] = _rigged(data, _ore.ATHANOR_RIG_TYPE_IDS[(cls, tier)], cls, security_band, tier)
         else:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any
 
@@ -159,6 +160,7 @@ def _adjusted_prices(esi_service: ESIService, type_ids: list[int]) -> dict[int, 
     adjusted price is left out (no average or base price stands in)."""
     wanted = {int(t) for t in type_ids}
     out: dict[int, float] = {}
+    unreadable: list[int] = []
     for row in esi_service.get_market_prices() or []:
         if not isinstance(row, dict) or row.get("adjusted_price") is None:
             continue
@@ -166,8 +168,21 @@ def _adjusted_prices(esi_service: ESIService, type_ids: list[int]) -> dict[int, 
             type_id = int(row.get("type_id"))
         except (TypeError, ValueError):
             continue
-        if type_id in wanted:
-            out[type_id] = float(row["adjusted_price"])
+        if type_id not in wanted:
+            continue
+        raw = row["adjusted_price"]
+        try:
+            price = None if isinstance(raw, bool) else float(raw)
+        except (TypeError, ValueError):
+            price = None
+        if price is None or not math.isfinite(price):
+            # Left out: the fee is then unknown, with its reason (_reprocessing_fee).
+            unreadable.append(type_id)
+            continue
+        out[type_id] = price
+    if unreadable:
+        logging.warning("Reprocessing fee: ESI adjusted_price of type(s) %s is not a number; left out, the fee "
+                        "is unknown", sorted(unreadable))
     return out
 
 

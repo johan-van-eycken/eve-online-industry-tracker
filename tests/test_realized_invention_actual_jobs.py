@@ -331,6 +331,19 @@ def test_without_sde_decryptor_data_no_decryptor_is_assumed(sde):
     assert "decryptor unknown" in source["unknown_reason"]
 
 
+@pytest.mark.parametrize("cost", [None, "n/a"])
+def test_a_job_without_a_readable_install_cost_is_skipped_with_a_reason(sde, cost):
+    """H1: never a free install (that under-costs every attempt)."""
+    source = _sources(sde, [_job(cost=cost)])[_TARGET_BP]
+    assert source.get("unit_cost_per_run") is None
+    assert "job 1: the job has no readable install cost" in source["unknown_reason"]
+
+
+def test_a_zero_install_cost_is_a_known_cost(sde):
+    source = _sources(sde, [_job(cost=0.0)])[_TARGET_BP]
+    assert source["unit_cost_per_run"] == pytest.approx(10 * _PER_ATTEMPT / (4 * _BASE_RUNS))
+
+
 def test_an_unpriced_input_is_no_cost_source(sde):
     prices = {k: v for k, v in _PRICES.items() if k != _DATACORE_B}
     source = _sources(sde, [_job()], prices=prices)[_TARGET_BP]
