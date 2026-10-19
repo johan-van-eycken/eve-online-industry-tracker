@@ -24,6 +24,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 import sde_industry_fakes as fakes
 from eve_online_industry_tracker.config import admin_settings as admin_settings_module
@@ -351,7 +352,7 @@ def test_a_down_esi_costs_one_short_lookup_per_window(monkeypatch):
 
     def down(endpoint, **kwargs):
         calls.append(kwargs)
-        raise ConnectionError("ESI unreachable")
+        raise requests.ConnectionError("ESI unreachable")   # what the requests session raises
 
     svc = _esi_service_with(down)
     now = [1000.0]
@@ -376,7 +377,7 @@ def test_with_esi_down_the_facility_shows_the_sde_name_with_one_lookup(monkeypat
 
     def down(endpoint, **kwargs):
         calls.append(endpoint)
-        raise ConnectionError("ESI unreachable")
+        raise requests.ConnectionError("ESI unreachable")   # what the requests session raises
 
     esi = _esi_service_with(down)
     mgr = _manager(tmp_path)

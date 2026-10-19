@@ -157,14 +157,19 @@ def get_blueprint_assets(
             result.append(bp)
 
     market_prices: list[dict] = []
+    # Why every price of the payload is None (each blueprint row carries it), or None.
+    price_unknown_reason: str | None = None
     try:
         if esi_service is not None:
             market_prices = esi_service.get_market_prices() or []
+        else:
+            price_unknown_reason = "market prices unavailable: no ESI service"
     except RuntimeError as exc:
         # get_market_prices wraps every ESI failure in RuntimeError. The blueprints are
         # still returned, with adjusted/average/unit prices None (not 0) for every line.
         logging.warning("Blueprint assets: ESI market prices unavailable, prices left empty: %s", exc)
         market_prices = []
+        price_unknown_reason = f"market prices unavailable: {exc}"
 
     price_dict = {
         item["type_id"]: {
@@ -176,6 +181,7 @@ def get_blueprint_assets(
     }
 
     for bp in result:
+        bp["price_unknown_reason"] = price_unknown_reason
         for mat in bp.get("materials", []) or []:
             if not isinstance(mat, dict):
                 continue

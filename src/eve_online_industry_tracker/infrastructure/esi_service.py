@@ -562,8 +562,9 @@ class ESIService:
             if id_type == "solar_system":
                 return self._public_esi_get(ESI_UNIVERSE_SYSTEMS.format(system_id=location_id))
             return {}
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            # Only ESI failures are wrapped; a bug in our code propagates as itself.
+            raise RuntimeError(f"ESI request failed for location {location_id}: {e}") from e
 
     # A station name is a display nicety: one short try, no retries, and a failure
     # cached for a few minutes, so a down ESI never holds up /facilities or the ore page.
@@ -624,7 +625,7 @@ class ESIService:
             payload = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id),
                                            headers={"Accept-Language": language},
                                            timeout_seconds=self.STATION_NAME_TIMEOUT_SECONDS, max_retries=0)
-        except Exception as e:
+        except ESI_REQUEST_ERRORS as e:
             message = f"ESI request failed for station {station_id}: {e}"
             self._station_name_failures[key] = (time.time(), message)
             raise RuntimeError(message) from e
@@ -662,8 +663,8 @@ class ESIService:
                 suppress_forbidden_log=suppress_forbidden_log,
                 suppress_not_found_log=suppress_not_found_log,
             )
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed for universe structure {structure_id}: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            raise RuntimeError(f"ESI request failed for universe structure {structure_id}: {e}") from e
 
     def get_market_prices(self) -> List[Dict[str, Any]]:
         """Return market prices for all items (cached)."""
@@ -674,8 +675,8 @@ class ESIService:
 
         try:
             market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES, paginate=True)
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            raise RuntimeError(f"ESI request failed: {e}") from e
 
         self._market_prices_cache = (now, market_prices)
         return market_prices
@@ -932,9 +933,10 @@ class ESIService:
                             "type_id": structure_data.get("type_id"),
                             "services": structure_data.get("services"),
                         }
-                except (RuntimeError, ValueError, TypeError) as exc:
-                    # get_universe_structure wraps ESI failures in RuntimeError; one
-                    # unreadable structure must not abort the scan. Counted and summarised below.
+                except ESI_REQUEST_ERRORS as exc:
+                    # get_universe_structure wraps ESI failures in RuntimeError (ValueError: an
+                    # invalid id); one unreadable structure must not abort the scan. Counted and
+                    # summarised below. A bug (TypeError, AttributeError, ...) propagates.
                     logging.debug("Public structure %s skipped: %s", structure_id, exc)
                     failed_ids.append(structure_id)
                     return None
@@ -967,7 +969,7 @@ class ESIService:
                     done, in_flight = wait(in_flight, timeout=min(0.25, remaining), return_when=FIRST_COMPLETED)
                     for fut in done:
                         # fetch_one already skips the expected per-structure failures;
-                        # anything else is a bug and surfaces (wrapped below).
+                        # anything else is a bug and propagates as itself.
                         item = fut.result()
                         if item:
                             results.append(item)
@@ -992,5 +994,6 @@ class ESIService:
                 )
             self._public_structures_cache[cache_key] = (now, results)
             return results
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed for system {system_id}: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            # The structure list's ESI failure (or its 403, raised above); a bug propagates.
+            raise RuntimeError(f"ESI request failed for system {system_id}: {e}") from e

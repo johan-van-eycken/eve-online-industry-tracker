@@ -181,8 +181,8 @@ def trigger_refresh_public_structures_for_system(
         except (RuntimeError, ValueError, SQLAlchemyError) as exc:
             # Background thread: nobody awaits it, so the reason goes to the log and to state.
             logging.warning("Background public structures refresh for system %s failed: %s", system_id, exc)
-            if not getattr(state, "public_structures_last_refresh_error", None):
-                state.public_structures_last_refresh_error = str(exc)
+            # Always this run's failure: an error left from an earlier run must not stand for it.
+            state.public_structures_last_refresh_error = str(exc)
         finally:
             with state.public_structures_refresh_lock:
                 state.public_structures_refreshing_system_ids.discard(system_id)

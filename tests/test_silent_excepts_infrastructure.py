@@ -72,8 +72,8 @@ def test_an_unreadable_public_structure_is_skipped_with_a_summary_warning(caplog
 def test_a_bug_in_the_public_structure_scan_surfaces():
     svc = _svc(SimpleNamespace(esi_get=lambda *a, **k: [1021]))
     svc.get_universe_structure = _raiser(NameError("name 'oops' is not defined"))
-    # get_public_structures wraps everything in RuntimeError; the bug's message is in it.
-    with pytest.raises(RuntimeError, match="oops"):
+    # get_public_structures wraps only ESI failures in RuntimeError; a bug propagates as itself.
+    with pytest.raises(NameError, match="oops"):
         svc.get_public_structures(30000142, max_workers=1)
 
 
