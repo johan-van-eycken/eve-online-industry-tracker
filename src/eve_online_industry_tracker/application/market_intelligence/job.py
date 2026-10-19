@@ -26,20 +26,29 @@ class MarketIntelligenceJob:
         self._last_error: str | None = None
 
     def start(self) -> None:
-        """Start the background daemon thread. Idempotent."""
+        """Start the background daemon thread. Idempotent.
+
+        _running is set only once the thread is registered (and started), all
+        under the lock: a registration that raises (e.g. a state without
+        background_threads_lock) propagates and leaves the job not running,
+        so a later start() can try again."""
         with self._lock:
             if self._running:
                 return
+            t = threading.Thread(target=self._loop, daemon=True, name=self.thread_name)
+            # Register with the app state's background threads for graceful shutdown tracking.
+            try:
+                from flask_app.background_jobs import register_thread
+            except ImportError:
+                register_thread = None  # no Flask package (scripts): nothing to register with
+            if register_thread is not None:
+                register_thread(self._state, self.thread_name, t)   # raises: not running, nothing started
             self._running = True
-
-        t = threading.Thread(target=self._loop, daemon=True, name=self.thread_name)
-        # Register with app state background threads for graceful shutdown tracking
-        try:
-            from flask_app.background_jobs import register_thread
-            register_thread(self._state, self.thread_name, t)
-        except ImportError:
-            pass  # no Flask app (scripts, tests): nothing to register with; register_thread itself never raises
-        t.start()
+            try:
+                t.start()
+            except RuntimeError:
+                self._running = False   # e.g. "can't start new thread"
+                raise
 
     def stop(self) -> None:
         self._stop_event.set()
