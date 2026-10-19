@@ -469,13 +469,17 @@ def render():
                     × (1 + 0.02·the ore's processing skill)
                     × (1 + Implant)
 
-            Rm: rig (T1 +1, T2 +3); Sec: the rig's security modifier (only with a rig);
+            Rm: the rig of the ore's class (T1 +1, T2 +3): on an Athanor one M-Set rig per class
+            (asteroid ore, moon ore, ice), on a Tatara the L-Set monitor for all three;
+            Sec: that rig's security modifier (only for a class with a rig);
             Sm: the structure's bonus (Athanor 2%, Tatara 5.5%). Each material is rounded
             down per batch. Values shown are final batch yields.
         """)
         facility = opt_display.get("facility") or {}
         if facility:
-            st.write(f"Facility: {facility.get('name')} (multiplier {facility.get('multiplier', 0):.4f})")
+            multipliers = facility.get("multipliers") or {}
+            st.write(f"Facility: {facility.get('name')} (multiplier "
+                     + ", ".join(f"{cls} {m:.4f}" for cls, m in multipliers.items()) + ")")
         # Show multipliers for the first ore as an example
         if opt_display["ore_yields"]:
             ore = opt_display["ore_yields"][0]

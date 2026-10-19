@@ -26,10 +26,13 @@ def compute_yields(ores: list[dict], skill_levels: Mapping[int, int], facility: 
     (typeDogma attribute 790), each with its SDE per-level bonus (attribute
     379). Each material is rounded down per batch.
 
-    An ore with materials but no ore skill, no bonus for its skill, or no
-    portionSize or volume is left out with a WARNING naming it; an ore
-    without materials yields nothing and is left out quietly. A missing
-    Reprocessing or Reprocessing Efficiency bonus raises
+    The facility yield is the one of the ore's class (asteroid ore, moon ore
+    or ice, ore.ore_class of its SDE group): its rig, or the unrigged base.
+
+    An ore with materials but no ore class, no ore skill, no bonus for its
+    skill, or no portionSize or volume is left out with a WARNING naming it;
+    an ore without materials yields nothing and is left out quietly. A
+    missing Reprocessing or Reprocessing Efficiency bonus raises
     SdeIndustryDataMissing."""
     data = data if data is not None else _ore.ore_data()
     base_skills: dict[int, float] = {}
@@ -50,6 +53,11 @@ def compute_yields(ores: list[dict], skill_levels: Mapping[int, int], facility: 
         if not portion or volume is None:
             left_out.append(f"{label}: no portionSize or volume in the SDE")
             continue
+        ore_class = _ore.ore_class(o.get("groupID"), o.get("categoryID"))
+        if ore_class is None:
+            left_out.append(f"{label}: no reprocessing ore class (group {o.get('groupID')}, category "
+                            f"{o.get('categoryID')} is not an asteroid-category group)")
+            continue
         ore_skill = o.get("reprocessingSkillTypeID")
         if ore_skill is None:
             left_out.append(f"{label}: no reprocessing skill (typeDogma attribute 790)")
@@ -59,7 +67,8 @@ def compute_yields(ores: list[dict], skill_levels: Mapping[int, int], facility: 
             left_out.append(f"{label}: its skill {ore_skill} has no bonus (typeDogma attribute 379)")
             continue
 
-        fraction = _r.reprocessing_yield(facility, skill_bonuses={**base_skills, int(ore_skill): ore_bonus},
+        fraction = _r.reprocessing_yield(facility, ore_class=ore_class,
+                                         skill_bonuses={**base_skills, int(ore_skill): ore_bonus},
                                          skill_levels=skill_levels, implant_bonus=implant_bonus)
         results.append(
             {
@@ -69,6 +78,7 @@ def compute_yields(ores: list[dict], skill_levels: Mapping[int, int], facility: 
                 "batch_size": portion,
                 "batch_volume": float(volume) * portion,
                 "batch_yield_percent": fraction * 100,
+                "ore_class": ore_class,
                 "compressed": bool(o.get("compressed")),
             }
         )

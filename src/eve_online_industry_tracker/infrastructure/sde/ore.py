@@ -13,6 +13,20 @@ The "Batch Compressed" ores (the pre-2021 compression, made by blueprints
 that are no longer published) are not in compressibleTypes: they are not a
 compressed form here, but they carry their own attribute 790.
 
+The reprocessing rigs' ore classes come from dogma too: a rig's typeDogma
+effects (structureRigAsteroidOreYield 6674, structureRigMoonOreYield 6675,
+structureRigIceYield 6678 in build 3607705) pre-assign its
+refiningYieldMultiplier (717) to the reprocessing service's
+refiningYieldNormalOres (2444), refiningYieldMoonOres (2445) or
+refiningYieldIce (2448); the service's own value of each is an unrigged
+structure's base yield for that class. An M-Set Asteroid/Moon/Ice Ore
+Grading Processor affects its one class, the L-Set Reprocessing Monitor all
+three. Which class an ore is the SDE does not say for reprocessing (only
+the compression typeLists, which are not imported, group them): it is the
+ore's group (ore_class: the five moon asteroid groups, the two ice groups,
+and every other asteroid-category group an asteroid ore), pinned against
+the local SDE by tests/test_reprocessing_rig_per_ore_class.py.
+
 Loaded once per process and cached like infrastructure.sde.industry: an SDE
 without the tables raises SdeIndustryDataMissing naming the re-import.
 """
@@ -26,6 +40,7 @@ from typing import Any, Callable, Mapping
 
 from sqlalchemy import text
 
+from eve_online_industry_tracker.domain.reprocessing import ORE_CLASS_ASTEROID, ORE_CLASS_ICE, ORE_CLASS_MOON
 from eve_online_industry_tracker.infrastructure.sde.data_cache import SdeDataCache
 from eve_online_industry_tracker.infrastructure.sde.industry import (
     REIMPORT_HINT,
@@ -37,7 +52,7 @@ from eve_online_industry_tracker.infrastructure.sde.industry import (
 
 logger = logging.getLogger(__name__)
 
-ORE_TABLES: tuple[str, ...] = ("compressibleTypes", "typeDogma")
+ORE_TABLES: tuple[str, ...] = ("compressibleTypes", "typeDogma", "dogmaEffects")
 PURPOSE = "ore compression and the ore reprocessing skills (the ore calculator) cannot be computed"
 REPROCESSING_SKILL_ATTRIBUTE_ID = 790  # reprocessingSkillType
 
@@ -55,16 +70,49 @@ REPROCESSING_EFFICIENCY_SKILL_TYPE_ID = 3389   # Reprocessing Efficiency
 ATHANOR_TYPE_ID = 35835
 TATARA_TYPE_ID = 35836
 STANDUP_REPROCESSING_FACILITY_TYPE_ID = 35899  # the service module: an unrigged structure's base yield
-# The rigs of each refinery's size; their values equal the moon-ore and ice
-# variants of the same size (M-Set rigs on an Athanor, L-Set on a Tatara).
-RIG_TYPE_IDS: Mapping[tuple[int, str], int] = {
-    (ATHANOR_TYPE_ID, "t1"): 46633,   # Standup M-Set Asteroid Ore Grading Processor I
-    (ATHANOR_TYPE_ID, "t2"): 46634,   # Standup M-Set Asteroid Ore Grading Processor II
-    (TATARA_TYPE_ID, "t1"): 46639,    # Standup L-Set Reprocessing Monitor I
-    (TATARA_TYPE_ID, "t2"): 46640,    # Standup L-Set Reprocessing Monitor II
+
+# The ore classes (domain.reprocessing) and the reprocessing service attribute
+# a rig sets for each (the service's own value: the unrigged base).
+ORE_CLASS_YIELD_ATTRIBUTE_IDS: Mapping[str, int] = {
+    ORE_CLASS_ASTEROID: 2444,   # refiningYieldNormalOres, "Refining yield for Asteroid Belt Ores"
+    ORE_CLASS_MOON: 2445,       # refiningYieldMoonOres
+    ORE_CLASS_ICE: 2448,        # refiningYieldIce
 }
+ASTEROID_CATEGORY_ID = 25
+MOON_ORE_GROUP_IDS = frozenset({1884, 1920, 1921, 1922, 1923})   # Ubiquitous ... Exceptional Moon Asteroids
+ICE_GROUP_IDS = frozenset({465, 903})                            # Ice, Ancient Compressed Ice
+
+# An Athanor's M-Set rigs, one per class, and a Tatara's L-Set Reprocessing
+# Monitor. The class each covers is read from its dogma effects (rig_ore_classes)
+# and checked against this table when the facility is built.
+ATHANOR_RIG_TYPE_IDS: Mapping[tuple[str, str], int] = {
+    (ORE_CLASS_ASTEROID, "t1"): 46633,   # Standup M-Set Asteroid Ore Grading Processor I
+    (ORE_CLASS_ASTEROID, "t2"): 46634,   # Standup M-Set Asteroid Ore Grading Processor II
+    (ORE_CLASS_ICE, "t1"): 46635,        # Standup M-Set Ice Grading Processor I
+    (ORE_CLASS_ICE, "t2"): 46636,        # Standup M-Set Ice Grading Processor II
+    (ORE_CLASS_MOON, "t1"): 46637,       # Standup M-Set Moon Ore Grading Processor I
+    (ORE_CLASS_MOON, "t2"): 46638,       # Standup M-Set Moon Ore Grading Processor II
+}
+TATARA_RIG_TYPE_IDS: Mapping[str, int] = {
+    "t1": 46639,    # Standup L-Set Reprocessing Monitor I
+    "t2": 46640,    # Standup L-Set Reprocessing Monitor II
+}
+RIG_TYPE_IDS: frozenset[int] = frozenset({*ATHANOR_RIG_TYPE_IDS.values(), *TATARA_RIG_TYPE_IDS.values()})
 FACILITY_TYPE_IDS: frozenset[int] = frozenset(
-    {ATHANOR_TYPE_ID, TATARA_TYPE_ID, STANDUP_REPROCESSING_FACILITY_TYPE_ID, *RIG_TYPE_IDS.values()})
+    {ATHANOR_TYPE_ID, TATARA_TYPE_ID, STANDUP_REPROCESSING_FACILITY_TYPE_ID, *RIG_TYPE_IDS})
+
+
+def ore_class(group_id: Any, category_id: Any) -> str | None:
+    """The reprocessing class of an ore by its SDE group: ice, moon ore, or
+    (any other asteroid-category group) asteroid ore; None for a type
+    outside the asteroid category."""
+    if group_id is None or category_id is None or int(category_id) != ASTEROID_CATEGORY_ID:
+        return None
+    if int(group_id) in ICE_GROUP_IDS:
+        return ORE_CLASS_ICE
+    if int(group_id) in MOON_ORE_GROUP_IDS:
+        return ORE_CLASS_MOON
+    return ORE_CLASS_ASTEROID
 
 
 @dataclass(frozen=True)
@@ -76,6 +124,8 @@ class OreData:
     refining_yield_bonus: Mapping[int, float] = dataclasses.field(default_factory=dict)
     # FACILITY_TYPE_IDS -> {attribute id: value}: the structures, rigs and service module
     facility_attributes: Mapping[int, Mapping[int, float]] = dataclasses.field(default_factory=dict)
+    # RIG_TYPE_IDS -> the ore classes its dogma effects give a rigged yield
+    rig_ore_classes: Mapping[int, frozenset[str]] = dataclasses.field(default_factory=dict)
 
     def is_compressed(self, type_id: int) -> bool:
         return int(type_id) in self.base_by_compressed
@@ -100,10 +150,29 @@ class OreData:
         return self.skill_by_type.get(base) if base is not None else None
 
 
+def _rig_ore_classes(type_dogma: Mapping[int, Mapping[str, Any]],
+                     dogma_effects: Mapping[int, Mapping[str, Any]]) -> dict[int, frozenset[str]]:
+    """{rig: the classes whose service yield attribute one of its effects
+    sets from the rig's refiningYieldMultiplier}."""
+    class_by_attribute = {a: c for c, a in ORE_CLASS_YIELD_ATTRIBUTE_IDS.items()}
+    out: dict[int, frozenset[str]] = {}
+    for rig in sorted(RIG_TYPE_IDS):
+        classes: set[str] = set()
+        for effect in (type_dogma.get(rig) or {}).get("dogmaEffects") or []:
+            for modifier in (dogma_effects.get(int(effect["effectID"])) or {}).get("modifierInfo") or []:
+                attribute = modifier.get("modifiedAttributeID")
+                if attribute in class_by_attribute and modifier.get("modifyingAttributeID") == \
+                        REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID:
+                    classes.add(class_by_attribute[attribute])
+        out[rig] = frozenset(classes)
+    return out
+
+
 def ore_data_from_tables(*, compressible_types: Mapping[int, Mapping[str, Any]],
-                         type_dogma: Mapping[int, Mapping[str, Any]]) -> OreData:
-    """OreData from compressibleTypes and typeDogma ({id: row}, the SDE YAML
-    shape). ValueError when a row is not what this code reads."""
+                         type_dogma: Mapping[int, Mapping[str, Any]],
+                         dogma_effects: Mapping[int, Mapping[str, Any]]) -> OreData:
+    """OreData from compressibleTypes, typeDogma and dogmaEffects ({id: row},
+    the SDE YAML shape). ValueError when a row is not what this code reads."""
     compressed_by_base: dict[int, int] = {}
     base_by_compressed: dict[int, int] = {}
     for base, row in compressible_types.items():
@@ -132,7 +201,8 @@ def ore_data_from_tables(*, compressible_types: Mapping[int, Mapping[str, Any]],
                 facility_attributes.setdefault(type_id, {})[int(attribute_id)] = float(attribute["value"])
     return OreData(compressed_by_base=compressed_by_base, base_by_compressed=base_by_compressed,
                    skill_by_type=skill_by_type, refining_yield_bonus=refining_yield_bonus,
-                   facility_attributes=facility_attributes)
+                   facility_attributes=facility_attributes,
+                   rig_ore_classes=_rig_ore_classes(type_dogma, dogma_effects))
 
 
 def refining_skill_levels(session: Any, trained_skills: list[Mapping[str, Any]]) -> dict[int, int]:
@@ -164,7 +234,8 @@ def load_ore_data(session: Any) -> OreData:
         raise SdeIndustryDataMissing(tables_missing_message(missing, PURPOSE))
     try:
         return ore_data_from_tables(compressible_types=read_table(session, "compressibleTypes"),
-                                    type_dogma=read_table(session, "typeDogma"))
+                                    type_dogma=read_table(session, "typeDogma"),
+                                    dogma_effects=read_table(session, "dogmaEffects"))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise SdeIndustryDataMissing(f"SDE ore tables unreadable ({exc}); {REIMPORT_HINT}") from exc
 

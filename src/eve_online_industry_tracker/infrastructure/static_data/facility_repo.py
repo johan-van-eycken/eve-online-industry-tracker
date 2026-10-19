@@ -1,14 +1,23 @@
 """The ore calculator's reprocessing facility: one, configured in the admin
-settings (reprocessing/facility_type, rig, security_band, npc_station_id,
-tax), with its values from the SDE (domain.reprocessing has the formula):
+settings (reprocessing/facility_type, rig, athanor_rig_asteroid/_moon/_ice,
+security_band, npc_station_id, tax), with its values from the SDE
+(domain.reprocessing has the formula):
 
 - an NPC station's base yield and base tax: npcStations.reprocessingEfficiency
-  and reprocessingStationsTake of the station npc_station_id names;
+  and reprocessingStationsTake of the station npc_station_id names, for
+  every ore class;
 - an Athanor's or Tatara's own bonus: typeDogma attribute 2722 strRefiningYieldBonus;
-- a rig's base yield: attribute 717 refiningYieldMultiplier (0.51 T1, 0.53 T2),
-  and its security modifier: 2355/2356/2357 hiSec/lowSec/nullSecModifier;
-- an unrigged structure's base yield: attribute 717 of the Standup
-  Reprocessing Facility I service module.
+- the rigs, per ore class (asteroid ore, moon ore, ice): an Athanor has an
+  M-Set rig per class (athanor_rig_*), a Tatara the one L-Set Reprocessing
+  Monitor (rig). The classes a rig covers come from its dogma effects
+  (ore.rig_ore_classes); a covered class gets the rig's attribute 717
+  refiningYieldMultiplier (0.51 T1, 0.53 T2) and its security modifier
+  2355/2356/2357 hiSec/lowSec/nullSecModifier;
+- a class without a rig: the Standup Reprocessing Facility I service's
+  attribute for the class (2444/2445/2448, 0.50) and no security modifier.
+
+A stored single `rig` on an Athanor from before the per-class rigs is read
+as the asteroid rig (config.admin_settings migrates it at load).
 
 The tax: at an NPC station the SDE's base tax (before standings), unless
 reprocessing/tax is set, which is then the rate after standings; at a player
@@ -41,10 +50,12 @@ _SECURITY_ATTRIBUTE_IDS = {
 }
 _FACILITY_NAMES = {_r.FACILITY_ATHANOR: "Athanor", _r.FACILITY_TATARA: "Tatara"}
 _RIG_NAMES = {_r.RIG_NONE: "no rig", _r.RIG_T1: "T1 rig", _r.RIG_T2: "T2 rig"}
+_RIG_SHORT = {_r.RIG_NONE: "none", _r.RIG_T1: "T1", _r.RIG_T2: "T2"}
 _SECURITY_NAMES = {_r.SECURITY_HIGH: "highsec", _r.SECURITY_LOW: "lowsec", _r.SECURITY_NULL: "nullsec/wormhole"}
 _STATION_COLUMNS = ("reprocessingEfficiency", "reprocessingStationsTake")
 
 NpcStationLookup = Callable[[int], "tuple[float, float] | None"]
+StationNameLookup = Callable[[int], "tuple[str | None, str | None]"]
 
 
 class ReprocessingSettingsInvalid(ServiceError):
@@ -100,15 +111,44 @@ def _tax(tax: Any) -> float:
     return float(tax)
 
 
+def _station_label(station_id: int, station_name: StationNameLookup | None) -> str:
+    return f"NPC station {station_id}"
+
+
+def _check_rigs(athanor_rigs: Any) -> dict[str, str]:
+    rigs = athanor_rigs if isinstance(athanor_rigs, dict) else {}
+    return {cls: _check(f"athanor_rig_{cls}", rigs.get(cls), _r.RIGS) for cls in _r.ORE_CLASSES}
+
+
+def _rigged(data: _ore.OreData, rig_type: int, ore_class: str, security_band: str, tier: str) -> _r.ClassYield:
+    if ore_class not in data.rig_ore_classes.get(rig_type, frozenset()):
+        raise SdeIndustryDataMissing(f"SDE dogma of rig {rig_type} does not give the {ore_class} ore class a "
+                                     f"rigged yield (its typeDogma effects / dogmaEffects modifiers); {REIMPORT_HINT}")
+    return _r.ClassYield(base_yield=_attribute(data, rig_type, _ore.REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID),
+                         security_multiplier=_attribute(data, rig_type, _SECURITY_ATTRIBUTE_IDS[security_band]),
+                         rig=tier)
+
+
+def _unrigged(data: _ore.OreData, ore_class: str) -> _r.ClassYield:
+    return _r.ClassYield(base_yield=_attribute(data, _ore.STANDUP_REPROCESSING_FACILITY_TYPE_ID,
+                                               _ore.ORE_CLASS_YIELD_ATTRIBUTE_IDS[ore_class]),
+                         security_multiplier=1.0, rig=_r.RIG_NONE)
+
+
 def facility_from_choice(*, facility_type: Any, rig: Any, security_band: Any, tax: Any, npc_station_id: Any,
-                         npc_station: NpcStationLookup, data: _ore.OreData) -> _r.ReprocessingFacility:
-    """The facility for these setting values. npc_station(id) gives an NPC
-    station's (base yield, base tax) or None; `data` has the SDE attributes."""
+                         npc_station: NpcStationLookup, data: _ore.OreData,
+                         athanor_rigs: Any = None, station_name: StationNameLookup | None = None,
+                         ) -> _r.ReprocessingFacility:
+    """The facility for these setting values. `rig` is a Tatara's L-Set
+    Reprocessing Monitor (none at an NPC station; not read for an Athanor);
+    athanor_rigs an Athanor's {ore class: rig}, each required. npc_station(id)
+    gives an NPC station's (base yield, base tax) or None; station_name(id)
+    its name or (None, reason); `data` has the SDE attributes."""
     facility_type = _check("facility_type", facility_type, _r.FACILITY_TYPES)
-    rig = _check("rig", rig, _r.RIGS)
     security_band = _check("security_band", security_band, _r.SECURITY_BANDS)
 
     if facility_type == _r.FACILITY_NPC_STATION:
+        rig = _check("rig", rig, _r.RIGS)
         if rig != _r.RIG_NONE:
             raise ReprocessingSettingsInvalid(
                 f"admin setting {SETTINGS_CATEGORY}/rig={rig!r}: an NPC station has no rigs")
@@ -127,33 +167,49 @@ def facility_from_choice(*, facility_type: Any, rig: Any, security_band: Any, ta
         else:
             tax_value, tax_source, tax_label = _tax(tax), _r.TAX_SETTING_AFTER_STANDINGS, "tax after standings"
         return _r.ReprocessingFacility(
-            name=f"NPC station {int(npc_station_id)}, {tax_value * 100:g}% {tax_label} (admin settings)",
-            base_yield=base, security_multiplier=1.0, structure_bonus=0.0, tax=tax_value, tax_source=tax_source)
+            name=f"{_station_label(int(npc_station_id), station_name)}, {tax_value * 100:g}% {tax_label} "
+                 "(admin settings)",
+            yields={cls: _r.ClassYield(base_yield=base, security_multiplier=1.0) for cls in _r.ORE_CLASSES},
+            structure_bonus=0.0, tax=tax_value, tax_source=tax_source)
 
+    if facility_type == _r.FACILITY_ATHANOR:
+        rigs = _check_rigs(athanor_rigs)
+    else:
+        rig = _check("rig", rig, _r.RIGS)
+        rigs = {cls: rig for cls in _r.ORE_CLASSES}
     if tax is None:
         raise ReprocessingSettingsInvalid(
             f"admin setting {SETTINGS_CATEGORY}/tax is not set: a player structure's tax is the owner's")
     tax_value = _tax(tax)
     structure = _STRUCTURE_TYPE_IDS[facility_type]
     structure_bonus = _attribute(data, structure, _ore.STR_REFINING_YIELD_BONUS_ATTRIBUTE_ID) / 100.0
-    if rig == _r.RIG_NONE:
-        base = _attribute(data, _ore.STANDUP_REPROCESSING_FACILITY_TYPE_ID, _ore.REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID)
-        security = 1.0
+
+    yields: dict[str, _r.ClassYield] = {}
+    for cls in _r.ORE_CLASSES:
+        tier = rigs[cls]
+        if facility_type == _r.FACILITY_TATARA and tier != _r.RIG_NONE:
+            rig_type = _ore.TATARA_RIG_TYPE_IDS[tier]
+            # The monitor's dogma decides which classes it covers; any other gets the unrigged base.
+            covered = cls in data.rig_ore_classes.get(rig_type, frozenset())
+            yields[cls] = _rigged(data, rig_type, cls, security_band, tier) if covered else _unrigged(data, cls)
+        elif tier != _r.RIG_NONE:
+            yields[cls] = _rigged(data, _ore.ATHANOR_RIG_TYPE_IDS[(cls, tier)], cls, security_band, tier)
+        else:
+            yields[cls] = _unrigged(data, cls)
+
+    if facility_type == _r.FACILITY_ATHANOR:
+        name = (f"Athanor, rigs: " + ", ".join(f"{cls} {_RIG_SHORT[rigs[cls]]}" for cls in _r.ORE_CLASSES))
     else:
-        rig_type = _ore.RIG_TYPE_IDS[(structure, rig)]
-        base = _attribute(data, rig_type, _ore.REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID)
-        security = _attribute(data, rig_type, _SECURITY_ATTRIBUTE_IDS[security_band])
-    name = f"{_FACILITY_NAMES[facility_type]}, {_RIG_NAMES[rig]}"
-    if rig != _r.RIG_NONE:
+        name = f"{_FACILITY_NAMES[facility_type]}, {_RIG_NAMES[rigs[_r.ORE_CLASS_ASTEROID]]}"
+    if any(y.rig != _r.RIG_NONE for y in yields.values()):
         name += f", {_SECURITY_NAMES[security_band]}"
     name += f", {tax_value * 100:g}% tax (admin settings)"
-    return _r.ReprocessingFacility(name=name, base_yield=base, security_multiplier=security,
-                                   structure_bonus=structure_bonus, tax=tax_value, tax_source=_r.TAX_SETTING)
+    return _r.ReprocessingFacility(name=name, yields=yields, structure_bonus=structure_bonus, tax=tax_value,
+                                   tax_source=_r.TAX_SETTING)
 
 
-def configured_facility(admin_settings: Any, sde_session: Any,
-                        data: _ore.OreData | None = None) -> _r.ReprocessingFacility:
-    """The facility the admin settings configure (data: the cached OreData)."""
+def _settings_choice(admin_settings: Any) -> dict[str, Any]:
+    """The reprocessing settings, read as the facility needs them."""
     if admin_settings is None:
         raise ReprocessingSettingsInvalid("admin settings not loaded")
 
@@ -164,30 +220,38 @@ def configured_facility(admin_settings: Any, sde_session: Any,
             raise ReprocessingSettingsInvalid(
                 f"admin setting {exc.category}/{exc.key}={exc.value!r} is invalid ({exc.problem})") from exc
 
-    return facility_from_choice(facility_type=get("facility_type"), rig=get("rig"),
-                                security_band=get("security_band"), tax=get("tax"),
-                                npc_station_id=get("npc_station_id"),
+    return {"facility_type": get("facility_type"), "rig": get("rig"), "security_band": get("security_band"),
+            "tax": get("tax"), "npc_station_id": get("npc_station_id"),
+            "athanor_rigs": {cls: get(f"athanor_rig_{cls}") for cls in _r.ORE_CLASSES}}
+
+
+def configured_facility(admin_settings: Any, sde_session: Any,
+                        data: _ore.OreData | None = None) -> _r.ReprocessingFacility:
+    """The facility the admin settings configure (data: the cached OreData)."""
+    return facility_from_choice(**_settings_choice(admin_settings),
                                 npc_station=lambda station_id: npc_station_reprocessing(sde_session, station_id),
                                 data=data if data is not None else _ore.ore_data())
 
 
-def get_facility(admin_settings: Any, sde_session: Any) -> dict:
-    facility = configured_facility(admin_settings, sde_session)
+def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None) -> dict:
+    choice = _settings_choice(admin_settings)
+    facility = configured_facility(admin_settings, sde_session, data)
     return {
         "id": CONFIGURED_FACILITY_ID,
         "name": facility.name,
-        "facility_type": admin_settings.get(SETTINGS_CATEGORY, "facility_type"),
-        "rig": admin_settings.get(SETTINGS_CATEGORY, "rig"),
-        "security_band": admin_settings.get(SETTINGS_CATEGORY, "security_band"),
-        "npc_station_id": admin_settings.get(SETTINGS_CATEGORY, "npc_station_id"),
-        "base_yield": facility.base_yield,
-        "security_multiplier": facility.security_multiplier,
+        "facility_type": choice["facility_type"],
+        "rig": choice["rig"],
+        "athanor_rigs": choice["athanor_rigs"],
+        "security_band": choice["security_band"],
+        "npc_station_id": choice["npc_station_id"],
         "structure_bonus": facility.structure_bonus,
-        "multiplier": facility.multiplier,
+        "by_ore_class": {cls: {"rig": y.rig, "base_yield": y.base_yield, "security_multiplier": y.security_multiplier,
+                               "multiplier": facility.multiplier_for(cls)}
+                         for cls, y in facility.yields.items()},
         "tax": facility.tax,
         "tax_source": facility.tax_source,
     }
 
 
-def get_all_facilities(admin_settings: Any, sde_session: Any) -> list[dict]:
-    return [get_facility(admin_settings, sde_session)]
+def get_all_facilities(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None) -> list[dict]:
+    return [get_facility(admin_settings, sde_session, data)]

@@ -630,10 +630,29 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                     {"value": "t1", "label": "T1 rig (51% base)"},
                     {"value": "t2", "label": "T2 rig (53% base)"},
                 ],
-                "label": "Ore calculator: reprocessing rig",
-                "help": "The structure's reprocessing rig (M-Set on an Athanor, L-Set on a Tatara), assumed to "
-                        "cover every ore reprocessed. None for an NPC station.",
+                "label": "Ore calculator: Tatara reprocessing rig",
+                "help": "A Tatara's Standup L-Set Reprocessing Monitor, which covers asteroid ore, moon ore and "
+                        "ice (the SDE's rig effects). Not used for an Athanor (its rigs are set per ore class "
+                        "below); none for an NPC station.",
             },
+            **{f"athanor_rig_{ore_class}": {
+                "type": "select",
+                "strict": True,
+                "default": "none",
+                "options": [
+                    {"value": "none", "label": "No rig"},
+                    {"value": "t1", "label": f"{rig_name} I (51% base)"},
+                    {"value": "t2", "label": f"{rig_name} II (53% base)"},
+                ],
+                "label": f"Ore calculator: Athanor {ore_label} rig",
+                "help": f"An Athanor's Standup M-Set {rig_name}: it lifts only {ore_label}. Without it "
+                        f"{ore_label} gets the unrigged 50% base and no security modifier. Not used for a Tatara "
+                        "or an NPC station.",
+            } for ore_class, ore_label, rig_name in [
+                ("asteroid", "asteroid ore", "Asteroid Ore Grading Processor"),
+                ("moon", "moon ore", "Moon Ore Grading Processor"),
+                ("ice", "ice", "Ice Grading Processor"),
+            ]},
             "security_band": {
                 "type": "select",
                 "strict": True,
@@ -644,7 +663,8 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                     {"value": "null", "label": "Nullsec / wormhole (x1.12)"},
                 ],
                 "label": "Ore calculator: security band",
-                "help": "The facility's security band; the rig's security modifier only applies with a rig.",
+                "help": "The facility's security band; a rig's security modifier only applies to the ore classes "
+                        "it covers.",
             },
             "npc_station_id": {
                 "type": "int",
@@ -963,6 +983,7 @@ class AdminSettingsManager:
             self._data = {}
             return
         self._data, self._invalid = self._coerce_stored(payload if isinstance(payload, dict) else {})
+        _migrate_single_athanor_rig(self._data)
 
     @classmethod
     def _coerce_stored(cls, payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], str]]:
@@ -1021,3 +1042,30 @@ def _invalid_consequence(spec: dict[str, Any]) -> str:
     if spec.get("startup_critical"):
         return f"the app uses the default {spec['default']!r} until it is fixed"
     return "the features that read it fail with an error until it is fixed"
+
+
+_ATHANOR_RIG_KEYS = ("athanor_rig_asteroid", "athanor_rig_moon", "athanor_rig_ice")
+
+
+def _migrate_single_athanor_rig(data: dict[str, dict[str, Any]]) -> None:
+    """The migration from PR #14's one reprocessing/rig to a rig per ore class.
+
+    The rule: on an Athanor with a stored rig (t1/t2) and none of the
+    athanor_rig_* settings stored, the rig is read as athanor_rig_asteroid,
+    the rig the single setting priced (the M-Set Asteroid Ore Grading
+    Processor); moon ore and ice stay unrigged until their rig is set, which
+    may lower their yield from what the single setting gave. In memory only,
+    with a WARNING: the file is rewritten on the next save (which then keeps
+    athanor_rig_asteroid, so the rule no longer applies). reprocessing/rig
+    itself is left as stored: it is now the Tatara's L-Set monitor."""
+    reprocessing = data.get("reprocessing")
+    if not reprocessing or reprocessing.get("facility_type") != "athanor":
+        return
+    rig = reprocessing.get("rig")
+    if rig not in ("t1", "t2") or any(key in reprocessing for key in _ATHANOR_RIG_KEYS):
+        return
+    reprocessing["athanor_rig_asteroid"] = rig
+    logging.warning(
+        "Admin settings: the stored reprocessing/rig=%r on an Athanor is read as reprocessing/athanor_rig_asteroid "
+        "(the M-Set Asteroid Ore Grading Processor it priced); moon ore and ice are unrigged until "
+        "athanor_rig_moon / athanor_rig_ice are set on the Admin Settings page", rig)

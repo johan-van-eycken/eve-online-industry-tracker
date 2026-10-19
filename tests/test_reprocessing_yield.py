@@ -36,13 +36,15 @@ from eve_online_industry_tracker.infrastructure.static_data.yield_calc import co
 ALL_FIVE = {3385: 5, 3389: 5, fakes.SKILL_SIMPLE_ORE_PROCESSING: 5}
 RX_804 = 0.04
 VELDSPAR = {"id": 1230, "name": "Veldspar", "portionSize": 100, "volume": 0.1, "compressed": False,
-            "reprocessingSkillTypeID": fakes.SKILL_SIMPLE_ORE_PROCESSING, "reprocessingSkill": "Simple Ore Processing",
+            "groupID": 462, "categoryID": 25, "reprocessingSkillTypeID": fakes.SKILL_SIMPLE_ORE_PROCESSING, "reprocessingSkill": "Simple Ore Processing",
             "materials": [{"name": "Tritanium", "quantity": 400}]}
 
 
 def _facility(facility_type, rig="none", band="high", tax=0.0, station=fakes.FAKE_NPC_STATION_ID):
+    """On an Athanor `rig` is the asteroid ore rig (Veldspar's class), on a Tatara the monitor."""
     return facility_repo.facility_from_choice(
-        facility_type=facility_type, rig=rig, security_band=band, tax=tax,
+        facility_type=facility_type, rig="none" if facility_type == "athanor" else rig, security_band=band, tax=tax,
+        athanor_rigs={"asteroid": rig, "moon": "none", "ice": "none"} if facility_type == "athanor" else None,
         npc_station_id=station if facility_type == "npc_station" else None,
         npc_station=fakes.fake_npc_station, data=fakes.fake_ore_data())
 
@@ -60,10 +62,12 @@ def _percent(facility):
     (0.53, 1.00, 0.0, 0.7669948),      # the same with a T2 rig, highsec
 ])
 def test_the_reference_numbers_without_a_structure_bonus(base, sec, sm, expected):
-    facility = reprocessing.ReprocessingFacility(name="x", base_yield=base, security_multiplier=sec,
-                                                 structure_bonus=sm, tax=0.0, tax_source="setting")
+    facility = reprocessing.ReprocessingFacility(
+        name="x", yields={"asteroid": reprocessing.ClassYield(base_yield=base, security_multiplier=sec)},
+        structure_bonus=sm, tax=0.0, tax_source="setting")
     bonuses = {3385: 0.03, 3389: 0.02, 60377: 0.02}
-    assert reprocessing.reprocessing_yield(facility, skill_bonuses=bonuses, skill_levels=ALL_FIVE | {60377: 5},
+    assert reprocessing.reprocessing_yield(facility, ore_class="asteroid", skill_bonuses=bonuses,
+                                           skill_levels=ALL_FIVE | {60377: 5},
                                            implant_bonus=RX_804) == pytest.approx(expected, abs=1e-9)
 
 
@@ -142,18 +146,21 @@ def test_an_ore_without_portion_size_or_volume_is_left_out_with_a_warning(caplog
 
 def test_the_facility_values_come_from_the_sde_attributes():
     athanor_t2_null = _facility("athanor", "t2", "null", tax=0.02)
-    assert (athanor_t2_null.base_yield, athanor_t2_null.security_multiplier, athanor_t2_null.structure_bonus,
+    asteroid = athanor_t2_null.yields["asteroid"]
+    assert (asteroid.base_yield, asteroid.security_multiplier, athanor_t2_null.structure_bonus,
             athanor_t2_null.tax) == (0.53, 1.12, pytest.approx(0.02), 0.02)
     tatara = _facility("tatara")
-    assert (tatara.base_yield, tatara.security_multiplier, tatara.structure_bonus) == (0.5, 1.0, pytest.approx(0.055))
+    assert (tatara.yields["asteroid"].base_yield, tatara.yields["asteroid"].security_multiplier,
+            tatara.structure_bonus) == (0.5, 1.0, pytest.approx(0.055))
     npc = _facility("npc_station", band="null")
-    assert (npc.base_yield, npc.security_multiplier, npc.structure_bonus) == (0.5, 1.0, 0.0)
+    assert (npc.yields["asteroid"].base_yield, npc.yields["asteroid"].security_multiplier,
+            npc.structure_bonus) == (0.5, 1.0, 0.0)
     assert not hasattr(reprocessing, "NPC_STATION_BASE_YIELD")
 
 
 def test_an_npc_stations_base_yield_is_its_sde_reprocessing_efficiency():
     poor = _facility("npc_station", station=fakes.FAKE_POOR_NPC_STATION_ID)
-    assert poor.base_yield == 0.3
+    assert poor.yields["asteroid"].base_yield == 0.3
     assert round(_percent(poor)["batch_yield_percent"], 2) == 43.41
     assert str(fakes.FAKE_POOR_NPC_STATION_ID) in poor.name
 
@@ -191,7 +198,7 @@ def test_a_missing_facility_attribute_raises_with_the_hint():
 
 @pytest.mark.parametrize("facility_type, rig, band, match", [
     ("citadel", "none", "high", "facility_type"),
-    ("athanor", "t3", "high", "rig"),
+    ("tatara", "t3", "high", "rig"),
     ("athanor", "t1", "wormhole", "security_band"),
     ("npc_station", "t1", "high", "NPC station"),
     (None, "none", "high", "facility_type"),
@@ -258,7 +265,7 @@ def test_the_configured_facility_reads_the_settings(tmp_path, sde_engine):
             facility_repo.configured_facility(mgr, session, fakes.fake_ore_data())   # the default: no station yet
         mgr.set("reprocessing", "npc_station_id", str(fakes.FAKE_NPC_STATION_ID))
         npc = facility_repo.configured_facility(mgr, session, fakes.fake_ore_data())
-        assert (npc.base_yield, npc.tax, npc.tax_source) == (0.5, 0.05, "sde_station_base")
+        assert (npc.yields["asteroid"].base_yield, npc.tax, npc.tax_source) == (0.5, 0.05, "sde_station_base")
         mgr.set_bulk({"reprocessing": {"facility_type": "tatara", "rig": "t2", "security_band": "null", "tax": 0.04}})
         tatara = facility_repo.configured_facility(mgr, session, fakes.fake_ore_data())
     assert round(_percent(tatara)["batch_yield_percent"], 2) == 90.63 and tatara.tax == 0.04
@@ -490,7 +497,9 @@ def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers
     assert data.facility_attributes[ore.TATARA_TYPE_ID][ore.STR_REFINING_YIELD_BONUS_ATTRIBUTE_ID] == 5.5
     service = data.facility_attributes[ore.STANDUP_REPROCESSING_FACILITY_TYPE_ID]
     assert service[ore.REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID] == 0.5
-    for (_, tier), rig in ore.RIG_TYPE_IDS.items():
+    tiers = {**{rig: tier for (_, tier), rig in ore.ATHANOR_RIG_TYPE_IDS.items()},
+             **{rig: tier for tier, rig in ore.TATARA_RIG_TYPE_IDS.items()}}
+    for rig, tier in tiers.items():
         attrs = data.facility_attributes[rig]
         assert attrs[ore.REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID] == {"t1": 0.51, "t2": 0.53}[tier]
         assert [attrs[a] for a in (ore.HISEC_MODIFIER_ATTRIBUTE_ID, ore.LOWSEC_MODIFIER_ATTRIBUTE_ID,
@@ -510,9 +519,10 @@ def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers
 
     for facility_type, rig, band, percent in [("npc_station", "none", "high", 72.36), ("athanor", "t1", "high", 75.28),
                                               ("tatara", "t2", "null", 90.63)]:
-        facility = facility_repo.facility_from_choice(facility_type=facility_type, rig=rig, security_band=band,
-                                                      tax=0.0, npc_station_id=60003760, npc_station=station,
-                                                      data=data)
+        facility = facility_repo.facility_from_choice(
+            facility_type=facility_type, rig="none" if facility_type == "athanor" else rig, security_band=band,
+            athanor_rigs={"asteroid": rig, "moon": "none", "ice": "none"}, tax=0.0, npc_station_id=60003760,
+            npc_station=station, data=data)
         (row,) = compute_yields([VELDSPAR], {3385: 5, 3389: 5, 60377: 5}, facility, RX_804, data)
         assert round(row["batch_yield_percent"], 2) == percent
 

@@ -319,8 +319,8 @@ def run_optimize(
     result["reprocessing_fee_basis"] = fee_basis
     result["total_cost_with_reprocessing"] = (
         float(result.get("total_cost") or 0.0) + fee if fee is not None else None)
-    result["facility"] = {"name": facility.name, "multiplier": facility.multiplier, "tax": facility.tax,
-                          "tax_source": facility.tax_source}
+    result["facility"] = {"name": facility.name, "tax": facility.tax, "tax_source": facility.tax_source,
+                          "multipliers": {cls: facility.multiplier_for(cls) for cls in facility.yields}}
     result["resale"] = resale
     result["resale_toggle"] = True
     result["price_provenance"] = _build_price_provenance(

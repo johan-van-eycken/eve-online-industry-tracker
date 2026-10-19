@@ -52,6 +52,7 @@ def _write_fake_sde(directory):
                            "volume": 16500.0}},
         "compressibleTypes": fakes.COMPRESSIBLE_TYPES,
         "typeDogma": fakes.TYPE_DOGMA,
+        "dogmaEffects": fakes.DOGMA_EFFECTS,
         "industryActivities": fakes.INDUSTRY_ACTIVITIES,
     }
     for name, rows in tables.items():
