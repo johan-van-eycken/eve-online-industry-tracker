@@ -308,7 +308,10 @@ def test_the_first_publish_re_snapshots_the_jobs_stored_without_a_choice(session
         assert history.acquisition_total_cost == pytest.approx(job.total_build_cost)
 
 
-def test_only_the_first_publish_re_snapshots(session_provider, sde_engine):
+def test_a_later_publish_with_a_newly_planned_blueprint_re_snapshots_again(session_provider, sde_engine):
+    """H1: the re-snapshot is not once per process: a later overview that
+    publishes a choice for a blueprint the earlier ones did not plan
+    re-snapshots its stored jobs too."""
     _seed_sde(sde_engine)
     state = _state()
     service = _service(state, session_provider)
@@ -317,7 +320,25 @@ def test_only_the_first_publish_re_snapshots(session_provider, sde_engine):
     service.publish_decryptor_choices({_TARGET_BP: DecryptorChoice(_DECRYPTOR, "chosen")})
     with session_provider.app_session() as session:
         job = session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one()
-        assert "no product overview has planned it yet" in job.invention_cost_unknown_reason
+        assert job.invention_cost_unknown_reason is None
+        assert job.invention_cost is not None and job.invention_cost > 0
+
+
+def test_a_publish_without_a_newly_planned_blueprint_does_not_re_snapshot(
+    session_provider, sde_engine, monkeypatch,
+):
+    from eve_online_industry_tracker.application.industry import service as service_module
+
+    _seed_sde(sde_engine)
+    runs = []
+    real = service_module.resnapshot_jobs_without_decryptor_choice
+    monkeypatch.setattr(service_module, "resnapshot_jobs_without_decryptor_choice",
+                        lambda **kw: runs.append(1) or real(**kw))
+    service = _service(_state(), session_provider)
+    service.publish_decryptor_choices({_TARGET_BP: DecryptorChoice(_DECRYPTOR, "chosen")})
+    service.publish_decryptor_choices({_TARGET_BP: DecryptorChoice(NO_DECRYPTOR, "changed")})
+    service.publish_decryptor_choices({})
+    assert runs == [1]
 
 
 def test_an_unplanned_blueprint_job_gets_the_not_planned_reason(session_provider, sde_engine):

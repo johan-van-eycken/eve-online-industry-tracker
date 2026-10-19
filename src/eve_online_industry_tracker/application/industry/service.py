@@ -10515,7 +10515,8 @@ class IndustryService:
         """Publish this overview's decryptor choices for the realized side:
         in memory (the overview cache), persisted in the app DB (read after a
         restart, before the first overview), and, after the first publish of
-        the process, the stored jobs that had no choice are re-snapshotted.
+        the process or one that plans a blueprint the earlier ones did not,
+        the stored jobs that had no choice are re-snapshotted.
         A database or ESI failure here is a WARNING: the overview stands."""
         published = self._published_decryptor_choices(choices)
         cached = getattr(self._state, "_overview_result_cache", None)
@@ -10541,15 +10542,18 @@ class IndustryService:
             logger.warning("Invention: the decryptor choices could not be persisted (%s); a restart forgets them", exc)
         finally:
             session.close()
-        self._resnapshot_jobs_after_first_publish()
+        self._resnapshot_jobs_after_publish(frozenset(int(bp) for bp in published))
         return published
 
-    def _resnapshot_jobs_after_first_publish(self) -> None:
-        """Once per process, after the first publish: re-snapshot the stored
-        jobs whose invention cost was unknown for want of a decryptor choice
-        (the startup job refresh runs before any overview). A failure is a
-        WARNING and the next publish tries again."""
-        if getattr(self._state, "_realized_invention_resnapshot_done", False):
+    def _resnapshot_jobs_after_publish(self, planned: frozenset[int]) -> None:
+        """After the first publish of the process, and after any later one
+        that plans a blueprint no earlier re-snapshot had a choice for:
+        re-snapshot the stored jobs whose invention cost was unknown for want
+        of a decryptor choice (the startup job refresh runs before any
+        overview; a blueprint the overview starts planning later leaves its
+        jobs so too). A failure is a WARNING and the next publish tries again."""
+        covered = getattr(self._state, "_realized_invention_resnapshot_blueprints", None)
+        if covered is not None and planned <= covered:
             return
         esi_service = getattr(self._state, "esi_service", None)
         if esi_service is None:
@@ -10571,7 +10575,7 @@ class IndustryService:
                 app_session=app_session, sde_session=sde_session, market_price_map=market_price_map,
                 invention_refresh=RealizedInventionRefresh(inputs=self.realized_invention_inputs()),
             )
-            self._state._realized_invention_resnapshot_done = True
+            self._state._realized_invention_resnapshot_blueprints = frozenset(covered or ()) | planned
         except (SQLAlchemyError, RuntimeError) as exc:  # RuntimeError: a database is not initialized
             if app_session is not None:
                 app_session.rollback()
