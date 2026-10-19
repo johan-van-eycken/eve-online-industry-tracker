@@ -20,12 +20,28 @@ blueprint). ChainPlanner claims in this order:
 
 An asset without an item_id (a hand-built fixture) is keyed by its type
 and position, so two such assets of one type stay two blueprints.
+
+A pilot's own blueprint (Task A item 1, a character asset) is booked like a
+corp one but bound to its owner (owner_of): only that pilot can install a
+job from it, which CharacterAssigner enforces. Sub-builds use corp BPOs only.
 """
 from __future__ import annotations
 
 from typing import Any, Hashable
 
 from eve_online_industry_tracker.application.daily_planner import research_first
+
+
+def owner_character_id(asset: Any) -> int | None:
+    """The pilot a blueprint belongs to (a character asset carries its
+    character_id), or None for a corp blueprint (Task A item 1). Only that
+    pilot can install a job from a character's blueprint."""
+    value = asset.get("character_id") if isinstance(asset, dict) else getattr(asset, "character_id", None)
+    try:
+        owner = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return owner if owner > 0 else None
 
 
 def _runs(asset: Any) -> int:
@@ -71,6 +87,15 @@ class BlueprintLedger:
             keys.append(pool.pop(index)[0])
         return keys
 
+    def owner_of(self, key: Hashable) -> int | None:
+        """The pilot who owns this blueprint (owner-bound), or None (corp)."""
+        for index in (self._bpos, self._bpcs):
+            for entries in index.values():
+                for k, asset in entries:
+                    if k == key:
+                        return owner_character_id(asset)
+        return None
+
     def claim_of(self, key: Hashable) -> tuple[int, str] | None:
         return self._claims.get(key)
 
@@ -80,6 +105,11 @@ class BlueprintLedger:
     def free_bpos(self, type_id: int) -> list[tuple[Hashable, Any]]:
         """This type's BPOs no one has claimed, in asset order."""
         return [(k, a) for k, a in self._bpos.get(int(type_id)) or [] if k not in self._claims]
+
+    def free_bpos_to_copy(self, type_id: int) -> list[tuple[Hashable, Any]]:
+        """free_bpos, the corp's first (any pilot can copy one), then the
+        pilots' own (only the owner can), each in asset order."""
+        return sorted(self.free_bpos(type_id), key=lambda e: owner_character_id(e[1]) is not None)
 
     def bpo_claim_labels(self, type_id: int) -> list[str]:
         """Who holds this type's BPOs, first claim first (for reasons)."""

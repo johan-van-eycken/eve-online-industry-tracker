@@ -20,7 +20,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.application.daily_planner import research_first
 from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
-from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger
+from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import (
+    BlueprintLedger,
+    owner_character_id,
+)
 from eve_online_industry_tracker.application.industry.invention_model import MAX_BLUEPRINT_TE as DEFAULT_MAX_BLUEPRINT_TE
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner import facility_bonus
@@ -345,7 +348,7 @@ class ChainPlanner:
             promised_bpcs.update(e[0] for e in picks)
             if need is not None and sum(e[2] for e in picks) >= need:
                 return
-            free = ledger.free_bpos(t1_bp_type_id)
+            free = ledger.free_bpos_to_copy(t1_bp_type_id)
             if free:
                 key, asset = free[0]
                 ledger.claim(key, decision.type_id, f"copy for {decision.type_name} ({decision.type_id})")
@@ -359,7 +362,7 @@ class ChainPlanner:
             if not ctx.get("copy"):
                 return
             t1_bp_type_id = invention_source.get(ctx["bp_type_id"])
-            for key, asset in ledger.free_bpos(t1_bp_type_id)[:max(0, _invention_lanes(decision.overview_row) - 1)]:
+            for key, asset in ledger.free_bpos_to_copy(t1_bp_type_id)[:max(0, _invention_lanes(decision.overview_row) - 1)]:
                 ledger.claim(key, decision.type_id, f"copy for {decision.type_name} ({decision.type_id})")
                 ctx["copy"].append((key, asset))
 
@@ -413,10 +416,16 @@ class ChainPlanner:
             # The blueprints this row holds, by job kind (named items only):
             # CharacterAssigner releases the ones no action used (Task A).
             claims: dict[str, list[int]] = {"manufacture": [], "copy": [], "invention": [], "research": []}
+            owners: dict[int, int] = {}
             for key, label in ledger.claims_of(decision.type_id):
                 if isinstance(key, int) and not isinstance(key, bool):
                     claims[_claim_category(label)].append(key)
+                    owner = ledger.owner_of(key)
+                    if owner is not None:
+                        owners[key] = owner
             decision.overview_row["ledger_claims"] = claims
+            # Task A item 1: the pilot each owner-bound blueprint belongs to.
+            decision.overview_row["blueprint_owner_by_item"] = owners
 
         for decision in ordered:
             if id(decision) in state:
@@ -493,6 +502,13 @@ class ChainPlanner:
         # use only the component BPOs no job above claimed.
         requests_by_parent: list[tuple[int, list[dict[str, Any]]]] = []
         fallback_requests: dict[int, list[dict[str, Any]]] = {}
+        # Task A item 1: a sub job goes to whichever pilot has a slot, so
+        # only corp BPOs sub-build; a component with only a pilot's BPO is
+        # bought (never under-bought).
+        corp_bpo_assets_by_type_id = {
+            t: corp for t, assets in free_bpo_assets_by_type_id.items()
+            if (corp := [a for a in assets if owner_character_id(a) is None])
+        }
 
         def _phase_d(decision: ItemDecision) -> None:
             # Which of this batch's materials the corp could build itself.
@@ -504,7 +520,7 @@ class ChainPlanner:
             fallback_need: dict[int, int] = {}
             requests = self._collect_sub_manufacture_requests(
                 decision=decision,
-                bpo_assets_by_type_id=free_bpo_assets_by_type_id,
+                bpo_assets_by_type_id=corp_bpo_assets_by_type_id,
                 product_to_blueprint=product_to_blueprint,
                 ledger=ledger, top_level_build_types=top_level_build_types,
                 stock=phase1_data.get("corp_material_stock") or {},
@@ -515,7 +531,7 @@ class ChainPlanner:
             if kept_row is not None:
                 fallback_requests[int(decision.type_id)] = self._collect_sub_manufacture_requests(
                     decision=decision, row=kept_row,
-                    bpo_assets_by_type_id=free_bpo_assets_by_type_id,
+                    bpo_assets_by_type_id=corp_bpo_assets_by_type_id,
                     product_to_blueprint=product_to_blueprint,
                     ledger=ledger, top_level_build_types=top_level_build_types,
                     stock=phase1_data.get("corp_material_stock") or {},
@@ -1027,9 +1043,11 @@ class ChainPlanner:
         - already not built (a busy BPC, research first "none"): kept as is;
         - a blueprint of its type in an active industry job (the asset
           snapshot dropped it): owned, only busy, so not a purchase;
-        - the producer priced it from an owned blueprint the corp hangar does
-          not hold (it reads character blueprints too, owned_blueprints_scope;
-          the planner reads the corp hangar only): not planned, not a purchase;
+        - the producer priced it from an owned blueprint neither the corp
+          nor a pilot holds in the planner's assets (another
+          owned_blueprints_scope, or its asset history): not planned, not a
+          purchase (the planner reads the corp's and every pilot's
+          blueprints, Task A item 1);
         - else (blueprint_sde_fallback, or no source): truly unowned, so the
           BPO analysis says whether to buy it, and "buy the BPO first"."""
         first = decision.overview_row.get("research_first")
@@ -1040,8 +1058,12 @@ class ChainPlanner:
             self._mark_not_built(decision, "owned blueprint in an active industry job")
             return
         if _priced_from_an_owned_blueprint(decision.overview_row):
-            self._skip_bpo_analysis(decision, "priced from an owned blueprint outside the corp hangar: not a purchase")
-            self._mark_not_built(decision, "blueprint outside the corp hangar (e.g. character-owned): not planned")
+            self._skip_bpo_analysis(
+                decision, "priced from an owned blueprint in neither the corp's nor a pilot's assets: not a purchase",
+            )
+            self._mark_not_built(
+                decision, "the owned blueprint it is priced from is in neither the corp's nor a pilot's assets: not planned",
+            )
             return
         self._analyze_bpo_investment(
             decision=decision,
@@ -1125,7 +1147,7 @@ class ChainPlanner:
         if not copies and not bpcs and t1_bp_type_id is not None:
             # Fix round 2: phase B planned no copy, yet no BPC was left in the
             # end: a free unclaimed T1 BPO copies instead.
-            free = ledger.free_bpos(t1_bp_type_id)
+            free = ledger.free_bpos_to_copy(t1_bp_type_id)
             if free:
                 key, asset = free[0]
                 ledger.claim(key, decision.type_id, f"copy for {decision.type_name} ({decision.type_id})")
@@ -1650,7 +1672,9 @@ class ChainPlanner:
                 continue  # no BPO for this material → buy from market
             name = str(names.get(mat_type_id) or f"type_{mat_type_id}")
             if ledger is not None:
-                unclaimed = [a for _k, a in ledger.free_bpos(mat_blueprint_type_id)]
+                unclaimed = [
+                    a for k, a in ledger.free_bpos(mat_blueprint_type_id) if ledger.owner_of(k) is None
+                ]
             else:
                 unclaimed = list(bpo_assets_by_type_id[mat_blueprint_type_id])
             # Whether the plan buys it is judged on the need pooled across

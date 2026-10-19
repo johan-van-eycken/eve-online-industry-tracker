@@ -643,15 +643,16 @@ def test_s2_a_busy_bpc_row_gets_one_not_built_reason():
 
 
 def test_a_blueprint_outside_the_corp_hangar_is_not_planned_and_not_a_purchase():
-    """The producer priced the row from an owned BPO the corp hangar does not
-    hold (e.g. character-owned): not built, no buy advice."""
+    """The producer priced the row from an owned BPO neither the corp nor a
+    pilot holds in the planner's assets: not built, no buy advice."""
     t1 = _dec(_t1_row(20), 12344, "Widget I", 1.0, 1)
     plan = _planner(0).plan_chain([t1], {
         "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {}, "blueprint_data": BP_B,
         "market_depth_cache": {**A.PRICES, 998: {"spot_sell_price": 1000.0}}, "variant_rows_by_type_id": {},
     })
     assert t1.decision_reason == (
-        "test; not built: blueprint outside the corp hangar (e.g. character-owned): not planned"
+        "test; not built: the owned blueprint it is priced from is in neither the corp's nor a pilot's "
+        "assets: not planned"
     )
     assert plan.bpo_opportunities == []
 

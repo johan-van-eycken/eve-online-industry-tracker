@@ -707,7 +707,18 @@ class DailyPlannerService:
         }
 
         with _ComputeStep(self, "indexing corp blueprints"):
-            bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
+            corp_index = self._index_blueprint_assets(corp_assets)
+        # Task A item 1: the pilots' own blueprints, from the producer's
+        # source (owned_blueprints_scope "all_characters", its default). The
+        # ledger binds each to its owner (its character_id): only that pilot
+        # can install a job from it.
+        with _ComputeStep(self, "reading character blueprints"):
+            character_blueprints = self._get_character_blueprint_assets()
+        with _ComputeStep(self, "indexing character blueprints"):
+            character_index = (
+                index_blueprint_assets(character_blueprints, self._meta_resolver) if character_blueprints else ({}, {})
+            )
+        bpo_assets_by_type_id, bpc_assets_by_type_id = merge_blueprint_indexes(corp_index, character_index)
         # Blueprints installed in an active job: chain planning neither
         # researches nor builds from them (Task 8c fix round 5).
         busy_item_ids = busy_blueprint_item_ids(industry_jobs)
@@ -1134,6 +1145,20 @@ class DailyPlannerService:
         try:
             from eve_online_industry_tracker.infrastructure.models import CorporationAssetsModel
             return session.query(CorporationAssetsModel).all()
+        finally:
+            session.close()
+
+    def _get_character_blueprint_assets(self) -> list[Any]:
+        """Every pilot's blueprint assets: the producer's owned-blueprint
+        source for its default scope (blueprints_repo.get_character_blueprints).
+
+        No error handler (like _get_corp_assets): an empty list would plan a
+        row the producer priced from a pilot's blueprint as not built, or
+        tell the user to buy a blueprint a pilot owns."""
+        session = self._session_provider.app_session()
+        try:
+            from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
+            return list(blueprints_repo.get_character_blueprints(session))
         finally:
             session.close()
 
@@ -1567,6 +1592,20 @@ def busy_blueprint_item_ids(industry_jobs: list[Any]) -> set[int]:
         if item_id > 0:
             out.add(item_id)
     return out
+
+
+def merge_blueprint_indexes(
+    *indexes: tuple[dict[int, list[Any]], dict[int, list[Any]]],
+) -> tuple[dict[int, list[Any]], dict[int, list[Any]]]:
+    """One (BPOs, BPCs) index from several (corp, then character), each
+    keyed by blueprint type_id, the assets in the given order."""
+    bpos: dict[int, list[Any]] = {}
+    bpcs: dict[int, list[Any]] = {}
+    for index_bpos, index_bpcs in indexes:
+        for target, source in ((bpos, index_bpos), (bpcs, index_bpcs)):
+            for type_id, assets in (source or {}).items():
+                target.setdefault(type_id, []).extend(assets)
+    return bpos, bpcs
 
 
 def index_blueprint_assets(
