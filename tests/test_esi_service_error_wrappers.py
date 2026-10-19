@@ -13,6 +13,7 @@ import pytest
 import requests
 
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
+from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
 
 
 def _raiser(exc):
@@ -32,7 +33,7 @@ def _svc(esi_client=None) -> ESIService:
 
 
 ESI_FAILURES = [requests.ConnectionError("reset"), requests.HTTPError("502"),
-                RuntimeError("ESI GET failed after retries"), ValueError("No refresh token")]
+                EsiRequestError("ESI GET failed after retries"), EsiRequestError("No refresh token")]
 BUGS = [AttributeError("'NoneType' object has no attribute 'get'"), NameError("name 'oops' is not defined"),
         TypeError("unsupported operand"), KeyError("name")]
 

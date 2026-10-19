@@ -13,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 
 from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
+from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
 
 
 def _svc(esi_client) -> ESIService:
@@ -32,7 +33,7 @@ def _raiser(exc):
 
 @pytest.mark.parametrize("method", ["resolve_universe_names", "get_universe_names"])
 def test_a_failed_universe_names_chunk_is_a_warning_and_the_ids_stay_unresolved(method, caplog):
-    svc = _svc(SimpleNamespace(esi_post=_raiser(RuntimeError("ESI POST failed after retries"))))
+    svc = _svc(SimpleNamespace(esi_post=_raiser(EsiRequestError("ESI POST failed after retries"))))
     with caplog.at_level(logging.WARNING):
         out = getattr(svc, method)([90000001, 90000002])
     assert out == {}
@@ -59,7 +60,7 @@ def test_an_unreadable_public_structure_is_skipped_with_a_summary_warning(caplog
 
     def get_structure(sid, **k):
         if sid == 1022:
-            raise RuntimeError("ESI request failed for universe structure 1022: timeout")
+            raise EsiRequestError("ESI request failed for universe structure 1022: timeout")
         return {"name": "S", "solar_system_id": 30000142, "owner_id": 1, "type_id": 35825, "services": []}
 
     svc.get_universe_structure = get_structure

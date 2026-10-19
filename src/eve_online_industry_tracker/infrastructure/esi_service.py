@@ -11,7 +11,13 @@ import requests
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
-from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient, call_esi_monitor
+from eve_online_industry_tracker.infrastructure.esi_client import (
+    ESI_REQUEST_ERRORS,
+    ESIClient,
+    EsiRequestError,
+    call_esi_monitor,
+    esi_total_pages,
+)
 from eve_online_industry_tracker.infrastructure.esi_versions import (
     ESI_COMPATIBILITY_DATE,
     ESI_MARKETS_ORDERS,
@@ -320,7 +326,7 @@ class ESIService:
             else:
                 all_data.append(payload)
 
-            total_pages = int(response.headers.get("X-Pages", "1"))
+            total_pages = esi_total_pages(response.headers, str(getattr(response, "url", endpoint)))
             if page >= total_pages:
                 break
             page += 1
@@ -610,7 +616,7 @@ class ESIService:
             return {}
         except ESI_REQUEST_ERRORS as e:
             # Only ESI failures are wrapped; a bug in our code propagates as itself.
-            raise RuntimeError(f"ESI request failed for location {location_id}: {e}") from e
+            raise EsiRequestError(f"ESI request failed for location {location_id}: {e}") from e
 
     # A station name is a display nicety: one short try, no retries, and a failure
     # cached for a few minutes, so a down ESI never holds up /facilities or the ore page.
@@ -639,7 +645,7 @@ class ESIService:
         Each (station, language) lookup is one try with a 3 s timeout and no
         retries, cached for the process; a failure is cached for
         STATION_NAME_FAILURE_TTL_SECONDS and raised again without an ESI call
-        meanwhile. RuntimeError when ESI fails or gives no name in the
+        meanwhile. EsiRequestError when ESI fails or gives no name in the
         requested language."""
         station_id = int(station_id)
         language = re.split(r"[-_]", str(language or "en").strip().lower(), maxsplit=1)[0] or "en"
@@ -651,7 +657,7 @@ class ESIService:
             return name, None
         try:
             english = self._fetch_station_name(station_id, "en")
-        except RuntimeError as exc:
+        except EsiRequestError as exc:
             return name, (f"{self.STATION_NAME_ENGLISH_ONLY}, perhaps (the English name could not be read to "
                           f"compare: {exc})")
         return name, (self.STATION_NAME_ENGLISH_ONLY if name == english else None)
@@ -666,7 +672,7 @@ class ESIService:
             return cached
         failure = self._station_name_failures.get(key)
         if failure is not None and time.time() - failure[0] < self.STATION_NAME_FAILURE_TTL_SECONDS:
-            raise RuntimeError(failure[1])
+            raise EsiRequestError(failure[1])
         try:
             payload = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id),
                                            headers={"Accept-Language": language},
@@ -674,12 +680,12 @@ class ESIService:
         except ESI_REQUEST_ERRORS as e:
             message = f"ESI request failed for station {station_id}: {e}"
             self._station_name_failures[key] = (time.time(), message)
-            raise RuntimeError(message) from e
+            raise EsiRequestError(message) from e
         name = payload.get("name") if isinstance(payload, dict) else None
         if not name:
             message = f"ESI /universe/stations/{station_id} gave no name"
             self._station_name_failures[key] = (time.time(), message)
-            raise RuntimeError(message)
+            raise EsiRequestError(message)
         self._station_name_failures.pop(key, None)
         self._station_name_cache[key] = str(name)
         return str(name)
@@ -710,7 +716,7 @@ class ESIService:
                 suppress_not_found_log=suppress_not_found_log,
             )
         except ESI_REQUEST_ERRORS as e:
-            raise RuntimeError(f"ESI request failed for universe structure {structure_id}: {e}") from e
+            raise EsiRequestError(f"ESI request failed for universe structure {structure_id}: {e}") from e
 
     def get_market_prices(self) -> List[Dict[str, Any]]:
         """Return market prices for all items (cached)."""
@@ -722,7 +728,7 @@ class ESIService:
         try:
             market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES, paginate=True)
         except ESI_REQUEST_ERRORS as e:
-            raise RuntimeError(f"ESI request failed: {e}") from e
+            raise EsiRequestError(f"ESI request failed: {e}") from e
 
         self._market_prices_cache = (now, market_prices)
         return market_prices
@@ -740,7 +746,7 @@ class ESIService:
         try:
             data = self._esi_client.esi_get(ESI_INDUSTRY_FACILITIES)
         except ESI_REQUEST_ERRORS as e:
-            raise RuntimeError(f"ESI request failed: {e}") from e
+            raise EsiRequestError(f"ESI request failed: {e}") from e
 
         out = list(data) if isinstance(data, list) else []
         self._industry_facilities_cache = (now, out)
@@ -760,7 +766,7 @@ class ESIService:
         try:
             data = self._esi_client.esi_get(ESI_INDUSTRY_SYSTEMS, paginate=True)
         except ESI_REQUEST_ERRORS as e:
-            raise RuntimeError(f"ESI request failed: {e}") from e
+            raise EsiRequestError(f"ESI request failed: {e}") from e
 
         out = list(data) if isinstance(data, list) else []
         self._industry_systems_cache = (now, out)
@@ -787,7 +793,7 @@ class ESIService:
         try:
             data = self._esi_client.esi_get(ESI_UNIVERSE_TYPE.format(type_id=type_id))
         except ESI_REQUEST_ERRORS as e:
-            raise RuntimeError(f"ESI request failed for /universe/types/{type_id}/: {e}") from e
+            raise EsiRequestError(f"ESI request failed for /universe/types/{type_id}/: {e}") from e
 
         out = dict(data) if isinstance(data, dict) else {}
         cache[type_id] = (now, out)
@@ -889,7 +895,7 @@ class ESIService:
         params = {"filter": filter} if filter is not None else None
         data = self._esi_client.esi_get(ESI_UNIVERSE_STRUCTURES_LIST, params=params, use_cache=False)
         if data is None:
-            raise RuntimeError(
+            raise EsiRequestError(
                 "ESI returned no data for /universe/structures (likely 403 Forbidden). "
                 "Your character may be missing the scope 'esi-universe.read_structures.v1' or has no access."
             )
@@ -932,7 +938,7 @@ class ESIService:
 
             # ESIClient returns None on 403/404; distinguish that from an empty list.
             if public_structure_ids is None:
-                raise RuntimeError(
+                raise EsiRequestError(
                     "ESI returned no data for /universe/structures (likely 403 Forbidden). "
                     "Your character may be missing the scope 'esi-universe.read_structures.v1' or has no access."
                 )
@@ -980,7 +986,7 @@ class ESIService:
                             "services": structure_data.get("services"),
                         }
                 except ESI_REQUEST_ERRORS as exc:
-                    # get_universe_structure wraps ESI failures in RuntimeError (ValueError: an
+                    # get_universe_structure wraps ESI failures in EsiRequestError (ValueError: an
                     # invalid id); one unreadable structure must not abort the scan. Counted and
                     # summarised below. A bug (TypeError, AttributeError, ...) propagates.
                     logging.debug("Public structure %s skipped: %s", structure_id, exc)
@@ -1042,4 +1048,4 @@ class ESIService:
             return results
         except ESI_REQUEST_ERRORS as e:
             # The structure list's ESI failure (or its 403, raised above); a bug propagates.
-            raise RuntimeError(f"ESI request failed for system {system_id}: {e}") from e
+            raise EsiRequestError(f"ESI request failed for system {system_id}: {e}") from e

@@ -34,18 +34,41 @@ from eve_online_industry_tracker.infrastructure.models import EsiCache, OAuthCha
 from eve_online_industry_tracker.infrastructure.oauth import OAuthHandler, OAuthServer
 from utils.requests_ssl import get_requests_ssl_kwargs
 
+class EsiRequestError(RuntimeError):
+    """An ESI request failed for a reason that is not a bug in our code: "failed
+    after retries", a token problem (no refresh token, an unexpected SSO token
+    response, storing a refreshed token), the ESI response cache that cannot be
+    read, or an ESI response the caller cannot use (ESIService). A RuntimeError,
+    so a caller that catches RuntimeError still sees it; the catch sites use
+    ESI_REQUEST_ERRORS, which no longer includes plain RuntimeError/ValueError."""
+
+
 # The contract of ESIClient.esi_get/esi_post (and of the ESIService calls built on them):
 # every failure that is not a bug in our code is one of these.
 #   - requests.RequestException: HTTP and connection errors, a body that is not JSON
 #     (requests' JSONDecodeError; ESIClient retries it, see below);
-#   - RuntimeError: "failed after retries", and the app DB problems of ESIClient itself
+#   - EsiRequestError: "failed after retries", token problems (no refresh token, an
+#     unexpected SSO token response), and the app DB problems of ESIClient itself
 #     (storing a refreshed token, reading the ESI response cache): ESIClient wraps their
-#     SQLAlchemyError in RuntimeError, so callers need not add SQLAlchemyError for them;
-#   - ValueError: token problems (no refresh token, an unexpected SSO token response).
+#     SQLAlchemyError in EsiRequestError, so callers need not add SQLAlchemyError for them.
 # Callers that skip one item on failure catch exactly these, so a NameError/
-# AttributeError/TypeError/KeyError in our own code still surfaces. A caller that also
-# touches the app DB itself adds SQLAlchemyError for its own queries.
-ESI_REQUEST_ERRORS: Tuple[type, ...] = (requests.RequestException, RuntimeError, ValueError)
+# AttributeError/TypeError/KeyError/ValueError/RuntimeError of our own code still
+# surfaces. A caller that also touches the app DB itself adds SQLAlchemyError for its
+# own queries.
+ESI_REQUEST_ERRORS: Tuple[type, ...] = (EsiRequestError, requests.RequestException)
+
+
+def esi_total_pages(headers: Any, url: str) -> int:
+    """The X-Pages header of a paginated ESI response (1 without it);
+    EsiRequestError when ESI sent one that is not a positive whole number."""
+    raw = headers.get("X-Pages", "1") if headers is not None else "1"
+    try:
+        pages = int(raw)
+    except (TypeError, ValueError):
+        raise EsiRequestError(f"ESI sent an unreadable X-Pages header {raw!r}: {url}") from None
+    if pages < 1:
+        raise EsiRequestError(f"ESI sent an unreadable X-Pages header {raw!r}: {url}")
+    return pages
 
 
 class _EsiErrorRateLimiter:
@@ -516,7 +539,7 @@ class ESIClient:
     def refresh_access_token(self) -> None:
         """Refresh access token using stored refresh token."""
         if not self.refresh_token:
-            raise RuntimeError("No refresh token provided for token refresh.")
+            raise EsiRequestError("No refresh token provided for token refresh.")
 
         response = requests.post(
             self.token_url,
@@ -545,7 +568,7 @@ class ESIClient:
         except SQLAlchemyError as exc:
             self._rollback_quietly()
             # The new token is in memory for this process; the stored one is the old one.
-            raise RuntimeError(
+            raise EsiRequestError(
                 f"could not store the refreshed ESI token of {self.character_name}: {exc}"
             ) from exc
 
@@ -554,21 +577,21 @@ class ESIClient:
     @staticmethod
     def _parse_token_payload(data: Any) -> Tuple[str, str, int]:
         """(access_token, refresh_token, expires_in) of an SSO token response;
-        ValueError("unexpected SSO token response: ...") for any other shape."""
+        EsiRequestError("unexpected SSO token response: ...") for any other shape."""
         if not isinstance(data, dict):
-            raise ValueError(f"unexpected SSO token response: not an object ({type(data).__name__})")
+            raise EsiRequestError(f"unexpected SSO token response: not an object ({type(data).__name__})")
         try:
             access_token = data["access_token"]
             refresh_token = data["refresh_token"]
             expires_in = data["expires_in"]
         except KeyError as exc:
-            raise ValueError(f"unexpected SSO token response: no {exc.args[0]!r}") from exc
+            raise EsiRequestError(f"unexpected SSO token response: no {exc.args[0]!r}") from exc
         if not isinstance(access_token, str) or not access_token:
-            raise ValueError("unexpected SSO token response: access_token is not a string")
+            raise EsiRequestError("unexpected SSO token response: access_token is not a string")
         if not isinstance(refresh_token, str) or not refresh_token:
-            raise ValueError("unexpected SSO token response: refresh_token is not a string")
+            raise EsiRequestError("unexpected SSO token response: refresh_token is not a string")
         if isinstance(expires_in, bool) or not isinstance(expires_in, (int, float)):
-            raise ValueError(f"unexpected SSO token response: expires_in is {expires_in!r}, not a number")
+            raise EsiRequestError(f"unexpected SSO token response: expires_in is {expires_in!r}, not a number")
         return access_token, refresh_token, int(expires_in)
 
     def _rollback_quietly(self) -> None:
@@ -580,14 +603,14 @@ class ESIClient:
             logging.warning("ESI client: rollback of the OAuth session failed: %s", exc)
 
     def _cache_lookup(self, cache_key: str) -> Tuple[Optional[Any], Optional[EsiCache]]:
-        """(cached data, cache row) of an ESI request; RuntimeError when the
+        """(cached data, cache row) of an ESI request; EsiRequestError when the
         esi_cache table cannot be read (see ESI_REQUEST_ERRORS)."""
         try:
             cached_data = self.get_cached_data(cache_key)
             cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == cache_key).first()
         except SQLAlchemyError as exc:
             self._rollback_quietly()
-            raise RuntimeError(f"ESI response cache unreadable for {cache_key}: {exc}") from exc
+            raise EsiRequestError(f"ESI response cache unreadable for {cache_key}: {exc}") from exc
         return cached_data, cache_entry
     
     # ----------------------------
@@ -896,7 +919,7 @@ class ESIClient:
                         data_json = response.json()
                         all_data.extend(data_json if isinstance(data_json, list) else [data_json])
                         last_headers = response.headers
-                        total_pages = int(response.headers.get("X-Pages", "1"))
+                        total_pages = esi_total_pages(response.headers, paged_url)
                         if page >= total_pages:
                             break
                         page += 1
@@ -931,7 +954,7 @@ class ESIClient:
                         backoff = (2 ** retries) + random.uniform(0, 1)
                         wait = max(backoff, retry_after, limiter_wait)
                         if retries + 1 >= max_attempts:
-                            raise RuntimeError(f"ESI GET failed after retries ({response.status_code}): {paged_url}")
+                            raise EsiRequestError(f"ESI GET failed after retries ({response.status_code}): {paged_url}")
                         logging.warning(f"ESI GET {response.status_code} on {paged_url}, retrying in {wait:.1f}s...")
                         _monitor(
                             "record_retry_event",
@@ -1000,7 +1023,7 @@ class ESIClient:
                     if retries < max_attempts:  # no wait after the last attempt
                         time.sleep(wait)
                     if retries >= max_attempts:
-                        raise RuntimeError(f"ESI GET failed after retries: {paged_url}")
+                        raise EsiRequestError(f"ESI GET failed after retries: {paged_url}")
             if return_headers:
                 return all_data, last_headers
             return all_data
@@ -1122,7 +1145,7 @@ class ESIClient:
                 if retries < max_attempts:  # no wait after the last attempt
                     time.sleep(wait)
 
-        raise RuntimeError(f"ESI GET failed after retries: {url}")
+        raise EsiRequestError(f"ESI GET failed after retries: {url}")
     
     def esi_post(self, endpoint: str, json: Optional[dict] = None, headers: Optional[dict] = None, use_cache: bool = False, paginate: bool = False, return_headers: bool = False, timeout: float | None = None) -> Any:
         """
@@ -1200,7 +1223,7 @@ class ESIClient:
                         data_json = response.json()
                         all_data.extend(data_json if isinstance(data_json, list) else [data_json])
                         last_headers = response.headers
-                        total_pages = int(response.headers.get("X-Pages", "1"))
+                        total_pages = esi_total_pages(response.headers, url)
                         if page >= total_pages:
                             break
                         page += 1
@@ -1232,7 +1255,7 @@ class ESIClient:
                         backoff = (2 ** retries) + random.uniform(0, 1)
                         wait = max(backoff, retry_after, limiter_wait)
                         if retries + 1 >= max_attempts:
-                            raise RuntimeError(f"ESI POST failed after retries ({response.status_code}): {url}")
+                            raise EsiRequestError(f"ESI POST failed after retries ({response.status_code}): {url}")
                         logging.warning(f"ESI POST {response.status_code} on {url}, retrying in {wait:.1f}s...")
                         _monitor(
                             "record_retry_event",
@@ -1280,7 +1303,7 @@ class ESIClient:
                     if retries < max_attempts:  # no wait after the last attempt
                         time.sleep(wait)
                     if retries >= max_attempts:
-                        raise RuntimeError(f"ESI POST failed after retries: {url}")
+                        raise EsiRequestError(f"ESI POST failed after retries: {url}")
        
         while retries < max_attempts:
             _t0: Optional[float] = None
@@ -1382,7 +1405,7 @@ class ESIClient:
                 if retries < max_attempts:  # no wait after the last attempt
                     time.sleep(wait)
 
-        raise RuntimeError(f"ESI POST failed after retries: {url}")
+        raise EsiRequestError(f"ESI POST failed after retries: {url}")
     
     def get_id_type(self, entity_id: int) -> Optional[str]:
         """Get the type of an entity by its ID."""

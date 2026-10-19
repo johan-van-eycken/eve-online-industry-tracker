@@ -1,6 +1,6 @@
 """F2b: what ESIClient raises. Every remote, token or storage failure of an
 ESI call is one of ESI_REQUEST_ERRORS (the DB problems of the token store and
-the response cache come wrapped in RuntimeError), and the ESI monitor is
+the response cache come wrapped in EsiRequestError), and the ESI monitor is
 telemetry that never fails a fetch. Fake values only."""
 from __future__ import annotations
 
@@ -64,10 +64,10 @@ def client(monkeypatch):
 @pytest.mark.parametrize("method, paginate", [("esi_get", False), ("esi_get", True),
                                               ("esi_post", False), ("esi_post", True)])
 def test_a_200_with_an_html_body_is_a_runtime_error_after_the_retries(client, method, paginate):
-    with pytest.raises(RuntimeError, match="after retries"):
+    with pytest.raises(esi_client_module.EsiRequestError, match="after retries"):
         getattr(client, method)("/x/", use_cache=False, paginate=paginate)
     assert client._http_session.calls == 3          # the first try and 2 retries
-    assert issubclass(RuntimeError, esi_client_module.ESI_REQUEST_ERRORS)
+    assert issubclass(esi_client_module.EsiRequestError, esi_client_module.ESI_REQUEST_ERRORS)
 
 
 # --- the SSO token refresh -------------------------------------------------------------------------
@@ -90,9 +90,9 @@ class _TokenResponse:
     {"access_token": "a", "refresh_token": "r", "expires_in": None},  # expires_in not a number
     ["not", "a", "dict"],
 ])
-def test_a_malformed_sso_token_response_is_a_value_error(client, monkeypatch, payload):
+def test_a_malformed_sso_token_response_is_an_esi_request_error(client, monkeypatch, payload):
     monkeypatch.setattr(esi_client_module.requests, "post", lambda url, **kwargs: _TokenResponse(payload))
-    with pytest.raises(ValueError, match="unexpected SSO token response"):
+    with pytest.raises(esi_client_module.EsiRequestError, match="unexpected SSO token response"):
         client.refresh_access_token()
     assert client.access_token == "token"          # nothing half-updated
     assert client.refresh_token == "refresh"
@@ -105,7 +105,7 @@ def test_a_failed_token_commit_is_a_runtime_error_and_rolls_back(client, monkeyp
         lambda url, **kwargs: _TokenResponse({"access_token": "a", "refresh_token": "r", "expires_in": 1199}),
     )
     client.db_oauth.session.commit.side_effect = _db_error()
-    with pytest.raises(RuntimeError, match="could not store the refreshed ESI token"):
+    with pytest.raises(esi_client_module.EsiRequestError, match="could not store the refreshed ESI token"):
         client.refresh_access_token()
     client.db_oauth.session.rollback.assert_called_once()
 
@@ -113,14 +113,14 @@ def test_a_failed_token_commit_is_a_runtime_error_and_rolls_back(client, monkeyp
 @pytest.mark.parametrize("method", ["esi_get", "esi_post"])
 def test_an_unreadable_esi_cache_is_a_runtime_error(client, method):
     client.db_oauth.session.query.side_effect = _db_error()
-    with pytest.raises(RuntimeError, match="ESI response cache"):
+    with pytest.raises(esi_client_module.EsiRequestError, match="ESI response cache"):
         getattr(client, method)("/x/", use_cache=True)
     client.db_oauth.session.rollback.assert_called()
     assert client._http_session.calls == 0
 
 
 def test_the_error_tuple_still_excludes_programming_errors():
-    for exc in (NameError, AttributeError, TypeError, KeyError):
+    for exc in (NameError, AttributeError, TypeError, KeyError, ValueError, RuntimeError):
         assert not issubclass(exc, esi_client_module.ESI_REQUEST_ERRORS)
 
 

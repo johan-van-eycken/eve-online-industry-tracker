@@ -29,6 +29,7 @@ from eve_online_industry_tracker.infrastructure.models import (
     MarketHistoryModel,
 )
 from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
+from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
 
 REGION = 10000002
 TRIT, PYE = 34, 35
@@ -101,7 +102,7 @@ def test_an_esi_error_is_a_transient_reason_with_a_warning(app_session, caplog):
     unavailable: dict[int, str] = {}
     transient: set[int] = set()
     with caplog.at_level(logging.WARNING):
-        assert _price(app_session, _Esi({}, raises=RuntimeError("HTTP 503")),
+        assert _price(app_session, _Esi({}, raises=EsiRequestError("HTTP 503")),
                       unavailable=unavailable, transient=transient) is None
     assert "HTTP 503" in unavailable[TRIT] and transient == {TRIT}
     assert "HTTP 503" in caplog.text

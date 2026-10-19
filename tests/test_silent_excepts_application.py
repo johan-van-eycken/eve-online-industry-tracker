@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
 
 _ORDERS = [{"character_id": 1, "corporation_id": 2, "market_orders": [
     {"order_id": 1, "type_id": 34, "is_buy_order": True, "price": 4.0, "issued": "2026-10-01T00:00:00Z",
@@ -88,7 +89,7 @@ IDS = ["character", "corporation"]
 @pytest.mark.parametrize("enrich", ENRICHERS, ids=IDS)
 def test_an_unavailable_order_book_is_a_warning_and_the_status_stays_na(enrich, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
-        rows = enrich(monkeypatch, _Esi(books=RuntimeError("ESI GET failed after retries")))
+        rows = enrich(monkeypatch, _Esi(books=EsiRequestError("ESI GET failed after retries")))
     assert {r["price_status"] for r in rows} == {"⚪N/A"}
     assert any("order book unavailable" in r.getMessage() for r in caplog.records)
 
@@ -183,7 +184,7 @@ def _char(name, esi_get):
 
 def test_a_failed_structure_lookup_via_one_character_warns_and_tries_the_next(caplog):
     good = {"name": "Fake Keepstar", "solar_system_id": 30000142}
-    svc = _locations([_char("A", _raiser(RuntimeError("ESI GET failed after retries"))),
+    svc = _locations([_char("A", _raiser(EsiRequestError("ESI GET failed after retries"))),
                       _char("B", lambda *a, **k: good)])
     with caplog.at_level(logging.WARNING):
         assert svc._resolve_structure_via_characters(1029999999999) == good
