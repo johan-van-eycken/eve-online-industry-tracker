@@ -494,6 +494,9 @@ class CharacterIndustryJobsModel(BaseApp):
     historical_input_costs: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     copy_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     invention_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Why invention_cost is unknown (the realized estimate had no inputs):
+    # the build cost is then a lower bound and feedback skips its sales.
+    invention_cost_unknown_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     total_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     unit_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     build_cost_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -541,6 +544,9 @@ class CorporationIndustryJobsModel(BaseApp):
     historical_input_costs: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     copy_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     invention_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Why invention_cost is unknown (the realized estimate had no inputs):
+    # the build cost is then a lower bound and feedback skips its sales.
+    invention_cost_unknown_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     total_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     unit_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     build_cost_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)

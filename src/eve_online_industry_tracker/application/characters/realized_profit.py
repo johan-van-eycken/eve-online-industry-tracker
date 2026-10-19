@@ -99,7 +99,13 @@ def _append_lot(lots_by_type: dict[int, list[FifoLot]], *, type_id: int, lot: Fi
     lots_by_type.setdefault(int(type_id), []).append(lot)
 
 
-def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
+def _consume_lots(
+    lots: list[FifoLot], *, quantity: int, cost_unknown_reason_by_job_id: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    """FIFO-take `quantity` from `lots`. An allocation whose lot has a
+    partly unknown build cost carries `cost_unknown_reason`: the lot's own,
+    or its industry job's (`cost_unknown_reason_by_job_id`, which also covers
+    the asset-history and transferred lots that point at the job)."""
     remaining = max(0, int(quantity or 0))
     total_cost = 0.0
     priced_quantity = 0
@@ -115,6 +121,9 @@ def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
         take = min(remaining, lot_quantity)
         chunk_cost = float(take) * float(head.unit_price)
         source = str(head.source or "unknown")
+        cost_unknown_reason = head.cost_unknown_reason
+        if cost_unknown_reason is None and cost_unknown_reason_by_job_id and head.reference_type == "industry_job":
+            cost_unknown_reason = cost_unknown_reason_by_job_id.get(int(head.reference_id or 0))
         slot = by_source.setdefault(source, {"quantity": 0, "cost": 0.0})
         slot["quantity"] = int(slot.get("quantity") or 0) + int(take)
         slot["cost"] = float(slot.get("cost") or 0.0) + float(chunk_cost)
@@ -127,6 +136,7 @@ def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
                 "acquisition_date": head.acquisition_date,
                 "reference_id": head.reference_id,
                 "reference_type": head.reference_type,
+                **({"cost_unknown_reason": cost_unknown_reason} if cost_unknown_reason else {}),
             }
         )
         remaining -= int(take)
@@ -142,6 +152,7 @@ def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
                 reference_id=head.reference_id,
                 reference_type=head.reference_type,
                 source=head.source,
+                cost_unknown_reason=head.cost_unknown_reason,
             )
         else:
             lots.pop(0)
@@ -572,6 +583,7 @@ class _BaseRealizedProfitLedgerService:
             asset_history_lots.setdefault(int(supp_type_id), []).extend(supp_lots)
 
         journal_by_id = self._load_journal_map(owner_id=int(owner_id))
+        cost_unknown_reason_by_job_id = self._load_cost_unknown_reason_by_job_id()
         owner_context = self._load_owner_context(owner_id=int(owner_id))
 
         lots_by_type: dict[int, list[FifoLot]] = {}
@@ -719,7 +731,9 @@ class _BaseRealizedProfitLedgerService:
                 if gross_revenue is None:
                     unit_price = _safe_float(getattr(tx, "unit_price", None)) or 0.0
                     gross_revenue = float(unit_price) * float(quantity)
-                allocation = _consume_lots(lots, quantity=int(quantity))
+                allocation = _consume_lots(
+                    lots, quantity=int(quantity), cost_unknown_reason_by_job_id=cost_unknown_reason_by_job_id,
+                )
                 if int(allocation["unpriced_quantity"]) > 0:
                     slot = allocation["by_source"].setdefault(ASSET_SOURCE_UNTRACKED, {"quantity": 0, "cost": 0.0})
                     slot["quantity"] = int(slot.get("quantity") or 0) + int(allocation["unpriced_quantity"])
@@ -805,6 +819,22 @@ class _BaseRealizedProfitLedgerService:
 
     def _load_journal_map(self, *, owner_id: int) -> dict[int, Any]:
         return {}
+
+    def _load_cost_unknown_reason_by_job_id(self) -> dict[int, str]:
+        """{job_id: why its build cost is partly unknown} over character and
+        corporation jobs (EVE job ids are unique across both): a corp sale
+        can consume a lot a character built."""
+        out: dict[int, str] = {}
+        for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
+            rows = (
+                self._app_session.query(model.job_id, model.invention_cost_unknown_reason)
+                .filter(model.invention_cost_unknown_reason.isnot(None))
+                .all()
+            )
+            for job_id, reason in rows:
+                if job_id is not None and reason:
+                    out[int(job_id)] = str(reason)
+        return out
 
     def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Return FifoLots sourced from asset history, keyed by type_id. Subclasses may override."""

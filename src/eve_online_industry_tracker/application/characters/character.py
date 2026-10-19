@@ -24,6 +24,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     build_market_price_map,
     build_cost_map_for_assets,
     build_invention_cost_per_run_by_blueprint_type,
+    current_realized_invention_inputs,
     industry_job_material_type_ids,
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
@@ -998,6 +999,8 @@ class Character:
 
             market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES)
             market_price_map = build_market_price_map(market_prices)
+            # Read once per refresh, not per job (None: each snapshot asks and says why).
+            realized_invention_inputs, _ = current_realized_invention_inputs()
             invention_cost_by_blueprint_type = build_invention_cost_per_run_by_blueprint_type(
                 jobs=jobs,
                 sde_session=self._db_sde.session,
@@ -1124,6 +1127,7 @@ class Character:
                     or None,
                     blueprint_provenance=blueprint_provenance,
                     owned_input_unit_cost_by_type_id=historical_input_costs,
+                    invention_inputs=realized_invention_inputs,
                 )
                 rows.append(
                     {
@@ -1158,6 +1162,7 @@ class Character:
                         "historical_input_costs": snapshot.get("historical_input_costs"),
                         "copy_cost": snapshot.get("copy_cost"),
                         "invention_cost": snapshot.get("invention_cost"),
+                        "invention_cost_unknown_reason": snapshot.get("invention_cost_unknown_reason"),
                         "total_build_cost": snapshot.get("total_cost"),
                         "unit_build_cost": snapshot.get("unit_cost"),
                         "build_cost_source": snapshot.get("source"),

@@ -496,6 +496,7 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         _ensure_column(db_app, table=table, column="historical_input_costs", ddl_type="JSON")
         _ensure_column(db_app, table=table, column="copy_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="invention_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="invention_cost_unknown_reason", ddl_type="TEXT")
         _ensure_column(db_app, table=table, column="total_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="unit_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="build_cost_source", ddl_type="TEXT")

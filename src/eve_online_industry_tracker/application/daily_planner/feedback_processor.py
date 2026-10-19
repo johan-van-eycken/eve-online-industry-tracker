@@ -81,6 +81,10 @@ def _industry_build_unit_cost(allocation_details: Any) -> tuple[float | None, st
         if source not in _INDUSTRY_BUILD_SOURCES:
             continue
         build_lots += 1
+        # A lot whose invention cost was unknown carries only a lower bound:
+        # comparing it would teach cost_multiplier a made-up saving.
+        if entry.get("cost_unknown_reason"):
+            return None, f"an industry-built lot's cost is partly unknown ({entry['cost_unknown_reason']})"
         quantity = _positive_number(entry.get("quantity"))
         cost = _positive_number(entry.get("total_cost"))
         if quantity is None or cost is None:
@@ -217,11 +221,21 @@ class FeedbackProcessor:
         # The two sides are closer, not identical. Accepted residual biases:
         #
         # Realized = materials + the manufacturing install fee (job.cost)
-        #   + for an invented T2 item, the invention cost: the matched actual
-        #     invention job's materials + install fee when the job snapshot was
-        #     persisted at refresh (corporation.py / character.py pass
-        #     invention_unit_cost_per_run), otherwise the expected invention
-        #     MATERIALS only (asset_provenance, the expected-invention estimate).
+        #   + for an invented T2 item, the invention cost per run:
+        #     - when the corp's own invention job for the blueprint was seen at
+        #       refresh: that job's install fee + ONE attempt's datacores (SDE
+        #       quantities at ESI prices) over its licensed runs (else the
+        #       runs the SDE invention yields);
+        #     - otherwise the expected invention inputs, sized like the
+        #       producer (asset_provenance.estimate_invention_cost_per_run):
+        #       one attempt's datacores + the producer's decryptor, over the
+        #       runs one invented BPC yields (SDE product quantity + the
+        #       decryptor's runs) x EVE's chance for the corp's best
+        #       qualifying inventor (resolve_invention_chance), after the
+        #       admin floor. An unknown input (no skills, no decryptor choice
+        #       yet, an unpriced datacore) gives no estimate: the job carries
+        #       invention_cost_unknown_reason, its lots' allocations carry
+        #       cost_unknown_reason, and this sale's cost update is skipped.
         #   Copy cost is always 0: nothing writes copy_cost; asset_provenance
         #   only reads it back.
         # Predicted = materials + the producer's total_job_cost, which adds the
@@ -232,29 +246,21 @@ class FeedbackProcessor:
         #   SDE runs per invented BPC), amortized over the batch
         #   (manufacturing_job.invention_material_cost holds the inputs).
         #
-        # 1. T2: the producer used to drop the invention inputs from
-        #    material_cost, which biased T2 towards < 1; that is fixed. What
-        #    still differs:
-        #    - predicted uses EVE's success chance for the corp's best
-        #      inventor of the blueprint, with the chosen decryptor
-        #      (invention_model.resolve_invention_chance), and buys that
-        #      decryptor per attempt;
-        #    - without a persisted invention-job snapshot the realized side
-        #      estimates the invention MATERIALS at the SDE base chance with
-        #      no skill bonus and no decryptor, per run of the T2 BP's
-        #      maxProductionLimit (asset_provenance, the expected-invention
-        #      estimate). The base chance expects more attempts than the
-        #      skilled one: towards < 1 (x 1/1.37 on the invention inputs at
-        #      skills 4/4/4). Dividing by maxProductionLimit instead of the
-        #      runs an invention yields understates the realized cost where
-        #      the two differ (capital T2 modules 5 vs 10, T3 subsystems
-        #      3-20 vs 300): towards > 1. It also has no invention install
-        #      fee and no source-copy fee, while predicted carries both:
-        #      towards > 1 (small, fees are a few % of the datacores);
-        #    - with a snapshot the realized side carries the attempts actually
-        #      made by the pilot who invented, so a less skilled pilot than
-        #      the best inventor costs more than predicted (towards < 1), and
-        #      one lucky or unlucky streak moves a single outcome either way.
+        # 1. T2: for the same skills, decryptor and prices the expected
+        #    invention inputs per run now agree on both sides (pinned in
+        #    tests/test_realized_invention_estimate.py). What still differs:
+        #    - prices: realized uses ESI average prices (or the owned cost),
+        #      predicted the hub price with take-or-buy against stock;
+        #    - the decryptor and the inventor are the producer's current
+        #      choice, not the ones of the past invention;
+        #    - with parallel invention lanes predicted mixes less skilled
+        #      pilots' attempts in; realized uses the best inventor only:
+        #      towards > 1 when lanes are known;
+        #    - the expected estimate has no invention install fee and no
+        #      source-copy fee, while predicted carries both: towards > 1
+        #      (small, fees are a few % of the datacores);
+        #    - an actual invention job counts one attempt per licensed BPC,
+        #      not the failed attempts: towards > 1.
         # 2. BPC-copied T1 and SDE-fallback rows, towards > 1: predicted
         #    includes copy/research job fees that the realized side never has.
         #    Probably small (job fees are a few % of materials).

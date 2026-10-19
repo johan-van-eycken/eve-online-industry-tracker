@@ -133,6 +133,7 @@ from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.domain import industry_facility as _industry_facility
 from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
+from eve_online_industry_tracker.application.characters.asset_provenance import RealizedInventionInputs
 
 
 logger = logging.getLogger(__name__)
@@ -10294,8 +10295,46 @@ class IndustryService:
 
         self._state._overview_result_cache = {
             "hash": overview_input_hash, "rows": product_rows, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
+            # The realized invention estimate uses the same decryptor (realized_invention_inputs).
+            "decryptor_by_blueprint_type_id": self._published_decryptor_choices(ctx.decryptor_choice_by_blueprint_type_id),
         }
         return product_rows
+
+    @staticmethod
+    def _published_decryptor_choices(choices: Mapping[int, DecryptorChoice]) -> dict[int, DecryptorOption]:
+        """{invented blueprint type_id: the decryptor this overview invents it
+        with}. A "no decryptor data" fallback is left out: the decryptor is
+        then unknown, not "none"."""
+        return {
+            int(bp_type_id): choice.option
+            for bp_type_id, choice in choices.items()
+            if choice.reason != NO_DECRYPTOR_DATA_REASON
+        }
+
+    def realized_invention_inputs(self) -> RealizedInventionInputs:
+        """The inputs the realized side sizes an invention with, the producer's
+        own: the corp's inventors (_get_inventor_skill_levels), the SDE
+        encryption skills, the admin floor, and per invented blueprint the
+        decryptor the last overview chose. Decryptor selection off: every
+        blueprint is invented without one, as in the producer. On and no
+        overview choice: unknown (the estimate then gives a reason)."""
+        levels = self._get_inventor_skill_levels()
+        context = InventionContext(
+            inventor_skill_levels_by_character_id=levels,
+            encryption_skill_type_ids=self._load_encryption_skill_type_ids(),
+            no_inventor_reason=NO_CHARACTER_SKILLS if levels else self._no_inventor_reason(),
+        )
+        selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled", True))
+        cached = getattr(self._state, "_overview_result_cache", None)
+        published = cached.get("decryptor_by_blueprint_type_id") if isinstance(cached, dict) else None
+        return RealizedInventionInputs(
+            invention_context=context,
+            decryptor_by_blueprint_type_id=dict(published or {}) if selection_enabled else {},
+            default_decryptor=None if selection_enabled else NO_DECRYPTOR,
+            probability_floor=float(self._adm(
+                "industry", "invention_probability_floor", DEFAULT_INVENTION_PROBABILITY_FLOOR,
+            )),
+        )
 
     def get_cached_overview_rows(self) -> list[dict] | None:
         """Return the most recent product overview rows from in-memory cache, or None if not yet computed
