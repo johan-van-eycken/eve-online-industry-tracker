@@ -10,7 +10,7 @@ from typing import Any
 import streamlit as st
 
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
-from streamlit_ui.api.admin_settings import planner_page_settings
+from streamlit_ui.api.admin_settings import planner_page_defaults
 from streamlit_ui.api.daily_planner import compute_plan, get_market_intel_status, get_plan, get_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # The plan's expiry, the market data age shown as fresh and the freshness
 # warning level are admin settings (daily_planner/planner_max_plan_age_hours,
 # planner_market_refresh_interval_hours, planner_freshness_warning_level), read
-# per render by streamlit_ui.api.admin_settings.planner_page_settings.
+# once per render by pages/daily_planner.py and passed in (render_status_bar).
 
 #: Action types Tab 1 (tab_actions) renders, in workflow order. Defined here,
 #: not in tab_actions, because tab_actions imports this module.
@@ -416,8 +416,11 @@ def _render_plan_diff(
 # Main render function
 # ---------------------------------------------------------------------------
 
-def render_status_bar(page_state: DailyPlannerPageState) -> None:
-    """Render the always-visible status bar at the top of the Daily Planner page."""
+def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None,
+                      settings_problems: list[str] | tuple[str, ...] = ()) -> None:
+    """Render the always-visible status bar at the top of the Daily Planner page.
+    planner_settings/settings_problems: the page's one admin settings read
+    (None: the schema defaults)."""
 
     # ------------------------------------------------------------------
     # 1. Poll compute status
@@ -519,7 +522,8 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     if page_state.plan:
         plan_meta = page_state.plan.get("plan") or {}
 
-    planner_settings, settings_problems = planner_page_settings()
+    if planner_settings is None:
+        planner_settings = planner_page_defaults()
     for problem in settings_problems:
         st.warning(problem)
 

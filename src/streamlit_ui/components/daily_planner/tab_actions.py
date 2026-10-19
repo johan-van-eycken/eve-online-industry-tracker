@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-from streamlit_ui.api.admin_settings import planner_page_settings
+from streamlit_ui.api.admin_settings import planner_page_defaults
 from streamlit_ui.api.daily_planner import mark_action_done, set_action_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.daily_planner.status_bar import (
@@ -378,7 +378,10 @@ def _render_character_section(
 # Main tab renderer
 # ---------------------------------------------------------------------------
 
-def render_tab_actions(page_state: DailyPlannerPageState) -> None:
+def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None) -> None:
+    """planner_settings: the page's one admin settings read (None: the schema defaults)."""
+    if planner_settings is None:
+        planner_settings = planner_page_defaults()
     if page_state.plan is None:
         st.info("No plan yet — click **Recompute Plan** to generate your first daily plan.")
         return
@@ -391,7 +394,7 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
         if dt:
             age_hours = (datetime.now(tz=timezone.utc) - dt).total_seconds() / 3600
             # daily_planner/planner_max_plan_age_hours (the status bar shows a problem reading it)
-            plan_expired = age_hours > planner_page_settings()[0]["planner_max_plan_age_hours"]
+            plan_expired = age_hours > planner_settings["planner_max_plan_age_hours"]
 
     if plan_expired:
         st.warning(

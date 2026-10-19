@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from streamlit_ui.api.admin_settings import planner_page_settings
 from streamlit_ui.state.daily_planner_page import get_page_state
 from streamlit_ui.components.daily_planner.status_bar import render_status_bar
 from streamlit_ui.components.daily_planner.tab_actions import render_tab_actions
@@ -16,7 +17,9 @@ def render(**_kwargs) -> None:
 
 def render_daily_planner(**_kwargs) -> None:
     state = get_page_state()
-    render_status_bar(state)
+    # One /admin_settings read per render, shared by the status bar and the actions tab.
+    planner_settings, settings_problems = planner_page_settings()
+    render_status_bar(state, planner_settings, settings_problems)
 
     if state.plan is None:
         st.info("No plan yet — click **Recompute Plan** to generate your first daily plan.")
@@ -24,7 +27,7 @@ def render_daily_planner(**_kwargs) -> None:
 
     tab1, tab2, tab3, tab4 = st.tabs(["Today's Actions", "Shopping List", "Build Plan", "Analytics"])
     with tab1:
-        render_tab_actions(state)
+        render_tab_actions(state, planner_settings)
     with tab2:
         render_tab_shopping(state)
     with tab3:

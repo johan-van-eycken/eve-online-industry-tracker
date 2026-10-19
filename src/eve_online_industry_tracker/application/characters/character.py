@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
@@ -15,7 +17,7 @@ from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
 from eve_online_industry_tracker.infrastructure.models import CharacterModel, CharacterWalletJournalModel \
     , CharacterWalletTransactionsModel, CharacterMarketOrdersModel, CharacterAssetsModel \
     , CharacterIndustryJobsModel \
-    , NpcCorporations, Bloodlines, Races, Types \
+    , NpcCorporations, NpcStations, Bloodlines, Races, Types \
     , Groups, Categories, Factions
 
 from eve_online_industry_tracker.application.characters.asset_provenance import (
@@ -544,7 +546,10 @@ class Character:
                 )
                 if station is not None:
                     owner_corp_id = int(station.ownerID)
-            except Exception:
+            except SQLAlchemyError as exc:
+                logging.warning("Market fees of %s: the Jita 4-4 station owner could not be read from the SDE (%s: %s); "
+                                "its corporation and faction standings count as 0", self.character_name,
+                                type(exc).__name__, exc)
                 owner_corp_id = None
 
             if owner_corp_id is not None:
@@ -556,7 +561,10 @@ class Character:
                     )
                     if corp is not None and corp.factionID is not None:
                         owner_faction_id = int(corp.factionID)
-                except Exception:
+                except SQLAlchemyError as exc:
+                    logging.warning("Market fees of %s: the faction of the Jita 4-4 owner %s could not be read from "
+                                    "the SDE (%s: %s); its faction standing counts as 0", self.character_name,
+                                    owner_corp_id, type(exc).__name__, exc)
                     owner_faction_id = None
 
             faction_standing = (

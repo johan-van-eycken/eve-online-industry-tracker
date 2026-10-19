@@ -74,7 +74,9 @@ def _character(admin, skills):
     c.standings = []
     c.character_name, c.character_id = "Pilot", 1
     c.market_fees = None
-    c._db_sde = SimpleNamespace(session=SimpleNamespace(query=lambda *a: (_ for _ in ()).throw(RuntimeError("no SDE"))))
+    # An SDE without the Jita 4-4 row: no owner, so no standings count.
+    c._db_sde = SimpleNamespace(session=SimpleNamespace(
+        query=lambda *a: SimpleNamespace(filter_by=lambda **k: SimpleNamespace(first=lambda: None))))
     c.save_character = lambda: None
     return c
 

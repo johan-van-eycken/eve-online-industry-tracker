@@ -101,12 +101,12 @@ class MarketDepthCollector:
                 raise  # a stored invalid value fails loudly, naming it
         return int(ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]["planner_vwap_days"]["default"])
 
-    def _compute_vwap_5d(self, type_id: int, region_id: int) -> float | None:
+    def _compute_vwap_5d(self, type_id: int, region_id: int, days: int | None = None) -> float | None:
         """The VWAP over the last planner_vwap_days trading days (5 by
         default; the cache column keeps its vwap_5d name) from
         MarketHistoryModel. None (the caller falls back to spot) with fewer
         than min(3, days) days of data."""
-        days = self._vwap_days()
+        days = self._vwap_days() if days is None else int(days)   # run() reads it once per cycle
         app_session = self._sessions.app_session()
         try:
             cutoff = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
@@ -208,6 +208,7 @@ class MarketDepthCollector:
     def run(self) -> None:
         hub, region_id = self._get_hub_and_region()
         sigma = self._get_outlier_sigma()
+        vwap_days = self._vwap_days()   # once per cycle: an invalid value fails the cycle, not each type
         type_ids = self._get_type_ids_from_active_plan()
 
         if not type_ids:
@@ -281,7 +282,7 @@ class MarketDepthCollector:
                 competitor_units = max(0, total_units - own_units)
 
                 # VWAP
-                vwap_5d = self._compute_vwap_5d(type_id, region_id)
+                vwap_5d = self._compute_vwap_5d(type_id, region_id, days=vwap_days)
                 if vwap_5d is None:
                     vwap_5d = spot_sell_price  # fallback
 

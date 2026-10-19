@@ -38,4 +38,11 @@ def settings_values(category: str, keys: tuple[str, ...]) -> tuple[dict[str, flo
 
 
 def planner_page_settings() -> tuple[dict[str, float], list[str]]:
+    """Read once per Daily Planner render (pages/daily_planner.py) and passed to its parts."""
     return settings_values("daily_planner", PLANNER_PAGE_KEYS)
+
+
+def planner_page_defaults() -> dict[str, float]:
+    """The schema defaults of PLANNER_PAGE_KEYS (a part rendered without the page's read)."""
+    specs = ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]
+    return {key: float(specs[key]["default"]) for key in PLANNER_PAGE_KEYS}

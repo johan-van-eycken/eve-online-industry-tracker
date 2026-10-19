@@ -771,6 +771,7 @@ class ESIClient:
                         if page >= total_pages:
                             break
                         page += 1
+                        retries = 0  # esi_max_retries applies per page
                         pacing = _auth_pagination_sleep_seconds()
                         try:
                             if get_esi_monitor is not None:
@@ -1084,6 +1085,7 @@ class ESIClient:
                         if page >= total_pages:
                             break
                         page += 1
+                        retries = 0  # esi_max_retries applies per page
                         pacing = _auth_pagination_sleep_seconds()
                         try:
                             if get_esi_monitor is not None:
