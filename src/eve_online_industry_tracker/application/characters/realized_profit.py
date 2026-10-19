@@ -7,6 +7,8 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import or_
+
 from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.application.characters.asset_provenance import (
     ASSET_SOURCE_INDUSTRY_BUILD,
@@ -871,17 +873,21 @@ class _BaseRealizedProfitLedgerService:
     def _load_cost_unknown_reason_by_job_id(self) -> dict[int, str]:
         """{job_id: why its build cost is partly unknown} over character and
         corporation jobs (EVE job ids are unique across both): a corp sale
-        can consume a lot a character built."""
+        can consume a lot a character built. The invention cost reason and
+        the materials cost lower-bound reason, both when both are set."""
         out: dict[int, str] = {}
         for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
             rows = (
-                self._app_session.query(model.job_id, model.invention_cost_unknown_reason)
-                .filter(model.invention_cost_unknown_reason.isnot(None))
+                self._app_session.query(
+                    model.job_id, model.invention_cost_unknown_reason, model.materials_cost_lower_bound_reason)
+                .filter(or_(model.invention_cost_unknown_reason.isnot(None),
+                            model.materials_cost_lower_bound_reason.isnot(None)))
                 .all()
             )
-            for job_id, reason in rows:
+            for job_id, invention_reason, materials_reason in rows:
+                reason = "; ".join(str(r) for r in (invention_reason, materials_reason) if r)
                 if job_id is not None and reason:
-                    out[int(job_id)] = str(reason)
+                    out[int(job_id)] = reason
         return out
 
     def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
