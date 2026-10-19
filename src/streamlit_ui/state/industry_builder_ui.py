@@ -196,6 +196,15 @@ def relist_note(row: dict[str, Any]) -> str:
     return str(row.get("relist_broker_fee_assumed") or "")
 
 
+def region_volume_note(row: dict[str, Any]) -> str:
+    """Why the region daily volume is unknown (its ESI market history fetch
+    failed: region_daily_volume_unavailable_reason), shown next to the volume
+    columns and in the drilldown; "" when the volume is known."""
+    reason = row.get("region_daily_volume_unavailable_reason") or get_manufacturing_job(row).get(
+        "region_daily_volume_unavailable_reason")
+    return f"region daily volume unknown: {reason}" if reason else ""
+
+
 def invention_summary_lines(row: dict[str, Any]) -> list[str]:
     """Drilldown captions: which decryptor the producer chose and why, and the
     invention chance it assumed. [] for a row that does not invent."""
@@ -291,6 +300,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
         market_hub = node.get("market_hub_label") or node.get("market_hub")
         region_daily_volume = node.get("region_daily_volume")
         region_daily_volume_7d_avg = node.get("region_daily_volume_7d_avg")
+        region_daily_volume_note = ""
         hub_buy_liquidity = node.get("hub_buy_liquidity")
         hub_sell_liquidity = node.get("hub_sell_liquidity")
         hub_buy_order_count = node.get("hub_buy_order_count")
@@ -381,6 +391,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
             market_hub = source_row.get("market_hub_label") or source_row.get("market_hub")
             region_daily_volume = source_row.get("region_daily_volume")
             region_daily_volume_7d_avg = source_row.get("region_daily_volume_7d_avg")
+            region_daily_volume_note = region_volume_note(source_row)
             hub_buy_liquidity = source_row.get("hub_buy_liquidity")
             hub_sell_liquidity = source_row.get("hub_sell_liquidity")
             hub_buy_order_count = source_row.get("hub_buy_order_count")
@@ -452,6 +463,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 market_hub = source_row.get("market_hub_label") or source_row.get("market_hub")
                 region_daily_volume = source_row.get("region_daily_volume")
                 region_daily_volume_7d_avg = source_row.get("region_daily_volume_7d_avg")
+                region_daily_volume_note = region_volume_note(source_row)
                 hub_buy_liquidity = source_row.get("hub_buy_liquidity")
                 hub_sell_liquidity = source_row.get("hub_sell_liquidity")
                 hub_buy_order_count = source_row.get("hub_buy_order_count")
@@ -525,6 +537,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Market Volume": market_volume,
                 "Region Daily Volume": region_daily_volume,
                 "Region Daily Volume (7d Avg)": region_daily_volume_7d_avg,
+                "Region Volume Note": region_daily_volume_note,
                 "Hub Buy Liquidity": hub_buy_liquidity,
                 "Hub Sell Liquidity": hub_sell_liquidity,
                 "Hub Buy Orders": hub_buy_order_count,
@@ -655,6 +668,7 @@ def build_debug_payload_preview(row: dict[str, Any] | None) -> dict[str, Any]:
             "region_daily_volume_7d_sample_size": manufacturing_job.get("region_daily_volume_7d_sample_size"),
             "region_daily_order_count": manufacturing_job.get("region_daily_order_count"),
             "region_daily_volume_date": manufacturing_job.get("region_daily_volume_date"),
+            "region_daily_volume_unavailable_reason": manufacturing_job.get("region_daily_volume_unavailable_reason"),
             "hub_buy_liquidity": manufacturing_job.get("hub_buy_liquidity"),
             "hub_sell_liquidity": manufacturing_job.get("hub_sell_liquidity"),
             "hub_buy_order_count": manufacturing_job.get("hub_buy_order_count"),

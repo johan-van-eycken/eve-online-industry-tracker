@@ -13,7 +13,7 @@ from streamlit_ui.state.industry_snapshot_page import (
     prepare_shared_industry_snapshot_page,
     render_pricing_batch_panel,
 )
-from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, invention_summary_lines, relist_note, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name, total_cost_label
+from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, invention_summary_lines, region_volume_note, relist_note, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name, total_cost_label
 from streamlit_ui.components.webpage_ui import require_aggrid
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
@@ -131,6 +131,8 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
 
         if row_assumes_owned_t2_bpo(selected_row):
             st.caption(ASSUMES_OWNED_T2_BPO_CAPTION)
+        if region_volume_note(selected_row):
+            st.caption(region_volume_note(selected_row))
         if relist_note(selected_row):
             st.caption(relist_note(selected_row))
         for line in invention_summary_lines(selected_row):
@@ -240,6 +242,7 @@ def _render_overview_grid(
         ("Market Price Source", 180),
         ("Region Daily Volume", 150),
         ("Region Daily Volume (7d Avg)", 180),
+        ("Region Volume Note", 260),
         ("Hub Buy Liquidity", 150),
         ("Hub Sell Liquidity", 150),
         ("Hub Buy Orders", 135),
