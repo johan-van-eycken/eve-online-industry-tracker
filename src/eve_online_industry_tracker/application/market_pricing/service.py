@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from config.schemas import CONFIG_SCHEMA
+from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.market_pricing.order_values import readable_int, readable_number
 from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo as market_orderbook_cache_repo
@@ -41,13 +43,27 @@ class MarketPricingService:
 
     @classmethod
     def normalize_market_hub(cls, hub: str | None) -> str:
+        """The hub key; jita when none is given. An unknown hub is refused (a
+        400 naming it), never priced as Jita."""
         normalized = str(hub or "").strip().lower()
-        return normalized if normalized in cls._MARKET_HUBS else "jita"
+        if not normalized:
+            return "jita"
+        if normalized not in cls._MARKET_HUBS:
+            raise ServiceError(
+                f"unknown market hub {normalized!r} (known: {', '.join(sorted(cls._MARKET_HUBS))})", status_code=400,
+            )
+        return normalized
 
     @staticmethod
     def normalize_order_side(side: str | None) -> str:
+        """buy or sell; sell when none is given. An unknown side is refused (a
+        400 naming it), never priced as sell."""
         normalized = str(side or "").strip().lower()
-        return normalized if normalized in {"buy", "sell"} else "sell"
+        if not normalized:
+            return "sell"
+        if normalized not in {"buy", "sell"}:
+            raise ServiceError(f"unknown order side {normalized!r} (known: buy, sell)", status_code=400)
+        return normalized
 
     def _market_hub_context(self, hub: str | None) -> dict[str, Any]:
         normalized_hub = self.normalize_market_hub(hub)
@@ -81,10 +97,21 @@ class MarketPricingService:
         """market_defaults/orderbook_depth (formerly config.json market_pricing.orderbook_depth)."""
         return int(self._admin_value("market_defaults", "orderbook_depth"))
 
+    _ORDERBOOK_SMOOTHINGS = frozenset({"mean_best_n", "median_best_n", "volume_weighted_mean_best_n"})
+
     def orderbook_smoothing(self) -> str:
-        raw_value = str(self._market_pricing_cfg().get("orderbook_smoothing") or "volume_weighted_mean_best_n").strip().lower()
-        if raw_value not in {"mean_best_n", "median_best_n", "volume_weighted_mean_best_n"}:
-            return "volume_weighted_mean_best_n"
+        """config defaults.market_pricing.orderbook_smoothing; the config
+        schema's default when it is not set. An invalid value is refused
+        (ValueError naming it), never silently replaced."""
+        raw = self._market_pricing_cfg().get("orderbook_smoothing")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return str(CONFIG_SCHEMA["defaults"]["market_pricing"]["orderbook_smoothing"])
+        raw_value = str(raw).strip().lower()
+        if raw_value not in self._ORDERBOOK_SMOOTHINGS:
+            raise ValueError(
+                f"config defaults.market_pricing.orderbook_smoothing={raw!r} is not one of "
+                f"{', '.join(sorted(self._ORDERBOOK_SMOOTHINGS))}"
+            )
         return raw_value
 
     def material_price_cache_ttl_seconds(self) -> int:

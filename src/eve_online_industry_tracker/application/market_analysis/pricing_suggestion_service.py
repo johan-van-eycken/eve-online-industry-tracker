@@ -405,7 +405,14 @@ class PricingSuggestionService:
                 cfg = cfg_manager.all() or {}
                 advisory_cfg = ((cfg.get("defaults") or {}).get("market_advisory") or {})
                 if "min_target_margin_pct" in advisory_cfg:
-                    return max(0.0, min(0.50, float(advisory_cfg["min_target_margin_pct"]) / 100))
+                    raw_fraction = float(advisory_cfg["min_target_margin_pct"]) / 100
+                    fraction = max(0.0, min(0.50, raw_fraction))
+                    if fraction != raw_fraction:
+                        logging.warning(
+                            "defaults.market_advisory.min_target_margin_pct=%s is outside 0-50; using %s%%",
+                            advisory_cfg["min_target_margin_pct"], f"{fraction * 100:g}",
+                        )
+                    return fraction
         except (AttributeError, TypeError, ValueError) as exc:
             logging.warning(
                 "defaults.market_advisory.min_target_margin_pct is unreadable (%s); using the default 8%%", exc
