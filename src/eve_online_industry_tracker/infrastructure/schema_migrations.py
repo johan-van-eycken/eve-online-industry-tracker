@@ -16,13 +16,33 @@ from eve_online_industry_tracker.infrastructure.database_manager import Database
 #: than a bare `except Exception` while working against either backend.
 _DB_ERRORS = (SQLAlchemyError, sqlite3.OperationalError)
 
+#: The DB errors a schema change can fail with (sqlite3.DatabaseError covers a
+#: malformed or read-only file on the raw sqlite3 stand-in).
+_SCHEMA_ERRORS = (SQLAlchemyError, sqlite3.DatabaseError)
+
+
+class SchemaMigrationError(RuntimeError):
+    """A table or column the app's models map could not be created: startup
+    fails with this message (the ORM would otherwise fail obscurely, "no such
+    column", on every read of the model). Shown on /health as the
+    initialisation error."""
+
+    def __init__(self, what: str, exc: BaseException):
+        super().__init__(
+            f"App database schema migration failed: {what} ({type(exc).__name__}: {exc}). The app's models need "
+            "it, so startup stops here. Check that database/eve_app.db is writable, not locked by another process "
+            "and not corrupt (restore a backup if it is), then restart."
+        )
+
 
 def _ensure_table(db: DatabaseManager, *, ddl: str, table: str) -> None:
+    """CREATE TABLE IF NOT EXISTS; SchemaMigrationError when it fails."""
     try:
         db.execute(ddl)
         logging.info("Ensured table %s", table)
-    except Exception as e:
-        logging.warning("Failed ensuring table %s: %s", table, str(e))
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed ensuring table %s: %s", table, str(e))
+        raise SchemaMigrationError(f"could not create table {table}", e) from e
 
 
 def _ensure_index(db: DatabaseManager, *, ddl: str, name: str) -> None:
@@ -73,12 +93,13 @@ def _ensure_market_orderbook_view_cache_unique_key(db: DatabaseManager) -> None:
 
 
 def _table_columns(db: DatabaseManager, table: str) -> set[str]:
+    """The columns of `table` (empty: the table does not exist);
+    SchemaMigrationError when they cannot be read."""
     try:
         rows = db.query(f"PRAGMA table_info({table});")
-    except _DB_ERRORS as e:
-        # Empty set: _ensure_column then tries ADD COLUMN, which logs its own warning if it exists.
-        logging.warning("Failed reading columns of %s: %s", table, str(e))
-        return set()
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed reading columns of %s: %s", table, str(e))
+        raise SchemaMigrationError(f"could not read the columns of {table}", e) from e
 
     cols: set[str] = set()
     for r in rows:
@@ -91,16 +112,22 @@ def _table_columns(db: DatabaseManager, table: str) -> set[str]:
 
 
 def _ensure_column(db: DatabaseManager, *, table: str, column: str, ddl_type: str) -> None:
+    """ALTER TABLE ADD COLUMN when `table` exists without `column`;
+    SchemaMigrationError when that fails. A table that does not exist is
+    skipped: create_all (or its _ensure_table) makes it with every column."""
     cols = _table_columns(db, table)
     if column in cols:
+        return
+    if not cols:
+        logging.debug("Schema migration: table %s does not exist (yet); column %s is not added", table, column)
         return
 
     try:
         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
         logging.info("Added column %s.%s", table, column)
-    except Exception as e:
-        # SQLite only supports limited ALTER TABLE; this should be safe for ADD COLUMN.
-        logging.warning("Failed adding column %s.%s: %s", table, column, str(e))
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed adding column %s.%s: %s", table, column, str(e))
+        raise SchemaMigrationError(f"could not add column {table}.{column}", e) from e
 
 
 def _backfill_activity_id_sql(db: DatabaseManager, *, table: str) -> None:
@@ -273,10 +300,12 @@ def normalize_double_encoded_json_column(db: DatabaseManager, *, table: str, col
 
 
 def ensure_app_schema(db_app: DatabaseManager) -> None:
-    """Best-effort forward migrations for the app DB.
+    """Forward migrations for the app DB.
 
     SQLAlchemy's create_all does not alter existing tables; this adds new columns
-    used by newer app versions.
+    used by newer app versions. A table or column that cannot be created raises
+    SchemaMigrationError (startup fails with it); the indexes and backfills
+    stay best-effort, logged.
     """
 
     # Character assets cost-basis/provenance columns

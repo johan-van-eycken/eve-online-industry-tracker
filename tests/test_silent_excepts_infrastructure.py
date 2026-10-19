@@ -139,12 +139,13 @@ def test_a_failed_background_structure_refresh_is_logged_and_kept_in_state(caplo
 
 # --- schema migrations -----------------------------------------------------------------------
 
-def test_unreadable_table_columns_are_a_warning(caplog):
-    from eve_online_industry_tracker.infrastructure.schema_migrations import _table_columns
+def test_unreadable_table_columns_are_an_error_that_fails_the_migration(caplog):
+    # Round H2.6: no longer a WARNING and an empty set (then a failing ADD COLUMN).
+    from eve_online_industry_tracker.infrastructure.schema_migrations import SchemaMigrationError, _table_columns
 
     db = SimpleNamespace(query=_raiser(OperationalError("PRAGMA", {}, Exception("database is locked"))))
-    with caplog.at_level(logging.WARNING):
-        assert _table_columns(db, "some_table") == set()
+    with caplog.at_level(logging.ERROR), pytest.raises(SchemaMigrationError, match="some_table"):
+        _table_columns(db, "some_table")
     assert any("Failed reading columns of some_table" in r.getMessage() for r in caplog.records)
 
 
