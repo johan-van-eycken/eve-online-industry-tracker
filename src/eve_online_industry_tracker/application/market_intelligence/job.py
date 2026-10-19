@@ -90,24 +90,31 @@ class MarketIntelligenceJob:
         return default
 
     def _run_cycle_safe(self) -> None:
-        try:
-            self._run_cycle()
-            with self._lock:
-                self._last_completed_at = datetime.utcnow()
-                self._last_error = None
-        except Exception as e:
-            logging.exception("MarketIntelligenceJob cycle failed: %s", e)
-            with self._lock:
-                self._last_error = str(e)
-
-    def _run_cycle(self) -> None:
-        from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import MarketDepthCollector
-        from eve_online_industry_tracker.application.market_intelligence.margin_correlator import MarginCorrelator
-
+        """One cycle: the market depth collector, then the margin correlator,
+        each in its own try so a collector failure (e.g. an invalid
+        daily_planner/planner_market_hub) does not skip the correlator. Each
+        failure is logged and named in last_error (the Daily Planner status
+        bar shows it); last_completed_at moves only when the collector, which
+        refreshes the market data, succeeded."""
         admin = getattr(self._state, "admin_settings", None)
-
-        collector = MarketDepthCollector(state=self._state, admin_settings=admin)
-        collector.run()
-
-        correlator = MarginCorrelator(state=self._state, admin_settings=admin)
-        correlator.run_if_due()
+        errors: list[str] = []
+        collected = False
+        try:
+            from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import (
+                MarketDepthCollector,
+            )
+            MarketDepthCollector(state=self._state, admin_settings=admin).run()
+            collected = True
+        except Exception as e:
+            logging.exception("MarketIntelligenceJob: the market depth collector failed: %s", e)
+            errors.append(f"market depth collector: {e}")
+        try:
+            from eve_online_industry_tracker.application.market_intelligence.margin_correlator import MarginCorrelator
+            MarginCorrelator(state=self._state, admin_settings=admin).run_if_due()
+        except Exception as e:
+            logging.exception("MarketIntelligenceJob: the margin correlation failed: %s", e)
+            errors.append(f"margin correlation: {e}")
+        with self._lock:
+            if collected:
+                self._last_completed_at = datetime.utcnow()
+            self._last_error = "; ".join(errors) or None

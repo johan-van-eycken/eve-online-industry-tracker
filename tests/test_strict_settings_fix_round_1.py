@@ -298,14 +298,13 @@ def test_the_esi_station_name_is_cached():
 
     def fake_get(endpoint, *args, **kwargs):
         calls.append(endpoint)
-        payload = {"station_id": 60008494, "name": "Amarr VIII (Oris) - Emperor Family Academy"}
-        return SimpleNamespace(json=lambda: payload, headers={"Content-Language": "en"})
+        return {"station_id": 60008494, "name": "Amarr VIII (Oris) - Emperor Family Academy"}
 
     svc._public_esi_get = fake_get
     assert svc.get_station_name(60008494) == ("Amarr VIII (Oris) - Emperor Family Academy", None)
     assert svc.get_station_name(60008494) == ("Amarr VIII (Oris) - Emperor Family Academy", None)
     assert len(calls) == 1 and "60008494" in calls[0]
-    svc._public_esi_get = lambda endpoint, *a, **k: SimpleNamespace(json=lambda: {}, headers={})
+    svc._public_esi_get = lambda endpoint, *a, **k: {}
     with pytest.raises(RuntimeError, match="no name"):
         svc.get_station_name(60000001)
 
@@ -359,8 +358,8 @@ def test_a_down_esi_costs_one_short_lookup_per_window(monkeypatch):
     monkeypatch.setattr(esi_module.time, "time", lambda: now[0])
     with pytest.raises(RuntimeError, match="unreachable"):
         svc.get_station_name(60008494)
-    assert calls == [{"headers": {"Accept-Language": "en"}, "timeout_seconds": 3.0, "max_retries": 0,
-                      "return_response": True}]                   # short, no retries
+    assert calls == [{"headers": {"Accept-Language": "en"}, "timeout_seconds": 3.0,
+                      "max_retries": 0}]                          # short, no retries
     with pytest.raises(RuntimeError, match="unreachable"):
         svc.get_station_name(60008494)                            # within the window: cached failure
     assert len(calls) == 1

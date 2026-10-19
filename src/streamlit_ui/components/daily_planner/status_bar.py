@@ -412,6 +412,16 @@ def _render_plan_diff(
         st.success("Plan updated — no decision changes vs prior plan.")
 
 
+def market_intel_warning(market_status: dict) -> str | None:
+    """The warning for the market intelligence job's last_error
+    (/planner/market_intel/status), or None when its last cycle was clean."""
+    last_error = (market_status or {}).get("last_error")
+    if not last_error:
+        return None
+    return (f"Market data refresh failed: {last_error}. The market depth and margin data may be stale "
+            "until the next successful cycle.")
+
+
 # ---------------------------------------------------------------------------
 # Main render function
 # ---------------------------------------------------------------------------
@@ -552,6 +562,13 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
             "Recomputing will plan from your current slot availability, stock, and market state."
         )
 
+    # The market intelligence job's status: the Market Data metric and its last_error warning
+    # (shown with or without a plan).
+    try:
+        market_status = get_market_intel_status() or {}
+    except Exception as exc:
+        market_status = {"last_error": f"its status could not be read ({exc})"}
+
     # Metrics row
     if plan_meta:
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -570,10 +587,6 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
             if caption:
                 st.caption(caption)
         with c5:
-            try:
-                market_status = get_market_intel_status() or {}
-            except Exception:
-                market_status = {}
             last_completed = market_status.get("last_completed_at")
             market_dt = _parse_dt(last_completed)
             if market_dt is None:
@@ -589,6 +602,10 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
                 else:
                     market_label = f"{age_text} 🔴"
             st.metric("Market Data", market_label)
+
+    market_warning = market_intel_warning(market_status)
+    if market_warning:
+        st.warning(market_warning)
 
     unavailable_caption = unavailable_inputs_caption(page_state.plan)
     if unavailable_caption:

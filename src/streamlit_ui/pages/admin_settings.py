@@ -114,6 +114,16 @@ def _select_choices(spec: dict, current: object,
     return [current, *values], [f"Invalid stored value: {current!r}", *labels], 0, problem
 
 
+def _choice_to_save(new: object, current: object, *, problem: str | None) -> object:
+    """The value to save for a select or bool setting, or NO_CHANGE. Type-aware
+    while a problem is shown: picking On over a stored invalid 1.0 saves True
+    (True == 1.0 would read as no change, so it could never be fixed); only
+    keeping the stored value's own entry is no change."""
+    if problem:
+        return NO_CHANGE if (new == current and type(new) is type(current)) else new
+    return NO_CHANGE if new == current else new
+
+
 def _bool_choices(spec: dict, current: object,
                   invalid_entry: dict | None = None) -> tuple[list, list[str], int, str | None] | None:
     """None for a valid bool setting (its checkbox). For a stored invalid
@@ -212,7 +222,7 @@ def render() -> None:
                 # Detect changes
                 if typ == "select" or (typ == "bool" and problem):
                     # A stored invalid select or bool stays selected (its own entry) until another option is picked.
-                    to_save = NO_CHANGE if new_val == current else new_val
+                    to_save = _choice_to_save(new_val, current, problem=problem)
                 else:
                     to_save = _pending_value(new=new_val, current=current, problem=problem)
                 if to_save is not NO_CHANGE:

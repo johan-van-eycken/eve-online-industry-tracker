@@ -174,3 +174,41 @@ def test_the_page_shows_a_stored_invalid_bool_as_its_own_choice():
     assert values[index] == "maybe" and "maybe" in labels[index]
     assert set(values[1:]) == {True, False}
     assert "maybe" in problem and "fail with an error" in problem
+
+
+# --- review round 1 ------------------------------------------------------------------------
+
+def test_an_empty_string_is_not_a_boolean(tmp_path):
+    # M2: "" used to read as False.
+    with pytest.raises(ValueError, match="not a boolean"):
+        _manager(tmp_path).set(*BOOL, "")
+    mgr = _manager(tmp_path, {"industry": {"invention_decryptor_selection_enabled": ""}})
+    with pytest.raises(AdminSettingInvalid):
+        mgr.get(*BOOL)
+
+
+@pytest.mark.parametrize("raw", ["Jita", "JITA", " jita "])
+def test_a_case_variant_of_an_option_is_refused_with_a_hint(tmp_path, raw):
+    # M5: still refused (the planner queries by the exact hub), but the error names the option.
+    with pytest.raises(ValueError, match="did you mean 'jita'"):
+        _manager(tmp_path).set(*HUB, raw)
+    mgr = _manager(tmp_path, {"daily_planner": {"planner_market_hub": raw}})
+    assert "did you mean 'jita'" in mgr.invalid()["daily_planner"]["planner_market_hub"]["problem"]
+
+
+def test_a_value_unlike_every_option_has_no_hint(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _manager(tmp_path).set(*HUB, "amarr")
+    assert "did you mean" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("stored", [1.0, 0.0, 1, "maybe"])
+def test_a_stored_invalid_bool_is_fixed_by_picking_on_or_off(stored):
+    # M1: picking On over a stored 1.0 was "no change" (True == 1.0), so it could never be fixed.
+    from streamlit_ui.pages.admin_settings import NO_CHANGE, _choice_to_save
+
+    assert _choice_to_save(True, stored, problem="invalid") is True
+    assert _choice_to_save(False, stored, problem="invalid") is False
+    assert _choice_to_save(stored, stored, problem="invalid") is NO_CHANGE    # the invalid entry kept
+    assert _choice_to_save(True, True, problem=None) is NO_CHANGE
+    assert _choice_to_save(False, True, problem=None) is False

@@ -23,9 +23,12 @@ from eve_online_industry_tracker.application.errors import ServiceError
 # min/max, and an int's step, are checked, never clamped or snapped (a float's
 # step is only the settings page's input granularity); a bool must be a
 # boolean and a select one of its options, never replaced by another value.
-# "startup_critical" marks a setting read on every ESI request or by a daemon
-# loop, whose stored invalid value reads as the default, with a WARNING once
-# per process (see AdminSettingsManager); only numbers are marked so.
+# "startup_critical" marks a setting read on every ESI request, or by a daemon
+# loop that a raise would stop (the market refresh interval), whose stored
+# invalid value reads as the default, with a WARNING once per process (see
+# AdminSettingsManager); only numbers are marked so. A setting read inside a
+# daemon cycle whose failure is logged and kept as the job's last_error (the
+# market depth collector's) does not need it: the cycle fails loudly instead.
 # ---------------------------------------------------------------------------
 
 ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
@@ -735,7 +738,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
 # AdminSettingsManager
 # ---------------------------------------------------------------------------
 
-_FALSE_STRINGS = frozenset({"false", "0", "no", "off", "n", ""})
+_FALSE_STRINGS = frozenset({"false", "0", "no", "off", "n"})
 _TRUE_STRINGS = frozenset({"true", "1", "yes", "on", "y"})
 
 
@@ -977,8 +980,12 @@ class AdminSettingsManager:
                     and (value is None or (isinstance(value, str) and value.strip().lower() in ("", "null", "none")))):
                 return None  # the "no filter" option, also as an empty string or "null" / "None"
             if value is None or value not in allowed_values:
-                # Never another option: a value that is not one is refused (a stored one is kept and reported).
-                raise ValueError(f"{value!r} is not one of {', '.join(map(str, allowed_values))}")
+                # Never another option: a value that is not one is refused (a stored one is kept and
+                # reported), a case variant too, with a hint (the readers match the option exactly).
+                hint = next((f"; did you mean {opt!r}?" for opt in allowed_values
+                             if isinstance(opt, str) and isinstance(value, str)
+                             and opt.lower() == value.strip().lower()), "")
+                raise ValueError(f"{value!r} is not one of {', '.join(map(str, allowed_values))}{hint}")
             return value
         raise ValueError(f"unknown setting type {typ!r}")
 
