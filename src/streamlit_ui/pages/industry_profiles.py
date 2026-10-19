@@ -8,6 +8,7 @@ from streamlit_ui.state.session_state import ensure_state_defaults
 from streamlit_ui.api.streamlit_client import cached_api_get
 from streamlit_ui.components.selectors import select_character_id
 from streamlit_ui.components.webpage_ui import render_aggrid_table, require_aggrid
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.application.industry.job_cost import (
     DEFAULT_RESEARCH_SCC_SURCHARGE,
@@ -146,9 +147,12 @@ def _security_band_of_system(system: dict | None) -> str | None:
     return _security_band.security_band(system.get("security_status"), system.get("region_id"))
 
 
-# NPC station facility tax (fraction) — default; overridden by admin settings
-# at runtime. The SCC default is the producer's one DEFAULT_SCC_SURCHARGE.
-_NPC_STATION_FACILITY_TAX = 0.0025
+# NPC station facility tax (fraction): admin setting industry/npc_station_facility_tax,
+# read per render and stored in an NPC profile when it is created; its schema
+# default when the settings cannot be read (the caption says so). The SCC
+# default is the producer's one DEFAULT_SCC_SURCHARGE.
+_NPC_STATION_FACILITY_TAX = float(
+    ADMIN_SETTINGS_SCHEMA["industry"]["settings"]["npc_station_facility_tax"]["default"])
 
 #: Shown when /admin_settings cannot be read (Task 14 minor 3): the rates
 #: on the page are then the defaults, not the stored settings.

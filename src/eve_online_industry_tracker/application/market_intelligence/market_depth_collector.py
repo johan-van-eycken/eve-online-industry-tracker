@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
-from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
 
@@ -92,18 +92,31 @@ class MarketDepthCollector:
         except Exception:
             return None
 
+    def _vwap_days(self) -> int:
+        """daily_planner/planner_vwap_days (the schema default without settings)."""
+        if self._admin:
+            try:
+                return int(self._admin.get("daily_planner", "planner_vwap_days"))
+            except AdminSettingInvalid:
+                raise  # a stored invalid value fails loudly, naming it
+        return int(ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]["planner_vwap_days"]["default"])
+
     def _compute_vwap_5d(self, type_id: int, region_id: int) -> float | None:
-        """Compute 5-day VWAP from MarketHistoryModel. Returns None if < 3 days of data."""
+        """The VWAP over the last planner_vwap_days trading days (5 by
+        default; the cache column keeps its vwap_5d name) from
+        MarketHistoryModel. None (the caller falls back to spot) with fewer
+        than min(3, days) days of data."""
+        days = self._vwap_days()
         app_session = self._sessions.app_session()
         try:
-            cutoff = (datetime.utcnow() - timedelta(days=5)).date().isoformat()
+            cutoff = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
             rows = app_session.query(MarketHistoryModel).filter(
                 MarketHistoryModel.type_id == type_id,
                 MarketHistoryModel.region_id == region_id,
                 MarketHistoryModel.date >= cutoff,
-            ).order_by(MarketHistoryModel.date.desc()).limit(5).all()
+            ).order_by(MarketHistoryModel.date.desc()).limit(days).all()
 
-            if len(rows) < 3:
+            if len(rows) < min(3, days):
                 return None
 
             # Only include rows where both close price and volume are present

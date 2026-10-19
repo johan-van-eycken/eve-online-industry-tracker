@@ -54,7 +54,10 @@ class _AdminSettings:
         self._values = values
 
     def get(self, section, key):
-        return self._values.get(key)
+        if key in self._values:
+            return self._values[key]
+        from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+        return ADMIN_SETTINGS_SCHEMA[section]["settings"][key]["default"]   # an unset setting: its default
 
 
 def _decision(meta_group_id: int | None = None) -> ItemDecision:

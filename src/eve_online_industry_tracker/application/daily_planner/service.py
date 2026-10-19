@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
@@ -192,6 +193,11 @@ def compute_freshness_score(
         plan_items, market_depth, drift_threshold_pct
     )
     return score
+
+
+def _schema_default(key: str) -> Any:
+    """A daily_planner setting's schema default (the fallback without a settings store)."""
+    return ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"][key]["default"]
 
 
 def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
@@ -403,6 +409,10 @@ class DailyPlannerService:
     def set_action_status(self, action_id: int, status: str) -> None:
         self._repo.set_action_status(action_id, status)
 
+    def _mineral_squeeze_factor(self) -> float:
+        """daily_planner/planner_mineral_squeeze_factor, read per compute."""
+        return float(_adm(self._admin, "planner_mineral_squeeze_factor", _schema_default("planner_mineral_squeeze_factor")))
+
     def get_analytics(self) -> dict[str, Any]:
         """Fetch self-learning accuracy stats for all tracked type_ids."""
         plan = self._repo.get_active_plan()
@@ -411,6 +421,7 @@ class DailyPlannerService:
 
         items = self._repo.get_plan_items(int(plan.id))
         type_ids = [int(i.type_id) for i in items]
+        batch_window = int(_adm(self._admin, "planner_analytics_batch_window", _schema_default("planner_analytics_batch_window")))
         weights = self._repo.get_weights(type_ids)
         invention_rates = self._repo.get_invention_success_rates(type_ids)
 
@@ -482,7 +493,7 @@ class DailyPlannerService:
         for item in items:
             tid = int(item.type_id)
             w = weights.get(tid)
-            outcomes = self._repo.get_outcomes(tid, limit=20)
+            outcomes = self._repo.get_outcomes(tid, limit=batch_window)
             md = market_depth.get(tid)
             mc = margin_by_type.get(tid)
             result.append({
@@ -803,6 +814,7 @@ class DailyPlannerService:
         logger.info("DailyPlannerService: Phase 3 — profitability scoring")
         input_by_type = {r.type_id: r for r in phase1["input_rows"]}
         trit_trend_7d: float | None = phase1.get("trit_trend_7d")
+        squeeze_factor = self._mineral_squeeze_factor()
         scored = []
         for ps in pipeline_states:
             row = input_by_type.get(ps.type_id)
@@ -824,6 +836,7 @@ class DailyPlannerService:
                     market_depth=market_depth,
                     margin_correlation=margin_corr,
                     trit_trend_7d=trit_trend_7d,
+                    mineral_squeeze_factor=squeeze_factor,
                 )
                 scored.append(scored_item)
             except (TypeError, ValueError):

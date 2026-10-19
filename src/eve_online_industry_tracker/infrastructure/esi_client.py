@@ -118,6 +118,31 @@ class _EsiErrorRateLimiter:
 _ESI_ERROR_LIMITER = _EsiErrorRateLimiter()
 
 
+def _esi_setting(category: str, key: str) -> Any:
+    """An ESI admin setting, read at each request: through the admin settings
+    the bootstrap wires into _ESI_ERROR_LIMITER, or the schema default before
+    that (the startup character refresh) and without a settings store."""
+    admin = _ESI_ERROR_LIMITER._admin_settings
+    if admin is None:
+        from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+        return ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"]
+    return admin.get(category, key)
+
+
+def esi_request_timeout_seconds() -> float:
+    """esi_resilience/esi_request_timeout_seconds."""
+    return float(_esi_setting("esi_resilience", "esi_request_timeout_seconds"))
+
+
+def esi_max_retries() -> int:
+    """esi_resilience/esi_max_retries: retries after the first attempt."""
+    return int(_esi_setting("esi_resilience", "esi_max_retries"))
+
+
+def _auth_pagination_sleep_seconds() -> float:
+    return float(_esi_setting("performance", "esi_auth_pagination_sleep_seconds"))
+
+
 class _EsiRequestErrorLogLimiter:
     """Rate-limit noisy per-request exception logs.
 
@@ -657,7 +682,7 @@ class ESIClient:
         use_cache: bool = True,
         paginate: bool = False,
         return_headers: bool = False,
-        timeout_seconds: float = 15,
+        timeout_seconds: float | None = None,
         suppress_forbidden_log: bool = False,
         suppress_not_found_log: bool = False,
     ) -> Any:
@@ -665,9 +690,14 @@ class ESIClient:
         Issue a GET request to the ESI API with optional query params and caching.
         If paginate=True, will fetch all pages and return a combined list.
         If return_headers=True, returns (data, headers) for the last page.
+        timeout_seconds None: esi_resilience/esi_request_timeout_seconds; the
+        attempts are 1 + esi_resilience/esi_max_retries.
         """
         if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
             self.refresh_access_token()
+        if timeout_seconds is None:
+            timeout_seconds = esi_request_timeout_seconds()
+        max_attempts = esi_max_retries() + 1
 
         # Build URL + cache key
         query = ""
@@ -741,11 +771,12 @@ class ESIClient:
                         if page >= total_pages:
                             break
                         page += 1
+                        pacing = _auth_pagination_sleep_seconds()
                         try:
                             if get_esi_monitor is not None:
                                 get_esi_monitor().record_sleep(
                                     kind="pagination",
-                                    seconds=0.2,
+                                    seconds=pacing,
                                     context="polite pacing",
                                     method="GET",
                                     endpoint=str(endpoint),
@@ -753,7 +784,7 @@ class ESIClient:
                                 )
                         except Exception:
                             pass
-                        time.sleep(0.1)  # polite pacing
+                        time.sleep(pacing)  # polite pacing
                     elif response.status_code == 304:
                         # Still update limiter from headers (done above).
                         return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
@@ -770,6 +801,8 @@ class ESIClient:
                         limiter_wait = _ESI_ERROR_LIMITER.suggested_sleep_seconds()
                         backoff = (2 ** retries) + random.uniform(0, 1)
                         wait = max(backoff, retry_after, limiter_wait)
+                        if retries + 1 >= max_attempts:
+                            raise RuntimeError(f"ESI GET failed after retries ({response.status_code}): {paged_url}")
                         logging.warning(f"ESI GET {response.status_code} on {paged_url}, retrying in {wait:.1f}s...")
                         try:
                             if get_esi_monitor is not None:
@@ -805,7 +838,7 @@ class ESIClient:
                         pass
                     next_retries = retries + 1
                     wait = 2 ** next_retries
-                    will_retry = next_retries < 3
+                    will_retry = next_retries < max_attempts
                     log_key = _esi_error_log_key(method="GET", endpoint=str(endpoint) if endpoint is not None else None, url=str(paged_url))
                     if will_retry:
                         if _ESI_REQUEST_ERROR_LOG_LIMITER.allow(log_key):
@@ -814,7 +847,7 @@ class ESIClient:
                                 str(paged_url),
                                 str(e),
                                 next_retries,
-                                3,
+                                max_attempts,
                                 float(wait),
                             )
                     else:
@@ -823,7 +856,7 @@ class ESIClient:
                             str(paged_url),
                             str(e),
                             next_retries,
-                            3,
+                            max_attempts,
                         )
 
                     retries = next_retries
@@ -838,15 +871,16 @@ class ESIClient:
                             )
                     except Exception:
                         pass
-                    time.sleep(wait)
-                    if retries >= 3:
+                    if retries < max_attempts:  # no wait after the last attempt
+                        time.sleep(wait)
+                    if retries >= max_attempts:
                         raise RuntimeError(f"ESI GET failed after retries: {paged_url}")
             if return_headers:
                 return all_data, last_headers
             return all_data
 
         # Non-paginated (original logic)
-        while retries < 3:
+        while retries < max_attempts:
             _t0: Optional[float] = None
             try:
                 _esi_gate(f"GET {endpoint}")
@@ -906,7 +940,8 @@ class ESIClient:
                             )
                     except Exception:
                         pass
-                    time.sleep(wait)
+                    if retries + 1 < max_attempts:  # no wait after the last attempt
+                        time.sleep(wait)
                     retries += 1
                     continue
                 else:
@@ -929,7 +964,7 @@ class ESIClient:
                     pass
                 next_retries = retries + 1
                 wait = 2 ** next_retries
-                will_retry = next_retries < 3
+                will_retry = next_retries < max_attempts
                 log_key = _esi_error_log_key(method="GET", endpoint=str(endpoint) if endpoint is not None else None, url=str(url))
                 if will_retry:
                     if _ESI_REQUEST_ERROR_LOG_LIMITER.allow(log_key):
@@ -938,7 +973,7 @@ class ESIClient:
                             str(url),
                             str(e),
                             next_retries,
-                            3,
+                            max_attempts,
                             float(wait),
                         )
                 else:
@@ -947,7 +982,7 @@ class ESIClient:
                         str(url),
                         str(e),
                         next_retries,
-                        3,
+                        max_attempts,
                     )
 
                 retries = next_retries
@@ -962,18 +997,24 @@ class ESIClient:
                         )
                 except Exception:
                     pass
-                time.sleep(wait)
+                if retries < max_attempts:  # no wait after the last attempt
+                    time.sleep(wait)
 
         raise RuntimeError(f"ESI GET failed after retries: {url}")
     
-    def esi_post(self, endpoint: str, json: Optional[dict] = None, headers: Optional[dict] = None, use_cache: bool = False, paginate: bool = False, return_headers: bool = False, timeout: int = 15) -> Any:
+    def esi_post(self, endpoint: str, json: Optional[dict] = None, headers: Optional[dict] = None, use_cache: bool = False, paginate: bool = False, return_headers: bool = False, timeout: float | None = None) -> Any:
         """
         Issue a POST request to the ESI API with caching.
         If paginate=True, will fetch all pages and return a combined list.
         If return_headers=True, returns (data, headers) for the last page.
+        timeout None: esi_resilience/esi_request_timeout_seconds; the attempts
+        are 1 + esi_resilience/esi_max_retries.
         """
         if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
             self.refresh_access_token()
+        if timeout is None:
+            timeout = esi_request_timeout_seconds()
+        max_attempts = esi_max_retries() + 1
         if headers is None:
             headers = {
                 "Accept": self.esi_header_accept,
@@ -1043,11 +1084,12 @@ class ESIClient:
                         if page >= total_pages:
                             break
                         page += 1
+                        pacing = _auth_pagination_sleep_seconds()
                         try:
                             if get_esi_monitor is not None:
                                 get_esi_monitor().record_sleep(
                                     kind="pagination",
-                                    seconds=0.2,
+                                    seconds=pacing,
                                     context="polite pacing",
                                     method="POST",
                                     endpoint=str(endpoint),
@@ -1055,7 +1097,7 @@ class ESIClient:
                                 )
                         except Exception:
                             pass
-                        time.sleep(0.2)
+                        time.sleep(pacing)
                     elif response.status_code == 304:
                         return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
                     elif response.status_code == 403:
@@ -1069,6 +1111,8 @@ class ESIClient:
                         limiter_wait = _ESI_ERROR_LIMITER.suggested_sleep_seconds()
                         backoff = (2 ** retries) + random.uniform(0, 1)
                         wait = max(backoff, retry_after, limiter_wait)
+                        if retries + 1 >= max_attempts:
+                            raise RuntimeError(f"ESI POST failed after retries ({response.status_code}): {url}")
                         logging.warning(f"ESI POST {response.status_code} on {url}, retrying in {wait:.1f}s...")
                         try:
                             if get_esi_monitor is not None:
@@ -1116,11 +1160,12 @@ class ESIClient:
                             )
                     except Exception:
                         pass
-                    time.sleep(wait)
-                    if retries >= 3:
+                    if retries < max_attempts:  # no wait after the last attempt
+                        time.sleep(wait)
+                    if retries >= max_attempts:
                         raise RuntimeError(f"ESI POST failed after retries: {url}")
        
-        while retries < 3:
+        while retries < max_attempts:
             _t0: Optional[float] = None
             try:
                 _esi_gate(f"POST {endpoint}")
@@ -1185,7 +1230,8 @@ class ESIClient:
                             )
                     except Exception:
                         pass
-                    time.sleep(wait)
+                    if retries + 1 < max_attempts:  # no wait after the last attempt
+                        time.sleep(wait)
                     retries += 1
                     continue
                 else:
@@ -1220,7 +1266,8 @@ class ESIClient:
                         )
                 except Exception:
                     pass
-                time.sleep(wait)
+                if retries < max_attempts:  # no wait after the last attempt
+                    time.sleep(wait)
 
         raise RuntimeError(f"ESI POST failed after retries: {url}")
     

@@ -9,16 +9,17 @@ from typing import Any
 
 import streamlit as st
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+from streamlit_ui.api.admin_settings import planner_page_settings
 from streamlit_ui.api.daily_planner import compute_plan, get_market_intel_status, get_plan, get_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 
 logger = logging.getLogger(__name__)
 
-# Default from spec: plan expires after 36 hours
-PLANNER_MAX_PLAN_AGE_HOURS: float = 36.0
-
-# Market intel refresh interval: green if fresher than this
-PLANNER_MARKET_REFRESH_INTERVAL_HOURS: float = 3.0
+# The plan's expiry, the market data age shown as fresh and the freshness
+# warning level are admin settings (daily_planner/planner_max_plan_age_hours,
+# planner_market_refresh_interval_hours, planner_freshness_warning_level), read
+# per render by streamlit_ui.api.admin_settings.planner_page_settings.
 
 #: Action types Tab 1 (tab_actions) renders, in workflow order. Defined here,
 #: not in tab_actions, because tab_actions imports this module.
@@ -299,7 +300,8 @@ def _fmt_age(hours: float) -> str:
     return f"{hours / 24:.1f}d ago"
 
 
-def freshness_summary(plan_data: dict[str, Any] | None) -> tuple[str, float | None]:
+def freshness_summary(plan_data: dict[str, Any] | None,
+                      warning_level: float | None = None) -> tuple[str, float | None]:
     """(label, score) for the Freshness metric; score is None when unknown.
 
     Reads the LIVE top-level `freshness_score` that get_active_plan recomputes
@@ -326,8 +328,11 @@ def freshness_summary(plan_data: dict[str, Any] | None) -> tuple[str, float | No
     if comparable == 0:
         return f"unknown · {counts} comparable" if counts else "unknown", None
 
+    if warning_level is None:   # daily_planner/planner_freshness_warning_level's schema default
+        warning_level = float(ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]
+                              ["planner_freshness_warning_level"]["default"])
     pct = int(score * 100)
-    if score >= 0.90:
+    if score >= warning_level:
         label = f"{pct}% (fresh)"
     elif score >= 0.75:
         label = f"{pct}% (mild drift)"
@@ -514,8 +519,13 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     if page_state.plan:
         plan_meta = page_state.plan.get("plan") or {}
 
+    planner_settings, settings_problems = planner_page_settings()
+    for problem in settings_problems:
+        st.warning(problem)
+
     # Live freshness (top level of the GET payload), None when unknown.
-    freshness_display, freshness_score = freshness_summary(page_state.plan)
+    freshness_display, freshness_score = freshness_summary(
+        page_state.plan, warning_level=planner_settings["planner_freshness_warning_level"])
     corp_wallet = wallet_snapshot(plan_meta)
     created_at = plan_meta.get("created_at")
 
@@ -526,7 +536,7 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
         if created_dt:
             now_utc = datetime.now(tz=timezone.utc)
             plan_age_hours = (now_utc - created_dt).total_seconds() / 3600
-            plan_expired = plan_age_hours > PLANNER_MAX_PLAN_AGE_HOURS
+            plan_expired = plan_age_hours > planner_settings["planner_max_plan_age_hours"]
 
     # Expired banner
     if plan_expired and plan_age_hours is not None:
@@ -568,7 +578,7 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
                 now_utc = datetime.now(tz=timezone.utc)
                 market_age_hours = (now_utc - market_dt).total_seconds() / 3600
                 age_text = _fmt_age(market_age_hours)
-                if market_age_hours < PLANNER_MARKET_REFRESH_INTERVAL_HOURS:
+                if market_age_hours < planner_settings["planner_market_refresh_interval_hours"]:
                     market_label = f"{age_text} ✓"
                 elif market_age_hours < 6.0:
                     market_label = f"{age_text} ⚠"
@@ -583,7 +593,8 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     # Freshness warning
     if page_state.plan and freshness_score is not None and freshness_score < 0.75:
         st.warning("Market prices have drifted significantly — consider recomputing.")
-    elif page_state.plan and freshness_score is not None and freshness_score < 0.90:
+    elif (page_state.plan and freshness_score is not None
+          and freshness_score < planner_settings["planner_freshness_warning_level"]):
         st.caption("Some prices have drifted slightly — recomputing is recommended.")
 
     # ------------------------------------------------------------------

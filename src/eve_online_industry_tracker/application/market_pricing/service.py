@@ -5,6 +5,7 @@ import time
 import threading
 from typing import Any, Callable
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo as market_orderbook_cache_repo
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
@@ -73,12 +74,16 @@ class MarketPricingService:
         market_pricing_cfg = ((cfg.get("defaults") or {}).get("market_pricing") or {})
         return market_pricing_cfg if isinstance(market_pricing_cfg, dict) else {}
 
+    def _admin_value(self, category: str, key: str) -> Any:
+        """An admin setting at each use; the schema default without a settings store."""
+        admin = getattr(self._state, "admin_settings", None)
+        if admin is None:
+            return ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"]
+        return admin.get(category, key)
+
     def orderbook_depth(self) -> int:
-        raw_value = self._market_pricing_cfg().get("orderbook_depth", 5)
-        try:
-            return max(1, int(raw_value))
-        except Exception:
-            return 5
+        """market_defaults/orderbook_depth (formerly config.json market_pricing.orderbook_depth)."""
+        return int(self._admin_value("market_defaults", "orderbook_depth"))
 
     def orderbook_smoothing(self) -> str:
         raw_value = str(self._market_pricing_cfg().get("orderbook_smoothing") or "volume_weighted_mean_best_n").strip().lower()
@@ -87,11 +92,9 @@ class MarketPricingService:
         return raw_value
 
     def material_price_cache_ttl_seconds(self) -> int:
-        raw_value = self._market_pricing_cfg().get("material_price_cache_ttl_seconds", 3600)
-        try:
-            return max(60, int(raw_value))
-        except Exception:
-            return 3600
+        """cache_ttl/material_price_cache_ttl_seconds (formerly config.json
+        market_pricing.material_price_cache_ttl_seconds)."""
+        return int(self._admin_value("cache_ttl", "material_price_cache_ttl_seconds"))
 
     def _fetch_order_book(
         self,

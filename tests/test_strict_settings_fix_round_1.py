@@ -194,8 +194,8 @@ def test_a_float_off_its_step_is_accepted_as_entered(tmp_path):
     assert mgr.get("daily_planner", "planner_price_outlier_sigma") == 3.3
     mgr.set("reprocessing", "tax", 0.0213)                                # 2.13% after standings, step 0.0005
     assert mgr.get("reprocessing", "tax") == 0.0213
-    mgr.set("market_defaults", "default_sales_tax", 0.05025)              # Accounting III, step 0.00125
-    assert mgr.get("market_defaults", "default_sales_tax") == 0.05025
+    mgr.set("industry", "base_sales_tax_rate", 0.0752)                   # step 0.005
+    assert mgr.get("industry", "base_sales_tax_rate") == 0.0752
     with pytest.raises(ValueError, match="daily_planner/planner_price_outlier_sigma.*outside 1.0 to 10.0"):
         mgr.set("daily_planner", "planner_price_outlier_sigma", 10.5)
 

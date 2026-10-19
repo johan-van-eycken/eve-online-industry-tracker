@@ -588,6 +588,6 @@ def test_the_facility_tax_bound_is_the_settings_bound():
 
 def test_other_float_settings_are_refused_too_not_clamped(tmp_path):
     mgr = AdminSettingsManager(tmp_path / "admin_settings.json")
-    with pytest.raises(ValueError, match="market_defaults/default_sales_tax"):
-        mgr.set("market_defaults", "default_sales_tax", 0.9)
-    assert mgr.get("market_defaults", "default_sales_tax") == 0.03375
+    with pytest.raises(ValueError, match="market_defaults/default_broker_fee"):
+        mgr.set("market_defaults", "default_broker_fee", 0.9)
+    assert mgr.get("market_defaults", "default_broker_fee") == 0.03

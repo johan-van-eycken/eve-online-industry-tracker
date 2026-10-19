@@ -58,13 +58,15 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "Sleep between paginated ESI pages (public endpoints).",
             },
             "esi_auth_pagination_sleep_seconds": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "float",
                 "default": 0.1,
                 "min": 0.0,
                 "max": 1.0,
                 "step": 0.05,
                 "label": "ESI auth pagination delay (seconds)",
-                "help": "Sleep between paginated ESI pages (authenticated endpoints).",
+                "help": "Sleep between paginated ESI pages (authenticated endpoints). Applies from the next "
+                        "request.",
             },
             "product_row_build_max_workers": {
                 "type": "int",
@@ -140,16 +142,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "market_defaults": {
         "label": "Market Defaults",
         "settings": {
-            "default_sales_tax": {
-                "type": "float",
-                "default": 0.03375,
-                "min": 0.0,
-                "max": 0.20,
-                "step": 0.00125,
-                "format": "%.4f",
-                "label": "Default sales tax rate",
-                "help": "Applied when computing sale proceeds.",
-            },
             "default_broker_fee": {
                 "type": "float",
                 "default": 0.03,
@@ -157,8 +149,10 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 0.20,
                 "step": 0.005,
                 "format": "%.4f",
-                "label": "Default broker fee rate",
-                "help": "Applied when computing sale proceeds.",
+                "label": "Assumed broker fee for relisting",
+                "help": "The broker fee the portfolio planner's relist-cost estimate assumes for a product whose "
+                        "own broker fee is unknown (no character to read Broker Relations and standings from). "
+                        "Sale proceeds themselves use the character's fee, or show it as unknown.",
             },
             "orderbook_depth": {
                 "type": "int",
@@ -197,7 +191,8 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "step": 0.0005,
                 "format": "%.4f",
                 "label": "NPC station facility tax",
-                "help": "Tax rate applied at NPC manufacturing stations.",
+                "help": "The facility tax an NPC station industry profile gets when it is created on the Industry "
+                        "Profiles page (and its fee preview). An existing profile keeps the tax it was saved with.",
             },
             "scc_surcharge": {
                 "type": "float",
@@ -436,14 +431,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Freshness warning level",
                 "help": "freshness_score below this value triggers the staleness warning in the UI.",
             },
-            "planner_industry_data_max_age_hours": {
-                "type": "int",
-                "default": 12,
-                "min": 1,
-                "max": 72,
-                "label": "Max IndustryService data age (hours)",
-                "help": "Age threshold above which the planner warns that Industry Builder data may be stale.",
-            },
             "planner_bpo_strong_buy_days": {
                 "type": "int",
                 "default": 30,
@@ -467,14 +454,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 365,
                 "label": "Slow mover timeout (days)",
                 "help": "Days before an unsold batch is written as a slow_mover outcome.",
-            },
-            "planner_shopping_future_stock_days": {
-                "type": "int",
-                "default": 7,
-                "min": 1,
-                "max": 30,
-                "label": "Future stock pre-buy window (days)",
-                "help": "Look-ahead window for pre-buying future_stock materials.",
             },
             "planner_analytics_batch_window": {
                 "type": "int",
@@ -505,14 +484,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "max": 30,
                 "label": "VWAP trading days",
                 "help": "Number of trading days used for VWAP calculation; falls back to spot if fewer days available.",
-            },
-            "planner_market_depth_threads": {
-                "type": "int",
-                "default": 10,
-                "min": 1,
-                "max": 20,
-                "label": "Market depth fetch threads",
-                "help": "Max parallel ESI calls for market depth collection in MarketIntelligenceJob.",
             },
             "planner_invention_min_attempts": {
                 "type": "int",
@@ -698,21 +669,27 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
         "label": "ESI Resilience",
         "settings": {
             "esi_max_retries": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "int",
                 "default": 4,
                 "min": 1,
                 "max": 10,
                 "label": "ESI max retries",
-                "help": "Maximum retry attempts for failed ESI requests.",
+                "help": "Retries after the first attempt of a failed ESI request (a connection error, a timeout "
+                        "or a 420/429/5xx), authenticated and public. A caller with its own limit (the station "
+                        "name lookup: none) keeps it. Applies from the next request.",
             },
             "esi_request_timeout_seconds": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "float",
                 "default": 15.0,
                 "min": 5.0,
                 "max": 60.0,
                 "step": 1.0,
                 "label": "ESI request timeout (seconds)",
-                "help": "Timeout per individual ESI HTTP request.",
+                "help": "Timeout per individual ESI HTTP request, authenticated and public. A caller with its own "
+                        "timeout (the station name lookup: 3 s; the public structures scan: "
+                        "FLASK_PUBLIC_STRUCTURES_ESI_TIMEOUT) keeps it. Applies from the next request.",
             },
             "esi_error_budget_low_watermark": {
                 "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default

@@ -8,6 +8,7 @@ import random
 import requests
 from typing import Any, Dict, Iterable, List, Optional, Union
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
 from eve_online_industry_tracker.infrastructure.esi_versions import (
     ESI_MARKETS_ORDERS,
@@ -98,6 +99,19 @@ class ESIService:
         if station_id is not None:
             self._station_id = station_id
 
+    def _esi_resilience(self, key: str) -> Any:
+        """An esi_resilience admin setting at each request; the schema default
+        without a settings store."""
+        if self._admin_settings is None:
+            return ADMIN_SETTINGS_SCHEMA["esi_resilience"]["settings"][key]["default"]
+        return self._admin_settings.get("esi_resilience", key)
+
+    def _cache_ttl(self, key: str, fallback: int) -> int:
+        """A cache_ttl admin setting, read at each use so a change on the
+        settings page applies at once; the constructor value without a
+        settings store."""
+        return int(fallback if self._admin_settings is None else self._admin_settings.get("cache_ttl", key))
+
     def _validate_type_ids(self, type_ids: Iterable[int]) -> List[int]:
         if type_ids is None:
             return []
@@ -137,9 +151,15 @@ class ESIService:
         *,
         params: Optional[Dict[str, Any]] = None,
         paginate: bool = False,
-        timeout_seconds: float = 15.0,
-        max_retries: int = 4,
+        timeout_seconds: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> Any:
+        # None: the admin settings esi_resilience/esi_request_timeout_seconds and esi_max_retries,
+        # read at each request (a caller with its own, like the station name lookup, keeps it).
+        if timeout_seconds is None:
+            timeout_seconds = float(self._esi_resilience("esi_request_timeout_seconds"))
+        if max_retries is None:
+            max_retries = int(self._esi_resilience("esi_max_retries"))
         base_uri = str(getattr(self._esi_client, "esi_base_uri", "https://esi.evetech.net")).rstrip("/")
 
         def issue_request(*, request_params: Optional[Dict[str, Any]] = None) -> requests.Response:
@@ -277,7 +297,7 @@ class ESIService:
         for type_id in type_ids_list:
             cache_key = (order_type, region_id, type_id)
             cached = self._type_orders_cache.get(cache_key)
-            if cached and (now - cached[0] < self._type_orders_cache_ttl_seconds):
+            if cached and (now - cached[0] < self._cache_ttl("type_orders_cache_ttl_seconds", self._type_orders_cache_ttl_seconds)):
                 all_orders.extend(cached[1])
             else:
                 to_fetch.append(int(type_id))
@@ -301,7 +321,6 @@ class ESIService:
                     ESI_MARKETS_ORDERS.format(region_id=region_id),
                     params={"order_type": order_type, "type_id": int(type_id)},
                     paginate=True,
-                    timeout_seconds=15.0,
                 )
             except Exception as e:
                 logging.warning(
@@ -432,7 +451,7 @@ class ESIService:
             "type_count": len(type_ids_list),
             "cached_type_count": cached_type_count,
             "total_orders": total_orders,
-            "cache_ttl_seconds": int(self._type_orders_cache_ttl_seconds),
+            "cache_ttl_seconds": int(self._cache_ttl("type_orders_cache_ttl_seconds", self._type_orders_cache_ttl_seconds)),
             "oldest_fetched_at": min(timestamps) if timestamps else None,
             "newest_fetched_at": max(timestamps) if timestamps else None,
         }
@@ -460,7 +479,7 @@ class ESIService:
         for type_id in type_ids_list:
             cache_key = (int(region_id), int(type_id))
             cached = self._market_history_cache.get(cache_key)
-            if cached and (now - cached[0] < self._market_history_cache_ttl_seconds):
+            if cached and (now - cached[0] < self._cache_ttl("market_history_cache_ttl_seconds", self._market_history_cache_ttl_seconds)):
                 result[int(type_id)] = cached[1] if isinstance(cached[1], list) else []
             else:
                 to_fetch.append(int(type_id))
@@ -474,7 +493,6 @@ class ESIService:
                     ESI_MARKETS_HISTORY.format(region_id=int(region_id)),
                     params={"type_id": int(type_id)},
                     paginate=False,
-                    timeout_seconds=15.0,
                 )
             except Exception as e:
                 logging.warning(
@@ -616,7 +634,7 @@ class ESIService:
         """Return market prices for all items (cached)."""
         now = time.time()
 
-        if self._market_prices_cache and (now - self._market_prices_cache[0] < self._market_prices_cache_ttl_seconds):
+        if self._market_prices_cache and (now - self._market_prices_cache[0] < self._cache_ttl("market_prices_cache_ttl_seconds", self._market_prices_cache_ttl_seconds)):
             return self._market_prices_cache[1]
 
         try:
@@ -634,7 +652,7 @@ class ESIService:
         structures per solar system than scanning /universe/structures.
         """
         now = time.time()
-        if self._industry_facilities_cache and (now - self._industry_facilities_cache[0] < self._industry_facilities_cache_ttl_seconds):
+        if self._industry_facilities_cache and (now - self._industry_facilities_cache[0] < self._cache_ttl("industry_facilities_cache_ttl_seconds", self._industry_facilities_cache_ttl_seconds)):
             return self._industry_facilities_cache[1]
 
         try:
@@ -755,7 +773,7 @@ class ESIService:
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
             try:
-                resp = self._esi_client.esi_post(ESI_UNIVERSE_NAMES, json=chunk, timeout=15)
+                resp = self._esi_client.esi_post(ESI_UNIVERSE_NAMES, json=chunk)
             except Exception:
                 continue
 

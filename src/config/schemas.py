@@ -41,9 +41,9 @@ CONFIG_SCHEMA = {
             "material_price_source_default": "Jita Sell",
             "product_price_source_default": "Jita Sell",
             "orderbook_smoothing": "median_best_n",
-            "orderbook_depth": 5,
-            "sales_tax_fraction": 0.03375,
-            "broker_fee_fraction": 0.03,
+            # orderbook_depth and the material price cache TTL are admin settings
+            # (market_defaults/orderbook_depth, cache_ttl/material_price_cache_ttl_seconds);
+            # the sales tax and broker fee come from the character (industry/*).
         },
     },
 }

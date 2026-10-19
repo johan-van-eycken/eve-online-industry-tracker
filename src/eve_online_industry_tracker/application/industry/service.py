@@ -42,6 +42,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from flask_app.background_jobs import register_thread
 from eve_online_industry_tracker.infrastructure.session_provider import (
     SessionProvider,
@@ -371,6 +372,19 @@ class IndustryService:
         if admin is None:
             return fallback
         return admin.get(category, key)
+
+    def _relist_broker_fee_fraction(self, row: dict[str, Any]) -> tuple[float, str | None]:
+        """(the broker fee fraction of a relist, the note when it is assumed).
+        The product's own broker fee (market_fee_context) when known, 0.0
+        included; otherwise admin setting market_defaults/default_broker_fee,
+        with a note naming it (it was a hidden 3.5% before)."""
+        own = self._as_float((row.get("market_fee_context") or {}).get("broker_fee_fraction"))
+        if own is not None:
+            return own, None
+        assumed = float(self._adm("market_defaults", "default_broker_fee",
+                                  ADMIN_SETTINGS_SCHEMA["market_defaults"]["settings"]["default_broker_fee"]["default"]))
+        return assumed, (f"broker fee unknown: the relist cost assumes {assumed:.2%} "
+                         "(admin setting market_defaults/default_broker_fee)")
 
     def _ensure_industry_job_manager(self) -> IndustryJobManager:
         mgr = getattr(self._state, "industry_job_manager", None)
@@ -2375,7 +2389,6 @@ class IndustryService:
                 else:
                     historical_margins[tid] = None
 
-        DEFAULT_BROKER_FEE = 0.035
         ORDER_DURATION_DAYS = 90.0
 
         for row in rows:
@@ -2476,10 +2489,8 @@ class IndustryService:
             row["selling_time_days"] = selling_days
 
             # Extra relist broker fee if selling_days > ORDER_DURATION_DAYS
-            broker_fee_frac = (
-                self._as_float((row.get("market_fee_context") or {}).get("broker_fee_fraction"))
-                or DEFAULT_BROKER_FEE
-            )
+            broker_fee_frac, broker_fee_assumed = self._relist_broker_fee_fraction(row)
+            row["relist_broker_fee_assumed"] = broker_fee_assumed
             if selling_days and selling_days > ORDER_DURATION_DAYS and market_price:
                 extra_listings = int(selling_days / ORDER_DURATION_DAYS)
                 relist_cost_per_unit = market_price * broker_fee_frac * extra_listings

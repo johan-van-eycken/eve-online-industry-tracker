@@ -47,6 +47,9 @@ def _out_of_range(spec):
 
 STARTUP_CRITICAL = {
     ("performance", "esi_pagination_sleep_seconds"),
+    ("performance", "esi_auth_pagination_sleep_seconds"),
+    ("esi_resilience", "esi_max_retries"),
+    ("esi_resilience", "esi_request_timeout_seconds"),
     ("esi_resilience", "esi_error_budget_low_watermark"),
     ("esi_resilience", "esi_error_budget_max_sleep_seconds"),
     ("esi_resilience", "esi_error_budget_pacing_sleep_seconds"),
@@ -102,7 +105,7 @@ def test_numeric_strings_and_the_bounds_themselves_are_accepted(tmp_path):
     assert mgr.get("daily_planner", "planner_bpo_strong_buy_days") == 45
     mgr.set("industry", "scc_surcharge", "0.04")
     assert mgr.get("industry", "scc_surcharge") == 0.04
-    mgr.set("market_defaults", "default_sales_tax", 0.2)
+    mgr.set("market_defaults", "default_broker_fee", 0.2)
     mgr.set("daily_planner", "planner_mineral_correlation_threshold", -1)
     assert mgr.get("daily_planner", "planner_mineral_correlation_threshold") == -1.0
 
@@ -120,10 +123,10 @@ def test_the_settings_route_answers_400_naming_the_setting_and_range(tmp_path):
 
     app = create_app()
     app.extensions["app_state"] = SimpleNamespace(admin_settings=_manager(tmp_path), db_app=None, db_sde=None, db_oauth=None)
-    response = app.test_client().put("/admin_settings", json={"market_defaults": {"default_sales_tax": 0.9}})
+    response = app.test_client().put("/admin_settings", json={"market_defaults": {"default_broker_fee": 0.9}})
     assert response.status_code == 400
     message = response.get_json()["message"]
-    assert "market_defaults/default_sales_tax" in message and "0.0" in message and "0.2" in message
+    assert "market_defaults/default_broker_fee" in message and "0.0" in message and "0.2" in message
 
 
 # --- a stored invalid value ---------------------------------------------------------------

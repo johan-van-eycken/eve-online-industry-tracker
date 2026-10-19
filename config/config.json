@@ -32,11 +32,7 @@
     "market_pricing": {
       "material_price_source_default": "Jita Sell",
       "product_price_source_default": "Jita Sell",
-      "orderbook_smoothing": "volume_weighted_mean_best_n",
-      "orderbook_depth": 5,
-      "material_price_cache_ttl_seconds": 3600,
-      "sales_tax_fraction": 0.03375,
-      "broker_fee_fraction": 0.03
+      "orderbook_smoothing": "volume_weighted_mean_best_n"
     },
     "scopes": [
       "esi-assets.read_assets.v1",
