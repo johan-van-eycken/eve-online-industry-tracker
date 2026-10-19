@@ -337,7 +337,7 @@ def test_the_admin_page_shows_an_unset_optional_number_as_empty():
 
     spec = ADMIN_SETTINGS_SCHEMA["reprocessing"]["settings"]["tax"]
     assert _number_choice(spec, None, None) == ({"value": None, "min_value": 0.0, "max_value": 0.5,
-                                                 "step": 0.0001, "format": "%.4f"}, None)
+                                                 "step": 0.0005, "format": "%.4f"}, None)
     assert _number_choice(spec, 0.02, None)[0]["value"] == 0.02
     args, problem = _number_choice(spec, 0.7, None)   # a stored tax outside its bounds: shown, not clamped
     assert args["value"] is None and "0.7" in problem

@@ -19,11 +19,12 @@ from eve_online_industry_tracker.application.errors import ServiceError
 # ---------------------------------------------------------------------------
 # Schema: defines every admin-configurable setting with type, default, label,
 # and optional min/max constraints.  The Streamlit admin page auto-generates
-# form controls from this schema.  Every int and float is strict (min/max and
-# the step, a float's within a tolerance, are checked, never clamped or
-# snapped); "startup_critical" marks a number read on every ESI request or by
-# a daemon thread, whose stored invalid value reads as the default, with a
-# WARNING once per process (see AdminSettingsManager).
+# form controls from this schema.  Every int and float is strict (min/max, and
+# an int's step, are checked, never clamped or snapped; a float's step is only
+# the settings page's input granularity); "startup_critical" marks a number
+# read on every ESI request or by a daemon thread, whose stored invalid value
+# reads as the default, with a WARNING once per process (see
+# AdminSettingsManager).
 # ---------------------------------------------------------------------------
 
 ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
@@ -144,8 +145,8 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": 0.03375,
                 "min": 0.0,
                 "max": 0.20,
-                "step": 0.00005,  # every Accounting level: 7.5% x (1 - 0.11 x L)
-                "format": "%.5f",
+                "step": 0.00125,
+                "format": "%.4f",
                 "label": "Default sales tax rate",
                 "help": "Applied when computing sale proceeds.",
             },
@@ -344,7 +345,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": 0.01,
                 "min": 0.001,
                 "max": 0.10,
-                "step": 0.001,
+                "step": 0.005,
                 "format": "%.3f",
                 "label": "Invention probability floor",
                 "help": "Minimum invention success probability used in attempt calculations.",
@@ -683,7 +684,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": None,
                 "min": 0.0,
                 "max": 0.5,
-                "step": 0.0001,  # 0.01%: a tax after standings such as 2.13%
+                "step": 0.0005,
                 "format": "%.4f",
                 "label": "Ore calculator: reprocessing tax (effective rate)",
                 "help": "The effective reprocessing tax (a fraction), charged on the minerals produced at their "
@@ -793,8 +794,10 @@ def _range_text(spec: dict[str, Any]) -> str:
 def _coerce_number(value: Any, spec: dict[str, Any]) -> int | float:
     """An int or float setting's value, or ValueError. Strict: a bool, a
     non-numeric string, a fraction for an int, NaN/inf, a value outside
-    min/max or off the step grid (a float's within a relative tolerance of
-    1e-6 steps) are refused, never coerced or clamped. A numeric string
+    min/max or (an int) off its step grid are refused, never coerced or
+    clamped. A float's step is the input granularity of the settings page,
+    not a validity rule: a float is checked for type, finiteness and min/max
+    only. A numeric string
     ("45", "6.0") and an integral float for an int (6.0) are read as the
     number."""
     is_int = spec["type"] == "int"
@@ -826,12 +829,6 @@ def _coerce_number(value: Any, spec: dict[str, Any]) -> int | float:
         if (number - origin) % step:
             raise ValueError(f"{number!r} is not a step of {step} from {origin} ({origin}, {origin + step}, "
                              f"{origin + 2 * step}, ...; {_range_text(spec)})")
-    elif not is_int and "step" in spec:
-        # A float on the grid min + k x step, within a relative tolerance for binary rounding (0.1 + 0.2).
-        origin, step = float(spec.get("min", 0.0)), float(spec["step"])
-        steps = (number - origin) / step
-        if abs(steps - round(steps)) > 1e-6:
-            raise ValueError(f"{number!r} is not a step of {step!r} from {origin!r} ({_range_text(spec)})")
     return number
 
 

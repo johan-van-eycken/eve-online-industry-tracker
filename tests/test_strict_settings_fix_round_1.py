@@ -6,8 +6,8 @@
 - M1: a startup-critical setting read as its default logs a WARNING once per
   process naming it and the default; the market refresh loop reads its
   interval visibly.
-- M2: a float setting is checked against its step (with a tolerance); "6.0"
-  reads as 6 for an int.
+- M2: a float's step is input granularity, not validity (type, finiteness
+  and min/max only); "6.0" reads as 6 for an int.
 - M4: the rig migration shows on /health and the settings page; an invalid
   legacy rig does not fail an Athanor.
 - M5: the NPC station name comes from ESI /universe/stations/{id} first.
@@ -187,24 +187,24 @@ def test_the_market_refresh_interval_reader_flags_an_invalid_setting(tmp_path, c
 
 # --- M2: float steps and integral strings -------------------------------------------------------
 
-def test_a_float_off_its_step_is_refused_with_a_tolerance(tmp_path):
+def test_a_float_off_its_step_is_accepted_as_entered(tmp_path):
+    """A float's step is the settings page's input granularity, not validity."""
     mgr = _manager(tmp_path)
-    with pytest.raises(ValueError, match="daily_planner/planner_price_outlier_sigma.*step"):
-        mgr.set("daily_planner", "planner_price_outlier_sigma", 3.3)
-    mgr.set("daily_planner", "planner_price_outlier_sigma", 3.5)
-    mgr.set("daily_planner", "planner_ema_alpha", 0.1 + 0.2)          # 0.30000000000000004: on the 0.01 grid
-    assert mgr.get("daily_planner", "planner_ema_alpha") == pytest.approx(0.3)
-    mgr.set("industry", "faction_standing_reduction_per_point", 0.0003)
+    mgr.set("daily_planner", "planner_price_outlier_sigma", 3.3)          # step 0.5
+    assert mgr.get("daily_planner", "planner_price_outlier_sigma") == 3.3
+    mgr.set("reprocessing", "tax", 0.0213)                                # 2.13% after standings, step 0.0005
+    assert mgr.get("reprocessing", "tax") == 0.0213
+    mgr.set("market_defaults", "default_sales_tax", 0.05025)              # Accounting III, step 0.00125
+    assert mgr.get("market_defaults", "default_sales_tax") == 0.05025
+    with pytest.raises(ValueError, match="daily_planner/planner_price_outlier_sigma.*outside 1.0 to 10.0"):
+        mgr.set("daily_planner", "planner_price_outlier_sigma", 10.5)
 
 
-def test_every_default_is_on_its_step_grid_and_a_real_tax_after_standings_is_accepted(tmp_path):
+def test_every_int_default_is_on_its_step_grid():
     for category, cat in ADMIN_SETTINGS_SCHEMA.items():
         for key, spec in cat["settings"].items():
-            if spec["type"] in ("int", "float") and spec["default"] is not None:
+            if spec["type"] == "int" and spec["default"] is not None:
                 AdminSettingsManager._coerce(spec["default"], spec)   # no ValueError
-    mgr = _manager(tmp_path)
-    mgr.set("reprocessing", "tax", 0.0213)                    # 2.13% after standings
-    mgr.set("market_defaults", "default_sales_tax", 0.05025)  # 7.5% x (1 - 0.11 x 3): Accounting III
 
 
 def test_an_integral_string_for_an_int_reads_like_the_float(tmp_path):
