@@ -12,9 +12,16 @@ from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
 
-def _history_values(item: dict[str, Any]) -> dict[str, Any] | None:
-    """The stored values of one ESI market history day; None when a field is
-    missing or not a number (the day is skipped, never stored as 0)."""
+def _history_row_values(item: Any) -> dict[str, Any] | None:
+    """The stored values of one ESI market history row, or None when the
+    row is malformed (not a dict, no date, a missing/None or non-numeric
+    price, volume or order count): the caller skips and counts it, never
+    storing it as 0."""
+    if not isinstance(item, dict):
+        return None
+    date_str = str(item.get("date") or "").strip()
+    if not date_str:
+        return None
     close = readable_number(item.get("average", item.get("close")))
     high = readable_number(item.get("highest"))
     low = readable_number(item.get("lowest"))
@@ -22,7 +29,8 @@ def _history_values(item: dict[str, Any]) -> dict[str, Any] | None:
     order_count = readable_int(item.get("order_count"))
     if None in (close, high, low, volume, order_count):
         return None
-    return {"close": close, "high": high, "low": low, "volume": volume, "order_count": order_count}
+    return {"date": date_str, "close": close, "high": high, "low": low, "volume": volume,
+            "order_count": order_count}
 
 
 class MarketHistoryService:
@@ -38,7 +46,9 @@ class MarketHistoryService:
         type_id: int,
         region_id: int = 10000002,  # Jita region by default
     ) -> None:
-        """Fetch market history from ESI and store in database."""
+        """Fetch market history from ESI and store in database. A malformed
+        row (None, no date, a None or non-numeric field) is skipped, never
+        stored as 0, with one WARNING per call counting the skipped rows."""
         app_session = self._sessions.app_session()
         try:
             esi_service = getattr(self._state, "esi_service", None)
@@ -47,18 +57,18 @@ class MarketHistoryService:
 
             history_rows = esi_service.get_market_history([type_id], region_id=region_id)
             items = history_rows.get(int(type_id), []) if isinstance(history_rows, dict) else []
+            if not isinstance(items, list):
+                logging.warning("Market history: the ESI history of type_id=%s region_id=%s is not a list (%r); "
+                                "nothing stored", type_id, region_id, type(items).__name__)
+                items = []
 
             skipped = 0
             for item in items:
-                if not isinstance(item, dict):
+                values = _history_row_values(item)
+                if values is None:
                     skipped += 1
                     continue
-
-                date_str = str(item.get("date") or "").strip()
-                values = _history_values(item)
-                if not date_str or values is None:
-                    skipped += 1
-                    continue
+                date_str = values["date"]
 
                 existing = app_session.query(MarketHistoryModel).filter(
                     and_(
@@ -70,18 +80,17 @@ class MarketHistoryService:
 
                 if existing:
                     for field, value in values.items():
-                        setattr(existing, field, value)
+                        if field != "date":
+                            setattr(existing, field, value)
                 else:
-                    app_session.add(MarketHistoryModel(type_id=type_id, region_id=region_id, date=date_str, **values))
+                    app_session.add(MarketHistoryModel(type_id=type_id, region_id=region_id, **values))
 
             app_session.commit()
             if skipped:
                 logging.warning(
-                    "Market history of type %s (region %s): skipped %d unreadable history row(s) "
-                    "(no date, or a price, volume or order count that is not a number)",
-                    type_id,
-                    region_id,
-                    skipped,
+                    "Market history: skipped %d unreadable history row(s) (%d of %d) for type_id=%s region_id=%s "
+                    "(None, no date, or a price, volume or order count that is not a number)",
+                    skipped, skipped, len(items), type_id, region_id,
                 )
         finally:
             try:
