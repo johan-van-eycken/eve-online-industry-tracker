@@ -729,9 +729,20 @@ class ESIService:
             market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES, paginate=True)
         except ESI_REQUEST_ERRORS as e:
             raise EsiRequestError(f"ESI request failed: {e}") from e
+        # None is a 403/404, not "no prices": not cached, so the next call asks again.
+        market_prices = self._require_list(ESI_MARKETS_PRICES, market_prices)
 
         self._market_prices_cache = (now, market_prices)
         return market_prices
+
+    @staticmethod
+    def _require_list(endpoint: str, data: Any) -> List[Any]:
+        """`data` when it is a list; EsiRequestError naming `endpoint` and what
+        ESI gave otherwise (None: a 403/404, logged by ESIClient)."""
+        if isinstance(data, list):
+            return data
+        what = "no data (403/404)" if data is None else f"a {type(data).__name__}, not a list"
+        raise EsiRequestError(f"ESI request failed: {endpoint} gave {what}")
 
     def get_industry_facilities(self) -> List[Dict[str, Any]]:
         """Return public industry facilities.
@@ -748,7 +759,7 @@ class ESIService:
         except ESI_REQUEST_ERRORS as e:
             raise EsiRequestError(f"ESI request failed: {e}") from e
 
-        out = list(data) if isinstance(data, list) else []
+        out = list(self._require_list(ESI_INDUSTRY_FACILITIES, data))
         self._industry_facilities_cache = (now, out)
         return out
 
@@ -768,7 +779,7 @@ class ESIService:
         except ESI_REQUEST_ERRORS as e:
             raise EsiRequestError(f"ESI request failed: {e}") from e
 
-        out = list(data) if isinstance(data, list) else []
+        out = list(self._require_list(ESI_INDUSTRY_SYSTEMS, data))
         self._industry_systems_cache = (now, out)
         self._industry_systems_cache_ttl_seconds = ttl
         return out

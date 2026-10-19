@@ -602,16 +602,26 @@ class ESIClient:
         except SQLAlchemyError as exc:
             logging.warning("ESI client: rollback of the OAuth session failed: %s", exc)
 
-    def _cache_lookup(self, cache_key: str) -> Tuple[Optional[Any], Optional[EsiCache]]:
-        """(cached data, cache row) of an ESI request; EsiRequestError when the
-        esi_cache table cannot be read (see ESI_REQUEST_ERRORS)."""
+    def _cache_lookup(self, cache_key: str) -> Tuple[Optional[Any], Optional[str], bool]:
+        """(cached data, the ETag to send, whether there is a cache row) of an
+        ESI request. The ETag is None unless the cached data decodes to a
+        value: a 304 must give the cached data, never None in its place.
+        EsiRequestError when the esi_cache table cannot be read (see
+        ESI_REQUEST_ERRORS)."""
         try:
-            cached_data = self.get_cached_data(cache_key)
             cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == cache_key).first()
         except SQLAlchemyError as exc:
             self._rollback_quietly()
             raise EsiRequestError(f"ESI response cache unreadable for {cache_key}: {exc}") from exc
-        return cached_data, cache_entry
+        if cache_entry is None:
+            return None, None, False
+        decoded, cached_data = self._decode_cache_entry(cache_key, cache_entry)
+        if not decoded or cached_data is None:
+            if cache_entry.etag:
+                logging.warning("ESI cache: the cached data of %s cannot be used, so no If-None-Match is sent "
+                                "(the response is fetched in full)", cache_key)
+            return None, None, True
+        return cached_data, cache_entry.etag, True
     
     # ----------------------------
     # Verify Access Token
@@ -797,15 +807,26 @@ class ESIClient:
     # ----------------------------
     # ESI API + Cache Helpers
     # ----------------------------
-    def get_cached_data(self, endpoint: str) -> Optional[Dict[str, Any]]:
+    def get_cached_data(self, endpoint: str) -> Optional[Any]:
+        """The decoded cached data of `endpoint`, None without a row or when it
+        cannot be decoded (an ERROR)."""
         cache_entry = self.db_oauth.session.query(EsiCache).filter(EsiCache.endpoint == endpoint).first()
-        if cache_entry:
-            try:
-                data = cache_entry.data
-                return jsonlib.loads(data) if isinstance(data, str) else data
-            except Exception as e:
-                logging.error(f"Failed to decode cached data for {endpoint}: {e}")
-        return None
+        if cache_entry is None:
+            return None
+        return self._decode_cache_entry(endpoint, cache_entry)[1]
+
+    @staticmethod
+    def _decode_cache_entry(endpoint: str, cache_entry: Any) -> Tuple[bool, Optional[Any]]:
+        """(decoded, data) of an esi_cache row: (False, None) with an ERROR when
+        its stored JSON cannot be decoded."""
+        data = cache_entry.data
+        if not isinstance(data, str):
+            return data is not None, data
+        try:
+            return True, jsonlib.loads(data)
+        except (ValueError, TypeError) as e:   # JSONDecodeError is a ValueError
+            logging.error(f"Failed to decode cached data for {endpoint}: {e}")
+            return False, None
 
     def save_to_cache(self, endpoint: str, etag: Optional[str], data: Dict[str, Any]) -> None:
         try:
@@ -869,13 +890,15 @@ class ESIClient:
         }
 
         etag: Optional[str] = None
-        cached_data: Optional[Dict[str, Any]] = None
+        cached_data: Optional[Any] = None
         cache_mode = "off"
         if use_cache:
-            cached_data, cache_entry = self._cache_lookup(cache_key)
-            if cache_entry and cache_entry.etag:
-                headers["If-None-Match"] = cache_entry.etag
-            cache_mode = "enabled_with_entry" if (cached_data is not None or cache_entry is not None) else "enabled_no_entry"
+            cached_data, cached_etag, has_entry = self._cache_lookup(cache_key)
+            # Not for a paginated request: its pages are never cached as a whole, so a 304
+            # would give another request's (first page's) data.
+            if cached_etag and not paginate:
+                headers = {**headers, "If-None-Match": cached_etag}
+            cache_mode = "enabled_with_entry" if has_entry else "enabled_no_entry"
 
         retries = 0
         url = f"{self.esi_base_uri}{endpoint}{query}"
@@ -939,7 +962,7 @@ class ESIClient:
                         time.sleep(pacing)  # polite pacing
                     elif response.status_code == 304:
                         # Still update limiter from headers (done above).
-                        return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                        return cached_data   # decoded by _cache_lookup
                     elif response.status_code == 403:
                         if not suppress_forbidden_log:
                             logging.warning(f"ESI GET 403 Forbidden: {paged_url}")
@@ -1057,12 +1080,13 @@ class ESIClient:
                 if response.status_code == 200:
                     etag = response.headers.get("ETag")
                     data_json = response.json()
-                    self.save_to_cache(cache_key, etag, data_json)
+                    if use_cache:
+                        self.save_to_cache(cache_key, etag, data_json)
                     if return_headers:
                         return data_json, response.headers
                     return data_json  # <-- Add this!
                 elif response.status_code == 304:
-                    return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                    return cached_data   # decoded by _cache_lookup
                 elif response.status_code == 403:
                     if not suppress_forbidden_log:
                         logging.warning(f"ESI 403 GET Forbidden: {url}")
@@ -1174,13 +1198,15 @@ class ESIClient:
         # Build cache key
         cache_key = esi_cache_key(f"{endpoint}:{json}" if json else endpoint)
         etag: Optional[str] = None
-        cached_data: Optional[Dict[str, Any]] = None
+        cached_data: Optional[Any] = None
         cache_mode = "off"
         if use_cache:
-            cached_data, cache_entry = self._cache_lookup(cache_key)
-            if cache_entry and cache_entry.etag:
-                headers["If-None-Match"] = cache_entry.etag
-            cache_mode = "enabled_with_entry" if (cached_data is not None or cache_entry is not None) else "enabled_no_entry"
+            cached_data, cached_etag, has_entry = self._cache_lookup(cache_key)
+            # Not for a paginated request: its pages are never cached as a whole, so a 304
+            # would give another request's (first page's) data.
+            if cached_etag and not paginate:
+                headers = {**headers, "If-None-Match": cached_etag}
+            cache_mode = "enabled_with_entry" if has_entry else "enabled_no_entry"
 
         retries = 0
 
@@ -1242,7 +1268,7 @@ class ESIClient:
                         )
                         time.sleep(pacing)
                     elif response.status_code == 304:
-                        return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                        return cached_data   # decoded by _cache_lookup
                     elif response.status_code == 403:
                         logging.warning(f"ESI POST 403 Forbidden: {url}")
                         return None
@@ -1340,12 +1366,13 @@ class ESIClient:
                 if response.status_code == 200:
                     etag = response.headers.get("ETag")
                     data_json = response.json()
-                    self.save_to_cache(cache_key, etag, data_json)
+                    if use_cache:
+                        self.save_to_cache(cache_key, etag, data_json)
                     if return_headers:
                         return data_json, response.headers
                     return data_json
                 elif response.status_code == 304:
-                    return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
+                    return cached_data   # decoded by _cache_lookup
                 elif response.status_code == 403:
                     logging.warning(f"ESI POST 403 Forbidden: {url}")
                     return None
