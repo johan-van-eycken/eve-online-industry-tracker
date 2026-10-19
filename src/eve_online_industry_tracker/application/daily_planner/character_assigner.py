@@ -165,8 +165,11 @@ class CharacterAssigner:
                 else:
                     if callable(replan):
                         # The last pass may have undone a re-plan: reword
-                        # the rows still not built from the final ledger.
-                        replan({}, {}, set())
+                        # the rows still not built from the final ledger,
+                        # once the BPCs rows took from the pool are booked
+                        # (fix round 2), so a taken BPC is not called free.
+                        _release, used_by = _unused_claims(top_level, emitted, bpc_pool)
+                        replan({}, used_by, set())
                 # Task A fix round 1 (I2): a parent with no manufacture action
                 # (owner binding, no slot) gets no sub-builds either: a
                 # component's quantity is its parents' need.
@@ -372,10 +375,11 @@ class CharacterAssigner:
             released: dict[int, list[Any]] = pools.setdefault("released", {})
             if bpcs is not None and released.get(t1_blueprint_type_id):
                 own = {e[0] for e in bpcs}
-                bpcs = sorted(
-                    [*bpcs, *(e for e in released[t1_blueprint_type_id] if e[0] not in used_bpcs and e[0] not in own)],
-                    key=lambda e: (-e[2], str(e[0])),
-                )
+                # Task A fix round 2: unique by key (one invention job per BPC).
+                pooled = {
+                    e[0]: e for e in released[t1_blueprint_type_id] if e[0] not in used_bpcs and e[0] not in own
+                }
+                bpcs = sorted([*bpcs, *pooled.values()], key=lambda e: (-e[2], str(e[0])))
             on_hand = sum(runs for _key, _item, runs in bpcs) if bpcs is not None else 0
             if wants_copy:
                 copy_bpos = _row_copy_bpos(row, t1_blueprint_type_id, used_bpos)
@@ -473,7 +477,7 @@ class CharacterAssigner:
                             "has no free slot for its own T1 BPC(s)"
                         )
                     if leftover:
-                        released.setdefault(t1_blueprint_type_id, []).extend(leftover)
+                        _pool_bpcs(released, t1_blueprint_type_id, leftover)
                         placeholder = _released_placeholder(type_id)
                         pools.setdefault("releases", []).append((decision, list(leftover), placeholder))
                         decision.decision_reason = (
@@ -504,7 +508,7 @@ class CharacterAssigner:
                         # same T1 source may invent from them instead.
                         # Fix round 5: what became of each BPC is worded after
                         # every row is assigned (_reword_released_bpcs).
-                        released.setdefault(t1_blueprint_type_id, []).extend(bpcs)
+                        _pool_bpcs(released, t1_blueprint_type_id, bpcs)
                         placeholder = _released_placeholder(type_id)
                         pools.setdefault("releases", []).append((decision, list(bpcs), placeholder))
                         why = f"{why}; {placeholder}"
@@ -1312,6 +1316,18 @@ def _unused_claims(
         if idle:
             release[int(decision.type_id)] = idle
     return release, used_by
+
+
+def _pool_bpcs(released: dict[int, list[Any]], t1_blueprint_type_id: int, entries: list[Any]) -> None:
+    """Offer T1 BPCs to the lower rows of the source, each key once (Task A
+    fix round 2): a row that took pooled BPCs and invents nothing gives
+    back the same BPCs, which must not become a second lane on one BPC."""
+    pool = released.setdefault(t1_blueprint_type_id, [])
+    pooled = {e[0] for e in pool}
+    for entry in entries:
+        if entry[0] not in pooled:
+            pool.append(entry)
+            pooled.add(entry[0])
 
 
 _OWNER_NO_SLOT = re.compile(r"owner [^;]+? has no free slot")
