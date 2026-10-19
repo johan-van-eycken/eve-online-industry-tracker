@@ -71,7 +71,7 @@ def _parse_date(value: Any) -> Optional[datetime]:
         s = s[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(s)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -1035,7 +1035,7 @@ def build_fifo_remaining_lots_by_type(
     for tid in (on_hand_quantities_by_type or {}).keys():
         try:
             tid_i = int(tid)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         lots_by_type.setdefault(tid_i, [])
 
@@ -1159,7 +1159,7 @@ def _build_price_map(market_prices: list[dict[str, Any]] | None) -> dict[int, fl
             continue
         try:
             type_id = int(raw_type_id)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         if type_id <= 0:
             continue
@@ -1170,7 +1170,7 @@ def _build_price_map(market_prices: list[dict[str, Any]] | None) -> dict[int, fl
             continue
         try:
             price_f = float(price)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         if price_f <= 0:
             continue
@@ -1183,7 +1183,7 @@ def _safe_float(x: Any) -> Optional[float]:
         if x is None:
             return None
         return float(x)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -1192,7 +1192,7 @@ def _safe_int(x: Any) -> Optional[int]:
         if x is None:
             return None
         return int(x)
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -1275,7 +1275,7 @@ def build_cost_map_for_assets(
             continue
         try:
             tid_int = int(tid)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         tx_by_type.setdefault(tid_int, []).append(r)
 

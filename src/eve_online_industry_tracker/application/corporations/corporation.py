@@ -4,6 +4,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
+
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
@@ -805,8 +809,8 @@ class Corporation:
                     npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
                     if npc_corp:
                         resolved[cid] = npc_corp.name[self._db_sde.language]
-                except Exception:
-                    pass
+                except (SQLAlchemyError, KeyError, TypeError) as exc:
+                    logging.warning("NPC corporation %s: no SDE name either (%s)", cid, exc)
         return resolved
 
     def _backfill_wallet_transaction_client_names(self) -> None:
@@ -1189,8 +1193,8 @@ class Corporation:
                         if isinstance(name, str) and name:
                             region_name_cache[region_id] = name
                             return name
-                except Exception:
-                    pass
+                except ESI_REQUEST_ERRORS as exc:
+                    logging.warning("Corporation market orders: region %s name unavailable: %s", region_id, exc)
                 region_name_cache[region_id] = None
                 return None
 
@@ -1220,8 +1224,10 @@ class Corporation:
                                             region_id = region_id_val
                     if region_id:
                         region_name = resolve_region_name(region_id)
-                except Exception:
-                    pass
+                except ESI_REQUEST_ERRORS as exc:
+                    logging.warning(
+                        "Corporation market orders: location %s name/region unavailable: %s", location_id, exc
+                    )
                 resolved = (location_name, region_id, region_name)
                 location_region_cache[location_id] = resolved
                 return resolved

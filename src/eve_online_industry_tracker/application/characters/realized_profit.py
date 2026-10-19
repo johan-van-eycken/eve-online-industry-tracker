@@ -38,7 +38,7 @@ def _safe_float(value: Any) -> float | None:
         if value is None:
             return None
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -47,7 +47,7 @@ def _safe_int(value: Any) -> int | None:
         if value is None:
             return None
         return int(value)
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -61,7 +61,7 @@ def _parse_date(value: Any) -> datetime | None:
         raw_value = raw_value[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw_value)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -268,7 +268,7 @@ def _parse_eve_date(date_str: Any) -> datetime | None:
         return date_str
     try:
         return datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-    except Exception:
+    except ValueError:
         return None
 
 

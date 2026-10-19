@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.application.characters.realized_profit import (
     CharacterRealizedProfitLedgerService,
@@ -16,6 +19,7 @@ from eve_online_industry_tracker.application.market_analysis.pricing_suggestion_
 from eve_online_industry_tracker.application.market_analysis.market_history_service import (
     MarketHistoryService,
 )
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.oauth_character_repository import (
     OAuthCharacterRepository,
 )
@@ -130,7 +134,9 @@ class CharactersService:
                     buy_order_book = self._state.esi_service.get_type_buyprices(sorted(buy_type_ids))
             except AdminSettingInvalid:
                 raise  # a stored invalid setting fails loudly, naming it
-            except Exception:
+            except ESI_REQUEST_ERRORS as exc:
+                # The orders still show, their price status "N/A" (no book to compare with).
+                logging.warning("Market orders: buy order book unavailable, no price comparison: %s", exc)
                 buy_order_book = {}
 
             try:
@@ -138,7 +144,8 @@ class CharactersService:
                     sell_order_book = self._state.esi_service.get_type_sellprices(sorted(sell_type_ids))
             except AdminSettingInvalid:
                 raise  # a stored invalid setting fails loudly, naming it
-            except Exception:
+            except ESI_REQUEST_ERRORS as exc:
+                logging.warning("Market orders: sell order book unavailable, no price comparison: %s", exc)
                 sell_order_book = {}
 
             # Fetch and cache market history for sell orders
@@ -147,21 +154,22 @@ class CharactersService:
                     market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
             except AdminSettingInvalid:
                 raise  # a stored invalid setting fails loudly, naming it
-            except Exception:
-                pass
+            except ESI_REQUEST_ERRORS + (SQLAlchemyError,) as exc:
+                # The pricing suggestions below then work from the history already stored.
+                logging.warning("Market orders: market history refresh stopped: %s", exc)
 
         for character in refreshed_data:
             for order in (character or {}).get("market_orders", []):
                 issued_raw = order.get("issued")
                 try:
                     issued_dt = datetime.fromisoformat(str(issued_raw).replace("Z", "+00:00"))
-                except Exception:
+                except ValueError:
                     issued_dt = now
 
                 duration_days = order.get("duration")
                 try:
                     duration_days_int = int(duration_days)
-                except Exception:
+                except (TypeError, ValueError):
                     duration_days_int = 0
 
                 expires_dt = issued_dt + timedelta(days=duration_days_int)
@@ -180,7 +188,12 @@ class CharactersService:
                 type_id = order.get("type_id")
                 try:
                     order_price = float(order.get("price"))
-                except Exception:
+                except (TypeError, ValueError):
+                    logging.warning(
+                        "Market order %s has no readable price (%r); counted as 0 ISK",
+                        order.get("order_id"),
+                        order.get("price"),
+                    )
                     order_price = 0.0
 
                 if include_orderbook_comparison and isinstance(type_id, int):
@@ -191,8 +204,8 @@ class CharactersService:
                                 highest_price = max(o.get("price", 0) for o in prices_list)
                                 price_difference = order_price - float(highest_price)
                                 price_status = "🟢Best price" if price_difference > 0 else "🔴Undercut"
-                            except Exception:
-                                pass
+                            except (TypeError, ValueError):
+                                pass  # an unreadable book price: the status stays N/A
                     else:
                         prices_list = sell_order_book.get(type_id, []) if isinstance(sell_order_book, dict) else []
                         if prices_list and all(isinstance(o, dict) for o in prices_list):
@@ -200,8 +213,8 @@ class CharactersService:
                                 lowest_price = min(o.get("price", 0) for o in prices_list)
                                 price_difference = order_price - float(lowest_price)
                                 price_status = "🔴Undercut" if price_difference > 0 else "🟢Best price"
-                            except Exception:
-                                pass
+                            except (TypeError, ValueError):
+                                pass  # an unreadable book price: the status stays N/A
 
                 # Best-effort: older cached orders may have region_id but no region_name
                 # due to ID classification/enrichment issues at the time they were stored.
@@ -211,11 +224,12 @@ class CharactersService:
                         region_info = self._state.esi_service.get_location_info(int(order.get("region_id")))
                         if isinstance(region_info, dict):
                             region_name = region_info.get("name")
-                    except Exception:
-                        region_name = None
+                    except ESI_REQUEST_ERRORS:
+                        region_name = None  # display only: falls back to "Region <id>"
 
                 # Get pricing suggestion for sell orders
                 advised_price_data = None
+                pricing_error: str | None = None
                 character_id = order.get("character_id") or (character or {}).get("character_id")
                 corporation_id = int((character or {}).get("corporation_id")) if order.get("is_corporation") and (character or {}).get("corporation_id") else None
                 if not order.get("is_buy_order") and isinstance(type_id, int) and isinstance(character_id, int):
@@ -234,8 +248,15 @@ class CharactersService:
                         )
                     except AdminSettingInvalid:
                         raise  # a stored invalid setting fails loudly, naming it
-                    except Exception:
+                    except (SQLAlchemyError, ValueError, ArithmeticError) as exc:
+                        logging.warning(
+                            "Pricing suggestion failed for order %s (type_id=%s): %s",
+                            order.get("order_id"),
+                            type_id,
+                            exc,
+                        )
                         advised_price_data = None
+                        pricing_error = f"pricing suggestion unavailable: {exc}"
 
                 enriched_order = {
                     "order_id": order.get("order_id"),
@@ -265,6 +286,9 @@ class CharactersService:
                     "type_category_name": order.get("type_category_name", "Unknown"),
                     "is_blueprint_copy": False,
                 }
+
+                if pricing_error:
+                    enriched_order["pricing_error"] = pricing_error
 
                 # Add pricing suggestion if available
                 if advised_price_data:

@@ -5,6 +5,8 @@ import time
 import threading
 from typing import Any, Callable
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo as market_orderbook_cache_repo
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
@@ -67,10 +69,7 @@ class MarketPricingService:
         cfg_manager = getattr(self._state, "cfg_manager", None)
         if cfg_manager is None:
             return {}
-        try:
-            cfg = cfg_manager.all() or {}
-        except Exception:
-            return {}
+        cfg = cfg_manager.all() or {}
         market_pricing_cfg = ((cfg.get("defaults") or {}).get("market_pricing") or {})
         return market_pricing_cfg if isinstance(market_pricing_cfg, dict) else {}
 
@@ -135,7 +134,7 @@ class MarketPricingService:
                 try:
                     price = float(row.get("price") or 0.0)
                     volume = int(row.get("volume_remain") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if price <= 0 or volume <= 0:
                     continue
@@ -160,7 +159,7 @@ class MarketPricingService:
                     continue
                 try:
                     volume = int(row.get("volume_remain") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if volume <= 0:
                     continue
@@ -181,7 +180,7 @@ class MarketPricingService:
             try:
                 prices.append(float(level[0]))
                 volumes.append(int(level[1]))
-            except Exception:
+            except (TypeError, ValueError):
                 continue
 
         if not prices:
@@ -332,7 +331,7 @@ class MarketPricingService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         return result
@@ -425,7 +424,7 @@ class MarketPricingService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         result: dict[int, dict[str, Any]] = {}

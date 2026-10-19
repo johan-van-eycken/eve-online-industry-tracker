@@ -4,6 +4,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.models import StructureNameCacheModel
 from eve_online_industry_tracker.infrastructure.esi_versions import ESI_UNIVERSE_STRUCTURE
 
@@ -103,7 +106,14 @@ class LocationsService:
                         char.character_name,
                     )
                     return data
-            except Exception:
+            except ESI_REQUEST_ERRORS as exc:
+                # Try the next character; the caller falls back to "Structure <id>".
+                logging.warning(
+                    "Structure %s: lookup via character %s failed: %s",
+                    structure_id,
+                    getattr(char, "character_name", "?"),
+                    exc,
+                )
                 continue
         return None
 
@@ -141,7 +151,7 @@ class LocationsService:
             logging.debug("Failed to cache structure %s: %s", structure_id, e)
             try:
                 self._state.db_app.session.rollback()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _lookup_structure_cache(self, structure_id: int) -> dict | None:
@@ -157,8 +167,8 @@ class LocationsService:
                     "owner_id": record.owner_id,
                     "type_id": record.type_id,
                 }
-        except Exception:
-            pass
+        except SQLAlchemyError as exc:
+            logging.warning("Structure name cache lookup for %s failed: %s", structure_id, exc)
         return None
 
     def _lookup_public_structures(self, structure_id: int) -> dict | None:
@@ -175,6 +185,6 @@ class LocationsService:
                     "owner_id": record.owner_id,
                     "type_id": record.type_id,
                 }
-        except Exception:
-            pass
+        except SQLAlchemyError as exc:
+            logging.warning("public_structures lookup for %s failed: %s", structure_id, exc)
         return None

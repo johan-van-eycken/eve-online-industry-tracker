@@ -344,7 +344,7 @@ class PricingSuggestionService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _stored_market_fees(self, *, character_id: int) -> Any:
@@ -403,8 +403,10 @@ class PricingSuggestionService:
                 advisory_cfg = ((cfg.get("defaults") or {}).get("market_advisory") or {})
                 if "min_target_margin_pct" in advisory_cfg:
                     return max(0.0, min(0.50, float(advisory_cfg["min_target_margin_pct"]) / 100))
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            logging.warning(
+                "defaults.market_advisory.min_target_margin_pct is unreadable (%s); using the default 8%%", exc
+            )
         return 0.08
 
     # ── Orderbook preprocessing ───────────────────────────────────────────────
@@ -573,7 +575,7 @@ class PricingSuggestionService:
             oldest = datetime.fromisoformat(str(dates[-1]).replace("Z", "+00:00"))
             newest = datetime.fromisoformat(str(dates[0]).replace("Z", "+00:00"))
             day_span = max(1.0, float((newest - oldest).days + 1))
-        except Exception:
+        except (IndexError, TypeError, ValueError):
             day_span = float(lookback_days)
 
         daily_velocity_raw = total_qty / day_span

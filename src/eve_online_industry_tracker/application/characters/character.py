@@ -11,7 +11,7 @@ from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
-from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
 from eve_online_industry_tracker.infrastructure.models import CharacterModel, CharacterWalletJournalModel \
@@ -306,7 +306,7 @@ class Character:
                             self._db_app.session.add(obj)
                             self._db_app.session.commit()
                             saved += 1
-                        except Exception:
+                        except SQLAlchemyError:  # a duplicate row: skipped, counted below
                             self._db_app.session.rollback()
                     logging.debug(
                         f"Wallet journal fallback insert: {saved}/{len(self.wallet_journal)} for {self.character_name} "
@@ -473,12 +473,9 @@ class Character:
             raise Exception(error_message)
 
     def _get_skill_level(self, *, skill_id: int, skill_name: str | None = None) -> int:
-        try:
-            skills_obj = self.skills or {}
-            skills_list = (skills_obj.get("skills") or []) if isinstance(skills_obj, dict) else []
-            if not isinstance(skills_list, list):
-                skills_list = []
-        except Exception:
+        skills_obj = self.skills or {}
+        skills_list = (skills_obj.get("skills") or []) if isinstance(skills_obj, dict) else []
+        if not isinstance(skills_list, list):
             skills_list = []
 
         for s in skills_list:
@@ -487,7 +484,8 @@ class Character:
             try:
                 if int(s.get("skill_id") or -1) == int(skill_id):
                     return int(s.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logging.warning("Unreadable skill row for %s skipped (%s): %r", self.character_name, exc, s)
                 continue
 
         if skill_name:
@@ -498,7 +496,8 @@ class Character:
                 try:
                     if str(s.get("skill_name") or "").strip().lower() == skill_name_norm:
                         return int(s.get("trained_skill_level") or 0)
-                except Exception:
+                except (TypeError, ValueError) as exc:
+                    logging.warning("Unreadable skill row for %s skipped (%s): %r", self.character_name, exc, s)
                     continue
 
         return 0
@@ -514,7 +513,8 @@ class Character:
                 if int(s.get("from_id") or -1) != int(from_id):
                     continue
                 return float(s.get("standing") or 0.0)
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logging.warning("Unreadable standing row for %s skipped (%s): %r", self.character_name, exc, s)
                 continue
         return 0.0
 
@@ -904,8 +904,8 @@ class Character:
                     npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
                     if npc_corp:
                         resolved[cid] = npc_corp.name[self._db_sde.language]
-                except Exception:
-                    pass
+                except (SQLAlchemyError, KeyError, TypeError) as exc:
+                    logging.warning("NPC corporation %s: no SDE name either (%s)", cid, exc)
         return resolved
 
     def _backfill_wallet_transaction_client_names(self) -> None:
@@ -1357,7 +1357,7 @@ class Character:
             for x in data:
                 try:
                     implant_ids.append(int(x))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
 
             self.implants = sorted(set(implant_ids))
@@ -1407,8 +1407,8 @@ class Character:
                         if isinstance(name, str) and name:
                             region_name_cache[region_id] = name
                             return name
-                except Exception:
-                    pass
+                except ESI_REQUEST_ERRORS as exc:
+                    logging.warning("Market orders: region %s name unavailable: %s", region_id, exc)
 
                 region_name_cache[region_id] = None
                 return None
@@ -1446,9 +1446,9 @@ class Character:
 
                     if region_id:
                         region_name = resolve_region_name(region_id)
-                except Exception:
+                except ESI_REQUEST_ERRORS as exc:
                     # Do not fail refresh_market_orders if enrichment fails.
-                    pass
+                    logging.warning("Market orders: location %s name/region unavailable: %s", location_id, exc)
 
                 resolved = (location_name, region_id, region_name)
                 location_region_cache[location_id] = resolved

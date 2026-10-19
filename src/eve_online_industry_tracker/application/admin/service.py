@@ -157,12 +157,9 @@ class AdminService:
         request_timeout_seconds: float,
     ) -> dict:
         # If a previous run was stopped, allow a new run.
-        try:
-            ev = getattr(self._state, "public_structures_global_scan_stop_event", None)
-            if ev is not None:
-                ev.clear()
-        except Exception:
-            pass
+        ev = getattr(self._state, "public_structures_global_scan_stop_event", None)
+        if ev is not None:
+            ev.clear()
 
         started = trigger_global_public_structures_scan(
             self._state,

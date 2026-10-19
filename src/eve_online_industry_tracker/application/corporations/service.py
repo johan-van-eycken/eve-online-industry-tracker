@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.application.characters.realized_profit import (
     CorporationRealizedProfitLedgerService,
     summarize_realized_profit_rows,
 )
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.esi_versions import ESI_CORP_PUBLIC
 
 
@@ -56,8 +60,9 @@ class CorporationsService:
                 ) or {}
                 if not isinstance(corp_info, dict):
                     corp_info = {}
-            except Exception:
-                pass
+            except ESI_REQUEST_ERRORS as exc:
+                # Display only: the entry falls back to the member's corporation name, no ticker.
+                logging.warning("Public corporation info for %s unavailable: %s", corp_id, exc)
 
             lightweight_corps.append({
                 "corporation_id": corp_id,
@@ -150,22 +155,26 @@ class CorporationsService:
                 buy_order_book = self._state.esi_service.get_type_buyprices(sorted(buy_type_ids))
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
-        except Exception:
+        except ESI_REQUEST_ERRORS as exc:
+            # The orders still show, their price status "N/A" (no book to compare with).
+            logging.warning("Corporation market orders: buy order book unavailable, no price comparison: %s", exc)
             buy_order_book = {}
         try:
             if sell_type_ids:
                 sell_order_book = self._state.esi_service.get_type_sellprices(sorted(sell_type_ids))
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
-        except Exception:
+        except ESI_REQUEST_ERRORS as exc:
+            logging.warning("Corporation market orders: sell order book unavailable, no price comparison: %s", exc)
             sell_order_book = {}
         try:
             for type_id in sell_type_ids:
                 market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
-        except Exception:
-            pass
+        except ESI_REQUEST_ERRORS + (SQLAlchemyError,) as exc:
+            # The pricing suggestions below then work from the history already stored.
+            logging.warning("Corporation market orders: market history refresh stopped: %s", exc)
 
         for corp_data in raw_corp_data:
             corp_orders = (corp_data or {}).get("market_orders", [])
@@ -176,13 +185,13 @@ class CorporationsService:
                 issued_raw = order.get("issued")
                 try:
                     issued_dt = datetime.fromisoformat(str(issued_raw).replace("Z", "+00:00"))
-                except Exception:
+                except ValueError:
                     issued_dt = now
 
                 duration_days_int = 0
                 try:
                     duration_days_int = int(order.get("duration") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     pass
 
                 expires_dt = issued_dt + timedelta(days=duration_days_int)
@@ -198,7 +207,12 @@ class CorporationsService:
                 type_id = order.get("type_id")
                 try:
                     order_price = float(order.get("price") or 0)
-                except Exception:
+                except (TypeError, ValueError):
+                    logging.warning(
+                        "Corporation market order %s has no readable price (%r); counted as 0 ISK",
+                        order.get("order_id"),
+                        order.get("price"),
+                    )
                     order_price = 0.0
 
                 price_difference = 0.0
@@ -211,8 +225,8 @@ class CorporationsService:
                                 highest_price = max(o.get("price", 0) for o in prices_list)
                                 price_difference = order_price - float(highest_price)
                                 price_status = "🟢Best price" if price_difference > 0 else "🔴Undercut"
-                            except Exception:
-                                pass
+                            except (TypeError, ValueError):
+                                pass  # an unreadable book price: the status stays N/A
                     else:
                         prices_list = sell_order_book.get(type_id, [])
                         if prices_list and all(isinstance(o, dict) for o in prices_list):
@@ -220,10 +234,11 @@ class CorporationsService:
                                 lowest_price = min(o.get("price", 0) for o in prices_list)
                                 price_difference = order_price - float(lowest_price)
                                 price_status = "🔴Undercut" if price_difference > 0 else "🟢Best price"
-                            except Exception:
-                                pass
+                            except (TypeError, ValueError):
+                                pass  # an unreadable book price: the status stays N/A
 
                 advised_price_data = None
+                pricing_error: str | None = None
                 if not order.get("is_buy_order") and isinstance(type_id, int) and fallback_character_id is not None:
                     days_remaining_int: int | None = max(0, expires_in_td.days) if expires_in_td.total_seconds() > 0 else None
                     try:
@@ -238,8 +253,15 @@ class CorporationsService:
                         )
                     except AdminSettingInvalid:
                         raise  # a stored invalid setting fails loudly, naming it
-                    except Exception:
+                    except (SQLAlchemyError, ValueError, ArithmeticError) as exc:
+                        logging.warning(
+                            "Pricing suggestion failed for corporation order %s (type_id=%s): %s",
+                            order.get("order_id"),
+                            type_id,
+                            exc,
+                        )
                         advised_price_data = None
+                        pricing_error = f"pricing suggestion unavailable: {exc}"
 
                 enriched_order: dict[str, Any] = {
                     "order_id": order.get("order_id"),
@@ -266,6 +288,9 @@ class CorporationsService:
                     "type_category_name": order.get("type_category_name", "Unknown"),
                     "is_blueprint_copy": False,
                 }
+
+                if pricing_error:
+                    enriched_order["pricing_error"] = pricing_error
 
                 if advised_price_data:
                     enriched_order["advised_price"] = advised_price_data.get("advised_price")
