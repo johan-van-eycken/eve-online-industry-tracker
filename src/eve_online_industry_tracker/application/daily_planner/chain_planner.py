@@ -622,10 +622,20 @@ class ChainPlanner:
             if isinstance(reasons, dict):
                 for type_id in [t for t in reasons if bought_need.get(t, 0) <= max(0, int(stock.get(t, 0)))]:
                     del reasons[type_id]
+        # The phase D buy reasons, which every sizing keeps; a sizing's own
+        # (an unknown-fee component) are replaced on each re-size (H1).
+        phase_d_buy_reasons = {
+            id(d): dict(d.overview_row.get("component_buy_reasons") or {}) for d in build_decisions
+        }
 
         def _sub_decisions(fallen: set[int], dropped: set[int] | frozenset[int] = frozenset()) -> list[ItemDecision]:
             # `dropped` (Task A fix round 1, I2): parents CharacterAssigner
             # gives no manufacture (e.g. owner binding): no sub-builds for them.
+            for decision in build_decisions:
+                if id(decision) in phase_d_buy_reasons and (
+                    phase_d_buy_reasons[id(decision)] or "component_buy_reasons" in decision.overview_row
+                ):
+                    decision.overview_row["component_buy_reasons"] = dict(phase_d_buy_reasons[id(decision)])
             per_parent = [
                 (parent, fallback_requests[parent] if parent in fallen and parent in fallback_requests else requests)
                 for parent, requests in requests_by_parent
@@ -672,6 +682,9 @@ class ChainPlanner:
             bpo_opportunities=bpo_opportunities,
             sub_manufacture_actions=sub_manufacture_actions,
             resize_sub_components=_sub_decisions,
+            sub_request_parent_type_ids=frozenset(
+                parent for parent, requests in requests_by_parent if requests or fallback_requests.get(parent)
+            ),
             rebuild_decisions=_rebuild,
             replan_released=_replan,
             undo_replan=_undo_replan,

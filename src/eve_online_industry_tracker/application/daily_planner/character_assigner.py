@@ -173,9 +173,13 @@ class CharacterAssigner:
                 # Task A fix round 1 (I2): a parent with no manufacture action
                 # (owner binding, no slot) gets no sub-builds either: a
                 # component's quantity is its parents' need.
+                # Every parent with sub-manufacture requests (the plan's
+                # requests_by_parent), not only those a current sub decision
+                # names: a later re-size would otherwise revive the
+                # sub-builds of a parent not built today (H1).
                 requesters = {
                     int(p) for d in sub_components for p in d.overview_row.get("requested_by_type_ids") or []
-                }
+                } | {int(p) for p in getattr(chain_plan, "sub_request_parent_type_ids", None) or ()}
                 no_build = {
                     int(d.type_id) for d in top_level
                     if d.decision == "build" and int(d.type_id) in requesters

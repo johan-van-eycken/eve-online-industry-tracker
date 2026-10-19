@@ -168,6 +168,9 @@ class ChainPlan:
     #: called with those parents' type_ids, returns the new sub-component
     #: decisions. None for a hand-built plan (the plan's sizes then stand).
     resize_sub_components: Any = field(default=None, repr=False, compare=False)
+    #: The parents with sub-manufacture requests (their batch's or their
+    #: research-first fallback's): the ones a re-size can drop.
+    sub_request_parent_type_ids: frozenset[int] = field(default_factory=frozenset)
     #: The plan's decisions for a new set of sub-component decisions, one
     #: ItemDecision per type_id (Task 14). None: top-level + subs as they are.
     rebuild_decisions: Any = field(default=None, repr=False, compare=False)
