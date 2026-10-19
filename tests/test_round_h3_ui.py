@@ -582,3 +582,287 @@ def test_the_builder_and_portfolio_pages_show_every_hidden_note():
 
     for page in (industry_builder, portfolio_planner):
         assert "unknown_value_hidden_notes(" in inspect.getsource(page)
+
+
+# =============================================================================================
+# 9. Wallet location names: one request, a failure memo (not re-asked on every rerun), no error caching
+# =============================================================================================
+
+
+@pytest.fixture
+def wallet_ui(monkeypatch):
+    import streamlit_ui.components.wallet_ui as wallet_ui
+
+    now = [1000.0]
+    monkeypatch.setattr(wallet_ui, "_monotonic", lambda: now[0])
+    wallet_ui.reset_location_names_cache()
+    yield SimpleNamespace(module=wallet_ui, now=now)
+    wallet_ui.reset_location_names_cache()
+
+
+def test_wallet_location_names_are_fetched_once_and_cached(monkeypatch, wallet_ui, st_messages):
+    calls = []
+    monkeypatch.setattr(wallet_ui.module, "api_post", lambda path, payload: calls.append(payload) or {
+        "status": "success", "data": {"60003760": {"name": "Jita IV - Moon 4"}}})
+    assert wallet_ui.module.fetch_location_name_map([60003760, "60003760", None]) == {60003760: "Jita IV - Moon 4"}
+    assert wallet_ui.module.fetch_location_name_map([60003760]) == {60003760: "Jita IV - Moon 4"}
+    assert calls == [{"location_ids": [60003760]}]
+
+
+def test_a_failed_location_lookup_is_memoised_briefly_and_then_asked_again(monkeypatch, wallet_ui, st_messages):
+    calls = []
+    monkeypatch.setattr(wallet_ui.module, "api_post", lambda path, payload: calls.append(payload) or None)
+    assert wallet_ui.module.fetch_location_name_map([60003760]) == {}
+    wallet_ui.now[0] += 5.0
+    assert wallet_ui.module.fetch_location_name_map([60003760]) == {}
+    assert len(calls) == 1  # the rerun did not ask again
+    warnings = [body for kind, body in st_messages if kind == "warning"]
+    assert len(warnings) == 2 and all("Location names could not be loaded" in w for w in warnings)
+    wallet_ui.now[0] += wallet_ui.module.LOCATION_NAMES_FAILURE_MEMO_SECONDS
+    monkeypatch.setattr(wallet_ui.module, "api_post", lambda path, payload: calls.append(payload) or {
+        "status": "success", "data": {"60003760": {"name": "Jita IV - Moon 4"}}})
+    assert wallet_ui.module.fetch_location_name_map([60003760]) == {60003760: "Jita IV - Moon 4"}
+    assert len(calls) == 2  # the failure was not cached
+
+
+def test_an_error_body_is_a_failure_with_its_reason(monkeypatch, wallet_ui, st_messages):
+    monkeypatch.setattr(wallet_ui.module, "api_post",
+                        lambda path, payload: {"status": "error", "message": "fake ESI down"})
+    assert wallet_ui.module.fetch_location_name_map([60003760]) == {}
+    assert any(kind == "warning" and "fake ESI down" in body for kind, body in st_messages)
+
+
+# =============================================================================================
+# 10. Admin settings: the NPC station caption is cached, a failed lookup is not
+# =============================================================================================
+
+
+def test_the_station_caption_is_cached_and_its_failure_is_not(monkeypatch):
+    from streamlit_ui.pages import admin_settings as page
+
+    calls = []
+    responses = [(None, "HTTP 503"),
+                 ({"data": {"station_id": 60003760, "name": "Jita IV - Moon 4", "problem": None}}, None)]
+    monkeypatch.setattr(page, "api_get_or_error", lambda path: calls.append(path) or responses.pop(0))
+    page._station_name_data.clear()
+    try:
+        caption, problem = page._station_caption(60003760)
+        assert caption is None and "HTTP 503" in problem
+        assert page._station_caption(60003760) == ("NPC station 60003760: Jita IV - Moon 4", None)
+        assert page._station_caption(60003760) == ("NPC station 60003760: Jita IV - Moon 4", None)
+        assert len(calls) == 2  # the failure was asked again, the success was cached
+    finally:
+        page._station_name_data.clear()
+
+
+# =============================================================================================
+# 11. Industry Jobs page: the build cost and the invention cost reason, where the payload has them
+# =============================================================================================
+
+
+def test_the_job_cost_lines_show_the_build_cost_and_the_reason():
+    from streamlit_ui.pages import industry_jobs as page
+
+    job = {"total_build_cost": 12_000_000.0, "unit_build_cost": 1_200_000.0,
+           "invention_cost_unknown_reason": "invention cost unknown: fake missing datacore price"}
+    lines = page._job_cost_lines(job)
+    assert any("Build cost" in line and "12" in line for line in lines)
+    assert any("fake missing datacore price" in line for line in lines)
+
+
+def test_the_job_cost_lines_tolerate_absent_keys():
+    from streamlit_ui.pages import industry_jobs as page
+
+    assert page._job_cost_lines({"cost": 1000.0}) == []
+    assert page._job_cost_lines({"total_build_cost": None, "invention_cost_unknown_reason": None}) == []
+
+
+def test_the_table_has_the_cost_columns_only_when_the_payload_has_them():
+    from streamlit_ui.pages import industry_jobs as page
+
+    plain = page._table_rows([{"activity_name": "Manufacturing", "cost": 10.0}])
+    assert "Build Cost" not in plain[0] and "Cost Note" not in plain[0]
+    rows = page._table_rows([{"activity_name": "Manufacturing", "cost": 10.0, "total_build_cost": None,
+                              "invention_cost_unknown_reason": "fake reason"},
+                             {"activity_name": "Manufacturing", "cost": 10.0}])
+    assert rows[0]["Build Cost"] is None and rows[0]["Cost Note"] == "fake reason"
+    assert rows[1]["Build Cost"] is None and rows[1]["Cost Note"] == ""
+
+
+# =============================================================================================
+# 12. Routes: a malformed type_ids or a non-positive industry_profile_id is a 400
+# =============================================================================================
+
+
+@pytest.fixture
+def industry_client(monkeypatch):
+    from flask_app.app import create_app
+    import flask_app.routes.industry as routes
+
+    monkeypatch.setattr(routes, "require_ready", lambda s: None)
+    monkeypatch.setattr(routes, "require_sde_ready", lambda s: None)
+    return create_app().test_client()
+
+
+@pytest.mark.parametrize("path", [
+    "/industry/blueprint_skill_qualification?blueprint_type_ids=1,x",
+    "/industry/reorder_alerts?type_ids=34,,abc",
+    "/industry/track_record?type_ids=1.5",
+])
+def test_malformed_type_ids_are_a_400(industry_client, path):
+    resp = industry_client.get(path)
+    assert resp.status_code == 400
+    assert "type_ids" in resp.get_json()["message"]
+
+
+def test_well_formed_type_ids_still_reach_the_service(industry_client, monkeypatch):
+    import flask_app.routes.industry as routes
+
+    seen = []
+
+    class _FakeService:
+        def __init__(self, state):
+            pass
+
+        def get_type_track_record(self, *, type_ids, today_iso):
+            seen.append(type_ids)
+            return {34: {"status": "proven"}}
+
+    monkeypatch.setattr(routes, "IndustryService", _FakeService)
+    body = industry_client.get("/industry/track_record?type_ids=34, 35").get_json()
+    assert body["data"] == {"34": {"status": "proven"}} and seen == [[34, 35]]
+    assert industry_client.get("/industry/track_record?type_ids=").get_json()["data"] == {}
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "abc", "2.5"])
+def test_a_non_positive_or_malformed_industry_profile_id_query_is_a_400(industry_client, value):
+    resp = industry_client.get(f"/industry_products/1?industry_profile_id={value}")
+    assert resp.status_code == 400
+    assert "industry_profile_id" in resp.get_json()["message"]
+
+
+@pytest.mark.parametrize("path", ["/industry_products/1/refresh", "/industry_products/1/portfolio_candidates/start"])
+@pytest.mark.parametrize("value", [0, -1, True, "x", 2.5])
+def test_a_non_positive_or_malformed_industry_profile_id_payload_is_a_400(industry_client, path, value):
+    resp = industry_client.post(path, json={"industry_profile_id": value})
+    assert resp.status_code == 400
+    assert "industry_profile_id" in resp.get_json()["message"]
+
+
+def test_the_industry_profile_id_param():
+    from eve_online_industry_tracker.application.errors import ServiceError
+    from flask_app.routes.industry import _industry_profile_id_param
+
+    assert _industry_profile_id_param({}) is None
+    assert _industry_profile_id_param({"industry_profile_id": ""}) is None
+    assert _industry_profile_id_param({"industry_profile_id": None}) is None
+    assert _industry_profile_id_param({"industry_profile_id": "7"}) == 7
+    assert _industry_profile_id_param({"industry_profile_id": 7}) == 7
+    with pytest.raises(ServiceError) as excinfo:
+        _industry_profile_id_param({"industry_profile_id": 0})
+    assert excinfo.value.status_code == 400
+
+
+def test_the_ui_sends_no_industry_profile_id_for_none_selected(monkeypatch):
+    from streamlit_ui.api import industry_builder as api
+
+    sent = []
+    monkeypatch.setattr(api, "api_post", lambda path, payload: sent.append(payload) or {"status": "success", "data": {}})
+    common = dict(maximize_bp_runs=False, group_identical_bpcs=True, build_from_bpc=True,
+                  have_blueprint_source_only=True, include_reactions=False, market_hub="jita",
+                  material_price_side="sell", product_price_side="sell", owned_blueprints_scope="all_characters",
+                  character_id=1)
+    api.start_product_overview_refresh(industry_profile_id=0, **common)
+    api.start_portfolio_candidates_refresh(industry_profile_id=0, planning_horizon_hours=24.0, **common)
+    assert [payload["industry_profile_id"] for payload in sent] == [None, None]
+
+
+# =============================================================================================
+# 14. Admin settings page: a stored invalid value is shown and an unchanged save does not overwrite it
+# =============================================================================================
+
+
+class _AdminFakeSt:
+    def __init__(self, *, click_save=True, choices=None):
+        self.errors: list[str] = []
+        self.buttons: dict[str, dict] = {}
+        self.inputs: dict[str, object] = {}
+        self.click_save = click_save
+        self.choices = choices or {}
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+    def error(self, body, *a, **k):
+        self.errors.append(str(body))
+
+    def columns(self, spec):
+        return [_NullContext() for _ in range(spec if isinstance(spec, int) else len(spec))]
+
+    def number_input(self, label, *, value=None, key=None, **k):
+        self.inputs[key] = value
+        return self.choices.get(key, value)
+
+    def checkbox(self, label, *, value=False, key=None, **k):
+        self.inputs[key] = value
+        return self.choices.get(key, value)
+
+    def selectbox(self, label, *, options, index=0, key=None, **k):
+        self.inputs[key] = options[index]
+        return self.choices.get(key, options[index])
+
+    def text_input(self, label, *, value="", key=None, **k):
+        self.inputs[key] = value
+        return self.choices.get(key, value)
+
+    def button(self, label, *a, disabled=False, **k):
+        self.buttons[label] = {"disabled": disabled}
+        return label == "Save Settings" and self.click_save and not disabled
+
+    def rerun(self):
+        pass
+
+
+_ADMIN_SCHEMA = {"market_fees": {"label": "Market fees", "settings": {
+    "relist_count": {"type": "int", "default": 2, "min": 0, "max": 10, "label": "Relists"},
+    "hub": {"type": "select", "default": "jita", "label": "Hub",
+            "options": [{"value": "jita", "label": "Jita"}, {"value": "amarr", "label": "Amarr"}]},
+    "enabled": {"type": "bool", "default": True, "label": "Enabled"},
+    "note": {"type": "str", "default": "", "label": "Note"},
+}}}
+_ADMIN_VALUES = {"market_fees": {"relist_count": 50, "hub": "atlantis", "enabled": 1.0, "note": "keep"}}
+_ADMIN_INVALID = {"market_fees": {"relist_count": {"value": 50, "problem": "50 is above the maximum 10"},
+                                  "hub": {"value": "atlantis", "problem": "not an option"},
+                                  "enabled": {"value": 1.0, "problem": "not a boolean"}}}
+
+
+def _render_admin(monkeypatch, fake):
+    from streamlit_ui.pages import admin_settings as page
+
+    puts = []
+    monkeypatch.setattr(page, "st", fake)
+    monkeypatch.setattr(page, "api_get", lambda path: {"status": "success", "data": {
+        "schema": _ADMIN_SCHEMA, "values": _ADMIN_VALUES, "invalid": _ADMIN_INVALID}})
+    monkeypatch.setattr(page, "api_put_or_error", lambda path, payload: puts.append(payload) or ({"status": "success"}, None))
+    monkeypatch.setattr(page, "api_post", lambda path, payload: pytest.fail("no reset expected"))
+    page.render()
+    return puts
+
+
+def test_the_admin_page_shows_each_invalid_value_and_an_unchanged_save_writes_nothing(monkeypatch):
+    fake = _AdminFakeSt(click_save=True)
+    puts = _render_admin(monkeypatch, fake)
+    for needle in ("50", "'atlantis'", "1.0"):
+        assert any(needle in error for error in fake.errors), needle
+    assert fake.inputs["admin_market_fees_relist_count"] is None       # not clamped to 10, not the default
+    # The stored invalid entry stays selected (the selectbox shows labels).
+    assert fake.inputs["admin_market_fees_hub"] == "Invalid stored value: 'atlantis'"
+    assert fake.inputs["admin_market_fees_enabled"] == "Invalid stored value: 1.0"
+    assert fake.buttons["Save Settings"]["disabled"] is True
+    assert puts == []
+
+
+def test_a_save_of_another_setting_leaves_the_invalid_values_alone(monkeypatch):
+    fake = _AdminFakeSt(click_save=True, choices={"admin_market_fees_note": "changed"})
+    puts = _render_admin(monkeypatch, fake)
+    assert puts == [{"market_fees": {"note": "changed"}}]

@@ -82,16 +82,32 @@ def _pending_value(*, new: object, current: object, problem: str | None) -> obje
     return NO_CHANGE if new == current and not problem else new
 
 
+class _StationNameFailed(RuntimeError):
+    pass
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _station_name_data(station_id: int) -> dict:
+    """/npc_stations/<id>/name's data, cached per station (every rerun of the
+    settings page used to ask again). A failed request raises, and
+    st.cache_data keeps no result of a call that raised."""
+    body, failure = api_get_or_error(f"/npc_stations/{station_id}/name")
+    if failure:
+        raise _StationNameFailed(failure)
+    data = (body or {}).get("data") if isinstance(body, dict) else None
+    return data if isinstance(data, dict) else {}
+
+
 def _station_caption(station_id: object) -> tuple[str | None, str | None]:
     """(caption, problem) for the reprocessing/npc_station_id input: the
     station's full name from the SDE, or why it has none (never an error
     for the page)."""
     if station_id is None or isinstance(station_id, bool) or not isinstance(station_id, int):
         return None, None
-    body, failure = api_get_or_error(f"/npc_stations/{station_id}/name")
-    if failure:
-        return None, f"NPC station {station_id}: the name could not be read ({failure})"
-    data = (body or {}).get("data") or {}
+    try:
+        data = _station_name_data(station_id)
+    except _StationNameFailed as exc:
+        return None, f"NPC station {station_id}: the name could not be read ({exc})"
     if data.get("name"):
         note = f" ({data['note']})" if data.get("note") else ""
         return f"NPC station {station_id}: {data['name']}{note}", None

@@ -128,6 +128,8 @@ def test_the_station_name_route_answers_with_the_name_or_the_reason(station_sde)
 def test_the_settings_page_shows_the_resolved_station_name(monkeypatch):
     from streamlit_ui.pages import admin_settings as page
 
+    # Round H3: the name is cached per station; each response here is a fresh read.
+    page._station_name_data.clear()
     monkeypatch.setattr(page, "api_get_or_error", lambda path: (
         {"data": {"station_id": 60003760, "name": "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
                   "problem": None}}, None))
@@ -137,10 +139,12 @@ def test_the_settings_page_shows_the_resolved_station_name(monkeypatch):
         {"data": {"station_id": 1, "name": None, "problem": "no NPC station 1 in the SDE npcStations"}}, None))
     caption, problem = page._station_caption(1)
     assert caption is None and "no NPC station 1" in problem
+    page._station_name_data.clear()
     monkeypatch.setattr(page, "api_get_or_error", lambda path: (None, "HTTP 503"))
     caption, problem = page._station_caption(1)
     assert caption is None and "HTTP 503" in problem
     assert page._station_caption(None) == (None, None)
+    page._station_name_data.clear()
 
 
 def test_the_local_sde_names_jita_4_4():

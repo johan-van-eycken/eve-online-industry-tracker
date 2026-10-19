@@ -8,6 +8,14 @@ from streamlit_ui.api.client import api_get, api_post
 from streamlit_ui.api.streamlit_client import cached_api_get
 
 
+def _profile_id_payload(industry_profile_id: int | None) -> int | None:
+    """The page's "no profile" (None or 0) is sent as None: the API refuses
+    a non-positive industry_profile_id."""
+    if industry_profile_id is None or int(industry_profile_id) <= 0:
+        return None
+    return int(industry_profile_id)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_product_overview(
     *,
@@ -82,7 +90,7 @@ def start_product_overview_refresh(
             "market_hub": str(market_hub),
             "material_price_side": str(material_price_side),
             "product_price_side": str(product_price_side),
-            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
+            "industry_profile_id": _profile_id_payload(industry_profile_id),
             "owned_blueprints_scope": str(owned_blueprints_scope),
         },
     ) or {}
@@ -120,7 +128,7 @@ def start_portfolio_candidates_refresh(
             "market_hub": str(market_hub),
             "material_price_side": str(material_price_side),
             "product_price_side": str(product_price_side),
-            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
+            "industry_profile_id": _profile_id_payload(industry_profile_id),
             "owned_blueprints_scope": str(owned_blueprints_scope),
             "planning_horizon_hours": float(planning_horizon_hours),
             "have_skills_only": bool(have_skills_only),

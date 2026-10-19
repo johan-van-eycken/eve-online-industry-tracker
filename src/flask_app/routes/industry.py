@@ -73,6 +73,35 @@ def _planning_horizon_param(params) -> float:
     return hours
 
 
+def _industry_profile_id_param(params) -> int | None:
+    """industry_profile_id: None when absent or blank; otherwise a positive
+    integer. A malformed, fractional, boolean, 0 or negative id is a 400
+    naming the field (a 0 used to mean "no profile" silently)."""
+    profile_id = _number_param(params, "industry_profile_id", None, int)
+    if profile_id is not None and profile_id <= 0:
+        raise ServiceError(
+            f"Invalid industry_profile_id: must be a positive integer, got {params.get('industry_profile_id')!r}.",
+            status_code=400,
+        )
+    return profile_id
+
+
+def _type_ids_param(key: str) -> list[int]:
+    """A comma-separated id list query value: [] when absent or blank. A
+    malformed entry (not a whole number, or an empty entry between commas)
+    is a 400 naming the field, not an empty result."""
+    raw = (request.args.get(key) or "").strip()
+    if not raw:
+        return []
+    ids: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part.isdigit():
+            raise ServiceError(f"Invalid {key}: must be comma-separated type ids, got {raw!r}.", status_code=400)
+        ids.append(int(part))
+    return ids
+
+
 def _string_list_payload(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -222,16 +251,7 @@ def industry_products(character_id: int):
     market_hub = str(request.args.get("market_hub") or "jita").strip().lower() or "jita"
     material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
     product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
-    industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
-    if industry_profile_id_raw:
-        try:
-            industry_profile_id = int(industry_profile_id_raw)
-        except (ValueError, TypeError):
-            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
-        if industry_profile_id <= 0:
-            industry_profile_id = None
-    else:
-        industry_profile_id = None
+    industry_profile_id = _industry_profile_id_param(request.args)
     owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
     payload = svc.industry_manufacturing_product_overview_payload(
@@ -268,16 +288,7 @@ def industry_products_refresh(character_id: int):
     material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
     product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
     force_refresh = bool(payload.get("force_refresh", True))
-    raw_industry_profile_id = payload.get("industry_profile_id")
-    if raw_industry_profile_id is not None:
-        try:
-            industry_profile_id = int(raw_industry_profile_id)
-        except (ValueError, TypeError):
-            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
-        if industry_profile_id <= 0:
-            industry_profile_id = None
-    else:
-        industry_profile_id = None
+    industry_profile_id = _industry_profile_id_param(payload)
     owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
     return ok(
@@ -322,16 +333,7 @@ def industry_portfolio_candidates_start(character_id: int):
     material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
     product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
     owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
-    raw_industry_profile_id = payload.get("industry_profile_id")
-    if raw_industry_profile_id is not None:
-        try:
-            industry_profile_id = int(raw_industry_profile_id)
-        except (ValueError, TypeError):
-            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
-        if industry_profile_id <= 0:
-            industry_profile_id = None
-    else:
-        industry_profile_id = None
+    industry_profile_id = _industry_profile_id_param(payload)
     planning_horizon_hours = _planning_horizon_param(payload)
     have_skills_only = bool(payload.get("have_skills_only", True))
 
@@ -381,16 +383,7 @@ def industry_portfolio_candidates(character_id: int):
     material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
     product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
     planning_horizon_hours = _planning_horizon_param(request.args)
-    industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
-    if industry_profile_id_raw:
-        try:
-            industry_profile_id = int(industry_profile_id_raw)
-        except (ValueError, TypeError):
-            return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
-        if industry_profile_id <= 0:
-            industry_profile_id = None
-    else:
-        industry_profile_id = None
+    industry_profile_id = _industry_profile_id_param(request.args)
     owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
     payload = svc.industry_manufacturing_portfolio_candidates_payload(
@@ -457,16 +450,7 @@ def industry_portfolio_plan(character_id: int):
         material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
         product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
         owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
-        raw_industry_profile_id = payload.get("industry_profile_id")
-        if raw_industry_profile_id is not None:
-            try:
-                industry_profile_id = int(raw_industry_profile_id)
-            except (ValueError, TypeError):
-                return error(message="Invalid industry_profile_id: must be an integer.", status_code=400)
-            if industry_profile_id <= 0:
-                industry_profile_id = None
-        else:
-            industry_profile_id = None
+        industry_profile_id = _industry_profile_id_param(payload)
 
         candidate_payload = svc.industry_manufacturing_portfolio_candidates_payload(
             maximize_bp_runs=maximize_bp_runs,
@@ -608,12 +592,8 @@ def industry_active_jobs():
 @industry_bp.get("/industry/blueprint_skill_qualification")
 def industry_blueprint_skill_qualification():
     require_ready(get_state())
-    raw = (request.args.get("blueprint_type_ids") or "").strip()
-    if not raw:
-        return ok(data={})
-    try:
-        type_ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
-    except ValueError:
+    type_ids = _type_ids_param("blueprint_type_ids")
+    if not type_ids:
         return ok(data={})
     svc = IndustryService(state=get_state())
     result = svc.get_blueprint_skill_qualification(blueprint_type_ids=type_ids)
@@ -624,12 +604,8 @@ def industry_blueprint_skill_qualification():
 @industry_bp.get("/industry/reorder_alerts")
 def industry_reorder_alerts():
     require_ready(get_state())
-    raw = (request.args.get("type_ids") or "").strip()
-    if not raw:
-        return ok(data={})
-    try:
-        type_ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
-    except ValueError:
+    type_ids = _type_ids_param("type_ids")
+    if not type_ids:
         return ok(data={})
     from datetime import date
     today_iso = date.today().isoformat()
@@ -641,12 +617,8 @@ def industry_reorder_alerts():
 @industry_bp.get("/industry/track_record")
 def industry_track_record():
     require_ready(get_state())
-    raw = (request.args.get("type_ids") or "").strip()
-    if not raw:
-        return ok(data={})
-    try:
-        type_ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
-    except ValueError:
+    type_ids = _type_ids_param("type_ids")
+    if not type_ids:
         return ok(data={})
     from datetime import date
     today_iso = date.today().isoformat()
