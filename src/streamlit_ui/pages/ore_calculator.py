@@ -205,7 +205,7 @@ def render():
                 )
 
             tiered_total_cost = result.get("tiered_total_cost", 0.0)
-            # None when the fee is unknown (a produced mineral has no price): shown as unknown, not as 0.
+            # None when the fee is unknown (a produced mineral has no adjusted price): shown as unknown, not as 0.
             total_cost_with_reprocessing = result.get("total_cost_with_reprocessing")
             if total_cost_with_reprocessing is None:
                 savings, savings_pct = None, None
@@ -275,7 +275,9 @@ def render():
     colc1.metric(
         "Reprocessing Fee (ISK)",
         f"{reprocessing_fee:,.2f}" if reprocessing_fee is not None else "unknown",
-        help=fee_unknown_reason or "The facility's tax on the estimated value of the minerals produced (ESI sell prices).",
+        help=fee_unknown_reason or ("The facility's tax on the minerals produced, valued at ESI's adjusted price "
+                                     "(the price the industry job cost uses; per community testing, not an official "
+                                     "CCP statement)."),
     )
 
     colc2.metric("Direct Minerals Cost (ISK)", f"{tiered_cost:,.2f}", help="Total ISK if you buy all minerals directly from the market.")

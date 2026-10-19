@@ -664,8 +664,8 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "step": 0.0005,
                 "format": "%.4f",
                 "label": "Ore calculator: reprocessing tax (effective rate)",
-                "help": "The effective reprocessing tax (a fraction), charged on the estimated value of the "
-                        "minerals produced. At an NPC station, empty uses the station's SDE base tax; your "
+                "help": "The effective reprocessing tax (a fraction), charged on the minerals produced at their "
+                        "ESI adjusted price (per community testing). At an NPC station, empty uses the station's SDE base tax; your "
                         "standings lower it, so set the rate you actually pay here (after standings). At a player "
                         "structure the owner sets it, so it is required.",
             },

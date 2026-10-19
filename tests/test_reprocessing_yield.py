@@ -377,11 +377,17 @@ def test_the_character_method_uses_the_id_keyed_levels(monkeypatch):
 # --- the optimizer -------------------------------------------------------------------------
 
 class _FakeEsi:
-    def __init__(self, prices):
+    """prices: the sell-order prices; adjusted: ESI /markets/prices adjusted_price."""
+
+    def __init__(self, prices, adjusted=None):
         self._prices = prices
+        self._adjusted = adjusted if adjusted is not None else {}
 
     def get_material_prices(self, ids):
         return {i: [{"price": p}] for i, p in self._prices.items() if i in ids}
+
+    def get_market_prices(self):
+        return [{"type_id": i, "adjusted_price": p, "average_price": 99.0} for i, p in self._adjusted.items()]
 
     def get_ore_prices(self, ids):
         return {i: [{"price": 10.0, "volume_remain": 10_000_000}] for i in ids}
@@ -390,7 +396,7 @@ class _FakeEsi:
         return {"region_id": 10000002}
 
 
-def _run(monkeypatch, tmp_path, prices, *, facility_id=None, solution_batches=10.0):
+def _run(monkeypatch, tmp_path, prices, *, adjusted=None, facility_id=None, solution_batches=10.0):
     from eve_online_industry_tracker.infrastructure.static_data import optimizer_service
 
     monkeypatch.setattr(optimizer_service, "build_all_ores", lambda session, language: [VELDSPAR])
@@ -407,24 +413,46 @@ def _run(monkeypatch, tmp_path, prices, *, facility_id=None, solution_batches=10
     character = SimpleNamespace(reprocessing_skills=ALL_FIVE)
     payload = {"demands": {"Tritanium": 2000}, "facility_id": facility_id or facility_repo.CONFIGURED_FACILITY_ID,
                "implant_pct": 4}
-    return optimizer_service.run_optimize(payload, character=character, esi_service=_FakeEsi(prices),
+    return optimizer_service.run_optimize(payload, character=character, esi_service=_FakeEsi(prices, adjusted),
                                           sde_session=None, language="en", admin_settings=mgr)
 
 
-def test_the_fee_taxes_the_value_of_the_minerals_produced(monkeypatch, tmp_path):
-    result = _run(monkeypatch, tmp_path, {34: 4.0})
-    # An unrigged Athanor (73.81%): 10 batches x 295 Tritanium x 4 ISK x 5% tax, not 5% of the 1000 ISK
-    # paid for the ore.
+def test_the_fee_taxes_the_minerals_produced_at_their_adjusted_price(monkeypatch, tmp_path):
+    result = _run(monkeypatch, tmp_path, {34: 4.0}, adjusted={34: 3.0})
+    # An unrigged Athanor (73.81%): 10 batches x 295 Tritanium x 3 ISK (the adjusted price, not the 4 ISK
+    # sell price) x 5% tax, not 5% of the 1000 ISK paid for the ore.
     assert result["demand_coverage"]["Tritanium"]["yielded"] == 2950
-    assert result["reprocessing_fee"] == pytest.approx(2950 * 4.0 * 0.05)
-    assert result["total_cost_with_reprocessing"] == pytest.approx(1000.0 + 2950 * 4.0 * 0.05)
+    assert result["reprocessing_fee"] == pytest.approx(2950 * 3.0 * 0.05)
+    assert result["total_cost_with_reprocessing"] == pytest.approx(1000.0 + 2950 * 3.0 * 0.05)
+    assert result["reprocessing_fee_unknown_reason"] is None
     assert result["ore_yields"][0]["batch_yields"] == {"Tritanium": 295}
+    # The mineral value the optimizer reports stays at the sell price.
+    assert result["raw_comparator"][0]["Unit Price (ISK)"] == 4.0
+    assert result["reprocessing_fee_basis"]["Tritanium"] == {"adjusted_price": 3.0, "quantity": 2950}
 
 
-def test_the_fee_without_a_mineral_price_is_unknown_with_a_reason(monkeypatch, tmp_path):
-    result = _run(monkeypatch, tmp_path, {})
+def test_the_fee_without_an_adjusted_price_is_unknown_with_a_reason(monkeypatch, tmp_path):
+    result = _run(monkeypatch, tmp_path, {34: 4.0}, adjusted={})   # a sell price, but no adjusted price
     assert result["reprocessing_fee"] is None and result["total_cost_with_reprocessing"] is None
-    assert "Tritanium" in result["reprocessing_fee_unknown_reason"]
+    reason = result["reprocessing_fee_unknown_reason"]
+    assert "Tritanium" in reason and "adjusted price" in reason
+
+
+def test_the_fee_when_esi_prices_fail_is_unknown_with_the_reason(monkeypatch, tmp_path, caplog):
+    def failing():
+        raise RuntimeError("ESI request failed: 503")
+
+    monkeypatch.setattr(_FakeEsi, "get_market_prices", lambda self: failing())
+    with caplog.at_level(logging.WARNING):
+        result = _run(monkeypatch, tmp_path, {34: 4.0}, adjusted={34: 3.0})
+    assert result["reprocessing_fee"] is None and result["total_cost_with_reprocessing"] is None
+    assert "503" in result["reprocessing_fee_unknown_reason"]
+    assert any("503" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_the_fee_does_not_need_a_sell_price(monkeypatch, tmp_path):
+    result = _run(monkeypatch, tmp_path, {}, adjusted={34: 3.0})
+    assert result["reprocessing_fee"] == pytest.approx(2950 * 3.0 * 0.05)
 
 
 def test_an_unknown_facility_id_is_refused(monkeypatch, tmp_path):

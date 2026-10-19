@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+import logging
 import time
+from typing import Any
 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
@@ -13,6 +14,8 @@ from eve_online_industry_tracker.infrastructure.static_data.facility_repo import
 from eve_online_industry_tracker.infrastructure.sde.static_data import build_all_materials, build_all_ores
 from eve_online_industry_tracker.infrastructure.static_data.yield_calc import compute_yields
 from eve_online_industry_tracker.infrastructure.static_data.optimizer import optimize_ore_tiered
+
+logger = logging.getLogger(__name__)
 
 
 def _build_raw_comparator_rows(
@@ -149,23 +152,50 @@ def _build_price_provenance(
     }
 
 
+def _adjusted_prices(esi_service: ESIService, type_ids: list[int]) -> dict[int, float]:
+    """{type id: adjusted_price} from ESI /markets/prices, the source the
+    industry job cost uses (ESIService.get_market_prices, read by
+    IndustryService._get_adjusted_market_price_map). A type without an
+    adjusted price is left out (no average or base price stands in)."""
+    wanted = {int(t) for t in type_ids}
+    out: dict[int, float] = {}
+    for row in esi_service.get_market_prices() or []:
+        if not isinstance(row, dict) or row.get("adjusted_price") is None:
+            continue
+        try:
+            type_id = int(row.get("type_id"))
+        except (TypeError, ValueError):
+            continue
+        if type_id in wanted:
+            out[type_id] = float(row["adjusted_price"])
+    return out
+
+
 def _reprocessing_fee(
     *,
     tax: float,
     demand_coverage: dict[str, dict[str, float]],
-    material_prices: dict[str, float | None],
-) -> tuple[float | None, str | None]:
-    """The facility's tax on the estimated value of the minerals produced
-    (every yielded unit, surplus included), valued at the optimizer's
-    mineral prices (ESI sell orders). (None, reason) when a produced
-    mineral has no price."""
-    unpriced = sorted(m for m, c in demand_coverage.items()
-                      if float(c.get("yielded") or 0.0) > 0 and material_prices.get(m) is None)
+    material_ids: dict[str, int],
+    adjusted_prices: dict[int, float],
+) -> tuple[float | None, str | None, dict[str, dict[str, float]]]:
+    """(fee, reason, basis): the facility's tax on every mineral produced
+    (surplus included) at its adjusted price (ESI /markets/prices
+    adjusted_price), x the refined quantity x the tax.
+
+    That EVE charges the reprocessing tax on the adjusted price, the price
+    the industry job cost uses, rests on community testing, not on an
+    official CCP statement. (None, reason, {}) when a produced mineral has
+    no adjusted price. basis is {mineral: {"adjusted_price", "quantity"}}."""
+    produced = {m: float(c.get("yielded") or 0.0) for m, c in demand_coverage.items()
+                if float(c.get("yielded") or 0.0) > 0}
+    unpriced = sorted(m for m in produced
+                      if material_ids.get(m) is None or adjusted_prices.get(material_ids[m]) is None)
     if unpriced:
-        return None, f"no mineral price for {', '.join(unpriced)}: the reprocessing fee is unknown"
-    value = sum(float(c.get("yielded") or 0.0) * float(material_prices[m] or 0.0)
-                for m, c in demand_coverage.items() if float(c.get("yielded") or 0.0) > 0)
-    return value * tax, None
+        return None, (f"no ESI adjusted price for {', '.join(unpriced)}: the reprocessing fee is unknown"), {}
+    basis = {m: {"adjusted_price": adjusted_prices[material_ids[m]], "quantity": quantity}
+             for m, quantity in produced.items()}
+    value = sum(b["adjusted_price"] * b["quantity"] for b in basis.values())
+    return value * tax, None, basis
 
 
 def run_optimize(
@@ -274,10 +304,19 @@ def run_optimize(
     result["demand_coverage"] = demand_coverage
     result["raw_total_volume"] = raw_total_volume
     result["total_raw_volume"] = raw_total_volume
-    fee, fee_unknown_reason = _reprocessing_fee(tax=facility.tax, demand_coverage=demand_coverage,
-                                                material_prices=mat_name_to_price)
+    material_ids = {str(m["name"]): int(m["id"]) for m in materials if m["name"] in req_mats}
+    try:
+        adjusted_prices = _adjusted_prices(esi_service, list(material_ids.values()))
+    except RuntimeError as exc:   # ESIService.get_market_prices: the request failed
+        logger.warning("Ore calculator: ESI adjusted prices unavailable, the reprocessing fee is unknown: %s", exc)
+        fee, fee_unknown_reason, fee_basis = None, f"ESI adjusted prices unavailable ({exc}): the reprocessing fee is unknown", {}
+    else:
+        fee, fee_unknown_reason, fee_basis = _reprocessing_fee(
+            tax=facility.tax, demand_coverage=demand_coverage, material_ids=material_ids,
+            adjusted_prices=adjusted_prices)
     result["reprocessing_fee"] = fee
     result["reprocessing_fee_unknown_reason"] = fee_unknown_reason
+    result["reprocessing_fee_basis"] = fee_basis
     result["total_cost_with_reprocessing"] = (
         float(result.get("total_cost") or 0.0) + fee if fee is not None else None)
     result["facility"] = {"name": facility.name, "multiplier": facility.multiplier, "tax": facility.tax,
