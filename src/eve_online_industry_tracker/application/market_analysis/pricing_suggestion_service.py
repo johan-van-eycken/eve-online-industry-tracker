@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing import MarketPricingService
@@ -218,6 +219,8 @@ class PricingSuggestionService:
             price_map = self._market_pricing.get_type_price_map(type_ids=[type_id], hub=hub, side="sell")
             if type_id in price_map:
                 return float(price_map[type_id].get("unit_price") or 0) or None
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
         except Exception as exc:
             logging.debug(f"_get_hub_price error (type_id={type_id}): {exc}")
         return None
@@ -228,6 +231,8 @@ class PricingSuggestionService:
             price_map = self._market_pricing.get_type_price_map(type_ids=[type_id], hub=hub, side="buy")
             if type_id in price_map:
                 return float(price_map[type_id].get("unit_price") or 0) or None
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
         except Exception as exc:
             logging.debug(f"_get_hub_buy_price error (type_id={type_id}): {exc}")
         return None

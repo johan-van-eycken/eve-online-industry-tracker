@@ -646,8 +646,8 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
                 if oid is not None and int(oid) not in char_order_ids:
                     all_orders.append(o)
                     char_order_ids.add(int(oid))
-        except Exception:
-            pass
+        except Exception as e:
+            st.error(f"Error fetching corporation {corp_id} market orders: {str(e)}")
 
     # Build Relist Priority map: (type_name, price, station) → "High" / "Medium" / "Low" / ""
     sell_raw_all = [o for o in all_orders if not o.get("is_buy_order")]

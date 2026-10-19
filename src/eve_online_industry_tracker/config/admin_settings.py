@@ -20,9 +20,10 @@ from eve_online_industry_tracker.application.errors import ServiceError
 # Schema: defines every admin-configurable setting with type, default, label,
 # and optional min/max constraints.  The Streamlit admin page auto-generates
 # form controls from this schema.  Every int and float is strict (min/max and
-# an int step are checked, never clamped or snapped); "startup_critical" marks
-# a number read on every ESI request or by a daemon thread, whose stored
-# invalid value reads as the default (see AdminSettingsManager).
+# the step, a float's within a tolerance, are checked, never clamped or
+# snapped); "startup_critical" marks a number read on every ESI request or by
+# a daemon thread, whose stored invalid value reads as the default, with a
+# WARNING once per process (see AdminSettingsManager).
 # ---------------------------------------------------------------------------
 
 ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
@@ -143,8 +144,8 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": 0.03375,
                 "min": 0.0,
                 "max": 0.20,
-                "step": 0.00125,
-                "format": "%.4f",
+                "step": 0.00005,  # every Accounting level: 7.5% x (1 - 0.11 x L)
+                "format": "%.5f",
                 "label": "Default sales tax rate",
                 "help": "Applied when computing sale proceeds.",
             },
@@ -343,7 +344,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": 0.01,
                 "min": 0.001,
                 "max": 0.10,
-                "step": 0.005,
+                "step": 0.001,
                 "format": "%.3f",
                 "label": "Invention probability floor",
                 "help": "Minimum invention success probability used in attempt calculations.",
@@ -682,7 +683,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": None,
                 "min": 0.0,
                 "max": 0.5,
-                "step": 0.0005,
+                "step": 0.0001,  # 0.01%: a tax after standings such as 2.13%
                 "format": "%.4f",
                 "label": "Ore calculator: reprocessing tax (effective rate)",
                 "help": "The effective reprocessing tax (a fraction), charged on the minerals produced at their "
@@ -754,6 +755,22 @@ _FALSE_STRINGS = frozenset({"false", "0", "no", "off", "n", ""})
 _TRUE_STRINGS = frozenset({"true", "1", "yes", "on", "y"})
 
 
+# (category, key) of the startup-critical settings whose default-in-use WARNING was logged.
+_DEFAULT_IN_USE_WARNED: set[tuple[str, str]] = set()
+_DEFAULT_IN_USE_LOCK = Lock()
+
+
+def _warn_default_in_use(category: str, key: str, value: Any, problem: str, default: Any) -> None:
+    """A WARNING, once per process, the first time a startup-critical
+    setting's stored invalid value is read as its default."""
+    with _DEFAULT_IN_USE_LOCK:
+        if (category, key) in _DEFAULT_IN_USE_WARNED:
+            return
+        _DEFAULT_IN_USE_WARNED.add((category, key))
+    logging.warning("Admin settings: %s/%s=%r is invalid (%s); using the default %r until it is fixed on the "
+                    "Admin Settings page", category, key, value, problem, default)
+
+
 class AdminSettingInvalid(ServiceError):
     """A stored admin setting is not a valid value: raised where it is read.
 
@@ -776,16 +793,17 @@ def _range_text(spec: dict[str, Any]) -> str:
 def _coerce_number(value: Any, spec: dict[str, Any]) -> int | float:
     """An int or float setting's value, or ValueError. Strict: a bool, a
     non-numeric string, a fraction for an int, NaN/inf, a value outside
-    min/max or off an int step grid are refused, never coerced or clamped.
-    A numeric string ("45") and an integral float for an int (6.0) are read
-    as the number."""
+    min/max or off the step grid (a float's within a relative tolerance of
+    1e-6 steps) are refused, never coerced or clamped. A numeric string
+    ("45", "6.0") and an integral float for an int (6.0) are read as the
+    number."""
     is_int = spec["type"] == "int"
     kind = "an integer" if is_int else "a number"
     if isinstance(value, bool):
         raise ValueError(f"{value!r} is a boolean, not {kind}")
     if isinstance(value, str):
         try:
-            number: int | float = int(value.strip()) if is_int else float(value.strip())
+            number: int | float = float(value.strip())   # "6.0" for an int reads like 6.0
         except ValueError:
             raise ValueError(f"{value!r} is not {kind}") from None
     elif isinstance(value, (int, float)):
@@ -808,6 +826,12 @@ def _coerce_number(value: Any, spec: dict[str, Any]) -> int | float:
         if (number - origin) % step:
             raise ValueError(f"{number!r} is not a step of {step} from {origin} ({origin}, {origin + step}, "
                              f"{origin + 2 * step}, ...; {_range_text(spec)})")
+    elif not is_int and "step" in spec:
+        # A float on the grid min + k x step, within a relative tolerance for binary rounding (0.1 + 0.2).
+        origin, step = float(spec.get("min", 0.0)), float(spec["step"])
+        steps = (number - origin) / step
+        if abs(steps - round(steps)) > 1e-6:
+            raise ValueError(f"{number!r} is not a step of {step!r} from {origin!r} ({_range_text(spec)})")
     return number
 
 
@@ -834,6 +858,7 @@ class AdminSettingsManager:
         self._lock = Lock()
         self._data: dict[str, dict[str, Any]] = {}
         self._invalid: dict[tuple[str, str], str] = {}
+        self._notices: list[str] = []
         self._load()
 
     # -- public API ---------------------------------------------------------
@@ -849,6 +874,7 @@ class AdminSettingsManager:
         if problem is None:
             return value
         if spec.get("startup_critical"):
+            _warn_default_in_use(category, key, value, problem, spec["default"])
             return spec["default"]
         raise AdminSettingInvalid(category, key, value, problem)
 
@@ -879,15 +905,22 @@ class AdminSettingsManager:
                 }
         return out
 
+    def notices(self) -> list[str]:
+        """What the load changed in memory (the single-rig migration), until
+        the next save writes it to the file."""
+        with self._lock:
+            return list(self._notices)
+
     def problems(self) -> list[str]:
-        """One line per stored invalid value (the /health warnings)."""
+        """One line per stored invalid value, then the notices (the /health
+        warnings)."""
         lines = []
         for category, values in self.invalid().items():
             for key, entry in values.items():
                 spec = ADMIN_SETTINGS_SCHEMA[category]["settings"][key]
                 lines.append(f"admin setting {category}/{key}={entry['value']!r} is invalid ({entry['problem']}): "
                              f"{_invalid_consequence(spec)}; fix it on the Admin Settings page")
-        return lines
+        return lines + self.notices()
 
     def set(self, category: str, key: str, value: Any) -> None:
         """Update a single setting and persist to disk."""
@@ -896,6 +929,7 @@ class AdminSettingsManager:
         with self._lock:
             self._data.setdefault(category, {})[key] = coerced
             self._invalid.pop((category, key), None)
+            self._notices = []   # the migrated values are in the file now
             self._persist()
 
     def set_bulk(self, updates: dict[str, dict[str, Any]]) -> None:
@@ -912,6 +946,7 @@ class AdminSettingsManager:
             for category, key, coerced in checked:
                 self._data.setdefault(category, {})[key] = coerced
                 self._invalid.pop((category, key), None)
+            self._notices = []   # the migrated values are in the file now
             self._persist()
 
     def reset_to_defaults(self) -> None:
@@ -919,6 +954,7 @@ class AdminSettingsManager:
         with self._lock:
             self._data = {}
             self._invalid = {}
+            self._notices = []
             self._persist()
 
     # -- internals ----------------------------------------------------------
@@ -984,7 +1020,8 @@ class AdminSettingsManager:
             self._data = {}
             return
         self._data, self._invalid = self._coerce_stored(payload if isinstance(payload, dict) else {})
-        _migrate_single_athanor_rig(self._data)
+        notice = _migrate_single_athanor_rig(self._data)
+        self._notices = [notice] if notice else []
 
     @classmethod
     def _coerce_stored(cls, payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], str]]:
@@ -1048,7 +1085,7 @@ def _invalid_consequence(spec: dict[str, Any]) -> str:
 _ATHANOR_RIG_KEYS = ("athanor_rig_asteroid", "athanor_rig_moon", "athanor_rig_ice")
 
 
-def _migrate_single_athanor_rig(data: dict[str, dict[str, Any]]) -> None:
+def _migrate_single_athanor_rig(data: dict[str, dict[str, Any]]) -> str | None:
     """The migration from PR #14's one reprocessing/rig to a rig per ore class.
 
     The rule: on an Athanor with a stored rig (t1/t2) and none of the
@@ -1057,16 +1094,24 @@ def _migrate_single_athanor_rig(data: dict[str, dict[str, Any]]) -> None:
     Processor); moon ore and ice stay unrigged until their rig is set, which
     may lower their yield from what the single setting gave. In memory only,
     with a WARNING: the file is rewritten on the next save (which then keeps
-    athanor_rig_asteroid, so the rule no longer applies). reprocessing/rig
-    itself is left as stored: it is now the Tatara's L-Set monitor."""
+    athanor_rig_asteroid, so the rule no longer applies). The notice it
+    returns is shown on /health and the Admin Settings page until then.
+
+    reprocessing/rig itself is left as stored: it is now the Tatara's L-Set
+    Reprocessing Monitor. After a switch to a Tatara the old value is read
+    as the monitor, which is its original meaning (the structure's one
+    reprocessing rig, covering every ore). An Athanor does not read it, so
+    an invalid stored rig does not fail an Athanor (it is still listed as
+    invalid)."""
     reprocessing = data.get("reprocessing")
     if not reprocessing or reprocessing.get("facility_type") != "athanor":
-        return
+        return None
     rig = reprocessing.get("rig")
     if rig not in ("t1", "t2") or any(key in reprocessing for key in _ATHANOR_RIG_KEYS):
-        return
+        return None
     reprocessing["athanor_rig_asteroid"] = rig
-    logging.warning(
-        "Admin settings: the stored reprocessing/rig=%r on an Athanor is read as reprocessing/athanor_rig_asteroid "
-        "(the M-Set Asteroid Ore Grading Processor it priced); moon ore and ice are unrigged until "
-        "athanor_rig_moon / athanor_rig_ice are set on the Admin Settings page", rig)
+    notice = (f"admin setting reprocessing/rig={rig!r} on an Athanor is read as reprocessing/athanor_rig_asteroid "
+              "(the M-Set Asteroid Ore Grading Processor it priced); moon ore and ice are unrigged until "
+              "athanor_rig_moon / athanor_rig_ice are set. Save the settings on the Admin Settings page to keep it")
+    logging.warning("Admin settings: %s", notice)
+    return notice

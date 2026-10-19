@@ -56,7 +56,7 @@ _SECURITY_NAMES = {_r.SECURITY_HIGH: "highsec", _r.SECURITY_LOW: "lowsec", _r.SE
 _STATION_COLUMNS = ("reprocessingEfficiency", "reprocessingStationsTake")
 
 NpcStationLookup = Callable[[int], "tuple[float, float] | None"]
-StationNameLookup = Callable[[int], "tuple[str | None, str | None]"]
+StationNameLookup = Callable[[int], "tuple[str | None, str | None, str | None]"]
 
 
 class ReprocessingSettingsInvalid(ServiceError):
@@ -113,20 +113,39 @@ def _tax(tax: Any) -> float:
 
 
 def _station_label(station_id: int, station_name: StationNameLookup | None) -> str:
-    """"<name> (<id>)", or the id and why there is no name."""
+    """"<name> (<id>)" with the name's note, or the id and why there is no name."""
     if station_name is None:
         return f"NPC station {station_id}"
-    name, problem = station_name(station_id)
+    name, problem, note = station_name(station_id)
     if name:
-        return f"{name} ({station_id})"
+        return f"{name} ({station_id})" + (f" [{note}]" if note else "")
     return f"NPC station {station_id} (name unknown: {problem})"
 
 
-def npc_station_name(session: Any, station_id: int, language: str = "en") -> tuple[str | None, str | None]:
-    """The NPC station's full name (locations.npc_station_name), or (None, reason)."""
+SDE_NAME_NOTE = ("name composed from the SDE: it may lack the unique name of the planet or moon the station orbits, "
+                 "e.g. Amarr VIII (Oris)")
+
+
+def npc_station_name(session: Any, station_id: int, language: str = "en",
+                     esi_service: Any = None) -> tuple[str | None, str | None, str | None]:
+    """(name, problem, note) for an NPC station. The official name from ESI
+    /universe/stations/{id} (ESIService.get_station_name, cached) first;
+    without ESI, or when it fails, the SDE composition
+    (locations.npc_station_name) with a note that it may lack the unique
+    name of the planet or moon (mapPlanets/mapMoons are not imported).
+    (None, reason, None) when neither gives a name. Never raises."""
+    esi_problem = "ESI unavailable"
+    if esi_service is not None and hasattr(esi_service, "get_station_name"):
+        try:
+            return esi_service.get_station_name(int(station_id)), None, None
+        except Exception as exc:   # any ESI failure: the SDE name stands in, with the note
+            esi_problem = f"ESI failed: {exc}"
     if session is None:
-        return None, "no SDE session"
-    return _locations.npc_station_name(session, station_id, language)
+        return None, f"no SDE session ({esi_problem})", None
+    name, problem = _locations.npc_station_name(session, station_id, language)
+    if name is None:
+        return None, f"{problem}; {esi_problem}", None
+    return name, None, f"{SDE_NAME_NOTE}; {esi_problem}"
 
 
 def _check_rigs(athanor_rigs: Any) -> dict[str, str]:
@@ -157,7 +176,7 @@ def facility_from_choice(*, facility_type: Any, rig: Any, security_band: Any, ta
     Reprocessing Monitor (none at an NPC station; not read for an Athanor);
     athanor_rigs an Athanor's {ore class: rig}, each required. npc_station(id)
     gives an NPC station's (base yield, base tax) or None; station_name(id)
-    its name or (None, reason); `data` has the SDE attributes."""
+    its (name, problem, note); `data` has the SDE attributes."""
     facility_type = _check("facility_type", facility_type, _r.FACILITY_TYPES)
     security_band = _check("security_band", security_band, _r.SECURITY_BANDS)
 
@@ -234,38 +253,55 @@ def _settings_choice(admin_settings: Any) -> dict[str, Any]:
             raise ReprocessingSettingsInvalid(
                 f"admin setting {exc.category}/{exc.key}={exc.value!r} is invalid ({exc.problem})") from exc
 
-    return {"facility_type": get("facility_type"), "rig": get("rig"), "security_band": get("security_band"),
-            "tax": get("tax"), "npc_station_id": get("npc_station_id"),
+    facility_type = get("facility_type")
+    rig, rig_problem = None, None
+    if facility_type == _r.FACILITY_ATHANOR:
+        # An Athanor does not read reprocessing/rig (the Tatara's monitor): an invalid
+        # stored one is flagged (invalid(), /health, the settings page), not a failure.
+        try:
+            rig = admin_settings.get(SETTINGS_CATEGORY, "rig")
+        except AdminSettingInvalid as exc:
+            rig_problem = f"admin setting {exc.category}/{exc.key}={exc.value!r} is invalid ({exc.problem})"
+    else:
+        rig = get("rig")
+    return {"facility_type": facility_type, "rig": rig, "rig_problem": rig_problem,
+            "security_band": get("security_band"), "tax": get("tax"), "npc_station_id": get("npc_station_id"),
             "athanor_rigs": {cls: get(f"athanor_rig_{cls}") for cls in _r.ORE_CLASSES}}
 
 
 def configured_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
-                        language: str = "en") -> _r.ReprocessingFacility:
+                        language: str = "en", esi_service: Any = None) -> _r.ReprocessingFacility:
     """The facility the admin settings configure (data: the cached OreData;
-    language: the NPC station's name)."""
-    return facility_from_choice(**_settings_choice(admin_settings),
+    language and esi_service: the NPC station's name)."""
+    choice = _settings_choice(admin_settings)
+    choice.pop("rig_problem")
+    return facility_from_choice(**choice,
                                 npc_station=lambda station_id: npc_station_reprocessing(sde_session, station_id),
-                                station_name=lambda station_id: npc_station_name(sde_session, station_id, language),
+                                station_name=lambda station_id: npc_station_name(sde_session, station_id, language,
+                                                                                 esi_service),
                                 data=data if data is not None else _ore.ore_data())
 
 
 def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
-                 language: str = "en") -> dict:
+                 language: str = "en", esi_service: Any = None) -> dict:
     choice = _settings_choice(admin_settings)
-    facility = configured_facility(admin_settings, sde_session, data, language)
+    facility = configured_facility(admin_settings, sde_session, data, language, esi_service)
     station_id = choice["npc_station_id"]
-    station_name, station_problem = (npc_station_name(sde_session, int(station_id), language)
-                                     if station_id is not None else (None, None))
+    station_name, station_problem, station_note = (
+        npc_station_name(sde_session, int(station_id), language, esi_service)
+        if station_id is not None else (None, None, None))
     return {
         "id": CONFIGURED_FACILITY_ID,
         "name": facility.name,
         "facility_type": choice["facility_type"],
         "rig": choice["rig"],
+        "rig_problem": choice["rig_problem"],
         "athanor_rigs": choice["athanor_rigs"],
         "security_band": choice["security_band"],
         "npc_station_id": station_id,
         "npc_station_name": station_name,
         "npc_station_name_problem": station_problem,
+        "npc_station_name_note": station_note,
         "structure_bonus": facility.structure_bonus,
         "by_ore_class": {cls: {"rig": y.rig, "base_yield": y.base_yield, "security_multiplier": y.security_multiplier,
                                "multiplier": facility.multiplier_for(cls)}
@@ -276,5 +312,5 @@ def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | Non
 
 
 def get_all_facilities(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
-                       language: str = "en") -> list[dict]:
-    return [get_facility(admin_settings, sde_session, data, language)]
+                       language: str = "en", esi_service: Any = None) -> list[dict]:
+    return [get_facility(admin_settings, sde_session, data, language, esi_service)]

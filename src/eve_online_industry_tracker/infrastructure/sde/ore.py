@@ -70,6 +70,7 @@ REPROCESSING_EFFICIENCY_SKILL_TYPE_ID = 3389   # Reprocessing Efficiency
 ATHANOR_TYPE_ID = 35835
 TATARA_TYPE_ID = 35836
 STANDUP_REPROCESSING_FACILITY_TYPE_ID = 35899  # the service module: an unrigged structure's base yield
+REPROCESSING_SERVICE_GROUP_ID = 1322            # its group, the one the rig effects modify
 
 # The ore classes (domain.reprocessing) and the reprocessing service attribute
 # a rig sets for each (the service's own value: the unrigged base).
@@ -153,7 +154,8 @@ class OreData:
 def _rig_ore_classes(type_dogma: Mapping[int, Mapping[str, Any]],
                      dogma_effects: Mapping[int, Mapping[str, Any]]) -> dict[int, frozenset[str]]:
     """{rig: the classes whose service yield attribute one of its effects
-    sets from the rig's refiningYieldMultiplier}."""
+    sets from the rig's refiningYieldMultiplier}: a LocationGroupModifier on
+    the reprocessing service group (1322) modifying 2444/2445/2448 from 717."""
     class_by_attribute = {a: c for c, a in ORE_CLASS_YIELD_ATTRIBUTE_IDS.items()}
     out: dict[int, frozenset[str]] = {}
     for rig in sorted(RIG_TYPE_IDS):
@@ -161,8 +163,10 @@ def _rig_ore_classes(type_dogma: Mapping[int, Mapping[str, Any]],
         for effect in (type_dogma.get(rig) or {}).get("dogmaEffects") or []:
             for modifier in (dogma_effects.get(int(effect["effectID"])) or {}).get("modifierInfo") or []:
                 attribute = modifier.get("modifiedAttributeID")
-                if attribute in class_by_attribute and modifier.get("modifyingAttributeID") == \
-                        REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID:
+                if (attribute in class_by_attribute
+                        and modifier.get("modifyingAttributeID") == REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID
+                        and modifier.get("func") == "LocationGroupModifier"
+                        and modifier.get("groupID") == REPROCESSING_SERVICE_GROUP_ID):
                     classes.add(class_by_attribute[attribute])
         out[rig] = frozenset(classes)
     return out

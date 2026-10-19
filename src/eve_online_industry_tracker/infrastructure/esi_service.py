@@ -87,6 +87,8 @@ class ESIService:
         self._public_structures_cache: Dict[tuple, tuple] = {}
         # (timestamp, [facilities])
         self._industry_facilities_cache: Optional[tuple] = None
+        # {station_id: name}: NPC station names do not change, cached for the process
+        self._station_name_cache: Dict[int, str] = {}
 
     def set_market_context(self, *, region_id: Optional[int] = None, station_id: Optional[int] = None) -> None:
         if region_id is not None:
@@ -545,6 +547,24 @@ class ESIService:
             return {}
         except Exception as e:
             raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
+
+    def get_station_name(self, station_id: int) -> str:
+        """An NPC station's official name from ESI /universe/stations/{id}/
+        (e.g. "Amarr VIII (Oris) - Emperor Family Academy"), cached for the
+        process. RuntimeError when ESI fails or gives no name."""
+        station_id = int(station_id)
+        cached = self._station_name_cache.get(station_id)
+        if cached:
+            return cached
+        try:
+            payload = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id))
+        except Exception as e:
+            raise RuntimeError(f"ESI request failed for station {station_id}: {e}") from e
+        name = payload.get("name") if isinstance(payload, dict) else None
+        if not name:
+            raise RuntimeError(f"ESI /universe/stations/{station_id}/ gave no name")
+        self._station_name_cache[station_id] = str(name)
+        return str(name)
 
     def get_universe_structure(
         self,

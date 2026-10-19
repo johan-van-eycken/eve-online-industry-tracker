@@ -14,6 +14,8 @@ def _load_settings() -> tuple[dict, dict, dict] | None:
     if not response or response.get("status") != "success":
         return None
     data = response.get("data") or {}
+    for notice in data.get("notices") or []:
+        st.warning(notice)
     return data.get("schema") or {}, data.get("values") or {}, data.get("invalid") or {}
 
 
@@ -91,7 +93,8 @@ def _station_caption(station_id: object) -> tuple[str | None, str | None]:
         return None, f"NPC station {station_id}: the name could not be read ({failure})"
     data = (body or {}).get("data") or {}
     if data.get("name"):
-        return f"NPC station {station_id}: {data['name']}", None
+        note = f" ({data['note']})" if data.get("note") else ""
+        return f"NPC station {station_id}: {data['name']}{note}", None
     return None, f"NPC station {station_id}: {data.get('problem') or 'no name in the SDE'}"
 
 

@@ -100,7 +100,7 @@ def test_an_unresolved_station_name_shows_the_id_and_the_reason():
     facility = facility_repo.facility_from_choice(
         facility_type="npc_station", rig="none", security_band="high", tax=None,
         npc_station_id=fakes.FAKE_NPC_STATION_ID, npc_station=fakes.fake_npc_station, data=fakes.fake_ore_data(),
-        station_name=lambda station_id: (None, "no system 30009999 in mapSolarSystems"))
+        station_name=lambda station_id: (None, "no system 30009999 in mapSolarSystems", None))
     assert f"NPC station {fakes.FAKE_NPC_STATION_ID}" in facility.name
     assert "name unknown: no system 30009999 in mapSolarSystems" in facility.name
     assert facility.tax == 0.05   # the facility itself is not affected
@@ -117,8 +117,10 @@ def test_the_station_name_route_answers_with_the_name_or_the_reason(station_sde)
         db_sde=SimpleNamespace(Session=sessionmaker(bind=station_sde), language="en"))
     client = app.test_client()
     body = client.get(f"/npc_stations/{MOON_STATION}/name").get_json()
-    assert body["data"] == {"station_id": MOON_STATION, "name": "Fakeburg IV - Moon 4 - Fake Navy Assembly Plant",
-                            "problem": None}
+    data = body["data"]
+    assert (data["station_id"], data["name"], data["problem"]) == (
+        MOON_STATION, "Fakeburg IV - Moon 4 - Fake Navy Assembly Plant", None)
+    assert "unique name" in data["note"]   # no ESI here: the SDE name, with the note
     body = client.get("/npc_stations/60123456/name").get_json()
     assert body["data"]["name"] is None and "60123456" in body["data"]["problem"]
 

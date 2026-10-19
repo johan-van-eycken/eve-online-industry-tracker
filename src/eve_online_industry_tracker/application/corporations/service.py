@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.application.characters.realized_profit import (
     CorporationRealizedProfitLedgerService,
     summarize_realized_profit_rows,
@@ -147,16 +148,22 @@ class CorporationsService:
         try:
             if buy_type_ids:
                 buy_order_book = self._state.esi_service.get_type_buyprices(sorted(buy_type_ids))
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
         except Exception:
             buy_order_book = {}
         try:
             if sell_type_ids:
                 sell_order_book = self._state.esi_service.get_type_sellprices(sorted(sell_type_ids))
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
         except Exception:
             sell_order_book = {}
         try:
             for type_id in sell_type_ids:
                 market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
         except Exception:
             pass
 
@@ -229,6 +236,8 @@ class CorporationsService:
                             days_remaining=days_remaining_int,
                             corporation_id=corp_id,
                         )
+                    except AdminSettingInvalid:
+                        raise  # a stored invalid setting fails loudly, naming it
                     except Exception:
                         advised_price_data = None
 

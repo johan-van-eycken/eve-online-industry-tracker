@@ -5,6 +5,8 @@ import threading
 from datetime import datetime
 from typing import Any
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
+
 
 class MarketIntelligenceJob:
     """Background job that collects market depth data every N hours.
@@ -54,15 +56,8 @@ class MarketIntelligenceJob:
         try:
             while not self._stop_event.is_set():
                 self._run_cycle_safe()
-                # Sleep for configured interval (default 3h), waking every 60s to check stop
-                interval_hours = 3.0
-                try:
-                    admin = getattr(self._state, "admin_settings", None)
-                    if admin:
-                        interval_hours = float(admin.get("daily_planner", "planner_market_refresh_interval_hours"))
-                except Exception:
-                    pass
-                deadline = interval_hours * 3600
+                # Sleep for the configured interval, waking every 60s to check stop
+                deadline = self._refresh_interval_hours() * 3600
                 elapsed = 0.0
                 while elapsed < deadline and not self._stop_event.is_set():
                     self._stop_event.wait(timeout=min(60.0, deadline - elapsed))
@@ -70,6 +65,27 @@ class MarketIntelligenceJob:
         finally:
             with self._lock:
                 self._running = False
+
+    def _refresh_interval_hours(self) -> float:
+        """daily_planner/planner_market_refresh_interval_hours. The setting is
+        startup-critical: a stored invalid value reads as the schema default
+        (the user's choice), with the ERROR at load, a WARNING at first use,
+        /health and the Admin Settings page. Any other failure to read it is
+        logged as a WARNING and the schema default is used, so the loop keeps
+        running; without a settings store the default is used."""
+        default = float(ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]["planner_market_refresh_interval_hours"]
+                        ["default"])
+        admin = getattr(self._state, "admin_settings", None)
+        if admin is None:
+            return default
+        try:
+            return float(admin.get("daily_planner", "planner_market_refresh_interval_hours"))
+        except AdminSettingInvalid as exc:
+            logging.warning("MarketIntelligenceJob: %s; using the default %g h", exc.message, default)
+        except Exception as exc:
+            logging.warning("MarketIntelligenceJob: reading daily_planner/planner_market_refresh_interval_hours "
+                            "failed (%s); using the default %g h", exc, default)
+        return default
 
     def _run_cycle_safe(self) -> None:
         try:

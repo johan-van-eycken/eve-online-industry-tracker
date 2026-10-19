@@ -16,6 +16,15 @@ MODE_OPTIONS = {
 }
 
 
+def _fee_unknown_warning(opt_display: dict) -> str | None:
+    """The warning shown above the cost metrics when the reprocessing fee is
+    unknown (also in their tooltips)."""
+    reason = opt_display.get("reprocessing_fee_unknown_reason")
+    if not reason:
+        return None
+    return f"Reprocessing fee unknown: {reason}. The total cost and the savings are unknown too."
+
+
 def _format_timestamp(ts: float | int | None) -> str:
     if ts is None:
         return "N/A"
@@ -264,6 +273,10 @@ def render():
     raw_volume_m3 = opt_display.get("total_raw_volume", 0.0)
     reprocessing_fee = opt_display.get("reprocessing_fee")
     fee_unknown_reason = opt_display.get("reprocessing_fee_unknown_reason")
+
+    fee_warning = _fee_unknown_warning(opt_display)
+    if fee_warning:
+        st.warning(fee_warning)
 
     colc1, colc2, colc3 = st.columns(3)
     colc1.metric(

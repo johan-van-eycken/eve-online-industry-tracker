@@ -224,12 +224,16 @@ class MarketDepthCollector:
         for type_id in type_ids:
             try:
                 history_svc.fetch_and_store_history(type_id=type_id, region_id=region_id)
+            except AdminSettingInvalid:
+                raise  # a stored invalid setting fails loudly, naming it
             except Exception as e:
                 logging.warning("MarketDepthCollector: history refresh failed for type_id=%s: %s", type_id, e)
 
         # Step 2: Fetch sell orders for all type_ids
         try:
             sell_orders: dict[int, list[dict]] = esi_service.get_sell_order_book(type_ids, region_id=region_id)
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
         except Exception as e:
             logging.warning("MarketDepthCollector: sell order fetch failed: %s", e)
             sell_orders = {}
