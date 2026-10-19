@@ -89,6 +89,8 @@ class ESIService:
         self._industry_facilities_cache: Optional[tuple] = None
         # {station_id: name}: NPC station names do not change, cached for the process
         self._station_name_cache: Dict[int, str] = {}
+        # {station_id: (failed_at, message)}: a failed lookup, not retried for STATION_NAME_FAILURE_TTL_SECONDS
+        self._station_name_failures: Dict[int, tuple] = {}
 
     def set_market_context(self, *, region_id: Optional[int] = None, station_id: Optional[int] = None) -> None:
         if region_id is not None:
@@ -548,21 +550,37 @@ class ESIService:
         except Exception as e:
             raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
 
+    # A station name is a display nicety: one short try, no retries, and a failure
+    # cached for a few minutes, so a down ESI never holds up /facilities or the ore page.
+    STATION_NAME_TIMEOUT_SECONDS = 3.0
+    STATION_NAME_FAILURE_TTL_SECONDS = 300.0
+
     def get_station_name(self, station_id: int) -> str:
         """An NPC station's official name from ESI /universe/stations/{id}/
         (e.g. "Amarr VIII (Oris) - Emperor Family Academy"), cached for the
-        process. RuntimeError when ESI fails or gives no name."""
+        process. One try with a 3 s timeout and no retries; a failure is
+        cached for STATION_NAME_FAILURE_TTL_SECONDS and raised again without
+        an ESI call meanwhile. RuntimeError when ESI fails or gives no name."""
         station_id = int(station_id)
         cached = self._station_name_cache.get(station_id)
         if cached:
             return cached
+        failure = self._station_name_failures.get(station_id)
+        if failure is not None and time.time() - failure[0] < self.STATION_NAME_FAILURE_TTL_SECONDS:
+            raise RuntimeError(failure[1])
         try:
-            payload = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id))
+            payload = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id),
+                                           timeout_seconds=self.STATION_NAME_TIMEOUT_SECONDS, max_retries=0)
         except Exception as e:
-            raise RuntimeError(f"ESI request failed for station {station_id}: {e}") from e
+            message = f"ESI request failed for station {station_id}: {e}"
+            self._station_name_failures[station_id] = (time.time(), message)
+            raise RuntimeError(message) from e
         name = payload.get("name") if isinstance(payload, dict) else None
         if not name:
-            raise RuntimeError(f"ESI /universe/stations/{station_id}/ gave no name")
+            message = f"ESI /universe/stations/{station_id}/ gave no name"
+            self._station_name_failures[station_id] = (time.time(), message)
+            raise RuntimeError(message)
+        self._station_name_failures.pop(station_id, None)
         self._station_name_cache[station_id] = str(name)
         return str(name)
 

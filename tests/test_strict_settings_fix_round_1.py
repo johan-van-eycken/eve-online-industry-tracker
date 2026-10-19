@@ -292,6 +292,7 @@ def test_the_esi_station_name_is_cached():
 
     svc = ESIService.__new__(ESIService)
     svc._station_name_cache = {}
+    svc._station_name_failures = {}
     calls = []
 
     def fake_get(endpoint, *args, **kwargs):
@@ -328,3 +329,61 @@ def test_the_ore_page_warns_when_the_fee_is_unknown():
         "Reprocessing fee unknown: no ESI adjusted price for Tritanium. The total cost and the savings are "
         "unknown too.")
     assert _fee_unknown_warning({"reprocessing_fee": 12.0, "reprocessing_fee_unknown_reason": None}) is None
+
+
+# --- re-review: the station name with ESI down --------------------------------------------------
+
+def _esi_service_with(public_get):
+    from eve_online_industry_tracker.infrastructure.esi_service import ESIService
+
+    svc = ESIService.__new__(ESIService)
+    svc._station_name_cache = {}
+    svc._station_name_failures = {}
+    svc._public_esi_get = public_get
+    return svc
+
+
+def test_a_down_esi_costs_one_short_lookup_per_window(monkeypatch):
+    from eve_online_industry_tracker.infrastructure import esi_service as esi_module
+
+    calls = []
+
+    def down(endpoint, **kwargs):
+        calls.append(kwargs)
+        raise ConnectionError("ESI unreachable")
+
+    svc = _esi_service_with(down)
+    now = [1000.0]
+    monkeypatch.setattr(esi_module.time, "time", lambda: now[0])
+    with pytest.raises(RuntimeError, match="unreachable"):
+        svc.get_station_name(60008494)
+    assert calls == [{"timeout_seconds": 3.0, "max_retries": 0}]   # short, no retries
+    with pytest.raises(RuntimeError, match="unreachable"):
+        svc.get_station_name(60008494)                            # within the window: cached failure
+    assert len(calls) == 1
+    now[0] += esi_module.ESIService.STATION_NAME_FAILURE_TTL_SECONDS + 1
+    with pytest.raises(RuntimeError):
+        svc.get_station_name(60008494)                            # the window is over: one new try
+    assert len(calls) == 2
+
+
+def test_with_esi_down_the_facility_shows_the_sde_name_with_one_lookup(monkeypatch, tmp_path):
+    monkeypatch.setattr(facility_repo._locations, "npc_station_name",
+                        lambda session, station_id, language: ("Fakeburg VIII - Fake Academy", None))
+    calls = []
+
+    def down(endpoint, **kwargs):
+        calls.append(endpoint)
+        raise ConnectionError("ESI unreachable")
+
+    esi = _esi_service_with(down)
+    mgr = _manager(tmp_path)
+    mgr.set("reprocessing", "npc_station_id", fakes.FAKE_NPC_STATION_ID)
+    monkeypatch.setattr(facility_repo, "npc_station_reprocessing", lambda session, station_id: (0.5, 0.05))
+    (payload,) = facility_repo.get_all_facilities(mgr, object(), data=fakes.fake_ore_data(), esi_service=esi)
+    assert len(calls) == 1                                        # one lookup per facility read
+    assert payload["npc_station_name"] == "Fakeburg VIII - Fake Academy"
+    assert "unique name" in payload["npc_station_name_note"] and "unreachable" in payload["npc_station_name_note"]
+    assert "Fakeburg VIII - Fake Academy" in payload["name"]
+    facility_repo.get_all_facilities(mgr, object(), data=fakes.fake_ore_data(), esi_service=esi)
+    assert len(calls) == 1                                        # the cached failure: no new ESI call

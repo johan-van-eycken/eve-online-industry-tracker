@@ -81,6 +81,8 @@ class MarketIntelligenceJob:
         try:
             return float(admin.get("daily_planner", "planner_market_refresh_interval_hours"))
         except AdminSettingInvalid as exc:
+            # Unreachable while the setting is startup_critical (get() then gives the default);
+            # kept so that dropping the flag still logs and keeps the loop on the default.
             logging.warning("MarketIntelligenceJob: %s; using the default %g h", exc.message, default)
         except Exception as exc:
             logging.warning("MarketIntelligenceJob: reading daily_planner/planner_market_refresh_interval_hours "

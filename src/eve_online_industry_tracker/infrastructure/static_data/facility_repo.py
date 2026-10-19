@@ -270,26 +270,38 @@ def _settings_choice(admin_settings: Any) -> dict[str, Any]:
 
 
 def configured_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
-                        language: str = "en", esi_service: Any = None) -> _r.ReprocessingFacility:
+                        language: str = "en", esi_service: Any = None,
+                        station_name: tuple[str | None, str | None, str | None] | None = None,
+                        ) -> _r.ReprocessingFacility:
     """The facility the admin settings configure (data: the cached OreData;
-    language and esi_service: the NPC station's name)."""
+    language and esi_service: the NPC station's name, looked up once, or
+    `station_name` when the caller has it already)."""
     choice = _settings_choice(admin_settings)
     choice.pop("rig_problem")
+    resolved: dict[int, tuple[str | None, str | None, str | None]] = {}
+
+    def name_once(station_id: int) -> tuple[str | None, str | None, str | None]:
+        if station_name is not None:
+            return station_name
+        if station_id not in resolved:
+            resolved[station_id] = npc_station_name(sde_session, station_id, language, esi_service)
+        return resolved[station_id]
+
     return facility_from_choice(**choice,
                                 npc_station=lambda station_id: npc_station_reprocessing(sde_session, station_id),
-                                station_name=lambda station_id: npc_station_name(sde_session, station_id, language,
-                                                                                 esi_service),
+                                station_name=name_once,
                                 data=data if data is not None else _ore.ore_data())
 
 
 def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
                  language: str = "en", esi_service: Any = None) -> dict:
     choice = _settings_choice(admin_settings)
-    facility = configured_facility(admin_settings, sde_session, data, language, esi_service)
     station_id = choice["npc_station_id"]
-    station_name, station_problem, station_note = (
-        npc_station_name(sde_session, int(station_id), language, esi_service)
-        if station_id is not None else (None, None, None))
+    # One name lookup per facility read, shared with the facility's own name.
+    resolved = (npc_station_name(sde_session, int(station_id), language, esi_service)
+                if station_id is not None and choice["facility_type"] == _r.FACILITY_NPC_STATION else None)
+    facility = configured_facility(admin_settings, sde_session, data, language, esi_service, station_name=resolved)
+    station_name, station_problem, station_note = resolved or (None, None, None)
     return {
         "id": CONFIGURED_FACILITY_ID,
         "name": facility.name,
