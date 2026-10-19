@@ -11,6 +11,15 @@ from eve_online_industry_tracker.application.characters.realized_profit import (
     CorporationRealizedProfitLedgerService,
     summarize_realized_profit_rows,
 )
+from eve_online_industry_tracker.application.market_pricing.order_values import (
+    NA_STATUS,
+    book_comparison,
+    order_price_or_reason,
+    order_total_price,
+    readable_int,
+    readable_number,
+    refresh_market_history,
+)
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.esi_versions import ESI_CORP_PUBLIC
 
@@ -167,14 +176,7 @@ class CorporationsService:
         except ESI_REQUEST_ERRORS as exc:
             logging.warning("Corporation market orders: sell order book unavailable, no price comparison: %s", exc)
             sell_order_book = {}
-        try:
-            for type_id in sell_type_ids:
-                market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
-        except AdminSettingInvalid:
-            raise  # a stored invalid setting fails loudly, naming it
-        except ESI_REQUEST_ERRORS + (SQLAlchemyError,) as exc:
-            # The pricing suggestions below then work from the history already stored.
-            logging.warning("Corporation market orders: market history refresh stopped: %s", exc)
+        refresh_market_history(market_history_svc, sell_type_ids, label="Corporation market orders")
 
         for corp_data in raw_corp_data:
             corp_orders = (corp_data or {}).get("market_orders", [])
@@ -205,48 +207,29 @@ class CorporationsService:
                     expires_in = "Expired"
 
                 type_id = order.get("type_id")
-                try:
-                    order_price = float(order.get("price") or 0)
-                except (TypeError, ValueError):
-                    logging.warning(
-                        "Corporation market order %s has no readable price (%r); counted as 0 ISK",
-                        order.get("order_id"),
-                        order.get("price"),
-                    )
-                    order_price = 0.0
+                order_price, price_unknown_reason = order_price_or_reason(order, label="Corporation market order")
 
-                price_difference = 0.0
-                price_status = "⚪N/A"
+                price_difference: float | None = 0.0 if order_price is not None else None
+                price_status = NA_STATUS
                 if isinstance(type_id, int):
-                    if order.get("is_buy_order"):
-                        prices_list = buy_order_book.get(type_id, [])
-                        if prices_list and all(isinstance(o, dict) for o in prices_list):
-                            try:
-                                highest_price = max(o.get("price", 0) for o in prices_list)
-                                price_difference = order_price - float(highest_price)
-                                price_status = "🟢Best price" if price_difference > 0 else "🔴Undercut"
-                            except (TypeError, ValueError):
-                                pass  # an unreadable book price: the status stays N/A
-                    else:
-                        prices_list = sell_order_book.get(type_id, [])
-                        if prices_list and all(isinstance(o, dict) for o in prices_list):
-                            try:
-                                lowest_price = min(o.get("price", 0) for o in prices_list)
-                                price_difference = order_price - float(lowest_price)
-                                price_status = "🔴Undercut" if price_difference > 0 else "🟢Best price"
-                            except (TypeError, ValueError):
-                                pass  # an unreadable book price: the status stays N/A
+                    book = buy_order_book if order.get("is_buy_order") else sell_order_book
+                    price_status, price_difference = book_comparison(
+                        order_price=order_price,
+                        book=book.get(type_id, []) if isinstance(book, dict) else [],
+                        is_buy_order=bool(order.get("is_buy_order")),
+                    )
 
                 advised_price_data = None
                 pricing_error: str | None = None
-                if not order.get("is_buy_order") and isinstance(type_id, int) and fallback_character_id is not None:
+                if (not order.get("is_buy_order") and isinstance(type_id, int) and fallback_character_id is not None
+                        and order_price is not None):   # no suggestion from an unknown price
                     days_remaining_int: int | None = max(0, expires_in_td.days) if expires_in_td.total_seconds() > 0 else None
                     try:
                         advised_price_data = pricing_svc.suggest_price(
                             character_id=fallback_character_id,
                             type_id=type_id,
                             current_price=order_price,
-                            quantity=int(order.get("volume_remain") or 0),
+                            quantity=int(readable_int(order.get("volume_remain")) or 0),
                             order_duration_days=duration_days_int or 90,
                             days_remaining=days_remaining_int,
                             corporation_id=corp_id,
@@ -268,11 +251,12 @@ class CorporationsService:
                     "owner": corp_name,
                     "type_id": type_id,
                     "type_name": order.get("type_name"),
-                    "price": order.get("price"),
+                    "price": order.get("price") if order_price is not None else None,
+                    "price_unknown_reason": price_unknown_reason,
                     "price_status": price_status,
                     "price_difference": price_difference,
                     "volume": str(order.get("volume_remain")) + "/" + str(order.get("volume_total")),
-                    "total_price": order_price * float(order.get("volume_remain") or 0),
+                    "total_price": order_total_price(order_price, order),
                     "range": order.get("range"),
                     "min_volume": order.get("min_volume"),
                     "expires_in": expires_in,
@@ -336,8 +320,8 @@ class CorporationsService:
                 score += 40.0
             if (order.get("relist_risk") or {}).get("at_risk"):
                 score += 25.0
-            price = float(order.get("price") or 0)
-            advised = float(order.get("advised_price") or price)
+            price = readable_number(order.get("price")) or 0.0
+            advised = readable_number(order.get("advised_price")) or price
             if price > 0 and advised < price:
                 undercut_pct = (price - advised) / price * 100
                 score += min(20.0, undercut_pct * 2)

@@ -225,7 +225,8 @@ class PricingSuggestionService:
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
         except Exception as exc:
-            logging.debug(f"_get_hub_price error (type_id={type_id}): {exc}")
+            # The advised price is then worked out without the hub price.
+            logging.warning("Pricing suggestion: hub sell price of type %s unavailable: %s", type_id, exc)
         return None
 
     def _get_hub_buy_price(self, *, type_id: int, hub: str = "jita") -> float | None:
@@ -237,7 +238,7 @@ class PricingSuggestionService:
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
         except Exception as exc:
-            logging.debug(f"_get_hub_buy_price error (type_id={type_id}): {exc}")
+            logging.warning("Pricing suggestion: hub buy price of type %s unavailable: %s", type_id, exc)
         return None
 
     def _get_cost_basis(
@@ -392,7 +393,8 @@ class PricingSuggestionService:
             finally:
                 app_session.close()
         except Exception as exc:
-            logging.debug(f"_get_orderbook_levels error (type_id={type_id}): {exc}")
+            # Without them there is no gap positioning, front-of-queue guard or seller concentration.
+            logging.warning("Pricing suggestion: cached order book levels of type %s unavailable: %s", type_id, exc)
         return []
 
     def _get_min_target_margin(self) -> float:

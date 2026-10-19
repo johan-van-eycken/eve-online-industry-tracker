@@ -1,13 +1,28 @@
 from __future__ import annotations
 
+import logging
 import statistics
 from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_
 from sqlalchemy.exc import SQLAlchemyError
+from eve_online_industry_tracker.application.market_pricing.order_values import readable_int, readable_number
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
+
+
+def _history_values(item: dict[str, Any]) -> dict[str, Any] | None:
+    """The stored values of one ESI market history day; None when a field is
+    missing or not a number (the day is skipped, never stored as 0)."""
+    close = readable_number(item.get("average", item.get("close")))
+    high = readable_number(item.get("highest"))
+    low = readable_number(item.get("lowest"))
+    volume = readable_int(item.get("volume"))
+    order_count = readable_int(item.get("order_count"))
+    if None in (close, high, low, volume, order_count):
+        return None
+    return {"close": close, "high": high, "low": low, "volume": volume, "order_count": order_count}
 
 
 class MarketHistoryService:
@@ -33,12 +48,16 @@ class MarketHistoryService:
             history_rows = esi_service.get_market_history([type_id], region_id=region_id)
             items = history_rows.get(int(type_id), []) if isinstance(history_rows, dict) else []
 
+            skipped = 0
             for item in items:
                 if not isinstance(item, dict):
+                    skipped += 1
                     continue
 
-                date_str = str(item.get("date", "")).strip()
-                if not date_str:
+                date_str = str(item.get("date") or "").strip()
+                values = _history_values(item)
+                if not date_str or values is None:
+                    skipped += 1
                     continue
 
                 existing = app_session.query(MarketHistoryModel).filter(
@@ -50,25 +69,20 @@ class MarketHistoryService:
                 ).first()
 
                 if existing:
-                    existing.close = float(item.get("average", item.get("close", 0)))
-                    existing.high = float(item.get("highest", 0))
-                    existing.low = float(item.get("lowest", 0))
-                    existing.volume = int(item.get("volume", 0))
-                    existing.order_count = int(item.get("order_count", 0))
+                    for field, value in values.items():
+                        setattr(existing, field, value)
                 else:
-                    record = MarketHistoryModel(
-                        type_id=type_id,
-                        region_id=region_id,
-                        date=date_str,
-                        close=float(item.get("average", item.get("close", 0))),
-                        high=float(item.get("highest", 0)),
-                        low=float(item.get("lowest", 0)),
-                        volume=int(item.get("volume", 0)),
-                        order_count=int(item.get("order_count", 0)),
-                    )
-                    app_session.add(record)
+                    app_session.add(MarketHistoryModel(type_id=type_id, region_id=region_id, date=date_str, **values))
 
             app_session.commit()
+            if skipped:
+                logging.warning(
+                    "Market history of type %s (region %s): skipped %d unreadable history row(s) "
+                    "(no date, or a price, volume or order count that is not a number)",
+                    type_id,
+                    region_id,
+                    skipped,
+                )
         finally:
             try:
                 app_session.close()

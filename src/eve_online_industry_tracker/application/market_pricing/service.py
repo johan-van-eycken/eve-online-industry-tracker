@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import statistics
 import time
 import threading
@@ -8,6 +9,7 @@ from typing import Any, Callable
 from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+from eve_online_industry_tracker.application.market_pricing.order_values import readable_int, readable_number
 from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo as market_orderbook_cache_repo
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
@@ -119,27 +121,43 @@ class MarketPricingService:
         side: str,
     ) -> dict[int, list[tuple[float, int]]]:
         normalized_side = self.normalize_order_side(side)
+        depth = self.orderbook_depth()
         out: dict[int, list[tuple[float, int]]] = {}
+        skipped = 0
+        skipped_type_ids: set[int] = set()
         for type_id, rows in (order_books or {}).items():
-            filtered_rows = [
-                row for row in (rows or []) if isinstance(row, dict) and int(row.get("location_id") or 0) == int(station_id)
-            ]
-            filtered_rows.sort(
-                key=lambda row: float(row.get("price") or 0.0),
-                reverse=normalized_side == "buy",
+            # Read every row at the station first: an unreadable one is skipped (counted),
+            # so it neither breaks the sort nor takes one of the `depth` levels.
+            readable: list[tuple[float, int]] = []
+            for row in rows or []:
+                location_id = readable_int(row.get("location_id")) if isinstance(row, dict) else None
+                if location_id is None:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
+                    continue
+                if location_id != int(station_id):
+                    continue
+                price = readable_number(row.get("price"))
+                volume = readable_int(row.get("volume_remain"))
+                if price is None or volume is None or price <= 0:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
+                    continue
+                if volume <= 0:
+                    continue  # a filled order: nothing left to buy or sell
+                readable.append((price, volume))
+            readable.sort(key=lambda level: level[0], reverse=normalized_side == "buy")
+            out[int(type_id)] = readable[:depth]
+        if skipped:
+            logging.warning(
+                "Market order book (%s, station %s): skipped %d unreadable row(s) (no readable location, "
+                "price or volume) of %d type(s): %s",
+                normalized_side,
+                station_id,
+                skipped,
+                len(skipped_type_ids),
+                sorted(skipped_type_ids)[:20],
             )
-
-            levels: list[tuple[float, int]] = []
-            for row in filtered_rows[: self.orderbook_depth()]:
-                try:
-                    price = float(row.get("price") or 0.0)
-                    volume = int(row.get("volume_remain") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if price <= 0 or volume <= 0:
-                    continue
-                levels.append((price, volume))
-            out[int(type_id)] = levels
         return out
 
     def _build_liquidity_summaries(
@@ -149,17 +167,23 @@ class MarketPricingService:
         station_id: int,
     ) -> dict[int, dict[str, int]]:
         out: dict[int, dict[str, int]] = {}
+        skipped = 0
+        skipped_type_ids: set[int] = set()
         for type_id, rows in (order_books or {}).items():
             total_volume = 0
             order_count = 0
             for row in rows or []:
-                if not isinstance(row, dict):
+                location_id = readable_int(row.get("location_id")) if isinstance(row, dict) else None
+                if location_id is None:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
                     continue
-                if int(row.get("location_id") or 0) != int(station_id):
+                if location_id != int(station_id):
                     continue
-                try:
-                    volume = int(row.get("volume_remain") or 0)
-                except (TypeError, ValueError):
+                volume = readable_int(row.get("volume_remain"))
+                if volume is None:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
                     continue
                 if volume <= 0:
                     continue
@@ -169,19 +193,35 @@ class MarketPricingService:
                 "total_volume": int(total_volume),
                 "order_count": int(order_count),
             }
+        if skipped:
+            logging.warning(
+                "Market liquidity (station %s): skipped %d unreadable order book row(s) (no readable "
+                "location or volume) of %d type(s): %s",
+                station_id,
+                skipped,
+                len(skipped_type_ids),
+                sorted(skipped_type_ids)[:20],
+            )
         return out
 
     def _summarize_levels(self, levels: list[list[float | int]]) -> dict[str, Any]:
         prices: list[float] = []
         volumes: list[int] = []
+        skipped = 0
         for level in levels[: self.orderbook_depth()]:
-            if not isinstance(level, list) or len(level) < 2:
+            price = readable_number(level[0]) if isinstance(level, (list, tuple)) and len(level) >= 2 else None
+            volume = readable_int(level[1]) if price is not None else None
+            if price is None or volume is None:
+                skipped += 1
                 continue
-            try:
-                prices.append(float(level[0]))
-                volumes.append(int(level[1]))
-            except (TypeError, ValueError):
-                continue
+            prices.append(price)
+            volumes.append(volume)
+        if skipped:
+            logging.warning(
+                "Market price levels: skipped %d unreadable price level(s) of %d (no readable price or volume)",
+                skipped,
+                len(levels[: self.orderbook_depth()]),
+            )
 
         if not prices:
             return {
@@ -257,7 +297,8 @@ class MarketPricingService:
                 if cached_levels is None:
                     continue
                 result[int(type_id)] = {
-                    **self._summarize_levels([[float(price), int(volume)] for price, volume in cached_levels[:depth]]),
+                    **self._summarize_levels([list(level) if isinstance(level, (list, tuple)) else level
+                                              for level in cached_levels[:depth]]),
                     "cached": True,
                     "fetched_at": cached_view.get("fetched_at") if isinstance(cached_view, dict) else None,
                     "hub": normalized_hub,
@@ -308,7 +349,7 @@ class MarketPricingService:
                 for index, type_id in enumerate(missing_ids, start=1):
                     fetched_levels = views_by_type_id.get(int(type_id), [])
                     result[int(type_id)] = {
-                        **self._summarize_levels([[float(price), int(volume)] for price, volume in fetched_levels[:depth]]),
+                        **self._summarize_levels([list(level) for level in fetched_levels[:depth]]),
                         "cached": False,
                         "fetched_at": now,
                         "hub": normalized_hub,
@@ -486,16 +527,21 @@ class MarketPricingService:
         history_by_type_id = esi_service.get_market_history(missing_type_ids, region_id=region_id)
         total_ids = len(missing_type_ids)
         fetched_results: dict[int, dict[str, Any]] = {}
+        skipped_rows = 0
+        skipped_type_ids: set[int] = set()
 
         for index, type_id in enumerate(missing_type_ids, start=1):
-            history_rows = history_by_type_id.get(int(type_id)) or []
+            # A day without a readable volume is skipped (counted), not read as 0.
+            history_rows: list[dict[str, Any]] = []
+            for row in history_by_type_id.get(int(type_id)) or []:
+                if isinstance(row, dict) and readable_int(row.get("volume")) is not None:
+                    history_rows.append(row)
+                else:
+                    skipped_rows += 1
+                    skipped_type_ids.add(int(type_id))
             latest_row = history_rows[-1] if history_rows else {}
             trailing_rows = history_rows[-7:] if history_rows else []
-            trailing_volumes = [
-                int(row.get("volume") or 0)
-                for row in trailing_rows
-                if isinstance(row, dict)
-            ]
+            trailing_volumes = [int(readable_int(row.get("volume")) or 0) for row in trailing_rows]
             trailing_average_volume = (
                 float(sum(trailing_volumes)) / float(len(trailing_volumes))
                 if trailing_volumes
@@ -505,10 +551,10 @@ class MarketPricingService:
                 "hub": normalized_hub,
                 "hub_label": str(hub_context.get("label") or normalized_hub.title()),
                 "region_id": region_id,
-                "daily_volume": int(latest_row.get("volume") or 0) if latest_row else 0,
+                "daily_volume": int(readable_int(latest_row.get("volume")) or 0) if latest_row else 0,
                 "daily_volume_7d_avg": trailing_average_volume,
                 "daily_volume_7d_sample_size": len(trailing_volumes),
-                "daily_order_count": int(latest_row.get("order_count") or 0) if latest_row else 0,
+                "daily_order_count": int(readable_int(latest_row.get("order_count")) or 0) if latest_row else 0,
                 "daily_volume_date": latest_row.get("date") if latest_row else None,
             }
             if progress_callback is not None:
@@ -517,6 +563,15 @@ class MarketPricingService:
                     f"Fetched {normalized_hub.title()} region history",
                     {"completed": index, "total": total_ids},
                 )
+
+        if skipped_rows:
+            logging.warning(
+                "Region daily volume (%s): skipped %d unreadable history row(s) (no readable volume) of %d type(s): %s",
+                normalized_hub,
+                skipped_rows,
+                len(skipped_type_ids),
+                sorted(skipped_type_ids)[:20],
+            )
 
         with self._region_volume_cache_lock:
             cached_entry = self._region_volume_cache.get(cache_key)
