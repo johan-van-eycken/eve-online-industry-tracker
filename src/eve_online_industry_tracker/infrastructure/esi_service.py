@@ -248,31 +248,24 @@ class ESIService:
                             page=page,
                         ),
                     )
-                except requests.RequestException:
-                    exc = None
-                    try:
-                        raise
-                    except requests.RequestException as caught:
-                        exc = caught
-                        _monitor(
-                            "record_http_attempt",
-                            lambda: dict(
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                                status_code=None,
-                                elapsed_ms=(time.time() - request_started_at) * 1000.0,
-                                headers=None,
-                                exception=caught,
-                                cache_mode="off",
-                                page=page,
-                            ),
-                        )
-                    if exc is None:
-                        raise
+                except requests.RequestException as exc:
+                    _monitor(
+                        "record_http_attempt",
+                        lambda: dict(
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                            status_code=None,
+                            elapsed_ms=(time.time() - request_started_at) * 1000.0,
+                            headers=None,
+                            exception=exc,
+                            cache_mode="off",
+                            page=page,
+                        ),
+                    )
                     attempts += 1
                     if attempts > max_retries:
-                        raise exc
+                        raise
                     wait_seconds = min(8.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
                     _monitor(
                         "record_retry_event",
