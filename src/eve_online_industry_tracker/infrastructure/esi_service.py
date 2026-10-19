@@ -65,6 +65,7 @@ class ESIService:
         public_structures_cache_ttl_seconds: int = 600,
         industry_facilities_cache_ttl_seconds: int = 6 * 3600,
         market_history_cache_ttl_seconds: int = 6 * 3600,
+        admin_settings: Any = None,
     ):
         self._esi_client = esi_client
         self._region_id = region_id if region_id is not None else self.DEFAULT_REGION_ID
@@ -83,8 +84,8 @@ class ESIService:
         if "verify" in ssl_kwargs:
             self._http_session.verify = ssl_kwargs["verify"]
 
-        # Optional admin settings manager (set after construction).
-        self._admin_settings = None
+        # Optional admin settings manager (None: the schema defaults).
+        self._admin_settings = admin_settings
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}

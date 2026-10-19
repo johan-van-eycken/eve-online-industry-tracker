@@ -98,6 +98,14 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Loading admin settings...")
         from config.paths import admin_settings_path
         state.admin_settings = AdminSettingsManager(admin_settings_path())
+        # The admin ESI settings apply from the first ESI request (the startup
+        # refresh below), not only after it: the error limiter is a
+        # module-level singleton, and a service kept from an earlier
+        # initialisation is re-wired too.
+        from eve_online_industry_tracker.infrastructure.esi_client import _ESI_ERROR_LIMITER
+        _ESI_ERROR_LIMITER._admin_settings = state.admin_settings
+        if getattr(state, "esi_service", None) is not None:
+            state.esi_service._admin_settings = state.admin_settings
 
         if getattr(state, "shutdown_event", None) is not None and state.shutdown_event.is_set():
             state.init_state = "Shutdown"
@@ -164,12 +172,7 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Initializing data adapters...")
         state.init_state = "Initializing Data Adapters"
         main_character = state.char_manager.get_main_character()
-        state.esi_service = ESIService(main_character.esi_client)
-        state.esi_service._admin_settings = state.admin_settings
-
-        # Wire admin settings into ESI error rate limiter (module-level singleton).
-        from eve_online_industry_tracker.infrastructure.esi_client import _ESI_ERROR_LIMITER
-        _ESI_ERROR_LIMITER._admin_settings = state.admin_settings
+        state.esi_service = ESIService(main_character.esi_client, admin_settings=state.admin_settings)
 
         state.industry_job_manager = IndustryJobManager(state=state)
         state.industry_job_manager.start()

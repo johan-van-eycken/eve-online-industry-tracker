@@ -156,7 +156,8 @@ class Character:
             self.is_corp_director,
             self._refresh_token,
         )
-        self._esi_service = ESIService(self._esi_client)
+        # The admin ESI settings (pacing, retries, cache TTLs) from the first request on.
+        self._esi_service = ESIService(self._esi_client, admin_settings=getattr(self, "_admin_settings", None))
         self.character_id = self._esi_client.character_id
 
     @property
