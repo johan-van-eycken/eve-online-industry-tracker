@@ -367,29 +367,33 @@ class ChainPlanner:
             """T2 rows: own T2 blueprint, else invention on the free BPCs."""
             ctx = state[id(decision)]
             if decision.meta_group_id != META_GROUP_T1 and ctx["busy_bpc_reason"] is None:
-                self._plan_t2_chain(
-                    decision=decision,
-                    bp_type_id=ctx["bp_type_id"],
-                    bp_data=ctx["bp_data"],
-                    blueprint_data=blueprint_data,
-                    invention_source=invention_source,
-                    bpo_assets_by_type_id=free_bpo_assets_by_type_id,
-                    bpc_assets_by_type_id=free_bpc_assets_by_type_id,
-                    busy_bpo_type_ids=busy_bpo_type_ids,
-                    market_depth_cache=market_depth_cache,
-                    invention_success_rates=invention_success_rates,
-                    bpo_opportunities=bpo_opportunities,
-                    bpo_strong_buy_days=bpo_strong_buy_days,
-                    bpo_consider_days=bpo_consider_days,
-                    ledger=ledger,
-                    copy_claims=ctx.get("copy") or [],
-                )
+                _t2_chain(decision, ctx.get("copy") or [])
             # The chains set the stage from the blueprints owned; a row
             # this plan does not build at all (unconditionally) is
             # "blocked" whatever they set (fix round 2, item 2).
             first = decision.overview_row.get("research_first")
             if isinstance(first, dict) and first.get("unconditional") and first.get("mode") == "none":
                 decision.pipeline_stage = NOT_BUILT_STAGE
+
+        def _t2_chain(decision: ItemDecision, copy_claims: list[tuple[Any, Any]]) -> None:
+            ctx = state[id(decision)]
+            self._plan_t2_chain(
+                decision=decision,
+                bp_type_id=ctx["bp_type_id"],
+                bp_data=ctx["bp_data"],
+                blueprint_data=blueprint_data,
+                invention_source=invention_source,
+                bpo_assets_by_type_id=free_bpo_assets_by_type_id,
+                bpc_assets_by_type_id=free_bpc_assets_by_type_id,
+                busy_bpo_type_ids=busy_bpo_type_ids,
+                market_depth_cache=market_depth_cache,
+                invention_success_rates=invention_success_rates,
+                bpo_opportunities=bpo_opportunities,
+                bpo_strong_buy_days=bpo_strong_buy_days,
+                bpo_consider_days=bpo_consider_days,
+                ledger=ledger,
+                copy_claims=copy_claims,
+            )
 
         # The T1 BPCs the T1 rows' own batches (and research-first variants)
         # build on: not counted as free for a T2 row's copy decision.
@@ -404,6 +408,85 @@ class ChainPlanner:
                             _note_bpc_use(t1_bpc_use, candidate)
             for decision in ordered:
                 _isolated(decision, step)
+
+        def _annotate(decision: ItemDecision) -> None:
+            # The blueprints this row holds, by job kind (named items only):
+            # CharacterAssigner releases the ones no action used (Task A).
+            claims: dict[str, list[int]] = {"manufacture": [], "copy": [], "invention": [], "research": []}
+            for key, label in ledger.claims_of(decision.type_id):
+                if isinstance(key, int) and not isinstance(key, bool):
+                    claims[_claim_category(label)].append(key)
+            decision.overview_row["ledger_claims"] = claims
+
+        for decision in ordered:
+            if id(decision) in state:
+                _annotate(decision)
+
+        names = {int(d.type_id): f"{d.type_name} ({d.type_id})" for d in build_decisions}
+
+        def _replan(
+            release: dict[int, list[int]], used_by: dict[int, int], eligible: set[int],
+        ) -> list[ItemDecision]:
+            """Task A items 2, 3 and 6: CharacterAssigner's report after a
+            pass. `release`: {row type_id: blueprint item_ids it claimed but
+            no action of it used}; `used_by`: {item_id: row type_id} of the
+            blueprints its actions use (a released BPC another row invents
+            from); `eligible`: the rows with no action yet. The claims are
+            released, the uses booked, and the eligible rows not built for a
+            blueprint now free are planned again, in score order. Returns
+            those rows (the same objects, re-planned)."""
+            released: dict[Any, str] = {}
+            for owner, items in release.items():
+                for item in items:
+                    held = ledger.claim_of(item)
+                    if held is not None and held[0] == int(owner):
+                        released[item] = held[1]
+                        ledger.release(item, owner)
+            for item, user in used_by.items():
+                held = ledger.claim_of(item)
+                if held is None or held[0] != int(user):
+                    kind = (ledger.type_of(item) or ("bpc", 0))[0]
+                    job = "invention for" if kind == "bpc" else "copy for"
+                    ledger.transfer(item, user, f"{job} {names.get(int(user), f'type {user}')}")
+            revived: list[ItemDecision] = []
+            for decision in ordered:
+                row = decision.overview_row
+                replan_on = row.get("replan_on")
+                ctx = state.get(id(decision))
+                if not isinstance(replan_on, dict) or ctx is None or int(decision.type_id) not in eligible:
+                    continue
+                before = {k for k, _l in ledger.claims_of(decision.type_id)}
+                snapshot = (
+                    decision.decision_reason, decision.pipeline_stage, decision.bpo_analysis_skip_reason, dict(row),
+                )
+                if replan_on.get("kind") == "t2":
+                    done = self._replan_t2(decision, ledger, replan_on, lambda d: _t2_chain(d, []))
+                else:
+                    done = self._replan_t1(decision, ledger, ctx)
+                if done:
+                    gained = [k for k, _l in ledger.claims_of(decision.type_id) if k not in before]
+                    _append_reason(decision, _released_wording(decision, ledger, gained, released))
+                    undo_state[id(decision)] = (*snapshot, gained)
+                    revived.append(decision)
+                    _annotate(decision)
+                elif replan_on.get("kind") == "t2":
+                    self._reword_t2_blocked(decision, ledger, replan_on)
+            return revived
+
+        undo_state: dict[int, tuple[Any, ...]] = {}
+
+        def _undo_replan(decision: ItemDecision) -> None:
+            """A re-planned row that still got no action: back to its
+            not-built plan and reason, and the blueprints it gained are free."""
+            saved = undo_state.pop(id(decision), None)
+            if saved is None:
+                return
+            reason, stage, skip_reason, row, gained = saved
+            decision.decision_reason, decision.pipeline_stage, decision.bpo_analysis_skip_reason = reason, stage, skip_reason
+            decision.overview_row.clear()
+            decision.overview_row.update(row)
+            for key in gained:
+                ledger.release(key, decision.type_id)
 
         # Each parent's sub-manufacture requests, in order, and (research
         # first) the ones its kept BPO row would make instead. Sub-builds
@@ -500,7 +583,82 @@ class ChainPlanner:
             sub_manufacture_actions=sub_manufacture_actions,
             resize_sub_components=_sub_decisions,
             rebuild_decisions=_rebuild,
+            replan_released=_replan,
+            undo_replan=_undo_replan,
         )
+
+    @staticmethod
+    def _unmark_not_built(decision: ItemDecision) -> None:
+        """Undo _mark_not_built for a row a re-plan builds after all."""
+        row = decision.overview_row
+        row.pop("research_first", None)
+        row.pop("replan_on", None)
+        suffix = row.pop("not_built_suffix", None)
+        if suffix:
+            decision.decision_reason = (decision.decision_reason or "").replace(suffix, "", 1)
+
+    def _replan_t2(
+        self, decision: ItemDecision, ledger: BlueprintLedger, replan_on: dict[str, Any], plan: Any,
+    ) -> bool:
+        """A T2 row not built for its T1 BPO / BPCs (held by other jobs):
+        planned again when one of that T1 source is free now."""
+        t1 = int(replan_on["t1"])
+        if not ledger.free_bpcs(t1) and not ledger.free_bpos(t1):
+            return False
+        self._unmark_not_built(decision)
+        plan(decision)
+        return decision.pipeline_stage != NOT_BUILT_STAGE
+
+    def _replan_t1(self, decision: ItemDecision, ledger: BlueprintLedger, ctx: dict[str, Any]) -> bool:
+        """A T1 row not built because another row's job held the BPO it is
+        priced from: built from it when that BPO is free now, and every
+        owned BPC its batch names is free too. Its components were not
+        sub-built, so its manufacture buys them."""
+        bpo_plan = ctx.get("bpo_plan")
+        keys = ctx.get("bpo_keys")
+        if not bpo_plan or not keys:
+            return False
+        priced = bpo_plan["priced"]
+        if priced in set(bpo_plan.get("busy") or ()) or ledger.claim_of(keys[priced]) is not None:
+            return False
+        row = decision.overview_row
+        if research_first.builds_on_owned_bpcs(row):
+            named = [
+                research_first.segment_bpc_item_id(seg) for seg in research_first.job_segments(row) or []
+                if str(seg.get("source")) == research_first.OWNED_BPC_SOURCE
+            ]
+            bp_type_id = orow.get_blueprint_type_id(row) or 0
+            if not named or any(i is None for i in named):
+                return False  # unnamed BPCs: cannot show they are free
+            for item in named:
+                key = ledger.bpc_key(bp_type_id, int(item))
+                if key is None or ledger.claim_of(key) is not None:
+                    return False
+        self._unmark_not_built(decision)
+        decision.pipeline_stage = "manufacturing"
+        self._claim_t1_build(
+            ledger, decision, bpo_plan, keys, f"manufacture of {decision.type_name} ({decision.type_id})",
+        )
+        _append_reason(decision, "its components are bought: they were not sub-built in this plan")
+        return True
+
+    @staticmethod
+    def _reword_t2_blocked(decision: ItemDecision, ledger: BlueprintLedger, replan_on: dict[str, Any]) -> None:
+        """A T2 row still not built after a re-plan names who holds its T1
+        blueprints now (a released one may have gone to another row)."""
+        t1 = int(replan_on["t1"])
+        labels = ledger.bpo_claim_labels(t1) if replan_on.get("blocked") == "bpo" else ledger.bpc_claim_labels(t1)
+        if not labels:
+            return
+        row = decision.overview_row
+        old = row.get("not_built_suffix")
+        new = f"; not built: {_t2_blocked_reason(str(replan_on.get('blocked')), t1, _holders(labels))}"
+        if old and old != new and old in (decision.decision_reason or ""):
+            decision.decision_reason = decision.decision_reason.replace(old, new, 1)
+            row["not_built_suffix"] = new
+            first = row.get("research_first")
+            if isinstance(first, dict):
+                first["note"] = f"{new[len('; not built: '):]}: not built from it in this plan"
 
     @staticmethod
     def _merge_sub_requests(
@@ -701,6 +859,8 @@ class ChainPlanner:
         # Persisted and shown in the Build Plan's Reason column (Task 12 fix
         # round 4): the row keeps decision="build", so say why it is not.
         decision.decision_reason = f"{decision.decision_reason}; not built: {reason}"
+        # Task A item 2: what a re-plan strips when the row is built after all.
+        decision.overview_row["not_built_suffix"] = f"; not built: {reason}"
         logger.info("ChainPlanner: type_id=%s: %s: not built from it in this plan", decision.type_id, reason)
 
     @staticmethod
@@ -1015,16 +1175,15 @@ class ChainPlanner:
                 f"the T1 BPO ({t1_bp_type_id}) is used by {holders} today: no copy in this plan; "
                 "it is owned, so not a purchase",
             )
-            self._mark_not_built(decision, f"T1 BPO ({t1_bp_type_id}) used by {holders} today: no copy in this plan")
+            self._mark_not_built(decision, _t2_blocked_reason("bpo", t1_bp_type_id, holders))
+            decision.overview_row["replan_on"] = {"kind": "t2", "t1": t1_bp_type_id, "blocked": "bpo"}
         elif t1_bp_type_id is not None and ledger.bpc_claim_labels(t1_bp_type_id):
             # Owned T1 BPCs, all taken by other jobs today, and no BPO: not
             # a purchase either (fix round 2).
             holders = _holders(ledger.bpc_claim_labels(t1_bp_type_id))
             self._skip_bpo_analysis(decision, f"the T1 BPCs ({t1_bp_type_id}) are used by {holders} today: owned")
-            self._mark_not_built(
-                decision,
-                f"T1 BPCs ({t1_bp_type_id}) used by {holders} today and no T1 BPO to copy: no invention in this plan",
-            )
+            self._mark_not_built(decision, _t2_blocked_reason("bpcs", t1_bp_type_id, holders))
+            decision.overview_row["replan_on"] = {"kind": "t2", "t1": t1_bp_type_id, "blocked": "bpcs"}
         elif t1_bp_type_id is not None and t1_bp_type_id in busy_bpo_type_ids:
             decision.pipeline_stage = "copying"
             self._skip_bpo_analysis(
@@ -1264,6 +1423,11 @@ class ChainPlanner:
                     decision.decision_reason = (
                         f"{decision.decision_reason}; not built: {cause}{unsized_note}"
                     )
+                    row["not_built_suffix"] = f"; not built: {cause}{unsized_note}"
+                    if priced in taken:
+                        # Task A item 6: another row's job holds the BPO; when
+                        # that job gets no slot the row is re-planned.
+                        row["replan_on"] = {"kind": "t1_bpo"}
             note = row["research_first"]["note"]
         _log(note)
 
@@ -2103,6 +2267,44 @@ def _pick_bpcs(free: list[tuple[Any, int | None, int]], need: int | None) -> lis
         picked.append(pick)
         left -= pick[2]
     return picked
+
+
+def _t2_blocked_reason(blocked: str, t1_bp_type_id: int, holders: str) -> str:
+    """Why a T2 row is not built: its T1 BPO ("bpo") or its T1 BPCs
+    ("bpcs") are held by other jobs today."""
+    if blocked == "bpo":
+        return f"T1 BPO ({t1_bp_type_id}) used by {holders} today: no copy in this plan"
+    return f"T1 BPCs ({t1_bp_type_id}) used by {holders} today and no T1 BPO to copy: no invention in this plan"
+
+
+def _released_wording(
+    decision: ItemDecision, ledger: BlueprintLedger, gained: list[Any], released: dict[Any, str],
+) -> str:
+    """ "re-planned: T1 BPC(s) 701 released by invention for X (1), which
+    does not use them today", per releasing job, for the released
+    blueprints a re-planned row now holds."""
+    by_holder: dict[tuple[str, str], list[str]] = {}
+    for key in gained:
+        if key not in released:
+            continue
+        kind = (ledger.type_of(key) or ("bpo", 0))[0]
+        by_holder.setdefault((kind, released[key]), []).append(str(key))
+    parts: list[str] = []
+    for (kind, holder), items in by_holder.items():
+        if decision.meta_group_id == META_GROUP_T1 and kind == "bpo":
+            parts.append(f"its BPO (item {', '.join(items)}) released by {holder}, which does not use it today")
+        else:
+            what = "T1 BPC(s)" if kind == "bpc" else "T1 BPO(s)"
+            parts.append(f"{what} {', '.join(items)} released by {holder}, which does not use them today")
+    return "re-planned: " + ("; ".join(parts) if parts else "a blueprint it needs is free again")
+
+
+def _claim_category(label: str) -> str:
+    """The job kind of a ledger claim, from its label."""
+    for prefix, category in (("manufacture of", "manufacture"), ("copy for", "copy"), ("invention for", "invention")):
+        if label.startswith(prefix):
+            return category
+    return "research"
 
 
 def _holders(labels: list[str]) -> str:

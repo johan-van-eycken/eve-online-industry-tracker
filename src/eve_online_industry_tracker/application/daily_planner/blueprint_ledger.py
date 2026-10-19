@@ -130,6 +130,23 @@ class BlueprintLedger:
         if held is not None and held[0] == int(owner_type_id):
             del self._claims[key]
 
+    def transfer(self, key: Hashable, owner_type_id: int, label: str) -> None:
+        """Book `key` for `owner_type_id`, whoever held it: the assigner
+        gave a released blueprint to that row's job (Task A items 2-3)."""
+        self._claims[key] = (int(owner_type_id), label)
+
+    def claims_of(self, owner_type_id: int) -> list[tuple[Hashable, str]]:
+        """(key, label) of every claim `owner_type_id` holds, in claim order."""
+        return [(k, c[1]) for k, c in self._claims.items() if c[0] == int(owner_type_id)]
+
+    def type_of(self, key: Hashable) -> tuple[str, int] | None:
+        """("bpo" | "bpc", blueprint type_id) of a ledger key, or None."""
+        for kind, index in (("bpo", self._bpos), ("bpc", self._bpcs)):
+            for type_id, entries in index.items():
+                if any(k == key for k, _a in entries):
+                    return kind, type_id
+        return None
+
     def claim_bpcs_of_row(self, type_id: int, item_ids: set[int] | None, owner_type_id: int, label: str) -> None:
         """Book the BPCs a manufacture builds on: the named items, or every
         free BPC of the type when the row does not name them (conservative:

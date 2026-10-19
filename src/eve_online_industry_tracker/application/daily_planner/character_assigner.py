@@ -119,8 +119,49 @@ class CharacterAssigner:
         # {T1 blueprint type_id: BPCs} a row could not invent from today,
         # offered to the lower rows of that source (Task 15 fix round 4).
         bpc_pool: dict[str, Any] = {}
+        # The actions of each top-level row (Task A): which claims they use.
+        emitted: dict[int, list[AssignedAction]] = {}
+
+        def _assign_one(decision: ItemDecision) -> list[AssignedAction]:
+            return self._assign_decision(
+                decision=decision,
+                row=decision.overview_row,
+                char_slots=char_slots,
+                characters=characters,
+                now=now,
+                probability_floor=probability_floor,
+                price_map=price_map or {},
+                fell_back=fell_back,
+                can_resize=callable(resize),
+                bpc_pool=bpc_pool,
+            )
+
         for pass_decisions in (top_level, None):
             if pass_decisions is None:
+                # Task A items 2, 3 and 6: blueprints claimed for a job that
+                # got no action go back; rows not built for them are planned
+                # again, before any sub-component takes a slot.
+                replan = getattr(chain_plan, "replan_released", None)
+                undo = getattr(chain_plan, "undo_replan", None)
+                tried: set[int] = set()
+                for _pass in range(MAX_REPLAN_PASSES if callable(replan) else 0):
+                    release, used_by = _unused_claims(top_level, emitted, bpc_pool)
+                    eligible = {int(d.type_id) for d in top_level if not emitted.get(id(d)) and id(d) not in tried}
+                    revived = replan(release, used_by, eligible) if (release or used_by) else []
+                    if not revived:
+                        break
+                    for decision in revived:
+                        tried.add(id(decision))
+                        actions = _assign_one(decision)
+                        if not actions and callable(undo):
+                            # Still nothing to do today (no free slot): keep
+                            # its not-built plan and reason as they were.
+                            undo(decision)
+                            bpc_pool["releases"] = [e for e in bpc_pool.get("releases") or [] if e[0] is not decision]
+                            continue
+                        logger.info("CharacterAssigner: type_id=%s re-planned after a blueprint release", decision.type_id)
+                        emitted[id(decision)] = actions
+                        assigned_actions.extend(actions)
                 if fell_back and callable(resize):
                     # Their components were sized for the research-first
                     # batch: re-plan them for the batch actually built (fix
@@ -138,18 +179,9 @@ class CharacterAssigner:
                     )
                 pass_decisions = sub_components
             for decision in pass_decisions:
-                actions = self._assign_decision(
-                    decision=decision,
-                    row=decision.overview_row,
-                    char_slots=char_slots,
-                    characters=characters,
-                    now=now,
-                    probability_floor=probability_floor,
-                    price_map=price_map or {},
-                    fell_back=fell_back,
-                    can_resize=callable(resize),
-                    bpc_pool=bpc_pool,
-                )
+                actions = _assign_one(decision)
+                if pass_decisions is top_level:
+                    emitted[id(decision)] = actions
                 # Slots are consumed inside _assign_decision, as each action is
                 # created -- two research actions on one item must not share a slot.
                 assigned_actions.extend(actions)
@@ -363,6 +395,8 @@ class CharacterAssigner:
                         max_runs_per_copy=max_runs_per_copy, lane_sizes=lane_sizes,
                     ))
                     used_bpos.update(copy_bpos[:len(reserved)])
+                    # Which T1 BPOs this row's copies use (Task A item 6).
+                    pools.setdefault("copy_used", {}).setdefault(int(type_id), []).extend(copy_bpos[:len(reserved)])
                 if on_hand <= 0:
                     logger.info(
                         "CharacterAssigner: type_id=%s: no T1 BPC on hand; copy first, no invent action today",
@@ -1116,6 +1150,46 @@ class CharacterAssigner:
 
 
 _LANE_WORDING = re.compile(r"lane \d+ of \d+")
+
+#: Task A: release-and-re-plan passes after the top-level rows (bounded:
+#: each pass only re-plans rows that had no action yet).
+MAX_REPLAN_PASSES = 3
+
+
+def _unused_claims(
+    top_level: list[ItemDecision], emitted: dict[int, list[AssignedAction]], bpc_pool: dict[str, Any],
+) -> tuple[dict[int, list[int]], dict[int, int]]:
+    """({row type_id: claimed blueprint item_ids no action of it uses},
+    {item_id: row type_id whose action uses it}), from ChainPlanner's
+    ledger_claims. Conservative: a manufacture keeps every BPO / BPC the
+    row claimed to build (and its research BPO); research keeps its BPO; a
+    copy or invention claim is used only by the copy / invent action that
+    names that blueprint."""
+    used_by: dict[int, int] = {}
+    copy_used: dict[int, list[Any]] = bpc_pool.get("copy_used") or {}
+    for decision in top_level:
+        for action in emitted.get(id(decision)) or []:
+            if action.action_type == "invent" and action.blueprint_item_id is not None:
+                used_by[int(action.blueprint_item_id)] = int(decision.type_id)
+        for key in copy_used.get(int(decision.type_id)) or []:
+            if isinstance(key, int) and not isinstance(key, bool):
+                used_by[key] = int(decision.type_id)
+    release: dict[int, list[int]] = {}
+    for decision in top_level:
+        claims = decision.overview_row.get("ledger_claims")
+        if not isinstance(claims, dict):
+            continue
+        kinds = {a.action_type for a in emitted.get(id(decision)) or []}
+        idle: list[int] = []
+        if "manufacture" not in kinds:
+            idle.extend(claims.get("manufacture") or [])
+            if not kinds & {"me_research", "te_research"}:
+                idle.extend(claims.get("research") or [])
+        idle.extend(k for k in claims.get("copy") or [] if used_by.get(k) != int(decision.type_id))
+        idle.extend(k for k in claims.get("invention") or [] if used_by.get(k) != int(decision.type_id))
+        if idle:
+            release[int(decision.type_id)] = idle
+    return release, used_by
 
 
 def _component_buy_reasons(decision: ItemDecision, action: AssignedAction) -> None:

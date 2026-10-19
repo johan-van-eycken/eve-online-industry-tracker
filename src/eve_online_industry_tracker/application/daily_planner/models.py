@@ -171,3 +171,9 @@ class ChainPlan:
     #: The plan's decisions for a new set of sub-component decisions, one
     #: ItemDecision per type_id (Task 14). None: top-level + subs as they are.
     rebuild_decisions: Any = field(default=None, repr=False, compare=False)
+    #: Task A items 2, 3 and 6: releases the blueprints the assigner found
+    #: unused and re-plans the rows not built for them (ChainPlanner's
+    #: _replan). None for a hand-built plan: nothing is re-planned.
+    replan_released: Any = field(default=None, repr=False, compare=False)
+    #: Puts a re-planned row that still got no action back as it was.
+    undo_replan: Any = field(default=None, repr=False, compare=False)
