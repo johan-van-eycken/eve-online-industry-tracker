@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from config.schemas import CONFIG_SCHEMA
 from config.paths import app_config_path, app_secret_path
@@ -173,12 +174,13 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
             logging.error("Database initialization failed: %s", e, exc_info=True)
         raise
 
-def init_char_manager(cfgManager: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager) -> CharacterManager:
+def init_char_manager(cfgManager: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager,
+                      admin_settings: Any = None) -> CharacterManager:
     """
     Initialize Character Manager
     """
     try:
-        char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde)
+        char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, admin_settings=admin_settings)
         return char_manager
     except ValueError as e:
         logging.error(f"Error encountered: {e}")

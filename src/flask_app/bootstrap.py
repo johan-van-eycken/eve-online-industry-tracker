@@ -116,7 +116,8 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Initializing characters...")
         state.init_state = "Initializing Characters"
         state.char_manager = init_char_manager(
-            state.cfg_manager, state.db_oauth, state.db_app, state.db_sde
+            state.cfg_manager, state.db_oauth, state.db_app, state.db_sde,
+            admin_settings=state.admin_settings,
         )
         try:
             state.char_manager.refresh_all()

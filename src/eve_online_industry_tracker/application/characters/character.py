@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from eve_online_industry_tracker.application import market_fees
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
@@ -70,9 +72,12 @@ class Character:
                  is_corp_director: bool = False,
                  refresh_token: Optional[str] = None,
                  industry_enabled: bool = True,
+                 admin_settings: Any = None,
         ) -> None:
         try:
             # Private properties
+            # The admin settings (industry/* market fee rates); None: the schema defaults.
+            self._admin_settings = admin_settings
             self._cfgManager = cfgManager
             self._cfg = cfgManager.all()
             self._db_oauth = db_oauth
@@ -503,19 +508,31 @@ class Character:
     def refresh_market_fees(self) -> None:
         """Compute and persist character-specific market fees (Jita 4-4 only).
 
-        Uses character skills + standings plus SDE station ownership.
-
-        Sales tax (seller): 7.5% * (1 - 0.11 * AccountingLevel)
-        Broker fee (NPC station): 3% - 0.3%*BrokerRelationsLevel - 0.03%*factionStanding - 0.02%*corpStanding
-        """
+        Uses character skills + standings plus SDE station ownership, with the
+        admin settings industry/* through application.market_fees (the
+        producer's formula). Without loaded skills the rates are None with
+        an unknown_reason (an untrained character is not assumed)."""
         try:
-            # Skills may not be loaded yet (e.g. missing scopes). Treat as best-effort.
+            fee_settings = market_fees.MarketFeeSettings.from_admin(getattr(self, "_admin_settings", None))
+            skills_list = (self.skills or {}).get("skills") if isinstance(self.skills, dict) else None
+            if not isinstance(skills_list, list) or not skills_list:
+                self.market_fees = {
+                    "jita_4_4": {
+                        "station_id": int(JITA_4_4_STATION_ID),
+                        "rates": {"sales_tax_fraction": None, "broker_fee_fraction": None},
+                        "unknown_reason": "the character's skills are not loaded (missing scope or not refreshed yet)",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "computed",
+                    }
+                }
+                logging.warning("Market fees of %s (%s) unknown: skills not loaded", self.character_name,
+                                self.character_id)
+                self.save_character()
+                return
+
             accounting_level = self._get_skill_level(skill_id=SKILL_ID_ACCOUNTING, skill_name="Accounting")
             broker_rel_level = self._get_skill_level(skill_id=SKILL_ID_BROKER_RELATIONS, skill_name="Broker Relations")
-
-            base_sales_tax = 0.075
-            sales_tax_fraction = float(base_sales_tax) * (1.0 - (0.11 * float(accounting_level)))
-            sales_tax_fraction = min(1.0, max(0.0, sales_tax_fraction))
+            sales_tax_fraction = market_fees.sales_tax_fraction(fee_settings, accounting_level=accounting_level)
 
             owner_corp_id: int | None = None
             owner_faction_id: int | None = None
@@ -552,14 +569,9 @@ class Character:
                 if owner_corp_id is not None
                 else 0.0
             )
-
-            broker_fee_fraction = (
-                0.03
-                - (0.003 * float(broker_rel_level))
-                - (0.0003 * float(faction_standing))
-                - (0.0002 * float(corp_standing))
-            )
-            broker_fee_fraction = min(0.03, max(0.0, float(broker_fee_fraction)))
+            broker_fee_fraction = market_fees.broker_fee_fraction(
+                fee_settings, broker_relations_level=broker_rel_level,
+                faction_standing=faction_standing, corp_standing=corp_standing)
 
             self.market_fees = {
                 "jita_4_4": {
@@ -575,7 +587,7 @@ class Character:
                         "corp_standing": float(corp_standing),
                     },
                     "rates": {
-                        "base_sales_tax_fraction": float(base_sales_tax),
+                        "base_sales_tax_fraction": float(fee_settings.base_sales_tax_rate),
                         "sales_tax_fraction": float(sales_tax_fraction),
                         "broker_fee_fraction": float(broker_fee_fraction),
                     },
@@ -585,6 +597,14 @@ class Character:
             }
 
             self.save_character()
+        except AdminSettingInvalid as exc:
+            # An invalid industry/* fee setting: the fees are unknown, naming it (not a silent default).
+            logging.error("Market fees of %s (%s) unknown: %s", self.character_name, self.character_id, exc.message)
+            self.market_fees = {"jita_4_4": {"station_id": int(JITA_4_4_STATION_ID),
+                                             "rates": {"sales_tax_fraction": None, "broker_fee_fraction": None},
+                                             "unknown_reason": exc.message,
+                                             "updated_at": datetime.now(timezone.utc).isoformat(),
+                                             "source": "computed"}}
         except Exception as e:
             logging.warning(
                 "Failed to compute market fees for %s (%s): %s",

@@ -225,7 +225,6 @@ def _build_clipboard_text(
     lines = ["=== Daily Planner Shopping List ==="]
     categories = [
         ("current_job", "-- Current Job Materials --"),
-        ("future_stock", "-- Future Build Stock --"),
         ("invention_input", "-- Invention Inputs --"),
     ]
     for cat, header in categories:
@@ -331,25 +330,19 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
 
     # Build per-category rows
     current_rows = _build_shopping_rows(actions, "current_job")
-    future_rows = _build_shopping_rows(actions, "future_stock")
     invention_rows = _build_shopping_rows(actions, "invention_input")
 
     # Pending lines only, plus the pending jobs' install fees (Task 14 minor
     # 1): the same total Capital Reserved counts for them.
     budget = shopping_budget(actions)
     total_isk = budget.purchases
-    all_rows = [r for r in (*current_rows, *future_rows, *invention_rows) if r["_status"] == "pending"]
+    all_rows = [r for r in (*current_rows, *invention_rows) if r["_status"] == "pending"]
     unpriced_lines = budget.unknown_lines
     # None = unknown (unpriced lines or fees, priced total within the wallet).
     wallet_short = wallet_is_short(corp_wallet, budget.total, unpriced_lines=unpriced_lines)
 
     # Current job materials (highest priority)
     _render_materials_section("Current Job Materials", current_rows, deemphasise=False, ag_imports=ag)
-
-    st.markdown("")
-
-    # Future stock (optional if wallet is short)
-    _render_materials_section("Future Build Stock", future_rows, deemphasise=bool(wallet_short), ag_imports=ag)
 
     st.markdown("")
 
@@ -394,7 +387,7 @@ def render_tab_shopping(page_state: DailyPlannerPageState) -> None:
     if wallet_short:
         st.warning(
             "Total shopping cost exceeds corp wallet. "
-            "Buy Current Job materials first; Future Build Stock is optional this cycle."
+            "Buy Current Job materials first."
         )
 
     # Export / clipboard

@@ -61,7 +61,7 @@ class ShoppingListBuilder:
         product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
         invention_source = build_invention_source_index(blueprint_data)
 
-        # Process actions in priority order (current_job first, then future_stock)
+        # Process actions in priority order (current_job first, then invention inputs)
         # Split by category
         current_job_actions = [a for a in assigned_actions if a.action_type in ("manufacture", "sub_manufacture")]
         invention_actions = [a for a in assigned_actions if a.action_type == "invent"]

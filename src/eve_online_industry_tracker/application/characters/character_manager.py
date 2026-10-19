@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
@@ -16,8 +16,11 @@ class CharacterManager:
         db_app: DatabaseManager,
         db_sde: DatabaseManager,
         corporation_id: Optional[int] = None,
-        char_manager: Optional["CharacterManager"] = None
+        char_manager: Optional["CharacterManager"] = None,
+        admin_settings: Any = None,
     ) -> None:
+        # The admin settings for the characters' market fees (industry/*); None: the schema defaults.
+        self.admin_settings = admin_settings
         # Private arguments
         self._cfgManager = cfgManager
         self._cfg = cfgManager.all()
@@ -93,6 +96,7 @@ class CharacterManager:
                     character_is_corp_director,
                     existing_token,
                     industry_enabled=character_industry_enabled,
+                    admin_settings=self.admin_settings,
                 )
                 self._character_list.append(char)
             except KeyError as e:

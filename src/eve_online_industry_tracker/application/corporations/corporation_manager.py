@@ -47,7 +47,8 @@ class CorporationManager:
     def _initialize_corporations(self) -> None:
         for corp_id in self._corporation_ids:
             try:
-                char_manager_corp = CharacterManager(self._cfgManager, self._db_oauth, self._db_app, self._db_sde, corp_id, self._char_manager)
+                char_manager_corp = CharacterManager(self._cfgManager, self._db_oauth, self._db_app, self._db_sde, corp_id, self._char_manager,
+                                                     admin_settings=getattr(self._char_manager, "admin_settings", None))
             except KeyError as e:
                 logging.error(f"Failed to initialize character manager for corporation ID {corp_id}. Missing key: {e}")
             except Exception as e:

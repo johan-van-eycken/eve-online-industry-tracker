@@ -150,7 +150,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "step": 0.005,
                 "format": "%.4f",
                 "label": "Assumed broker fee for relisting",
-                "help": "The broker fee the portfolio planner's relist-cost estimate assumes for a product whose "
+                "help": "The broker fee the Industry Builder's relist-cost estimate assumes for a product whose "
                         "own broker fee is unknown (no character to read Broker Relations and standings from). "
                         "Sale proceeds themselves use the character's fee, or show it as unknown.",
             },

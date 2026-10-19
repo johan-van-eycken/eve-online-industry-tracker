@@ -190,6 +190,12 @@ def row_assumes_owned_t2_bpo(row: dict[str, Any]) -> bool:
     return bool(get_manufacturing_job(row).get("assumes_owned_t2_bpo"))
 
 
+def relist_note(row: dict[str, Any]) -> str:
+    """The producer's note when the relist cost assumes the broker fee
+    (relist_broker_fee_assumed), shown next to the relist cost; "" otherwise."""
+    return str(row.get("relist_broker_fee_assumed") or "")
+
+
 def invention_summary_lines(row: dict[str, Any]) -> list[str]:
     """Drilldown captions: which decryptor the producer chose and why, and the
     invention chance it assumed. [] for a row that does not invent."""
@@ -572,6 +578,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Historical Margin %": historical_realized_margin_pct,
                 "Builder Accuracy (Δ%)": historical_vs_projected_delta_pct,
                 "Relist Cost/Unit": relist_cost_per_unit,
+                "Relist Note": relist_note(source_row),
                 "Profit (After Relist)": effective_profit_with_relist,
                 "Margin (After Relist) %": effective_margin_with_relist_pct,
             }

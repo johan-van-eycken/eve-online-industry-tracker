@@ -42,6 +42,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
+from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from flask_app.background_jobs import register_thread
 from eve_online_industry_tracker.infrastructure.session_provider import (
@@ -383,8 +384,8 @@ class IndustryService:
             return own, None
         assumed = float(self._adm("market_defaults", "default_broker_fee",
                                   ADMIN_SETTINGS_SCHEMA["market_defaults"]["settings"]["default_broker_fee"]["default"]))
-        return assumed, (f"broker fee unknown: the relist cost assumes {assumed:.2%} "
-                         "(admin setting market_defaults/default_broker_fee)")
+        return assumed, (f"relist cost as if the broker fee is {assumed:.2%} (its own is unknown; admin setting "
+                         "market_defaults/default_broker_fee)")
 
     def _ensure_industry_job_manager(self) -> IndustryJobManager:
         mgr = getattr(self._state, "industry_job_manager", None)
@@ -1891,7 +1892,8 @@ class IndustryService:
             trained_skill_levels = self._get_character_trained_skill_levels(character_id=int(character_id))
             accounting_level = int(trained_skill_levels.get(self._SKILL_ID_ACCOUNTING, 0) or 0)
             broker_relations_level = int(trained_skill_levels.get(self._SKILL_ID_BROKER_RELATIONS, 0) or 0)
-            sales_tax_fraction = max(0.0, min(1.0, float(self._adm("industry", "base_sales_tax_rate", 0.075)) * (1.0 - (float(self._adm("industry", "accounting_skill_reduction", 0.11)) * float(accounting_level)))))
+            fee_settings = market_fees.MarketFeeSettings.from_admin(self._admin)
+            sales_tax_fraction = market_fees.sales_tax_fraction(fee_settings, accounting_level=accounting_level)
 
             sde_session: Any = self._sessions.sde_session()
             station = (
@@ -1926,21 +1928,9 @@ class IndustryService:
                 from_type="npc_corp",
                 from_id=owner_corp_id,
             )
-            _fee_min = float(self._adm("industry", "broker_fee_min", 0.01))
-            _fee_base = float(self._adm("industry", "broker_fee_base", 0.03))
-            _br_red = float(self._adm("industry", "broker_relations_reduction_per_level", 0.003))
-            _fac_red = float(self._adm("industry", "faction_standing_reduction_per_point", 0.0003))
-            _corp_red = float(self._adm("industry", "corp_standing_reduction_per_point", 0.0002))
-            broker_fee_fraction = max(
-                _fee_min,
-                min(
-                    _fee_base,
-                    _fee_base
-                    - (_br_red * float(broker_relations_level))
-                    - (_fac_red * float(faction_standing))
-                    - (_corp_red * float(corp_standing)),
-                ),
-            )
+            broker_fee_fraction = market_fees.broker_fee_fraction(
+                fee_settings, broker_relations_level=broker_relations_level,
+                faction_standing=faction_standing, corp_standing=corp_standing)
 
         return {
             "market_hub": hub_context.get("hub"),
