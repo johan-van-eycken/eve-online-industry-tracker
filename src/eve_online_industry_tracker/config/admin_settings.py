@@ -597,6 +597,74 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "reprocessing": {
+        "label": "Reprocessing",
+        "settings": {
+            "facility_type": {
+                "type": "select",
+                "strict": True,
+                "default": "npc_station",
+                "options": [
+                    {"value": "npc_station", "label": "NPC station"},
+                    {"value": "athanor", "label": "Athanor"},
+                    {"value": "tatara", "label": "Tatara"},
+                ],
+                "label": "Ore calculator: reprocessing facility",
+                "help": "Where the ore calculator reprocesses. An Athanor adds 2% and a Tatara 5.5% "
+                        "(the SDE's strRefiningYieldBonus); an NPC station has a 50% base yield and no rigs.",
+            },
+            "rig": {
+                "type": "select",
+                "strict": True,
+                "default": "none",
+                "options": [
+                    {"value": "none", "label": "No reprocessing rig"},
+                    {"value": "t1", "label": "T1 rig (51% base)"},
+                    {"value": "t2", "label": "T2 rig (53% base)"},
+                ],
+                "label": "Ore calculator: reprocessing rig",
+                "help": "The structure's reprocessing rig (M-Set on an Athanor, L-Set on a Tatara), assumed to "
+                        "cover every ore reprocessed. None for an NPC station.",
+            },
+            "security_band": {
+                "type": "select",
+                "strict": True,
+                "default": "high",
+                "options": [
+                    {"value": "high", "label": "Highsec (x1.00)"},
+                    {"value": "low", "label": "Lowsec (x1.06)"},
+                    {"value": "null", "label": "Nullsec / wormhole (x1.12)"},
+                ],
+                "label": "Ore calculator: security band",
+                "help": "The facility's security band; the rig's security modifier only applies with a rig.",
+            },
+            "npc_station_id": {
+                "type": "int",
+                "optional": True,
+                "default": None,
+                # No min/max: the int coercion would clamp a wrong id into another station's; the SDE
+                # lookup rejects an id it does not have instead.
+                "label": "Ore calculator: NPC station id",
+                "help": "The NPC station (its id, e.g. 60003760 for Jita IV - Moon 4) whose SDE reprocessing "
+                        "yield and base tax the ore calculator uses. Required for an NPC station.",
+            },
+            "tax": {
+                "type": "float",
+                "optional": True,
+                "strict": True,  # outside min/max is an error, not clamped
+                "default": None,
+                "min": 0.0,
+                "max": 0.5,
+                "step": 0.0005,
+                "format": "%.4f",
+                "label": "Ore calculator: reprocessing tax (effective rate)",
+                "help": "The effective reprocessing tax (a fraction), charged on the estimated value of the "
+                        "minerals produced. At an NPC station, empty uses the station's SDE base tax; your "
+                        "standings lower it, so set the rate you actually pay here (after standings). At a player "
+                        "structure the owner sets it, so it is required.",
+            },
+        },
+    },
     "esi_resilience": {
         "label": "ESI Resilience",
         "settings": {
@@ -687,7 +755,7 @@ class AdminSettingsManager:
     def set(self, category: str, key: str, value: Any) -> None:
         """Update a single setting and persist to disk."""
         spec = self._spec(category, key)
-        coerced = self._coerce(value, spec)
+        coerced = self._coerce_named(category, key, value, spec)
         with self._lock:
             self._data.setdefault(category, {})[key] = coerced
             self._persist()
@@ -697,7 +765,7 @@ class AdminSettingsManager:
         for category, values in updates.items():
             for key, value in values.items():
                 spec = self._spec(category, key)
-                coerced = self._coerce(value, spec)
+                coerced = self._coerce_named(category, key, value, spec)
                 self._data.setdefault(category, {})[key] = coerced
         with self._lock:
             self._persist()
@@ -720,9 +788,19 @@ class AdminSettingsManager:
             raise KeyError(f"Unknown setting: {category!r}/{key!r}")
         return spec
 
+    @classmethod
+    def _coerce_named(cls, category: str, key: str, value: Any, spec: dict[str, Any]) -> Any:
+        """_coerce, with the setting named in a ValueError (the 400 the settings route returns)."""
+        try:
+            return cls._coerce(value, spec)
+        except ValueError as exc:
+            raise ValueError(f"{category}/{key}: {exc}") from exc
+
     @staticmethod
     def _coerce(value: Any, spec: dict[str, Any]) -> Any:
         typ = spec["type"]
+        if spec.get("optional") and (value is None or (isinstance(value, str) and not value.strip())):
+            return None  # an optional setting that is not set
         if typ == "int":
             if isinstance(value, str):
                 value = value.strip()
@@ -738,6 +816,8 @@ class AdminSettingsManager:
             return coerced
         if typ == "float":
             coerced = float(value)
+            if spec.get("strict") and not (spec.get("min", coerced) <= coerced <= spec.get("max", coerced)):
+                raise ValueError(f"{coerced!r} is outside {spec.get('min')}-{spec.get('max')}")
             if "min" in spec:
                 coerced = max(spec["min"], coerced)
             if "max" in spec:
@@ -754,6 +834,12 @@ class AdminSettingsManager:
             return bool(value)
         if typ == "str":
             return str(value)
+        if typ == "select" and spec.get("strict"):
+            # A strict select has no "no filter" option: any other value is an error.
+            allowed_values = [opt["value"] for opt in spec.get("options", [])]
+            if value not in allowed_values:
+                raise ValueError(f"{value!r} is not one of {', '.join(map(str, allowed_values))}")
+            return value
         if typ == "select":
             # Treat empty string and the string "null" / "None" as None (no filter)
             if value is None or value == "" or str(value).lower() in ("null", "none"):
@@ -795,7 +881,13 @@ class AdminSettingsManager:
                     continue
                 try:
                     coerced = cls._coerce(raw, spec)
-                except (TypeError, ValueError, OverflowError):
+                except (TypeError, ValueError, OverflowError) as exc:
+                    if spec.get("strict"):
+                        # Kept as stored, so its consumer fails loudly naming it instead of a default.
+                        logging.error("Admin settings: stored %s/%s=%r is invalid (%s); fix it on the Admin "
+                                      "Settings page", category, key, raw, exc)
+                        data.setdefault(category, {})[key] = raw
+                        continue
                     logging.warning(
                         "Admin settings: stored %s/%s=%r is not a valid %s; using the default %r",
                         category, key, raw, spec["type"], spec["default"],

@@ -111,7 +111,14 @@ def render():
             show_yield_table = st.checkbox("Show per-ore batch yields (debug)", value=False, key="dbg_yields")
             show_coverage_debug = st.checkbox("Show coverage & surplus breakdown (debug)", value=False, key="dbg_coverage")
             show_formula = st.checkbox("Show reprocessing formula details", value=False, key="dbg_formula")
-        only_compressed = st.checkbox("Only use compressed ores", value=False, key="opt_only_compressed")
+        only_compressed = st.checkbox(
+            "Only use compressed ores",
+            value=False,
+            key="opt_only_compressed",
+            help="Compressed means a compressed form in the SDE's compressibleTypes. The legacy "
+                 "'Batch Compressed' ores are not in it, so this leaves them out; unticked, they are used "
+                 "like any other ore.",
+        )
 
     with left:
         st.subheader("Material Requirements")
@@ -198,12 +205,13 @@ def render():
                 )
 
             tiered_total_cost = result.get("tiered_total_cost", 0.0)
-            total_cost_with_reprocessing = result.get(
-                "total_cost_with_reprocessing",
-                float(result["total_cost"]) + float(result.get("reprocessing_fee", 0.0) or 0.0),
-            )
-            savings = tiered_total_cost - total_cost_with_reprocessing
-            savings_pct = (savings / tiered_total_cost * 100) if tiered_total_cost > 0 else 0
+            # None when the fee is unknown (a produced mineral has no price): shown as unknown, not as 0.
+            total_cost_with_reprocessing = result.get("total_cost_with_reprocessing")
+            if total_cost_with_reprocessing is None:
+                savings, savings_pct = None, None
+            else:
+                savings = tiered_total_cost - total_cost_with_reprocessing
+                savings_pct = (savings / tiered_total_cost * 100) if tiered_total_cost > 0 else 0
             sourcing_plan_df = pd.DataFrame(_build_sourcing_plan_rows(solution))
             price_provenance = result.get("price_provenance", {}) or {}
 
@@ -218,7 +226,9 @@ def render():
                 "total_ore_volume_m3": result.get("total_ore_volume_m3", 0.0),
                 "raw_total_volume": result.get("raw_total_volume", 0.0),
                 "total_raw_volume": result.get("total_raw_volume", 0.0),
-                "reprocessing_fee": result.get("reprocessing_fee", 0.0),
+                "reprocessing_fee": result.get("reprocessing_fee"),
+                "reprocessing_fee_unknown_reason": result.get("reprocessing_fee_unknown_reason"),
+                "facility": result.get("facility") or {},
                 "total_yielded_materials": result.get("total_yielded_materials", {}),
                 "df_solution": df_sol,
                 "df_ore_summary": df_ore_summary,
@@ -252,17 +262,29 @@ def render():
     tiered_cost = opt_display["tiered_total_cost"]
     ore_volume_m3 = opt_display.get("total_ore_volume_m3", 0.0)
     raw_volume_m3 = opt_display.get("total_raw_volume", 0.0)
-    reprocessing_fee = opt_display.get("reprocessing_fee", 0.0)
+    reprocessing_fee = opt_display.get("reprocessing_fee")
+    fee_unknown_reason = opt_display.get("reprocessing_fee_unknown_reason")
 
     colc1, colc2, colc3 = st.columns(3)
-    colc1.metric("Total Cost incl. Reprocessing (ISK)", f"{total_cost_with_reprocessing:,.2f}", help="Total cost including ore purchase and reprocessing fee.")
+    colc1.metric(
+        "Total Cost incl. Reprocessing (ISK)",
+        f"{total_cost_with_reprocessing:,.2f}" if total_cost_with_reprocessing is not None else "unknown",
+        help="Total cost including ore purchase and reprocessing fee." + (f" {fee_unknown_reason}" if fee_unknown_reason else ""),
+    )
     colc1.metric("Ore Volume (m³)", f"{ore_volume_m3:,.2f}" if ore_volume_m3 is not None else "N/A", help="Estimated total ore volume to purchase.")
-    colc1.metric("Reprocessing Fee (ISK)", f"{reprocessing_fee:,.2f}", help="ISK fee charged by the facility for reprocessing.")
+    colc1.metric(
+        "Reprocessing Fee (ISK)",
+        f"{reprocessing_fee:,.2f}" if reprocessing_fee is not None else "unknown",
+        help=fee_unknown_reason or "The facility's tax on the estimated value of the minerals produced (ESI sell prices).",
+    )
 
     colc2.metric("Direct Minerals Cost (ISK)", f"{tiered_cost:,.2f}", help="Total ISK if you buy all minerals directly from the market.")
     colc2.metric("Direct Minerals Volume (m³)", f"{raw_volume_m3:,.2f}" if raw_volume_m3 is not None else "N/A", help="Total volume of minerals if you buy everything directly from the market.")
 
-    colc3.metric("Savings (ISK)", f"{opt_display['savings']:,.2f}", f"{opt_display['savings_pct']:+.2f}%", help="Difference between optimized ore solution and direct mineral purchase.")
+    if opt_display["savings"] is None:
+        colc3.metric("Savings (ISK)", "unknown", help=fee_unknown_reason or "")
+    else:
+        colc3.metric("Savings (ISK)", f"{opt_display['savings']:,.2f}", f"{opt_display['savings_pct']:+.2f}%", help="Difference between optimized ore solution and direct mineral purchase.")
     colc3.metric("Savings Volume (m³)", f"{(raw_volume_m3 - ore_volume_m3):,.2f}" if ore_volume_m3 is not None else "N/A", help="Volume difference between direct minerals and optimized ore solution.")
     st.caption(f"Optimization mode: {MODE_OPTIONS.get(str(opt_display.get('optimization_mode')), str(opt_display.get('optimization_mode')))}")
 
@@ -439,14 +461,19 @@ def render():
         st.markdown("""
             **Reprocessing Yield Formula**
 
-            batch_output = base * FacilityBase
-                        * (1 + 0.02*Refining)
-                        * (1 + 0.02*ReprocessingEfficiency)
-                        * (1 + 0.02*SpecificOreProcessing)
-                        * (1 + Rig + Structure + Implants)
+            yield = (50 + Rm)/100 × (1 + Sec) × (1 + Sm)
+                    × (1 + 0.03·Reprocessing)
+                    × (1 + 0.02·Reprocessing Efficiency)
+                    × (1 + 0.02·the ore's processing skill)
+                    × (1 + Implant)
 
-            Values shown are final post-skill batch yields.
+            Rm: rig (T1 +1, T2 +3); Sec: the rig's security modifier (only with a rig);
+            Sm: the structure's bonus (Athanor 2%, Tatara 5.5%). Each material is rounded
+            down per batch. Values shown are final batch yields.
         """)
+        facility = opt_display.get("facility") or {}
+        if facility:
+            st.write(f"Facility: {facility.get('name')} (multiplier {facility.get('multiplier', 0):.4f})")
         # Show multipliers for the first ore as an example
         if opt_display["ore_yields"]:
             ore = opt_display["ore_yields"][0]

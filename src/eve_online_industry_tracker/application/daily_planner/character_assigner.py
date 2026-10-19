@@ -51,12 +51,14 @@ NO_MANUFACTURE_NOTE = "no manufacture until a T2 BPC exists"
 NO_FREE_RESEARCH_SLOT_REASON = "no free research slot today"
 NO_FREE_SKILLED_INVENTOR_REASON = "no free pilot with the invention skills"
 
-# EVE activity IDs
-ACTIVITY_MANUFACTURING = 1
-ACTIVITY_RESEARCHING_TE = 3
-ACTIVITY_RESEARCHING_ME = 4
-ACTIVITY_COPYING = 5
-ACTIVITY_INVENTION = 8
+# EVE activity IDs (domain.industry_activities)
+from eve_online_industry_tracker.domain.industry_activities import (  # noqa: E402
+    ACTIVITY_COPYING,
+    ACTIVITY_INVENTION,
+    ACTIVITY_MANUFACTURING,
+    ACTIVITY_ME_RESEARCH as ACTIVITY_RESEARCHING_ME,
+    ACTIVITY_TE_RESEARCH as ACTIVITY_RESEARCHING_TE,
+)
 
 # Fallback inventor ranking for a row without the producer's invention skills.
 SCIENCE_SKILLS = ("Science", "Advanced Industry", "Metallurgy", "Research")

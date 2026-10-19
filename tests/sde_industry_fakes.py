@@ -15,7 +15,7 @@ local SDE (database/eve_sde.db) when it is present.
 from __future__ import annotations
 
 from functools import cache
-from typing import Any
+from typing import Any, Callable
 
 TARGET_FILTERS: dict[int, dict[str, Any]] = {
     1: {"categoryIDs": [18, 87], "name": "Drones/Fighters"},
@@ -152,6 +152,106 @@ def fake_industry_data():
     )
 
 
+# --- compressibleTypes, the ore reprocessing skill, industryActivities ---------------
+#
+# compressibleTypes maps a base ore to its compressed form; typeDogma attribute
+# 790 (reprocessingSkillType) names the skill that reprocesses an ore. Made-up
+# type ids (98xxxx) except the skills, whose ids and names are CCP's (public
+# game data). industryActivities is CCP's table as the SDE ships it.
+
+FAKE_ORE_BASE = 980001          # an ore with a compressed form, both with attribute 790
+FAKE_ORE_COMPRESSED = 980002
+FAKE_ORE_BASE_ONLY_SKILL = 980003       # its compressed form has no attribute 790 of its own
+FAKE_ORE_COMPRESSED_NO_SKILL = 980004
+FAKE_ORE_NO_SKILL = 980005      # an ore with neither attribute 790 nor a compressed form
+FAKE_ORE_LEGACY_COMPRESSED = 980006     # named "Batch Compressed ...": not in compressibleTypes
+FAKE_GAS = 980007               # compressible, but no reprocessing skill at all
+FAKE_GAS_COMPRESSED = 980008
+
+SKILL_SIMPLE_ORE_PROCESSING = 60377
+SKILL_COMPLEX_ORE_PROCESSING = 60380
+SKILL_NAMES: dict[int, str] = {SKILL_SIMPLE_ORE_PROCESSING: "Simple Ore Processing",
+                               SKILL_COMPLEX_ORE_PROCESSING: "Complex Ore Processing"}
+
+COMPRESSIBLE_TYPES: dict[int, dict[str, Any]] = {
+    FAKE_ORE_BASE: {"compressedTypeID": FAKE_ORE_COMPRESSED},
+    FAKE_ORE_BASE_ONLY_SKILL: {"compressedTypeID": FAKE_ORE_COMPRESSED_NO_SKILL},
+    FAKE_GAS: {"compressedTypeID": FAKE_GAS_COMPRESSED},
+}
+
+
+def _dogma(*attributes: tuple[int, float]) -> dict[str, Any]:
+    return {"dogmaAttributes": [{"attributeID": a, "value": v} for a, v in attributes]}
+
+
+TYPE_DOGMA: dict[int, dict[str, Any]] = {
+    FAKE_ORE_BASE: _dogma((182, 3386.0), (790, float(SKILL_SIMPLE_ORE_PROCESSING)), (2711, float(FAKE_ORE_BASE))),
+    FAKE_ORE_COMPRESSED: _dogma((790, float(SKILL_SIMPLE_ORE_PROCESSING))),
+    FAKE_ORE_BASE_ONLY_SKILL: _dogma((790, float(SKILL_COMPLEX_ORE_PROCESSING))),
+    FAKE_ORE_COMPRESSED_NO_SKILL: _dogma((182, 3386.0)),
+    FAKE_ORE_NO_SKILL: _dogma((1980, 0.5)),
+    FAKE_ORE_LEGACY_COMPRESSED: _dogma((790, float(SKILL_COMPLEX_ORE_PROCESSING)),
+                                       (2711, float(FAKE_ORE_BASE_ONLY_SKILL))),
+    FAKE_GAS: _dogma((1980, 0.5)),
+    # The reprocessing formula's attributes, with CCP's ids and values (build 3607705):
+    # 379 refiningYieldMutator on the skills, 2722 strRefiningYieldBonus on the
+    # refineries, 717 refiningYieldMultiplier and 2355-2357 the security modifiers on
+    # the rigs, 717 on the Standup Reprocessing Facility service.
+    3385: _dogma((181, 165.0), (379, 3.0)),                 # Reprocessing
+    3389: _dogma((181, 165.0), (379, 2.0)),                 # Reprocessing Efficiency
+    SKILL_SIMPLE_ORE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
+    SKILL_COMPLEX_ORE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
+    27174: _dogma((331, 8.0), (379, 4.0)),                  # Zainou 'Beancounter' Reprocessing RX-804
+    35835: _dogma((2339, -20.0), (2722, 2.0)),              # Athanor
+    35836: _dogma((2339, -25.0), (2722, 5.5)),              # Tatara
+    35899: _dogma((717, 0.5), (2444, 0.5)),                 # Standup Reprocessing Facility I
+    **{rig: _dogma((717, base), (2355, 1.0), (2356, 1.06), (2357, 1.12), (2358, 1.0))
+       for rig, base in [(46633, 0.51), (46634, 0.53), (46639, 0.51), (46640, 0.53)]},
+}
+
+# npcStations: made-up station ids with the SDE's reprocessing columns
+# (reprocessingEfficiency, reprocessingStationsTake): a standard 50% station and
+# a poor 30% one.
+FAKE_NPC_STATION_ID = 60999901
+FAKE_POOR_NPC_STATION_ID = 60999902
+NPC_STATIONS: dict[int, tuple[float, float]] = {FAKE_NPC_STATION_ID: (0.5, 0.05),
+                                                FAKE_POOR_NPC_STATION_ID: (0.3, 0.05)}
+
+
+def fake_npc_station(station_id: int) -> tuple[float, float] | None:
+    """The (base yield, base tax) of a fake station, the shape
+    facility_repo.npc_station_reprocessing returns; None when unknown."""
+    return NPC_STATIONS.get(int(station_id))
+
+
+INDUSTRY_ACTIVITIES: dict[int, dict[str, Any]] = {
+    1: {"description": "Manufacturing of things", "name": "Manufacturing"},
+    3: {"description": "Researching time efficiency", "name": "Time Efficiency Research"},
+    4: {"description": "Researching material efficiency", "name": "Material Efficiency Research"},
+    5: {"description": "Making blueprint copies", "name": "Copying"},
+    8: {"description": "The process of creating a more advanced item based on an existing item",
+        "name": "Invention"},
+    9: {"description": "The process of combining raw and intermediate materials to create advanced components",
+        "name": "Reactions"},
+}
+
+
+@cache
+def fake_ore_data():
+    """OreData built from the tables above, through the production builder."""
+    from eve_online_industry_tracker.infrastructure.sde.ore import ore_data_from_tables
+
+    return ore_data_from_tables(compressible_types=COMPRESSIBLE_TYPES, type_dogma=TYPE_DOGMA)
+
+
+@cache
+def fake_industry_activities():
+    """IndustryActivities built from INDUSTRY_ACTIVITIES, through the production builder."""
+    from eve_online_industry_tracker.infrastructure.sde.activities import industry_activities_from_table
+
+    return industry_activities_from_table(INDUSTRY_ACTIVITIES)
+
+
 # --- the local SDE (database/eve_sde.db), for the integration tests ------------------
 
 import os as _os
@@ -185,6 +285,59 @@ def local_industry_data_or_skip():
     import pytest
 
     data = _local_industry_data()
+    if isinstance(data, str):
+        pytest.skip(data)
+    return data
+
+
+def _local_sde_read(load: Callable[[Any], Any], tables: tuple[str, ...]) -> Any:
+    """load(session) on the local SDE, or the reason it cannot be read."""
+    if not _os.path.exists(LOCAL_SDE):
+        return "local SDE database/eve_sde.db not present"
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from eve_online_industry_tracker.infrastructure.sde import industry
+
+    engine = create_engine(f"sqlite:///file:{LOCAL_SDE}?mode=ro&uri=true")
+    try:
+        with Session(engine) as session:
+            missing = industry.missing_tables(session, tables)
+            if missing:
+                return (f"local SDE lacks {', '.join(missing)}: re-run scripts/import_sde.py --download --import "
+                        "--force to import them")
+            return load(session)
+    finally:
+        engine.dispose()
+
+
+@cache
+def _local_ore_data() -> Any:
+    from eve_online_industry_tracker.infrastructure.sde import ore
+
+    return _local_sde_read(ore.load_ore_data, ore.ORE_TABLES)
+
+
+@cache
+def _local_industry_activities() -> Any:
+    from eve_online_industry_tracker.infrastructure.sde import activities
+
+    return _local_sde_read(activities.load_industry_activities, activities.ACTIVITY_TABLES)
+
+
+def local_ore_data_or_skip():
+    import pytest
+
+    data = _local_ore_data()
+    if isinstance(data, str):
+        pytest.skip(data)
+    return data
+
+
+def local_industry_activities_or_skip():
+    import pytest
+
+    data = _local_industry_activities()
     if isinstance(data, str):
         pytest.skip(data)
     return data

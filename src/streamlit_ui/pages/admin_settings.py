@@ -25,16 +25,20 @@ def _number_input_args(spec: dict, current: object) -> dict:
     (the backend now coerces on load too, Task 8c fix round 1)."""
     is_int = spec.get("type") == "int"
     cast = int if is_int else float
-    try:
-        value = cast(current)
-    except (TypeError, ValueError, OverflowError):
-        value = cast(spec.get("default", 0))
     min_value = cast(spec["min"]) if "min" in spec else None
     max_value = cast(spec["max"]) if "max" in spec else None
-    if min_value is not None:
-        value = max(min_value, value)
-    if max_value is not None:
-        value = min(max_value, value)
+    if spec.get("optional") and current is None:
+        value = None  # not set: an empty input, not a number the user did not choose
+    else:
+        try:
+            value = cast(current)
+        except (TypeError, ValueError, OverflowError):
+            default = spec.get("default", 0)
+            value = None if default is None else cast(default)
+        if value is not None and min_value is not None:
+            value = max(min_value, value)
+        if value is not None and max_value is not None:
+            value = min(max_value, value)
     args: dict = {"value": value, "min_value": min_value, "max_value": max_value}
     if is_int:
         args["step"] = int(spec.get("step", 1))
@@ -42,6 +46,21 @@ def _number_input_args(spec: dict, current: object) -> dict:
         args["step"] = float(spec.get("step", 0.01))
         args["format"] = spec.get("format", "%.4f")
     return args
+
+
+def _select_choices(spec: dict, current: object) -> tuple[list, list[str], int, str | None]:
+    """(values, labels, index of current, problem) for a select setting. A
+    stored value that is not an option (an invalid strict value) is shown as
+    its own entry and selected, with a problem to show, so the page does not
+    pre-select another option that a save would then write over it."""
+    options = spec.get("options", [])
+    values = [opt["value"] for opt in options]
+    labels = [opt["label"] for opt in options]
+    if current in values:
+        return values, labels, values.index(current), None
+    problem = (f"The stored value {current!r} is not a valid option. Pick a valid one and save; until then "
+               "the features that read it fail with an error.")
+    return [current, *values], [f"Invalid stored value: {current!r}", *labels], 0, problem
 
 
 def render() -> None:
@@ -90,13 +109,9 @@ def render() -> None:
                         key=widget_key,
                     )
                 elif typ == "select":
-                    options = spec.get("options", [])
-                    option_values = [opt["value"] for opt in options]
-                    option_labels = [opt["label"] for opt in options]
-                    try:
-                        current_index = option_values.index(current)
-                    except ValueError:
-                        current_index = 0
+                    option_values, option_labels, current_index, problem = _select_choices(spec, current)
+                    if problem:
+                        st.error(f"{label}: {problem}")
                     selected_label = st.selectbox(
                         label,
                         options=option_labels,

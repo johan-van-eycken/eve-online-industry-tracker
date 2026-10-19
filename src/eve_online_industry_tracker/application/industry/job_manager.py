@@ -14,6 +14,7 @@ from eve_online_industry_tracker.infrastructure.session_provider import (
     StateSessionProvider,
 )
 from eve_online_industry_tracker.infrastructure.sde.blueprints import get_blueprint_manufacturing_data
+from eve_online_industry_tracker.domain import industry_activities as _activities
 
 
 class IndustryJobManager:
@@ -126,12 +127,12 @@ class IndustryJobManager:
         return False
 
     _ACTIVITY_ID_TO_KEY = {
-        1: "manufacturing",
-        3: "research_time",
-        4: "research_material",
-        5: "copying",
-        8: "invention",
-        9: "reaction",
+        _activities.ACTIVITY_MANUFACTURING: "manufacturing",
+        _activities.ACTIVITY_TE_RESEARCH: "research_time",
+        _activities.ACTIVITY_ME_RESEARCH: "research_material",
+        _activities.ACTIVITY_COPYING: "copying",
+        _activities.ACTIVITY_INVENTION: "invention",
+        _activities.ACTIVITY_REACTION: "reaction",
     }
 
     def _active_job_counts(self) -> dict[str, int]:

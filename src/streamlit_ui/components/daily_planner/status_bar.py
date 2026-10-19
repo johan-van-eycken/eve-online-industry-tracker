@@ -145,7 +145,7 @@ def capital_reserved_display(reserved: CapitalReserved) -> tuple[str, str | None
 
 
 #: ESI activity id of ME research.
-ME_RESEARCH_ACTIVITY_ID = 4
+from eve_online_industry_tracker.domain.industry_activities import ACTIVITY_ME_RESEARCH as ME_RESEARCH_ACTIVITY_ID  # noqa: E402
 
 
 def queued_te_status(

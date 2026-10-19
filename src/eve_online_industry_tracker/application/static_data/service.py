@@ -22,7 +22,7 @@ class StaticDataService:
         self._sessions = sessions or StateSessionProvider(state=state)
 
     def list_facilities(self) -> Any:
-        return get_all_facilities()
+        return get_all_facilities(getattr(self._state, "admin_settings", None), self._sessions.sde_session())
 
     def optimize_ore_plan(self, payload: dict) -> Any:
         character_id = payload["character_id"]
@@ -38,6 +38,7 @@ class StaticDataService:
             esi_service=self._state.esi_service,
             sde_session=sde_session,
             language=language,
+            admin_settings=getattr(self._state, "admin_settings", None),
         )
 
     def list_materials_cached(self) -> Any:

@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 from eve_online_industry_tracker.application.industry import overview_row as orow
+from eve_online_industry_tracker.domain import industry_activities as _activities
 
 #: Batch sources that need the owned BPO itself: building from it, or copying it.
 BPO_SOURCES = frozenset({"owned_blueprint_original", "copied_from_owned_blueprint_original"})
@@ -143,9 +144,10 @@ def _job_field(job: Any, name: str) -> Any:
 
 
 #: Activities that only a BPO can run: ME and TE research, copying.
-_BPO_ONLY_ACTIVITY_IDS = frozenset({3, 4, 5})
+_BPO_ONLY_ACTIVITY_IDS = frozenset({_activities.ACTIVITY_ME_RESEARCH, _activities.ACTIVITY_TE_RESEARCH,
+                                    _activities.ACTIVITY_COPYING})
 #: Activities that only a BPC can run: invention.
-_BPC_ONLY_ACTIVITY_IDS = frozenset({8})
+_BPC_ONLY_ACTIVITY_IDS = frozenset({_activities.ACTIVITY_INVENTION})
 
 
 def busy_blueprint_type_ids(

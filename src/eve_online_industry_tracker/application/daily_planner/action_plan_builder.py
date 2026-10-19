@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
+from eve_online_industry_tracker.domain import industry_activities as _activities
 from eve_online_industry_tracker.infrastructure.models import DailyActionLogModel
 
 logger = logging.getLogger(__name__)
@@ -164,9 +165,19 @@ class ActionPlanBuilder:
             # no product_quantity column to fall back to.
             output_qty = int(_job_attr(job, "output_quantity") or runs)
 
-            activity_map = {1: "manufacture", 3: "te_research", 4: "me_research", 5: "copy", 8: "invent"}
-            activity_id = int(_job_attr(job, "activity_id") or 1)
-            action_type = activity_map.get(activity_id, "manufacture")
+            # activity_id is nullable on both job models (the job sync stores None when ESI's row has
+            # none): such a job, or one with an activity this builder does not know, gets no deliver
+            # action rather than being called a manufacturing job.
+            raw_activity_id = _job_attr(job, "activity_id")
+            action_type = (_DELIVER_ACTIVITY_LABELS.get(int(raw_activity_id))
+                           if raw_activity_id is not None else None)
+            if action_type is None:
+                logger.warning(
+                    "ActionPlanBuilder: job %s has %s; no deliver action",
+                    _job_attr(job, "job_id"),
+                    "no activity_id" if raw_activity_id is None else f"an unknown activity_id {raw_activity_id}",
+                )
+                continue
 
             rows.append(DailyActionLogModel(
                 plan_id=plan_id,
@@ -314,6 +325,17 @@ class ActionPlanBuilder:
                 notes="; ".join(notes_parts),
             ))
         return rows
+
+
+#: The deliver note's label per activity id.
+_DELIVER_ACTIVITY_LABELS: dict[int, str] = {
+    _activities.ACTIVITY_MANUFACTURING: "manufacture",
+    _activities.ACTIVITY_TE_RESEARCH: "te_research",
+    _activities.ACTIVITY_ME_RESEARCH: "me_research",
+    _activities.ACTIVITY_COPYING: "copy",
+    _activities.ACTIVITY_INVENTION: "invent",
+    _activities.ACTIVITY_REACTION: "reaction",
+}
 
 
 def _job_attr(job: Any, attr: str) -> Any:

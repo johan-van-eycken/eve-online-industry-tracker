@@ -18,20 +18,28 @@ from eve_online_industry_tracker.infrastructure.persistence.daily_planner_repo i
 
 @pytest.fixture(autouse=True)
 def fake_sde_industry_data():
-    """The SDE industry tables (rig target filters, assembly lines) the
-    producer and planner read through infrastructure.sde.industry: the small
-    fake tables in tests/sde_industry_fakes.py, installed for every test.
-    A test that needs them missing calls industry.reset_industry_data()."""
-    from sde_industry_fakes import fake_industry_data
+    """The SDE data the app reads through a process-wide cache, installed for
+    every test from the small fake tables in tests/sde_industry_fakes.py:
+    the industry tables (rig target filters, assembly lines;
+    infrastructure.sde.industry), the ore compression and reprocessing skills
+    (infrastructure.sde.ore) and the industry activities
+    (infrastructure.sde.activities). A test that needs them missing calls
+    industry.reset_industry_data(), ore.reset_ore_data() or
+    activities.reset_industry_activities()."""
+    from sde_industry_fakes import fake_industry_activities, fake_industry_data, fake_ore_data
 
-    from eve_online_industry_tracker.infrastructure.sde import industry
+    from eve_online_industry_tracker.infrastructure.sde import activities, industry, ore
 
     data = fake_industry_data()
     industry.install_industry_data(data)
+    ore.install_ore_data(fake_ore_data())
+    activities.install_industry_activities(fake_industry_activities())
     try:
         yield data
     finally:
         industry.reset_industry_data()
+        ore.reset_ore_data()
+        activities.reset_industry_activities()
 
 
 @pytest.fixture()

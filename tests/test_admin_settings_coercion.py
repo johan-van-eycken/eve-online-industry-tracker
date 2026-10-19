@@ -97,6 +97,9 @@ def test_every_schema_number_setting_gets_valid_number_input_args():
                 continue
             for stored in (spec["default"], 10**9, -(10**9), None, "x"):
                 args = _number_input_args(spec, stored)
+                if args["value"] is None:
+                    assert spec.get("optional")  # only an optional setting shows as empty
+                    continue
                 if args["min_value"] is not None:
                     assert args["value"] >= args["min_value"]
                 if args["max_value"] is not None:

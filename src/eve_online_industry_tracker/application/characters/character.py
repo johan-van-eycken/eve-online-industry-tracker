@@ -106,7 +106,7 @@ class Character:
             self.market_fees: Optional[Dict[str, Any]] = None
             self.wallet_journal: Optional[List[Dict[str, Any]]] = None
             self.wallet_transactions: Optional[List[Dict[str, Any]]] = None
-            self.reprocessing_skills: Optional[Dict[str, int]] = None
+            self.reprocessing_skills: Optional[Dict[int, int]] = None  # {skill type id: level}
             self.market_orders: Optional[List[Dict[str, Any]]] = None
             self.assets: Optional[List[Dict[str, Any]]] = None
 
@@ -1174,41 +1174,18 @@ class Character:
     # -------------------
     # Skillpoints
     # -------------------
-    def extract_reprocessing_skills(self) -> str:
-        """Extract reprocessing related skills and levels for the current character."""
+    def extract_reprocessing_skills(self) -> Dict[int, int]:
+        """The character's reprocessing skills: {skill type id: trained level}
+        for every trained skill with a reprocessing bonus in the SDE (typeDogma
+        attribute 379: Reprocessing, Reprocessing Efficiency, the ore, ice and
+        moon processing skills). Keyed by id, whatever the SDE language."""
         if not self.skills or "skills" not in self.skills:
             self.refresh_skills()
 
         try:
-            # Find all relevant skill groups
-            skill_groups = self._db_sde.session.query(Groups).filter(
-                Groups.categoryID == 16,  # Skills category
-                Groups.published == 1,
-                Groups.name[self._db_sde.language].ilike("%Processing%")
-            ).all()
+            from eve_online_industry_tracker.infrastructure.sde.ore import refining_skill_levels
 
-            # Get all skill type IDs in these groups
-            skill_ids = set()
-            skills_in_groups = self._db_sde.session.query(Types).filter(
-                Types.groupID.in_([g.id for g in skill_groups]),
-                Types.published == 1,
-                Types.name[self._db_sde.language].ilike("%Processing%")
-            ).all()
-            for skill in skills_in_groups:
-                skill_ids.add(skill.id)
-
-            # Build mapping: skill ID → skill name
-            skill_map = {}
-            all_skills = self._db_sde.session.query(Types).filter(Types.id.in_(list(skill_ids))).all()
-            for skill in all_skills:
-                skill_map[skill.id] = skill.name[self._db_sde.language]
-
-            # Extract trained levels
-            self.reprocessing_skills = {}
-            for skill in self.skills["skills"]:
-                skill_id = skill.get("skill_id")
-                if skill_id in skill_map:
-                    self.reprocessing_skills[skill_map[skill_id]] = skill.get("trained_skill_level", 0)
+            self.reprocessing_skills = refining_skill_levels(self._db_sde.session, self.skills["skills"])
 
             logging.debug(f"Reprocessing skills successfully updated for {self.character_name}.")
             return self.reprocessing_skills

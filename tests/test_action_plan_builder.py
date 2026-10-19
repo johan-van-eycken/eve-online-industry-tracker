@@ -301,3 +301,46 @@ def test_a_job_action_persists_its_install_fee():
     )
     (row,) = ActionPlanBuilder()._build_job_actions(0, [action], datetime(2026, 1, 1))
     assert row.estimated_job_fee_isk == 25_000.0
+
+
+# --- the job's activity: no default to manufacturing -------------------------------
+
+def _deliver_rows(job):
+    rows = ActionPlanBuilder().build(
+        plan_id=1, assigned_actions=[], shopping_items=[], industry_jobs=[job],
+        admin_settings=SimpleNamespace(), character_name_map={}, meta_resolver=None,
+    )
+    return [r for r in rows if r.action_type == "deliver"]
+
+
+def test_a_finished_reaction_is_delivered_as_a_reaction():
+    (row,) = _deliver_rows(_job(activity_id=9, job_id=7))
+    assert row.notes == "Deliver completed reaction job"
+
+
+def test_each_known_activity_keeps_its_label():
+    for activity_id, label in [(1, "manufacture"), (3, "te_research"), (4, "me_research"), (5, "copy"),
+                               (8, "invent")]:
+        (row,) = _deliver_rows(_job(activity_id=activity_id, job_id=activity_id))
+        assert row.notes == f"Deliver completed {label} job"
+
+
+def test_a_job_without_an_activity_id_is_skipped_with_a_warning(caplog):
+    """activity_id is nullable on both job models (the sync stores None when
+    ESI's row has none): such a job gets no deliver action, and a WARNING says
+    which job and why, instead of being called a manufacturing job."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        assert _deliver_rows(_job(activity_id=None, job_id=123)) == []
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("123" in m and "activity_id" in m for m in messages)
+
+
+def test_a_job_with_an_unknown_activity_is_skipped_with_a_warning(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        assert _deliver_rows(_job(activity_id=7, job_id=124)) == []
+    assert any("124" in r.getMessage() and "7" in r.getMessage() for r in caplog.records
+               if r.levelno == logging.WARNING)
