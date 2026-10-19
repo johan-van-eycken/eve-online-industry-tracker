@@ -123,12 +123,14 @@ def test_bool_strings_parse(raw, expected):
     assert AdminSettingsManager._coerce(raw, spec) is expected
 
 
-def test_an_unparseable_bool_string_falls_back_to_the_default(tmp_path, caplog):
+def test_an_unparseable_bool_string_is_kept_with_an_error_not_the_default(tmp_path, caplog):
+    # Since the strict bool/select follow-up (tests/test_admin_settings_strict_bool_select.py).
     key = next(
         (c, k) for c, cat in ADMIN_SETTINGS_SCHEMA.items()
         for k, spec in cat["settings"].items() if spec["type"] == "bool"
     )
     caplog.set_level(logging.WARNING)
     mgr = _manager(tmp_path, {key[0]: {key[1]: "maybe"}})
-    assert mgr.get(*key) == ADMIN_SETTINGS_SCHEMA[key[0]]["settings"][key[1]]["default"]
-    assert any("maybe" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    with pytest.raises(AdminSettingInvalid, match="maybe"):
+        mgr.get(*key)
+    assert any("maybe" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)

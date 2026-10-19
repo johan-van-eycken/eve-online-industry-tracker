@@ -114,6 +114,21 @@ def _select_choices(spec: dict, current: object,
     return [current, *values], [f"Invalid stored value: {current!r}", *labels], 0, problem
 
 
+def _bool_choices(spec: dict, current: object,
+                  invalid_entry: dict | None = None) -> tuple[list, list[str], int, str | None] | None:
+    """None for a valid bool setting (its checkbox). For a stored invalid
+    value (the backend's `invalid` entry, or not a bool): (values, labels,
+    index of current, problem) for a selectbox that shows the stored value as
+    its own selected entry, so the page does not show a checkbox state that
+    a save would then write over it."""
+    if invalid_entry is None and isinstance(current, bool):
+        return None
+    reason = (invalid_entry or {}).get("problem") or f"{current!r} is not a boolean"
+    problem = (f"The stored value {current!r} is invalid ({reason}). Pick On or Off and save; "
+               + _consequence(spec, invalid_entry))
+    return [current, True, False], [f"Invalid stored value: {current!r}", "On", "Off"], 0, problem
+
+
 def render() -> None:
     st.title("Application Settings")
     st.caption("Runtime-configurable settings. Changes are saved immediately and take effect on the next operation that reads them.")
@@ -164,16 +179,17 @@ def render() -> None:
                             st.caption(station_caption)
                         elif station_problem:
                             st.warning(station_problem)
-                elif typ == "bool":
+                elif typ == "bool" and _bool_choices(spec, current, invalid_entry) is None:
                     new_val = st.checkbox(
                         label,
                         value=bool(current),
                         help=help_text,
                         key=widget_key,
                     )
-                elif typ == "select":
-                    option_values, option_labels, current_index, problem = _select_choices(
-                        spec, current, invalid_entry)
+                elif typ in ("select", "bool"):
+                    option_values, option_labels, current_index, problem = (
+                        _select_choices(spec, current, invalid_entry) if typ == "select"
+                        else _bool_choices(spec, current, invalid_entry))
                     if problem:
                         st.error(f"{label}: {problem}")
                     selected_label = st.selectbox(
@@ -194,8 +210,8 @@ def render() -> None:
                     )
 
                 # Detect changes
-                if typ == "select":
-                    # A stored invalid select stays selected (its own entry) until another option is picked.
+                if typ == "select" or (typ == "bool" and problem):
+                    # A stored invalid select or bool stays selected (its own entry) until another option is picked.
                     to_save = NO_CHANGE if new_val == current else new_val
                 else:
                     to_save = _pending_value(new=new_val, current=current, problem=problem)

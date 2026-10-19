@@ -22,14 +22,16 @@ class MarketDepthCollector:
         self._sessions = StateSessionProvider(state=state)
 
     def _get_hub_and_region(self) -> tuple[str, int]:
-        hub = "jita"
-        if self._admin:
-            try:
-                hub = str(self._admin.get("daily_planner", "planner_market_hub")).lower()
-            except Exception:
-                pass
-        region_id = HUB_REGION.get(hub, 10000002)
-        return hub, region_id
+        """(daily_planner/planner_market_hub, its region). The setting is a
+        strict select of the HUB_REGION hubs: a stored invalid value raises
+        AdminSettingInvalid naming it, so the cycle fails loudly (logged and
+        kept as the job's last_error) instead of collecting Jita silently.
+        Jita without a settings store."""
+        hub = "jita" if self._admin is None else self._admin.get("daily_planner", "planner_market_hub")
+        if hub not in HUB_REGION:
+            raise ValueError(f"daily_planner/planner_market_hub={hub!r} is not a hub with a known region "
+                             f"({', '.join(sorted(HUB_REGION))})")
+        return hub, HUB_REGION[hub]
 
     def _get_outlier_sigma(self) -> float:
         if self._admin:

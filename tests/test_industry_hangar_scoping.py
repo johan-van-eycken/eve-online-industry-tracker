@@ -14,6 +14,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -97,12 +98,15 @@ class TestIndustryHangarFlagSetting:
         mgr.set("industry", "industry_hangar_flag", "CorpSAG2")
         assert mgr.get("industry", "industry_hangar_flag") == "CorpSAG2"
 
-    def test_manager_rejects_invalid_flag_and_stores_none(self) -> None:
+    def test_manager_refuses_an_invalid_flag_and_keeps_the_stored_one(self) -> None:
+        # Refused, not stored as None ("all divisions"), since the strict bool/select follow-up.
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             path = f.name
         mgr = AdminSettingsManager(path)
-        mgr.set("industry", "industry_hangar_flag", "CorpSAGInvalid")
-        assert mgr.get("industry", "industry_hangar_flag") is None
+        mgr.set("industry", "industry_hangar_flag", "CorpSAG2")
+        with pytest.raises(ValueError, match="industry/industry_hangar_flag"):
+            mgr.set("industry", "industry_hangar_flag", "CorpSAGInvalid")
+        assert mgr.get("industry", "industry_hangar_flag") == "CorpSAG2"
 
     def test_manager_stores_none_when_given_empty_string(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:

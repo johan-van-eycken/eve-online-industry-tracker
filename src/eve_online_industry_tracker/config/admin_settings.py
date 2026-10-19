@@ -19,12 +19,13 @@ from eve_online_industry_tracker.application.errors import ServiceError
 # ---------------------------------------------------------------------------
 # Schema: defines every admin-configurable setting with type, default, label,
 # and optional min/max constraints.  The Streamlit admin page auto-generates
-# form controls from this schema.  Every int and float is strict (min/max, and
-# an int's step, are checked, never clamped or snapped; a float's step is only
-# the settings page's input granularity); "startup_critical" marks a number
-# read on every ESI request or by a daemon thread, whose stored invalid value
-# reads as the default, with a WARNING once per process (see
-# AdminSettingsManager).
+# form controls from this schema.  Every setting is strict: an int and float's
+# min/max, and an int's step, are checked, never clamped or snapped (a float's
+# step is only the settings page's input granularity); a bool must be a
+# boolean and a select one of its options, never replaced by another value.
+# "startup_critical" marks a setting read on every ESI request or by a daemon
+# loop, whose stored invalid value reads as the default, with a WARNING once
+# per process (see AdminSettingsManager); only numbers are marked so.
 # ---------------------------------------------------------------------------
 
 ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
@@ -472,8 +473,13 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "Rolling window of archived plans shown in the Tab 4 history timeline.",
             },
             "planner_market_hub": {
-                "type": "str",
+                "type": "select",
+                "strict": True,
                 "default": "jita",
+                # The hubs MarketDepthCollector.HUB_REGION maps to a region (pinned by a test).
+                "options": [
+                    {"value": "jita", "label": "Jita (The Forge)"},
+                ],
                 "label": "Market hub",
                 "help": "Primary market hub for shopping list price lookups and BPO analysis.",
             },
@@ -809,16 +815,10 @@ def _coerce_number(value: Any, spec: dict[str, Any]) -> int | float:
     return number
 
 
-def _is_strict(spec: dict[str, Any]) -> bool:
-    """A setting whose stored invalid value is kept and reported, never
-    replaced: every number, and a strict select."""
-    return spec["type"] in ("int", "float") or bool(spec.get("strict"))
-
-
 class AdminSettingsManager:
     """Loads, validates and persists admin settings from/to a JSON file.
 
-    Every number and strict select is strict: an invalid value is refused on
+    Every setting (number, bool and select) is strict: an invalid value is refused on
     save (ValueError naming category/key and the range), and a stored invalid
     value is kept as stored, logged as an ERROR at load and listed by
     invalid()/problems() (the Admin Settings page, /health). Reading it with
@@ -959,29 +959,28 @@ class AdminSettingsManager:
         if typ in ("int", "float"):
             return _coerce_number(value, spec)
         if typ == "bool":
+            # Strict: True/False, 0/1 and the boolean words; anything else (2, 0.5, None, "maybe") is refused.
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int) and value in (0, 1):
+                return bool(value)
             if isinstance(value, str):
                 text = value.strip().lower()
                 if text in _FALSE_STRINGS:
                     return False
                 if text in _TRUE_STRINGS:
                     return True
-                raise ValueError(f"not a boolean: {value!r}")
-            return bool(value)
-        if typ == "str":
-            return str(value)
-        if typ == "select" and spec.get("strict"):
-            # A strict select has no "no filter" option: any other value is an error.
+            raise ValueError(f"not a boolean: {value!r}")
+        if typ == "select":
             allowed_values = [opt["value"] for opt in spec.get("options", [])]
-            if value not in allowed_values:
+            if (None in allowed_values and not spec.get("strict")
+                    and (value is None or (isinstance(value, str) and value.strip().lower() in ("", "null", "none")))):
+                return None  # the "no filter" option, also as an empty string or "null" / "None"
+            if value is None or value not in allowed_values:
+                # Never another option: a value that is not one is refused (a stored one is kept and reported).
                 raise ValueError(f"{value!r} is not one of {', '.join(map(str, allowed_values))}")
             return value
-        if typ == "select":
-            # Treat empty string and the string "null" / "None" as None (no filter)
-            if value is None or value == "" or str(value).lower() in ("null", "none"):
-                return None
-            allowed = {opt["value"] for opt in spec.get("options", []) if opt["value"] is not None}
-            return str(value) if str(value) in allowed else None
-        return value
+        raise ValueError(f"unknown setting type {typ!r}")
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -1000,10 +999,9 @@ class AdminSettingsManager:
     @classmethod
     def _coerce_stored(cls, payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], str]]:
         """(the stored settings, {(category, key): problem}), each value
-        checked against its spec as set() would. An invalid number or strict
-        select is kept as stored with an ERROR naming it (get() then raises,
-        or gives the default for a startup_critical one); any other invalid
-        value falls back to the default with a WARNING. A value read as
+        checked against its spec as set() would. An invalid value (any type)
+        is kept as stored with an ERROR naming it (get() then raises, or gives
+        the default for a startup_critical one). A value read as
         another type ("45" for an int) logs a WARNING. A key the schema no
         longer has (e.g. the removed planner_optimal_te_threshold_pct) is
         ignored with an INFO log."""
@@ -1022,17 +1020,11 @@ class AdminSettingsManager:
                 try:
                     coerced = cls._coerce(raw, spec)
                 except (TypeError, ValueError, OverflowError) as exc:
-                    if _is_strict(spec):
-                        # Kept as stored, so it is shown and fails loudly naming it instead of a default.
-                        logging.error("Admin settings: stored %s/%s=%r is invalid (%s): %s; fix it on the Admin "
-                                      "Settings page", category, key, raw, exc, _invalid_consequence(spec))
-                        data.setdefault(category, {})[key] = raw
-                        invalid[(category, key)] = str(exc)
-                        continue
-                    logging.warning(
-                        "Admin settings: stored %s/%s=%r is not a valid %s; using the default %r",
-                        category, key, raw, spec["type"], spec["default"],
-                    )
+                    # Kept as stored, so it is shown and fails loudly naming it instead of a default.
+                    logging.error("Admin settings: stored %s/%s=%r is invalid (%s): %s; fix it on the Admin "
+                                  "Settings page", category, key, raw, exc, _invalid_consequence(spec))
+                    data.setdefault(category, {})[key] = raw
+                    invalid[(category, key)] = str(exc)
                     continue
                 widened = isinstance(raw, int) and not isinstance(raw, bool) and isinstance(coerced, float)
                 if coerced != raw or (type(coerced) is not type(raw) and not widened):
