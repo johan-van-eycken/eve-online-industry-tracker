@@ -50,7 +50,7 @@ def select_character_id(
                 continue
             try:
                 main_id = int(raw_id)
-            except Exception:
+            except (ValueError, TypeError):
                 main_id = None
             break
 
@@ -76,5 +76,5 @@ def select_character_id(
         return None
     try:
         return int(selected)
-    except Exception:
+    except (ValueError, TypeError):
         return None

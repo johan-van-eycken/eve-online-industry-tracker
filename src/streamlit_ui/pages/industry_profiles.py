@@ -25,15 +25,47 @@ def _get_industry_profiles(character_id: int) -> dict | None:
     return api_get(f"/industry_profiles/{int(character_id)}")
 
 
-def _extract_manufacturing_cost_index(system_cost_index_payload: dict) -> float:
+def _extract_manufacturing_cost_index(system_cost_index_payload: dict) -> float | None:
+    """The manufacturing cost index; None when the payload is malformed.
+
+    A system without a manufacturing entry keeps 0.0."""
     try:
         cost_indices = system_cost_index_payload.get("cost_indices") or []
         for entry in cost_indices:
             if entry.get("activity") == "manufacturing":
                 return float(entry.get("cost_index") or 0.0)
-    except Exception:
-        return 0.0
+    except (ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Industry profiles: malformed system cost index payload: %s", exc)
+        return None
     return 0.0
+
+
+def _fetch_facility_bonuses(type_id: int) -> tuple[dict, str | None]:
+    """The SDE facility bonuses (fractions) of a structure type, and the
+    reason when they could not be loaded ({} then)."""
+    bonus_resp = cached_api_get(f"/structure_type_bonuses/{int(type_id)}")
+    if not bonus_resp or bonus_resp.get("status") != "success":
+        reason = (bonus_resp or {}).get("message") or "the structure type bonuses request failed (see the logs)"
+        logger.warning("Industry profiles: facility bonuses for type %s did not load: %s", type_id, reason)
+        return {}, str(reason)
+    bonuses = (bonus_resp.get("data") or {}).get("bonuses") or {}
+    try:
+        parsed = {key: float(bonuses.get(key) or 0.0) for key in ("material_reduction", "time_reduction", "cost_reduction")}
+    except (ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Industry profiles: malformed facility bonuses for type %s: %s", type_id, exc)
+        return {}, f"malformed facility bonuses ({exc})"
+    return parsed, None
+
+
+def _fetch_facility_bonus_pcts(type_id: int) -> tuple[float, float, float, str | None]:
+    """(ME %, TE %, cost %, reason); the percentages are 0 when reason is set."""
+    bonuses, reason = _fetch_facility_bonuses(type_id)
+    return (
+        float(bonuses.get("material_reduction") or 0.0) * 100.0,
+        float(bonuses.get("time_reduction") or 0.0) * 100.0,
+        float(bonuses.get("cost_reduction") or 0.0) * 100.0,
+        reason,
+    )
 
 
 def _describe_profile_location(profile: dict, *, resolved_structure_type_name: str | None = None) -> str:
@@ -70,7 +102,8 @@ def _compute_combined_reduction(reductions: list[float]) -> float:
             r = min(r, 1.0)
             mul *= (1.0 - r)
         total = 1.0 - mul
-    except Exception:
+    except (ValueError, TypeError) as exc:
+        logger.warning("Industry profiles: a rig reduction is not a number (%s); the combined reduction is 0", exc)
         total = 0.0
     return max(0.0, min(total, 1.0))
 
@@ -423,16 +456,23 @@ def _infer_upwell_size_from_type_name(type_name: str | None) -> str | None:
 def _load_rig_options() -> tuple[dict[int, str], dict[int, dict], list[int]]:
     rig_options = {0: "None"}
     rig_bonus_map: dict[int, dict] = {}
-    try:
-        rigs_resp = cached_api_get("/industry_structure_rigs")
-        if rigs_resp and rigs_resp.get("status") == "success":
-            rigs = rigs_resp.get("data") or []
-            for rig in rigs:
+    rigs_resp = cached_api_get("/industry_structure_rigs")
+    if rigs_resp and rigs_resp.get("status") == "success":
+        skipped = 0
+        for rig in rigs_resp.get("data") or []:
+            try:
                 tid = int(rig.get("type_id"))
-                rig_options[tid] = _format_rig_name(rig.get("name") or str(tid))
-                rig_bonus_map[tid] = rig
-    except Exception:
-        pass
+            except (ValueError, TypeError, AttributeError):
+                skipped += 1
+                continue
+            rig_options[tid] = _format_rig_name(rig.get("name") or str(tid))
+            rig_bonus_map[tid] = rig
+        if skipped:
+            logger.warning("Industry profiles: skipped %d structure rig(s) without a valid type_id", skipped)
+    else:
+        reason = (rigs_resp or {}).get("message") or "the structure rigs request failed (see the logs)"
+        logger.warning("Industry profiles: structure rigs did not load: %s", reason)
+        st.warning(f"Structure rigs could not be loaded ({reason}); only 'None' can be selected as a rig.")
 
     rig_option_ids = [0] + sorted(
         [tid for tid in rig_options.keys() if tid != 0],
@@ -453,41 +493,49 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
     }
     try:
         system_ids = sorted({int(profile.get("system_id")) for profile in profiles if profile.get("system_id") is not None})
-        for system_id in system_ids:
-            ci_resp = cached_api_get(f"/industry_system_cost_index/{system_id}")
-            if ci_resp and ci_resp.get("status") == "success":
-                context["system_cost_index_map"][system_id] = _extract_manufacturing_cost_index(ci_resp.get("data") or {})
+    except (ValueError, TypeError) as exc:
+        logger.warning("Industry profiles: a profile has an invalid system_id (%s); no live cost indices", exc)
+        system_ids = []
+    for system_id in system_ids:
+        ci_resp = cached_api_get(f"/industry_system_cost_index/{system_id}")
+        if ci_resp and ci_resp.get("status") == "success":
+            context["system_cost_index_map"][system_id] = _extract_manufacturing_cost_index(ci_resp.get("data") or {})
+        else:
+            # The profile then shows its stored cost index, with a caption.
+            logger.warning("Industry profiles: the cost index of system %s did not load", system_id)
 
-        corp_resp = cached_api_get(f"/corporation_structures/{selected_character_id}")
-        if corp_resp and corp_resp.get("status") == "success":
-            for structure in corp_resp.get("data") or []:
-                structure_id = structure.get("structure_id")
+    def _add_structures(structures: object, *, id_key: str, names: dict, type_ids: dict) -> None:
+        for structure in structures or []:
+            if not isinstance(structure, dict):
+                continue
+            try:
+                structure_id = structure.get(id_key)
                 type_name = structure.get("type_name") or structure.get("type")
                 if structure_id is not None and type_name:
-                    context["corp_structure_type_name_by_id"][int(structure_id)] = str(type_name)
-                try:
-                    type_id = structure.get("type_id")
-                    if structure_id is not None and type_id is not None:
-                        context["corp_structure_type_id_by_id"][int(structure_id)] = int(type_id)
-                except Exception:
-                    pass
+                    names[int(structure_id)] = str(type_name)
+                type_id = structure.get("type_id")
+                if structure_id is not None and type_id is not None:
+                    type_ids[int(structure_id)] = int(type_id)
+            except (ValueError, TypeError):
+                continue  # a structure without a numeric id or type: shown without its type
 
-        for system_id in system_ids:
-            public_resp = cached_api_get(f"/public_structures/{system_id}")
-            if public_resp and public_resp.get("status") == "success":
-                for structure in public_resp.get("data") or []:
-                    structure_id = structure.get("station_id")
-                    type_name = structure.get("type_name") or structure.get("type")
-                    if structure_id is not None and type_name:
-                        context["public_structure_type_name_by_id"][int(structure_id)] = str(type_name)
-                    try:
-                        type_id = structure.get("type_id")
-                        if structure_id is not None and type_id is not None:
-                            context["public_structure_type_id_by_id"][int(structure_id)] = int(type_id)
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+    corp_resp = cached_api_get(f"/corporation_structures/{selected_character_id}")
+    if corp_resp and corp_resp.get("status") == "success":
+        _add_structures(corp_resp.get("data"), id_key="structure_id",
+                        names=context["corp_structure_type_name_by_id"],
+                        type_ids=context["corp_structure_type_id_by_id"])
+    else:
+        logger.warning("Industry profiles: the corporation structures of character %s did not load; their "
+                       "structure types and facility bonuses are not shown", selected_character_id)
+
+    for system_id in system_ids:
+        public_resp = cached_api_get(f"/public_structures/{system_id}")
+        if public_resp and public_resp.get("status") == "success":
+            _add_structures(public_resp.get("data"), id_key="station_id",
+                            names=context["public_structure_type_name_by_id"],
+                            type_ids=context["public_structure_type_id_by_id"])
+        else:
+            logger.warning("Industry profiles: the public structures of system %s did not load", system_id)
     # Security status and region of each profile's system, in a try of its
     # own: the rig totals are shown for the system's band, and a failure here
     # must not cost the cost indices above.
@@ -543,30 +591,25 @@ def _render_existing_profiles(
                         location_id = int(profile.get("location_id"))
                         resolved_type_name = profile_context["corp_structure_type_name_by_id"].get(location_id) or profile_context["public_structure_type_name_by_id"].get(location_id)
                         resolved_type_id = profile_context["corp_structure_type_id_by_id"].get(location_id) or profile_context["public_structure_type_id_by_id"].get(location_id)
-                except Exception:
+                except (ValueError, TypeError):
                     resolved_type_name = None
                     resolved_type_id = None
 
                 st.write(f"**Type:** {_describe_profile_location(profile, resolved_structure_type_name=resolved_type_name)}")
 
-                try:
-                    if resolved_type_id is not None:
-                        cached = profile_context["facility_bonuses_by_type_id"].get(int(resolved_type_id))
-                        if cached is None:
-                            bonus_resp = cached_api_get(f"/structure_type_bonuses/{int(resolved_type_id)}")
-                            if bonus_resp and bonus_resp.get("status") == "success":
-                                cached = ((bonus_resp.get("data") or {}).get("bonuses") or {})
-                            else:
-                                cached = {}
-                            profile_context["facility_bonuses_by_type_id"][int(resolved_type_id)] = cached
-
-                        me = float((cached or {}).get("material_reduction") or 0.0)
-                        te = float((cached or {}).get("time_reduction") or 0.0)
-                        cost = float((cached or {}).get("cost_reduction") or 0.0)
-                        if (me + te + cost) > 0:
-                            st.write("**Facility Bonus:** " f"Cost {cost:.0%} | ME {me:.0%} | TE {te:.0%}")
-                except Exception:
-                    pass
+                if resolved_type_id is not None:
+                    cached = profile_context["facility_bonuses_by_type_id"].get(int(resolved_type_id))
+                    if cached is None:
+                        cached = _fetch_facility_bonuses(int(resolved_type_id))
+                        profile_context["facility_bonuses_by_type_id"][int(resolved_type_id)] = cached
+                    bonuses, bonus_reason = cached
+                    if bonus_reason:
+                        st.caption(f"Facility bonus could not be loaded: {bonus_reason}")
+                    me = float(bonuses.get("material_reduction") or 0.0)
+                    te = float(bonuses.get("time_reduction") or 0.0)
+                    cost = float(bonuses.get("cost_reduction") or 0.0)
+                    if (me + te + cost) > 0:
+                        st.write("**Facility Bonus:** " f"Cost {cost:.0%} | ME {me:.0%} | TE {te:.0%}")
 
             with col2:
                 profile_system_id = profile.get("system_id")
@@ -698,20 +741,21 @@ def _render_create_profile_section(
     )
     selected_system = next((system for system in solar_systems if system["id"] == selected_system_id), None)
 
-    system_mfg_cost_index = 0.0
-    try:
-        cost_index_resp = cached_api_get(f"/industry_system_cost_index/{selected_system_id}")
-        if cost_index_resp and cost_index_resp.get("status") == "success":
-            system_mfg_cost_index = _extract_manufacturing_cost_index(cost_index_resp.get("data") or {})
-    except Exception:
-        system_mfg_cost_index = 0.0
+    system_mfg_cost_index: float | None = None
+    cost_index_resp = cached_api_get(f"/industry_system_cost_index/{selected_system_id}")
+    if cost_index_resp and cost_index_resp.get("status") == "success":
+        system_mfg_cost_index = _extract_manufacturing_cost_index(cost_index_resp.get("data") or {})
+    if system_mfg_cost_index is None:
+        reason = (cost_index_resp or {}).get("message") or "the cost index request failed or was malformed (see the logs)"
+        st.warning(f"The system cost index could not be loaded ({reason}).")
+    system_mfg_cost_index_label = "N/A" if system_mfg_cost_index is None else f"{float(system_mfg_cost_index):.2%}"
 
     if selected_system:
         st.caption(
             f"**Region:** {selected_system.get('region_name', 'Unknown')} | "
             f"**Constellation:** {selected_system.get('constellation_name', 'Unknown')} | "
             f"**Security:** {selected_system.get('security_status', 0.0):.2f}"
-            f" | **System Index Cost:** {float(system_mfg_cost_index):.2%}"
+            f" | **System Index Cost:** {system_mfg_cost_index_label}"
         )
 
     stations: list[dict] = []
@@ -806,7 +850,7 @@ def _render_create_profile_section(
                 else:
                     tid_s = str(tid_raw).strip()
                     selected_upwell_type_id = int(tid_s) if tid_s else None
-            except Exception:
+            except (ValueError, TypeError):
                 selected_upwell_type_id = None
 
         if selected_station:
@@ -845,16 +889,15 @@ def _render_create_profile_section(
     facility_te_bonus_pct = 0.0
     facility_cost_bonus_pct = 0.0
     if not is_npc_station:
-        try:
-            if selected_upwell_type_id is not None:
-                bonus_resp = cached_api_get(f"/structure_type_bonuses/{int(selected_upwell_type_id)}")
-                if bonus_resp and bonus_resp.get("status") == "success":
-                    bonuses = (bonus_resp.get("data") or {}).get("bonuses") or {}
-                    facility_me_bonus_pct = float(bonuses.get("material_reduction") or 0.0) * 100.0
-                    facility_te_bonus_pct = float(bonuses.get("time_reduction") or 0.0) * 100.0
-                    facility_cost_bonus_pct = float(bonuses.get("cost_reduction") or 0.0) * 100.0
-        except Exception:
-            pass
+        if selected_upwell_type_id is not None:
+            facility_me_bonus_pct, facility_te_bonus_pct, facility_cost_bonus_pct, bonus_reason = (
+                _fetch_facility_bonus_pcts(int(selected_upwell_type_id))
+            )
+            if bonus_reason:
+                st.warning(
+                    f"Facility bonuses could not be loaded ({bonus_reason}); they show as 0% and a "
+                    "profile saved now stores 0%."
+                )
 
         st.markdown("**Facility Bonus**")
         st.caption("Base facility bonuses from SDE (typeBonus).")
@@ -874,7 +917,7 @@ def _render_create_profile_section(
     if selected_station_key != "none":
         try:
             selected_facility_id = int(selected_station_key)
-        except Exception:
+        except ValueError:
             selected_facility_id = None
 
     if is_npc_station and selected_facility_id is not None:
@@ -882,7 +925,7 @@ def _render_create_profile_section(
 
     col1, col2 = st.columns(2)
     with col1:
-        st.write(f"**System Index Cost (live):** {float(system_mfg_cost_index):.2%}")
+        st.write(f"**System Index Cost (live):** {system_mfg_cost_index_label}")
     with col2:
         if is_npc_station:
             if selected_facility_id is not None:

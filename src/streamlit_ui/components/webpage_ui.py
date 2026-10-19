@@ -163,8 +163,8 @@ def render_aggrid_table(
     if hidden_cols:
         try:
             gb.configure_side_bar()
-        except Exception:
-            pass
+        except AttributeError:
+            pass  # an st_aggrid version without a side bar: the hidden columns just stay hidden
 
     grid_options = gb.build()
     if auto_size_columns:

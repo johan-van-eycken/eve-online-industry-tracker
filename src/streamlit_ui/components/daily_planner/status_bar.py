@@ -259,7 +259,7 @@ def _parse_dt(s: Any) -> datetime | None:
         if "." in ts:
             return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-    except Exception:
+    except ValueError:
         try:
             parsed = datetime.fromisoformat(str(s))
         except ValueError:

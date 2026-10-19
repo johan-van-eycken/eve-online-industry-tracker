@@ -127,10 +127,7 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         try:
             state.char_manager.refresh_all()
         except Exception as e:
-            try:
-                state.init_warnings.append(f"Character refresh failed: {e}")
-            except Exception:
-                pass
+            state.init_warnings.append(f"Character refresh failed: {e}")
             friendly = _user_friendly_error(e)
             if friendly:
                 logging.warning("Character refresh warning (startup continues):\n  %s", friendly.replace("\n", "\n  "))
@@ -153,10 +150,7 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         try:
             state.corp_manager.refresh_all()
         except Exception as e:
-            try:
-                state.init_warnings.append(f"Corporation refresh failed: {e}")
-            except Exception:
-                pass
+            state.init_warnings.append(f"Corporation refresh failed: {e}")
             friendly = _user_friendly_error(e)
             if friendly:
                 logging.warning("Corporation refresh warning (startup continues):\n  %s", friendly.replace("\n", "\n  "))

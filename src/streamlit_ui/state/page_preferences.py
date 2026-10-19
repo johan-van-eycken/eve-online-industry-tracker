@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from threading import Lock
 from typing import Any, Mapping
@@ -21,7 +22,9 @@ def _read_all_preferences() -> dict[str, Any]:
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError) as exc:
+        # The pages fall back to their defaults; say why the saved ones are gone.
+        logging.warning("Page preferences in %s could not be read, using defaults: %s", path, exc)
         return {}
     return payload if isinstance(payload, dict) else {}
 

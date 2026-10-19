@@ -86,7 +86,7 @@ def _parse_iso_timestamp(value: Any) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -420,7 +420,7 @@ def render_job_manager_status(job_manager_status: dict[str, Any]) -> None:
 def _format_age_minutes(value: Any) -> str:
     try:
         minutes = float(value or 0.0)
-    except Exception:
+    except (ValueError, TypeError):
         return "N/A"
     if minutes <= 0:
         return "just now"
@@ -439,7 +439,7 @@ def _format_iso_timestamp(iso_timestamp: Any) -> str:
             local_dt = dt.astimezone()
             return local_dt.strftime("%Y-%m-%d %H:%M:%S")
         return str(iso_timestamp)
-    except Exception:
+    except (ValueError, OverflowError, OSError):
         return str(iso_timestamp)
 
 
@@ -549,7 +549,7 @@ def _refresh_status_fragment() -> None:
             fetch_status_fn=fetch_product_overview_refresh_status,
             fetch_job_manager_status_fn=fetch_job_manager_status,
         )
-    except Exception as exc:
+    except RuntimeError as exc:
         clear_overview_refresh_job(error_message=str(exc))
     if overview_refresh_is_active():
         render_refresh_in_progress(overview_refresh_view())
@@ -770,7 +770,7 @@ def prepare_shared_industry_snapshot_page(
         if bool(_char.get("is_main")):
             try:
                 _corp_id = int(_char.get("corporation_id") or 0)
-            except Exception:
+            except (ValueError, TypeError):
                 _corp_id = 0
             if _corp_id > 0:
                 _candidate = f"corporation:{_corp_id}"

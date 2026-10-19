@@ -1,3 +1,5 @@
+import logging
+
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
@@ -123,7 +125,9 @@ def _wallet_transactions_view(transactions_data: list[dict[str, Any]], *, range_
     return transactions_df
 
 
-def _extract_master_wallet_balance(wallets_raw) -> float:
+def _extract_master_wallet_balance(wallets_raw) -> float | None:
+    """The master wallet (division 1) balance; None when the stored wallets
+    cannot be read, so the tile says so instead of showing ISK 0."""
     if not wallets_raw:
         return 0.0
 
@@ -132,9 +136,17 @@ def _extract_master_wallet_balance(wallets_raw) -> float:
         master_wallet = next((wallet for wallet in wallets if str(wallet.get("division")) == "1"), None)
         if master_wallet:
             return float(master_wallet.get("balance", 0.0) or 0.0)
-    except Exception:
-        return 0.0
+    except (ValueError, TypeError, AttributeError) as exc:
+        # Malformed JSON, a non-list or a non-dict wallet entry.
+        logging.warning("Corporation wallets could not be read for the master wallet balance: %s", exc)
+        return None
     return 0.0
+
+
+def _master_wallet_label(balance: float | None) -> str:
+    if balance is None:
+        return "Unavailable (wallet data unreadable, see the logs)"
+    return format_isk(balance)
 
 
 def _render_asset_table(
@@ -214,7 +226,7 @@ def _fetch_current_corporation_assets(corporation_id: int) -> list[dict]:
             if int(row.get("corporation_id") or 0) == int(corporation_id):
                 assets = row.get("assets") or []
                 return assets if isinstance(assets, list) else []
-        except Exception:
+        except (ValueError, TypeError):
             continue
 
     return []
@@ -233,7 +245,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
             try:
                 st.session_state[override_key] = _fetch_current_corporation_assets(selected_corporation_id)
                 st.session_state[status_key] = ("success", "Showing refreshed current assets.")
-            except Exception as exc:
+            except RuntimeError as exc:
                 st.session_state[status_key] = ("error", f"Failed to refresh current assets: {exc}")
     with status_col:
         status_payload = st.session_state.get(status_key)
@@ -592,7 +604,7 @@ def render():
             border_style = "2px solid #444" if has_director else "2px dashed #666"
             access_badge = "" if has_director else '<div style="font-size:11px; color:#f59e0b; margin-bottom:6px;">⚠ Limited Access</div>'
             ceo_html = f"CEO: {ceo_name}<br>" if ceo_name else ""
-            wallet_html = f"<b>Master Wallet Balance:</b><br><b>{format_isk(master_wallet_balance)}</b>" if has_director else ""
+            wallet_html = f"<b>Master Wallet Balance:</b><br><b>{_master_wallet_label(master_wallet_balance)}</b>" if has_director else ""
 
             tile_html = (
                 f'<div style="background-color: rgba(30,30,30,0.95); padding: 20px; border-radius: 10px; border: {border_style}; box-shadow: 2px 2px 10px rgba(0,0,0,0.5); text-align: center; margin-bottom: 10px;">'
@@ -693,7 +705,7 @@ def render():
                     if isinstance(titles, str):
                         try:
                             titles = json.loads(titles)
-                        except Exception:
+                        except ValueError:
                             return titles
                     if isinstance(titles, dict):
                         return titles.get("title_name", "")

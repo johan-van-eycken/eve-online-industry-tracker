@@ -30,7 +30,7 @@ def _format_timestamp(ts: float | int | None) -> str:
         return "N/A"
     try:
         return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
+    except (ValueError, TypeError, OverflowError, OSError):
         return "N/A"
 
 

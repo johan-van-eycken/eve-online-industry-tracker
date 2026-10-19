@@ -196,7 +196,7 @@ def _fetch_current_character_assets(character_id: int) -> list[dict]:
             if int(row.get("character_id") or 0) == int(character_id):
                 assets = row.get("assets") or []
                 return assets if isinstance(assets, list) else []
-        except Exception:
+        except (ValueError, TypeError):
             continue
 
     return []
@@ -213,7 +213,7 @@ def _render_character_assets_tab(render_table, char_row: dict, selected_id: int)
             try:
                 st.session_state[override_key] = _fetch_current_character_assets(int(selected_id))
                 st.session_state[status_key] = ("success", "Showing refreshed current assets.")
-            except Exception as exc:
+            except RuntimeError as exc:
                 st.session_state[status_key] = ("error", f"Failed to refresh current assets: {exc}")
     with status_col:
         status_payload = st.session_state.get(status_key)
@@ -517,7 +517,7 @@ def render():
             security_status = row.get("security_status")
             try:
                 security_status_display = f"{float(security_status):.2f}" if security_status is not None else "N/A"
-            except Exception:
+            except (ValueError, TypeError):
                 security_status_display = "N/A"
 
             with col:

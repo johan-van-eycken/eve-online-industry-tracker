@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from flask import g, has_app_context
+from sqlalchemy.exc import SQLAlchemyError
 
 from flask_app.deps import get_state
 
@@ -49,12 +50,9 @@ def close_request_sessions(exc: Optional[BaseException] = None) -> None:
         if session is not None:
             try:
                 session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
-            try:
-                delattr(g, key)
-            except Exception:
-                pass
+            delattr(g, key)
 
     # If DatabaseManager.session is a scoped_session proxy, remove it so the next
     # request gets a fresh session.
@@ -67,5 +65,5 @@ def close_request_sessions(exc: Optional[BaseException] = None) -> None:
         if callable(remove):
             try:
                 remove()
-            except Exception:
+            except SQLAlchemyError:
                 pass

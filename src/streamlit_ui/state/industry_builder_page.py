@@ -53,7 +53,7 @@ def default_character_id(characters: list[dict[str, Any]], character_options: di
             continue
         try:
             main_character_id = int(character.get("character_id") or 0)
-        except Exception:
+        except (ValueError, TypeError):
             continue
         if main_character_id in character_options:
             selected_default_character_id = main_character_id
@@ -152,7 +152,7 @@ def resolve_profile_security_status(
             continue
         try:
             selected_profile_system_id = int(profile.get("system_id") or 0) or None
-        except Exception:
+        except (ValueError, TypeError):
             selected_profile_system_id = None
         break
 

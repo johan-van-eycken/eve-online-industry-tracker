@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pandas as pd
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.aggrid_import import import_aggrid
@@ -315,7 +317,9 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
                 allow_unsafe_jscode=True,
                 key="build_plan_grid",
             )
-        except Exception:
+        except (TypeError, ValueError, StreamlitAPIException) as exc:
+            # Cosmetic: the plain table shows the same rows.
+            logging.warning("Build plan grid failed, showing a plain table: %s", exc)
             st.dataframe(
                 df.drop(columns=["_decision_raw"]),
                 hide_index=True,

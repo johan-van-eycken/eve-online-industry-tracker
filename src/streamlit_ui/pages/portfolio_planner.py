@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from typing import Any, cast
+import logging
+from typing import Any, Callable, cast
 
 import pandas as pd
 import streamlit as st
@@ -427,11 +428,26 @@ _REACTION_ACTIVITY_IDS = ACTIVITY_REACTION_IDS
 
 
 def _fetch_jobs_data() -> dict[str, Any]:
-    """Fetch active industry jobs; returns empty structure on error."""
+    """Fetch active industry jobs; on an API error, warn and return an empty structure."""
     try:
         return fetch_active_industry_jobs()
-    except Exception:
+    except RuntimeError as exc:
+        logging.warning("Portfolio planner: active industry jobs could not be loaded: %s", exc)
+        st.warning(
+            f"Active industry jobs could not be loaded ({exc}). The slot summary, the Active? "
+            "column and the character assignment do not include the running jobs."
+        )
         return {"jobs": [], "slot_capacities": {}}
+
+
+def _fetch_optional(fetch_fn: Callable[[tuple[int, ...]], dict], ids: tuple[int, ...], *, what: str) -> dict:
+    """Run an optional per-candidate fetch; on an API error, warn with the reason and return {}."""
+    try:
+        return fetch_fn(ids)
+    except RuntimeError as exc:
+        logging.warning("Portfolio planner: %s could not be loaded: %s", what, exc)
+        st.warning(f"The {what} could not be loaded ({exc}); the recommendations are shown without it.")
+        return {}
 
 
 def _parse_end_date(end_date: Any) -> datetime | None:
@@ -445,7 +461,7 @@ def _parse_end_date(end_date: Any) -> datetime | None:
         else:
             dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
         return dt.replace(tzinfo=timezone.utc)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -1070,10 +1086,7 @@ def render() -> None:
     }))
     _track_record_pre: dict[str, dict] = {}
     if _pre_type_ids:
-        try:
-            _track_record_pre = fetch_type_track_record(_pre_type_ids)
-        except Exception:
-            _track_record_pre = {}
+        _track_record_pre = _fetch_optional(fetch_type_track_record, _pre_type_ids, what="track record")
     ranked = [
         (row, _apply_track_record_multiplier(score, row, _track_record_pre))
         for row, score in ranked
@@ -1101,10 +1114,9 @@ def render() -> None:
     )
     skill_qual: dict[str, dict[str, bool]] = {}
     if blueprint_type_ids_for_qual:
-        try:
-            skill_qual = fetch_blueprint_skill_qualification(blueprint_type_ids_for_qual)
-        except Exception:
-            skill_qual = {}
+        skill_qual = _fetch_optional(
+            fetch_blueprint_skill_qualification, blueprint_type_ids_for_qual, what="blueprint skill qualification"
+        )
     assignment = _compute_character_assignment(top_candidates, skill_qual, jobs_data)
 
     candidate_type_ids = tuple(sorted({
@@ -1114,17 +1126,11 @@ def render() -> None:
     }))
     reorder_alerts: dict[str, dict] = {}
     if candidate_type_ids:
-        try:
-            reorder_alerts = fetch_reorder_alerts(candidate_type_ids)
-        except Exception:
-            reorder_alerts = {}
+        reorder_alerts = _fetch_optional(fetch_reorder_alerts, candidate_type_ids, what="reorder alerts")
 
     track_record: dict[str, dict] = {}
     if candidate_type_ids:
-        try:
-            track_record = fetch_type_track_record(candidate_type_ids)
-        except Exception:
-            track_record = {}
+        track_record = _fetch_optional(fetch_type_track_record, candidate_type_ids, what="track record")
 
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 

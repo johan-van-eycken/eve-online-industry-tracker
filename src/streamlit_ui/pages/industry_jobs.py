@@ -40,7 +40,7 @@ def _parse_iso(value: Any) -> datetime | None:
         raw = raw[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw)
-    except Exception:
+    except ValueError:
         return None
 
 

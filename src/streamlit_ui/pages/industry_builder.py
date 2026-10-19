@@ -35,7 +35,7 @@ ASSUMES_OWNED_T2_BPO_CAPTION = (
 def _format_age_minutes(value: Any) -> str:
     try:
         minutes = float(value or 0.0)
-    except Exception:
+    except (ValueError, TypeError):
         return "N/A"
     if minutes <= 0:
         return "0 min"

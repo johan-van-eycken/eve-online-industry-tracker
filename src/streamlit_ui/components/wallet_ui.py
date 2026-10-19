@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
@@ -22,7 +23,7 @@ def _parse_iso_date(value: Any) -> datetime | None:
         raw_value = raw_value[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw_value)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -49,14 +50,16 @@ def fetch_location_name_map(location_ids: Iterable[Any]) -> dict[int, str]:
             if value is None or str(value).strip() == "":
                 continue
             normalized_ids.append(int(value))
-        except Exception:
+        except (ValueError, TypeError):
             continue
     if not normalized_ids:
         return {}
 
-    try:
-        response = api_post("/locations", payload={"location_ids": normalized_ids}) or {}
-    except Exception:
+    response = api_post("/locations", payload={"location_ids": normalized_ids})
+    if not isinstance(response, dict):
+        # api_post logged the HTTP failure.
+        logging.warning("Wallet location names could not be loaded for %d location(s)", len(normalized_ids))
+        st.warning("Location names could not be loaded (the /locations request failed); showing location IDs instead.")
         return {}
 
     data = response.get("data") or {}

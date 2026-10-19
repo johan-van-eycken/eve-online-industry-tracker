@@ -745,8 +745,14 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
 
 
 def _get_director_corp_ids() -> list[int]:
-    from streamlit_ui.api.corporations import fetch_director_corporations
-    return [int(c["corporation_id"]) for c in fetch_director_corporations()]
+    from streamlit_ui.api import corporations
+
+    try:
+        corps = corporations.fetch_director_corporations()
+    except RuntimeError as exc:
+        st.warning(f"Corporation market orders are not shown: {exc}")
+        return []
+    return [int(c["corporation_id"]) for c in corps]
 
 
 

@@ -361,7 +361,7 @@ def _render_character_section(
                         for a in pending_delivers:
                             try:
                                 mark_action_done(int(a.get("id") or 0))
-                            except Exception as exc:
+                            except RuntimeError as exc:
                                 errors.append(str(exc))
                         if errors:
                             st.error(f"Some actions failed: {'; '.join(errors)}")

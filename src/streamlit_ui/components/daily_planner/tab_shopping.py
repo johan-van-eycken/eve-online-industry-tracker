@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.aggrid_import import import_aggrid
@@ -301,7 +303,9 @@ def _render_materials_section(
                 fit_columns_on_grid_load=True,
                 allow_unsafe_jscode=False,
             )
-        except Exception:
+        except (TypeError, ValueError, StreamlitAPIException) as exc:
+            # Cosmetic: the plain table shows the same rows.
+            logging.warning("Shopping list grid failed, showing a plain table: %s", exc)
             st.dataframe(df, hide_index=True, width="stretch")
     else:
         st.dataframe(df, hide_index=True, width="stretch")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from flask import Blueprint, request
 
+from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.industry.portfolio_service import (
     IndustryPortfolioService,
     PortfolioCandidateDirective,
@@ -15,6 +16,21 @@ from flask_app.http import error, ok
 
 
 industry_bp = Blueprint("industry", __name__)
+
+
+def _number_param(params, key: str, default, cast):
+    """A numeric request value, or `default` when it is absent or empty.
+
+    A value that is present but not a number is a 400 naming the field,
+    not a silent default (a bad capital limit must not plan with 0)."""
+    raw = params.get(key)
+    if isinstance(raw, str):
+        raw = raw.strip()
+    try:
+        return cast(raw or default)
+    except (ValueError, TypeError):
+        kind = "an integer" if cast is int else "a number"
+        raise ServiceError(f"Invalid {key}: must be {kind}, got {raw!r}.", status_code=400) from None
 
 
 def _string_list_payload(value: object) -> list[str]:
@@ -39,11 +55,14 @@ def _candidate_directives_payload(value: object) -> list[PortfolioCandidateDirec
         if not overview_row_id:
             continue
 
-        def _optional_int(raw_value: object) -> int | None:
+        def _optional_int(raw_value: object, field_name: str) -> int | None:
             try:
-                parsed = int(raw_value) if raw_value is not None else None
-            except Exception:
-                return None
+                parsed = int(raw_value) if raw_value is not None else None  # type: ignore[arg-type]
+            except (ValueError, TypeError):
+                raise ServiceError(
+                    f"Invalid {field_name} for candidate {overview_row_id}: must be an integer, got {raw_value!r}.",
+                    status_code=400,
+                ) from None
             return parsed if parsed is not None and parsed > 0 else None
 
         directives.append(
@@ -52,51 +71,24 @@ def _candidate_directives_payload(value: object) -> list[PortfolioCandidateDirec
                 force_include=bool(entry.get("force_include", False)),
                 exclude=bool(entry.get("exclude", False)),
                 lock_required=bool(entry.get("lock_required", False)),
-                max_batches_override=_optional_int(entry.get("max_batches_override")),
-                target_batches_override=_optional_int(entry.get("target_batches_override")),
-                target_units_override=_optional_int(entry.get("target_units_override")),
+                max_batches_override=_optional_int(entry.get("max_batches_override"), "max_batches_override"),
+                target_batches_override=_optional_int(entry.get("target_batches_override"), "target_batches_override"),
+                target_units_override=_optional_int(entry.get("target_units_override"), "target_units_override"),
             )
         )
     return directives
 
 
 def _portfolio_plan_request_from_payload(payload: dict[str, object]) -> PortfolioPlanRequest:
-    try:
-        planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
-    except Exception:
-        planning_horizon_hours = 24.0
-    try:
-        capital_limit_isk = float(payload.get("capital_limit_isk") or 0.0)
-    except Exception:
-        capital_limit_isk = 0.0
-    try:
-        manufacturing_slots_available = int(payload.get("manufacturing_slots_available") or 0)
-    except Exception:
-        manufacturing_slots_available = 0
-    try:
-        research_slots_available = int(payload.get("research_slots_available") or 0)
-    except Exception:
-        research_slots_available = 0
-    try:
-        reaction_slots_available = int(payload.get("reaction_slots_available") or 0)
-    except Exception:
-        reaction_slots_available = 0
-    try:
-        min_margin_pct = float(payload.get("min_margin_pct") or 0.0)
-    except Exception:
-        min_margin_pct = 0.0
-    try:
-        min_isk_per_hour = float(payload.get("min_isk_per_hour") or 0.0)
-    except Exception:
-        min_isk_per_hour = 0.0
-    try:
-        min_region_daily_volume = int(payload.get("min_region_daily_volume") or 0)
-    except Exception:
-        min_region_daily_volume = 0
-    try:
-        min_owned_input_coverage_pct = float(payload.get("min_owned_input_coverage_pct") or 0.0)
-    except Exception:
-        min_owned_input_coverage_pct = 0.0
+    planning_horizon_hours = _number_param(payload, "planning_horizon_hours", 24.0, float)
+    capital_limit_isk = _number_param(payload, "capital_limit_isk", 0.0, float)
+    manufacturing_slots_available = _number_param(payload, "manufacturing_slots_available", 0, int)
+    research_slots_available = _number_param(payload, "research_slots_available", 0, int)
+    reaction_slots_available = _number_param(payload, "reaction_slots_available", 0, int)
+    min_margin_pct = _number_param(payload, "min_margin_pct", 0.0, float)
+    min_isk_per_hour = _number_param(payload, "min_isk_per_hour", 0.0, float)
+    min_region_daily_volume = _number_param(payload, "min_region_daily_volume", 0, int)
+    min_owned_input_coverage_pct = _number_param(payload, "min_owned_input_coverage_pct", 0.0, float)
 
     return PortfolioPlanRequest(
         candidate_snapshot_id=str(payload.get("candidate_snapshot_id") or "").strip(),
@@ -300,10 +292,7 @@ def industry_portfolio_candidates_start(character_id: int):
             industry_profile_id = None
     else:
         industry_profile_id = None
-    try:
-        planning_horizon_hours = float(payload.get("planning_horizon_hours") or 24.0)
-    except Exception:
-        planning_horizon_hours = 24.0
+    planning_horizon_hours = _number_param(payload, "planning_horizon_hours", 24.0, float)
     have_skills_only = bool(payload.get("have_skills_only", True))
 
     svc = IndustryService(state=get_state())
@@ -351,11 +340,7 @@ def industry_portfolio_candidates(character_id: int):
     market_hub = str(request.args.get("market_hub") or "jita").strip().lower() or "jita"
     material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
     product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
-    planning_horizon_hours_raw = (request.args.get("planning_horizon_hours") or "24").strip()
-    try:
-        planning_horizon_hours = float(planning_horizon_hours_raw or 24.0)
-    except Exception:
-        planning_horizon_hours = 24.0
+    planning_horizon_hours = _number_param(request.args, "planning_horizon_hours", 24.0, float)
     industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
     if industry_profile_id_raw:
         try:

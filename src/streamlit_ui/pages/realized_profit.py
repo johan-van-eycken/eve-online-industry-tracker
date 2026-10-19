@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import altair as alt
+import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -34,7 +35,7 @@ def _parse_iso_date(value: Any) -> datetime | None:
         raw_value = raw_value[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw_value)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -50,14 +51,35 @@ def _safe_float(value: Any) -> float | None:
         if value is None:
             return None
         return float(value)
-    except Exception:
+    except (ValueError, TypeError):
         return None
+
+
+_LOAD_WARNINGS_KEY = "realized_profit_load_warnings_shown"
+
+
+def _reset_load_warnings() -> None:
+    """Called at the start of each render: a load failure is warned once per run."""
+    st.session_state[_LOAD_WARNINGS_KEY] = set()
+
+
+def _warn_load_failure(what: str, exc: Exception) -> None:
+    logging.warning("Realized profit: %s could not be loaded: %s", what, exc)
+    shown = st.session_state.setdefault(_LOAD_WARNINGS_KEY, set())
+    if what in shown:
+        return
+    shown.add(what)
+    st.warning(
+        f"The {what} could not be loaded ({exc}). The owner list and the trade purchase "
+        "figures leave them out, so the rolling trade profit may be overstated."
+    )
 
 
 def _character_name_map() -> dict[int, str]:
     try:
         characters = filter_industry_characters(fetch_characters())
-    except Exception:
+    except RuntimeError as exc:
+        _warn_load_failure("characters", exc)
         return {}
     return build_character_options(characters)
 
@@ -65,16 +87,19 @@ def _character_name_map() -> dict[int, str]:
 def _character_payloads() -> list[dict[str, Any]]:
     try:
         characters = filter_industry_characters(fetch_characters())
-    except Exception:
+    except RuntimeError as exc:
+        _warn_load_failure("characters", exc)
         return []
     return characters if isinstance(characters, list) else []
 
 
 def _corporation_payloads() -> list[dict[str, Any]]:
-    from streamlit_ui.api.corporations import fetch_director_corporations
+    from streamlit_ui.api import corporations
+
     try:
-        corps = fetch_director_corporations()
-    except Exception:
+        corps = corporations.fetch_director_corporations()
+    except RuntimeError as exc:
+        _warn_load_failure("director corporations", exc)
         return []
     return corps if isinstance(corps, list) else []
 
@@ -708,6 +733,7 @@ def _table_frame(
 def render() -> None:
     st.header("Realized Profit")
     runtime = require_aggrid()
+    _reset_load_warnings()
 
     character_name_by_id = _character_name_map()
     owner_selector_options = _owner_selector_options()

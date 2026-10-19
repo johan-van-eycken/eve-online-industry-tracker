@@ -149,7 +149,7 @@ def tree_node_icon_url(source_row: dict[str, Any], node: dict[str, Any]) -> str:
 
     try:
         type_id = int(node.get("type_id") or source_row.get("type_id") or 0)
-    except Exception:
+    except (ValueError, TypeError):
         type_id = 0
 
     try:
@@ -159,7 +159,7 @@ def tree_node_icon_url(source_row: dict[str, Any], node: dict[str, Any]) -> str:
             or source_row.get("blueprint_type_id")
             or 0
         )
-    except Exception:
+    except (ValueError, TypeError):
         blueprint_type_id = 0
 
     if node_type in {"product", "material"} and type_id > 0:

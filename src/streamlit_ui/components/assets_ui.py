@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import streamlit as st
@@ -26,11 +27,11 @@ from flask_app.settings import api_base as _get_api_base
 
 @st.cache_data(ttl=300)
 def fetch_location_info(location_ids: list[int]) -> dict[str, Any]:
-    try:
-        response = api_post("/locations", payload={"location_ids": list(map(int, location_ids))})
-        return response if isinstance(response, dict) else {}
-    except Exception as e:
-        return {"status": "error", "message": str(e), "data": {}}
+    response = api_post("/locations", payload={"location_ids": list(map(int, location_ids))})
+    if not isinstance(response, dict):
+        # api_post logged the HTTP failure; give the page a reason to show.
+        return {"status": "error", "message": "the /locations request failed (see the logs)", "data": {}}
+    return response
 
 
 def apply_location_names(
@@ -44,6 +45,10 @@ def apply_location_names(
 
     location_ids = list(df[top_location_column].dropna().unique())
     location_info_map = fetch_location_info([int(location_id) for location_id in location_ids])
+    if (location_info_map or {}).get("status") == "error":
+        reason = location_info_map.get("message") or "unknown error"
+        logging.warning("Location names could not be loaded: %s", reason)
+        st.warning(f"Location names could not be loaded ({reason}); showing location IDs instead.")
     return apply_location_names_from_data(
         df,
         (location_info_map or {}).get("data", {}),
