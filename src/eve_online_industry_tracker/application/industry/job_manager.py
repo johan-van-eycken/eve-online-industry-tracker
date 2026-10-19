@@ -7,6 +7,8 @@ import threading
 from typing import Any
 import uuid
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from flask_app.background_jobs import register_thread
 
 from eve_online_industry_tracker.infrastructure.session_provider import (
@@ -32,18 +34,16 @@ class IndustryJobManager:
         if cfg_manager is None:
             return set()
 
-        try:
-            cfg = cfg_manager.all() or {}
-        except Exception:
-            return set()
+        cfg = cfg_manager.all() or {}
 
         raw_ids = (((cfg.get("defaults") or {}).get("industry") or {}).get("excluded_blueprint_type_ids") or [])
         excluded: set[int] = set()
         for raw_id in raw_ids:
             try:
                 excluded.add(int(raw_id))
-            except Exception:
-                continue
+            except (TypeError, ValueError):
+                logging.warning("IndustryJobManager: ignoring excluded_blueprint_type_ids entry %r (not a type ID)",
+                                raw_id)
         return excluded
 
     def __init__(self, *, state: Any, sessions: SessionProvider | None = None):
@@ -255,7 +255,7 @@ class IndustryJobManager:
         finally:
             try:
                 session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         finished_at = datetime.now(timezone.utc)

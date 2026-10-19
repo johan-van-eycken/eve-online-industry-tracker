@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
@@ -39,12 +40,15 @@ class MarketDepthCollector:
                 return float(self._admin.get("daily_planner", "planner_price_outlier_sigma"))
             except AdminSettingInvalid:
                 raise  # a stored invalid value fails loudly, naming it
-            except Exception:
-                pass
+            except (TypeError, ValueError) as exc:
+                logging.warning("MarketDepthCollector: daily_planner/planner_price_outlier_sigma is not a "
+                                "number (%s); using 3.0", exc)
         return 3.0
 
     def _get_type_ids_from_active_plan(self) -> list[int]:
-        """Return type_ids from the most recent active build_plan."""
+        """Return type_ids from the most recent active build_plan. A failed
+        read raises, so the cycle fails loudly (the job logs it and names it
+        in last_error) instead of reporting a refresh that collected nothing."""
         app_session = self._sessions.app_session()
         try:
             result = app_session.execute(text(
@@ -54,12 +58,10 @@ class MarketDepthCollector:
                 "ORDER BY bp.id DESC"
             )).fetchall()
             return [int(row[0]) for row in result]
-        except Exception:
-            return []
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _get_effective_velocity(self, type_id: int, corp_id: int | None) -> float | None:
@@ -74,12 +76,13 @@ class MarketDepthCollector:
             ), {"type_id": type_id}).fetchone()
             if row and row[0] is not None:
                 return float(row[0])
-        except Exception:
-            pass
+        except SQLAlchemyError as exc:
+            logging.warning("MarketDepthCollector: could not read the plan effective_velocity for type_id=%s "
+                            "(%s); falling back to the sales history", type_id, exc)
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         # Fallback: compute from SalesHistoryService
@@ -91,7 +94,9 @@ class MarketDepthCollector:
             history = svc.get_sold_history(character_id=0, corporation_id=corp_id, type_id=type_id, days=30)
             total_qty = sum(int(tx.get("quantity", 0)) for tx in history)
             return max(0.01, total_qty / 30.0) if total_qty > 0 else None
-        except Exception:
+        except SQLAlchemyError as exc:
+            logging.warning("MarketDepthCollector: could not read the sales history for type_id=%s (%s); "
+                            "no competition_index", type_id, exc)
             return None
 
     def _vwap_days(self) -> int:
@@ -130,7 +135,7 @@ class MarketDepthCollector:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _get_avg_30d_stats(self, type_id: int, region_id: int) -> tuple[float | None, float | None]:
@@ -152,7 +157,7 @@ class MarketDepthCollector:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _get_own_volume_for_type(self, corp_id: int | None, type_id: int) -> int:
@@ -168,12 +173,14 @@ class MarketDepthCollector:
                 CorporationMarketOrdersModel.is_buy_order == False,
             ).all()
             return sum(int(getattr(r, "volume_remain", 0) or 0) for r in rows)
-        except Exception:
+        except SQLAlchemyError as exc:
+            logging.warning("MarketDepthCollector: could not read the own sell orders for type_id=%s (%s); "
+                            "competitor_units includes them", type_id, exc)
             return 0
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _write_market_depth(
@@ -204,7 +211,7 @@ class MarketDepthCollector:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def run(self) -> None:
@@ -225,8 +232,11 @@ class MarketDepthCollector:
                 ids = getattr(corp_manager, "_corporation_ids", None) or []
                 if ids:
                     corp_id = int(ids[0])
-        except Exception:
-            pass
+        except (TypeError, ValueError) as exc:
+            # _corporation_ids is a set, so ids[0] raises TypeError today: picking the primary
+            # corporation is a user decision (Task C1 report). Logged instead of swallowed.
+            logging.warning("MarketDepthCollector: could not determine the primary corporation (%s); own sell "
+                            "orders are not subtracted and there is no sales-history velocity fallback", exc)
 
         # Step 1: Refresh market history for all type_ids
         esi_service = getattr(self._state, "esi_service", None)

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, desc
+from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.infrastructure.models import CharacterWalletTransactionsModel, CorporationWalletTransactionsModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
@@ -75,7 +76,7 @@ class SalesHistoryService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def suggest_sell_price(

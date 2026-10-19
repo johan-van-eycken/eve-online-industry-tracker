@@ -37,8 +37,8 @@ class MarketIntelligenceJob:
         try:
             from flask_app.background_jobs import register_thread
             register_thread(self._state, self.thread_name, t)
-        except Exception:
-            pass
+        except ImportError:
+            pass  # no Flask app (scripts, tests): nothing to register with; register_thread itself never raises
         t.start()
 
     def stop(self) -> None:

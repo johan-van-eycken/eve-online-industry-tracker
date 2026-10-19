@@ -68,7 +68,7 @@ class IndustryPortfolioService:
     def _safe_float(value: Any) -> float | None:
         try:
             parsed = float(value)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
         if math.isnan(parsed) or math.isinf(parsed):
             return None
@@ -78,7 +78,7 @@ class IndustryPortfolioService:
     def _safe_int(value: Any) -> int:
         try:
             return int(value or 0)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     @staticmethod
@@ -95,7 +95,7 @@ class IndustryPortfolioService:
     def _override_or_none(value: Any) -> int | None:
         try:
             parsed = int(value)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
         return parsed if parsed > 0 else None
 
