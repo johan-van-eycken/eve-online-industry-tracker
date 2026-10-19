@@ -795,24 +795,30 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
                     st.caption(f"**Anomaly:** {'; '.join(anomaly_reasons)}")
 
 
-def confidence_capped_hint(rows: list[dict[str, Any]], *, shown: int) -> str | None:
+def _row_key(row: dict[str, Any]) -> tuple[Any, Any]:
+    """One overview row: the producer's row id, with the type as a fallback."""
+    return row.get("overview_row_id"), row.get("type_id")
+
+
+def confidence_capped_hint(rows: list[dict[str, Any]], *, shown_rows: list[dict[str, Any]]) -> str | None:
     """The API's "N rows capped: job fees unknown" hint (portfolio_service)
-    for this page (Task A item 4): the rows whose pricing confidence is held
-    at Medium because their job fees are unknown (their profit is an upper
-    bound), said only when the result is empty or filtered (`shown`, the
-    rows left after the filters and disqualifiers, is below `rows`)."""
-    if shown >= len(rows):
-        return None
+    for this page (Task A item 4): the rows the filters or disqualifiers
+    left out of the result (not in `shown_rows`, Task A fix round 1 M2)
+    whose pricing confidence is held at Medium because their job fees are
+    unknown (their profit is an upper bound)."""
+    # By key, not identity: filter_overview_rows (st.cache_data) returns copies.
+    shown = {_row_key(row) for row in shown_rows}
     capped = sum(
         1 for row in rows
-        if str(row.get("pricing_confidence") or "").strip().lower() == "medium"
+        if _row_key(row) not in shown
+        and str(row.get("pricing_confidence") or "").strip().lower() == "medium"
         and get_profit_upper_bound_reason(row) is not None
     )
     return IndustryPortfolioService.confidence_capped_hint(capped)
 
 
-def _render_confidence_capped_hint(rows: list[dict[str, Any]], *, shown: int) -> None:
-    hint = confidence_capped_hint(rows, shown=shown)
+def _render_confidence_capped_hint(rows: list[dict[str, Any]], *, shown_rows: list[dict[str, Any]]) -> None:
+    hint = confidence_capped_hint(rows, shown_rows=shown_rows)
     if hint:
         st.info(f"{hint} (their pricing confidence is held at Medium)")
 
@@ -1123,7 +1129,7 @@ def render() -> None:
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
-        _render_confidence_capped_hint(overview_rows, shown=len(eligible_rows))
+        _render_confidence_capped_hint(overview_rows, shown_rows=eligible_rows)
         _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts, objective=scoring_objective, track_record=track_record)
         _render_excluded_section(disqualified)
 
