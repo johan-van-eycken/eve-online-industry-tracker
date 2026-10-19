@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
 
@@ -34,6 +35,8 @@ class MarketDepthCollector:
         if self._admin:
             try:
                 return float(self._admin.get("daily_planner", "planner_price_outlier_sigma"))
+            except AdminSettingInvalid:
+                raise  # a stored invalid value fails loudly, naming it
             except Exception:
                 pass
         return 3.0

@@ -8,15 +8,21 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from threading import Lock
 from typing import Any
+
+from eve_online_industry_tracker.application.errors import ServiceError
 
 
 # ---------------------------------------------------------------------------
 # Schema: defines every admin-configurable setting with type, default, label,
 # and optional min/max constraints.  The Streamlit admin page auto-generates
-# form controls from this schema.
+# form controls from this schema.  Every int and float is strict (min/max and
+# an int step are checked, never clamped or snapped); "startup_critical" marks
+# a number read on every ESI request or by a daemon thread, whose stored
+# invalid value reads as the default (see AdminSettingsManager).
 # ---------------------------------------------------------------------------
 
 ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
@@ -40,6 +46,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "Number of parallel threads for ESI market history fetches.",
             },
             "esi_pagination_sleep_seconds": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "float",
                 "default": 0.1,
                 "min": 0.0,
@@ -562,6 +569,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "Minimum trading days required before computing margin–mineral Pearson correlation.",
             },
             "planner_market_refresh_interval_hours": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "int",
                 "default": 3,
                 "min": 1,
@@ -642,8 +650,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "type": "int",
                 "optional": True,
                 "default": None,
-                # No min/max: the int coercion would clamp a wrong id into another station's; the SDE
-                # lookup rejects an id it does not have instead.
+                # No min/max: the SDE lookup rejects an id it does not have instead.
                 "label": "Ore calculator: NPC station id",
                 "help": "The NPC station (its id, e.g. 60003760 for Jita IV - Moon 4) whose SDE reprocessing "
                         "yield and base tax the ore calculator uses. Required for an NPC station.",
@@ -651,7 +658,6 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "tax": {
                 "type": "float",
                 "optional": True,
-                "strict": True,  # outside min/max is an error, not clamped
                 "default": None,
                 "min": 0.0,
                 "max": 0.5,
@@ -686,6 +692,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "Timeout per individual ESI HTTP request.",
             },
             "esi_error_budget_low_watermark": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "int",
                 "default": 5,
                 "min": 1,
@@ -694,6 +701,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "Start pacing requests when error budget remaining drops below this.",
             },
             "esi_error_budget_max_sleep_seconds": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "int",
                 "default": 60,
                 "min": 10,
@@ -702,6 +710,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "help": "Maximum sleep duration when ESI error budget is exhausted.",
             },
             "esi_error_budget_pacing_sleep_seconds": {
+                "startup_critical": True,  # read on every ESI request / by a daemon: invalid reads as the default
                 "type": "float",
                 "default": 0.2,
                 "min": 0.05,
@@ -724,25 +733,108 @@ _FALSE_STRINGS = frozenset({"false", "0", "no", "off", "n", ""})
 _TRUE_STRINGS = frozenset({"true", "1", "yes", "on", "y"})
 
 
+class AdminSettingInvalid(ServiceError):
+    """A stored admin setting is not a valid value: raised where it is read.
+
+    A ServiceError (500), not a KeyError, AttributeError or ValueError, so the
+    readers that fall back when there is no settings store do not swallow it."""
+
+    def __init__(self, category: str, key: str, value: Any, problem: str):
+        self.category, self.key, self.value, self.problem = category, key, value, problem
+        super().__init__(f"admin setting {category}/{key}={value!r} is invalid ({problem}); fix it on the Admin "
+                         "Settings page", status_code=500)
+
+
+def _range_text(spec: dict[str, Any]) -> str:
+    low, high = spec.get("min"), spec.get("max")
+    if low is not None and high is not None:
+        return f"{low!r} to {high!r}"
+    return f"at least {low!r}" if low is not None else f"at most {high!r}"
+
+
+def _coerce_number(value: Any, spec: dict[str, Any]) -> int | float:
+    """An int or float setting's value, or ValueError. Strict: a bool, a
+    non-numeric string, a fraction for an int, NaN/inf, a value outside
+    min/max or off an int step grid are refused, never coerced or clamped.
+    A numeric string ("45") and an integral float for an int (6.0) are read
+    as the number."""
+    is_int = spec["type"] == "int"
+    kind = "an integer" if is_int else "a number"
+    if isinstance(value, bool):
+        raise ValueError(f"{value!r} is a boolean, not {kind}")
+    if isinstance(value, str):
+        try:
+            number: int | float = int(value.strip()) if is_int else float(value.strip())
+        except ValueError:
+            raise ValueError(f"{value!r} is not {kind}") from None
+    elif isinstance(value, (int, float)):
+        number = value
+    else:
+        raise ValueError(f"{value!r} is not {kind}")
+    if not math.isfinite(number):
+        raise ValueError(f"{value!r} is not {kind}")
+    if is_int:
+        if isinstance(number, float):
+            if not number.is_integer():
+                raise ValueError(f"{value!r} is not an integer")
+            number = int(number)
+    else:
+        number = float(number)
+    if ("min" in spec and number < spec["min"]) or ("max" in spec and number > spec["max"]):
+        raise ValueError(f"{number!r} is outside {_range_text(spec)}")
+    if is_int and "step" in spec:
+        origin, step = int(spec.get("min", 0)), int(spec["step"])
+        if (number - origin) % step:
+            raise ValueError(f"{number!r} is not a step of {step} from {origin} ({origin}, {origin + step}, "
+                             f"{origin + 2 * step}, ...; {_range_text(spec)})")
+    return number
+
+
+def _is_strict(spec: dict[str, Any]) -> bool:
+    """A setting whose stored invalid value is kept and reported, never
+    replaced: every number, and a strict select."""
+    return spec["type"] in ("int", "float") or bool(spec.get("strict"))
+
+
 class AdminSettingsManager:
-    """Loads, validates and persists admin settings from/to a JSON file."""
+    """Loads, validates and persists admin settings from/to a JSON file.
+
+    Every number and strict select is strict: an invalid value is refused on
+    save (ValueError naming category/key and the range), and a stored invalid
+    value is kept as stored, logged as an ERROR at load and listed by
+    invalid()/problems() (the Admin Settings page, /health). Reading it with
+    get() raises AdminSettingInvalid naming it, except for a setting marked
+    startup_critical (ESI pacing and the market refresh loop, read on every
+    ESI request or by a daemon thread): that one reads as its schema default,
+    named in the ERROR, the page and /health."""
 
     def __init__(self, file_path: str | Path) -> None:
         self._path = Path(file_path)
         self._lock = Lock()
         self._data: dict[str, dict[str, Any]] = {}
+        self._invalid: dict[tuple[str, str], str] = {}
         self._load()
 
     # -- public API ---------------------------------------------------------
 
     def get(self, category: str, key: str) -> Any:
-        """Return the current value for *category*/*key*, falling back to the schema default."""
+        """Return the current value for *category*/*key*, falling back to the
+        schema default when it is not stored. A stored invalid value raises
+        AdminSettingInvalid (a startup_critical one gives the default)."""
         spec = self._spec(category, key)
         with self._lock:
-            return self._data.get(category, {}).get(key, spec["default"])
+            value = self._data.get(category, {}).get(key, spec["default"])
+            problem = self._invalid.get((category, key))
+        if problem is None:
+            return value
+        if spec.get("startup_critical"):
+            return spec["default"]
+        raise AdminSettingInvalid(category, key, value, problem)
 
     def get_all(self) -> dict[str, dict[str, Any]]:
-        """Return all current settings (filled with defaults for missing keys)."""
+        """Return all current settings (filled with defaults for missing
+        keys). A stored invalid value is returned as stored: invalid() says
+        which, so the settings page shows it instead of another value."""
         result: dict[str, dict[str, Any]] = {}
         for cat_key, cat_schema in ADMIN_SETTINGS_SCHEMA.items():
             cat_values: dict[str, Any] = {}
@@ -752,28 +844,60 @@ class AdminSettingsManager:
             result[cat_key] = cat_values
         return result
 
+    def invalid(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """{category: {key: {"value", "problem", "startup_critical"}}} for each
+        stored invalid value."""
+        out: dict[str, dict[str, dict[str, Any]]] = {}
+        with self._lock:
+            for (category, key), problem in sorted(self._invalid.items()):
+                spec = ADMIN_SETTINGS_SCHEMA[category]["settings"][key]
+                out.setdefault(category, {})[key] = {
+                    "value": self._data.get(category, {}).get(key),
+                    "problem": problem,
+                    "startup_critical": bool(spec.get("startup_critical")),
+                }
+        return out
+
+    def problems(self) -> list[str]:
+        """One line per stored invalid value (the /health warnings)."""
+        lines = []
+        for category, values in self.invalid().items():
+            for key, entry in values.items():
+                spec = ADMIN_SETTINGS_SCHEMA[category]["settings"][key]
+                lines.append(f"admin setting {category}/{key}={entry['value']!r} is invalid ({entry['problem']}): "
+                             f"{_invalid_consequence(spec)}; fix it on the Admin Settings page")
+        return lines
+
     def set(self, category: str, key: str, value: Any) -> None:
         """Update a single setting and persist to disk."""
         spec = self._spec(category, key)
         coerced = self._coerce_named(category, key, value, spec)
         with self._lock:
             self._data.setdefault(category, {})[key] = coerced
+            self._invalid.pop((category, key), None)
             self._persist()
 
     def set_bulk(self, updates: dict[str, dict[str, Any]]) -> None:
-        """Update multiple settings at once and persist."""
+        """Update multiple settings at once and persist. Every value is
+        checked first: one invalid value saves none of them."""
+        checked: list[tuple[str, str, Any]] = []
         for category, values in updates.items():
+            if not isinstance(values, dict):
+                raise ValueError(f"{category}: expected an object of settings, got {values!r}")
             for key, value in values.items():
                 spec = self._spec(category, key)
-                coerced = self._coerce_named(category, key, value, spec)
-                self._data.setdefault(category, {})[key] = coerced
+                checked.append((category, key, self._coerce_named(category, key, value, spec)))
         with self._lock:
+            for category, key, coerced in checked:
+                self._data.setdefault(category, {})[key] = coerced
+                self._invalid.pop((category, key), None)
             self._persist()
 
     def reset_to_defaults(self) -> None:
         """Reset all settings to schema defaults and persist."""
         with self._lock:
             self._data = {}
+            self._invalid = {}
             self._persist()
 
     # -- internals ----------------------------------------------------------
@@ -793,7 +917,7 @@ class AdminSettingsManager:
         """_coerce, with the setting named in a ValueError (the 400 the settings route returns)."""
         try:
             return cls._coerce(value, spec)
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             raise ValueError(f"{category}/{key}: {exc}") from exc
 
     @staticmethod
@@ -801,28 +925,8 @@ class AdminSettingsManager:
         typ = spec["type"]
         if spec.get("optional") and (value is None or (isinstance(value, str) and not value.strip())):
             return None  # an optional setting that is not set
-        if typ == "int":
-            if isinstance(value, str):
-                value = value.strip()
-            coerced = int(value)
-            if "step" in spec:
-                # Snap to the nearest value on the step grid from min (TE 15 -> 16).
-                origin, step = int(spec.get("min", 0)), int(spec["step"])
-                coerced = origin + ((coerced - origin) * 2 + step) // (2 * step) * step
-            if "min" in spec:
-                coerced = max(spec["min"], coerced)
-            if "max" in spec:
-                coerced = min(spec["max"], coerced)
-            return coerced
-        if typ == "float":
-            coerced = float(value)
-            if spec.get("strict") and not (spec.get("min", coerced) <= coerced <= spec.get("max", coerced)):
-                raise ValueError(f"{coerced!r} is outside {spec.get('min')}-{spec.get('max')}")
-            if "min" in spec:
-                coerced = max(spec["min"], coerced)
-            if "max" in spec:
-                coerced = min(spec["max"], coerced)
-            return coerced
+        if typ in ("int", "float"):
+            return _coerce_number(value, spec)
         if typ == "bool":
             if isinstance(value, str):
                 text = value.strip().lower()
@@ -858,17 +962,20 @@ class AdminSettingsManager:
             logging.warning("Failed to load admin settings from %s; using defaults", self._path)
             self._data = {}
             return
-        self._data = self._coerce_stored(payload if isinstance(payload, dict) else {})
+        self._data, self._invalid = self._coerce_stored(payload if isinstance(payload, dict) else {})
 
     @classmethod
-    def _coerce_stored(cls, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        """The stored settings, each coerced against its spec (type, min/max)
-        as set() would. A value that changes logs a WARNING with the key and
-        the old and new value; one that cannot be coerced falls back to the
-        default (dropped, so get() returns the default). A key the schema no
+    def _coerce_stored(cls, payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], str]]:
+        """(the stored settings, {(category, key): problem}), each value
+        checked against its spec as set() would. An invalid number or strict
+        select is kept as stored with an ERROR naming it (get() then raises,
+        or gives the default for a startup_critical one); any other invalid
+        value falls back to the default with a WARNING. A value read as
+        another type ("45" for an int) logs a WARNING. A key the schema no
         longer has (e.g. the removed planner_optimal_te_threshold_pct) is
         ignored with an INFO log."""
         data: dict[str, dict[str, Any]] = {}
+        invalid: dict[tuple[str, str], str] = {}
         for category, values in payload.items():
             cat_schema = ADMIN_SETTINGS_SCHEMA.get(category)
             if cat_schema is None or not isinstance(values, dict):
@@ -882,11 +989,12 @@ class AdminSettingsManager:
                 try:
                     coerced = cls._coerce(raw, spec)
                 except (TypeError, ValueError, OverflowError) as exc:
-                    if spec.get("strict"):
-                        # Kept as stored, so its consumer fails loudly naming it instead of a default.
-                        logging.error("Admin settings: stored %s/%s=%r is invalid (%s); fix it on the Admin "
-                                      "Settings page", category, key, raw, exc)
+                    if _is_strict(spec):
+                        # Kept as stored, so it is shown and fails loudly naming it instead of a default.
+                        logging.error("Admin settings: stored %s/%s=%r is invalid (%s): %s; fix it on the Admin "
+                                      "Settings page", category, key, raw, exc, _invalid_consequence(spec))
                         data.setdefault(category, {})[key] = raw
+                        invalid[(category, key)] = str(exc)
                         continue
                     logging.warning(
                         "Admin settings: stored %s/%s=%r is not a valid %s; using the default %r",
@@ -896,14 +1004,20 @@ class AdminSettingsManager:
                 widened = isinstance(raw, int) and not isinstance(raw, bool) and isinstance(coerced, float)
                 if coerced != raw or (type(coerced) is not type(raw) and not widened):
                     logging.warning(
-                        "Admin settings: stored %s/%s=%r is outside its spec; using %r",
+                        "Admin settings: stored %s/%s=%r is not stored as its type; read as %r",
                         category, key, raw, coerced,
                     )
                 data.setdefault(category, {})[key] = coerced
-        return data
+        return data, invalid
 
     def _persist(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self._path)
+
+
+def _invalid_consequence(spec: dict[str, Any]) -> str:
+    if spec.get("startup_critical"):
+        return f"the app uses the default {spec['default']!r} until it is fixed"
+    return "the features that read it fail with an error until it is fixed"

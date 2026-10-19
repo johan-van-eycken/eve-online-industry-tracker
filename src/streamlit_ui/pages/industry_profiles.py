@@ -162,11 +162,23 @@ def _admin_industry_values() -> tuple[dict, str | None]:
     """(the admin settings' industry section, a caption when the read
     failed), read once per page render. A failed read gives {} (every rate
     then uses its default) and ADMIN_SETTINGS_UNAVAILABLE_CAPTION, with a
-    WARNING, so the defaults are never shown as the stored settings."""
+    WARNING, so the defaults are never shown as the stored settings. A
+    stored invalid value (the reply's "invalid") is left out too, so its
+    default rate is shown, and the caption names it."""
     resp = api_get("/admin_settings")
     if resp and resp.get("status") == "success":
-        vals = (resp.get("data") or {}).get("values", {}).get("industry", {})
-        return (vals if isinstance(vals, dict) else {}), None
+        data = resp.get("data") or {}
+        vals = data.get("values", {}).get("industry", {})
+        vals = dict(vals) if isinstance(vals, dict) else {}
+        invalid = (data.get("invalid") or {}).get("industry") or {}
+        problems = []
+        for key, entry in sorted(invalid.items()):
+            vals.pop(key, None)
+            problems.append(f"industry/{key}={(entry or {}).get('value')!r} ({(entry or {}).get('problem')})")
+        if problems:
+            return vals, ("Invalid admin settings: " + "; ".join(problems)
+                          + ". The default rate is shown for them; fix them on the Application Settings page.")
+        return vals, None
     logger.warning(
         "Industry profiles: /admin_settings read failed (%s); showing the default fee rates",
         (resp or {}).get("message") if isinstance(resp, dict) else "no response",

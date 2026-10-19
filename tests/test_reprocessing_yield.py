@@ -326,11 +326,14 @@ def test_the_admin_page_shows_a_stored_invalid_select_value_instead_of_preselect
 
 
 def test_the_admin_page_shows_an_unset_optional_number_as_empty():
-    from streamlit_ui.pages.admin_settings import _number_input_args
+    from streamlit_ui.pages.admin_settings import _number_choice
 
     spec = ADMIN_SETTINGS_SCHEMA["reprocessing"]["settings"]["tax"]
-    assert _number_input_args(spec, None)["value"] is None
-    assert _number_input_args(spec, 0.02)["value"] == 0.02
+    assert _number_choice(spec, None, None) == ({"value": None, "min_value": 0.0, "max_value": 0.5,
+                                                 "step": 0.0005, "format": "%.4f"}, None)
+    assert _number_choice(spec, 0.02, None)[0]["value"] == 0.02
+    args, problem = _number_choice(spec, 0.7, None)   # a stored tax outside its bounds: shown, not clamped
+    assert args["value"] is None and "0.7" in problem
 
 
 # --- the character's skills ----------------------------------------------------------------
@@ -533,7 +536,7 @@ def test_a_stored_tax_outside_its_bounds_is_kept_and_fails_loudly_at_use(tmp_pat
     path.write_text(json.dumps({"reprocessing": {"facility_type": "athanor", "tax": 0.7}}), encoding="utf-8")
     with caplog.at_level(logging.ERROR):
         mgr = AdminSettingsManager(path)
-    assert mgr.get("reprocessing", "tax") == 0.7
+    assert mgr.get_all()["reprocessing"]["tax"] == 0.7   # kept as stored, shown on the settings page
     assert any("reprocessing/tax" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
     with pytest.raises(facility_repo.ReprocessingSettingsInvalid, match="reprocessing/tax=0.7"):
         facility_repo.configured_facility(mgr, None, fakes.fake_ore_data())
@@ -545,7 +548,8 @@ def test_the_facility_tax_bound_is_the_settings_bound():
     assert _facility("athanor", tax=0.5).tax == 0.5
 
 
-def test_other_float_settings_still_clamp(tmp_path):
+def test_other_float_settings_are_refused_too_not_clamped(tmp_path):
     mgr = AdminSettingsManager(tmp_path / "admin_settings.json")
-    mgr.set("market_defaults", "default_sales_tax", 0.9)
-    assert mgr.get("market_defaults", "default_sales_tax") == 0.20
+    with pytest.raises(ValueError, match="market_defaults/default_sales_tax"):
+        mgr.set("market_defaults", "default_sales_tax", 0.9)
+    assert mgr.get("market_defaults", "default_sales_tax") == 0.03375

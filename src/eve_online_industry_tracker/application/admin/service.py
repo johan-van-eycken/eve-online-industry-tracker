@@ -26,10 +26,18 @@ class AdminService:
                 payload["error"] = self._state.init_error
             return payload, 503
         payload: dict[str, Any] = {"status": "OK"}
-        warnings = list(getattr(self._state, "init_warnings", None) or []) + self._sde_warnings()
+        warnings = (list(getattr(self._state, "init_warnings", None) or []) + self._sde_warnings()
+                    + self._admin_settings_warnings())
         if warnings:
             payload["warnings"] = warnings
         return payload, 200
+
+    def _admin_settings_warnings(self) -> list[str]:
+        """The stored admin settings that are invalid (kept as stored and
+        failing where read, or a startup-critical one read as its default)."""
+        admin_settings = getattr(self._state, "admin_settings", None)
+        problems = getattr(admin_settings, "problems", None)
+        return list(problems()) if callable(problems) else []
 
     def _sde_warnings(self) -> list[str]:
         """The SDE problems found at startup, re-checked while there are any:

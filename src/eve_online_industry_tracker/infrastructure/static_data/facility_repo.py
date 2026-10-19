@@ -25,7 +25,7 @@ from typing import Any, Callable
 from sqlalchemy import inspect, text
 
 from eve_online_industry_tracker.application.errors import ServiceError
-from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
 from eve_online_industry_tracker.domain import reprocessing as _r
 from eve_online_industry_tracker.infrastructure.sde import ore as _ore
 from eve_online_industry_tracker.infrastructure.sde.industry import REIMPORT_HINT, SdeIndustryDataMissing
@@ -158,7 +158,11 @@ def configured_facility(admin_settings: Any, sde_session: Any,
         raise ReprocessingSettingsInvalid("admin settings not loaded")
 
     def get(key: str) -> Any:
-        return admin_settings.get(SETTINGS_CATEGORY, key)
+        try:
+            return admin_settings.get(SETTINGS_CATEGORY, key)
+        except AdminSettingInvalid as exc:   # a stored invalid value
+            raise ReprocessingSettingsInvalid(
+                f"admin setting {exc.category}/{exc.key}={exc.value!r} is invalid ({exc.problem})") from exc
 
     return facility_from_choice(facility_type=get("facility_type"), rig=get("rig"),
                                 security_band=get("security_band"), tax=get("tax"),

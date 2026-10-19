@@ -1,9 +1,12 @@
 # tests/test_admin_settings_coercion.py
-"""Task 8c fix round 1: stored admin settings are coerced against the schema
+"""Task 8c fix round 1: stored admin settings are checked against the schema
 on load. An out-of-range or mistyped stored value used to pass straight
 through: it changed behaviour silently and crashed st.number_input on the
-settings page. A key the schema no longer has (the removed TE threshold) is
-ignored with an INFO log. Fake values throughout."""
+settings page. Since the strict-settings follow-up a stored invalid number is
+neither clamped nor replaced by the default: it is kept, logged as an ERROR
+and fails where it is read (tests/test_admin_settings_strict_numbers.py). A
+key the schema no longer has (the removed TE threshold) is ignored with an
+INFO log. Fake values throughout."""
 from __future__ import annotations
 
 import json
@@ -11,7 +14,11 @@ import logging
 
 import pytest
 
-from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingsManager
+from eve_online_industry_tracker.config.admin_settings import (
+    ADMIN_SETTINGS_SCHEMA,
+    AdminSettingInvalid,
+    AdminSettingsManager,
+)
 
 
 def _manager(tmp_path, payload) -> AdminSettingsManager:
@@ -20,13 +27,14 @@ def _manager(tmp_path, payload) -> AdminSettingsManager:
     return AdminSettingsManager(path)
 
 
-def test_an_out_of_range_stored_value_is_clamped_with_a_warning(tmp_path, caplog):
+def test_an_out_of_range_stored_value_is_kept_with_an_error_not_clamped(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     mgr = _manager(tmp_path, {"industry": {"max_blueprint_time_efficiency": 99}})
-    assert mgr.get("industry", "max_blueprint_time_efficiency") == 20
-    warning = next(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
-    assert "industry/max_blueprint_time_efficiency" in warning
-    assert "99" in warning and "20" in warning
+    with pytest.raises(AdminSettingInvalid, match="industry/max_blueprint_time_efficiency=99"):
+        mgr.get("industry", "max_blueprint_time_efficiency")
+    error = next(r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+    assert "industry/max_blueprint_time_efficiency" in error
+    assert "99" in error and "0 to 20" in error
 
 
 def test_a_mistyped_stored_value_gets_the_spec_type(tmp_path, caplog):
@@ -37,11 +45,12 @@ def test_a_mistyped_stored_value_gets_the_spec_type(tmp_path, caplog):
     assert any("planner_bpo_strong_buy_days" in r.getMessage() for r in caplog.records)
 
 
-def test_an_unusable_stored_value_falls_back_to_the_default(tmp_path, caplog):
+def test_an_unusable_stored_value_is_kept_with_an_error_not_the_default(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     mgr = _manager(tmp_path, {"industry": {"max_blueprint_time_efficiency": "lots"}})
-    assert mgr.get("industry", "max_blueprint_time_efficiency") == 20
-    assert any("lots" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    with pytest.raises(AdminSettingInvalid, match="lots"):
+        mgr.get("industry", "max_blueprint_time_efficiency")
+    assert any("lots" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
 
 
 def test_a_valid_stored_value_loads_unchanged_without_a_warning(tmp_path, caplog):
@@ -71,49 +80,31 @@ def test_the_te_max_setting_is_a_percentage_0_to_20():
 
 
 # --- the settings page -------------------------------------------------------------
+# (the strict number inputs: tests/test_admin_settings_strict_numbers.py)
 
-def test_the_settings_page_number_input_args_never_put_the_value_out_of_range():
-    from streamlit_ui.pages.admin_settings import _number_input_args
+def test_the_settings_page_number_input_args_keep_a_valid_value_and_the_spec():
+    from streamlit_ui.pages.admin_settings import _number_choice
 
     int_spec = ADMIN_SETTINGS_SCHEMA["industry"]["settings"]["max_blueprint_time_efficiency"]
-    assert _number_input_args(int_spec, 99)["value"] == 20
-    assert _number_input_args(int_spec, -5)["value"] == 0
-    assert _number_input_args(int_spec, "junk")["value"] == int_spec["default"]
-    args = _number_input_args(int_spec, 18)
+    args, problem = _number_choice(int_spec, 18, None)
+    assert problem is None
     assert args["value"] == 18 and args["min_value"] == 0 and args["max_value"] == 20
 
     float_spec = {"type": "float", "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.1, "format": "%.1f"}
-    args = _number_input_args(float_spec, 7.0)
-    assert args["value"] == 2.0 and isinstance(args["value"], float)
+    args, problem = _number_choice(float_spec, 1, None)
+    assert args["value"] == 1.0 and isinstance(args["value"], float) and problem is None
     assert args["format"] == "%.1f" and args["step"] == 0.1
-
-
-def test_every_schema_number_setting_gets_valid_number_input_args():
-    from streamlit_ui.pages.admin_settings import _number_input_args
-
-    for category in ADMIN_SETTINGS_SCHEMA.values():
-        for spec in category["settings"].values():
-            if spec["type"] not in ("int", "float"):
-                continue
-            for stored in (spec["default"], 10**9, -(10**9), None, "x"):
-                args = _number_input_args(spec, stored)
-                if args["value"] is None:
-                    assert spec.get("optional")  # only an optional setting shows as empty
-                    continue
-                if args["min_value"] is not None:
-                    assert args["value"] >= args["min_value"]
-                if args["max_value"] is not None:
-                    assert args["value"] <= args["max_value"]
 
 
 # --- fix round 2: step and bool strings ----------------------------------------------
 
-def test_an_odd_stored_te_snaps_to_the_2_percent_step_with_a_warning(tmp_path, caplog):
+def test_an_odd_stored_te_is_kept_with_an_error_not_snapped(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
     mgr = _manager(tmp_path, {"industry": {"max_blueprint_time_efficiency": 15}})
-    assert mgr.get("industry", "max_blueprint_time_efficiency") == 16
-    warning = next(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
-    assert "max_blueprint_time_efficiency" in warning and "15" in warning and "16" in warning
+    with pytest.raises(AdminSettingInvalid, match="industry/max_blueprint_time_efficiency=15"):
+        mgr.get("industry", "max_blueprint_time_efficiency")
+    error = next(r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+    assert "max_blueprint_time_efficiency" in error and "15" in error and "step of 2" in error
 
 
 def test_every_int_default_is_on_its_step_grid():

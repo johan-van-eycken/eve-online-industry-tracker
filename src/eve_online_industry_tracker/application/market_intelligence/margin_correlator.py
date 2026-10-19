@@ -6,6 +6,8 @@ from typing import Any
 
 from sqlalchemy import text
 
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
+
 TRITANIUM_TYPE_ID = 34
 
 
@@ -18,6 +20,8 @@ class MarginCorrelator:
         if self._admin:
             try:
                 return int(self._admin.get("daily_planner", "planner_mineral_correlation_min_days"))
+            except AdminSettingInvalid:
+                raise  # a stored invalid value fails loudly, naming it
             except Exception:
                 pass
         return 30
@@ -26,6 +30,8 @@ class MarginCorrelator:
         if self._admin:
             try:
                 return float(self._admin.get("daily_planner", "planner_mineral_correlation_threshold"))
+            except AdminSettingInvalid:
+                raise  # a stored invalid value fails loudly, naming it
             except Exception:
                 pass
         return -0.7
