@@ -61,13 +61,17 @@ def test_without_an_overview_no_decryptor_is_known():
     assert _service().realized_invention_inputs().decryptor_for(990002) is None
 
 
-def test_the_overview_publishes_its_decryptor_choices_but_not_a_no_data_fallback():
+def test_the_overview_publishes_its_decryptor_choices_a_no_data_fallback_as_no_decryptor():
+    """The producer prices a "no decryptor data" fallback without a
+    decryptor, so the realized side does too."""
     choices = {
         990002: DecryptorChoice(_DECRYPTOR, "chosen"),
         990004: DecryptorChoice(NO_DECRYPTOR, "no decryptor beats the others"),
         990006: DecryptorChoice(NO_DECRYPTOR, NO_DECRYPTOR_DATA_REASON),
     }
-    assert IndustryService._published_decryptor_choices(choices) == {990002: _DECRYPTOR, 990004: NO_DECRYPTOR}
+    assert IndustryService._published_decryptor_choices(choices) == {
+        990002: _DECRYPTOR, 990004: NO_DECRYPTOR, 990006: NO_DECRYPTOR,
+    }
 
 
 def test_the_bootstrap_provider_reads_the_producer_inputs(monkeypatch):

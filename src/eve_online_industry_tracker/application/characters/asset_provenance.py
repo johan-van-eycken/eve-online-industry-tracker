@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from sqlalchemy import desc
 
 from eve_online_industry_tracker.application.industry.invention_model import (
+    NO_DECRYPTOR,
     DecryptorOption,
     InventionContext,
     decryptor_options_from_rows,
@@ -18,7 +19,13 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     invention_attempts,
     resolve_invention_chance,
 )
-from eve_online_industry_tracker.infrastructure.models import Blueprints, MarketHistoryModel
+from eve_online_industry_tracker.infrastructure.models import (
+    Blueprints,
+    CharacterIndustryJobsModel,
+    CorporationIndustryJobsModel,
+    MarketHistoryModel,
+    RealizedInventionDecryptorChoiceModel,
+)
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_blueprint_manufacturing_data,
     get_invention_source_blueprint_ids,
@@ -332,6 +339,11 @@ NO_REALIZED_INVENTION_INPUTS_REASON = (
     "no inventor skills or decryptor choice available (the app has not registered the producer's invention inputs)"
 )
 
+#: The start of the reason a job's invention cost is unknown for want of the
+#: producer's decryptor; the first overview of a process re-snapshots them
+#: (resnapshot_jobs_without_decryptor_choice).
+NO_DECRYPTOR_CHOICE_REASON = "no decryptor choice"
+
 #: The ESI status of a finished invention job whose successful_runs is final.
 _DELIVERED_STATUS = "delivered"
 
@@ -346,12 +358,17 @@ class RealizedInventionInputs:
     for the invented blueprint (`decryptor_by_blueprint_type_id`, from the
     last overview), or `default_decryptor` for every blueprint when the
     producer does not choose (decryptor selection off: NO_DECRYPTOR). None
-    for both: no choice known, so no estimate."""
+    for both: no choice known, so no estimate.
+
+    `decryptor_choices_published`: an overview has published its choices
+    (in memory, or persisted before a restart), so a blueprint missing from
+    them is one the overview does not plan, not one it has not reached yet."""
 
     invention_context: InventionContext
     decryptor_by_blueprint_type_id: Mapping[int, DecryptorOption]
     default_decryptor: DecryptorOption | None
     probability_floor: float
+    decryptor_choices_published: bool = False
 
     def decryptor_for(self, blueprint_type_id: int) -> DecryptorOption | None:
         return self.decryptor_by_blueprint_type_id.get(int(blueprint_type_id), self.default_decryptor)
@@ -404,6 +421,144 @@ class RealizedInventionRefresh:
             rows = get_t2_invention_decryptors(sde_session, language="en") if sde_session is not None else []
             self.decryptor_options = decryptor_options_from_rows(rows)
         return self.decryptor_options
+
+
+def save_published_decryptor_choices(
+    app_session: Any, choices: Mapping[int, tuple[DecryptorOption, str | None]], *, now: datetime,
+) -> None:
+    """Replace the persisted decryptor choices with `choices` ({invented
+    blueprint: (decryptor, the producer's reason)}), the last published
+    overview's. Commits; a database error propagates."""
+    app_session.query(RealizedInventionDecryptorChoiceModel).delete(synchronize_session=False)
+    for blueprint_type_id, (option, reason) in sorted(choices.items()):
+        app_session.add(RealizedInventionDecryptorChoiceModel(
+            blueprint_type_id=int(blueprint_type_id),
+            decryptor_type_id=int(option.type_id) if option.type_id is not None else None,
+            decryptor_type_name=str(option.type_name),
+            probability_multiplier=float(option.probability_multiplier),
+            me_modifier=int(option.me_modifier),
+            te_modifier=int(option.te_modifier),
+            max_run_modifier=int(option.max_run_modifier),
+            choice_reason=reason,
+            set_at=now,
+        ))
+    app_session.commit()
+
+
+def load_published_decryptor_choices(app_session: Any) -> dict[int, DecryptorOption] | None:
+    """The persisted decryptor choices, None when none were ever stored
+    (an overview that planned no invention cannot be told from no overview).
+    A database error propagates."""
+    rows = app_session.query(RealizedInventionDecryptorChoiceModel).all()
+    if not rows:
+        return None
+    return {
+        int(row.blueprint_type_id): (
+            NO_DECRYPTOR if row.decryptor_type_id is None else DecryptorOption(
+                type_id=int(row.decryptor_type_id),
+                type_name=str(row.decryptor_type_name),
+                probability_multiplier=float(row.probability_multiplier),
+                me_modifier=int(row.me_modifier),
+                te_modifier=int(row.te_modifier),
+                max_run_modifier=int(row.max_run_modifier),
+            )
+        )
+        for row in rows
+    }
+
+
+def resnapshot_jobs_without_decryptor_choice(
+    *,
+    app_session: Any,
+    sde_session: Any,
+    market_price_map: Mapping[int, float],
+    invention_refresh: RealizedInventionRefresh,
+) -> int:
+    """Re-snapshot the stored manufacturing jobs whose invention cost was
+    unknown for want of the producer's decryptor (NO_DECRYPTOR_CHOICE_REASON),
+    with `invention_refresh`'s inputs: a job refresh that ran before the
+    first overview of the process (the startup refresh) stored them so. The
+    job's build cost and its historical acquisition are updated; the job
+    keeps a reason when the estimate is still unknown (for a blueprint the
+    overview does not plan: "this blueprint is not planned by the overview").
+    Commits; returns the number of jobs re-snapshotted."""
+    from eve_online_industry_tracker.application.characters.asset_history import (
+        _owner_models,
+        build_historical_input_cost_lookup,
+    )
+
+    count = 0
+    for owner_kind, model, owner_field in (
+        ("character", CharacterIndustryJobsModel, "character_id"),
+        ("corporation", CorporationIndustryJobsModel, "corporation_id"),
+    ):
+        _, history_model, _, _ = _owner_models(owner_kind)
+        rows = (
+            app_session.query(model)
+            .filter(model.invention_cost_unknown_reason.like(f"%{NO_DECRYPTOR_CHOICE_REASON}%"))
+            .all()
+        )
+        for row in rows:
+            raw = row.raw if isinstance(row.raw, dict) else None
+            if raw is None:
+                logging.warning(
+                    "Industry job %s: no stored ESI payload, so it cannot be re-snapshotted with the "
+                    "overview's decryptor; it keeps its reason until the next job refresh", row.job_id,
+                )
+                continue
+            owner_id = int(getattr(row, owner_field))
+            completed_at = row.completed_date or row.end_date
+            owned_costs = build_historical_input_cost_lookup(
+                app_session=app_session, owner_kind=owner_kind, owner_id=owner_id, as_of=completed_at,
+                type_ids=industry_job_material_type_ids(
+                    sde_session=sde_session, blueprint_type_id=int(row.blueprint_type_id or 0),
+                ),
+            )
+            snapshot = resolve_industry_job_cost_snapshot(
+                job=type("IndustryJobPayload", (), dict(raw))(),
+                sde_session=sde_session,
+                market_price_map=dict(market_price_map),
+                blueprint_provenance={
+                    "item_id": row.blueprint_item_id,
+                    "is_blueprint_copy": row.blueprint_is_blueprint_copy,
+                    "blueprint_runs": row.blueprint_runs,
+                    "blueprint_time_efficiency": row.blueprint_time_efficiency,
+                    "blueprint_material_efficiency": row.blueprint_material_efficiency,
+                    "source": row.blueprint_provenance_source,
+                    "reference_id": row.blueprint_provenance_ref_id,
+                },
+                owned_input_unit_cost_by_type_id=owned_costs,
+                invention_refresh=invention_refresh,
+            )
+            row.output_quantity = snapshot.get("output_quantity")
+            row.materials_cost = snapshot.get("materials_cost")
+            row.historical_materials_cost = snapshot.get("historical_materials_cost")
+            row.historical_material_cost_source = snapshot.get("historical_material_cost_source")
+            row.historical_material_coverage_fraction = snapshot.get("historical_material_coverage_fraction")
+            row.historical_input_costs = snapshot.get("historical_input_costs")
+            row.invention_cost = snapshot.get("invention_cost")
+            row.invention_cost_unknown_reason = snapshot.get("invention_cost_unknown_reason")
+            row.total_build_cost = snapshot.get("total_cost")
+            row.unit_build_cost = snapshot.get("unit_cost")
+            row.build_cost_source = snapshot.get("source")
+            unit_cost = _safe_float(snapshot.get("unit_cost"))
+            output_quantity = _safe_int(snapshot.get("output_quantity"))
+            if unit_cost is not None and unit_cost > 0 and output_quantity and output_quantity > 0:
+                (
+                    app_session.query(history_model)
+                    .filter(getattr(history_model, owner_field) == owner_id)
+                    .filter(history_model.acquisition_reference_type == REFERENCE_TYPE_INDUSTRY_JOB)
+                    .filter(history_model.acquisition_reference_id == int(row.job_id))
+                    .update({
+                        "acquisition_unit_cost": float(unit_cost),
+                        "acquisition_total_cost": float(unit_cost) * float(output_quantity),
+                    }, synchronize_session=False)
+                )
+            count += 1
+    app_session.commit()
+    if count:
+        logging.info("Re-snapshotted %d industry job(s) stored without the overview's decryptor choice", count)
+    return count
 
 
 def _invention_target_product(invention: Mapping[str, Any], target_blueprint_type_id: int) -> Mapping[str, Any] | None:
@@ -526,7 +681,9 @@ def estimate_invention_cost_per_run(
         return None, inputs_unknown_reason
     decryptor = invention_inputs.decryptor_for(target)
     if decryptor is None:
-        return None, f"no decryptor choice for blueprint {target} (no product overview has planned it yet)"
+        if invention_inputs.decryptor_choices_published:
+            return None, f"blueprint {target}: {NO_DECRYPTOR_CHOICE_REASON} (this blueprint is not planned by the overview)"
+        return None, f"{NO_DECRYPTOR_CHOICE_REASON} for blueprint {target} (no product overview has planned it yet)"
     chance = resolve_invention_chance(
         invention_inputs.invention_context, blueprint_type_id=target,
         skill_entries=[e for e in ((invention or {}).get("skills") or []) if isinstance(e, Mapping)],

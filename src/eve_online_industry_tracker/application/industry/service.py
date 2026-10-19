@@ -135,8 +135,16 @@ from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.domain import industry_facility as _industry_facility
 from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
-from eve_online_industry_tracker.application.characters.asset_provenance import RealizedInventionInputs
+from eve_online_industry_tracker.application.characters.asset_provenance import (
+    RealizedInventionInputs,
+    RealizedInventionRefresh,
+    build_market_price_map,
+    load_published_decryptor_choices,
+    resnapshot_jobs_without_decryptor_choice,
+    save_published_decryptor_choices,
+)
 from eve_online_industry_tracker.application.characters.character_manager import CharacterDataError
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 
 
 logger = logging.getLogger(__name__)
@@ -10384,21 +10392,92 @@ class IndustryService:
 
         self._state._overview_result_cache = {
             "hash": overview_input_hash, "rows": product_rows, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
-            # The realized invention estimate uses the same decryptor (realized_invention_inputs).
-            "decryptor_by_blueprint_type_id": self._published_decryptor_choices(ctx.decryptor_choice_by_blueprint_type_id),
         }
+        # The realized invention estimate uses the same decryptor (realized_invention_inputs).
+        self.publish_decryptor_choices(ctx.decryptor_choice_by_blueprint_type_id)
         return product_rows
 
     @staticmethod
     def _published_decryptor_choices(choices: Mapping[int, DecryptorChoice]) -> dict[int, DecryptorOption]:
         """{invented blueprint type_id: the decryptor this overview invents it
-        with}. A "no decryptor data" fallback is left out: the decryptor is
-        then unknown, not "none"."""
-        return {
-            int(bp_type_id): choice.option
-            for bp_type_id, choice in choices.items()
-            if choice.reason != NO_DECRYPTOR_DATA_REASON
-        }
+        with}. A "no decryptor data" fallback (NO_DECRYPTOR_DATA_REASON) is
+        published as NO_DECRYPTOR: the producer plans and prices that
+        invention without a decryptor, so the realized side does too."""
+        return {int(bp_type_id): choice.option for bp_type_id, choice in choices.items()}
+
+    def publish_decryptor_choices(self, choices: Mapping[int, DecryptorChoice]) -> dict[int, DecryptorOption]:
+        """Publish this overview's decryptor choices for the realized side:
+        in memory (the overview cache), persisted in the app DB (read after a
+        restart, before the first overview), and, after the first publish of
+        the process, the stored jobs that had no choice are re-snapshotted.
+        A database or ESI failure here is a WARNING: the overview stands."""
+        published = self._published_decryptor_choices(choices)
+        cached = getattr(self._state, "_overview_result_cache", None)
+        if not isinstance(cached, dict):
+            cached = {}
+            self._state._overview_result_cache = cached
+        cached["decryptor_by_blueprint_type_id"] = published
+        if self._sessions is None:  # no databases in this process (tests)
+            return published
+        try:
+            session = self._sessions.app_session()
+        except RuntimeError as exc:  # no app DB in this process
+            logger.warning("Invention: the decryptor choices are not persisted (%s); a restart forgets them", exc)
+            return published
+        try:
+            save_published_decryptor_choices(
+                session,
+                {bp: (published[bp], choices[bp].reason) for bp in published},
+                now=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+        except SQLAlchemyError as exc:
+            session.rollback()
+            logger.warning("Invention: the decryptor choices could not be persisted (%s); a restart forgets them", exc)
+        finally:
+            session.close()
+        self._resnapshot_jobs_after_first_publish()
+        return published
+
+    def _resnapshot_jobs_after_first_publish(self) -> None:
+        """Once per process, after the first publish: re-snapshot the stored
+        jobs whose invention cost was unknown for want of a decryptor choice
+        (the startup job refresh runs before any overview). A failure is a
+        WARNING and the next publish tries again."""
+        if getattr(self._state, "_realized_invention_resnapshot_done", False):
+            return
+        esi_service = getattr(self._state, "esi_service", None)
+        if esi_service is None:
+            logger.warning("Invention: no ESI service, so no re-snapshot of the jobs without a decryptor choice")
+            return
+        try:
+            market_price_map = build_market_price_map(esi_service.get_market_prices())
+        except ESI_REQUEST_ERRORS as exc:
+            logger.warning(
+                "Invention: market prices unavailable (%s); the jobs without a decryptor choice keep their "
+                "reason, the re-snapshot is retried at the next overview", exc,
+            )
+            return
+        app_session = sde_session = None
+        try:
+            app_session = self._sessions.app_session()
+            sde_session = self._sessions.sde_session()
+            resnapshot_jobs_without_decryptor_choice(
+                app_session=app_session, sde_session=sde_session, market_price_map=market_price_map,
+                invention_refresh=RealizedInventionRefresh(inputs=self.realized_invention_inputs()),
+            )
+            self._state._realized_invention_resnapshot_done = True
+        except (SQLAlchemyError, RuntimeError) as exc:  # RuntimeError: a database is not initialized
+            if app_session is not None:
+                app_session.rollback()
+            logger.warning(
+                "Invention: the re-snapshot of the jobs without a decryptor choice failed (%s); it is "
+                "retried at the next overview", exc,
+            )
+        finally:
+            if sde_session is not None:
+                sde_session.close()
+            if app_session is not None:
+                app_session.close()
 
     def realized_invention_inputs(self) -> RealizedInventionInputs:
         """The inputs the realized side sizes an invention with, the producer's
@@ -10414,8 +10493,7 @@ class IndustryService:
             no_inventor_reason=NO_CHARACTER_SKILLS if levels else self._no_inventor_reason(),
         )
         selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled", True))
-        cached = getattr(self._state, "_overview_result_cache", None)
-        published = cached.get("decryptor_by_blueprint_type_id") if isinstance(cached, dict) else None
+        published = self._last_published_decryptor_choices() if selection_enabled else None
         return RealizedInventionInputs(
             invention_context=context,
             decryptor_by_blueprint_type_id=dict(published or {}) if selection_enabled else {},
@@ -10423,7 +10501,26 @@ class IndustryService:
             probability_floor=float(self._adm(
                 "industry", "invention_probability_floor", DEFAULT_INVENTION_PROBABILITY_FLOOR,
             )),
+            decryptor_choices_published=published is not None,
         )
+
+    def _last_published_decryptor_choices(self) -> dict[int, DecryptorOption] | None:
+        """The in-memory overview's decryptor choices, else the persisted
+        ones (after a restart), else None. A database error propagates (the
+        provider caller turns it into a reason)."""
+        cached = getattr(self._state, "_overview_result_cache", None)
+        if isinstance(cached, dict) and isinstance(cached.get("decryptor_by_blueprint_type_id"), dict):
+            return dict(cached["decryptor_by_blueprint_type_id"])
+        if self._sessions is None:  # no databases in this process (tests)
+            return None
+        try:
+            session = self._sessions.app_session()
+        except RuntimeError:  # no app DB in this process: nothing was persisted
+            return None
+        try:
+            return load_published_decryptor_choices(session)
+        finally:
+            session.close()
 
     def get_cached_overview_rows(self) -> list[dict] | None:
         """Return the most recent product overview rows from in-memory cache, or None if not yet computed

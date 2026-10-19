@@ -1224,3 +1224,24 @@ class MarginCorrelationCacheModel(BaseApp):
     is_squeeze_sensitive: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     data_points: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RealizedInventionDecryptorChoiceModel(BaseApp):
+    """The decryptor the last published product overview invents each
+    blueprint with (IndustryService.realized_invention_inputs), kept so the
+    realized invention estimate knows it after a restart. Replaced as a
+    whole on every publish; a blueprint the overview does not plan has no row."""
+
+    __tablename__ = "realized_invention_decryptor_choices"
+
+    blueprint_type_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    #: None: invented without a decryptor.
+    decryptor_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    decryptor_type_name: Mapped[str] = mapped_column(String, nullable=False)
+    probability_multiplier: Mapped[float] = mapped_column(Float, nullable=False)
+    me_modifier: Mapped[int] = mapped_column(Integer, nullable=False)
+    te_modifier: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_run_modifier: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: The producer's DecryptorChoice.reason.
+    choice_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    set_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

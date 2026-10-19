@@ -505,6 +505,26 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         _ensure_column(db_app, table=table, column="build_cost_source", ddl_type="TEXT")
         _ensure_column(db_app, table=table, column="activity_id", ddl_type="INTEGER")
 
+    # The decryptor the last published overview invents each blueprint with,
+    # read by the realized invention estimate after a restart.
+    _ensure_table(
+        db_app,
+        table="realized_invention_decryptor_choices",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS realized_invention_decryptor_choices ("
+            "blueprint_type_id INTEGER PRIMARY KEY,"
+            "decryptor_type_id INTEGER,"
+            "decryptor_type_name TEXT NOT NULL,"
+            "probability_multiplier REAL NOT NULL,"
+            "me_modifier INTEGER NOT NULL,"
+            "te_modifier INTEGER NOT NULL,"
+            "max_run_modifier INTEGER NOT NULL,"
+            "choice_reason TEXT,"
+            "set_at DATETIME NOT NULL"
+            ")"
+        ),
+    )
+
     _ensure_index(
         db_app,
         name="ix_corporation_industry_jobs_activity_id",
