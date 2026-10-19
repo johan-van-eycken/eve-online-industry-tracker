@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from flask import g, has_app_context
 from sqlalchemy.exc import SQLAlchemyError
 
 from flask_app.deps import get_state
+
+logger = logging.getLogger(__name__)
 
 
 def _get_or_create_session(g_key: str, session_factory) -> object:
@@ -44,15 +47,22 @@ def get_db_oauth_session():
 
 
 def close_request_sessions(exc: Optional[BaseException] = None) -> None:
-    # Best-effort close; errors shouldn't mask the original exception.
+    # Best-effort close; a database error closing one session is logged and
+    # the others are still closed. Each session is taken off `g` before its
+    # close, so even an unexpected error (which propagates after the other
+    # sessions are closed) never leaves a closed-or-broken session behind.
+    unexpected: BaseException | None = None
     for key in ("_db_app_session", "_db_sde_session", "_db_oauth_session"):
-        session = getattr(g, key, None)
-        if session is not None:
-            try:
-                session.close()
-            except SQLAlchemyError:
-                pass
-            delattr(g, key)
+        session = g.pop(key, None)
+        if session is None:
+            continue
+        try:
+            session.close()
+        except SQLAlchemyError as close_exc:
+            logger.warning("Closing the request session %s failed: %s", key, close_exc)
+        except Exception as close_exc:  # noqa: BLE001 - re-raised below, after the other sessions
+            if unexpected is None:
+                unexpected = close_exc
 
     # If DatabaseManager.session is a scoped_session proxy, remove it so the next
     # request gets a fresh session.
@@ -65,5 +75,7 @@ def close_request_sessions(exc: Optional[BaseException] = None) -> None:
         if callable(remove):
             try:
                 remove()
-            except SQLAlchemyError:
-                pass
+            except SQLAlchemyError as remove_exc:
+                logger.warning("Removing the scoped session failed: %s", remove_exc)
+    if unexpected is not None:
+        raise unexpected

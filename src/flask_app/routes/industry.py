@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from flask import Blueprint, request
 
 from eve_online_industry_tracker.application.errors import ServiceError
@@ -18,19 +20,57 @@ from flask_app.http import error, ok
 industry_bp = Blueprint("industry", __name__)
 
 
-def _number_param(params, key: str, default, cast):
-    """A numeric request value, or `default` when it is absent or empty.
+def _strict_number(raw: object, cast):
+    """`raw` as a finite float (cast float) or a whole int (cast int).
 
-    A value that is present but not a number is a 400 naming the field,
-    not a silent default (a bad capital limit must not plan with 0)."""
+    Raises ValueError for a non-number, a non-finite value (inf, nan, or an
+    int too large for a float: OverflowError) and a fractional value given
+    for an int, so none of them is silently truncated or kept as inf."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        raise ValueError(f"not a number: {raw!r}")
+    try:
+        value = float(raw)
+    except OverflowError:
+        raise ValueError(f"out of range: {raw!r}") from None
+    if not math.isfinite(value):
+        raise ValueError(f"not finite: {raw!r}")
+    if cast is int:
+        if isinstance(raw, int):
+            return int(raw)
+        if not value.is_integer():
+            raise ValueError(f"not a whole number: {raw!r}")
+        return int(value)
+    return cast(value)
+
+
+def _number_param(params, key: str, default, cast):
+    """A numeric request value, or `default` when it is absent or blank.
+
+    A value that is present but not a (finite, for an int whole) number is a
+    400 naming the field, not a silent default (a bad capital limit must not
+    plan with 0). An explicit 0 is kept: it is not "absent"."""
     raw = params.get(key)
     if isinstance(raw, str):
         raw = raw.strip()
+    if raw is None or raw == "":
+        return default
     try:
-        return cast(raw or default)
-    except (ValueError, TypeError):
-        kind = "an integer" if cast is int else "a number"
+        return _strict_number(raw, cast)
+    except ValueError:
+        kind = "an integer" if cast is int else "a finite number"
         raise ServiceError(f"Invalid {key}: must be {kind}, got {raw!r}.", status_code=400) from None
+
+
+def _planning_horizon_param(params) -> float:
+    """planning_horizon_hours: 24 when absent; an explicit value must be > 0
+    (0 hours would plan nothing, and used to become 24 silently)."""
+    hours = _number_param(params, "planning_horizon_hours", 24.0, float)
+    if hours <= 0:
+        raise ServiceError(
+            f"Invalid planning_horizon_hours: must be greater than 0, got {params.get('planning_horizon_hours')!r}.",
+            status_code=400,
+        )
+    return hours
 
 
 def _string_list_payload(value: object) -> list[str]:
@@ -57,8 +97,8 @@ def _candidate_directives_payload(value: object) -> list[PortfolioCandidateDirec
 
         def _optional_int(raw_value: object, field_name: str) -> int | None:
             try:
-                parsed = int(raw_value) if raw_value is not None else None  # type: ignore[arg-type]
-            except (ValueError, TypeError):
+                parsed = _strict_number(raw_value, int) if raw_value is not None else None
+            except ValueError:
                 raise ServiceError(
                     f"Invalid {field_name} for candidate {overview_row_id}: must be an integer, got {raw_value!r}.",
                     status_code=400,
@@ -80,7 +120,7 @@ def _candidate_directives_payload(value: object) -> list[PortfolioCandidateDirec
 
 
 def _portfolio_plan_request_from_payload(payload: dict[str, object]) -> PortfolioPlanRequest:
-    planning_horizon_hours = _number_param(payload, "planning_horizon_hours", 24.0, float)
+    planning_horizon_hours = _planning_horizon_param(payload)
     capital_limit_isk = _number_param(payload, "capital_limit_isk", 0.0, float)
     manufacturing_slots_available = _number_param(payload, "manufacturing_slots_available", 0, int)
     research_slots_available = _number_param(payload, "research_slots_available", 0, int)
@@ -292,7 +332,7 @@ def industry_portfolio_candidates_start(character_id: int):
             industry_profile_id = None
     else:
         industry_profile_id = None
-    planning_horizon_hours = _number_param(payload, "planning_horizon_hours", 24.0, float)
+    planning_horizon_hours = _planning_horizon_param(payload)
     have_skills_only = bool(payload.get("have_skills_only", True))
 
     svc = IndustryService(state=get_state())
@@ -340,7 +380,7 @@ def industry_portfolio_candidates(character_id: int):
     market_hub = str(request.args.get("market_hub") or "jita").strip().lower() or "jita"
     material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
     product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
-    planning_horizon_hours = _number_param(request.args, "planning_horizon_hours", 24.0, float)
+    planning_horizon_hours = _planning_horizon_param(request.args)
     industry_profile_id_raw = (request.args.get("industry_profile_id") or "").strip()
     if industry_profile_id_raw:
         try:
@@ -440,7 +480,7 @@ def industry_portfolio_plan(character_id: int):
             industry_profile_id=industry_profile_id,
             owned_blueprints_scope=owned_blueprints_scope,
             character_id=int(character_id),
-            planning_horizon_hours=float(plan_request.planning_horizon_hours or 24.0),
+            planning_horizon_hours=float(plan_request.planning_horizon_hours),
         )
         candidate_snapshot = {
             "snapshot_id": "",
@@ -494,6 +534,20 @@ def industry_system_cost_index(system_id: int):
     require_ready(get_state())
     svc = IndustryService(state=get_state())
     return ok(data=svc.industry_system_cost_index(system_id=system_id))
+
+
+@industry_bp.get("/industry_profile_context/<int:profile_id>")
+def industry_profile_context(profile_id: int):
+    """The profile as the producer resolves it: the profile plus its system
+    cost indices, facility and structure bonuses, with the reasons a part
+    could not be read (lookup_error, cost_index_unknown_reason), so the
+    profile page can show them."""
+    require_ready(get_state())
+    svc = IndustryService(state=get_state())
+    context = svc._resolve_industry_profile_context(character_id=None, industry_profile_id=int(profile_id))
+    if context is None:
+        return error(message=f"Industry profile ID {profile_id} not found", status_code=404)
+    return ok(data=context)
 
 
 @industry_bp.get("/industry_facility/<int:facility_id>")
