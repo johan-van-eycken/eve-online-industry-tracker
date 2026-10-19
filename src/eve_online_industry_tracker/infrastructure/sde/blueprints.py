@@ -21,7 +21,7 @@ def _enrich_type_entry(
 ) -> dict[str, Any] | None:
     try:
         type_id = int(raw_type_id)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
     enriched: dict[str, Any] = dict(type_data_map.get(type_id, {}))
@@ -79,38 +79,38 @@ def get_blueprint_manufacturing_data(
         for mat in manufacturing.get("materials", []):
             try:
                 material_type_ids.add(int(mat["typeID"]))
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 continue
 
         for prod in manufacturing.get("products", []):
             try:
                 product_type_ids.add(int(prod["typeID"]))
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 continue
 
         for skill in manufacturing.get("skills", []):
             try:
                 skill_type_ids.add(int(skill["typeID"]))
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 continue
 
         if isinstance(reaction, dict):
             for mat in reaction.get("materials", []):
                 try:
                     material_type_ids.add(int(mat["typeID"]))
-                except Exception:
+                except (KeyError, TypeError, ValueError):
                     continue
 
             for prod in reaction.get("products", []):
                 try:
                     product_type_ids.add(int(prod["typeID"]))
-                except Exception:
+                except (KeyError, TypeError, ValueError):
                     continue
 
             for skill in reaction.get("skills", []):
                 try:
                     skill_type_ids.add(int(skill["typeID"]))
-                except Exception:
+                except (KeyError, TypeError, ValueError):
                     continue
 
         # Invention activity (T2 invention from T1 BPCs)
@@ -118,19 +118,19 @@ def get_blueprint_manufacturing_data(
             for mat in invention.get("materials", []):
                 try:
                     material_type_ids.add(int(mat["typeID"]))
-                except Exception:
+                except (KeyError, TypeError, ValueError):
                     continue
 
             for prod in invention.get("products", []):
                 try:
                     product_type_ids.add(int(prod["typeID"]))
-                except Exception:
+                except (KeyError, TypeError, ValueError):
                     continue
 
             for skill in invention.get("skills", []):
                 try:
                     skill_type_ids.add(int(skill["typeID"]))
-                except Exception:
+                except (KeyError, TypeError, ValueError):
                     continue
 
     all_type_ids = list(material_type_ids | product_type_ids | blueprint_type_id_set | skill_type_ids)
@@ -249,7 +249,7 @@ def get_blueprint_manufacturing_data(
                     continue
                 try:
                     pf = float(p)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if pf > 0:
                     raw_probs.append(pf)
@@ -257,11 +257,8 @@ def get_blueprint_manufacturing_data(
             if len(raw_probs) == 1:
                 invention_probability = raw_probs[0]
             elif len(raw_probs) > 1:
-                try:
-                    if max(raw_probs) - min(raw_probs) < 1e-9:
-                        invention_probability = raw_probs[0]
-                except Exception:
-                    pass
+                if max(raw_probs) - min(raw_probs) < 1e-9:
+                    invention_probability = raw_probs[0]
 
         invention_skills = []
         for skill in (invention.get("skills", []) or []):

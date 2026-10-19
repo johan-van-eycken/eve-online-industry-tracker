@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
@@ -159,7 +160,10 @@ def get_blueprint_assets(
     try:
         if esi_service is not None:
             market_prices = esi_service.get_market_prices() or []
-    except Exception:
+    except RuntimeError as exc:
+        # get_market_prices wraps every ESI failure in RuntimeError. The blueprints are
+        # still returned, with adjusted/average/unit prices None (not 0) for every line.
+        logging.warning("Blueprint assets: ESI market prices unavailable, prices left empty: %s", exc)
         market_prices = []
 
     price_dict = {

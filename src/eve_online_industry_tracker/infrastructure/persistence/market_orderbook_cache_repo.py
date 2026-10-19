@@ -34,7 +34,7 @@ def get_cached_orderbook_levels(
 
     try:
         fetched_at = float(row.fetched_at)
-    except Exception:
+    except (TypeError, ValueError):
         return None
     import time
 
@@ -48,7 +48,7 @@ def get_cached_orderbook_levels(
             continue
         try:
             normalized_levels.append([float(level[0]), int(level[1])])
-        except Exception:
+        except (TypeError, ValueError):
             continue
     return normalized_levels, fetched_at
 

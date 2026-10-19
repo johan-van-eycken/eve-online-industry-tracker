@@ -140,7 +140,7 @@ def npc_station_name(session: Any, station_id: int, language: str = "en",
         try:
             esi_name, esi_note = esi_service.get_station_name(int(station_id), language)
             return esi_name, None, esi_note
-        except Exception as exc:   # any ESI failure: the SDE name stands in, with the note
+        except (RuntimeError, TypeError, ValueError) as exc:   # any ESI failure: the SDE name stands in, with the note
             esi_problem = f"ESI failed: {exc}"
     if session is None:
         return None, f"no SDE session ({esi_problem})", None

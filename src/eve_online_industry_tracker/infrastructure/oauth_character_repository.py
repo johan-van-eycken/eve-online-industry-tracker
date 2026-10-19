@@ -36,7 +36,7 @@ class OAuthCharacterRepository:
             else:
                 try:
                     expires_in_seconds = int(token_expiry) - now
-                except Exception:
+                except (TypeError, ValueError):
                     expires_in_seconds = None
 
             out.append(

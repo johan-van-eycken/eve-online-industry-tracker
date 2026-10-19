@@ -92,7 +92,7 @@ def get_t2_invention_decryptors(sde_session: Any, *, language: str) -> list[dict
                 continue
             try:
                 aid_i = int(aid)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if aid_i not in {
                 _ATTR_INVENTION_PROB_MULT,
@@ -103,7 +103,7 @@ def get_t2_invention_decryptors(sde_session: Any, *, language: str) -> list[dict
                 continue
             try:
                 m[aid_i] = float(val)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
         attrs_by_type_id[int(tid)] = m
 

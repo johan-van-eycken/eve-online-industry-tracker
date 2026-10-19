@@ -1,6 +1,8 @@
 import logging
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from config.schemas import CONFIG_SCHEMA
 from config.paths import app_config_path, app_secret_path
 from eve_online_industry_tracker.config.config_manager import ConfigManager
@@ -161,7 +163,7 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
             logging.warning("ESI cache cleanup failed: %s", exc)
             try:
                 db_oauth.session.rollback()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         logging.debug(f"Database URI for App: {cfg['app']['database_app_uri']}")

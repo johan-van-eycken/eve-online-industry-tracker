@@ -44,7 +44,7 @@ def _safe_json_loads(value: Any) -> Any:
     if isinstance(value, str):
         try:
             return json.loads(value)
-        except Exception:
+        except (TypeError, ValueError):
             return None
     return value
 
@@ -212,7 +212,7 @@ def compute_combined_reduction(reductions: Iterable[float]) -> float:
     for r in reductions:
         try:
             r_f = float(r or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             continue
 
         # Defensive normalization:

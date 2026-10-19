@@ -7,6 +7,8 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.db_models import PublicStructuresModel, PublicStructuresScanStateModel
 
 from eve_online_industry_tracker.infrastructure.persistence import public_structures_repo, public_structures_scan_state_repo
@@ -20,8 +22,9 @@ def _ensure_table_exists(session) -> None:
     try:
         engine = session.get_bind()
         PublicStructuresModel.__table__.create(bind=engine, checkfirst=True)
-    except Exception:
-        pass
+    except SQLAlchemyError as exc:
+        # The query that follows fails with its own error if the table really is missing.
+        logging.warning("Could not ensure table public_structures exists: %s", exc)
 
 
 def _ensure_scan_state_table_exists(session) -> None:
@@ -30,8 +33,8 @@ def _ensure_scan_state_table_exists(session) -> None:
         # Imported at module level via eve_online_industry_tracker.db_models
 
         PublicStructuresScanStateModel.__table__.create(bind=engine, checkfirst=True)
-    except Exception:
-        pass
+    except SQLAlchemyError as exc:
+        logging.warning("Could not ensure table public_structures_scan_state exists: %s", exc)
 
 
 def get_cached_public_structures(*, state: Any, system_id: int, ttl_seconds: int) -> tuple[list[dict], bool]:
@@ -62,7 +65,7 @@ def get_cached_public_structures(*, state: Any, system_id: int, ttl_seconds: int
     finally:
         try:
             session.close()
-        except Exception:
+        except SQLAlchemyError:
             pass
 
 
@@ -130,7 +133,7 @@ def refresh_public_structures_for_system(
         state.public_structures_last_refresh_by_system[system_id] = state.public_structures_last_refresh_finished_at
         try:
             session.close()
-        except Exception:
+        except SQLAlchemyError:
             pass
 
 
@@ -175,8 +178,11 @@ def trigger_refresh_public_structures_for_system(
                 time_budget_seconds=time_budget_seconds,
                 max_results=max_results,
             )
-        except Exception:
-            pass
+        except (RuntimeError, ValueError, SQLAlchemyError) as exc:
+            # Background thread: nobody awaits it, so the reason goes to the log and to state.
+            logging.warning("Background public structures refresh for system %s failed: %s", system_id, exc)
+            if not getattr(state, "public_structures_last_refresh_error", None):
+                state.public_structures_last_refresh_error = str(exc)
         finally:
             with state.public_structures_refresh_lock:
                 state.public_structures_refreshing_system_ids.discard(system_id)
@@ -208,10 +214,7 @@ def trigger_global_public_structures_scan(
     job = getattr(state, "_public_structures_global_scan_job", None)
     if job is None:
         job = PublicStructuresGlobalScanJob()
-        try:
-            setattr(state, "_public_structures_global_scan_job", job)
-        except Exception:
-            pass
+        setattr(state, "_public_structures_global_scan_job", job)
 
     cfg = PublicStructuresScanConfig(
         scan_cap=int(scan_cap),
@@ -233,10 +236,7 @@ def stop_global_public_structures_scan(*, state: Any) -> bool:
     job = getattr(state, "_public_structures_global_scan_job", None)
     if job is None:
         job = PublicStructuresGlobalScanJob()
-        try:
-            setattr(state, "_public_structures_global_scan_job", job)
-        except Exception:
-            pass
+        setattr(state, "_public_structures_global_scan_job", job)
     return bool(job.stop(state=state))
 
 
@@ -250,7 +250,7 @@ def _persist_global_cursor(*, state: Any, cursor: int) -> None:
     finally:
         try:
             session.close()
-        except Exception:
+        except SQLAlchemyError:
             pass
 
 
@@ -266,7 +266,7 @@ def _commit_global_batch(*, state: Any, rows: list[dict], new_cursor: int) -> No
     finally:
         try:
             session.close()
-        except Exception:
+        except SQLAlchemyError:
             pass
 
 
@@ -311,10 +311,7 @@ def _global_scan_loop(
 
         while True:
             if stop_event is not None and stop_event.is_set():
-                try:
-                    ex.shutdown(wait=False, cancel_futures=True)
-                except Exception:
-                    pass
+                ex.shutdown(wait=False, cancel_futures=True)
                 return
 
             state.public_structures_global_scan_cursor = int(cursor)
@@ -345,7 +342,7 @@ def _global_scan_loop(
                     if isinstance(val, (int, str)):
                         try:
                             system_id = int(val)
-                        except Exception:
+                        except (TypeError, ValueError):
                             system_id = None
                     else:
                         system_id = None
@@ -357,10 +354,15 @@ def _global_scan_loop(
                         "structure_name": data.get("name"),
                         "services": data.get("services"),
                     }
-                except Exception:
+                except (RuntimeError, ValueError, TypeError) as exc:
+                    # get_universe_structure wraps ESI failures in RuntimeError: skip this
+                    # structure, count it, and warn once per slice below.
+                    logging.debug("Global public structures scan: structure %s skipped: %s", structure_id, exc)
+                    failed_in_slice.append(structure_id)
                     return None
 
             rows_batch: list[dict] = []
+            failed_in_slice: list[int] = []
             attempted_in_slice = 0
 
             it = iter(ids_slice)
@@ -376,12 +378,9 @@ def _global_scan_loop(
             while in_flight:
                 if stop_event is not None and stop_event.is_set():
                     # Cancel what we can and exit promptly.
-                    try:
-                        for fut in in_flight:
-                            fut.cancel()
-                        ex.shutdown(wait=False, cancel_futures=True)
-                    except Exception:
-                        pass
+                    for fut in in_flight:
+                        fut.cancel()
+                    ex.shutdown(wait=False, cancel_futures=True)
                     return
 
                 remaining = time_budget_seconds - (time.time() - slice_start)
@@ -397,10 +396,8 @@ def _global_scan_loop(
                 for fut in done:
                     attempted_in_slice += 1
                     state.public_structures_global_scan_attempted += 1
-                    try:
-                        item = fut.result()
-                    except Exception:
-                        item = None
+                    # fetch_one already skips the expected per-structure failures.
+                    item = fut.result()
                     if item and item.get("structure_id") and item.get("system_id"):
                         rows_batch.append(item)
                     if len(rows_batch) >= batch_size:
@@ -417,11 +414,14 @@ def _global_scan_loop(
             # If we broke due to time budget, cancel pending work so we don't block shutdown
             # or waste requests after we've moved on.
             if in_flight:
-                try:
-                    for fut in in_flight:
-                        fut.cancel()
-                except Exception:
-                    pass
+                for fut in in_flight:
+                    fut.cancel()
+
+            if failed_in_slice:
+                logging.warning(
+                    "Global public structures scan: %d structure(s) in this slice could not be read and were skipped",
+                    len(failed_in_slice),
+                )
 
             if rows_batch:
                 _commit_global_batch(state=state, rows=rows_batch, new_cursor=cursor + attempted_in_slice)
@@ -441,7 +441,4 @@ def _global_scan_loop(
                 time.sleep(max(1.0, pause_seconds))
     finally:
         if ex is not None:
-            try:
-                ex.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                pass
+            ex.shutdown(wait=False, cancel_futures=True)

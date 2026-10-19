@@ -30,12 +30,9 @@ class PublicStructuresGlobalScanJob:
             return False
 
         # Clear any previous stop signal.
-        try:
-            ev = getattr(state, "public_structures_global_scan_stop_event", None)
-            if ev is not None:
-                ev.clear()
-        except Exception:
-            pass
+        ev = getattr(state, "public_structures_global_scan_stop_event", None)
+        if ev is not None:
+            ev.clear()
 
         stop_event = _CompositeStopEvent(
             getattr(state, "shutdown_event", None),
@@ -87,22 +84,16 @@ class PublicStructuresGlobalScanJob:
         ev = getattr(state, "public_structures_global_scan_stop_event", None)
         if ev is None:
             return False
-        try:
-            ev.set()
-            return True
-        except Exception:
-            return False
+        ev.set()
+        return True
 
     def _register_thread(self, state: Any, thread: threading.Thread) -> None:
-        # Best-effort: if state supports the registry, record this thread.
-        try:
-            lock = getattr(state, "background_threads_lock", None)
-            threads = getattr(state, "background_threads", None)
-            if lock is not None and threads is not None:
-                with lock:
-                    threads[self.thread_name] = thread
-        except Exception:
-            pass
+        # Only if state supports the registry, record this thread.
+        lock = getattr(state, "background_threads_lock", None)
+        threads = getattr(state, "background_threads", None)
+        if lock is not None and threads is not None:
+            with lock:
+                threads[self.thread_name] = thread
 
 
 class _CompositeStopEvent:
@@ -111,9 +102,6 @@ class _CompositeStopEvent:
 
     def is_set(self) -> bool:
         for e in self._events:
-            try:
-                if e.is_set():
-                    return True
-            except Exception:
-                continue
+            if e.is_set():
+                return True
         return False

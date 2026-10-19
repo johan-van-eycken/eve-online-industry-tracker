@@ -82,7 +82,7 @@ class ESIMonitor:
     ) -> None:
         try:
             s = float(seconds)
-        except Exception:
+        except (TypeError, ValueError):
             return
         if s <= 0:
             return
@@ -160,27 +160,27 @@ class ESIMonitor:
                 if ra is not None:
                     try:
                         retry_after = float(ra)
-                    except Exception:
+                    except (TypeError, ValueError):
                         retry_after = None
 
                 er = headers.get("X-Esi-Error-Limit-Remain")
                 if er is not None:
                     try:
                         remain = int(er)
-                    except Exception:
+                    except (TypeError, ValueError):
                         remain = None
 
                 es = headers.get("X-Esi-Error-Limit-Reset")
                 if es is not None:
                     try:
                         reset = int(es)
-                    except Exception:
+                    except (TypeError, ValueError):
                         reset = None
 
                 wh = headers.get("Warning")
                 if wh is not None:
                     warning_header = str(wh)
-        except Exception:
+        except AttributeError:
             # Never let monitoring break requests.
             pass
 
@@ -193,7 +193,7 @@ class ESIMonitor:
         elif status_code is not None:
             try:
                 sc = int(status_code)
-            except Exception:
+            except (TypeError, ValueError):
                 sc = None
             if sc is not None:
                 if 500 <= sc:
@@ -222,7 +222,7 @@ class ESIMonitor:
         latency_ms: Optional[float]
         try:
             latency_ms = float(elapsed_ms) if elapsed_ms is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             latency_ms = None
         if latency_ms is not None and latency_ms < 0:
             latency_ms = None
@@ -244,7 +244,7 @@ class ESIMonitor:
             else:
                 try:
                     sc_i = int(status_code)
-                except Exception:
+                except (TypeError, ValueError):
                     sc_i = -1
                 if 200 <= sc_i < 400 or sc_i == 304:
                     if route_key:
@@ -391,7 +391,7 @@ class ESIMonitor:
             for k, v in calls_by_status.items():
                 try:
                     sc = int(k)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if pred(sc):
                     out += int(v)
@@ -455,7 +455,7 @@ class ESIMonitor:
                 continue
             try:
                 sc = int(k)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if 200 <= sc < 400 or sc == 304:
                 success_total += int(v)

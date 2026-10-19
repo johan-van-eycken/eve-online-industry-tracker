@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from sqlalchemy import bindparam, text
+from sqlalchemy.exc import SQLAlchemyError
 
 
 _CACHE_VERSION = 1
@@ -70,14 +71,14 @@ def get_views(
         try:
             if int(version or 0) != int(_CACHE_VERSION):
                 continue
-        except Exception:
+        except (TypeError, ValueError):
             continue
 
         levels_obj: Any = levels_raw
         if isinstance(levels_obj, str):
             try:
                 levels_obj = json.loads(levels_obj)
-            except Exception:
+            except (TypeError, ValueError):
                 levels_obj = None
 
         if not isinstance(levels_obj, list):
@@ -92,7 +93,7 @@ def get_views(
             try:
                 price_f = float(pair[0])
                 vol_i = int(pair[1])
-            except Exception:
+            except (TypeError, ValueError):
                 ok = False
                 break
             if price_f <= 0 or vol_i <= 0:
@@ -109,7 +110,7 @@ def get_views(
                 "total_volume": int(total_volume or 0),
                 "order_count": int(order_count or 0),
             }
-        except Exception:
+        except (TypeError, ValueError):
             continue
 
     return out
@@ -170,7 +171,7 @@ def get_liquidity_summaries(
             if isinstance(levels_obj, str):
                 try:
                     levels_obj = json.loads(levels_obj)
-                except Exception:
+                except (TypeError, ValueError):
                     levels_obj = None
 
             has_cached_levels = False
@@ -181,7 +182,7 @@ def get_liquidity_summaries(
                     try:
                         price_f = float(pair[0])
                         vol_i = int(pair[1])
-                    except Exception:
+                    except (TypeError, ValueError):
                         continue
                     if price_f > 0 and vol_i > 0:
                         has_cached_levels = True
@@ -196,7 +197,7 @@ def get_liquidity_summaries(
                 "total_volume": int(total_volume or 0),
                 "order_count": int(order_count or 0),
             }
-        except Exception:
+        except (TypeError, ValueError):
             continue
 
     return out
@@ -236,7 +237,7 @@ def upsert_views(
     bind = None
     try:
         bind = session.get_bind()
-    except Exception:
+    except SQLAlchemyError:
         bind = getattr(session, "bind", None)
 
     if bind is None:
@@ -260,7 +261,7 @@ def upsert_views(
         for type_id, levels in views_by_type_id.items():
             try:
                 tid = int(type_id)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if tid <= 0:
                 continue

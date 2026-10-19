@@ -47,7 +47,8 @@ def _ensure_market_orderbook_view_cache_unique_key(db: DatabaseManager) -> None:
                 names = [str(col[2]) for col in cols]
                 if names == ["hub", "region_id", "station_id", "side", "type_id", "at_hub"]:
                     return
-        except Exception:
+        except _DB_ERRORS + (IndexError, TypeError, ValueError) as e:
+            logging.warning("Failed reading market_orderbook_view_cache index %r: %s", row, str(e))
             continue
 
     try:
@@ -74,7 +75,9 @@ def _ensure_market_orderbook_view_cache_unique_key(db: DatabaseManager) -> None:
 def _table_columns(db: DatabaseManager, table: str) -> set[str]:
     try:
         rows = db.query(f"PRAGMA table_info({table});")
-    except Exception:
+    except _DB_ERRORS as e:
+        # Empty set: _ensure_column then tries ADD COLUMN, which logs its own warning if it exists.
+        logging.warning("Failed reading columns of %s: %s", table, str(e))
         return set()
 
     cols: set[str] = set()
@@ -82,7 +85,7 @@ def _table_columns(db: DatabaseManager, table: str) -> set[str]:
         # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
         try:
             cols.add(str(r[1]))
-        except Exception:
+        except (IndexError, TypeError):
             continue
     return cols
 

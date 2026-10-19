@@ -11,16 +11,16 @@ from typing import Optional, Any, Dict, Tuple, Union
 
 try:
     from utils.esi_monitor import get_esi_monitor
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     get_esi_monitor = None  # type: ignore
 
 try:
     import jwt  # type: ignore
     try:
         from jwt.algorithms import RSAAlgorithm  # type: ignore
-    except Exception:  # pragma: no cover
+    except ImportError:  # pragma: no cover
         RSAAlgorithm = None
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     jwt = None
     RSAAlgorithm = None
 
@@ -32,6 +32,12 @@ from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.models import EsiCache, OAuthCharacter
 from eve_online_industry_tracker.infrastructure.oauth import OAuthHandler, OAuthServer
 from utils.requests_ssl import get_requests_ssl_kwargs
+
+# What an ESI call through ESIClient can raise for a remote/transient reason: HTTP and
+# connection errors (incl. JSON decode), "failed after retries" (RuntimeError) and token
+# problems (ValueError). Callers that skip one item on failure catch exactly these, so a
+# NameError/AttributeError/TypeError in our own code still surfaces.
+ESI_REQUEST_ERRORS: Tuple[type, ...] = (requests.RequestException, RuntimeError, ValueError)
 
 
 class _EsiErrorRateLimiter:
@@ -62,18 +68,18 @@ class _EsiErrorRateLimiter:
         try:
             remain_raw = headers.get("X-Esi-Error-Limit-Remain")
             reset_raw = headers.get("X-Esi-Error-Limit-Reset")
-        except Exception:
+        except AttributeError:
             return
 
         remain: Optional[int]
         reset_seconds: Optional[int]
         try:
             remain = int(remain_raw) if remain_raw is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             remain = None
         try:
             reset_seconds = int(reset_raw) if reset_raw is not None else None
-        except Exception:
+        except (TypeError, ValueError):
             reset_seconds = None
 
         with self._lock:
@@ -275,21 +281,21 @@ def _parse_retry_after_seconds(headers: Any) -> float:
         return 0.0
     try:
         ra = headers.get("Retry-After")
-    except Exception:
+    except AttributeError:
         return 0.0
     if ra is None:
         return 0.0
     try:
         # Retry-After is seconds for ESI throttles.
         return max(0.0, float(ra))
-    except Exception:
+    except (TypeError, ValueError):
         return 0.0
 
 
 def _sleep_seconds(seconds: float) -> None:
     try:
         seconds = float(seconds)
-    except Exception:
+    except (TypeError, ValueError):
         return
     if seconds <= 0:
         return
@@ -312,11 +318,8 @@ def _esi_gate(context: str) -> None:
         str(remain) if remain is not None else "?",
         str(reset_seconds) if reset_seconds is not None else "?",
     )
-    try:
-        if get_esi_monitor is not None:
-            get_esi_monitor().record_sleep(kind="gate", seconds=float(wait), context=str(context))
-    except Exception:
-        pass
+    if get_esi_monitor is not None:
+        get_esi_monitor().record_sleep(kind="gate", seconds=float(wait), context=str(context))
     _sleep_seconds(wait)
 
 
@@ -422,7 +425,7 @@ class ESIClient:
         streamlit_url = None
         try:
             streamlit_url = (self.cfg.get("app") or {}).get("streamlit_url")
-        except Exception:
+        except AttributeError:
             streamlit_url = None
         if not streamlit_url:
             streamlit_url = "http://localhost:8501"
@@ -650,7 +653,7 @@ class ESIClient:
             return None
         try:
             return int(m.group(1))
-        except Exception:
+        except ValueError:
             return None
     
     # ------------------------------------------------------------------
@@ -793,21 +796,18 @@ class ESIClient:
                         headers=headers,
                         timeout=float(timeout_seconds),
                     )
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_http_attempt(
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(paged_url),
-                                status_code=int(response.status_code) if response is not None else None,
-                                elapsed_ms=(time.time() - _t0) * 1000.0,
-                                headers=getattr(response, "headers", None),
-                                exception=None,
-                                cache_mode=cache_mode,
-                                page=int(page),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_http_attempt(
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(paged_url),
+                            status_code=int(response.status_code) if response is not None else None,
+                            elapsed_ms=(time.time() - _t0) * 1000.0,
+                            headers=getattr(response, "headers", None),
+                            exception=None,
+                            cache_mode=cache_mode,
+                            page=int(page),
+                        )
                     _ESI_ERROR_LIMITER.update_from_headers(response.headers)
                     if response.status_code == 200:
                         etag = response.headers.get("ETag")
@@ -820,18 +820,15 @@ class ESIClient:
                         page += 1
                         retries = 0  # esi_max_retries applies per page
                         pacing = _auth_pagination_sleep_seconds()
-                        try:
-                            if get_esi_monitor is not None:
-                                get_esi_monitor().record_sleep(
-                                    kind="pagination",
-                                    seconds=pacing,
-                                    context="polite pacing",
-                                    method="GET",
-                                    endpoint=str(endpoint),
-                                    url=str(paged_url),
-                                )
-                        except Exception:
-                            pass
+                        if get_esi_monitor is not None:
+                            get_esi_monitor().record_sleep(
+                                kind="pagination",
+                                seconds=pacing,
+                                context="polite pacing",
+                                method="GET",
+                                endpoint=str(endpoint),
+                                url=str(paged_url),
+                            )
                         time.sleep(pacing)  # polite pacing
                     elif response.status_code == 304:
                         # Still update limiter from headers (done above).
@@ -852,38 +849,32 @@ class ESIClient:
                         if retries + 1 >= max_attempts:
                             raise RuntimeError(f"ESI GET failed after retries ({response.status_code}): {paged_url}")
                         logging.warning(f"ESI GET {response.status_code} on {paged_url}, retrying in {wait:.1f}s...")
-                        try:
-                            if get_esi_monitor is not None:
-                                get_esi_monitor().record_retry_event(
-                                    reason=str(response.status_code),
-                                    sleep_seconds=float(wait),
-                                    method="GET",
-                                    endpoint=str(endpoint),
-                                    url=str(paged_url),
-                                )
-                        except Exception:
-                            pass
+                        if get_esi_monitor is not None:
+                            get_esi_monitor().record_retry_event(
+                                reason=str(response.status_code),
+                                sleep_seconds=float(wait),
+                                method="GET",
+                                endpoint=str(endpoint),
+                                url=str(paged_url),
+                            )
                         time.sleep(wait)
                         retries += 1
                         continue
                     else:
                         response.raise_for_status()
                 except requests.RequestException as e:
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_http_attempt(
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(paged_url),
-                                status_code=None,
-                                elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
-                                headers=None,
-                                exception=e,
-                                cache_mode=cache_mode,
-                                page=int(page),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_http_attempt(
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(paged_url),
+                            status_code=None,
+                            elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
+                            headers=None,
+                            exception=e,
+                            cache_mode=cache_mode,
+                            page=int(page),
+                        )
                     next_retries = retries + 1
                     wait = 2 ** next_retries
                     will_retry = next_retries < max_attempts
@@ -908,17 +899,14 @@ class ESIClient:
                         )
 
                     retries = next_retries
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_retry_event(
-                                reason=f"exception:{type(e).__name__}",
-                                sleep_seconds=float(wait),
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(paged_url),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_retry_event(
+                            reason=f"exception:{type(e).__name__}",
+                            sleep_seconds=float(wait),
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(paged_url),
+                        )
                     if retries < max_attempts:  # no wait after the last attempt
                         time.sleep(wait)
                     if retries >= max_attempts:
@@ -938,21 +926,18 @@ class ESIClient:
                     headers=headers,
                     timeout=float(timeout_seconds),
                 )
-                try:
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_http_attempt(
-                            method="GET",
-                            endpoint=str(endpoint),
-                            url=str(url),
-                            status_code=int(response.status_code) if response is not None else None,
-                            elapsed_ms=(time.time() - _t0) * 1000.0,
-                            headers=getattr(response, "headers", None),
-                            exception=None,
-                            cache_mode=cache_mode,
-                            page=None,
-                        )
-                except Exception:
-                    pass
+                if get_esi_monitor is not None:
+                    get_esi_monitor().record_http_attempt(
+                        method="GET",
+                        endpoint=str(endpoint),
+                        url=str(url),
+                        status_code=int(response.status_code) if response is not None else None,
+                        elapsed_ms=(time.time() - _t0) * 1000.0,
+                        headers=getattr(response, "headers", None),
+                        exception=None,
+                        cache_mode=cache_mode,
+                        page=None,
+                    )
                 _ESI_ERROR_LIMITER.update_from_headers(response.headers)
                 if response.status_code == 200:
                     etag = response.headers.get("ETag")
@@ -977,17 +962,14 @@ class ESIClient:
                     backoff = (2 ** retries) + random.uniform(0, 1)
                     wait = max(backoff, retry_after, limiter_wait)
                     logging.warning(f"ESI GET{response.status_code} on {url}, retrying in {wait:.1f}s...")
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_retry_event(
-                                reason=str(response.status_code),
-                                sleep_seconds=float(wait),
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_retry_event(
+                            reason=str(response.status_code),
+                            sleep_seconds=float(wait),
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                        )
                     if retries + 1 < max_attempts:  # no wait after the last attempt
                         time.sleep(wait)
                     retries += 1
@@ -995,21 +977,18 @@ class ESIClient:
                 else:
                     response.raise_for_status()
             except requests.RequestException as e:
-                try:
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_http_attempt(
-                            method="GET",
-                            endpoint=str(endpoint),
-                            url=str(url),
-                            status_code=None,
-                            elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
-                            headers=None,
-                            exception=e,
-                            cache_mode=cache_mode,
-                            page=None,
-                        )
-                except Exception:
-                    pass
+                if get_esi_monitor is not None:
+                    get_esi_monitor().record_http_attempt(
+                        method="GET",
+                        endpoint=str(endpoint),
+                        url=str(url),
+                        status_code=None,
+                        elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
+                        headers=None,
+                        exception=e,
+                        cache_mode=cache_mode,
+                        page=None,
+                    )
                 next_retries = retries + 1
                 wait = 2 ** next_retries
                 will_retry = next_retries < max_attempts
@@ -1034,17 +1013,14 @@ class ESIClient:
                     )
 
                 retries = next_retries
-                try:
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_retry_event(
-                            reason=f"exception:{type(e).__name__}",
-                            sleep_seconds=float(wait),
-                            method="GET",
-                            endpoint=str(endpoint),
-                            url=str(url),
-                        )
-                except Exception:
-                    pass
+                if get_esi_monitor is not None:
+                    get_esi_monitor().record_retry_event(
+                        reason=f"exception:{type(e).__name__}",
+                        sleep_seconds=float(wait),
+                        method="GET",
+                        endpoint=str(endpoint),
+                        url=str(url),
+                    )
                 if retries < max_attempts:  # no wait after the last attempt
                     time.sleep(wait)
 
@@ -1107,21 +1083,18 @@ class ESIClient:
                         timeout=timeout,
                         **get_requests_ssl_kwargs(),
                     )
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_http_attempt(
-                                method="POST",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                                status_code=int(response.status_code) if response is not None else None,
-                                elapsed_ms=(time.time() - _t0) * 1000.0,
-                                headers=getattr(response, "headers", None),
-                                exception=None,
-                                cache_mode=cache_mode,
-                                page=int(page),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_http_attempt(
+                            method="POST",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                            status_code=int(response.status_code) if response is not None else None,
+                            elapsed_ms=(time.time() - _t0) * 1000.0,
+                            headers=getattr(response, "headers", None),
+                            exception=None,
+                            cache_mode=cache_mode,
+                            page=int(page),
+                        )
                     _ESI_ERROR_LIMITER.update_from_headers(response.headers)
                     if response.status_code == 200:
                         etag = response.headers.get("ETag")
@@ -1134,18 +1107,15 @@ class ESIClient:
                         page += 1
                         retries = 0  # esi_max_retries applies per page
                         pacing = _auth_pagination_sleep_seconds()
-                        try:
-                            if get_esi_monitor is not None:
-                                get_esi_monitor().record_sleep(
-                                    kind="pagination",
-                                    seconds=pacing,
-                                    context="polite pacing",
-                                    method="POST",
-                                    endpoint=str(endpoint),
-                                    url=str(url),
-                                )
-                        except Exception:
-                            pass
+                        if get_esi_monitor is not None:
+                            get_esi_monitor().record_sleep(
+                                kind="pagination",
+                                seconds=pacing,
+                                context="polite pacing",
+                                method="POST",
+                                endpoint=str(endpoint),
+                                url=str(url),
+                            )
                         time.sleep(pacing)
                     elif response.status_code == 304:
                         return jsonlib.loads(cached_data) if isinstance(cached_data, str) else cached_data
@@ -1163,52 +1133,43 @@ class ESIClient:
                         if retries + 1 >= max_attempts:
                             raise RuntimeError(f"ESI POST failed after retries ({response.status_code}): {url}")
                         logging.warning(f"ESI POST {response.status_code} on {url}, retrying in {wait:.1f}s...")
-                        try:
-                            if get_esi_monitor is not None:
-                                get_esi_monitor().record_retry_event(
-                                    reason=str(response.status_code),
-                                    sleep_seconds=float(wait),
-                                    method="POST",
-                                    endpoint=str(endpoint),
-                                    url=str(url),
-                                )
-                        except Exception:
-                            pass
+                        if get_esi_monitor is not None:
+                            get_esi_monitor().record_retry_event(
+                                reason=str(response.status_code),
+                                sleep_seconds=float(wait),
+                                method="POST",
+                                endpoint=str(endpoint),
+                                url=str(url),
+                            )
                         time.sleep(wait)
                         retries += 1
                         continue
                     else:
                         response.raise_for_status()
                 except requests.RequestException as e:
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_http_attempt(
-                                method="POST",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                                status_code=None,
-                                elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
-                                headers=None,
-                                exception=e,
-                                cache_mode=cache_mode,
-                                page=int(page),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_http_attempt(
+                            method="POST",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                            status_code=None,
+                            elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
+                            headers=None,
+                            exception=e,
+                            cache_mode=cache_mode,
+                            page=int(page),
+                        )
                     logging.error(f"ESI POST request error {url}: {e}")
                     retries += 1
                     wait = 2 ** retries
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_retry_event(
-                                reason=f"exception:{type(e).__name__}",
-                                sleep_seconds=float(wait),
-                                method="POST",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_retry_event(
+                            reason=f"exception:{type(e).__name__}",
+                            sleep_seconds=float(wait),
+                            method="POST",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                        )
                     if retries < max_attempts:  # no wait after the last attempt
                         time.sleep(wait)
                     if retries >= max_attempts:
@@ -1226,21 +1187,18 @@ class ESIClient:
                     timeout=timeout,
                     **get_requests_ssl_kwargs(),
                 )
-                try:
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_http_attempt(
-                            method="POST",
-                            endpoint=str(endpoint),
-                            url=str(url),
-                            status_code=int(response.status_code) if response is not None else None,
-                            elapsed_ms=(time.time() - _t0) * 1000.0,
-                            headers=getattr(response, "headers", None),
-                            exception=None,
-                            cache_mode=cache_mode,
-                            page=None,
-                        )
-                except Exception:
-                    pass
+                if get_esi_monitor is not None:
+                    get_esi_monitor().record_http_attempt(
+                        method="POST",
+                        endpoint=str(endpoint),
+                        url=str(url),
+                        status_code=int(response.status_code) if response is not None else None,
+                        elapsed_ms=(time.time() - _t0) * 1000.0,
+                        headers=getattr(response, "headers", None),
+                        exception=None,
+                        cache_mode=cache_mode,
+                        page=None,
+                    )
                 _ESI_ERROR_LIMITER.update_from_headers(response.headers)
                 logging.debug(f"ESI POST {url} responded with status {response.status_code}")
                 logging.debug(f"ESI POST Request Headers: {response.request.headers}")
@@ -1268,17 +1226,14 @@ class ESIClient:
                     backoff = (2 ** retries) + random.uniform(0, 1)
                     wait = max(backoff, retry_after, limiter_wait)
                     logging.warning(f"ESI POST {response.status_code} on {url}, retrying in {wait:.1f}s...")
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_retry_event(
-                                reason=str(response.status_code),
-                                sleep_seconds=float(wait),
-                                method="POST",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                            )
-                    except Exception:
-                        pass
+                    if get_esi_monitor is not None:
+                        get_esi_monitor().record_retry_event(
+                            reason=str(response.status_code),
+                            sleep_seconds=float(wait),
+                            method="POST",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                        )
                     if retries + 1 < max_attempts:  # no wait after the last attempt
                         time.sleep(wait)
                     retries += 1
@@ -1286,35 +1241,29 @@ class ESIClient:
                 else:
                     response.raise_for_status()
             except requests.RequestException as e:
-                try:
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_http_attempt(
-                            method="POST",
-                            endpoint=str(endpoint),
-                            url=str(url),
-                            status_code=None,
-                            elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
-                            headers=None,
-                            exception=e,
-                            cache_mode=cache_mode,
-                            page=None,
-                        )
-                except Exception:
-                    pass
+                if get_esi_monitor is not None:
+                    get_esi_monitor().record_http_attempt(
+                        method="POST",
+                        endpoint=str(endpoint),
+                        url=str(url),
+                        status_code=None,
+                        elapsed_ms=((time.time() - _t0) * 1000.0) if _t0 is not None else None,
+                        headers=None,
+                        exception=e,
+                        cache_mode=cache_mode,
+                        page=None,
+                    )
                 logging.error(f"ESI POST request error {url}: {e}")
                 retries += 1
                 wait = 2 ** retries
-                try:
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_retry_event(
-                            reason=f"exception:{type(e).__name__}",
-                            sleep_seconds=float(wait),
-                            method="POST",
-                            endpoint=str(endpoint),
-                            url=str(url),
-                        )
-                except Exception:
-                    pass
+                if get_esi_monitor is not None:
+                    get_esi_monitor().record_retry_event(
+                        reason=f"exception:{type(e).__name__}",
+                        sleep_seconds=float(wait),
+                        method="POST",
+                        endpoint=str(endpoint),
+                        url=str(url),
+                    )
                 if retries < max_attempts:  # no wait after the last attempt
                     time.sleep(wait)
 
