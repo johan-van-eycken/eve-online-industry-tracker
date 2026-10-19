@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
 from eve_online_industry_tracker.db_models import (
     Factions,
     MapConstellations,
@@ -79,13 +82,10 @@ def get_npc_stations(session: Any, language: str, system_id: int) -> list[dict]:
     for st in stations_q:
         corporation = corporation_map.get(st.ownerID)
         owner_name = parse_localized(getattr(corporation, "name", None), language) if corporation else ""
-        station_name = owner_name
         operation = operation_map.get(st.operationID)
-
-        if st.useOperationName and st.operationID:
-            operation_name = parse_localized(getattr(operation, "operationName", None), language) if operation else ""
-            if operation_name:
-                station_name += " " + operation_name
+        station_name = _owner_operation_name(
+            owner_name, bool(st.useOperationName and st.operationID),
+            parse_localized(getattr(operation, "operationName", None), language) if operation else "")
 
         service_ids = getattr(operation, "services", None) if operation else []
         services = []
@@ -115,3 +115,70 @@ def get_npc_stations(session: Any, language: str, system_id: int) -> list[dict]:
         )
 
     return stations
+
+
+def _owner_operation_name(owner_name: str, use_operation_name: bool, operation_name: str) -> str:
+    """The owner and operation part of an NPC station's name ("Caldari Navy
+    Assembly Plant"): the owner corporation, then the operation when the
+    station uses its operation's name."""
+    if use_operation_name and operation_name:
+        return f"{owner_name} {operation_name}"
+    return owner_name
+
+
+_ROMAN = ((10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"))
+
+
+def _roman(number: int) -> str:
+    out = ""
+    for value, numeral in _ROMAN:
+        while number >= value:
+            out += numeral
+            number -= value
+    return out
+
+
+def npc_station_name(session: Any, station_id: int, language: str) -> tuple[str | None, str | None]:
+    """(name, None) for an NPC station, composed as EVE names it from the
+    SDE: "<system> <planet in roman numerals>[ - Moon <n>] - <owner>[
+    <operation>]", e.g. "Jita IV - Moon 4 - Caldari Navy Assembly Plant";
+    (None, reason) when the SDE does not have what the name needs. Never
+    raises.
+
+    The SDE tables this app imports have no planet or moon names, so a
+    planet or moon with a name of its own (e.g. "Amarr VIII (Oris)", 43
+    planets and 137 moons in build 3607705, in the non-imported
+    mapPlanets/mapMoons uniqueName) shows by its index instead."""
+    try:
+        station = session.execute(text(
+            'SELECT "solarSystemID", "celestialIndex", "orbitIndex", "ownerID", "operationID", "useOperationName" '
+            'FROM "npcStations" WHERE id = :id'), {"id": int(station_id)}).first()
+        if station is None:
+            return None, f"no NPC station {station_id} in the SDE npcStations"
+        system_id, celestial_index, orbit_index, owner_id, operation_id, use_operation_name = station
+        system = session.execute(text('SELECT name FROM "mapSolarSystems" WHERE id = :id'),
+                                 {"id": system_id}).first()
+        if system is None or not parse_localized(system[0], language):
+            return None, f"no solar system {system_id} (of NPC station {station_id}) in the SDE mapSolarSystems"
+        owner = session.execute(text('SELECT name FROM "npcCorporations" WHERE id = :id'), {"id": owner_id}).first()
+        if owner is None or not parse_localized(owner[0], language):
+            return None, f"no corporation {owner_id} (the owner of NPC station {station_id}) in the SDE npcCorporations"
+        operation_name = ""
+        if use_operation_name and operation_id is not None:
+            operation = session.execute(text('SELECT "operationName" FROM "stationOperations" WHERE id = :id'),
+                                        {"id": operation_id}).first()
+            if operation is None:
+                return None, (f"no station operation {operation_id} (of NPC station {station_id}) in the SDE "
+                              "stationOperations")
+            operation_name = parse_localized(operation[0], language)
+        if celestial_index is None:
+            return None, f"NPC station {station_id} has no celestialIndex in the SDE npcStations"
+    except SQLAlchemyError as exc:
+        session.rollback()
+        return None, f"the SDE station tables could not be read ({type(exc).__name__}: {exc.args[0] if exc.args else exc})"
+
+    location = f"{parse_localized(system[0], language)} {_roman(int(celestial_index))}"
+    if orbit_index is not None:
+        location += f" - Moon {int(orbit_index)}"
+    return (f"{location} - "
+            f"{_owner_operation_name(parse_localized(owner[0], language), bool(use_operation_name), operation_name)}"), None

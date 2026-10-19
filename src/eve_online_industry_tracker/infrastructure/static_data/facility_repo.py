@@ -36,6 +36,7 @@ from sqlalchemy import inspect, text
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
 from eve_online_industry_tracker.domain import reprocessing as _r
+from eve_online_industry_tracker.infrastructure.sde import locations as _locations
 from eve_online_industry_tracker.infrastructure.sde import ore as _ore
 from eve_online_industry_tracker.infrastructure.sde.industry import REIMPORT_HINT, SdeIndustryDataMissing
 
@@ -112,7 +113,20 @@ def _tax(tax: Any) -> float:
 
 
 def _station_label(station_id: int, station_name: StationNameLookup | None) -> str:
-    return f"NPC station {station_id}"
+    """"<name> (<id>)", or the id and why there is no name."""
+    if station_name is None:
+        return f"NPC station {station_id}"
+    name, problem = station_name(station_id)
+    if name:
+        return f"{name} ({station_id})"
+    return f"NPC station {station_id} (name unknown: {problem})"
+
+
+def npc_station_name(session: Any, station_id: int, language: str = "en") -> tuple[str | None, str | None]:
+    """The NPC station's full name (locations.npc_station_name), or (None, reason)."""
+    if session is None:
+        return None, "no SDE session"
+    return _locations.npc_station_name(session, station_id, language)
 
 
 def _check_rigs(athanor_rigs: Any) -> dict[str, str]:
@@ -225,17 +239,23 @@ def _settings_choice(admin_settings: Any) -> dict[str, Any]:
             "athanor_rigs": {cls: get(f"athanor_rig_{cls}") for cls in _r.ORE_CLASSES}}
 
 
-def configured_facility(admin_settings: Any, sde_session: Any,
-                        data: _ore.OreData | None = None) -> _r.ReprocessingFacility:
-    """The facility the admin settings configure (data: the cached OreData)."""
+def configured_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
+                        language: str = "en") -> _r.ReprocessingFacility:
+    """The facility the admin settings configure (data: the cached OreData;
+    language: the NPC station's name)."""
     return facility_from_choice(**_settings_choice(admin_settings),
                                 npc_station=lambda station_id: npc_station_reprocessing(sde_session, station_id),
+                                station_name=lambda station_id: npc_station_name(sde_session, station_id, language),
                                 data=data if data is not None else _ore.ore_data())
 
 
-def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None) -> dict:
+def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
+                 language: str = "en") -> dict:
     choice = _settings_choice(admin_settings)
-    facility = configured_facility(admin_settings, sde_session, data)
+    facility = configured_facility(admin_settings, sde_session, data, language)
+    station_id = choice["npc_station_id"]
+    station_name, station_problem = (npc_station_name(sde_session, int(station_id), language)
+                                     if station_id is not None else (None, None))
     return {
         "id": CONFIGURED_FACILITY_ID,
         "name": facility.name,
@@ -243,7 +263,9 @@ def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | Non
         "rig": choice["rig"],
         "athanor_rigs": choice["athanor_rigs"],
         "security_band": choice["security_band"],
-        "npc_station_id": choice["npc_station_id"],
+        "npc_station_id": station_id,
+        "npc_station_name": station_name,
+        "npc_station_name_problem": station_problem,
         "structure_bonus": facility.structure_bonus,
         "by_ore_class": {cls: {"rig": y.rig, "base_yield": y.base_yield, "security_multiplier": y.security_multiplier,
                                "multiplier": facility.multiplier_for(cls)}
@@ -253,5 +275,6 @@ def get_facility(admin_settings: Any, sde_session: Any, data: _ore.OreData | Non
     }
 
 
-def get_all_facilities(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None) -> list[dict]:
-    return [get_facility(admin_settings, sde_session, data)]
+def get_all_facilities(admin_settings: Any, sde_session: Any, data: _ore.OreData | None = None,
+                       language: str = "en") -> list[dict]:
+    return [get_facility(admin_settings, sde_session, data, language)]

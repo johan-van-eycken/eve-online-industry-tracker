@@ -216,7 +216,7 @@ def run_optimize(
     if facility_id != CONFIGURED_FACILITY_ID:
         raise ServiceError(f"Unknown facility_id {facility_id!r}: the ore calculator has one facility "
                            f"({CONFIGURED_FACILITY_ID}), configured in the admin settings", status_code=400)
-    facility = configured_facility(admin_settings, sde_session)
+    facility = configured_facility(admin_settings, sde_session, language=language)
 
     # {skill type id: level} (ore.refining_skill_levels).
     skills = getattr(character, "reprocessing_skills", None) or character.extract_reprocessing_skills()

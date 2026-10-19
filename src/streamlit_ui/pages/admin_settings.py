@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from streamlit_ui.api.client import api_get, api_post, api_put_or_error
+from streamlit_ui.api.client import api_get, api_get_or_error, api_post, api_put_or_error
 
 
 def _load_settings() -> tuple[dict, dict, dict] | None:
@@ -80,6 +80,21 @@ def _pending_value(*, new: object, current: object, problem: str | None) -> obje
     return NO_CHANGE if new == current and not problem else new
 
 
+def _station_caption(station_id: object) -> tuple[str | None, str | None]:
+    """(caption, problem) for the reprocessing/npc_station_id input: the
+    station's full name from the SDE, or why it has none (never an error
+    for the page)."""
+    if station_id is None or isinstance(station_id, bool) or not isinstance(station_id, int):
+        return None, None
+    body, failure = api_get_or_error(f"/npc_stations/{station_id}/name")
+    if failure:
+        return None, f"NPC station {station_id}: the name could not be read ({failure})"
+    data = (body or {}).get("data") or {}
+    if data.get("name"):
+        return f"NPC station {station_id}: {data['name']}", None
+    return None, f"NPC station {station_id}: {data.get('problem') or 'no name in the SDE'}"
+
+
 def _select_choices(spec: dict, current: object,
                     invalid_entry: dict | None = None) -> tuple[list, list[str], int, str | None]:
     """(values, labels, index of current, problem) for a select setting. A
@@ -140,6 +155,12 @@ def render() -> None:
                         help=help_text,
                         key=widget_key,
                     )
+                    if (cat_key, key) == ("reprocessing", "npc_station_id") and not problem:
+                        station_caption, station_problem = _station_caption(current)
+                        if station_caption:
+                            st.caption(station_caption)
+                        elif station_problem:
+                            st.warning(station_problem)
                 elif typ == "bool":
                     new_val = st.checkbox(
                         label,

@@ -24,6 +24,14 @@ def facilities():
     return ok(data=svc.list_facilities())
 
 
+@static_data_bp.get("/npc_stations/<int:station_id>/name")
+def npc_station_name(station_id: int):
+    """The NPC station's full name from the SDE, or None with the reason."""
+    require_ready(get_state())
+    svc = StaticDataService(state=get_state())
+    return ok(data=svc.npc_station_name(station_id))
+
+
 @static_data_bp.post("/optimize")
 def optimize():
     """Ore optimization endpoint (ported from original flask_app.py)."""

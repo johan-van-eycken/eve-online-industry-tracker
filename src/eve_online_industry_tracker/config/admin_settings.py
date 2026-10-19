@@ -672,8 +672,9 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "default": None,
                 # No min/max: the SDE lookup rejects an id it does not have instead.
                 "label": "Ore calculator: NPC station id",
-                "help": "The NPC station (its id, e.g. 60003760 for Jita IV - Moon 4) whose SDE reprocessing "
-                        "yield and base tax the ore calculator uses. Required for an NPC station.",
+                "help": "The NPC station (its id, e.g. 60003760 for Jita IV - Moon 4 - Caldari Navy Assembly "
+                        "Plant) whose SDE reprocessing yield and base tax the ore calculator uses. Required for an "
+                        "NPC station. The configured station's full name is shown below the input.",
             },
             "tax": {
                 "type": "float",
