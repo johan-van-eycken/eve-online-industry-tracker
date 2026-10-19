@@ -843,7 +843,9 @@ class CharacterAssigner:
         copy_runs = max(0, needed - on_hand)
         wholes = [inv.whole_attempts for _cid, inv in results]
         lane_sizes = [int(w) for w in wholes] if wholes and all(w is not None for w in wholes) else [copy_runs]
-        return _shape_copy_jobs(copy_runs, lane_sizes, max(1, job_count), max_runs_per_copy), needed, lane_sizes
+        return _shape_copy_jobs(
+            copy_runs, lane_sizes, max(1, job_count), max_runs_per_copy, _copy_seconds_per_run(row),
+        ), needed, lane_sizes
 
     def _release_slot(self, char_slots: dict[int, dict], char_id: int, action_type: str) -> None:
         """Give back one slot taken by _take_slot (a reserved copy not needed)."""
@@ -958,6 +960,8 @@ class CharacterAssigner:
                     )
                 if max_runs_per_copy is None:
                     shape.append("runs per copy not capped: the SDE max runs per copy is unknown")
+                if _copy_seconds_per_run(row) is None:
+                    shape.append("the SDE copy time is unknown: copies per job not checked against the 30-day job limit")
             actions.append(AssignedAction(
                 type_id=t1_blueprint_type_id,
                 type_name=type_name + " (copy)",
@@ -1270,8 +1274,51 @@ def _max_runs_per_copy(row: dict[str, Any], type_id: int) -> int | None:
     return None
 
 
+#: EVE refuses a job of more than one run that would take longer than 30
+#: days (community-verified, see max_copies_per_job).
+MAX_JOB_SECONDS = 30 * 24 * 3600
+
+
+def max_copies_per_job(runs_per_copy: int, copy_seconds_per_run: int | None, max_runs_per_copy: int | None) -> int | None:
+    """The most copies one copy job may make (Task A item 5).
+
+    EVE's rule, verified as far as the sources go:
+    - runs per copy: at most the "maximum production runs" of the
+      blueprint original (CCP support, "Copying": "This is limited by the
+      maximum number of production runs listed in the Bill of Materials");
+      the SDE's blueprint maxProductionLimit. Enforced by the caller.
+    - copies per job: no SDE field limits them (the SDE copying activity
+      holds only its time). The job's duration is "the total number of
+      licensed productions over all copies" x the copy time per run (CCP
+      support), and EVE refuses a job of more than one run longer than 30
+      days (EVE forums, "BPO Maximum runs", several players with a worked
+      example; not an official CCP statement). So copies x runs per copy x
+      copy time <= 30 days, at least one copy. The SDE base copy time is
+      used: skills and structures only shorten it, so this never exceeds
+      what EVE allows.
+    - conservative: the earlier cap (copies <= maxProductionLimit) is kept
+      on top, as it is unverified but never plans more than before.
+    None: no limit known (both inputs unknown)."""
+    caps: list[int] = []
+    if max_runs_per_copy is not None:
+        caps.append(max_runs_per_copy)
+    if copy_seconds_per_run is not None and copy_seconds_per_run > 0 and runs_per_copy > 0:
+        caps.append(max(1, MAX_JOB_SECONDS // (runs_per_copy * copy_seconds_per_run)))
+    return min(caps) if caps else None
+
+
+def _copy_seconds_per_run(row: dict[str, Any]) -> int | None:
+    """The T1 source's SDE copy time per run (ChainPlanner's
+    t1_copy_seconds_per_run), or None when unknown."""
+    value = row.get("t1_copy_seconds_per_run")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
 def _shape_copy_jobs(
     copy_runs: int, lane_sizes: list[int], job_count: int, max_runs_per_copy: int | None,
+    copy_seconds_per_run: int | None = None,
 ) -> list[dict[str, int]]:
     """The copy jobs for `copy_runs` copied runs: one copy per invent lane
     (largest lanes first, the last cut to what is left), a lane above the
@@ -1279,7 +1326,8 @@ def _shape_copy_jobs(
     round-robin over at most `job_count` BPOs. A job's copies all carry the
     same runs (EVE), so a job with several lanes is sized at its largest:
     conservative (a few spare BPC runs), never short of a lane. A job never
-    makes more copies than the max either; what it cannot make is `short`."""
+    makes more copies than max_copies_per_job either; what it cannot make
+    is `short`."""
     if copy_runs <= 0:
         return []
     lanes: list[int] = []
@@ -1301,8 +1349,9 @@ def _shape_copy_jobs(
     jobs: list[dict[str, int]] = []
     for group in groups:
         copies, short = len(group), 0
-        if max_runs_per_copy is not None and copies > max_runs_per_copy:
-            copies, short = max_runs_per_copy, copies - max_runs_per_copy
+        cap = max_copies_per_job(max(group), copy_seconds_per_run, max_runs_per_copy)
+        if cap is not None and copies > cap:
+            copies, short = cap, copies - cap
         jobs.append({"copies": copies, "runs_per_copy": max(group), "short": short})
     return jobs
 

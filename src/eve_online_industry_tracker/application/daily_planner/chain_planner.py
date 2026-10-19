@@ -997,6 +997,9 @@ class ChainPlanner:
             row["t1_bpc_runs_on_hand"] = sum(runs for _k, _item, runs in bpcs)
             # Runs per copy are capped at the SDE maxProductionLimit (None: unknown).
             row["t1_max_runs_per_copy"] = _max_runs_per_job(blueprint_data.get(t1_bp_type_id) or {})
+            # The SDE copy time per run (Task A item 5): with the runs per
+            # copy it caps the copies per job (30-day job limit).
+            row["t1_copy_seconds_per_run"] = _copy_seconds(blueprint_data.get(t1_bp_type_id) or {})
             row["invention_materials"] = list(t1_invention.get("materials") or [])
             if not copies:
                 logger.info(
@@ -2248,6 +2251,17 @@ def _max_runs_per_job(bp_data: dict[str, Any]) -> int | None:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         return None
     return limit
+
+
+def _copy_seconds(bp_data: dict[str, Any]) -> int | None:
+    """The blueprint's SDE copy time per run in seconds, or None when it is
+    missing or not a positive integer."""
+    value = bp_data.get("copying")
+    if isinstance(value, dict):
+        value = value.get("time")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def _material_unit_prices(manufacturing_job: dict[str, Any]) -> dict[int, float]:
