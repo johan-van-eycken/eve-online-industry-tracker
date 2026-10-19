@@ -7,7 +7,7 @@ import requests as _requests  # pyright: ignore[reportMissingModuleSource]
 
 import streamlit as st
 
-from streamlit_ui.api.client import api_get, api_post
+from streamlit_ui.api.client import api_get, api_get_or_error, api_post
 from flask_app.settings import api_base, api_request_timeout_seconds
 
 
@@ -76,11 +76,15 @@ def set_action_status(action_id: int, status: str) -> dict[str, Any]:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_market_intel_status() -> dict[str, Any]:
-    """GET /planner/market_intel/status — market intelligence job status."""
-    response = api_get("/planner/market_intel/status") or {}
-    if response.get("status") != "success":
-        return {}
-    return response.get("data") or {}
+    """GET /planner/market_intel/status — market intelligence job status.
+    Raises RuntimeError with the API's reason when it cannot be read, so the
+    status bar can say so (a failure is not cached)."""
+    body, error = api_get_or_error("/planner/market_intel/status")
+    if error is not None or not isinstance(body, dict) or body.get("status") != "success":
+        reason = error or (body.get("message") if isinstance(body, dict) else None) or "unexpected response"
+        raise RuntimeError(f"market intelligence status could not be read: {reason}")
+    data = body.get("data")
+    return data if isinstance(data, dict) else {}
 
 
 @st.cache_data(ttl=300, show_spinner=False)

@@ -9,6 +9,8 @@ from __future__ import annotations
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from eve_online_industry_tracker.application.market_intelligence.job import MarketIntelligenceJob
 
 
@@ -132,3 +134,47 @@ def test_the_status_bar_warns_without_a_plan_too(monkeypatch):
     monkeypatch.setattr(status_bar, "get_market_intel_status", lambda: {"last_error": "fake failure"})
     status_bar.render_status_bar(DailyPlannerPageState(plan=None))
     assert any("fake failure" in w for w in fake.warnings)
+
+
+def test_a_failed_status_read_raises_with_the_api_reason(monkeypatch):
+    # api_get returned {} on failure, so a failed read showed nothing at all.
+    from streamlit_ui.api import daily_planner as api
+
+    monkeypatch.setattr(api, "api_get_or_error", lambda path: (None, "HTTP 503"))
+    api.get_market_intel_status.clear()
+    try:
+        with pytest.raises(RuntimeError, match="HTTP 503"):
+            api.get_market_intel_status()
+    finally:
+        api.get_market_intel_status.clear()
+
+
+def test_a_status_read_returns_the_data(monkeypatch):
+    from streamlit_ui.api import daily_planner as api
+
+    monkeypatch.setattr(api, "api_get_or_error",
+                        lambda path: ({"status": "success", "data": {"last_error": None}}, None))
+    api.get_market_intel_status.clear()
+    try:
+        assert api.get_market_intel_status() == {"last_error": None}
+    finally:
+        api.get_market_intel_status.clear()
+
+
+def test_the_status_bar_warns_when_the_status_cannot_be_read(monkeypatch):
+    import tests.test_daily_planner_status_bar_freshness as freshness
+    from streamlit_ui.components.daily_planner import status_bar
+    from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
+
+    def _fails():
+        raise RuntimeError("market intelligence status could not be read: HTTP 503")
+
+    fake = freshness._FakeSt()
+    monkeypatch.setattr(status_bar, "st", fake)
+    monkeypatch.setattr(status_bar, "get_status", lambda: {"status": "idle"})
+    monkeypatch.setattr(status_bar, "get_plan", lambda: None)
+    monkeypatch.setattr(status_bar, "get_market_intel_status", _fails)
+    status_bar.render_status_bar(DailyPlannerPageState(plan=None))
+    assert any("Market data status could not be read" in w and "HTTP 503" in w for w in fake.warnings)
+    # Not reported as a failed refresh: the refresh's own state is unknown.
+    assert not any("Market data refresh failed" in w for w in fake.warnings)

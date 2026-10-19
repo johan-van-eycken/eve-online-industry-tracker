@@ -567,7 +567,11 @@ def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[
     try:
         market_status = get_market_intel_status() or {}
     except Exception as exc:
-        market_status = {"last_error": f"its status could not be read ({exc})"}
+        market_status = {}
+        st.warning(
+            f"Market data status could not be read ({exc}): whether the market depth and margin data "
+            "are current is unknown."
+        )
 
     # Metrics row
     if plan_meta:
