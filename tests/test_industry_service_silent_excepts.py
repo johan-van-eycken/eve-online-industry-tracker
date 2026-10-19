@@ -46,8 +46,8 @@ def test_a_non_numeric_system_cost_index_is_logged(caplog):
     profile = {"system_id": 30000001,
                "system_cost_indices": [{"activity": "manufacturing", "cost_index": "n/a"}]}
     with caplog.at_level(logging.WARNING):
-        assert IndustryService._system_cost_index(profile_payload=profile, activity="manufacturing") == 0.0
-    assert "cost_index" in caplog.text and "n/a" in caplog.text and "30000001" in caplog.text
+        assert IndustryService._system_cost_index(profile_payload=profile, activity="manufacturing") is None
+    assert "cost index" in caplog.text and "n/a" in caplog.text and "30000001" in caplog.text
 
 
 def test_a_non_numeric_eiv_quantity_is_logged(caplog):

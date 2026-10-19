@@ -115,9 +115,11 @@ def job_install_cost(
     *,
     activity: str,
     process_value: float | None,
-    system_index: float,
+    system_index: float | None,
     structure_cost_reduction: float,
     surcharge_rates: JobSurchargeRates,
+    index_unknown_reason: str | None = None,
+    eiv_unknown_reason: str | None = None,
 ) -> dict[str, Any]:
     """The install cost of one job whose job value is `process_value`.
 
@@ -126,15 +128,16 @@ def job_install_cost(
     installation_surcharge (value x the activity's surcharge rate),
     total_job_cost, and fee_unknown_reason (None when priced). The fee is
     unknown (all None but process_value, with the reason) when the value is
-    unknown or not positive (a material without a price), the index is
-    unknown (<= 0: the profile has no index for this activity; EVE's floor is
-    positive, so 0 is never a real index), or the facility tax is unknown."""
+    unknown or not positive (a material without a price, or a non-numeric
+    quantity: `eiv_unknown_reason`), the index is unknown (None, with
+    `index_unknown_reason`, or <= 0: EVE's floor is positive, so 0 is never a
+    real index), or the facility tax is unknown."""
     rate = surcharge_rates.rate(activity)
     reason: str | None = None
     if process_value is None or float(process_value) <= 0:
-        reason = f"no priced EIV for the {activity} job (a material has no adjusted price)"
-    elif float(system_index) <= 0:
-        reason = f"the industry profile has no {activity} cost index"
+        reason = f"no priced EIV for the {activity} job ({eiv_unknown_reason or 'a material has no adjusted price'})"
+    elif system_index is None or float(system_index) <= 0:
+        reason = index_unknown_reason or f"the industry profile has no {activity} cost index"
     elif rate is None:
         reason = surcharge_rates.unknown_reason or "the facility tax is unknown"
     if reason is not None or rate is None:
@@ -147,7 +150,7 @@ def job_install_cost(
             "fee_unknown_reason": reason,
         }
     value = float(process_value)
-    base_job_cost = value * float(system_index)
+    base_job_cost = value * float(system_index or 0.0)
     discounted_job_cost = base_job_cost * max(0.0, 1.0 - float(structure_cost_reduction))
     surcharge_cost = value * rate
     return {

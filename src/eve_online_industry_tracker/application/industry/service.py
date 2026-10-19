@@ -1575,6 +1575,12 @@ class IndustryService:
             band, _ = _security_band.profile_security_band(profile_payload)
             if band is not None:
                 profile_payload["system_security_band"] = band
+        # The manufacturing cost index, or why it is unknown (the page shows it; the fees are then unknown).
+        _index, profile_payload["cost_index_unknown_reason"] = (
+            self._system_cost_index_with_reason(profile_payload=profile_payload, activity="manufacturing")
+            if profile.system_id is not None
+            else (None, "the industry profile has no solar system, so no manufacturing cost index")
+        )
 
         if profile.facility_id is not None:
             try:
@@ -3890,22 +3896,46 @@ class IndustryService:
             logger.warning("Rig bonus security multiplier: %s", reason)
 
     @classmethod
-    def _system_cost_index(cls, *, profile_payload: dict[str, Any] | None, activity: str) -> float:
+    def _system_cost_index(cls, *, profile_payload: dict[str, Any] | None, activity: str) -> float | None:
+        """The activity's system cost index; None when it is unknown (see
+        _system_cost_index_with_reason): never a silent 0."""
+        index, _reason = cls._system_cost_index_with_reason(profile_payload=profile_payload, activity=activity)
+        return index
+
+    @classmethod
+    def _system_cost_index_with_reason(
+        cls, *, profile_payload: dict[str, Any] | None, activity: str,
+    ) -> tuple[float | None, str | None]:
+        """(index, None), or (None, why) when the profile has no index for
+        the activity (no profile, a failed lookup, a system without the
+        entry, a null or non-numeric value). The job fee is then unknown,
+        with this reason (job_fee_unknown_reasons), never 0."""
+        missing = f"the industry profile has no {activity} cost index"
         if not isinstance(profile_payload, dict):
-            return 0.0
+            return None, missing
         aliases = set(cls._ACTIVITY_COST_INDEX_ALIASES.get(activity, (activity,)))
+        system_id = profile_payload.get("system_id")
         for entry in profile_payload.get("system_cost_indices") or []:
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("activity") or "") not in aliases:
                 continue
+            raw = entry.get("cost_index")
+            if raw is None:
+                return None, f"{missing} (the ESI entry has no value)"
             try:
-                return max(0.0, float(entry.get("cost_index") or 0.0))
+                return max(0.0, float(raw)), None
             except (TypeError, ValueError):
-                logger.warning("System cost index: the %s cost_index %r of system %s is not a number; the job fee uses "
-                               "0", activity, entry.get("cost_index"), profile_payload.get("system_id"))
-                return 0.0
-        return 0.0
+                where = f" of system {system_id}" if system_id is not None else ""
+                reason = f"the {activity} cost index {raw!r}{where} is not a number"
+                logger.warning("System cost index: %s; the job fee is unknown", reason)
+                return None, reason
+        industry_system = profile_payload.get("industry_system")
+        lookup_error = industry_system.get("lookup_error") if isinstance(industry_system, dict) else None
+        if lookup_error:
+            where = f" of system {system_id}" if system_id is not None else ""
+            return None, f"{missing} (the cost indices{where} could not be read: {lookup_error})"
+        return None, missing
 
     def _get_adjusted_market_price_map(self) -> dict[int, dict[str, Any]]:
         now = time.time()
@@ -3969,12 +3999,15 @@ class IndustryService:
         *,
         quantity_key: str,
         adjusted_price_map: dict[int, dict[str, Any]],
+        unknown_reasons: list[str] | None = None,
     ) -> tuple[float | None, int]:
         """(EIV, priced line count). The EIV is None when no line, or ANY line,
-        lacks a price (fix round 1): a partial sum would price a job fee low
-        and pass as exact, so the fee reads unknown instead."""
+        lacks a price or has a non-numeric quantity (fix round 1, F1): a
+        partial sum would price a job fee low and pass as exact, so the fee
+        reads unknown instead."""
         total, priced_count, _line_count = cls._sum_estimated_item_value_counted(
             entries, quantity_key=quantity_key, adjusted_price_map=adjusted_price_map,
+            unknown_reasons=unknown_reasons,
         )
         return total, priced_count
 
@@ -3985,9 +4018,12 @@ class IndustryService:
         *,
         quantity_key: str,
         adjusted_price_map: dict[int, dict[str, Any]],
+        unknown_reasons: list[str] | None = None,
     ) -> tuple[float | None, int, int]:
         """_sum_estimated_item_value plus the number of lines it counted
-        (priced or not): the M of "N of M priced"."""
+        (priced or not): the M of "N of M priced". A non-numeric quantity
+        makes the EIV unknown; its reason is appended to `unknown_reasons`
+        (when given), for the job fee's fee_unknown_reason."""
         total = 0.0
         priced_count = 0
         line_count = 0
@@ -4013,9 +4049,12 @@ class IndustryService:
             try:
                 quantity = int(entry.get(quantity_key) or 0)
             except (TypeError, ValueError):
-                logger.warning("EIV: type_id=%s has a non-numeric %s %r; it counts as 0 units in the job fee",
-                               type_id, quantity_key, entry.get(quantity_key))
-                quantity = 0
+                reason = f"the {quantity_key} {entry.get(quantity_key)!r} of type_id={type_id} is not a number"
+                logger.warning("EIV: %s; the EIV and the job fee are unknown", reason)
+                if unknown_reasons is not None:
+                    unknown_reasons.append(reason)
+                unpriced = True
+                continue
             total += float(unit_value) * quantity
             priced_count += 1
         if priced_count == 0:
@@ -4397,16 +4436,20 @@ class IndustryService:
         *,
         activity: str,
         process_value: float | None,
-        system_index: float,
+        system_index: float | None,
         structure_cost_reduction: float,
         surcharge_rates: JobSurchargeRates,
+        index_unknown_reason: str | None = None,
+        eiv_unknown_reason: str | None = None,
     ) -> dict[str, Any]:
         """The one install-cost model of every activity (job_cost.py): job
         value x index x (1 - reduction) + job value x the activity's
-        surcharge rate. `process_value` is the activity's job value."""
+        surcharge rate. `process_value` is the activity's job value; an
+        unknown value or index names its reason in fee_unknown_reason."""
         return job_install_cost(
             activity=activity, process_value=process_value, system_index=system_index,
             structure_cost_reduction=structure_cost_reduction, surcharge_rates=surcharge_rates,
+            index_unknown_reason=index_unknown_reason, eiv_unknown_reason=eiv_unknown_reason,
         )
 
     #: Row labels of the activities whose fee can be unknown (I1).
@@ -4962,12 +5005,16 @@ class IndustryService:
             adjusted_material_entries.append(material)
             base_material_entries.append({**material, "quantity": base_total_quantity})
 
+        eiv_unknown_reasons: list[str] = []
         process_value, priced_material_count, eiv_material_count = self._sum_estimated_item_value_counted(
             base_material_entries,
             quantity_key="quantity",
             adjusted_price_map=adjusted_market_price_map,
+            unknown_reasons=eiv_unknown_reasons,
         )
-        cost_index = self._system_cost_index(profile_payload=selected_industry_profile, activity=activity)
+        cost_index, cost_index_unknown_reason = self._system_cost_index_with_reason(
+            profile_payload=selected_industry_profile, activity=activity,
+        )
         surcharge_rates = self._profile_job_surcharge_rates(selected_industry_profile)
         job_cost = self._job_install_cost(
             activity=activity,
@@ -4975,6 +5022,8 @@ class IndustryService:
             system_index=cost_index,
             structure_cost_reduction=cost_reduction,
             surcharge_rates=surcharge_rates,
+            index_unknown_reason=cost_index_unknown_reason,
+            eiv_unknown_reason="; ".join(eiv_unknown_reasons) or None,
         )
         direct_duration_seconds = sum(int(job_segment["duration_seconds"]) for job_segment in job_segments)
 
@@ -7186,8 +7235,10 @@ class IndustryService:
             self._profile_rig_reduction(profile_payload=selected_industry_profile, activity=activity, metric="cost", manufacturing_group=manufacturing_group),
             self._implant_reduction(character_modifier_payload=selected_character_modifiers, activity=activity, metric="cost"),
         ])
-        cost_index = self._system_cost_index(profile_payload=selected_industry_profile, activity=activity)
-        job_cost = self._job_install_cost(activity=activity, process_value=process_value, system_index=cost_index, structure_cost_reduction=cost_reduction, surcharge_rates=surcharge_rates)
+        cost_index, cost_index_unknown_reason = self._system_cost_index_with_reason(
+            profile_payload=selected_industry_profile, activity=activity,
+        )
+        job_cost = self._job_install_cost(activity=activity, process_value=process_value, system_index=cost_index, structure_cost_reduction=cost_reduction, surcharge_rates=surcharge_rates, index_unknown_reason=cost_index_unknown_reason)
         duration_seconds = self._round_duration_seconds(base_time_seconds * runs * max(0.0, 1.0 - time_reduction))
         result: dict[str, Any] = {
             "activity": activity, "duration_seconds": duration_seconds,
@@ -8046,9 +8097,10 @@ class IndustryService:
         if source_base_time <= 0:
             return None, "the T1 source blueprint has no copy time in the SDE"
         source_mfg_materials = [dict(e) for e in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or []) if isinstance(e, dict)]
-        source_pv, _ = self._sum_estimated_item_value(source_mfg_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map)
+        eiv_reasons: list[str] = []
+        source_pv, _ = self._sum_estimated_item_value(source_mfg_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map, unknown_reasons=eiv_reasons)
         if source_pv is None:
-            return None, "no priced EIV for the source copy (a material has no adjusted price)"
+            return None, f"no priced EIV for the source copy ({'; '.join(eiv_reasons) or 'a material has no adjusted price'})"
         fee = compute_activity(
             activity="copying", base_time_seconds=source_base_time, runs=1,
             process_value=self._copy_process_value(source_pv, 1),
@@ -8868,11 +8920,13 @@ class IndustryService:
         if base_time <= 0:
             return None, "the component's blueprint has no manufacturing time in the SDE"
         materials = [dict(e) for e in (job.get("materials") or []) if isinstance(e, dict)]
+        eiv_reasons: list[str] = []
         process_value, _ = self._sum_estimated_item_value(
             materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map,
+            unknown_reasons=eiv_reasons,
         )
         if process_value is None:
-            return None, "no priced EIV for the component (a material has no adjusted price)"
+            return None, f"no priced EIV for the component ({'; '.join(eiv_reasons) or 'a material has no adjusted price'})"
         product = next(
             (p for p in (job.get("products") or []) if isinstance(p, dict) and int(p.get("type_id") or 0) == int(component_type_id)),
             {},
@@ -9432,14 +9486,15 @@ class IndustryService:
         base_material_entries = cast(list[dict[str, Any]], sized_batch["base_material_entries"])
 
         # EIV calculations
-        base_material_eiv_total, base_material_eiv_priced_count, base_material_eiv_line_count = self._sum_estimated_item_value_counted(base_material_entries, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+        base_material_eiv_unknown_reasons: list[str] = []
+        base_material_eiv_total, base_material_eiv_priced_count, base_material_eiv_line_count = self._sum_estimated_item_value_counted(base_material_entries, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map, unknown_reasons=base_material_eiv_unknown_reasons)
         per_run_material_eiv, _ = self._sum_estimated_item_value(adjusted_material_entries, quantity_key="quantity_per_run", adjusted_price_map=ctx.adjusted_market_price_map)
         product_eiv_unit, product_eiv_source = self._resolve_eiv_pricing(type_id=product_type_id, type_payload=compact_product, adjusted_price_map=ctx.adjusted_market_price_map)
         product_eiv_total = float(product_eiv_unit) * int(compact_product.get("quantity") or 0) if product_eiv_unit is not None else None
 
         # Recompute manufacturing job cost with actual process value
-        manufacturing_cost_index = self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="manufacturing")
-        manufacturing_job_cost = self._job_install_cost(activity="manufacturing", process_value=base_material_eiv_total, system_index=manufacturing_cost_index, structure_cost_reduction=manufacturing_cost_reduction, surcharge_rates=ctx.surcharge_rates)
+        manufacturing_cost_index, manufacturing_cost_index_unknown_reason = self._system_cost_index_with_reason(profile_payload=ctx.selected_industry_profile, activity="manufacturing")
+        manufacturing_job_cost = self._job_install_cost(activity="manufacturing", process_value=base_material_eiv_total, system_index=manufacturing_cost_index, structure_cost_reduction=manufacturing_cost_reduction, surcharge_rates=ctx.surcharge_rates, index_unknown_reason=manufacturing_cost_index_unknown_reason, eiv_unknown_reason="; ".join(base_material_eiv_unknown_reasons) or None)
         direct_manufacturing_time_seconds = sum(int(segment["duration_seconds"]) for segment in job_segments)
 
         # Activity breakdown
@@ -10580,8 +10635,14 @@ class IndustryService:
         systems = self._state.esi_service.get_industry_systems()
         row = next((s for s in systems if s.get("solar_system_id") == system_id), None)
         if not row:
-            return {"solar_system_id": system_id, "cost_indices": []}
-        return row
+            return {"solar_system_id": system_id, "cost_indices": [],
+                    "cost_index_unknown_reason": f"ESI reports no cost indices for system {system_id}"}
+        out = dict(row)   # a copy: the ESI rows are cached
+        _index, out["cost_index_unknown_reason"] = self._system_cost_index_with_reason(
+            profile_payload={"system_id": system_id, "system_cost_indices": out.get("cost_indices") or []},
+            activity="manufacturing",
+        )
+        return out
 
     def industry_facility(self, *, facility_id: int) -> dict:
         if not facility_id:

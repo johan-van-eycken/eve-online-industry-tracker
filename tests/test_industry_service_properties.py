@@ -576,20 +576,21 @@ class TestSystemCostIndex:
         )
         assert math.isclose(result, 0.042, abs_tol=1e-9)
 
-    def test_missing_activity_returns_zero(self):
+    def test_missing_activity_is_unknown(self):
         profile = {
             "system_cost_indices": [
                 {"activity": "copying", "cost_index": 0.01},
             ],
         }
+        # F1 item 4: unknown (the fee is unknown, with the reason), never 0%
         assert IndustryService._system_cost_index(
             profile_payload=profile, activity="manufacturing",
-        ) == 0.0
+        ) is None
 
-    def test_none_profile_returns_zero(self):
+    def test_none_profile_is_unknown(self):
         assert IndustryService._system_cost_index(
             profile_payload=None, activity="manufacturing",
-        ) == 0.0
+        ) is None
 
 
 # ---------------------------------------------------------------------------
