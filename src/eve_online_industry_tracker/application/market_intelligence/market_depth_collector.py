@@ -64,8 +64,10 @@ class MarketDepthCollector:
             except SQLAlchemyError:
                 pass
 
-    def _get_effective_velocity(self, type_id: int, corp_id: int | None) -> float | None:
-        """Read effective_velocity from most recent build_plan_item, or fall back to SalesHistory."""
+    def _get_effective_velocity(self, type_id: int, corp_ids: Any = (), character_ids: Any = ()) -> float | None:
+        """Read effective_velocity from the most recent active build_plan_item,
+        or fall back to the 30-day sales history of every tracked corporation
+        and character (the same owners whose sell orders count as own volume)."""
         app_session = self._sessions.app_session()
         try:
             row = app_session.execute(text(
@@ -85,14 +87,21 @@ class MarketDepthCollector:
             except SQLAlchemyError:
                 pass
 
-        # Fallback: compute from SalesHistoryService
-        if corp_id is None:
+        # Fallback: the sales history of every tracked owner
+        corp_ids = sorted(int(c) for c in (corp_ids or ()))
+        character_ids = sorted(int(c) for c in (character_ids or ()))
+        if not corp_ids and not character_ids:
             return None
         try:
             from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
             svc = SalesHistoryService(state=self._state)
-            history = svc.get_sold_history(character_id=0, corporation_id=corp_id, type_id=type_id, days=30)
-            total_qty = sum(int(tx.get("quantity", 0)) for tx in history)
+            total_qty = 0
+            for corp_id in corp_ids:
+                history = svc.get_sold_history(character_id=0, corporation_id=corp_id, type_id=type_id, days=30)
+                total_qty += sum(int(tx.get("quantity", 0)) for tx in history)
+            for character_id in character_ids:
+                history = svc.get_sold_history(character_id=character_id, type_id=type_id, days=30)
+                total_qty += sum(int(tx.get("quantity", 0)) for tx in history)
             return max(0.01, total_qty / 30.0) if total_qty > 0 else None
         except SQLAlchemyError as exc:
             logging.warning("MarketDepthCollector: could not read the sales history for type_id=%s (%s); "
@@ -160,28 +169,88 @@ class MarketDepthCollector:
             except SQLAlchemyError:
                 pass
 
-    def _get_own_volume_for_type(self, corp_id: int | None, type_id: int) -> int:
-        """Total volume_remain of corp's own sell orders for this type_id."""
-        if corp_id is None:
+    def _tracked_owner_ids(self) -> tuple[set[int], set[int]]:
+        """(corporation ids, character ids) of every owner we track: their
+        sell orders are our own volume, not competition. corp_manager keeps
+        its ids in a set, so there is no "primary" corporation to pick."""
+        corp_manager = getattr(self._state, "corp_manager", None)
+        corp_ids = {int(c) for c in (getattr(corp_manager, "_corporation_ids", None) or ()) if c is not None}
+        char_manager = getattr(self._state, "char_manager", None)
+        character_ids = {
+            int(ch.character_id)
+            for ch in (getattr(char_manager, "_character_list", None) or ())
+            if getattr(ch, "character_id", None) is not None
+        }
+        return corp_ids, character_ids
+
+    def _query_own_sell_volume(self, type_id: int, corp_ids: set[int], character_ids: set[int]) -> int:
+        """Total volume_remain of the open sell orders of every tracked
+        corporation and character for this type_id. A failed read raises
+        (SQLAlchemyError): the caller keeps the previous row, marked stale."""
+        if not corp_ids and not character_ids:
             return 0
+        from eve_online_industry_tracker.infrastructure.models import (
+            CharacterMarketOrdersModel,
+            CorporationMarketOrdersModel,
+        )
         app_session = self._sessions.app_session()
         try:
-            from eve_online_industry_tracker.infrastructure.models import CorporationMarketOrdersModel
-            rows = app_session.query(CorporationMarketOrdersModel).filter(
-                CorporationMarketOrdersModel.corporation_id == corp_id,
-                CorporationMarketOrdersModel.type_id == type_id,
-                CorporationMarketOrdersModel.is_buy_order == False,
-            ).all()
-            return sum(int(getattr(r, "volume_remain", 0) or 0) for r in rows)
-        except SQLAlchemyError as exc:
-            logging.warning("MarketDepthCollector: could not read the own sell orders for type_id=%s (%s); "
-                            "competitor_units includes them", type_id, exc)
-            return 0
+            total = 0
+            if corp_ids:
+                rows = app_session.query(CorporationMarketOrdersModel).filter(
+                    CorporationMarketOrdersModel.corporation_id.in_(sorted(corp_ids)),
+                    CorporationMarketOrdersModel.type_id == type_id,
+                    CorporationMarketOrdersModel.is_buy_order == False,  # noqa: E712
+                ).all()
+                total += sum(int(getattr(r, "volume_remain", 0) or 0) for r in rows)
+            if character_ids:
+                rows = app_session.query(CharacterMarketOrdersModel).filter(
+                    CharacterMarketOrdersModel.character_id.in_(sorted(character_ids)),
+                    CharacterMarketOrdersModel.type_id == type_id,
+                    CharacterMarketOrdersModel.is_buy_order == False,  # noqa: E712
+                ).all()
+                total += sum(int(getattr(r, "volume_remain", 0) or 0) for r in rows)
+            return total
         finally:
             try:
                 app_session.close()
             except SQLAlchemyError:
                 pass
+
+    def _ensure_stale_reason_column(self) -> None:
+        """Add market_depth_cache.stale_reason when it is missing (additive;
+        NULL on a fresh snapshot, the reason on a kept, stale one)."""
+        app_session = self._sessions.app_session()
+        try:
+            cols = {str(r[1]) for r in app_session.execute(text("PRAGMA table_info(market_depth_cache)")).fetchall()}
+            if cols and "stale_reason" not in cols:
+                app_session.execute(text("ALTER TABLE market_depth_cache ADD COLUMN stale_reason TEXT"))
+                app_session.commit()
+        finally:
+            try:
+                app_session.close()
+            except SQLAlchemyError:
+                pass
+
+    def _mark_stale(self, type_id: int, hub: str, reason: str) -> None:
+        """Keep the previous market_depth_cache row for (type_id, hub) and
+        mark it stale with the reason, with a WARNING. Without a previous row
+        nothing is written."""
+        app_session = self._sessions.app_session()
+        try:
+            result = app_session.execute(text(
+                "UPDATE market_depth_cache SET stale_reason = :reason WHERE type_id = :type_id AND hub = :hub"
+            ), {"reason": reason, "type_id": type_id, "hub": hub})
+            app_session.commit()
+            kept = bool(result.rowcount)
+        finally:
+            try:
+                app_session.close()
+            except SQLAlchemyError:
+                pass
+        logging.warning("MarketDepthCollector: type_id=%s not refreshed, %s (%s)", type_id,
+                        "the previous market depth row is kept and marked stale" if kept
+                        else "there is no previous market depth row (stale, nothing written)", reason)
 
     def _write_market_depth(
         self,
@@ -196,8 +265,10 @@ class MarketDepthCollector:
         try:
             app_session.execute(text(
                 "INSERT OR REPLACE INTO market_depth_cache "
-                "(type_id, hub, competitor_units, vwap_5d, spot_sell_price, competition_index, snapshot_at) "
-                "VALUES (:type_id, :hub, :competitor_units, :vwap_5d, :spot_sell_price, :competition_index, :snapshot_at)"
+                "(type_id, hub, competitor_units, vwap_5d, spot_sell_price, competition_index, snapshot_at, "
+                "stale_reason) "
+                "VALUES (:type_id, :hub, :competitor_units, :vwap_5d, :spot_sell_price, :competition_index, "
+                ":snapshot_at, NULL)"
             ), {
                 "type_id": type_id,
                 "hub": hub,
@@ -224,19 +295,9 @@ class MarketDepthCollector:
             logging.info("MarketDepthCollector: no active plan type_ids, skipping cycle")
             return
 
-        # Get primary corp ID
-        corp_id: int | None = None
-        try:
-            corp_manager = getattr(self._state, "corp_manager", None)
-            if corp_manager:
-                ids = getattr(corp_manager, "_corporation_ids", None) or []
-                if ids:
-                    corp_id = int(ids[0])
-        except (TypeError, ValueError) as exc:
-            # _corporation_ids is a set, so ids[0] raises TypeError today: picking the primary
-            # corporation is a user decision (Task C1 report). Logged instead of swallowed.
-            logging.warning("MarketDepthCollector: could not determine the primary corporation (%s); own sell "
-                            "orders are not subtracted and there is no sales-history velocity fallback", exc)
+        # Own volume: the sell orders of every tracked corporation and character
+        corp_ids, character_ids = self._tracked_owner_ids()
+        self._ensure_stale_reason_column()
 
         # Step 1: Refresh market history for all type_ids
         esi_service = getattr(self._state, "esi_service", None)
@@ -288,9 +349,14 @@ class MarketDepthCollector:
                 if orders:
                     spot_sell_price = min(float(o.get("price", 0)) for o in orders if o.get("price"))
 
-                # competitor_units = total volume_remain minus own corp volume
+                # competitor_units = total volume_remain minus our own (every tracked corp and character)
                 total_units = sum(int(o.get("volume_remain", 0)) for o in orders)
-                own_units = self._get_own_volume_for_type(corp_id, type_id)
+                try:
+                    own_units = self._query_own_sell_volume(type_id, corp_ids, character_ids)
+                except SQLAlchemyError as exc:
+                    # competitor_units would silently include our own orders: keep the previous row instead
+                    self._mark_stale(type_id, hub, f"own sell orders unreadable: {exc}")
+                    continue
                 competitor_units = max(0, total_units - own_units)
 
                 # VWAP
@@ -299,7 +365,7 @@ class MarketDepthCollector:
                     vwap_5d = spot_sell_price  # fallback
 
                 # effective_velocity for competition_index
-                ev = self._get_effective_velocity(type_id, corp_id)
+                ev = self._get_effective_velocity(type_id, corp_ids, character_ids)
                 competition_index: float | None = None
                 if ev is not None and ev > 0:
                     competition_index = competitor_units / (ev * 30)

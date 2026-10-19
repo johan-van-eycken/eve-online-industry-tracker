@@ -125,7 +125,7 @@ def test_effective_velocity_warns_when_the_plan_and_sales_history_cannot_be_read
 
     monkeypatch.setattr(sales_history_service, "SalesHistoryService", _Svc)
     with caplog.at_level(logging.WARNING):
-        assert _collector()._get_effective_velocity(34, 98000001) is None
+        assert _collector()._get_effective_velocity(34, {98000001}) is None
     assert caplog.text.count("fake db down") == 2
     assert "type_id=34" in caplog.text
 
@@ -146,23 +146,16 @@ def test_effective_velocity_propagates_a_programming_error_in_the_sales_history(
 
     monkeypatch.setattr(sales_history_service, "SalesHistoryService", _Svc)
     with pytest.raises(TypeError):
-        _collector(session=_Session(None))._get_effective_velocity(34, 98000001)
+        _collector(session=_Session(None))._get_effective_velocity(34, {98000001})
 
 
-def test_own_volume_warns_when_the_corp_orders_cannot_be_read(caplog):
-    with caplog.at_level(logging.WARNING):
-        assert _collector()._get_own_volume_for_type(98000001, 34) == 0
-    assert "fake db down" in caplog.text and "type_id=34" in caplog.text
+def test_own_volume_read_failure_raises_for_the_caller_to_mark_the_row_stale():
+    # F1 item 2: no silent 0 (competitor_units would include our own orders); run() keeps the old row
+    with pytest.raises(OperationalError):
+        _collector()._query_own_sell_volume(34, {98000001}, set())
 
 
-def test_unreadable_primary_corporation_is_logged(monkeypatch, caplog):
-    # corp_manager._corporation_ids is a set, so ids[0] fails: today corp_id stays None. Logged now.
-    state = SimpleNamespace(corp_manager=SimpleNamespace(_corporation_ids={98000001}), esi_service=None)
-    c = _collector(state=state)
-    monkeypatch.setattr(c, "_get_hub_and_region", lambda: ("jita", 10000002))
-    monkeypatch.setattr(c, "_get_outlier_sigma", lambda: 3.0)
-    monkeypatch.setattr(c, "_vwap_days", lambda: 5)
-    monkeypatch.setattr(c, "_get_type_ids_from_active_plan", lambda: [34])
-    with caplog.at_level(logging.WARNING):
-        c.run()
-    assert "primary corporation" in caplog.text
+def test_the_corporation_set_is_read_without_indexing(monkeypatch):
+    # _corporation_ids is a set: every corporation counts, there is no "primary" one to index
+    state = SimpleNamespace(corp_manager=SimpleNamespace(_corporation_ids={98000001, 98000002}))
+    assert _collector(state=state)._tracked_owner_ids() == ({98000001, 98000002}, set())
