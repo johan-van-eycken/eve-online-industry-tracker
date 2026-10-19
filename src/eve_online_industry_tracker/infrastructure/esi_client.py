@@ -118,6 +118,39 @@ class _EsiErrorRateLimiter:
 
 _ESI_ERROR_LIMITER = _EsiErrorRateLimiter()
 
+# The configured X-Compatibility-Date values whose "ignored" WARNING was logged (once per process).
+_COMPATIBILITY_DATE_WARNED: set[str] = set()
+_COMPATIBILITY_DATE_WARNED_LOCK = threading.Lock()
+
+
+def esi_cache_key(endpoint_and_query: str) -> str:
+    """The esi_cache row key of an ESI request: the request prefixed with the
+    compatibility date ("[2025-08-26]/characters/1/skills"), so a later date
+    never reuses an entry, or its ETag (an old-shape 304), of another date."""
+    return f"[{ESI_COMPATIBILITY_DATE}]{endpoint_and_query}"
+
+
+def prune_stale_esi_cache(session: Any) -> int:
+    """Delete the esi_cache rows that are not keyed for the current
+    compatibility date: the /latest/ and /vN/ routes of before the
+    unversioned endpoints, the unprefixed keys of before esi_cache_key, and
+    the keys of an earlier date. No request reads them any more. Idempotent
+    (a second run deletes nothing); the count is logged. Returns it (0
+    without an esi_cache table yet)."""
+    from sqlalchemy import inspect as sqlalchemy_inspect  # pyright: ignore[reportMissingImports]
+
+    if not sqlalchemy_inspect(session.get_bind()).has_table(EsiCache.__tablename__):
+        return 0
+    prefix = esi_cache_key("")
+    stale = session.query(EsiCache).filter(~EsiCache.endpoint.startswith(prefix, autoescape=True))
+    count = stale.count()
+    if count:
+        stale.delete(synchronize_session=False)
+        session.commit()
+        logging.info("ESI cache: pruned %d esi_cache row(s) not keyed for compatibility date %s "
+                     "(/latest/, /vN/ and older keys no request reads)", count, ESI_COMPATIBILITY_DATE)
+    return count
+
 
 def _esi_setting(category: str, key: str) -> Any:
     """An ESI admin setting, read at each request: through the admin settings
@@ -320,11 +353,15 @@ class ESIClient:
         # the code's (esi_versions.ESI_COMPATIBILITY_DATE), not a config choice.
         _configured_date = (self.cfg.get("esi").get("headers") or {}).get("X-Compatibility-Date")
         if _configured_date and _configured_date != ESI_COMPATIBILITY_DATE:
-            logging.warning(
-                "config esi.headers.X-Compatibility-Date=%s ignored; ESI requests use the pinned %s",
-                _configured_date,
-                ESI_COMPATIBILITY_DATE,
-            )
+            with _COMPATIBILITY_DATE_WARNED_LOCK:
+                first = _configured_date not in _COMPATIBILITY_DATE_WARNED
+                _COMPATIBILITY_DATE_WARNED.add(_configured_date)
+            if first:   # once per process, not once per character's client
+                logging.warning(
+                    "config esi.headers.X-Compatibility-Date=%s ignored; ESI requests use the pinned %s",
+                    _configured_date,
+                    ESI_COMPATIBILITY_DATE,
+                )
         self.esi_header_xcompatibilitydate = ESI_COMPATIBILITY_DATE
         self.esi_header_xtenant = self.cfg.get("esi").get("headers")["X-Tenant"]
         self.client_id = self.cfg.get("oauth")["client_id"]
@@ -713,7 +750,7 @@ class ESIClient:
         query = ""
         if params:
             query = "?" + urlencode(sorted(params.items()), doseq=True)
-        cache_key = f"{endpoint}{query}"
+        cache_key = esi_cache_key(f"{endpoint}{query}")
 
         headers = {
             "Accept": self.esi_header_accept,
@@ -1038,7 +1075,7 @@ class ESIClient:
         url = f"{self.esi_base_uri}{endpoint}"
 
         # Build cache key
-        cache_key = f"{endpoint}:{json}" if json else endpoint
+        cache_key = esi_cache_key(f"{endpoint}:{json}" if json else endpoint)
         etag: Optional[str] = None
         cached_data: Optional[Dict[str, Any]] = None
         cache_mode = "off"

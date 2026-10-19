@@ -10764,7 +10764,7 @@ class IndustryService:
                 "facility_id": int(getattr(job, "facility_id", 0) or 0),
                 "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
                 "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
-                "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
+                "location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
                 "is_corp_job": False,
             })
@@ -10809,7 +10809,7 @@ class IndustryService:
                 "facility_id": int(getattr(job, "facility_id", 0) or 0),
                 "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
                 "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
-                "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
+                "location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
                 "is_corp_job": True,
             })

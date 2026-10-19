@@ -153,6 +153,16 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         db_oauth = init_db_oauth(cfgManager)
         if refresh_metadata:
             BaseOauth.metadata.create_all(bind=db_oauth.engine)
+        # One-off, idempotent: drop the ESI cache rows no request reads any more (logged).
+        try:
+            from eve_online_industry_tracker.infrastructure.esi_client import prune_stale_esi_cache
+            prune_stale_esi_cache(db_oauth.session)
+        except Exception as exc:   # a cleanup: startup goes on, the orphaned rows stay until the next start
+            logging.warning("ESI cache cleanup failed: %s", exc)
+            try:
+                db_oauth.session.rollback()
+            except Exception:
+                pass
 
         logging.debug(f"Database URI for App: {cfg['app']['database_app_uri']}")
         db_app = init_db_app(cfgManager)

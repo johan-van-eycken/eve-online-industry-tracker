@@ -4,9 +4,8 @@ This module is packaged under src/ so imports like:
 
     from config.schemas import CONFIG_SCHEMA
 
-work after `pip install -e .`.
-
-Keep this in sync with config/schemas.py.
+work after `pip install -e .`. It is the only copy (the repo-root
+config/schemas.py was a stale duplicate and is removed).
 """
 
 # schemas.py
