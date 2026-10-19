@@ -113,6 +113,14 @@ def _order_pricing_issue(order: dict) -> str | None:
     return "; ".join(reasons) or None
 
 
+def _isk_total_label(known_total: float, unknown_count: int) -> str:
+    """A sum of ISK amounts that names the amounts that are unknown."""
+    if unknown_count and not known_total:
+        return f"unknown ({unknown_count})"
+    label = format_isk_short(known_total)
+    return f"{label} + {unknown_count} unknown" if unknown_count else label
+
+
 def _order_price_label(price) -> str:
     """The order price, or "unknown" when the backend could not read it (never 0)."""
     return "unknown" if price is None else format_isk_short(price)
@@ -134,7 +142,10 @@ def _pricing_issues_warning(orders: list[dict]) -> str | None:
 
 def _compute_sell_stats(orders: list[dict]) -> dict:
     count = len(orders)
-    total_listed = sum(float(o.get("total_price") or 0) for o in orders)
+    # An order whose price is unknown (price_unknown_reason) has total_price
+    # None: it is counted as unknown, not as 0 ISK listed.
+    total_listed = sum(float(o["total_price"]) for o in orders if o.get("total_price") is not None)
+    total_listed_unknown = sum(1 for o in orders if o.get("total_price") is None)
 
     # Est. profit at current price: total_price × net_margin% / 100
     # (net_margin = (net_proceeds - cost) / price × 100, so cost-profit = price × qty × margin/100 = total_price × margin/100)
@@ -196,6 +207,7 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
     return {
         "count": count,
         "total_listed": total_listed,
+        "total_listed_unknown": total_listed_unknown,
         "est_profit_current": est_profit_current,
         "est_profit_advised": est_profit_advised,
         "total_isk_day_current": total_isk_day_current,
@@ -221,7 +233,7 @@ def _render_sell_stats_box(stats: dict) -> None:
 
     left_cards = [
         ("Active Orders", str(stats["count"])),
-        ("Total Listed ISK", format_isk_short(stats["total_listed"])),
+        ("Total Listed ISK", _isk_total_label(stats["total_listed"], stats.get("total_listed_unknown", 0))),
         (
             "Avg Margin % (Current)",
             _colored(f"{stats['avg_margin_current']:.1f}%", color=margin_color)
@@ -272,7 +284,10 @@ def _render_sell_stats_box(stats: dict) -> None:
 def _render_buy_stats_box(df: pd.DataFrame) -> None:
     cards = [
         ("Active Buy Orders", str(len(df))),
-        ("Total Buy Value", format_isk_short(df["Total Price"].sum())),
+        ("Total Buy Value", _isk_total_label(
+            float(pd.to_numeric(df["Total Price"], errors="coerce").sum()),
+            int(pd.to_numeric(df["Total Price"], errors="coerce").isna().sum()),
+        )),
         ("Total Escrow", format_isk_short(df["Escrow Remaining"].sum())),
     ]
     _render_stat_card_grid(cards)
@@ -289,9 +304,14 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
             "Owner": order.get("owner", ""),
             "Icon": get_item_image_url(order),
             "Type": order.get("type_name", ""),
+            # None (not 0) when the backend could not read the price
+            # (price_unknown_reason); the Pricing Note says why.
             "Price": order.get("price", 0),
             "Price Status": order.get("price_status") or "N/A",
-            "Price Difference": order.get("price_difference") or 0,
+            "Price Difference": (
+                None if order.get("price") is None or order.get("price_unknown_reason")
+                else (order.get("price_difference") or 0)
+            ),
             "Volume": order.get("volume", 0),
             "Total Price": order.get("total_price", 0),
             "Expires In": order.get("expires_in", ""),

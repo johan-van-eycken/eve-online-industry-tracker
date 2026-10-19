@@ -652,3 +652,39 @@ def test_sell_stats_skip_an_unknown_price():
     ])
     assert stats["below_cost_count"] == 2
     assert stats["below_cost_isk"] == 30.0
+
+
+def test_order_rows_keep_an_unknown_price_unknown():
+    from streamlit_ui.pages import marketorders as page
+
+    orders = [{"type_name": "Tritanium", "is_buy_order": False, "price": None, "total_price": None,
+               "price_difference": None, "price_unknown_reason": "order price unreadable"},
+              {"type_name": "Pyerite", "is_buy_order": False, "price": 5.0, "total_price": 50.0}]
+    sells, _ = page._build_order_rows(orders)
+    assert sells[0]["Price"] is None and sells[0]["Total Price"] is None and sells[0]["Price Difference"] is None
+    # A known price without a comparison keeps the old 0 difference.
+    assert sells[1]["Price Difference"] == 0
+
+
+def test_sell_stats_total_listed_counts_the_unknown_totals():
+    from streamlit_ui.pages import marketorders as page
+
+    stats = page._compute_sell_stats([
+        {"price": None, "total_price": None, "price_unknown_reason": "order price unreadable"},
+        {"price": 5.0, "total_price": 50.0},
+    ])
+    assert stats["total_listed"] == 50.0
+    assert stats["total_listed_unknown"] == 1
+    assert page._isk_total_label(50.0, 1) == "50.00 + 1 unknown"
+    assert page._isk_total_label(50.0, 0) == "50.00"
+    assert page._isk_total_label(0.0, 2) == "unknown (2)"
+
+
+def test_buy_stats_count_the_unknown_totals(monkeypatch):
+    import pandas as pd
+    from streamlit_ui.pages import marketorders as page
+
+    cards = []
+    monkeypatch.setattr(page, "_render_stat_card_grid", lambda c: cards.extend(c))
+    page._render_buy_stats_box(pd.DataFrame({"Total Price": [None, 100.0], "Escrow Remaining": [0.0, 10.0]}))
+    assert ("Total Buy Value", "100.00 + 1 unknown") in cards
