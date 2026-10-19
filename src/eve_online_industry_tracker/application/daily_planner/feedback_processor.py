@@ -52,7 +52,10 @@ def _per_unit(total: Any, units: Any) -> float | None:
 #: unit_build_cost wins), also via corp asset history.
 #: industry_build_transferred(_avg): a character job's unit_build_cost, FIFO
 #: matched or quantity-weighted (realized_profit._load_character_source_lots,
-#: scripts/backfill_corp_transfer_costs.py). Market buys, opening inventory
+#: scripts/backfill_corp_transfer_costs.py). A lot naming its job is priced
+#: from the job's current cost and carries the job's reason; a blended lot
+#: (no job) carries a reason while any job of its type has one, so the
+#: cost_unknown_reason check below skips it. Market buys, opening inventory
 #: and untracked units are not build costs and are left out.
 _INDUSTRY_BUILD_SOURCES = frozenset({
     "industry_build", "industry_build_transferred", "industry_build_transferred_avg",
