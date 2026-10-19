@@ -18,7 +18,7 @@ def format_decimal_eu(value: Any, *, decimals: int = 2, missing: str = "-") -> s
         if isinstance(value, str) and not value.strip():
             return missing
         v = float(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return missing
 
     s = f"{v:,.{int(decimals)}f}"  # 1,234,567.89
@@ -66,7 +66,7 @@ def format_duration(seconds: float | int | None) -> str:
 def type_icon_url(type_id: Any, *, size: int = 32) -> str | None:
     try:
         tid = int(type_id)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
     if tid <= 0:
         return None
@@ -76,7 +76,7 @@ def type_icon_url(type_id: Any, *, size: int = 32) -> str | None:
 def blueprint_image_url(blueprint_type_id: Any, *, is_bpc: bool, size: int = 32) -> str | None:
     try:
         tid = int(blueprint_type_id)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
     if tid <= 0:
         return None
@@ -91,7 +91,7 @@ def format_isk(value: Optional[float]) -> str:
     try:
         value = float(value)
         return "ISK {:,.2f}".format(value).replace(",", "X").replace(".", ",").replace("X", ".")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return "N/A"
 
 def format_isk_short(value):
@@ -100,7 +100,7 @@ def format_isk_short(value):
 
     try:
         numeric_value = float(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return "N/A"
 
     absolute_value = abs(numeric_value)
@@ -129,7 +129,7 @@ def format_date_into_age(iso_date: Optional[str]) -> str:
         months, days = divmod(rem_days, 30)  # approx months
 
         return f"{years}y {months}m {days}d"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return "N/A"
     
 def format_date_countdown(iso_date: Optional[str]) -> str:
@@ -151,7 +151,7 @@ def format_date_countdown(iso_date: Optional[str]) -> str:
         minutes, seconds = divmod(rem, 60)
 
         return f"{days}d {hours}h {minutes}m"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return "N/A"
 
 def format_date(iso_date: Optional[str]) -> str:
@@ -166,7 +166,7 @@ def format_date(iso_date: Optional[str]) -> str:
         formatted_date = dt.strftime("%d-%m-%Y")
 
         return f"{formatted_date}"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return "N/A"
 
 def format_datetime(iso_date: Optional[str]) -> str:
@@ -181,5 +181,5 @@ def format_datetime(iso_date: Optional[str]) -> str:
         formatted_date = dt.strftime("%d-%m-%Y %H:%M:%S")
 
         return f"{formatted_date}"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return "N/A"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, cast
@@ -39,6 +40,7 @@ from streamlit_ui.state.session_state import ensure_valid_state_value, ensure_st
 from streamlit_ui.state.industry_builder_ui import get_meta_group_name, meta_group_label, meta_group_toggle_key, ordered_meta_group_names
 from streamlit_ui.components.webpage_ui import render_job_status_panel
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SharedIndustrySnapshotContext:
@@ -539,11 +541,10 @@ def render_pricing_batch_panel(pricing_batch: dict[str, Any], job_manager_status
             st.caption(f"Oldest market history: {_format_age_minutes(pricing_batch.get('oldest_market_history_age_minutes'))}")
 
 
-@st.fragment(run_every=1)
-def _refresh_status_fragment() -> None:
-    if not overview_refresh_is_active():
-        st.rerun()
-        return
+def _poll_overview_refresh_safely() -> None:
+    """One poll of the overview refresh job. A failed status read
+    (RuntimeError) or a malformed status (a non-numeric progress: ValueError,
+    TypeError) ends the job with the reason, instead of failing every poll."""
     try:
         poll_overview_refresh_job(
             fetch_status_fn=fetch_product_overview_refresh_status,
@@ -551,6 +552,17 @@ def _refresh_status_fragment() -> None:
         )
     except RuntimeError as exc:
         clear_overview_refresh_job(error_message=str(exc))
+    except (ValueError, TypeError) as exc:
+        logger.warning("Industry builder: malformed overview refresh status: %s", exc)
+        clear_overview_refresh_job(error_message=f"The overview refresh status was malformed ({exc}).")
+
+
+@st.fragment(run_every=1)
+def _refresh_status_fragment() -> None:
+    if not overview_refresh_is_active():
+        st.rerun()
+        return
+    _poll_overview_refresh_safely()
     if overview_refresh_is_active():
         render_refresh_in_progress(overview_refresh_view())
     else:

@@ -125,27 +125,43 @@ def _wallet_transactions_view(transactions_data: list[dict[str, Any]], *, range_
     return transactions_df
 
 
-def _extract_master_wallet_balance(wallets_raw) -> float | None:
-    """The master wallet (division 1) balance; None when the stored wallets
-    cannot be read, so the tile says so instead of showing ISK 0."""
-    if not wallets_raw:
-        return 0.0
+NO_WALLETS_REPORTED = "No wallets reported"
+WALLETS_UNREADABLE = "Unavailable (wallet data unreadable, see the logs)"
+NO_MASTER_WALLET = "No master wallet (division 1) reported"
 
+
+def _master_wallet_balance_and_reason(wallets_raw) -> tuple[float | None, str | None]:
+    """(master wallet (division 1) balance, None), or (None, why there is
+    none): no wallets reported at all, unreadable wallet data, or no
+    division 1 among them. Never ISK 0 for a balance nobody reported."""
     try:
-        wallets = json.loads(wallets_raw) if isinstance(wallets_raw, str) else wallets_raw
+        if isinstance(wallets_raw, str):
+            wallets = json.loads(wallets_raw) if wallets_raw.strip() else None
+        else:
+            wallets = wallets_raw
+        if not wallets:
+            return None, NO_WALLETS_REPORTED
         master_wallet = next((wallet for wallet in wallets if str(wallet.get("division")) == "1"), None)
-        if master_wallet:
-            return float(master_wallet.get("balance", 0.0) or 0.0)
+        if master_wallet is None:
+            return None, NO_MASTER_WALLET
+        balance = master_wallet.get("balance")
+        if balance is None:
+            return None, WALLETS_UNREADABLE
+        return float(balance), None
     except (ValueError, TypeError, AttributeError) as exc:
         # Malformed JSON, a non-list or a non-dict wallet entry.
         logging.warning("Corporation wallets could not be read for the master wallet balance: %s", exc)
-        return None
-    return 0.0
+        return None, WALLETS_UNREADABLE
 
 
-def _master_wallet_label(balance: float | None) -> str:
+def _extract_master_wallet_balance(wallets_raw) -> float | None:
+    """The master wallet (division 1) balance; None when there is none to show."""
+    return _master_wallet_balance_and_reason(wallets_raw)[0]
+
+
+def _master_wallet_label(balance: float | None, reason: str | None = None) -> str:
     if balance is None:
-        return "Unavailable (wallet data unreadable, see the logs)"
+        return reason or WALLETS_UNREADABLE
     return format_isk(balance)
 
 
@@ -599,12 +615,12 @@ def render():
             has_director = bool(row.get("has_director_access", True))
 
             # --- Extract Master Wallet balance ---
-            master_wallet_balance = _extract_master_wallet_balance(row.get("wallets", None))
+            master_wallet_balance, master_wallet_reason = _master_wallet_balance_and_reason(row.get("wallets", None))
 
             border_style = "2px solid #444" if has_director else "2px dashed #666"
             access_badge = "" if has_director else '<div style="font-size:11px; color:#f59e0b; margin-bottom:6px;">⚠ Limited Access</div>'
             ceo_html = f"CEO: {ceo_name}<br>" if ceo_name else ""
-            wallet_html = f"<b>Master Wallet Balance:</b><br><b>{_master_wallet_label(master_wallet_balance)}</b>" if has_director else ""
+            wallet_html = f"<b>Master Wallet Balance:</b><br><b>{_master_wallet_label(master_wallet_balance, master_wallet_reason)}</b>" if has_director else ""
 
             tile_html = (
                 f'<div style="background-color: rgba(30,30,30,0.95); padding: 20px; border-radius: 10px; border: {border_style}; box-shadow: 2px 2px 10px rgba(0,0,0,0.5); text-align: center; margin-bottom: 10px;">'

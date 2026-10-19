@@ -102,6 +102,34 @@ def _has_real_cost(o: dict) -> bool:
     return o.get("cost_basis_source") not in (None, "market_order_fallback")
 
 
+def _order_pricing_issue(order: dict) -> str | None:
+    """Why the order has no advised price or no known price: the backend's
+    pricing_error and/or price_unknown_reason (either may be absent)."""
+    reasons: list[str] = []
+    for key in ("pricing_error", "price_unknown_reason"):
+        reason = order.get(key)
+        if isinstance(reason, str) and reason.strip() and reason.strip() not in reasons:
+            reasons.append(reason.strip())
+    return "; ".join(reasons) or None
+
+
+def _order_price_label(price) -> str:
+    """The order price, or "unknown" when the backend could not read it (never 0)."""
+    return "unknown" if price is None else format_isk_short(price)
+
+
+def _pricing_issues_warning(orders: list[dict]) -> str | None:
+    """One summary line for the orders with a pricing issue, or None."""
+    issues = [
+        f"{order.get('type_name') or order.get('type_id') or 'unknown item'}: {issue}"
+        for order in orders
+        if (issue := _order_pricing_issue(order))
+    ]
+    if not issues:
+        return None
+    return f"{len(issues)} order(s) have no advised or known price: " + "; ".join(issues)
+
+
 # ── Summary stats computation ─────────────────────────────────────────────────
 
 def _compute_sell_stats(orders: list[dict]) -> dict:
@@ -157,9 +185,11 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
         and float(o["hub_price"]) < float(o["cost_basis"])
     )
     below_cost_isk = sum(
-        float(o.get("price", 0)) * float(o.get("volume_remain", 0))
+        float(o["price"]) * float(o.get("volume_remain") or 0)
         for o in orders
-        if _has_real_cost(o) and o.get("hub_price") and o.get("cost_basis")
+        # An order with an unknown price (price_unknown_reason) has no listed value to count.
+        if o.get("price") is not None
+        and _has_real_cost(o) and o.get("hub_price") and o.get("cost_basis")
         and float(o["hub_price"]) < float(o["cost_basis"])
     )
 
@@ -273,6 +303,9 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
             "Range": order.get("range", ""),
         }
 
+        pricing_issue = _order_pricing_issue(order)
+        if pricing_issue:
+            core["Pricing Note"] = pricing_issue
         if order.get("is_buy_order"):
             buy_orders.append({**core, "Min. Volume": order.get("min_volume", 0), "Escrow Remaining": order.get("escrow_remaining", 0), **location})
         else:
@@ -435,6 +468,9 @@ def _render_orders_grid(
 # ── Pricing analysis panel ────────────────────────────────────────────────────
 
 def _render_pricing_analysis(selected_order: dict) -> None:
+    pricing_issue = _order_pricing_issue(selected_order)
+    if pricing_issue:
+        st.warning(f"No advised price for this order: {pricing_issue}.")
     if not selected_order.get("pricing_breakdown"):
         st.info("No pricing analysis available for this order yet.")
         return
@@ -442,13 +478,15 @@ def _render_pricing_analysis(selected_order: dict) -> None:
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("Current Price", format_isk_short(selected_order.get("price", 0)))
+        current_price = selected_order.get("price")
+        st.metric("Current Price", _order_price_label(current_price))
         if selected_order.get("advised_price"):
             advised = selected_order.get("advised_price", 0)
             st.metric("Advised Price", format_isk_short(advised))
-            diff = advised - selected_order.get("price", 0)
-            diff_pct = selected_order.get("price_difference_pct") or 0
-            st.metric("Difference", format_isk_short(diff), f"{diff_pct:+.1f}%")
+            if current_price is not None:
+                diff = advised - current_price
+                diff_pct = selected_order.get("price_difference_pct") or 0
+                st.metric("Difference", format_isk_short(diff), f"{diff_pct:+.1f}%")
 
     with col2:
         st.metric("Confidence", selected_order.get("advised_price_confidence", "N/A"))
@@ -636,9 +674,11 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
         st.error(f"Error fetching market orders: {str(e)}")
         return
 
-    # Merge corp orders from the ESI corporation endpoint (adds orders placed by other characters)
+    # Merge corp orders from the ESI corporation endpoint (adds orders placed by other characters).
+    # Read once per run: the refresh below reuses it (one warning when it fails).
+    director_corp_ids = _get_director_corp_ids()
     char_order_ids: set[int] = {int(o["order_id"]) for o in all_orders if o.get("order_id") is not None}
-    for corp_id in _get_director_corp_ids():
+    for corp_id in director_corp_ids:
         try:
             corp_orders = fetch_corp_market_orders_enriched(corp_id)
             for o in corp_orders:
@@ -681,7 +721,7 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
                         refresh_market_orders()
                     except Exception as e:
                         st.error(f"Refresh failed: {str(e)}")
-                    for corp_id in _get_director_corp_ids():
+                    for corp_id in director_corp_ids:
                         try:
                             refresh_corp_market_orders(corp_id)
                         except Exception as e:
@@ -693,6 +733,9 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
             st.write("")
 
         st.subheader("Selling")
+        pricing_warning = _pricing_issues_warning([o for o in all_orders if not o.get("is_buy_order")])
+        if pricing_warning:
+            st.warning(pricing_warning)
 
         sell_raw_filtered = [
             o for o in all_orders
@@ -714,6 +757,9 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
 
     if buy_orders:
         st.subheader("Buying")
+        buy_pricing_warning = _pricing_issues_warning([o for o in all_orders if o.get("is_buy_order")])
+        if buy_pricing_warning:
+            st.warning(buy_pricing_warning)
         df_buy = pd.DataFrame(buy_orders)
         df_buy = df_buy.reset_index(drop=True).sort_values(by=["Type", "Price"], ascending=[True, False])
         if selected_owner != "All":
@@ -733,7 +779,7 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
         full_sell_orders = [o for o in all_orders if not o.get("is_buy_order")]
         if full_sell_orders:
             order_options = [
-                f"{o.get('type_name', 'Unknown')} @ {o.get('station', 'Unknown')} - {format_isk_short(o.get('price', 0))}/unit"
+                f"{o.get('type_name', 'Unknown')} @ {o.get('station', 'Unknown')} - {_order_price_label(o.get('price'))}/unit"
                 for o in full_sell_orders
             ]
             selected_idx = st.selectbox(

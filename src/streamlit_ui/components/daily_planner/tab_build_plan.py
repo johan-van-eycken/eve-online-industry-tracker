@@ -317,7 +317,7 @@ def render_tab_build_plan(page_state: DailyPlannerPageState) -> None:
                 allow_unsafe_jscode=True,
                 key="build_plan_grid",
             )
-        except (TypeError, ValueError, StreamlitAPIException) as exc:
+        except (TypeError, ValueError, KeyError, AttributeError, StreamlitAPIException) as exc:
             # Cosmetic: the plain table shows the same rows.
             logging.warning("Build plan grid failed, showing a plain table: %s", exc)
             st.dataframe(

@@ -25,28 +25,114 @@ def _get_industry_profiles(character_id: int) -> dict | None:
     return api_get(f"/industry_profiles/{int(character_id)}")
 
 
-def _extract_manufacturing_cost_index(system_cost_index_payload: dict) -> float | None:
-    """The manufacturing cost index; None when the payload is malformed.
+#: The reason when a system reports no manufacturing cost index (the user
+#: ruled: unknown, not 0%) and the backend gave none of its own.
+NO_MANUFACTURING_INDEX_REASON = "no manufacturing cost index is reported for this system"
+COST_INDEX_UNKNOWN_PREFIX = "The system cost index is unknown"
 
-    A system without a manufacturing entry keeps 0.0."""
+
+def _manufacturing_cost_index_and_reason(system_cost_index_payload: dict | None) -> tuple[float | None, str | None]:
+    """(manufacturing cost index, None), or (None, why it is unknown).
+
+    Unknown when the payload carries the backend's cost_index_unknown_reason
+    or a lookup_error (either may be absent), has no manufacturing entry, or
+    is malformed. Never 0.0 for a missing index: the job fees depend on it."""
+    payload = system_cost_index_payload if isinstance(system_cost_index_payload, dict) else {}
+    backend_reason = payload.get("cost_index_unknown_reason")
+    lookup_error = payload.get("lookup_error")
     try:
-        cost_indices = system_cost_index_payload.get("cost_indices") or []
+        cost_indices = payload.get("cost_indices") or []
         for entry in cost_indices:
             if entry.get("activity") == "manufacturing":
-                return float(entry.get("cost_index") or 0.0)
+                raw = entry.get("cost_index")
+                if raw is None:
+                    break
+                return float(raw), None
     except (ValueError, TypeError, AttributeError) as exc:
         logger.warning("Industry profiles: malformed system cost index payload: %s", exc)
+        return None, f"the system cost index payload is malformed ({exc})"
+    if backend_reason:
+        return None, str(backend_reason)
+    if lookup_error:
+        return None, f"the system cost indices could not be read ({lookup_error})"
+    return None, NO_MANUFACTURING_INDEX_REASON
+
+
+def _extract_manufacturing_cost_index(system_cost_index_payload: dict) -> float | None:
+    """The manufacturing cost index; None when it is unknown (missing or malformed)."""
+    return _manufacturing_cost_index_and_reason(system_cost_index_payload)[0]
+
+
+def _cost_index_label(value: float | None) -> str:
+    return "unknown" if value is None else f"{float(value):.2%}"
+
+
+#: The nested parts of a resolved profile context that carry a lookup_error.
+_PROFILE_CONTEXT_PARTS: tuple[tuple[str, str], ...] = (
+    ("industry_system", "The system cost indices"),
+    ("facility", "The facility"),
+    ("structure_type_bonuses", "The structure type bonuses"),
+)
+
+
+def _profile_context_warnings(context: dict | None) -> list[str]:
+    """One line per reason the resolved profile context (the producer's view
+    of the profile, /industry_profile_context) names: a part's lookup_error
+    and the cost_index_unknown_reason. Absent keys give nothing."""
+    if not isinstance(context, dict):
+        return []
+    warnings: list[str] = []
+    if context.get("lookup_error"):
+        warnings.append(f"The industry profile context could not be read: {context['lookup_error']}")
+    for key, label in _PROFILE_CONTEXT_PARTS:
+        part = context.get(key)
+        if isinstance(part, dict) and part.get("lookup_error"):
+            warnings.append(f"{label} could not be read: {part['lookup_error']}")
+    if context.get("cost_index_unknown_reason"):
+        warnings.append(
+            f"{COST_INDEX_UNKNOWN_PREFIX} ({context['cost_index_unknown_reason']}); "
+            "the job fees that depend on it are unknown."
+        )
+    return warnings
+
+
+def _profile_save_block_reason(
+    *,
+    is_npc_station: bool,
+    structure_selected: bool,
+    structure_type_id: int | None,
+    bonus_reason: str | None,
+) -> str | None:
+    """Why the profile cannot be saved now, or None. The user ruled: no save
+    while the facility bonuses of the selected structure cannot be loaded,
+    since the profile would store 0% for them."""
+    if is_npc_station or not structure_selected:
         return None
-    return 0.0
+    if structure_type_id is None:
+        return ("the structure type of the selected structure is unknown, so its facility bonuses cannot be "
+                "loaded")
+    if bonus_reason:
+        return f"the facility bonuses could not be loaded ({bonus_reason})"
+    return None
+
+
+def _forget_cached_get(path: str) -> None:
+    """Drop a failed response from cached_api_get, so the next run asks again."""
+    clear = getattr(cached_api_get, "clear", None)
+    if callable(clear):
+        clear(path)
 
 
 def _fetch_facility_bonuses(type_id: int) -> tuple[dict, str | None]:
     """The SDE facility bonuses (fractions) of a structure type, and the
     reason when they could not be loaded ({} then)."""
-    bonus_resp = cached_api_get(f"/structure_type_bonuses/{int(type_id)}")
+    path = f"/structure_type_bonuses/{int(type_id)}"
+    bonus_resp = cached_api_get(path)
     if not bonus_resp or bonus_resp.get("status") != "success":
         reason = (bonus_resp or {}).get("message") or "the structure type bonuses request failed (see the logs)"
         logger.warning("Industry profiles: facility bonuses for type %s did not load: %s", type_id, reason)
+        # A blocked save says "reload": the failure must not stay cached.
+        _forget_cached_get(path)
         return {}, str(reason)
     bonuses = (bonus_resp.get("data") or {}).get("bonuses") or {}
     try:
@@ -469,6 +555,7 @@ def _load_rig_options() -> tuple[dict[int, str], dict[int, dict], list[int]]:
             rig_bonus_map[tid] = rig
         if skipped:
             logger.warning("Industry profiles: skipped %d structure rig(s) without a valid type_id", skipped)
+            st.warning(f"{skipped} structure rig(s) without a valid type id are not shown (see the logs).")
     else:
         reason = (rigs_resp or {}).get("message") or "the structure rigs request failed (see the logs)"
         logger.warning("Industry profiles: structure rigs did not load: %s", reason)
@@ -490,6 +577,8 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
         "corp_structure_type_id_by_id": {},
         "facility_bonuses_by_type_id": {},
         "solar_system_by_id": {},
+        "system_cost_index_reason": {},
+        "profile_warnings_by_id": {},
     }
     try:
         system_ids = sorted({int(profile.get("system_id")) for profile in profiles if profile.get("system_id") is not None})
@@ -499,10 +588,29 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
     for system_id in system_ids:
         ci_resp = cached_api_get(f"/industry_system_cost_index/{system_id}")
         if ci_resp and ci_resp.get("status") == "success":
-            context["system_cost_index_map"][system_id] = _extract_manufacturing_cost_index(ci_resp.get("data") or {})
+            value, reason = _manufacturing_cost_index_and_reason(ci_resp.get("data") or {})
+            context["system_cost_index_map"][system_id] = value
+            if reason:
+                context["system_cost_index_reason"][system_id] = reason
         else:
             # The profile then shows its stored cost index, with a caption.
             logger.warning("Industry profiles: the cost index of system %s did not load", system_id)
+
+    # The producer's view of each profile: the reasons a part of it could not
+    # be read (lookup_error, cost_index_unknown_reason).
+    for profile in profiles:
+        profile_id = profile.get("id")
+        if profile_id is None:
+            continue
+        context_resp = cached_api_get(f"/industry_profile_context/{int(profile_id)}")
+        if context_resp and context_resp.get("status") == "success":
+            warnings = _profile_context_warnings(context_resp.get("data"))
+        else:
+            reason = (context_resp or {}).get("message") or "the request failed (see the logs)"
+            logger.warning("Industry profiles: the context of profile %s did not load: %s", profile_id, reason)
+            _forget_cached_get(f"/industry_profile_context/{int(profile_id)}")
+            warnings =[f"The profile's cost indices, facility and bonuses could not be checked ({reason})."]
+        context["profile_warnings_by_id"][int(profile_id)] = warnings
 
     def _add_structures(structures: object, *, id_key: str, names: dict, type_ids: dict) -> None:
         for structure in structures or []:
@@ -567,6 +675,8 @@ def _render_existing_profiles(
 ) -> None:
     for profile in profiles:
         with st.expander(f"{'⭐ ' if profile['is_default'] else ''}{profile['profile_name']}"):
+            for warning in profile_context.get("profile_warnings_by_id", {}).get(profile.get("id"), []):
+                st.warning(warning)
             col1, col2, col3 = st.columns([2, 2, 1])
 
             is_profile_npc_station = (
@@ -617,8 +727,19 @@ def _render_existing_profiles(
                 if profile_system_id is not None:
                     current_ci = profile_context["system_cost_index_map"].get(int(profile_system_id))
 
+                ci_reason = (
+                    profile_context.get("system_cost_index_reason", {}).get(int(profile_system_id))
+                    if profile_system_id is not None else None
+                )
                 if current_ci is not None:
                     st.write(f"**System Cost Index (live):** {float(current_ci):.2%}")
+                elif ci_reason:
+                    # The live read worked but names no index: unknown, not
+                    # the stored value and not 0%.
+                    st.write("**System Cost Index (live):** unknown")
+                    profile_warnings = profile_context.get("profile_warnings_by_id", {}).get(profile.get("id"), [])
+                    if not any(w.startswith(COST_INDEX_UNKNOWN_PREFIX) for w in profile_warnings):
+                        st.warning(f"{COST_INDEX_UNKNOWN_PREFIX} ({ci_reason}); the job fees that depend on it are unknown.")
                 else:
                     stored_ci = profile.get("manufacturing_cost_index")
                     if stored_ci is None:
@@ -744,11 +865,12 @@ def _render_create_profile_section(
     system_mfg_cost_index: float | None = None
     cost_index_resp = cached_api_get(f"/industry_system_cost_index/{selected_system_id}")
     if cost_index_resp and cost_index_resp.get("status") == "success":
-        system_mfg_cost_index = _extract_manufacturing_cost_index(cost_index_resp.get("data") or {})
+        system_mfg_cost_index, cost_index_reason = _manufacturing_cost_index_and_reason(cost_index_resp.get("data") or {})
+    else:
+        cost_index_reason = (cost_index_resp or {}).get("message") or "the cost index request failed (see the logs)"
     if system_mfg_cost_index is None:
-        reason = (cost_index_resp or {}).get("message") or "the cost index request failed or was malformed (see the logs)"
-        st.warning(f"The system cost index could not be loaded ({reason}).")
-    system_mfg_cost_index_label = "N/A" if system_mfg_cost_index is None else f"{float(system_mfg_cost_index):.2%}"
+        st.warning(f"The system cost index is unknown ({cost_index_reason}); the job fees that depend on it are unknown.")
+    system_mfg_cost_index_label = _cost_index_label(system_mfg_cost_index)
 
     if selected_system:
         st.caption(
@@ -888,16 +1010,21 @@ def _render_create_profile_section(
     facility_me_bonus_pct = 0.0
     facility_te_bonus_pct = 0.0
     facility_cost_bonus_pct = 0.0
+    bonus_reason: str | None = None
+    if not is_npc_station and selected_upwell_type_id is not None:
+        facility_me_bonus_pct, facility_te_bonus_pct, facility_cost_bonus_pct, bonus_reason = (
+            _fetch_facility_bonus_pcts(int(selected_upwell_type_id))
+        )
+    # The user ruled: no save while the facility bonuses cannot be loaded.
+    save_block_reason = _profile_save_block_reason(
+        is_npc_station=is_npc_station,
+        structure_selected=selected_station_key != "none",
+        structure_type_id=selected_upwell_type_id,
+        bonus_reason=bonus_reason,
+    )
+    if save_block_reason:
+        st.error(f"This profile cannot be saved: {save_block_reason}. Reload the page once the bonuses load.")
     if not is_npc_station:
-        if selected_upwell_type_id is not None:
-            facility_me_bonus_pct, facility_te_bonus_pct, facility_cost_bonus_pct, bonus_reason = (
-                _fetch_facility_bonus_pcts(int(selected_upwell_type_id))
-            )
-            if bonus_reason:
-                st.warning(
-                    f"Facility bonuses could not be loaded ({bonus_reason}); they show as 0% and a "
-                    "profile saved now stores 0%."
-                )
 
         st.markdown("**Facility Bonus**")
         st.caption("Base facility bonuses from SDE (typeBonus).")
@@ -1035,9 +1162,12 @@ def _render_create_profile_section(
     with st.form("create_profile_form"):
         profile_name = st.text_input("Profile Name", placeholder="e.g., Jita 4-4 Tatara")
         is_default = st.checkbox("Set as default")
-        submitted = st.form_submit_button("Create Profile", type="primary")
+        submitted = st.form_submit_button("Create Profile", type="primary", disabled=bool(save_block_reason))
 
     if not submitted:
+        return
+    if save_block_reason:  # the button is disabled; never save 0% bonuses
+        st.error(f"This profile cannot be saved: {save_block_reason}.")
         return
 
     location_id = None

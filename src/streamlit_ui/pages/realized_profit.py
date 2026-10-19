@@ -59,20 +59,47 @@ _LOAD_WARNINGS_KEY = "realized_profit_load_warnings_shown"
 
 
 def _reset_load_warnings() -> None:
-    """Called at the start of each render: a load failure is warned once per run."""
+    """Called at the start of each render: a load failure is shown once per run."""
     st.session_state[_LOAD_WARNINGS_KEY] = set()
 
 
 def _warn_load_failure(what: str, exc: Exception) -> None:
+    """Record a wallet owner load failure, shown once per run as an st.error.
+
+    The user ruled: without every owner's wallet the trade purchases are
+    incomplete, so the page stops (render checks _owner_load_failures) and
+    shows no rolling profit until they load."""
     logging.warning("Realized profit: %s could not be loaded: %s", what, exc)
     shown = st.session_state.setdefault(_LOAD_WARNINGS_KEY, set())
     if what in shown:
         return
     shown.add(what)
-    st.warning(
-        f"The {what} could not be loaded ({exc}). The owner list and the trade purchase "
-        "figures leave them out, so the rolling trade profit may be overstated."
+    st.error(
+        f"The {what} could not be loaded ({exc}). Realized profit is not shown until they load: "
+        "the owner list and the trade purchases would leave them out, overstating the rolling trade profit."
     )
+
+
+def _owner_load_failures() -> list[str]:
+    """The wallet owner loads that failed in this run, sorted."""
+    return sorted(st.session_state.get(_LOAD_WARNINGS_KEY) or ())
+
+
+def _lower_bound_cost_warning(rows: list[dict[str, Any]]) -> str | None:
+    """The summary of the sales whose allocated cost is a lower bound (a
+    lot's cost was partly unknown: the row's cost_lower_bound_reason), or
+    None when no row has one (or the key is absent)."""
+    count_by_reason: dict[str, int] = {}
+    for row in rows:
+        reason = row.get("cost_lower_bound_reason")
+        if isinstance(reason, str) and reason.strip():
+            count_by_reason[reason.strip()] = count_by_reason.get(reason.strip(), 0) + 1
+    if not count_by_reason:
+        return None
+    total = sum(count_by_reason.values())
+    reasons = "; ".join(f"{reason} ({n})" for reason, n in sorted(count_by_reason.items()))
+    return (f"{total} sales use a lower-bound cost: {reasons}. Their realized profit and margin are "
+            "upper bounds.")
 
 
 def _character_name_map() -> dict[int, str]:
@@ -704,6 +731,7 @@ def _table_frame(
                 "Unpriced Qty": int(row.get("unpriced_quantity") or 0),
                 "Transaction ID": int(row.get("transaction_id") or 0),
                 "Profit Type": _profit_type_label(row.get("source_mix")),
+                "Cost Lower Bound": str(row.get("cost_lower_bound_reason") or ""),
                 "_negative_flag": bool(negative_flag),
             }
         )
@@ -724,6 +752,7 @@ def _table_frame(
             "Unpriced Qty",
             "Transaction ID",
             "Profit Type",
+            "Cost Lower Bound",
             "_negative_flag",
         ]
         frame = frame[[column for column in desired_columns if column in frame.columns]]
@@ -737,6 +766,10 @@ def render() -> None:
 
     character_name_by_id = _character_name_map()
     owner_selector_options = _owner_selector_options()
+    # Both loads ran above (characters, director corporations).
+    if _owner_load_failures():
+        # The st.error naming each failure is already shown.
+        return
 
     controls_owner, controls_range, controls_refresh, controls_about = st.columns([2.5, 4.5, 1.5, 1.0])
     with controls_owner:
@@ -865,6 +898,10 @@ def render() -> None:
     if not filtered_rows:
         st.warning("No sales match the current filters.")
         return
+
+    lower_bound_warning = _lower_bound_cost_warning(filtered_rows)
+    if lower_bound_warning:
+        st.warning(lower_bound_warning)
 
     overview = _overview_payload(filtered_rows)
     period_label = _period_label(str(range_preset))

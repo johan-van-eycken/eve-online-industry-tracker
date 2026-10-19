@@ -427,27 +427,60 @@ _LAB_ACTIVITY_IDS = ACTIVITY_LAB_IDS
 _REACTION_ACTIVITY_IDS = ACTIVITY_REACTION_IDS
 
 
-def _fetch_jobs_data() -> dict[str, Any]:
-    """Fetch active industry jobs; on an API error, warn and return an empty structure."""
+def _fetch_jobs_data() -> dict[str, Any] | None:
+    """The active industry jobs, or None after an st.error with the reason.
+
+    The user ruled: without the running jobs the slot summary, the Active?
+    column and the character assignment would be wrong, so the page shows
+    no recommendations until the jobs load."""
     try:
         return fetch_active_industry_jobs()
     except RuntimeError as exc:
         logging.warning("Portfolio planner: active industry jobs could not be loaded: %s", exc)
-        st.warning(
-            f"Active industry jobs could not be loaded ({exc}). The slot summary, the Active? "
-            "column and the character assignment do not include the running jobs."
+        st.error(
+            f"Active industry jobs could not be loaded ({exc}). No recommendations are shown until they "
+            "load: the free slots and the character assignment depend on the running jobs."
         )
-        return {"jobs": [], "slot_capacities": {}}
+        return None
 
 
-def _fetch_optional(fetch_fn: Callable[[tuple[int, ...]], dict], ids: tuple[int, ...], *, what: str) -> dict:
-    """Run an optional per-candidate fetch; on an API error, warn with the reason and return {}."""
+def _fetch_optional(
+    fetch_fn: Callable[[tuple[int, ...]], dict],
+    ids: tuple[int, ...],
+    *,
+    what: str,
+    failed: set[str] | None = None,
+) -> dict:
+    """Run an optional per-candidate fetch; on an API error, warn with the reason and return {}.
+
+    `failed` (one set per page run) remembers the fetches that failed, so a
+    second fetch of the same kind in the run neither repeats the request nor
+    the warning."""
+    if failed is not None and what in failed:
+        return {}
     try:
         return fetch_fn(ids)
     except RuntimeError as exc:
         logging.warning("Portfolio planner: %s could not be loaded: %s", what, exc)
         st.warning(f"The {what} could not be loaded ({exc}); the recommendations are shown without it.")
+        if failed is not None:
+            failed.add(what)
         return {}
+
+
+def _reuse_or_fetch(
+    fetch_fn: Callable[[tuple[int, ...]], dict],
+    ids: tuple[int, ...],
+    *,
+    previous_ids: tuple[int, ...],
+    previous: dict,
+    what: str,
+    failed: set[str],
+) -> dict:
+    """The earlier result of this run when it already covers `ids`, else a fetch."""
+    if set(ids) <= set(previous_ids):
+        return previous
+    return _fetch_optional(fetch_fn, ids, what=what, failed=failed)
 
 
 def _parse_end_date(end_date: Any) -> datetime | None:
@@ -1076,6 +1109,20 @@ def render() -> None:
 
     ranked = _rank_candidates(eligible_rows, objective=scoring_objective)
 
+    _render_header_banner(overview_rows, filtered_rows, eligible_rows, overview_meta)
+
+    if overview_refresh_is_active():
+        return
+
+    # Fetch active jobs once for the slot summary header and the "Active?"
+    # column; without them the page stops (the user ruled).
+    jobs_data = _fetch_jobs_data()
+    if jobs_data is None:
+        return
+
+    # One failed optional fetch is warned once per run and not repeated.
+    failed_fetches: set[str] = set()
+
     # Apply track record multipliers after ranking
     # (track_record is fetched below after top_candidates are determined,
     # but we need to apply it before final re-sort — so we fetch it on top_15 type_ids)
@@ -1086,20 +1133,14 @@ def render() -> None:
     }))
     _track_record_pre: dict[str, dict] = {}
     if _pre_type_ids:
-        _track_record_pre = _fetch_optional(fetch_type_track_record, _pre_type_ids, what="track record")
+        _track_record_pre = _fetch_optional(fetch_type_track_record, _pre_type_ids, what="track record",
+                                            failed=failed_fetches)
     ranked = [
         (row, _apply_track_record_multiplier(score, row, _track_record_pre))
         for row, score in ranked
     ]
     ranked.sort(key=lambda pair: pair[1], reverse=True)
 
-    _render_header_banner(overview_rows, filtered_rows, eligible_rows, overview_meta)
-
-    if overview_refresh_is_active():
-        return
-
-    # Fetch active jobs once for the slot summary header and the "Active?" column
-    jobs_data = _fetch_jobs_data()
     _render_slot_summary_header(jobs_data)
     active_type_ids = _build_active_type_ids(jobs_data)
 
@@ -1115,7 +1156,8 @@ def render() -> None:
     skill_qual: dict[str, dict[str, bool]] = {}
     if blueprint_type_ids_for_qual:
         skill_qual = _fetch_optional(
-            fetch_blueprint_skill_qualification, blueprint_type_ids_for_qual, what="blueprint skill qualification"
+            fetch_blueprint_skill_qualification, blueprint_type_ids_for_qual, what="blueprint skill qualification",
+            failed=failed_fetches,
         )
     assignment = _compute_character_assignment(top_candidates, skill_qual, jobs_data)
 
@@ -1126,11 +1168,14 @@ def render() -> None:
     }))
     reorder_alerts: dict[str, dict] = {}
     if candidate_type_ids:
-        reorder_alerts = _fetch_optional(fetch_reorder_alerts, candidate_type_ids, what="reorder alerts")
+        reorder_alerts = _fetch_optional(fetch_reorder_alerts, candidate_type_ids, what="reorder alerts",
+                                         failed=failed_fetches)
 
     track_record: dict[str, dict] = {}
     if candidate_type_ids:
-        track_record = _fetch_optional(fetch_type_track_record, candidate_type_ids, what="track record")
+        # Reuses the pre-ranking result when it covers these ids.
+        track_record = _reuse_or_fetch(fetch_type_track_record, candidate_type_ids, previous_ids=_pre_type_ids,
+                                       previous=_track_record_pre, what="track record", failed=failed_fetches)
 
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 

@@ -134,8 +134,9 @@ def test_portfolio_planner_warns_when_active_jobs_fail(monkeypatch, st_messages)
         raise RuntimeError("Failed to load active industry jobs")
 
     monkeypatch.setattr(page, "fetch_active_industry_jobs", boom)
-    assert page._fetch_jobs_data() == {"jobs": [], "slot_capacities": {}}
-    assert any(kind == "warning" and "active industry jobs" in body.lower() for kind, body in st_messages)
+    # The user ruled: the page stops with an error (tests/test_final_f3_ui.py).
+    assert page._fetch_jobs_data() is None
+    assert any(kind == "error" and "active industry jobs" in body.lower() for kind, body in st_messages)
 
 
 def test_portfolio_planner_optional_fetch_warns_with_the_reason(st_messages):
@@ -169,9 +170,10 @@ def test_realized_profit_warns_when_wallet_owners_fail(monkeypatch, st_messages)
     page._reset_load_warnings()
     assert page._character_payloads() == []
     assert page._character_name_map() == {}
-    warnings = [body for kind, body in st_messages if kind == "warning"]
-    assert len(warnings) == 1  # one warning per failure per run
-    assert "Failed to load characters" in warnings[0]
+    # The user ruled: an error that stops the page (tests/test_final_f3_ui.py), once per run.
+    errors = [body for kind, body in st_messages if kind == "error"]
+    assert len(errors) == 1
+    assert "Failed to load characters" in errors[0]
 
 
 def test_realized_profit_warns_when_director_corporations_fail(monkeypatch, st_messages):
@@ -184,7 +186,7 @@ def test_realized_profit_warns_when_director_corporations_fail(monkeypatch, st_m
     monkeypatch.setattr(corps, "fetch_director_corporations", boom)
     page._reset_load_warnings()
     assert page._corporation_payloads() == []
-    assert any(kind == "warning" and "HTTP 503" in body for kind, body in st_messages)
+    assert any(kind == "error" and "HTTP 503" in body for kind, body in st_messages)
 
 
 def test_corporation_master_wallet_balance_is_none_when_unreadable(caplog):
@@ -194,7 +196,8 @@ def test_corporation_master_wallet_balance_is_none_when_unreadable(caplog):
         assert page._extract_master_wallet_balance("{not json") is None
     assert any("wallet" in r.getMessage().lower() for r in caplog.records)
     assert page._extract_master_wallet_balance([{"division": 1, "balance": 12.5}]) == 12.5
-    assert page._extract_master_wallet_balance(None) == 0.0
+    # No wallets at all: "no wallets reported", not ISK 0 (tests/test_final_f3_ui.py).
+    assert page._extract_master_wallet_balance(None) is None
 
 
 def test_corporation_wallet_label_says_unavailable_instead_of_zero():
@@ -269,8 +272,8 @@ def test_manufacturing_cost_index_is_none_for_a_malformed_payload():
 
     assert page._extract_manufacturing_cost_index({"cost_indices": [{"activity": "manufacturing", "cost_index": "x"}]}) is None
     assert page._extract_manufacturing_cost_index({"cost_indices": [{"activity": "manufacturing", "cost_index": 0.05}]}) == 0.05
-    # No manufacturing entry keeps the documented 0.0 (listed for a user decision).
-    assert page._extract_manufacturing_cost_index({"cost_indices": []}) == 0.0
+    # No manufacturing entry is unknown, not 0.0 (the user ruled).
+    assert page._extract_manufacturing_cost_index({"cost_indices": []}) is None
 
 
 def test_facility_bonuses_give_a_reason_when_they_do_not_load(monkeypatch):

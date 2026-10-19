@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import requests as _requests  # pyright: ignore[reportMissingModuleSource]
@@ -74,17 +75,57 @@ def set_action_status(action_id: int, status: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+#: How long a failed market intelligence status read is remembered: the
+#: status bar renders on every rerun, and an unreachable backend would make
+#: each rerun wait for the request timeout again.
+MARKET_INTEL_FAILURE_CACHE_SECONDS = 30.0
+
+#: (monotonic time of the failure, reason) of the last failed read, per process.
+_market_intel_failure: tuple[float, str] | None = None
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 @st.cache_data(ttl=60, show_spinner=False)
-def get_market_intel_status() -> dict[str, Any]:
-    """GET /planner/market_intel/status — market intelligence job status.
-    Raises RuntimeError with the API's reason when it cannot be read, so the
-    status bar can say so (a failure is not cached)."""
+def _fetch_market_intel_status() -> dict[str, Any]:
+    """The successful read, cached for 60 s (st.cache_data never caches the raise)."""
     body, error = api_get_or_error("/planner/market_intel/status")
     if error is not None or not isinstance(body, dict) or body.get("status") != "success":
         reason = error or (body.get("message") if isinstance(body, dict) else None) or "unexpected response"
-        raise RuntimeError(f"market intelligence status could not be read: {reason}")
+        raise RuntimeError(str(reason))
     data = body.get("data")
     return data if isinstance(data, dict) else {}
+
+
+def get_market_intel_status() -> dict[str, Any]:
+    """GET /planner/market_intel/status — market intelligence job status.
+
+    Raises RuntimeError with the API's reason alone (the status bar words the
+    message) when it cannot be read. A failure is remembered for
+    MARKET_INTEL_FAILURE_CACHE_SECONDS, so the reruns in between raise the
+    same reason without paying the request timeout again."""
+    global _market_intel_failure
+    if _market_intel_failure is not None:
+        failed_at, reason = _market_intel_failure
+        if _monotonic() - failed_at < MARKET_INTEL_FAILURE_CACHE_SECONDS:
+            raise RuntimeError(reason)
+        _market_intel_failure = None
+    try:
+        return _fetch_market_intel_status()
+    except RuntimeError as exc:
+        _market_intel_failure = (_monotonic(), str(exc))
+        raise
+
+
+def _clear_market_intel_status() -> None:
+    global _market_intel_failure
+    _market_intel_failure = None
+    _fetch_market_intel_status.clear()
+
+
+get_market_intel_status.clear = _clear_market_intel_status  # type: ignore[attr-defined]
 
 
 @st.cache_data(ttl=300, show_spinner=False)

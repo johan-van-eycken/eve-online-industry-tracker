@@ -303,7 +303,7 @@ def _render_materials_section(
                 fit_columns_on_grid_load=True,
                 allow_unsafe_jscode=False,
             )
-        except (TypeError, ValueError, StreamlitAPIException) as exc:
+        except (TypeError, ValueError, KeyError, AttributeError, StreamlitAPIException) as exc:
             # Cosmetic: the plain table shows the same rows.
             logging.warning("Shopping list grid failed, showing a plain table: %s", exc)
             st.dataframe(df, hide_index=True, width="stretch")

@@ -25,13 +25,31 @@ from streamlit_ui.api.client import api_post
 from flask_app.settings import api_base as _get_api_base
 
 
+class _LocationLookupFailed(RuntimeError):
+    """Raised inside the cached fetch so st.cache_data does not keep the error."""
+
+
 @st.cache_data(ttl=300)
-def fetch_location_info(location_ids: list[int]) -> dict[str, Any]:
+def _fetch_location_info_cached(location_ids: list[int]) -> dict[str, Any]:
     response = api_post("/locations", payload={"location_ids": list(map(int, location_ids))})
     if not isinstance(response, dict):
         # api_post logged the HTTP failure; give the page a reason to show.
-        return {"status": "error", "message": "the /locations request failed (see the logs)", "data": {}}
+        raise _LocationLookupFailed("the /locations request failed (see the logs)")
+    if response.get("status") == "error":
+        raise _LocationLookupFailed(str(response.get("message") or "the /locations request failed"))
     return response
+
+
+def fetch_location_info(location_ids: list[int]) -> dict[str, Any]:
+    """The /locations response; a failure is an error dict with the reason,
+    which is not cached (the next run asks again)."""
+    try:
+        return _fetch_location_info_cached(location_ids)
+    except _LocationLookupFailed as exc:
+        return {"status": "error", "message": str(exc), "data": {}}
+
+
+fetch_location_info.clear = _fetch_location_info_cached.clear  # type: ignore[attr-defined]
 
 
 def apply_location_names(
