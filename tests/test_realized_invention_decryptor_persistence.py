@@ -172,6 +172,54 @@ def test_the_startup_job_refresh_after_a_restart_estimates_with_the_persisted_ch
     assert snapshot["invention_cost"] > 0
 
 
+def test_end_to_end_a_job_reason_reaches_the_ledger_allocation_and_feedback_skips_it(
+    session_provider, sde_engine,
+):
+    """The startup refresh without a decryptor choice -> the job's reason ->
+    the sale's allocation_details and cost_lower_bound_reason -> feedback
+    skips the cost update."""
+    from eve_online_industry_tracker.application.characters.realized_profit import (
+        CharacterRealizedProfitLedgerService,
+    )
+    from eve_online_industry_tracker.application.daily_planner.feedback_processor import _industry_build_unit_cost
+    from eve_online_industry_tracker.infrastructure.models import CharacterModel, CharacterWalletTransactionsModel
+
+    _seed_sde(sde_engine)
+    inputs = _service(_state(), session_provider).realized_invention_inputs()  # nothing published yet
+    raw = {"job_id": 5001, "activity_id": 1, "runs": 2, "blueprint_type_id": _TARGET_BP,
+           "product_type_id": _PRODUCT, "cost": 40.0}
+    with Session(sde_engine) as sde:
+        snapshot = ap.resolve_industry_job_cost_snapshot(
+            job=type("IndustryJobPayload", (), raw)(), sde_session=sde,
+            market_price_map={_DATACORE_A: 100.0, _DATACORE_B: 50.0, _MINERAL: 5.0},
+            invention_refresh=ap.RealizedInventionRefresh(inputs=inputs),
+        )
+    reason = snapshot["invention_cost_unknown_reason"]
+    assert "no decryptor choice" in reason
+
+    with session_provider.app_session() as session:
+        session.add(CharacterModel(character_name="Fake Pilot", character_id=_PILOT))
+        session.add(CharacterIndustryJobsModel(
+            character_id=_PILOT, job_id=5001, status="delivered", activity_id=1, runs=2,
+            blueprint_type_id=_TARGET_BP, product_type_id=_PRODUCT, cost=40.0,
+            completed_date="2026-10-01T00:00:00Z", output_quantity=snapshot["output_quantity"],
+            total_build_cost=snapshot["total_cost"], unit_build_cost=snapshot["unit_cost"],
+            invention_cost_unknown_reason=reason, raw=raw,
+        ))
+        session.add(CharacterWalletTransactionsModel(
+            character_id=_PILOT, transaction_id=6001, date="2026-10-02T00:00:00Z", is_buy=False,
+            is_personal=True, quantity=2, type_id=_PRODUCT, unit_price=200.0, total_price=400.0,
+        ))
+        session.commit()
+        ledger = CharacterRealizedProfitLedgerService(app_session=session, sde_session=None, market_prices=[])
+        ledger.rebuild(character_id=_PILOT)
+        [row] = ledger.list_rows(character_id=_PILOT)
+    assert row["allocation_details"][0]["cost_unknown_reason"] == reason
+    assert row["cost_lower_bound_reason"] == reason
+    cost, skip_reason = _industry_build_unit_cost(row["allocation_details"])
+    assert cost is None and reason in skip_reason
+
+
 def test_a_new_publish_replaces_the_stored_choices(session_provider):
     service = _service(_state(), session_provider)
     service.publish_decryptor_choices({_TARGET_BP: DecryptorChoice(_DECRYPTOR, "chosen")})

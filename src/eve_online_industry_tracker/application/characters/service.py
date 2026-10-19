@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.application.characters.realized_profit import (
     CharacterRealizedProfitLedgerService,
+    ledger_rebuild_lock,
     summarize_realized_profit_rows,
 )
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
@@ -34,14 +35,10 @@ from eve_online_industry_tracker.infrastructure.oauth_character_repository impor
 )
 
 
-_LEDGER_REBUILD_LOCKS: dict[int, threading.Lock] = {}
-_LEDGER_REBUILD_LOCKS_GUARD = threading.Lock()
-
-
 def _ledger_rebuild_lock(character_id: int) -> threading.Lock:
-    """The one lock per character for a stale-ledger rebuild (per process)."""
-    with _LEDGER_REBUILD_LOCKS_GUARD:
-        return _LEDGER_REBUILD_LOCKS.setdefault(int(character_id), threading.Lock())
+    """The one lock per character for a ledger rebuild (per process only:
+    realized_profit.ledger_rebuild_lock)."""
+    return ledger_rebuild_lock("character_id", int(character_id))
 
 
 class CharactersService:
@@ -84,18 +81,31 @@ class CharactersService:
 
         rows = ledger_service.list_rows(character_id=character_id)
         if refresh or not rows:
-            rows = ledger_service.rebuild(character_id=character_id)
+            # Every rebuild holds the character's lock (two at once race on
+            # UNIQUE(character_id, transaction_id)). Without a refresh the
+            # emptiness is re-checked inside: the other request may have
+            # just built it. A refresh rebuilds, one after the other.
+            owner_ids = [int(character_id)] if character_id is not None else ledger_service.owner_ids()
+            for owner_id in owner_ids:
+                with _ledger_rebuild_lock(owner_id):
+                    if not refresh and ledger_service.list_rows(character_id=owner_id):
+                        continue
+                    ledger_service.rebuild(character_id=owner_id)
+            rows = ledger_service.list_rows(character_id=character_id)
         else:
-            # A character whose rows predate a fee settings, skills or standings change is rebuilt
+            # A character whose rows predate a fee settings, skills or standings change, or
+            # whose lower-bound cost has since been resolved (a re-snapshotted job), is rebuilt
             # here (local data only, no ESI), so the persisted ledger never shows stale fees.
-            stale = ledger_service.stale_character_ids(rows)
+            stale = ledger_service.stale_character_ids(rows) | ledger_service.stale_resolved_cost_owner_ids(rows)
             for stale_character_id in sorted(stale):
                 # Two requests can find the same character stale; two rebuilds
                 # race on UNIQUE(character_id, transaction_id). One rebuilds,
                 # the other re-checks under the lock and finds it fresh.
                 with _ledger_rebuild_lock(int(stale_character_id)):
-                    still_stale = ledger_service.stale_character_ids(
-                        ledger_service.list_rows(character_id=int(stale_character_id))
+                    current_rows = ledger_service.list_rows(character_id=int(stale_character_id))
+                    still_stale = (
+                        ledger_service.stale_character_ids(current_rows)
+                        | ledger_service.stale_resolved_cost_owner_ids(current_rows)
                     )
                     if int(stale_character_id) in still_stale:
                         ledger_service.rebuild(character_id=stale_character_id)

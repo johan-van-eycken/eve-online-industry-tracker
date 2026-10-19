@@ -286,6 +286,9 @@ def test_concurrent_reads_rebuild_a_stale_character_once(monkeypatch):
                 barrier.wait()   # both requests see the character stale
             return set(stale)
 
+        def stale_resolved_cost_owner_ids(self, rows):
+            return set()
+
         def rebuild(self, character_id=None):
             time.sleep(0.05)
             rebuilt.append(character_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime
@@ -30,6 +31,30 @@ from eve_online_industry_tracker.db_models import (
 
 
 ASSET_SOURCE_UNTRACKED = "untracked_inventory"
+
+# One lock per ledger owner for a rebuild: two requests that rebuild the same
+# owner at once race on UNIQUE(owner, transaction_id). The locks are per
+# process only: two app processes on one database are not serialized.
+_LEDGER_REBUILD_LOCKS: dict[tuple[str, int], threading.Lock] = {}
+_LEDGER_REBUILD_LOCKS_GUARD = threading.Lock()
+
+
+def ledger_rebuild_lock(owner_field: str, owner_id: int) -> threading.Lock:
+    """The one lock (per process) for rebuilding `owner_id`'s ledger;
+    `owner_field` is "character_id" or "corporation_id"."""
+    with _LEDGER_REBUILD_LOCKS_GUARD:
+        return _LEDGER_REBUILD_LOCKS.setdefault((str(owner_field), int(owner_id)), threading.Lock())
+
+
+def cost_lower_bound_reason(allocation_details: Any) -> str | None:
+    """Why a sale's allocated cost is a lower bound: the distinct
+    `cost_unknown_reason`s of its allocations, in order, or None."""
+    reasons: list[str] = []
+    for entry in allocation_details or []:
+        reason = entry.get("cost_unknown_reason") if isinstance(entry, dict) else None
+        if reason and str(reason) not in reasons:
+            reasons.append(str(reason))
+    return "; ".join(reasons) or None
 ASSET_SOURCE_OPENING_INVENTORY = "opening_inventory"
 
 
@@ -543,10 +568,7 @@ class _BaseRealizedProfitLedgerService:
         self._admin_settings = admin_settings
 
     def rebuild(self, *, owner_id: int | None = None) -> list[dict[str, Any]]:
-        if owner_id is not None:
-            owner_ids = [int(owner_id)]
-        else:
-            owner_ids = [int(getattr(row, self.owner_id_field)) for row in self._app_session.query(self.owner_model).all()]
+        owner_ids = [int(owner_id)] if owner_id is not None else self.owner_ids()
 
         persisted_rows: list[Any] = []
         for current_owner_id in owner_ids:
@@ -554,6 +576,32 @@ class _BaseRealizedProfitLedgerService:
 
         self._app_session.commit()
         return [self._serialize_row(row) for row in persisted_rows]
+
+    def owner_ids(self) -> list[int]:
+        """Every owner a rebuild of all owners covers."""
+        return [int(getattr(row, self.owner_id_field)) for row in self._app_session.query(self.owner_model).all()]
+
+    def stale_resolved_cost_owner_ids(self, rows: list[dict[str, Any]]) -> set[int]:
+        """The owners with a row whose lower-bound reason no longer matches
+        its industry job's (the job was re-snapshotted, e.g. once the
+        overview published its decryptor choices): rebuilt on read."""
+        current: dict[int, str] | None = None
+        stale: set[int] = set()
+        for row in rows:
+            owner_id = _safe_int(row.get(self.owner_id_field))
+            if owner_id is None or owner_id in stale:
+                continue
+            for entry in row.get("allocation_details") or []:
+                if not isinstance(entry, dict) or not entry.get("cost_unknown_reason"):
+                    continue
+                if entry.get("reference_type") != "industry_job":
+                    continue
+                if current is None:
+                    current = self._load_cost_unknown_reason_by_job_id()
+                if current.get(int(_safe_int(entry.get("reference_id")) or 0)) != entry.get("cost_unknown_reason"):
+                    stale.add(int(owner_id))
+                    break
+        return stale
 
     def list_rows(self, *, owner_id: int | None = None) -> list[dict[str, Any]]:
         query = self._app_session.query(self.ledger_model)
@@ -884,6 +932,9 @@ class _BaseRealizedProfitLedgerService:
             "confidence": row.confidence,
             "notes": row.notes or [],
             "updated_at": row.updated_at.isoformat() if row.updated_at is not None else None,
+            # Contract: why allocated_cost is a lower bound (part of a build
+            # cost is unknown), None when it is not.
+            "cost_lower_bound_reason": cost_lower_bound_reason(row.allocation_details),
         }
         if hasattr(row, "fee_inputs"):
             payload["fee_inputs"] = row.fee_inputs

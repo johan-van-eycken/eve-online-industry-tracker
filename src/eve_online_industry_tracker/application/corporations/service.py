@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.application.characters.realized_profit import (
     CorporationRealizedProfitLedgerService,
+    ledger_rebuild_lock,
     summarize_realized_profit_rows,
 )
 from eve_online_industry_tracker.application.market_pricing.order_values import (
@@ -346,8 +347,29 @@ class CorporationsService:
         )
 
         rows = ledger_service.list_rows(corporation_id=corporation_id)
+        # Every rebuild holds the corporation's lock (per process only): two
+        # at once race on UNIQUE(corporation_id, transaction_id). Without a
+        # refresh the need is re-checked inside the lock: the other request
+        # may have just rebuilt it. A refresh rebuilds, one after the other.
         if refresh or not rows:
-            rows = ledger_service.rebuild(corporation_id=corporation_id)
+            owner_ids = [int(corporation_id)] if corporation_id is not None else ledger_service.owner_ids()
+            for owner_id in owner_ids:
+                with ledger_rebuild_lock("corporation_id", owner_id):
+                    if not refresh and ledger_service.list_rows(corporation_id=owner_id):
+                        continue
+                    ledger_service.rebuild(corporation_id=owner_id)
+            rows = ledger_service.list_rows(corporation_id=corporation_id)
+        else:
+            # A lower-bound cost resolved since the rows were built (a
+            # re-snapshotted job) makes the corporation's ledger stale.
+            stale = ledger_service.stale_resolved_cost_owner_ids(rows)
+            for stale_id in sorted(stale):
+                with ledger_rebuild_lock("corporation_id", int(stale_id)):
+                    current_rows = ledger_service.list_rows(corporation_id=int(stale_id))
+                    if int(stale_id) in ledger_service.stale_resolved_cost_owner_ids(current_rows):
+                        ledger_service.rebuild(corporation_id=int(stale_id))
+            if stale:
+                rows = ledger_service.list_rows(corporation_id=corporation_id)
 
         return {
             "rows": rows,
