@@ -16,7 +16,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
@@ -232,8 +232,8 @@ def _schema_default(key: str) -> Any:
     return ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"][key]["default"]
 
 
-def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
-    """A daily_planner setting, or `fallback` when there is no settings store.
+def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
+    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
 
     AttributeError covers stub/None admin objects; KeyError is what
     AdminSettingsManager.get raises for an unknown key (every key read here is
@@ -463,7 +463,7 @@ class DailyPlannerService:
 
         # Competition data
         try:
-            hub = str(_adm(self._admin, "planner_market_hub", "jita"))
+            hub = str(_adm(self._admin, "planner_market_hub"))
             market_depth = self._repo.get_market_depth(type_ids, hub)
         except SQLAlchemyError as exc:
             _warn_read_failed("get_analytics/market_depth", exc)
@@ -565,7 +565,7 @@ class DailyPlannerService:
         # and SQLite silently rejects (rather than coerces) a string compared
         # against it, so a bare `except` around this used to hide a permanently
         # empty plan_history. Let a genuinely broken query raise instead.
-        history_days = int(_adm(self._admin, "planner_history_days", 90))
+        history_days = int(_adm(self._admin, "planner_history_days"))
         cutoff = _now() - timedelta(days=history_days)
         ph_session = self._session_provider.app_session()
         try:
@@ -718,13 +718,13 @@ class DailyPlannerService:
             sell_velocities, sell_velocity_unavailable = self._get_sell_velocities(type_ids)
 
         # Market depth cache (from pre-populated tables written by MarketIntelligenceJob)
-        hub = str(_adm(self._admin, "planner_market_hub", "jita"))
+        hub = str(_adm(self._admin, "planner_market_hub"))
         with _ComputeStep(self, "reading market depth"):
             market_depth = self._repo.get_market_depth(type_ids, hub) if type_ids else {}
 
         margin_correlations, margin_unavailable = self._get_margin_correlations(type_ids)
 
-        min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
+        min_attempts = int(_adm(self._admin, "planner_invention_min_attempts"))
         with _ComputeStep(self, "reading invention success rates"):
             invention_rates = (
                 self._repo.get_invention_success_rates(type_ids, min_attempts) if type_ids else {}
@@ -1058,7 +1058,7 @@ class DailyPlannerService:
         # DetachedInstanceError.
         plan_items = self._build_plan_items(plan_id, chain_plan.decisions, market_depth_cache)
 
-        drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0))
+        drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct"))
         freshness = compute_freshness_score(plan_items, market_depth_cache, drift_threshold_pct)
 
         if plan_items:
@@ -1076,7 +1076,7 @@ class DailyPlannerService:
             self._repo.insert_actions(action_log_rows)
 
         # Cleanup old action log rows
-        cutoff_days = int(_adm(self._admin, "planner_history_days", 90))
+        cutoff_days = int(_adm(self._admin, "planner_history_days"))
         deleted = self._repo.purge_old_action_log_rows(cutoff_days)
         if deleted > 0:
             logger.info("DailyPlannerService: purged %d old action log rows", deleted)
@@ -1543,10 +1543,10 @@ class DailyPlannerService:
             if not plan_items:
                 return 1.0, 0, 0
 
-            hub = str(_adm(self._admin, "planner_market_hub", "jita"))
+            hub = str(_adm(self._admin, "planner_market_hub"))
             type_ids = [int(i.type_id) for i in plan_items]
             market_depth = self._repo.get_market_depth(type_ids, hub)
-            drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0))
+            drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct"))
 
             return compute_freshness_stats(plan_items, market_depth, drift_threshold_pct)
         except (KeyError, TypeError, ValueError, AttributeError):

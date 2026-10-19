@@ -19,12 +19,11 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.application.daily_planner import research_first
-from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import (
     BlueprintLedger,
     owner_character_id,
 )
-from eve_online_industry_tracker.application.industry.invention_model import MAX_BLUEPRINT_TE as DEFAULT_MAX_BLUEPRINT_TE
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner import facility_bonus
 from eve_online_industry_tracker.application.daily_planner.models import (
@@ -48,8 +47,8 @@ def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
-def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
-    """A daily_planner setting, or `fallback` when there is no settings store.
+def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
+    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
 
     AttributeError covers stub/None admin objects; KeyError is what
     AdminSettingsManager.get raises for an unknown key. Every key the planner
@@ -163,14 +162,12 @@ class ChainPlanner:
         bpo_opportunities: list[dict[str, Any]] = []
         sub_manufacture_actions: list[AssignedAction] = []
 
-        bpo_strong_buy_days = float(_adm(self._admin, "planner_bpo_strong_buy_days", 30))
-        bpo_consider_days = float(_adm(self._admin, "planner_bpo_consider_days", 90))
+        bpo_strong_buy_days = float(_adm(self._admin, "planner_bpo_strong_buy_days"))
+        bpo_consider_days = float(_adm(self._admin, "planner_bpo_consider_days"))
         # TE is always researched to the max (the user's decision, Task 8c fix
         # round 1): EVE's percentage, 0..20 in steps of 2.
-        te_research_target = int(admin_setting(
-            self._admin, "industry", "max_blueprint_time_efficiency", DEFAULT_MAX_BLUEPRINT_TE,
-        ))
-        invention_min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
+        te_research_target = int(admin_setting(self._admin, "industry", "max_blueprint_time_efficiency"))
+        invention_min_attempts = int(_adm(self._admin, "planner_invention_min_attempts"))
 
         bpo_assets_by_type_id: dict[int, list] = phase1_data.get("bpo_assets_by_type_id", {})
         bpc_assets_by_type_id: dict[int, list] = phase1_data.get("bpc_assets_by_type_id", {})

@@ -72,11 +72,6 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
 )
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry.job_cost import (
-    DEFAULT_COPY_COST_EIV_MULTIPLIER,
-    DEFAULT_INVENTION_COST_EIV_MULTIPLIER,
-    DEFAULT_RESEARCH_COST_EIV_MULTIPLIER,
-    DEFAULT_RESEARCH_SCC_SURCHARGE,
-    DEFAULT_SCC_SURCHARGE,
     JobSurchargeRates,
     job_install_cost,
     profile_facility_tax,
@@ -92,7 +87,6 @@ from eve_online_industry_tracker.application.industry.shopping_list import LATER
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.application.industry.invention_model import (
     ALL_INVENTORS_EXCLUDED,
-    DEFAULT_INVENTION_PROBABILITY_FLOOR,
     DECRYPTOR_SELECTION_OFF_REASON,
     NO_CHARACTER_SKILLS,
     NO_DECRYPTOR,
@@ -329,7 +323,6 @@ class _ProductPlanningContext:
 class IndustryService:
     _SKILL_ID_ACCOUNTING = 16622
     _SKILL_ID_BROKER_RELATIONS = 3446
-    _STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS = 24 * 3600
     _STRUCTURE_RIGS_CACHE_VERSION = 4
 
     _INDUSTRY_CHARACTER_MODIFIER_SKILL_NAMES: tuple[str, ...] = (
@@ -371,8 +364,6 @@ class IndustryService:
         "product": "Product Overview",
     }
     _MAX_RESEARCH_LEVEL = 10
-    _MAX_BLUEPRINT_MATERIAL_EFFICIENCY = 10
-    _MAX_BLUEPRINT_TIME_EFFICIENCY = 20
 
     def __init__(self, *, state: Any, sessions: SessionProvider | None = None):
         self._state = state
@@ -382,11 +373,12 @@ class IndustryService:
     def _admin(self):
         return getattr(self._state, "admin_settings", None)
 
-    def _adm(self, category: str, key: str, fallback: Any = None) -> Any:
-        """Read an admin setting, returning *fallback* when the manager is unavailable."""
+    def _adm(self, category: str, key: str) -> Any:
+        """Read an admin setting; its schema default when the manager is
+        unavailable (no duplicated constant that can drift from it)."""
         admin = self._admin
         if admin is None:
-            return fallback
+            return ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"]
         return admin.get(category, key)
 
     def _relist_broker_fee_fraction(self, row: dict[str, Any]) -> tuple[float, str | None]:
@@ -397,8 +389,7 @@ class IndustryService:
         own = self._as_float((row.get("market_fee_context") or {}).get("broker_fee_fraction"))
         if own is not None:
             return own, None
-        assumed = float(self._adm("market_defaults", "default_broker_fee",
-                                  ADMIN_SETTINGS_SCHEMA["market_defaults"]["settings"]["default_broker_fee"]["default"]))
+        assumed = float(self._adm("market_defaults", "default_broker_fee"))
         return assumed, (f"relist cost as if the broker fee is {assumed:.2%} (its own is unknown; admin setting "
                          "market_defaults/default_broker_fee)")
 
@@ -2666,8 +2657,8 @@ class IndustryService:
             else:
                 reasons.append("Orderbook sample size is missing.")
 
-            _liq_threshold = int(self._adm("industry", "portfolio_liquidity_threshold", 100))
-            _ord_threshold = int(self._adm("industry", "portfolio_order_count_threshold", 5))
+            _liq_threshold = int(self._adm("industry", "portfolio_liquidity_threshold"))
+            _ord_threshold = int(self._adm("industry", "portfolio_order_count_threshold"))
             if relevant_liquidity is None or relevant_order_count is None:
                 reasons.append(
                     f"{normalized_product_price_side.title()}-side hub liquidity is unknown "
@@ -3788,8 +3779,8 @@ class IndustryService:
         (job_cost.profile_facility_tax). A tax the profile does not determine
         is unknown, never 0 %: every fee then reads unknown with the reason,
         and a WARNING is logged once per reason."""
-        scc = max(0.0, float(self._adm("industry", "scc_surcharge", DEFAULT_SCC_SURCHARGE)))
-        research_scc = max(0.0, float(self._adm("industry", "research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)))
+        scc = max(0.0, float(self._adm("industry", "scc_surcharge")))
+        research_scc = max(0.0, float(self._adm("industry", "research_scc_surcharge")))
         facility_tax, reason = profile_facility_tax(profile_payload, scc=scc)
         if reason is not None and isinstance(profile_payload, dict):
             warned = self.__dict__.setdefault("_facility_tax_warned", set())
@@ -5015,8 +5006,8 @@ class IndustryService:
                     blueprint_time_efficiency = int(matched_blueprint_originals[0].blueprint_time_efficiency or 0)
                     blueprint_source_kind = "owned_blueprint_original"
                 else:
-                    blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency", self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY))
-                    blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency", self._MAX_BLUEPRINT_TIME_EFFICIENCY))
+                    blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency"))
+                    blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency"))
                     blueprint_source_kind = "blueprint_sde_fallback"
                     include_sde_research_chain = True
 
@@ -7646,7 +7637,7 @@ class IndustryService:
             character_id=character_id, market_hub=normalized_market_hub,
             product_price_side=normalized_product_price_side,
         )
-        decryptor_selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled", True))
+        decryptor_selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled"))
         decryptor_options = self._load_decryptor_options() if decryptor_selection_enabled else (NO_DECRYPTOR,)
         inventor_skill_levels = self._get_inventor_skill_levels()
         material_price_type_ids = sorted({
@@ -7673,7 +7664,7 @@ class IndustryService:
             progress_callback(0.45, "Loading owned item inventory", {"stage": "inventory"})
         blueprint_copy_assets_by_type_id: dict[int, list] = {}
         blueprint_original_assets_by_type_id: dict[int, list] = {}
-        _admin_hangar_flag = self._adm("industry", "industry_hangar_flag", None)
+        _admin_hangar_flag = self._adm("industry", "industry_hangar_flag")
         _corporation_hangar_flags: list[str] | None = (
             [str(_admin_hangar_flag)] if _admin_hangar_flag is not None else None
         )
@@ -7954,7 +7945,7 @@ class IndustryService:
             chance.probability if chance is not None
             else invention_probability(base_probability, None, decryptor.probability_multiplier)
         )
-        probability_floor = float(self._adm("industry", "invention_probability_floor", DEFAULT_INVENTION_PROBABILITY_FLOOR))
+        probability_floor = float(self._adm("industry", "invention_probability_floor"))
         runs_per_invented_blueprint = int((target_entry or {}).get("quantity") or 0)
         if invented_runs > 0:
             # Once per blueprint per refresh: batch 1, the later batches and
@@ -8030,7 +8021,7 @@ class IndustryService:
         # Job value per attempt: 0.02 x the invented blueprint's per-run
         # manufacturing EIV (EVE), times the attempts.
         per_attempt_process_value = (
-            float(invented_blueprint_eiv) * float(self._adm("industry", "invention_cost_eiv_multiplier", DEFAULT_INVENTION_COST_EIV_MULTIPLIER))
+            float(invented_blueprint_eiv) * float(self._adm("industry", "invention_cost_eiv_multiplier"))
             if invented_blueprint_eiv is not None else None
         )
         invention_process_value = float(per_attempt_process_value) * invention_attempts if per_attempt_process_value is not None else None
@@ -9040,7 +9031,7 @@ class IndustryService:
             return None
         return (
             float(per_run_material_eiv) * max(0.0, float(copied_runs))
-            * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER))
+            * float(self._adm("industry", "copy_cost_eiv_multiplier"))
         )
 
     def _research_process_value(self, per_run_material_eiv: float | None, target_level: int) -> float | None:
@@ -9056,7 +9047,7 @@ class IndustryService:
         level_multiplier = research_level_multiplier(0, int(target_level))
         if level_multiplier <= 0:
             return None
-        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier", DEFAULT_RESEARCH_COST_EIV_MULTIPLIER)) * level_multiplier
+        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier")) * level_multiplier
 
     def _research_job_cost_by_level(
         self,
@@ -9541,8 +9532,8 @@ class IndustryService:
                 blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
                 blueprint_source_kind = "owned_blueprint_original"
             else:
-                blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency", self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY))
-                blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency", self._MAX_BLUEPRINT_TIME_EFFICIENCY))
+                blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency"))
+                blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency"))
                 blueprint_source_kind = "blueprint_sde_fallback"
                 include_sde_research_chain = True
 
@@ -10602,15 +10593,13 @@ class IndustryService:
             encryption_skill_type_ids=self._load_encryption_skill_type_ids(),
             no_inventor_reason=NO_CHARACTER_SKILLS if levels else self._no_inventor_reason(),
         )
-        selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled", True))
+        selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled"))
         published = self._last_published_decryptor_choices() if selection_enabled else None
         return RealizedInventionInputs(
             invention_context=context,
             decryptor_by_blueprint_type_id=dict(published or {}) if selection_enabled else {},
             default_decryptor=None if selection_enabled else NO_DECRYPTOR,
-            probability_floor=float(self._adm(
-                "industry", "invention_probability_floor", DEFAULT_INVENTION_PROBABILITY_FLOOR,
-            )),
+            probability_floor=float(self._adm("industry", "invention_probability_floor")),
             decryptor_choices_published=published is not None,
         )
 
@@ -10858,7 +10847,7 @@ class IndustryService:
             and isinstance(cache, tuple)
             and len(cache) == 3
             and cache[1] == self._STRUCTURE_RIGS_CACHE_VERSION
-            and (now - cache[0] < int(self._adm("cache_ttl", "structure_rig_cache_ttl_seconds", self._STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS)))
+            and (now - cache[0] < int(self._adm("cache_ttl", "structure_rig_cache_ttl_seconds")))
         ):
             return cache[2]
 

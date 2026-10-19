@@ -28,7 +28,6 @@ class MarketPricingService:
         "hek": {"label": "Hek VIII - Moon 12", "region_id": 10000042, "station_id": 60005686},
     }
 
-    _REGION_VOLUME_CACHE_TTL_SECONDS = 6 * 3600
     _region_volume_cache_lock = threading.Lock()
     _region_volume_cache: dict[str, tuple[float, dict[int, dict[str, Any]]]] = {}
 
@@ -38,8 +37,7 @@ class MarketPricingService:
 
     @property
     def _region_volume_ttl(self) -> int:
-        admin = getattr(self._state, "admin_settings", None)
-        return int(admin.get("cache_ttl", "region_volume_cache_ttl_seconds")) if admin else self._REGION_VOLUME_CACHE_TTL_SECONDS
+        return int(self._admin_value("cache_ttl", "region_volume_cache_ttl_seconds"))
 
     @classmethod
     def normalize_market_hub(cls, hub: str | None) -> str:
@@ -314,10 +312,10 @@ class MarketPricingService:
             return {}
 
         hub_context = self._market_hub_context(hub)
-        normalized_hub = str(hub_context.get("hub") or "jita")
+        normalized_hub = str(hub_context["hub"])
         normalized_side = self.normalize_order_side(side)
-        region_id = int(hub_context.get("region_id") or 10000002)
-        station_id = int(hub_context.get("station_id") or 60003760)
+        region_id = int(hub_context["region_id"])
+        station_id = int(hub_context["station_id"])
         ttl_seconds = self.material_price_cache_ttl_seconds()
         depth = self.orderbook_depth()
         result: dict[int, dict[str, Any]] = {}
@@ -447,9 +445,9 @@ class MarketPricingService:
             return {}
 
         hub_context = self._market_hub_context(hub)
-        normalized_hub = str(hub_context.get("hub") or "jita")
-        region_id = int(hub_context.get("region_id") or 10000002)
-        station_id = int(hub_context.get("station_id") or 60003760)
+        normalized_hub = str(hub_context["hub"])
+        region_id = int(hub_context["region_id"])
+        station_id = int(hub_context["station_id"])
         ttl_seconds = self.material_price_cache_ttl_seconds()
 
         app_session = self._sessions.app_session()
@@ -581,8 +579,8 @@ class MarketPricingService:
             return {}
 
         hub_context = self._market_hub_context(hub)
-        normalized_hub = str(hub_context.get("hub") or "jita")
-        region_id = int(hub_context.get("region_id") or 10000002)
+        normalized_hub = str(hub_context["hub"])
+        region_id = int(hub_context["region_id"])
 
         now = time.time()
         cache_key = f"{normalized_hub}:{region_id}"

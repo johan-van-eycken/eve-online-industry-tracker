@@ -67,7 +67,7 @@ def test_correlator_setting_reader_propagates_an_unknown_setting(reader):
         getattr(corr, reader)()
 
 
-@pytest.mark.parametrize("reader,default", [("_get_min_days", 30), ("_get_threshold", -0.7)])
+@pytest.mark.parametrize("reader,default", [("_get_min_days", 30), ("_get_threshold", -0.6)])  # the schema defaults (H1: -0.7 had drifted)
 def test_correlator_setting_reader_warns_on_an_unparsable_value(reader, default, caplog):
     corr = MarginCorrelator(state=SimpleNamespace(), admin_settings=_Admin(ValueError("not a number")))
     with caplog.at_level(logging.WARNING):

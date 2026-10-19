@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
 from eve_online_industry_tracker.infrastructure.models import (
     PlanItemOutcomeModel,
     PlanLearningWeightsModel,
@@ -131,7 +131,7 @@ class FeedbackProcessor:
         self._admin = admin_settings
         self._session_provider = session_provider
 
-    def _adm(self, key: str, fallback: Any) -> Any:
+    def _adm(self, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
         """A daily_planner setting, or `fallback` when there is no settings store.
 
         AttributeError covers stub/None admin objects; KeyError is what
@@ -145,9 +145,9 @@ class FeedbackProcessor:
 
         Returns the number of action rows processed.
         """
-        alpha: float = float(self._adm("planner_ema_alpha", 0.2))
-        slow_mover_timeout: float = float(self._adm("planner_slow_mover_timeout_days", 60))
-        invention_min_attempts: int = int(self._adm("planner_invention_min_attempts", 10))
+        alpha: float = float(self._adm("planner_ema_alpha"))
+        slow_mover_timeout: float = float(self._adm("planner_slow_mover_timeout_days"))
+        invention_min_attempts: int = int(self._adm("planner_invention_min_attempts"))
 
         done_actions = self._repo.get_unprocessed_done_actions()
         if not done_actions:
