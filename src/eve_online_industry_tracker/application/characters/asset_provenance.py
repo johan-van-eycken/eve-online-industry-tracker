@@ -17,6 +17,8 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     effective_invention_probability,
     invented_runs_per_blueprint,
     invention_attempts,
+    invention_skill_set,
+    required_invention_skill_levels,
     resolve_invention_chance,
 )
 from eve_online_industry_tracker.infrastructure.models import (
@@ -31,6 +33,7 @@ from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_invention_source_blueprint_ids,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
+from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
 ASSET_SOURCE_INDUSTRY_BUILD = "industry_build"
@@ -410,6 +413,9 @@ class RealizedInventionRefresh:
     #: (NO_DECRYPTOR, the SDE's T2 decryptors); None: loaded on first use.
     decryptor_options: tuple[DecryptorOption, ...] | None = None
     source_activity_by_target: dict[int, tuple[int | None, Mapping[str, Any] | None]] = field(default_factory=dict)
+    #: The SDE encryption skills (the producer's, when its inputs are read);
+    #: None: loaded on first use.
+    encryption_skill_type_ids: frozenset[int] | None = None
 
     @classmethod
     def read(cls) -> "RealizedInventionRefresh":
@@ -421,6 +427,25 @@ class RealizedInventionRefresh:
             rows = get_t2_invention_decryptors(sde_session, language="en") if sde_session is not None else []
             self.decryptor_options = decryptor_options_from_rows(rows)
         return self.decryptor_options
+
+    def encryption_skills(self, sde_session: Any) -> frozenset[int]:
+        if self.encryption_skill_type_ids is None:
+            known = self.inputs.invention_context.encryption_skill_type_ids if self.inputs is not None else None
+            if known:
+                self.encryption_skill_type_ids = frozenset(known)
+            else:
+                self.encryption_skill_type_ids = (
+                    get_encryption_skill_type_ids(sde_session) if sde_session is not None else frozenset()
+                )
+        return self.encryption_skill_type_ids
+
+    def overview_decryptor_for(self, blueprint_type_id: int) -> DecryptorOption | None:
+        """The decryptor the published overview invents this blueprint with
+        (in memory or persisted); None when it plans none for it. Not the
+        "decryptor selection off" default: that is no per-blueprint choice."""
+        if self.inputs is None:
+            return None
+        return self.inputs.decryptor_by_blueprint_type_id.get(int(blueprint_type_id))
 
 
 def save_published_decryptor_choices(
@@ -716,30 +741,85 @@ def estimate_invention_cost_per_run(
     }, None
 
 
-def _infer_job_decryptor(
-    *, licensed_runs: int, base_runs: int, options: tuple[DecryptorOption, ...],
-) -> tuple[DecryptorOption | None, str | None]:
-    """The decryptor an invention job used, read from its licensed runs: the
-    SDE base runs plus the decryptor's run modifier. (option, None) when
-    exactly one option (no decryptor included) explains the runs; (None,
-    "decryptor unknown: ...") otherwise. Never guessed: no decryptor (+0)
-    and the Process decryptor (+0) cannot be told apart this way."""
-    if len(options) <= 1:
-        return None, "decryptor unknown: the SDE gave no decryptor data"
-    modifier = int(licensed_runs) - int(base_runs)
-    matches = [o for o in options if int(o.max_run_modifier) == modifier]
-    if len(matches) == 1:
-        return matches[0], None
-    if not matches:
-        return None, (
-            f"decryptor unknown: {licensed_runs} licensed runs over {base_runs} SDE base runs (+{modifier}) "
-            "match no decryptor"
+#: An ESI success chance is a float32: a decryptor fits when the skill factor
+#: it implies is a whole-level factor within this relative tolerance (the
+#: factors are 1/120 apart, about 0.6%).
+_SUCCESS_CHANCE_RELATIVE_TOLERANCE = 1e-4
+
+
+def _feasible_invention_skill_factors(
+    invention: Mapping[str, Any] | None, encryption_skill_type_ids: frozenset[int],
+) -> tuple[float, ...]:
+    """Every skill factor 1 + (sci1 + sci2)/30 + enc/40 an installer of this
+    invention can have: whole levels from the SDE's required level (at least
+    1) to 5. When the SDE skills cannot be read as 2 science + 1 encryption,
+    every level from 0 (wider: more candidates, never fewer)."""
+    entries = [e for e in ((invention or {}).get("skills") or []) if isinstance(e, Mapping)]
+    skill_set = invention_skill_set(entries, encryption_skill_type_ids)[0] if entries else None
+    if skill_set is None:
+        science_min, encryption_levels = 0, range(0, 6)
+    else:
+        required = required_invention_skill_levels(skill_set, entries)
+        science_min = sum(int(required[type_id]) for type_id in skill_set.science_skill_type_ids)
+        encryption_levels = (
+            range(int(required[skill_set.encryption_skill_type_id]), 6)
+            if skill_set.encryption_skill_type_id is not None else range(0, 1)
         )
+    return tuple(sorted({
+        1.0 + science / 30.0 + encryption / 40.0
+        for science in range(min(science_min, 10), 11) for encryption in encryption_levels
+    }))
+
+
+def _infer_job_decryptor(
+    *,
+    probability: float | None,
+    base_probability: float | None,
+    skill_factors: tuple[float, ...],
+    options: tuple[DecryptorOption, ...],
+    overview_choice: DecryptorOption | None = None,
+) -> tuple[DecryptorOption | None, str | None, bool]:
+    """The decryptor an invention job used, read from its ESI success chance:
+    SDE base x skill factor x decryptor multiplier, the skill factor one of
+    `skill_factors` (whole levels). ESI's licensed_runs on an invention job is
+    the source T1 copy's runs, so it is no evidence.
+
+    (option, None, False) when exactly one option (no decryptor included)
+    fits; (option, None, True) when several fit and the overview's published
+    choice for the blueprint is one of them; else (None, "decryptor unknown:
+    ...", False). Never guessed: no decryptor and Symmetry (both x1.0) only
+    the overview's choice can tell apart."""
+    if len(options) <= 1:
+        return None, "decryptor unknown: the SDE gave no decryptor data", False
+    if probability is None or probability <= 0:
+        return None, "decryptor unknown: the job gives no success chance to read it from", False
+    if probability >= 1.0 - 1e-9:
+        return None, "decryptor unknown: the job's success chance is capped at 100%", False
+    if base_probability is None or base_probability <= 0:
+        return None, "decryptor unknown: the SDE gives no base success chance", False
+
+    def _fits(option: DecryptorOption) -> bool:
+        multiplier = float(option.probability_multiplier)
+        if multiplier <= 0:
+            return False
+        implied = float(probability) / (float(base_probability) * multiplier)
+        return any(abs(factor - implied) <= _SUCCESS_CHANCE_RELATIVE_TOLERANCE * factor for factor in skill_factors)
+
+    matches = [o for o in options if _fits(o)]
+    chance = f"the job's {float(probability):.4f} success chance over the SDE base {float(base_probability):g}"
+    if len(matches) == 1:
+        return matches[0], None, False
+    if not matches:
+        return None, f"decryptor unknown: {chance} matches no decryptor at any skill level", False
+    if overview_choice is not None:
+        for option in matches:
+            if option.type_id == overview_choice.type_id:
+                return option, None, True
     names = ", ".join(sorted(str(o.type_name) for o in matches))
-    return None, (
-        f"decryptor unknown: {licensed_runs} licensed runs over {base_runs} SDE base runs (+{modifier}) "
-        f"match {len(matches)} options ({names})"
-    )
+    reason = f"decryptor unknown: candidates {names} ({chance} fits each)"
+    if overview_choice is not None:
+        reason += f"; the overview's choice ({overview_choice.type_name}) is not one of them"
+    return None, reason, False
 
 
 def build_invention_cost_per_run_by_blueprint_type(
@@ -754,10 +834,14 @@ def build_invention_cost_per_run_by_blueprint_type(
 
     cost per run = sum(runs x one attempt's inputs + job cost) /
     sum(successful_runs x licensed_runs): every attempt is paid for (failed
-    ones and failed jobs included), only successes yield runs. A job is left
-    out when it is not delivered, has no successful_runs or licensed_runs,
-    its decryptor cannot be read from its licensed runs (_infer_job_decryptor)
-    or an input has no price. A blueprint without a usable job, or with zero
+    ones and failed jobs included), only successes yield runs, each the SDE
+    runs plus the job's decryptor's (not ESI's licensed_runs: that is the
+    source T1 copy's runs). A job is left out when it is not delivered, has
+    no successful_runs or runs, its decryptor cannot be read from its success
+    chance (_infer_job_decryptor; several candidates are settled by the
+    overview's published choice for the blueprint when it is one of them,
+    listed in `decryptor_from_overview_choice_job_ids`) or an input has no
+    price. A blueprint without a usable job, or with zero
     successes over its usable jobs, maps to {"unknown_reason": why} and no
     unit_cost_per_run: the caller then uses the expected estimate."""
     refresh = invention_refresh or RealizedInventionRefresh(inputs=None)
@@ -774,6 +858,7 @@ def build_invention_cost_per_run_by_blueprint_type(
             continue
         entry = totals.setdefault(int(target), {
             "cost": 0.0, "attempts": 0, "successful_runs": 0, "invented_runs": 0, "jobs": 0, "skipped": [],
+            "overview_choice_job_ids": [],
         })
         job_id = job.get("job_id")
 
@@ -785,12 +870,11 @@ def build_invention_cost_per_run_by_blueprint_type(
             continue  # not finished: its outcome is not known yet (not a reason, just not yet)
         runs = _safe_int((raw or {}).get("runs"))
         successful_runs = _safe_int((raw or {}).get("successful_runs"))
-        licensed_runs = _safe_int((raw or {}).get("licensed_runs"))
         if successful_runs is None or successful_runs < 0:
             _skip("no successful_runs")
             continue
-        if not runs or runs <= 0 or not licensed_runs or licensed_runs <= 0:
-            _skip("no runs or licensed runs")
+        if not runs or runs <= 0:
+            _skip("no runs")
             continue
         source_id, invention = _invention_source_activity(sde_session, int(target), memo)
         product = _invention_target_product(invention or {}, int(target)) if source_id is not None else None
@@ -798,8 +882,12 @@ def build_invention_cost_per_run_by_blueprint_type(
         if not base_runs or base_runs <= 0:
             _skip("the SDE gives no runs per invented BPC")
             continue
-        decryptor, decryptor_reason = _infer_job_decryptor(
-            licensed_runs=int(licensed_runs), base_runs=int(base_runs), options=refresh.decryptors(sde_session),
+        decryptor, decryptor_reason, by_overview_choice = _infer_job_decryptor(
+            probability=_safe_float((raw or {}).get("probability")),
+            base_probability=_safe_float((product or {}).get("probability")),
+            skill_factors=_feasible_invention_skill_factors(invention, refresh.encryption_skills(sde_session)),
+            options=refresh.decryptors(sde_session),
+            overview_choice=refresh.overview_decryptor_for(int(target)),
         )
         if decryptor is None:
             _skip(str(decryptor_reason))
@@ -813,8 +901,14 @@ def build_invention_cost_per_run_by_blueprint_type(
         entry["cost"] += float(runs) * float(per_attempt) + float(_safe_float(job.get("cost")) or 0.0)
         entry["attempts"] += int(runs)
         entry["successful_runs"] += int(successful_runs)
-        entry["invented_runs"] += int(successful_runs) * int(licensed_runs)
+        entry["invented_runs"] += int(successful_runs) * invented_runs_per_blueprint(int(base_runs), decryptor)
         entry["jobs"] += 1
+        if by_overview_choice:
+            entry["overview_choice_job_ids"].append(job_id)
+            logging.info(
+                "Invention job %s for blueprint %s: its success chance fits several decryptors; the overview's "
+                "choice (%s) is one of them and is used", job_id, target, decryptor.type_name,
+            )
 
     out: dict[int, dict[str, Any]] = {}
     for target, entry in totals.items():
@@ -836,6 +930,7 @@ def build_invention_cost_per_run_by_blueprint_type(
             "attempts": int(entry["attempts"]),
             "successful_runs": int(entry["successful_runs"]),
             "invented_runs": int(entry["invented_runs"]),
+            "decryptor_from_overview_choice_job_ids": list(entry["overview_choice_job_ids"]),
         }
     return out
 

@@ -225,10 +225,12 @@ class FeedbackProcessor:
         #     - when the corp's own delivered invention jobs for the blueprint
         #       were seen at refresh: sum(runs x one attempt's datacores (SDE
         #       quantities at ESI prices) + the decryptor read from the
-        #       licensed runs + install fee) / sum(successful_runs x
-        #       licensed_runs), so failed attempts are paid for
+        #       job's ESI success chance + install fee) / sum(successful_runs
+        #       x (SDE runs + the decryptor's runs)), so failed attempts are
+        #       paid for
         #       (asset_provenance.build_invention_cost_per_run_by_blueprint_type);
-        #       a job whose decryptor the licensed runs do not name is left
+        #       a job whose chance fits several decryptors uses the
+        #       overview's choice when it is one of them, else it is left
         #       out, never guessed;
         #     - otherwise the expected invention inputs, sized like the
         #       producer (asset_provenance.estimate_invention_cost_per_run):
