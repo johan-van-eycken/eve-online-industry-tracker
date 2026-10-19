@@ -489,13 +489,12 @@ def test_the_re_snapshot_keeps_the_actual_invention_jobs_part_of_the_reason(
     assert reason.endswith(_ACTUAL_JOB_REASON)
 
 
-def test_the_re_snapshot_costs_from_the_actual_jobs_the_overview_choice_disambiguates(
+def test_the_re_snapshot_does_not_settle_a_tie_with_the_overview_choice(
     session_provider, sde_engine, monkeypatch,
 ):
     """The stored invention job's chance fits no decryptor and Fake
-    Symmetry; the published choice (no decryptor) settles it, so the
-    re-snapshot uses the actual source: (10 x 350 + 100) / (4 x 10) = 90 ISK
-    per run, 2 runs."""
+    Symmetry; the published choice (no decryptor) is no evidence, so the
+    actual source stays unknown and the expected estimate is used."""
     _seed_sde(sde_engine)
     _sde_decryptors(monkeypatch, _DECRYPTOR, _TWIN)
     _store_invention_job(session_provider, successful_runs=4)
@@ -508,7 +507,38 @@ def test_the_re_snapshot_costs_from_the_actual_jobs_the_overview_choice_disambig
     with session_provider.app_session() as session:
         job = session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one()
         assert job.invention_cost_unknown_reason is None
-        assert job.invention_cost == pytest.approx(2 * 90.0)
+        assert "actual_invention_job" not in str(job.build_cost_source)
+        assert "expected_invention_material_cost" in str(job.build_cost_source)
+
+
+def test_the_re_snapshot_settles_a_tie_from_the_owners_stored_manufacturing_jobs(
+    session_provider, sde_engine, monkeypatch,
+):
+    """The same tie, with a stored manufacturing job on a BPC of the
+    blueprint after the invention: its 12 runs (more than the 10 no
+    decryptor gives) settle Fake Symmetry, and the re-snapshot uses the
+    actual source: (10 x (350 + 400) + 100) / (4 x 12) ISK per run, 2 runs."""
+    _seed_sde(sde_engine)
+    _sde_decryptors(monkeypatch, _DECRYPTOR, _TWIN)
+    _store_invention_job(session_provider, successful_runs=4)
+    with session_provider.app_session() as session:
+        session.add(CharacterIndustryJobsModel(
+            character_id=_PILOT, job_id=4100, status="delivered", activity_id=1, runs=12,
+            blueprint_type_id=_TARGET_BP, product_type_id=_PRODUCT, cost=1.0,
+            raw={"job_id": 4100, "activity_id": 1, "status": "delivered", "runs": 12,
+                 "blueprint_type_id": _TARGET_BP, "blueprint_id": 77, "product_type_id": _PRODUCT,
+                 "start_date": "2026-09-21T00:00:00Z", "licensed_runs": 10},
+        ))
+        session.commit()
+    _store_job_without_a_choice(session_provider)
+    state = _state()
+    prices = state.esi_service.get_market_prices() + [{"type_id": _TWIN.type_id, "average_price": 400.0}]
+    state.esi_service = SimpleNamespace(get_market_prices=lambda: prices)
+    _service(state, session_provider).publish_decryptor_choices({_TARGET_BP: DecryptorChoice(NO_DECRYPTOR, "x")})
+    with session_provider.app_session() as session:
+        job = session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one()
+        assert job.invention_cost_unknown_reason is None
+        assert job.invention_cost == pytest.approx(2 * (10 * 750.0 + 100.0) / (4 * 12))
         assert job.build_cost_source.endswith("+actual_invention_job")
 
 

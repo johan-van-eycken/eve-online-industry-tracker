@@ -7,9 +7,12 @@ successful attempts yield runs. The decryptor of a job is read from its ESI
 success chance (`probability` = SDE base x skill factor x decryptor
 multiplier, the skill factor 1 + (sci1 + sci2)/30 + enc/40 at whole levels):
 ESI's licensed_runs on an invention job is the source T1 copy's runs, not
-the invented BPC's, so it names no decryptor. Several candidates: the
-overview's published choice for the blueprint when it is one of them, else
-"decryptor unknown: candidates ...". Never guessed.
+the invented BPC's, so it names no decryptor (nor does a manufacturing job's
+licensed_runs: that is the T2 blueprint's maxProductionLimit). Several
+candidates: settled by runs evidence (a BPC of the blueprint first used
+after the job that only this job can have made, with more runs than all but
+one candidate gives), else "decryptor unknown: candidates ...". Never
+guessed.
 
 Fake ids and prices only; the SDE rows are built in memory.
 """
@@ -217,47 +220,77 @@ def test_an_ambiguous_decryptor_is_never_guessed(sde):
     assert "decryptor unknown: candidates Fake +2 B, No decryptor" in source["unknown_reason"]
 
 
-def test_the_overview_choice_disambiguates_when_it_is_a_candidate(sde):
-    source = _sources(
-        sde, [_job()], options=_OPTIONS_WITH_TWIN, overview_choices={_TARGET_BP: _PLUS_2B},
-    )[_TARGET_BP]
+def _mfg(job_id, *, blueprint_id=77, runs=12, start_date="2026-10-02T00:00:00Z"):
+    """A later manufacturing job installed from an invented BPC (blueprint_id).
+    Its licensed_runs is the T2 blueprint's maxProductionLimit (10), not the
+    BPC's runs: no evidence."""
+    return {
+        "job_id": job_id, "activity_id": 1, "status": "delivered", "blueprint_type_id": _TARGET_BP,
+        "blueprint_id": blueprint_id, "product_type_id": _PRODUCT, "runs": runs,
+        "licensed_runs": 10, "start_date": start_date,
+    }
+
+
+def test_the_overview_choice_no_longer_settles_a_tie(sde):
+    """H1.3 (the user's ruling: evidence, else skip): the overview's
+    published choice is no evidence of what an earlier job used."""
+    for choice in (_PLUS_2B, NO_DECRYPTOR):
+        source = _sources(sde, [_job()], options=_OPTIONS_WITH_TWIN, overview_choices={_TARGET_BP: choice})[_TARGET_BP]
+        assert source.get("unit_cost_per_run") is None
+        assert "decryptor unknown: candidates Fake +2 B, No decryptor" in source["unknown_reason"]
+        assert "no runs evidence" in source["unknown_reason"]
+
+
+def test_a_later_bpc_with_more_runs_than_one_candidate_settles_the_tie(sde):
+    """A BPC of the blueprint first used after the job, 12 runs: no
+    decryptor gives 10 runs per BPC, so the job used Fake +2 B (12)."""
+    source = _sources(sde, [_job(), _mfg(2, runs=12)], options=_OPTIONS_WITH_TWIN)[_TARGET_BP]
     assert source["unit_cost_per_run"] == pytest.approx((10 * (_PER_ATTEMPT + 500.0) + 100.0) / (4 * 12))
-    assert source["decryptor_from_overview_choice_job_ids"] == [1]
+    assert source["decryptor_from_runs_evidence_job_ids"] == [1]
+    assert "decryptor_from_overview_choice_job_ids" not in source
 
 
-def test_the_overview_choice_disambiguates_to_no_decryptor(sde):
+def test_the_runs_of_several_jobs_on_one_bpc_add_up(sde):
     source = _sources(
-        sde, [_job()], options=_OPTIONS_WITH_TWIN, overview_choices={_TARGET_BP: NO_DECRYPTOR},
+        sde, [_job(), _mfg(2, runs=6), _mfg(3, runs=5, start_date="2026-10-05T00:00:00Z")],
+        options=_OPTIONS_WITH_TWIN,
     )[_TARGET_BP]
-    assert source["unit_cost_per_run"] == pytest.approx(90.0)
-    assert source["decryptor_from_overview_choice_job_ids"] == [1]
+    assert source["decryptor_from_runs_evidence_job_ids"] == [1]
 
 
-def test_an_overview_choice_outside_the_candidates_does_not_decide(sde):
+def test_runs_every_candidate_explains_settle_nothing(sde):
+    source = _sources(sde, [_job(), _mfg(2, runs=10)], options=_OPTIONS_WITH_TWIN)[_TARGET_BP]
+    assert source.get("unit_cost_per_run") is None
+    assert "no runs evidence" in source["unknown_reason"]
+
+
+def test_a_bpc_used_before_the_job_completed_is_no_evidence(sde):
     source = _sources(
-        sde, [_job()], options=_OPTIONS_WITH_TWIN, overview_choices={_TARGET_BP: _PLUS_1},
+        sde, [_job(), _mfg(2, runs=12, start_date="2026-09-30T00:00:00Z")], options=_OPTIONS_WITH_TWIN,
     )[_TARGET_BP]
     assert source.get("unit_cost_per_run") is None
-    reason = source["unknown_reason"]
-    assert "decryptor unknown: candidates Fake +2 B, No decryptor" in reason
-    assert "the overview's choice (Fake +1) is not one of them" in reason
 
 
-def test_another_blueprints_overview_choice_does_not_decide(sde):
-    source = _sources(
-        sde, [_job()], options=_OPTIONS_WITH_TWIN, overview_choices={990099: NO_DECRYPTOR},
-    )[_TARGET_BP]
+def test_a_bpc_another_invention_job_could_have_made_is_no_evidence(sde):
+    """Job 5 (Fake +2 A, 12 runs per BPC) completed before the BPC was
+    used, so the 12-run BPC may be job 5's: job 1 is left out."""
+    other = _job(5, probability=_chance(_PLUS_2A), completed_date="2026-09-25T00:00:00Z")
+    source = _sources(sde, [_job(), other, _mfg(2, runs=12)], options=_OPTIONS_WITH_TWIN)[_TARGET_BP]
+    assert source["jobs"] == 1   # job 5 only
+    assert source["decryptor_from_runs_evidence_job_ids"] == []
+
+
+def test_a_bpc_with_more_runs_than_any_candidate_settles_nothing(sde):
+    source = _sources(sde, [_job(), _mfg(2, runs=40)], options=_OPTIONS_WITH_TWIN)[_TARGET_BP]
     assert source.get("unit_cost_per_run") is None
-    assert "decryptor unknown: candidates" in source["unknown_reason"]
 
 
-def test_an_unambiguous_chance_is_not_overridden_by_the_overview_choice(sde):
+def test_an_unambiguous_chance_needs_no_runs_evidence(sde):
     source = _sources(
-        sde, [_job(probability=_chance(_PLUS_1))], options=_OPTIONS_WITH_TWIN,
-        overview_choices={_TARGET_BP: NO_DECRYPTOR},
+        sde, [_job(probability=_chance(_PLUS_1)), _mfg(2, runs=40)], options=_OPTIONS_WITH_TWIN,
     )[_TARGET_BP]
     assert source["unit_cost_per_run"] == pytest.approx((10 * (_PER_ATTEMPT + 300.0) + 100.0) / (4 * 11))
-    assert source["decryptor_from_overview_choice_job_ids"] == []
+    assert source["decryptor_from_runs_evidence_job_ids"] == []
 
 
 def test_a_skill_factor_below_the_sde_required_levels_is_no_candidate(sde):

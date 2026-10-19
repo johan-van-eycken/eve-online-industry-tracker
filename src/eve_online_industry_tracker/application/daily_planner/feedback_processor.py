@@ -232,9 +232,10 @@ class FeedbackProcessor:
         #       x (SDE runs + the decryptor's runs)), so failed attempts are
         #       paid for
         #       (asset_provenance.build_invention_cost_per_run_by_blueprint_type);
-        #       a job whose chance fits several decryptors uses the
-        #       overview's choice when it is one of them, else it is left
-        #       out, never guessed;
+        #       a job whose chance fits several decryptors is settled only
+        #       by runs evidence (a later BPC of the blueprint only it can
+        #       have made, used for more runs than all but one candidate
+        #       gives), else it is left out, never guessed;
         #     - otherwise the expected invention inputs, sized like the
         #       producer (asset_provenance.estimate_invention_cost_per_run):
         #       one attempt's datacores + the producer's decryptor, over the

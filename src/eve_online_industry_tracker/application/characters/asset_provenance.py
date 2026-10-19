@@ -441,14 +441,6 @@ class RealizedInventionRefresh:
                 )
         return self.encryption_skill_type_ids
 
-    def overview_decryptor_for(self, blueprint_type_id: int) -> DecryptorOption | None:
-        """The decryptor the published overview invents this blueprint with
-        (in memory or persisted); None when it plans none for it. Not the
-        "decryptor selection off" default: that is no per-blueprint choice."""
-        if self.inputs is None:
-            return None
-        return self.inputs.decryptor_by_blueprint_type_id.get(int(blueprint_type_id))
-
 
 def save_published_decryptor_choices(
     app_session: Any, choices: Mapping[int, tuple[DecryptorOption, str | None]], *, now: datetime,
@@ -515,8 +507,9 @@ def resnapshot_jobs_without_decryptor_choice(
     keeps a reason when the estimate is still unknown (for a blueprint the
     overview does not plan: "this blueprint is not planned by the overview").
     The actual-invention source is re-evaluated too, from the owner's stored
-    invention jobs with this publish's choices (they may now settle an
-    ambiguous decryptor), so a reason naming both sources keeps both.
+    invention jobs (a decryptor tie settled only by the runs on the owner's
+    stored manufacturing jobs, never by the overview's choice), so a reason
+    naming both sources keeps both.
     Commits; returns the number of jobs re-snapshotted."""
     from eve_online_industry_tracker.application.characters.asset_history import (
         _owner_models,
@@ -533,13 +526,15 @@ def resnapshot_jobs_without_decryptor_choice(
 
         def _invention_sources(owner_id: int) -> dict[int, dict[str, Any]]:
             """The owner's actual-invention sources from its stored invention
-            jobs, as its job refresh reads them from ESI, with this
-            publish's decryptor choices."""
+            jobs, with its stored manufacturing jobs as the runs evidence for
+            a decryptor tie, as its job refresh reads them from ESI. The
+            stored jobs can reach further back than ESI's job history (the
+            refresh's set), so the re-snapshot may see more evidence."""
             if owner_id not in invention_sources_by_owner:
                 stored = (
                     app_session.query(model.raw)
                     .filter(getattr(model, owner_field) == owner_id)
-                    .filter(model.activity_id == 8)
+                    .filter(model.activity_id.in_((1, 8)))
                     .all()
                 )
                 invention_sources_by_owner[owner_id] = build_invention_cost_per_run_by_blueprint_type(
@@ -816,26 +811,26 @@ def _infer_job_decryptor(
     base_probability: float | None,
     skill_factors: tuple[float, ...],
     options: tuple[DecryptorOption, ...],
-    overview_choice: DecryptorOption | None = None,
-) -> tuple[DecryptorOption | None, str | None, bool]:
+) -> tuple[DecryptorOption | None, str | None, tuple[DecryptorOption, ...]]:
     """The decryptor an invention job used, read from its ESI success chance:
     SDE base x skill factor x decryptor multiplier, the skill factor one of
     `skill_factors` (whole levels). ESI's licensed_runs on an invention job is
     the source T1 copy's runs, so it is no evidence.
 
-    (option, None, False) when exactly one option (no decryptor included)
-    fits; (option, None, True) when several fit and the overview's published
-    choice for the blueprint is one of them; else (None, "decryptor unknown:
-    ...", False). Never guessed: no decryptor and Symmetry (both x1.0) only
-    the overview's choice can tell apart."""
+    (option, None, (option,)) when exactly one option (no decryptor
+    included) fits; (None, "decryptor unknown: candidates ...", candidates)
+    when several fit, for the caller to settle from runs evidence
+    (_settle_decryptor_from_runs); else (None, "decryptor unknown: ...", ()).
+    Never guessed, and never the overview's choice: what the producer plans
+    now is no evidence of what an earlier job used."""
     if len(options) <= 1:
-        return None, "decryptor unknown: the SDE gave no decryptor data", False
+        return None, "decryptor unknown: the SDE gave no decryptor data", ()
     if probability is None or probability <= 0:
-        return None, "decryptor unknown: the job gives no success chance to read it from", False
+        return None, "decryptor unknown: the job gives no success chance to read it from", ()
     if probability >= 1.0 - 1e-9:
-        return None, "decryptor unknown: the job's success chance is capped at 100%", False
+        return None, "decryptor unknown: the job's success chance is capped at 100%", ()
     if base_probability is None or base_probability <= 0:
-        return None, "decryptor unknown: the SDE gives no base success chance", False
+        return None, "decryptor unknown: the SDE gives no base success chance", ()
 
     def _fits(option: DecryptorOption) -> bool:
         multiplier = float(option.probability_multiplier)
@@ -844,21 +839,92 @@ def _infer_job_decryptor(
         implied = float(probability) / (float(base_probability) * multiplier)
         return any(abs(factor - implied) <= _SUCCESS_CHANCE_RELATIVE_TOLERANCE * factor for factor in skill_factors)
 
-    matches = [o for o in options if _fits(o)]
+    matches = tuple(o for o in options if _fits(o))
     chance = f"the job's {float(probability):.4f} success chance over the SDE base {float(base_probability):g}"
     if len(matches) == 1:
-        return matches[0], None, False
+        return matches[0], None, matches
     if not matches:
-        return None, f"decryptor unknown: {chance} matches no decryptor at any skill level", False
-    if overview_choice is not None:
-        for option in matches:
-            if option.type_id == overview_choice.type_id:
-                return option, None, True
+        return None, f"decryptor unknown: {chance} matches no decryptor at any skill level", ()
     names = ", ".join(sorted(str(o.type_name) for o in matches))
-    reason = f"decryptor unknown: candidates {names} ({chance} fits each)"
-    if overview_choice is not None:
-        reason += f"; the overview's choice ({overview_choice.type_name}) is not one of them"
-    return None, reason, False
+    return None, f"decryptor unknown: candidates {names} ({chance} fits each)", matches
+
+
+def _job_finished_at(raw: Mapping[str, Any]) -> str | None:
+    """When a job's output could first be used: its completed date, else its
+    end date (ESI ISO strings, which compare in time order)."""
+    value = raw.get("completed_date") or raw.get("end_date")
+    return str(value) if value else None
+
+
+def _bpc_runs_lower_bounds(jobs: Iterable[Mapping[str, Any]]) -> dict[int, list[tuple[str, int]]]:
+    """{blueprint type: [(first use, runs used), one per blueprint item]}
+    from the owner's manufacturing jobs. The runs of every job installed from
+    one blueprint item add up to at most that BPC's runs: a lower bound on
+    them. ESI's licensed_runs on a manufacturing job is no evidence: it is
+    the blueprint's maxProductionLimit, not the BPC's runs (all 1117 stored
+    manufacturing jobs, 2026-10-19). A job without a blueprint item, start
+    date or runs is left out."""
+    by_item: dict[tuple[int, int], list[Any]] = {}
+    for job in jobs:
+        raw = job.get("raw") if isinstance(job.get("raw"), dict) else job
+        if not isinstance(raw, Mapping) or _safe_int(raw.get("activity_id")) != 1:
+            continue
+        blueprint_type_id = _safe_int(raw.get("blueprint_type_id"))
+        item_id = _safe_int(raw.get("blueprint_id"))
+        runs = _safe_int(raw.get("runs"))
+        start = raw.get("start_date")
+        if not blueprint_type_id or not item_id or not runs or runs <= 0 or not start:
+            continue
+        slot = by_item.setdefault((int(blueprint_type_id), int(item_id)), [str(start), 0])
+        slot[0] = min(slot[0], str(start))
+        slot[1] += int(runs)
+    out: dict[int, list[tuple[str, int]]] = defaultdict(list)
+    for (blueprint_type_id, _), (first_use, runs) in by_item.items():
+        out[blueprint_type_id].append((first_use, runs))
+    return dict(out)
+
+
+def _settle_decryptor_from_runs(
+    *,
+    finished_at: str | None,
+    candidates: tuple[DecryptorOption, ...],
+    base_runs: int,
+    bpc_lower_bounds: list[tuple[str, int]],
+    other_producers: list[tuple[str | None, int | None]],
+) -> tuple[DecryptorOption | None, str]:
+    """Settle a decryptor tie from the runs used on the blueprint's later BPCs.
+
+    A BPC is this job's evidence when it was first used after the job
+    finished, this job can have made it (a candidate gives at least the runs
+    used on it) and no other of the owner's invention jobs of the blueprint
+    (`other_producers`: (finished at, the most runs per BPC it can give;
+    None: unknown, any)) that finished before that use can have. This job's
+    invented runs are then at least those runs, which rules out every
+    candidate giving fewer. (decryptor, the evidence) when exactly one
+    candidate remains, else (None, why no runs evidence settles it). A BPC
+    bought or received from outside would look like this job's: the
+    evidence assumes the owner's T2 BPCs of the blueprint are its own
+    inventions."""
+    if finished_at is None:
+        return None, "no runs evidence settles it (the job has no completion date)"
+    runs_by_candidate = [(c, invented_runs_per_blueprint(int(base_runs), c)) for c in candidates]
+    most = max(runs for _, runs in runs_by_candidate)
+    floor = 0
+    for first_use, runs in bpc_lower_bounds:
+        if first_use <= finished_at or runs > most:
+            continue  # used before this job's BPCs existed, or more runs than it can give
+        if any(
+            (done is None or done < first_use) and (max_runs is None or max_runs >= runs)
+            for done, max_runs in other_producers
+        ):
+            continue  # another invention job may have made this BPC
+        floor = max(floor, int(runs))
+    remaining = [c for c, runs in runs_by_candidate if runs >= floor]
+    if floor and len(remaining) == 1:
+        return remaining[0], f"a later BPC was used for {floor} runs"
+    if floor:
+        return None, f"no runs evidence settles it (a later BPC used for {floor} runs fits several)"
+    return None, "no runs evidence settles it (no later BPC of this blueprint that only this job can have made)"
 
 
 def build_invention_cost_per_run_by_blueprint_type(
@@ -877,77 +943,106 @@ def build_invention_cost_per_run_by_blueprint_type(
     runs plus the job's decryptor's (not ESI's licensed_runs: that is the
     source T1 copy's runs). A job is left out when it is not delivered, has
     no successful_runs or runs, its decryptor cannot be read from its success
-    chance (_infer_job_decryptor; several candidates are settled by the
-    overview's published choice for the blueprint when it is one of them,
-    listed in `decryptor_from_overview_choice_job_ids`) or an input has no
-    price. A blueprint without a usable job, or with zero
-    successes over its usable jobs, maps to {"unknown_reason": why} and no
-    unit_cost_per_run: the caller then uses the expected estimate."""
+    chance (_infer_job_decryptor; several candidates are settled only by runs
+    evidence from the owner's manufacturing jobs in `jobs`,
+    _settle_decryptor_from_runs, listed in
+    `decryptor_from_runs_evidence_job_ids`) or an input has no price. A
+    blueprint without a usable job, or with zero successes over its usable
+    jobs, maps to {"unknown_reason": why} and no unit_cost_per_run: the
+    caller then uses the expected estimate."""
     refresh = invention_refresh or RealizedInventionRefresh(inputs=None)
     memo = refresh.source_activity_by_target
+    job_list = [job for job in (jobs or []) if isinstance(job, dict)]
+    bpc_lower_bounds = _bpc_runs_lower_bounds(job_list)
     totals: dict[int, dict[str, Any]] = {}
-    for job in jobs or []:
-        if not isinstance(job, dict):
-            continue
+    #: Every delivered invention job with a success, per invented blueprint:
+    #: (the job, finished at, the most runs per BPC it can give or None).
+    producers: dict[int, list[tuple[dict[str, Any], str | None, int | None]]] = defaultdict(list)
+    readings: list[tuple[int, dict[str, Any], Mapping[str, Any], Mapping[str, Any] | None, int,
+                         DecryptorOption | None, str | None, tuple[DecryptorOption, ...]]] = []
+
+    def _skip(target: int, job_id: Any, why: str) -> None:
+        totals[target]["skipped"].append(f"job {job_id}: {why}")
+        logging.info("Invention job %s for blueprint %s skipped as a cost source: %s", job_id, target, why)
+
+    for job in job_list:
         raw = job.get("raw") if isinstance(job.get("raw"), dict) else job
         if _safe_int((raw or {}).get("activity_id")) != 8:
             continue
         target = _safe_int(job.get("product_type_id"))
         if not target or target <= 0:
             continue
-        entry = totals.setdefault(int(target), {
+        target = int(target)
+        totals.setdefault(target, {
             "cost": 0.0, "attempts": 0, "successful_runs": 0, "invented_runs": 0, "jobs": 0, "skipped": [],
-            "overview_choice_job_ids": [],
+            "runs_evidence_job_ids": [],
         })
         job_id = job.get("job_id")
-
-        def _skip(why: str) -> None:
-            entry["skipped"].append(f"job {job_id}: {why}")
-            logging.info("Invention job %s for blueprint %s skipped as a cost source: %s", job_id, target, why)
-
         if str((raw or {}).get("status") or "").lower() != _DELIVERED_STATUS:
             continue  # not finished: its outcome is not known yet (not a reason, just not yet)
         runs = _safe_int((raw or {}).get("runs"))
         successful_runs = _safe_int((raw or {}).get("successful_runs"))
         if successful_runs is None or successful_runs < 0:
-            _skip("no successful_runs")
+            _skip(target, job_id, "no successful_runs")
             continue
         if not runs or runs <= 0:
-            _skip("no runs")
+            _skip(target, job_id, "no runs")
             continue
-        source_id, invention = _invention_source_activity(sde_session, int(target), memo)
-        product = _invention_target_product(invention or {}, int(target)) if source_id is not None else None
+        source_id, invention = _invention_source_activity(sde_session, target, memo)
+        product = _invention_target_product(invention or {}, target) if source_id is not None else None
         base_runs = _safe_int((product or {}).get("quantity"))
         if not base_runs or base_runs <= 0:
-            _skip("the SDE gives no runs per invented BPC")
+            _skip(target, job_id, "the SDE gives no runs per invented BPC")
             continue
-        decryptor, decryptor_reason, by_overview_choice = _infer_job_decryptor(
+        decryptor, decryptor_reason, candidates = _infer_job_decryptor(
             probability=_safe_float((raw or {}).get("probability")),
             base_probability=_safe_float((product or {}).get("probability")),
             skill_factors=_feasible_invention_skill_factors(invention, refresh.encryption_skills(sde_session)),
             options=refresh.decryptors(sde_session),
-            overview_choice=refresh.overview_decryptor_for(int(target)),
         )
+        if successful_runs > 0:
+            most_runs = (
+                max(invented_runs_per_blueprint(int(base_runs), c) for c in candidates) if candidates else None
+            )
+            producers[target].append((job, _job_finished_at(raw or {}), most_runs))
+        readings.append((target, job, raw or {}, invention, int(base_runs), decryptor, decryptor_reason, candidates))
+
+    for target, job, raw, invention, base_runs, decryptor, decryptor_reason, candidates in readings:
+        entry = totals[target]
+        job_id = job.get("job_id")
+        by_runs_evidence = False
+        if decryptor is None and len(candidates) > 1:
+            decryptor, evidence = _settle_decryptor_from_runs(
+                finished_at=_job_finished_at(raw), candidates=candidates, base_runs=base_runs,
+                bpc_lower_bounds=bpc_lower_bounds.get(target, []),
+                other_producers=[(done, most) for other, done, most in producers[target] if other is not job],
+            )
+            if decryptor is None:
+                decryptor_reason = f"{decryptor_reason}; {evidence}"
+            else:
+                by_runs_evidence = True
+                logging.info(
+                    "Invention job %s for blueprint %s: its success chance fits several decryptors; %s, which "
+                    "rules out all but %s", job_id, target, evidence, decryptor.type_name,
+                )
         if decryptor is None:
-            _skip(str(decryptor_reason))
+            _skip(target, job_id, str(decryptor_reason))
             continue
         per_attempt, unpriced = _price_invention_inputs(
             _invention_attempt_inputs(invention, decryptor), market_price_map=market_price_map,
         )
         if per_attempt is None:
-            _skip(f"invention input(s) {unpriced} have no price")
+            _skip(target, job_id, f"invention input(s) {unpriced} have no price")
             continue
+        runs = int(_safe_int(raw.get("runs")) or 0)
+        successful_runs = int(_safe_int(raw.get("successful_runs")) or 0)
         entry["cost"] += float(runs) * float(per_attempt) + float(_safe_float(job.get("cost")) or 0.0)
-        entry["attempts"] += int(runs)
-        entry["successful_runs"] += int(successful_runs)
-        entry["invented_runs"] += int(successful_runs) * invented_runs_per_blueprint(int(base_runs), decryptor)
+        entry["attempts"] += runs
+        entry["successful_runs"] += successful_runs
+        entry["invented_runs"] += successful_runs * invented_runs_per_blueprint(base_runs, decryptor)
         entry["jobs"] += 1
-        if by_overview_choice:
-            entry["overview_choice_job_ids"].append(job_id)
-            logging.info(
-                "Invention job %s for blueprint %s: its success chance fits several decryptors; the overview's "
-                "choice (%s) is one of them and is used", job_id, target, decryptor.type_name,
-            )
+        if by_runs_evidence:
+            entry["runs_evidence_job_ids"].append(job_id)
 
     out: dict[int, dict[str, Any]] = {}
     for target, entry in totals.items():
@@ -969,7 +1064,8 @@ def build_invention_cost_per_run_by_blueprint_type(
             "attempts": int(entry["attempts"]),
             "successful_runs": int(entry["successful_runs"]),
             "invented_runs": int(entry["invented_runs"]),
-            "decryptor_from_overview_choice_job_ids": list(entry["overview_choice_job_ids"]),
+            # Tied jobs whose decryptor the runs on a later BPC settled.
+            "decryptor_from_runs_evidence_job_ids": list(entry["runs_evidence_job_ids"]),
         }
     return out
 
