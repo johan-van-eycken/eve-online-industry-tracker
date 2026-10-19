@@ -253,3 +253,65 @@ def test_the_fee_inputs_column_is_migrated():
 
     source = inspect.getsource(schema_migrations.ensure_app_schema)
     assert 'table="character_realized_sales_ledger", column="fee_inputs"' in source
+
+
+def test_concurrent_reads_rebuild_a_stale_character_once(monkeypatch):
+    """Two requests that both find character 1 stale must not both rebuild
+    it: two rebuilds race on UNIQUE(character_id, transaction_id). The
+    rebuild runs under a per-character lock and re-checks staleness inside."""
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from eve_online_industry_tracker.application.characters import service as characters_service
+
+    barrier = threading.Barrier(2, timeout=5)
+    calls = {"stale": 0}
+    rebuilt: list[int] = []
+    stale = {1}
+    guard = threading.Lock()
+
+    class _Ledger:
+        def __init__(self, **_):
+            pass
+
+        def list_rows(self, character_id=None):
+            return [{"character_id": 1}]
+
+        def stale_character_ids(self, rows):
+            with guard:
+                calls["stale"] += 1
+                first_two = calls["stale"] <= 2
+            if first_two:
+                barrier.wait()   # both requests see the character stale
+            return set(stale)
+
+        def rebuild(self, character_id=None):
+            time.sleep(0.05)
+            rebuilt.append(character_id)
+            stale.discard(character_id)
+            return []
+
+    monkeypatch.setattr(characters_service, "CharacterRealizedProfitLedgerService", _Ledger)
+    monkeypatch.setattr(characters_service, "summarize_realized_profit_rows", lambda rows: {})
+    state = SimpleNamespace(
+        esi_service=SimpleNamespace(get_market_prices=lambda: []),
+        db_app=SimpleNamespace(session=None), db_sde=SimpleNamespace(session=None),
+        admin_settings=None,
+    )
+    svc = characters_service.CharactersService(state=state)
+    errors: list[BaseException] = []
+
+    def _read():
+        try:
+            svc.get_realized_profit_ledger(character_id=1)
+        except BaseException as exc:  # surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_read) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not errors
+    assert rebuilt == [1]

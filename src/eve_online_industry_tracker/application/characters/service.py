@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,16 @@ from eve_online_industry_tracker.application.market_analysis.market_history_serv
 from eve_online_industry_tracker.infrastructure.oauth_character_repository import (
     OAuthCharacterRepository,
 )
+
+
+_LEDGER_REBUILD_LOCKS: dict[int, threading.Lock] = {}
+_LEDGER_REBUILD_LOCKS_GUARD = threading.Lock()
+
+
+def _ledger_rebuild_lock(character_id: int) -> threading.Lock:
+    """The one lock per character for a stale-ledger rebuild (per process)."""
+    with _LEDGER_REBUILD_LOCKS_GUARD:
+        return _LEDGER_REBUILD_LOCKS.setdefault(int(character_id), threading.Lock())
 
 
 class CharactersService:
@@ -66,7 +77,15 @@ class CharactersService:
             # here (local data only, no ESI), so the persisted ledger never shows stale fees.
             stale = ledger_service.stale_character_ids(rows)
             for stale_character_id in sorted(stale):
-                ledger_service.rebuild(character_id=stale_character_id)
+                # Two requests can find the same character stale; two rebuilds
+                # race on UNIQUE(character_id, transaction_id). One rebuilds,
+                # the other re-checks under the lock and finds it fresh.
+                with _ledger_rebuild_lock(int(stale_character_id)):
+                    still_stale = ledger_service.stale_character_ids(
+                        ledger_service.list_rows(character_id=int(stale_character_id))
+                    )
+                    if int(stale_character_id) in still_stale:
+                        ledger_service.rebuild(character_id=stale_character_id)
             if stale:
                 rows = ledger_service.list_rows(character_id=character_id)
 
