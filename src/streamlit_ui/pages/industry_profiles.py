@@ -540,6 +540,15 @@ def _infer_upwell_size_from_type_name(type_name: str | None) -> str | None:
 
 
 def _load_rig_options() -> tuple[dict[int, str], dict[int, dict], list[int]]:
+    rig_options, rig_bonus_map, rig_option_ids, _problem = _load_rig_catalog()
+    return rig_options, rig_bonus_map, rig_option_ids
+
+
+def _load_rig_catalog() -> tuple[dict[int, str], dict[int, dict], list[int], str | None]:
+    """(rig names, rig bonuses, option ids, load problem): the problem names
+    a failed /industry_structure_rigs read (None when it loaded), so the page
+    can refuse to save rigs from an incomplete list."""
+    problem: str | None = None
     rig_options = {0: "None"}
     rig_bonus_map: dict[int, dict] = {}
     rigs_resp = cached_api_get("/industry_structure_rigs")
@@ -560,12 +569,41 @@ def _load_rig_options() -> tuple[dict[int, str], dict[int, dict], list[int]]:
         reason = (rigs_resp or {}).get("message") or "the structure rigs request failed (see the logs)"
         logger.warning("Industry profiles: structure rigs did not load: %s", reason)
         st.warning(f"Structure rigs could not be loaded ({reason}); only 'None' can be selected as a rig.")
+        problem = f"the structure rigs could not be loaded ({reason})"
 
     rig_option_ids = [0] + sorted(
         [tid for tid in rig_options.keys() if tid != 0],
         key=lambda tid: str(rig_options.get(tid, tid)).lower(),
     )
-    return rig_options, rig_bonus_map, rig_option_ids
+    return rig_options, rig_bonus_map, rig_option_ids, problem
+
+
+def _rig_select_option_ids(rig_option_ids: list[int], *, stored_ids: list[int]) -> list[int]:
+    """The rig options of a profile's slots: the loaded rigs, plus each stored
+    rig id the list lacks (the rigs failed to load, or lost that entry) as its
+    own option, so the slot keeps showing the stored rig instead of "None"."""
+    extra = [int(tid) for tid in stored_ids if int(tid or 0) != 0 and int(tid) not in rig_option_ids]
+    return [*rig_option_ids, *dict.fromkeys(extra)]
+
+
+def _rig_label(type_id: int, rig_options: dict[int, str]) -> str:
+    """The rig's name, or "Unknown rig (id N)" for a stored id the rig list lacks."""
+    return rig_options[type_id] if type_id in rig_options else f"Unknown rig (id {int(type_id)})"
+
+
+def _rig_save_block_reason(rig_type_ids: list[int], *, rig_bonus_map: dict[int, dict],
+                           rigs_load_problem: str | None) -> str | None:
+    """Why "Save rigs" is disabled, or None. Saving writes the rigs' bonuses
+    too, so it is refused while the rig list failed to load and while a
+    selected rig has no loaded bonuses (it would save 0 for that rig)."""
+    if rigs_load_problem:
+        return f"Save rigs is disabled: {rigs_load_problem}. Reload the page once the rigs load."
+    unknown = [int(tid) for tid in rig_type_ids if int(tid or 0) != 0 and int(tid) not in rig_bonus_map]
+    if unknown:
+        ids = ", ".join(str(tid) for tid in dict.fromkeys(unknown))
+        return (f"Save rigs is disabled: the stored rig(s) {ids} are not in the loaded rig list, "
+                "so their bonuses are unknown. Reload the page once the rigs load.")
+    return None
 
 
 def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> dict[str, dict]:
@@ -672,6 +710,7 @@ def _render_existing_profiles(
     rig_option_ids: list[int],
     profile_context: dict[str, dict],
     scc_rates: tuple[float, float],
+    rigs_load_problem: str | None = None,
 ) -> None:
     for profile in profiles:
         with st.expander(f"{'⭐ ' if profile['is_default'] else ''}{profile['profile_name']}"):
@@ -758,28 +797,31 @@ def _render_existing_profiles(
                         st.write(line)
                     st.markdown("**Rigs**")
 
+                    stored_rig_ids = [int(profile.get(f"rig_slot{slot}_type_id") or 0) for slot in range(3)]
+                    slot_option_ids = _rig_select_option_ids(rig_option_ids, stored_ids=stored_rig_ids)
+
                     def _default_index(saved_id: int) -> int:
-                        return rig_option_ids.index(saved_id) if saved_id in rig_option_ids else 0
+                        return slot_option_ids.index(saved_id) if saved_id in slot_option_ids else 0
 
                     rig0 = st.selectbox(
                         "Rig Slot 1",
-                        options=rig_option_ids,
-                        index=_default_index(int(profile.get("rig_slot0_type_id") or 0)),
-                        format_func=lambda x: rig_options.get(x, str(x)),
+                        options=slot_option_ids,
+                        index=_default_index(stored_rig_ids[0]),
+                        format_func=lambda x: _rig_label(x, rig_options),
                         key=f"edit_rig0_{profile['id']}",
                     )
                     rig1 = st.selectbox(
                         "Rig Slot 2",
-                        options=rig_option_ids,
-                        index=_default_index(int(profile.get("rig_slot1_type_id") or 0)),
-                        format_func=lambda x: rig_options.get(x, str(x)),
+                        options=slot_option_ids,
+                        index=_default_index(stored_rig_ids[1]),
+                        format_func=lambda x: _rig_label(x, rig_options),
                         key=f"edit_rig1_{profile['id']}",
                     )
                     rig2 = st.selectbox(
                         "Rig Slot 3",
-                        options=rig_option_ids,
-                        index=_default_index(int(profile.get("rig_slot2_type_id") or 0)),
-                        format_func=lambda x: rig_options.get(x, str(x)),
+                        options=slot_option_ids,
+                        index=_default_index(stored_rig_ids[2]),
+                        format_func=lambda x: _rig_label(x, rig_options),
                         key=f"edit_rig2_{profile['id']}",
                     )
 
@@ -801,7 +843,15 @@ def _render_existing_profiles(
                             st.markdown("\n".join(breakdown))
 
             with col3:
-                if not is_profile_npc_station and st.button("Save rigs", key=f"save_rigs_{profile['id']}"):
+                rig_save_block = (
+                    None if is_profile_npc_station
+                    else _rig_save_block_reason([int(rig0), int(rig1), int(rig2)], rig_bonus_map=rig_bonus_map,
+                                                rigs_load_problem=rigs_load_problem)
+                )
+                if rig_save_block:
+                    st.warning(rig_save_block)
+                if not is_profile_npc_station and st.button("Save rigs", key=f"save_rigs_{profile['id']}",
+                                                            disabled=bool(rig_save_block)):
                     payload = {
                         "rig_slot0_type_id": None if int(rig0) == 0 else int(rig0),
                         "rig_slot1_type_id": None if int(rig1) == 0 else int(rig1),
@@ -1247,7 +1297,7 @@ def render():
 
     if selected_character_id is None:
         st.stop()
-    rig_options, rig_bonus_map, rig_option_ids = _load_rig_options()
+    rig_options, rig_bonus_map, rig_option_ids, rigs_load_problem = _load_rig_catalog()
 
     # Fetch profiles (cached to avoid repeated backend calls on reruns)
     response = _get_industry_profiles(int(selected_character_id))
@@ -1274,6 +1324,7 @@ def render():
             rig_option_ids=rig_option_ids,
             profile_context=profile_context,
             scc_rates=scc_rates,
+            rigs_load_problem=rigs_load_problem,
         )
     else:
         st.info("No profiles found. Create one below.")
