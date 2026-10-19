@@ -73,6 +73,13 @@ def industry_job_location_id(job: Dict[str, Any]) -> Optional[int]:
     return value
 
 
+
+class CharacterSaveError(Exception):
+    """Character.save_character could not write the profile (the app DB
+    failed; the session is rolled back). An Exception, as before, so the
+    callers that catch Exception still do."""
+
+
 class Character:
     """Ingame entity of a character."""
 
@@ -275,10 +282,15 @@ class Character:
             self._db_app.session.commit()
             logging.debug(f"Character '{self.character_name}' saved to database.")
     
-        except Exception as e:
+        except SQLAlchemyError as e:
             error_message = f"Failed to save character '{self.character_name}' to database. Error: {str(e)}"
             logging.error(error_message)
-            raise Exception(error_message)
+            try:
+                self._db_app.session.rollback()
+            except SQLAlchemyError as rollback_exc:
+                logging.warning("Character %s: rollback after the failed save failed: %s", self.character_name,
+                                rollback_exc)
+            raise CharacterSaveError(error_message) from e
 
     # -------------------
     # Save Wallet Journal
@@ -626,7 +638,7 @@ class Character:
                                              "unknown_reason": exc.message,
                                              "updated_at": datetime.now(timezone.utc).isoformat(),
                                              "source": "computed"}}
-        except Exception as e:
+        except (SQLAlchemyError, CharacterSaveError, *ESI_REQUEST_ERRORS) as e:   # a bug propagates
             logging.warning(
                 "Failed to compute market fees for %s (%s): %s",
                 self.character_name,

@@ -822,9 +822,9 @@ class ESIClient:
             self.db_oauth.session.execute(stmt)
             self.db_oauth.session.commit()
             logging.debug(f"Cache updated for {endpoint}.")
-        except Exception as e:
+        except SQLAlchemyError as e:   # the request's data stands; a bug propagates
             logging.error(f"Error saving cache for {endpoint}: {e}")
-            self.db_oauth.session.rollback()
+            self._rollback_quietly()
     
     # ------------------------------
     # ESI API Calls (with Caching)

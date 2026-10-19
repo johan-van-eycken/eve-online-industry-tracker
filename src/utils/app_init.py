@@ -159,12 +159,12 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         try:
             from eve_online_industry_tracker.infrastructure.esi_client import prune_stale_esi_cache
             prune_stale_esi_cache(db_oauth.session)
-        except Exception as exc:   # a cleanup: startup goes on, the orphaned rows stay until the next start
+        except SQLAlchemyError as exc:   # a cleanup: startup goes on, the orphaned rows stay until the next start
             logging.warning("ESI cache cleanup failed: %s", exc)
             try:
                 db_oauth.session.rollback()
-            except SQLAlchemyError:
-                pass
+            except SQLAlchemyError as rollback_exc:
+                logging.warning("ESI cache cleanup: rollback failed: %s", rollback_exc)
 
         logging.debug(f"Database URI for App: {cfg['app']['database_app_uri']}")
         db_app = init_db_app(cfgManager)

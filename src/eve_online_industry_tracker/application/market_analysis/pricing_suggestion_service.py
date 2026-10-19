@@ -11,6 +11,7 @@ from sqlalchemy import and_
 from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing import MarketPricingService
@@ -224,7 +225,7 @@ class PricingSuggestionService:
                 return float(price_map[type_id].get("unit_price") or 0) or None
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
-        except Exception as exc:
+        except (SQLAlchemyError, *ESI_REQUEST_ERRORS) as exc:   # a bug propagates
             # The advised price is then worked out without the hub price.
             logging.warning("Pricing suggestion: hub sell price of type %s unavailable: %s", type_id, exc)
         return None
@@ -237,7 +238,7 @@ class PricingSuggestionService:
                 return float(price_map[type_id].get("unit_price") or 0) or None
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
-        except Exception as exc:
+        except (SQLAlchemyError, *ESI_REQUEST_ERRORS) as exc:   # a bug propagates
             logging.warning("Pricing suggestion: hub buy price of type %s unavailable: %s", type_id, exc)
         return None
 
@@ -392,7 +393,7 @@ class PricingSuggestionService:
                     return sorted(levels, key=lambda lv: lv[0])
             finally:
                 app_session.close()
-        except Exception as exc:
+        except SQLAlchemyError as exc:   # the cached order book table; a bug propagates
             # Without them there is no gap positioning, front-of-queue guard or seller concentration.
             logging.warning("Pricing suggestion: cached order book levels of type %s unavailable: %s", type_id, exc)
         return []
