@@ -2132,10 +2132,17 @@ class IndustryService:
             manufacturing_job["region_daily_order_count"] = region_order_count
             manufacturing_job["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
             manufacturing_job["region_daily_volume_unavailable_reason"] = volume_reason
-            manufacturing_job["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
-            manufacturing_job["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
-            manufacturing_job["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
-            manufacturing_job["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
+            # A failed order-book side is unknown (None, with the reason), not 0 units.
+            liquidity_fields = {
+                "hub_buy_liquidity": self._optional_int(hub_liquidity, "buy_volume_total"),
+                "hub_sell_liquidity": self._optional_int(hub_liquidity, "sell_volume_total"),
+                "hub_buy_order_count": self._optional_int(hub_liquidity, "buy_order_count"),
+                "hub_sell_order_count": self._optional_int(hub_liquidity, "sell_order_count"),
+                "liquidity_unavailable_reason": hub_liquidity.get("liquidity_unavailable_reason") or (
+                    None if type_id in hub_liquidity_map else "hub liquidity unknown: no order book data returned"
+                ),
+            }
+            manufacturing_job.update(liquidity_fields)
 
             row["region_daily_volume"] = region_volume
             row["region_daily_volume_7d_avg"] = self._as_float(daily_volume.get("daily_volume_7d_avg"))
@@ -2143,10 +2150,7 @@ class IndustryService:
             row["region_daily_order_count"] = region_order_count
             row["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
             row["region_daily_volume_unavailable_reason"] = volume_reason
-            row["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
-            row["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
-            row["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
-            row["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
+            row.update(liquidity_fields)
 
         if progress_callback is not None:
             progress_callback(
@@ -2169,9 +2173,10 @@ class IndustryService:
                 continue
 
             manufacturing_job = row.get("manufacturing_job") or {}
-            hub_sell_liquidity = int(manufacturing_job.get("hub_sell_liquidity") or 0)
+            # None: the hub's sell book could not be fetched, every metric is unknown.
+            hub_sell_liquidity = self._optional_int(manufacturing_job, "hub_sell_liquidity")
             region_daily_volume_7d_avg = self._as_float(manufacturing_job.get("region_daily_volume_7d_avg"))
-            hub_sell_orders = int(manufacturing_job.get("hub_sell_order_count") or 0)
+            hub_sell_orders = self._optional_int(manufacturing_job, "hub_sell_order_count")
 
             row["days_of_supply"] = self._calculate_days_of_supply(
                 hub_sell_liquidity=hub_sell_liquidity,
@@ -2272,7 +2277,7 @@ class IndustryService:
             market_unit_price = self._as_float(row.get("market_unit_price"))
             quantity = max(1, int(row.get("quantity") or 1))
             material_cost = self._as_float(manufacturing_job.get("material_cost"))
-            hub_sell_order_count = int(row.get("hub_sell_order_count") or 0)
+            hub_sell_order_count = self._optional_int(row, "hub_sell_order_count")
 
             anomaly_reasons: list[str] = []
             risk_level: str | None = None
@@ -2306,8 +2311,13 @@ class IndustryService:
                         anomaly_reasons.append("Market price is below manufacturing material cost")
                         risk_level = upgrade("Medium")
 
-                # Tier 1b: thin orderbook
-                if hub_sell_order_count < 3:
+                # Tier 1b: thin orderbook (unknown when the hub's sell book could not be fetched)
+                if hub_sell_order_count is None:
+                    anomaly_reasons.append(
+                        "Hub sell orders unknown, the thin-market check is skipped: "
+                        f"{row.get('liquidity_unavailable_reason') or 'no hub order book data'}"
+                    )
+                elif hub_sell_order_count < 3:
                     anomaly_reasons.append(
                         f"Only {hub_sell_order_count} sell order(s) at hub — thin market, easy to manipulate"
                     )
@@ -2619,12 +2629,13 @@ class IndustryService:
             if market_price_fetched_at is not None and market_price_fetched_at > 0:
                 market_price_age_minutes = max(0.0, (float(now) - float(market_price_fetched_at)) / 60.0)
 
+            # None: that side's hub order book could not be fetched (unknown, not 0 units).
             if normalized_product_price_side == "buy":
-                relevant_liquidity = int(row.get("hub_buy_liquidity") or 0)
-                relevant_order_count = int(row.get("hub_buy_order_count") or 0)
+                relevant_liquidity = self._optional_int(row, "hub_buy_liquidity")
+                relevant_order_count = self._optional_int(row, "hub_buy_order_count")
             else:
-                relevant_liquidity = int(row.get("hub_sell_liquidity") or 0)
-                relevant_order_count = int(row.get("hub_sell_order_count") or 0)
+                relevant_liquidity = self._optional_int(row, "hub_sell_liquidity")
+                relevant_order_count = self._optional_int(row, "hub_sell_order_count")
 
             region_daily_volume = int(row.get("region_daily_volume") or 0)
             region_daily_volume_7d_avg = self._as_float(row.get("region_daily_volume_7d_avg"))
@@ -2657,7 +2668,12 @@ class IndustryService:
 
             _liq_threshold = int(self._adm("industry", "portfolio_liquidity_threshold", 100))
             _ord_threshold = int(self._adm("industry", "portfolio_order_count_threshold", 5))
-            if relevant_liquidity >= _liq_threshold or relevant_order_count >= _ord_threshold:
+            if relevant_liquidity is None or relevant_order_count is None:
+                reasons.append(
+                    f"{normalized_product_price_side.title()}-side hub liquidity is unknown "
+                    f"({row.get('liquidity_unavailable_reason') or 'no hub order book data'})."
+                )
+            elif relevant_liquidity >= _liq_threshold or relevant_order_count >= _ord_threshold:
                 score += 2
                 reasons.append(
                     f"{normalized_product_price_side.title()}-side hub liquidity is healthy ({relevant_liquidity:,} units / {relevant_order_count} orders)."
@@ -3436,25 +3452,28 @@ class IndustryService:
             "region_daily_volume": None if row.get("region_daily_volume") is None else region_daily_volume,
             "region_daily_volume_7d_avg": region_daily_volume_7d_avg,
             "region_daily_volume_unavailable_reason": row.get("region_daily_volume_unavailable_reason"),
-            "hub_buy_liquidity": int(row.get("hub_buy_liquidity") or 0),
-            "hub_sell_liquidity": int(row.get("hub_sell_liquidity") or 0),
+            # Unknown hub liquidity (a failed order-book fetch) stays None, with its reason.
+            "hub_buy_liquidity": cls._optional_int(row, "hub_buy_liquidity"),
+            "hub_sell_liquidity": cls._optional_int(row, "hub_sell_liquidity"),
+            "liquidity_unavailable_reason": row.get("liquidity_unavailable_reason"),
+            "price_unavailable_reason": row.get("price_unavailable_reason"),
             "days_of_supply": cls._calculate_days_of_supply(
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
             ),
             "sell_through_rate": cls._calculate_sell_through_rate(
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
             ),
             "liquidity_indicator": cls._calculate_liquidity_indicator(
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
-                hub_sell_orders=int(row.get("hub_sell_order_count") or 0),
+                hub_sell_orders=cls._optional_int(row, "hub_sell_order_count"),
             ),
             "liquidity_score": cls._calculate_liquidity_score(
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
-                hub_sell_orders=int(row.get("hub_sell_order_count") or 0),
+                hub_sell_orders=cls._optional_int(row, "hub_sell_order_count"),
             ),
             "pricing_confidence": row.get("pricing_confidence"),
             "pricing_confidence_reasons": row.get("pricing_confidence_reasons") or [],
@@ -4556,9 +4575,24 @@ class IndustryService:
             return None
 
     @staticmethod
-    def _calculate_days_of_supply(hub_sell_liquidity: int, region_daily_volume_7d_avg: float | None) -> float | None:
-        """Calculate Days of Supply (DOS) = Hub Sell Liquidity / Region Daily Volume (7d avg)"""
+    def _optional_int(mapping: Any, key: str) -> int | None:
+        """mapping[key] as an int; None when it is absent, None or not a
+        number (unknown, never 0)."""
+        value = mapping.get(key) if isinstance(mapping, dict) else None
+        if value is None or isinstance(value, bool):
+            return None
         try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _calculate_days_of_supply(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None) -> float | None:
+        """Calculate Days of Supply (DOS) = Hub Sell Liquidity / Region Daily Volume (7d avg).
+        None when either is unknown."""
+        try:
+            if hub_sell_liquidity is None:
+                return None
             if region_daily_volume_7d_avg is None or float(region_daily_volume_7d_avg) <= 0:
                 return None
             return float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
@@ -4576,9 +4610,12 @@ class IndustryService:
             return None
 
     @staticmethod
-    def _calculate_liquidity_indicator(hub_sell_liquidity: int, region_daily_volume_7d_avg: float | None, hub_sell_orders: int) -> str:
-        """Calculate liquidity indicator based on DOS ranges: Very High, High, Medium, Low, Very Low"""
+    def _calculate_liquidity_indicator(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None, hub_sell_orders: int | None) -> str:
+        """Calculate liquidity indicator based on DOS ranges: Very High, High, Medium, Low, Very Low;
+        Unknown when the hub liquidity or the region volume is unknown."""
         try:
+            if hub_sell_liquidity is None:
+                return "Unknown"
             if region_daily_volume_7d_avg is None or float(region_daily_volume_7d_avg) <= 0:
                 return "Unknown"
             dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
@@ -4597,9 +4634,12 @@ class IndustryService:
             return "Unknown"
 
     @staticmethod
-    def _calculate_liquidity_score(hub_sell_liquidity: int, region_daily_volume_7d_avg: float, hub_sell_orders: int) -> float:
-        """Calculate combined liquidity score (0-100) based on DOS and order count"""
+    def _calculate_liquidity_score(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float, hub_sell_orders: int | None) -> float | None:
+        """Calculate combined liquidity score (0-100) based on DOS and order count;
+        None when the hub's sell book could not be fetched (unknown, not 0)."""
         try:
+            if hub_sell_liquidity is None or hub_sell_orders is None:
+                return None
             if region_daily_volume_7d_avg is None or region_daily_volume_7d_avg <= 0:
                 return 0.0
 
@@ -10009,6 +10049,7 @@ class IndustryService:
                 "product_market_price_fetched_at": product_market_pricing.get("fetched_at"),
                 "product_market_price_sample_size": product_market_pricing.get("sample_size"),
                 "product_market_volume_total": product_market_pricing.get("volume_total"),
+                "product_market_price_unavailable_reason": product_market_pricing.get("price_unavailable_reason"),
                 "activity_breakdown": activity_breakdown,
                 "recursive_activity_breakdown": recursive_prerequisite_plan.get("activity_breakdown") or {},
                 "procurement_materials": self._overview_keyed_entries(top_level_procurement_materials, compactor=lambda e: e),
@@ -10038,6 +10079,8 @@ class IndustryService:
             "market_price_fetched_at": product_market_pricing.get("fetched_at"),
             "market_price_sample_size": product_market_pricing.get("sample_size"),
             "market_volume_total": product_market_pricing.get("volume_total"),
+            # Why the product price is unknown: its hub order-book fetch failed.
+            "price_unavailable_reason": product_market_pricing.get("price_unavailable_reason"),
             "bpc_count": len(ctx.blueprint_copy_assets_by_type_id.get(blueprint_type_id, [])),
             "has_bpo": bool(ctx.blueprint_original_assets_by_type_id.get(blueprint_type_id)),
         }

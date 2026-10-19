@@ -108,6 +108,30 @@ class MarketPricingService:
             return esi_service.get_buy_order_book(type_ids, region_id=region_id)
         return esi_service.get_sell_order_book(type_ids, region_id=region_id)
 
+    def _order_book_unavailable_reasons(
+        self, *, type_ids: list[int], region_id: int, side: str, books: dict[int, Any] | None,
+    ) -> dict[int, str]:
+        """{type: why its `side` order-book fetch failed} for the requested
+        types left out of `books` with a reason (ESIService leaves a failed
+        type out; a type with no orders is left out without one). A failed
+        type's price and liquidity are unknown, not an empty book."""
+        reader = getattr(getattr(self._state, "esi_service", None), "order_book_unavailable_reason", None)
+        if reader is None:
+            return {}
+        out: dict[int, str] = {}
+        for type_id in type_ids:
+            if int(type_id) in (books or {}):
+                continue
+            reason = reader(int(type_id), side=side, region_id=region_id)
+            if reason:
+                out[int(type_id)] = str(reason)
+        if out:
+            logging.warning(
+                "Market order book (%s, region %s): the fetch of %d type(s) failed, their price and liquidity are "
+                "unknown: %s", side, region_id, len(out), sorted(out)[:20],
+            )
+        return out
+
     def _build_cached_views(
         self,
         *,
@@ -301,6 +325,7 @@ class MarketPricingService:
                     "side": normalized_side,
                     "region_id": region_id,
                     "station_id": station_id,
+                    "price_unavailable_reason": None,
                 }
                 result[int(type_id)]["price_source"] = (
                     f"market_{normalized_hub}_{normalized_side}:{self.orderbook_smoothing()}:{self.orderbook_depth()}"
@@ -327,6 +352,10 @@ class MarketPricingService:
                     order_books=fetched_books,
                     station_id=station_id,
                 )
+                # A failed fetch is not in the book, so it is not cached either.
+                unavailable = self._order_book_unavailable_reasons(
+                    type_ids=missing_ids, region_id=region_id, side=normalized_side, books=fetched_books,
+                )
                 now = time.time()
                 market_orderbook_cache_repo.upsert_views(
                     app_session,
@@ -352,7 +381,11 @@ class MarketPricingService:
                         "side": normalized_side,
                         "region_id": region_id,
                         "station_id": station_id,
+                        "price_unavailable_reason": unavailable.get(int(type_id)),
                     }
+                    if int(type_id) in unavailable:
+                        # The fetch failed: the price is unknown, not an empty book's.
+                        result[int(type_id)]["unit_price"] = None
                     result[int(type_id)]["price_source"] = (
                         f"market_{normalized_hub}_{normalized_side}:{self.orderbook_smoothing()}:{self.orderbook_depth()}"
                     )
@@ -417,6 +450,8 @@ class MarketPricingService:
 
             missing_sell_ids = [type_id for type_id in normalized_type_ids if int(type_id) not in cached_sell_summary]
             missing_buy_ids = [type_id for type_id in normalized_type_ids if int(type_id) not in cached_buy_summary]
+            #: {side: {type: why its fetch failed}}: unknown liquidity, not 0 units.
+            unavailable: dict[str, dict[int, str]] = {"sell": {}, "buy": {}}
 
             if missing_sell_ids:
                 sell_books = self._fetch_order_book(type_ids=missing_sell_ids, region_id=region_id, side="sell")
@@ -424,6 +459,9 @@ class MarketPricingService:
                     progress_callback(0.5, f"Fetched {normalized_hub.title()} sell liquidity", {"type_count": len(missing_sell_ids)})
                 sell_views = self._build_cached_views(order_books=sell_books, station_id=station_id, side="sell")
                 sell_summary = self._build_liquidity_summaries(order_books=sell_books, station_id=station_id)
+                unavailable["sell"] = self._order_book_unavailable_reasons(
+                    type_ids=missing_sell_ids, region_id=region_id, side="sell", books=sell_books,
+                )
                 market_orderbook_cache_repo.upsert_views(
                     app_session,
                     hub=normalized_hub,
@@ -443,6 +481,9 @@ class MarketPricingService:
                     progress_callback(1.0, f"Fetched {normalized_hub.title()} buy liquidity", {"type_count": len(missing_buy_ids)})
                 buy_views = self._build_cached_views(order_books=buy_books, station_id=station_id, side="buy")
                 buy_summary = self._build_liquidity_summaries(order_books=buy_books, station_id=station_id)
+                unavailable["buy"] = self._order_book_unavailable_reasons(
+                    type_ids=missing_buy_ids, region_id=region_id, side="buy", books=buy_books,
+                )
                 market_orderbook_cache_repo.upsert_views(
                     app_session,
                     hub=normalized_hub,
@@ -467,15 +508,20 @@ class MarketPricingService:
         for type_id in normalized_type_ids:
             sell_metrics = cached_sell_summary.get(int(type_id)) or {}
             buy_metrics = cached_buy_summary.get(int(type_id)) or {}
+            sell_failed = unavailable["sell"].get(int(type_id))
+            buy_failed = unavailable["buy"].get(int(type_id))
+            reasons = [f"{side}: {why}" for side, why in (("sell", sell_failed), ("buy", buy_failed)) if why]
             result[int(type_id)] = {
                 "hub": normalized_hub,
                 "hub_label": str(hub_context.get("label") or normalized_hub.title()),
                 "region_id": region_id,
                 "station_id": station_id,
-                "sell_volume_total": int(sell_metrics.get("total_volume") or 0),
-                "sell_order_count": int(sell_metrics.get("order_count") or 0),
-                "buy_volume_total": int(buy_metrics.get("total_volume") or 0),
-                "buy_order_count": int(buy_metrics.get("order_count") or 0),
+                # A failed side is unknown (None), not an empty book's 0.
+                "sell_volume_total": None if sell_failed else int(sell_metrics.get("total_volume") or 0),
+                "sell_order_count": None if sell_failed else int(sell_metrics.get("order_count") or 0),
+                "buy_volume_total": None if buy_failed else int(buy_metrics.get("total_volume") or 0),
+                "buy_order_count": None if buy_failed else int(buy_metrics.get("order_count") or 0),
+                "liquidity_unavailable_reason": "; ".join(reasons) or None,
             }
 
         return result
