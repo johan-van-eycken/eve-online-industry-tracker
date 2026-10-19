@@ -4038,25 +4038,48 @@ class IndustryService:
         type_id: int,
         type_payload: dict[str, Any] | None,
         adjusted_price_map: dict[int, dict[str, Any]],
+        unknown_reasons: list[str] | None = None,
     ) -> tuple[float | None, str | None]:
+        """(unit EIV, "esi_adjusted_price"): EVE's estimated item value is the
+        ESI adjusted price. Without a readable one it is unknown, (None,
+        None), its reason appended to `unknown_reasons` when given: no
+        average or SDE base price stands in (that would price the job fee on
+        another basis and pass as exact). `type_payload` is not read."""
         pricing = adjusted_price_map.get(int(type_id)) or {}
         adjusted_price = pricing.get("adjusted_price")
-        average_price = pricing.get("average_price")
-        if adjusted_price is not None:
+        value: float | None = None
+        if adjusted_price is not None and not isinstance(adjusted_price, bool):
             try:
-                return float(adjusted_price), "esi_adjusted_price"
+                value = float(adjusted_price)
             except (TypeError, ValueError):
-                pass  # try the next price source
-        if average_price is not None:
-            try:
-                return float(average_price), "esi_average_price"
-            except (TypeError, ValueError):
-                pass  # try the next price source
-        if isinstance(type_payload, dict) and type_payload.get("base_price") is not None:
-            try:
-                return float(type_payload.get("base_price")), "sde_base_price"
-            except (TypeError, ValueError):
-                pass  # try the next price source
+                value = None
+        if value is not None and math.isfinite(value):
+            return value, "esi_adjusted_price"
+        reason = (
+            f"type_id={type_id} has no ESI adjusted price: its estimated item value is unknown"
+            if adjusted_price is None
+            else f"the ESI adjusted price {adjusted_price!r} of type_id={type_id} is not a number: its estimated "
+                 "item value is unknown"
+        )
+        if unknown_reasons is not None:
+            unknown_reasons.append(reason)
+        return None, None
+
+    @classmethod
+    def _reference_unit_price(
+        cls, *, type_id: int, type_payload: dict[str, Any] | None, adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> tuple[float | None, str | None]:
+        """A labelled reference value for an item (not an EIV): the ESI
+        adjusted, else average, else the SDE base price, with its source."""
+        pricing = adjusted_price_map.get(int(type_id)) or {}
+        for value, source in (
+            (pricing.get("adjusted_price"), "esi_adjusted_price"),
+            (pricing.get("average_price"), "esi_average_price"),
+            ((type_payload or {}).get("base_price") if isinstance(type_payload, dict) else None, "sde_base_price"),
+        ):
+            number = cls._as_float(value)
+            if number is not None:
+                return number, source
         return None, None
 
     @classmethod
@@ -4109,6 +4132,7 @@ class IndustryService:
                 type_id=type_id,
                 type_payload=entry,
                 adjusted_price_map=adjusted_price_map,
+                unknown_reasons=unknown_reasons,
             )
             if unit_value is None:
                 unpriced = True
@@ -4162,7 +4186,7 @@ class IndustryService:
         if adjusted_price is not None and adjusted_price > 0:
             return adjusted_price, "asset_adjusted_price"
 
-        return cls._resolve_eiv_pricing(
+        return cls._reference_unit_price(
             type_id=type_id,
             type_payload=payload,
             adjusted_price_map=adjusted_price_map,
