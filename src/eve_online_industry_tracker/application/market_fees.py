@@ -8,8 +8,8 @@
                        broker_fee_min, broker_fee_base)
 
 The one copy of the formula: the producer (IndustryService's market fee
-context), the character's stored market fees (Character.refresh_market_fees)
-and the price suggestion use it.
+context), the character's stored market fees (Character.refresh_market_fees),
+the price suggestion and the realized-profit fee estimates use it.
 """
 from __future__ import annotations
 

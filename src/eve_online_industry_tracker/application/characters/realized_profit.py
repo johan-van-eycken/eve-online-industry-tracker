@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
-import json
 from typing import Any
 
+from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.application.characters.asset_provenance import (
     ASSET_SOURCE_INDUSTRY_BUILD,
     ASSET_SOURCE_MARKET_BUY,
@@ -377,22 +377,21 @@ def _corp_journal_fee_breakdown(
     return broker_fee, tax_fee, net_revenue, mode, notes
 
 
-def _extract_market_fee_rates(raw_market_fees: Any) -> tuple[float | None, float | None]:
-    payload = raw_market_fees
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = None
-    if not isinstance(payload, dict):
-        return None, None
-    jita = payload.get("jita_4_4") or {}
-    if not isinstance(jita, dict):
-        return None, None
-    rates = jita.get("rates") or {}
-    if not isinstance(rates, dict):
-        return None, None
-    return _safe_float(rates.get("sales_tax_fraction")), _safe_float(rates.get("broker_fee_fraction"))
+#: The fee capture modes of a sale whose fees were assumed (the character's skills unknown).
+ASSUMED_FEE_CAPTURE_MODES = ("assumed_market_fees", "journal_plus_assumed_broker_fee")
+
+
+def _character_market_fees(raw_market_fees: Any, admin_settings: Any) -> tuple[float, float, str | None]:
+    """(sales tax, broker fee, reason) for a character: from its stored
+    skills and standings (Character.refresh_market_fees) with the current
+    admin settings industry/*, through application.market_fees like the
+    price suggestion (not the stored rates, which lag a settings change).
+    Without known skills: the fees of an untrained character without
+    standings (the highest) and the reason, starting "Fees assumed". A
+    stored invalid fee setting raises AdminSettingInvalid naming it."""
+    settings = market_fees.MarketFeeSettings.from_admin(admin_settings)
+    sales_tax, broker_fee, reason = market_fees.fees_from_stored_market_fees(raw_market_fees, settings)
+    return sales_tax, broker_fee, (reason[:1].upper() + reason[1:]) if reason else None
 
 
 def _apply_estimated_market_fees(
@@ -405,28 +404,43 @@ def _apply_estimated_market_fees(
     sales_tax_fraction: float | None,
     broker_fee_fraction: float | None,
     journal: CharacterWalletJournalModel | None,
+    fee_reason: str | None = None,
 ) -> tuple[float, float, float, str, list[str]]:
+    """The sale's fees with the estimates added: sales tax when no journal
+    entry gives it, and the broker / order update fees. With `fee_reason`
+    (the character's skills unknown, so the fractions are the assumed
+    highest ones) the reason is noted once and the mode is an assumed one
+    (ASSUMED_FEE_CAPTURE_MODES)."""
     normalized_notes = list(notes)
     normalized_sales_tax = float(max(0.0, sales_tax_amount))
     normalized_other_fees = float(max(0.0, other_fees_amount))
     normalized_mode = str(fee_capture_mode or "gross_only")
+    estimated = "estimated_market_fees" if fee_reason is None else "assumed_market_fees"
+    source = "the character market fee profile" if fee_reason is None else "assumed fees (see below)"
+    applied = False
 
     if journal is None and sales_tax_fraction is not None and normalized_sales_tax <= 0.0:
         normalized_sales_tax = max(0.0, float(gross_revenue) * float(sales_tax_fraction))
-        normalized_notes.append("Sales tax was estimated from the character market fee profile.")
-        normalized_mode = "estimated_market_fees"
+        normalized_notes.append(f"Sales tax was estimated from {source}.")
+        normalized_mode = estimated
+        applied = True
 
     if broker_fee_fraction is not None and broker_fee_fraction > 0.0:
         estimated_broker_fee = max(0.0, float(gross_revenue) * float(broker_fee_fraction))
         if estimated_broker_fee > 0.0:
             normalized_other_fees += estimated_broker_fee
             normalized_notes.append(
-                "Broker / order update fees were estimated from the character market fee profile; exact relist history is not stored."
+                f"Broker / order update fees were estimated from {source}; exact relist history is not stored."
             )
+            applied = True
             if normalized_mode == "journal_amount":
-                normalized_mode = "journal_plus_estimated_broker_fee"
-            elif normalized_mode != "estimated_market_fees":
-                normalized_mode = "estimated_market_fees"
+                normalized_mode = ("journal_plus_estimated_broker_fee" if fee_reason is None
+                                   else "journal_plus_assumed_broker_fee")
+            elif normalized_mode != estimated:
+                normalized_mode = estimated
+
+    if applied and fee_reason:
+        normalized_notes.append(fee_reason)
 
     normalized_net_revenue = max(0.0, float(gross_revenue) - normalized_sales_tax - normalized_other_fees)
     return normalized_other_fees, normalized_sales_tax, normalized_net_revenue, normalized_mode, normalized_notes
@@ -487,10 +501,13 @@ class _BaseRealizedProfitLedgerService:
     industry_job_model: Any
     owner_model: Any
 
-    def __init__(self, *, app_session: Any, sde_session: Any, market_prices: list[dict[str, Any]] | None = None):
+    def __init__(self, *, app_session: Any, sde_session: Any, market_prices: list[dict[str, Any]] | None = None,
+                 admin_settings: Any = None):
         self._app_session = app_session
         self._sde_session = sde_session
         self._market_prices = market_prices or []
+        # The admin settings industry/* of the fee estimates, read at each rebuild (None: the schema defaults).
+        self._admin_settings = admin_settings
 
     def rebuild(self, *, owner_id: int | None = None) -> list[dict[str, Any]]:
         if owner_id is not None:
@@ -852,10 +869,12 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         character = self._app_session.query(CharacterModel).filter_by(character_id=int(owner_id)).first()
-        sales_tax_fraction, broker_fee_fraction = _extract_market_fee_rates(getattr(character, "market_fees", None) if character is not None else None)
+        sales_tax_fraction, broker_fee_fraction, fee_reason = _character_market_fees(
+            getattr(character, "market_fees", None) if character is not None else None, self._admin_settings)
         return {
             "sales_tax_fraction": sales_tax_fraction,
             "broker_fee_fraction": broker_fee_fraction,
+            "fee_reason": fee_reason,
         }
 
     def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:
@@ -872,6 +891,7 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             sales_tax_fraction=_safe_float(owner_context.get("sales_tax_fraction")),
             broker_fee_fraction=_safe_float(owner_context.get("broker_fee_fraction")),
             journal=journal,
+            fee_reason=owner_context.get("fee_reason"),
         )
 
 

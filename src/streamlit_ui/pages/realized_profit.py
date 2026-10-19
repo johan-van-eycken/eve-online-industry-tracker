@@ -622,6 +622,29 @@ def _overview_payload(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: The backend's fee capture modes of a sale whose fees were assumed (realized_profit.ASSUMED_FEE_CAPTURE_MODES).
+_ASSUMED_FEE_CAPTURE_MODES = ("assumed_market_fees", "journal_plus_assumed_broker_fee")
+
+
+def _assumed_fee_warnings(rows: list[dict[str, Any]], owner_name_by_id: dict[int, str]) -> list[str]:
+    """One line per character whose sales have assumed fees (its skills
+    unknown, so the highest, untrained fees are deducted): the count and the
+    reason the ledger noted ("Fees assumed ...")."""
+    count_by_owner: dict[int, int] = {}
+    reason_by_owner: dict[int, str] = {}
+    for row in rows:
+        if row.get("fee_capture_mode") not in _ASSUMED_FEE_CAPTURE_MODES or row.get("character_id") is None:
+            continue
+        owner_id = int(row["character_id"])
+        count_by_owner[owner_id] = count_by_owner.get(owner_id, 0) + 1
+        reason = next((str(note) for note in (row.get("notes") or []) if str(note).startswith("Fees assumed")), None)
+        if reason and owner_id not in reason_by_owner:
+            reason_by_owner[owner_id] = reason
+    return [f"{owner_name_by_id.get(owner_id, str(owner_id))}: {count} sale(s) with assumed fees. "
+            f"{reason_by_owner.get(owner_id, 'Fees assumed (no reason noted).')}"
+            for owner_id, count in sorted(count_by_owner.items())]
+
+
 def _table_frame(
     rows: list[dict[str, Any]],
     owner_name_by_id: dict[int, str],
@@ -794,6 +817,9 @@ def render() -> None:
         if not isinstance(rows, list) or not rows:
             st.info("No realized sales have been recorded yet for the selected scope.")
             return
+
+    for fee_warning in _assumed_fee_warnings(rows, owner_name_by_id):
+        st.warning(fee_warning)
 
     min_available_date, max_available_date = _available_date_span(rows)
     start_date, end_date = _resolve_range_preset(

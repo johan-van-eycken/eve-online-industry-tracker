@@ -55,6 +55,7 @@ class CharactersService:
             app_session=self._state.db_app.session,
             sde_session=self._state.db_sde.session,
             market_prices=market_prices if isinstance(market_prices, list) else [],
+            admin_settings=getattr(self._state, "admin_settings", None),
         )
 
         rows = ledger_service.list_rows(character_id=character_id)
