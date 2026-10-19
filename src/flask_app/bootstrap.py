@@ -26,6 +26,7 @@ from utils.app_init import (
 )
 
 from eve_online_industry_tracker.application.characters.asset_provenance import set_realized_invention_inputs_provider
+from eve_online_industry_tracker.application.characters.character_manager import CharacterRefreshError
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
@@ -129,11 +130,21 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
             state.cfg_manager, state.db_oauth, state.db_app, state.db_sde,
             admin_settings=state.admin_settings,
         )
+        # A configured character that could not be initialised is named, not only logged.
+        state.init_warnings.extend(
+            f"Character initialisation failed: {message}" for message in getattr(state.char_manager, "init_errors", None) or []
+        )
         # The realized invention estimate (job cost snapshots, refreshed below)
         # sizes inventions with the producer's inputs.
         set_realized_invention_inputs_provider(lambda: IndustryService(state=state).realized_invention_inputs())
         try:
             state.char_manager.refresh_all()
+        except CharacterRefreshError as e:
+            # Every character was refreshed but these; one line each.
+            for name, message in e.errors.items():
+                state.init_warnings.append(f"Character refresh failed for {name}: {message}")
+            logging.warning("Character refresh failed for %d character(s); startup continues: %s",
+                            len(e.errors), ", ".join(e.errors))
         except Exception as e:
             state.init_warnings.append(f"Character refresh failed: {e}")
             friendly = _user_friendly_error(e)
