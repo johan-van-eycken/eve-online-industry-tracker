@@ -1197,6 +1197,9 @@ class MarketDepthCacheModel(BaseApp):
     spot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     competition_index: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     snapshot_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # NULL on a fresh snapshot; on a kept, stale one why it was not refreshed
+    # (the collector marks it, every reader shows it).
+    stale_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 class InventionOutcomeLogModel(BaseApp):

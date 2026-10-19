@@ -217,21 +217,6 @@ class MarketDepthCollector:
             except SQLAlchemyError:
                 pass
 
-    def _ensure_stale_reason_column(self) -> None:
-        """Add market_depth_cache.stale_reason when it is missing (additive;
-        NULL on a fresh snapshot, the reason on a kept, stale one)."""
-        app_session = self._sessions.app_session()
-        try:
-            cols = {str(r[1]) for r in app_session.execute(text("PRAGMA table_info(market_depth_cache)")).fetchall()}
-            if cols and "stale_reason" not in cols:
-                app_session.execute(text("ALTER TABLE market_depth_cache ADD COLUMN stale_reason TEXT"))
-                app_session.commit()
-        finally:
-            try:
-                app_session.close()
-            except SQLAlchemyError:
-                pass
-
     def _mark_stale(self, type_id: int, hub: str, reason: str) -> None:
         """Keep the previous market_depth_cache row for (type_id, hub) and
         mark it stale with the reason, with a WARNING. Without a previous row
@@ -297,7 +282,6 @@ class MarketDepthCollector:
 
         # Own volume: the sell orders of every tracked corporation and character
         corp_ids, character_ids = self._tracked_owner_ids()
-        self._ensure_stale_reason_column()
 
         # Step 1: Refresh market history for all type_ids
         esi_service = getattr(self._state, "esi_service", None)

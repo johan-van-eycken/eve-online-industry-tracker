@@ -92,6 +92,38 @@ def _unavailable_input_notes(
     return notes
 
 
+def _market_depth_stale_note(entry: Any) -> str | None:
+    """The decision-reason note of a stale market depth row (the collector
+    kept the previous snapshot and marked it with stale_reason), or None for
+    a fresh row or no row."""
+    if entry is None:
+        return None
+    reason = _get_attr(entry, "stale_reason")
+    if not reason:
+        return None
+    snapshot_at = _get_attr(entry, "snapshot_at")
+    since = f" since {snapshot_at}" if snapshot_at else ""
+    return f"market depth stale{since} ({reason}): scored with the previous snapshot"
+
+
+def _market_depth_stale_inputs(market_depth: dict[int, Any]) -> dict[str, str]:
+    """The plan-level unavailable input for the stale market depth rows,
+    {} when every row is fresh."""
+    stale = {
+        int(type_id): str(_get_attr(entry, "stale_reason"))
+        for type_id, entry in sorted((market_depth or {}).items())
+        if entry is not None and _get_attr(entry, "stale_reason")
+    }
+    if not stale:
+        return {}
+    listed = "; ".join(f"type_id {type_id}: {reason}" for type_id, reason in stale.items())
+    return {
+        "market_depth_stale": (
+            f"market depth stale for {len(stale)} type(s) ({listed}): scored with the previous snapshot"
+        ),
+    }
+
+
 def _plan_unavailable_inputs(plan: Any) -> dict[str, str]:
     """The unavailable inputs Phase 9 recorded in plan_summary_json, {} when none."""
     raw = getattr(plan, "plan_summary_json", None)
@@ -508,9 +540,14 @@ class DailyPlannerService:
                 "invention_success_rate": invention_rates.get(tid),
                 "recent_outcomes": [_model_to_dict(o) for o in outcomes],
                 # Competition data
-                "competition_index": float(getattr(md, "competition_index", None) or 0.0) if md else None,
+                # None stays None (unknown: no velocity to divide by), not 0.0.
+                "competition_index": (
+                    float(md.competition_index) if md and md.competition_index is not None else None
+                ),
                 "competitor_units": int(getattr(md, "competitor_units", 0) or 0) if md else None,
                 "market_snapshot_at": str(getattr(md, "snapshot_at", None) or "") if md else None,
+                # Set when the collector kept the previous snapshot: why it was not refreshed.
+                "market_stale_reason": (getattr(md, "stale_reason", None) or None) if md else None,
                 # Margin correlation data
                 "pearson_correlation": (
                     float(getattr(mc, "pearson_correlation", None))
@@ -705,6 +742,9 @@ class DailyPlannerService:
             )
             if reason
         }
+        # A stale market depth row is still scored (the previous snapshot is
+        # the best there is), but named on the plan and on its row (Phase 4).
+        unavailable_inputs.update(_market_depth_stale_inputs(market_depth))
 
         with _ComputeStep(self, "indexing corp blueprints"):
             corp_index = self._index_blueprint_assets(corp_assets)
@@ -867,6 +907,7 @@ class DailyPlannerService:
         input_by_type = {r.type_id: r for r in phase1["input_rows"]}
         unavailable: dict[str, str] = phase1.get("unavailable_inputs") or {}
         margin_correlations: dict[int, Any] = phase1.get("margin_correlations") or {}
+        market_depth_cache: dict[int, Any] = phase1.get("market_depth_cache") or {}
         decisions = []
         for scored in scored_items:
             ps = pipeline_by_type.get(scored.type_id)
@@ -886,6 +927,9 @@ class DailyPlannerService:
                     meta_group_id=input_row.meta_group_id if input_row is not None else None,
                 )
                 notes = _unavailable_input_notes(scored.type_id, unavailable, margin_correlations)
+                stale_note = _market_depth_stale_note(market_depth_cache.get(scored.type_id))
+                if stale_note:
+                    notes.append(stale_note)
                 if notes:
                     decision.decision_reason = "; ".join(
                         part for part in (decision.decision_reason, *notes) if part

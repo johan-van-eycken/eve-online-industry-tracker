@@ -811,10 +811,13 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "spot_sell_price REAL NULL,"
             "competition_index REAL NULL,"
             "snapshot_at DATETIME NOT NULL,"
+            "stale_reason TEXT NULL,"
             "UNIQUE(type_id, hub)"
             ")"
         ),
     )
+    # NULL on a fresh snapshot, the reason on a kept, stale one.
+    _ensure_column(db_app, table="market_depth_cache", column="stale_reason", ddl_type="TEXT")
 
     _ensure_table(
         db_app,
