@@ -58,14 +58,14 @@ def _seed_orders(app_engine):
     oid = 1
     for corp, units in ((CORP_A, 10), (CORP_B, 20)):
         s.add(CorporationMarketOrdersModel(corporation_id=corp, order_id=oid, type_id=TYPE, is_buy_order=False,
-                                           volume_remain=units))
+                                           volume_remain=units, region_id=10000002))
         oid += 1
     s.add(CorporationMarketOrdersModel(corporation_id=CORP_A, order_id=oid, type_id=TYPE, is_buy_order=True,
                                        volume_remain=1000))   # a buy order is not own sell volume
     oid += 1
     for char, units in ((CHAR_A, 5), (CHAR_B, 7)):
         s.add(CharacterMarketOrdersModel(character_id=char, order_id=oid, type_id=TYPE, is_buy_order=False,
-                                         volume_remain=units))
+                                         volume_remain=units, region_id=10000002))
         oid += 1
     s.add(CharacterMarketOrdersModel(character_id=90000099, order_id=oid, type_id=TYPE, is_buy_order=False,
                                      volume_remain=500))    # an untracked character

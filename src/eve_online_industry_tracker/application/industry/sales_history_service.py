@@ -22,6 +22,7 @@ class SalesHistoryService:
         type_id: int,
         days: int = 30,
         corporation_id: int | None = None,
+        personal_only: bool = False,
     ) -> list[dict[str, Any]]:
         """Get list of historical sales for a character (or corporation) and item type.
 
@@ -31,6 +32,8 @@ class SalesHistoryService:
             days: Number of days to look back (default 30).
             corporation_id: If provided, query corporation wallet transactions instead
                 of character wallet transactions.
+            personal_only: Character transactions only: leave out the ones made
+                for the corporation (is_personal False; NULL counts as personal).
 
         Returns:
             List of transactions sorted by date (newest first), each with:
@@ -54,14 +57,17 @@ class SalesHistoryService:
                     )
                 ).order_by(desc(CorporationWalletTransactionsModel.date)).all()
             else:
-                transactions = app_session.query(CharacterWalletTransactionsModel).filter(
+                query = app_session.query(CharacterWalletTransactionsModel).filter(
                     and_(
                         CharacterWalletTransactionsModel.character_id == character_id,
                         CharacterWalletTransactionsModel.type_id == type_id,
                         CharacterWalletTransactionsModel.is_buy == False,
                         CharacterWalletTransactionsModel.date >= cutoff_str,
                     )
-                ).order_by(desc(CharacterWalletTransactionsModel.date)).all()
+                )
+                if personal_only:
+                    query = query.filter(CharacterWalletTransactionsModel.is_personal.is_not(False))
+                transactions = query.order_by(desc(CharacterWalletTransactionsModel.date)).all()
 
             result = [
                 {

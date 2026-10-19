@@ -69,7 +69,9 @@ class MarketDepthCollector:
     def _get_effective_velocity(self, type_id: int, corp_ids: Any = (), character_ids: Any = ()) -> float | None:
         """Read effective_velocity from the most recent active build_plan_item,
         or fall back to the 30-day sales history of every tracked corporation
-        and character (the same owners whose sell orders count as own volume)."""
+        and character (the same owners whose sell orders count as own volume;
+        a character's personal sales only, so a corporation sale is counted
+        once)."""
         app_session = self._sessions.app_session()
         try:
             row = app_session.execute(text(
@@ -102,7 +104,10 @@ class MarketDepthCollector:
                 history = svc.get_sold_history(character_id=0, corporation_id=corp_id, type_id=type_id, days=30)
                 total_qty += sum(int(tx.get("quantity", 0)) for tx in history)
             for character_id in character_ids:
-                history = svc.get_sold_history(character_id=character_id, type_id=type_id, days=30)
+                # Personal sales only: a pilot's sale for the corporation is in
+                # the corporation's history already (counted above).
+                history = svc.get_sold_history(character_id=character_id, type_id=type_id, days=30,
+                                               personal_only=True)
                 total_qty += sum(int(tx.get("quantity", 0)) for tx in history)
             return max(0.01, total_qty / 30.0) if total_qty > 0 else None
         except SQLAlchemyError as exc:
@@ -185,9 +190,29 @@ class MarketDepthCollector:
         }
         return corp_ids, character_ids
 
-    def _query_own_sell_volume(self, type_id: int, corp_ids: set[int], character_ids: set[int]) -> int:
+    def _character_corporation_ids(self) -> dict[int, int]:
+        """{tracked character: its corporation}, for the characters whose
+        corporation is known."""
+        char_manager = getattr(self._state, "char_manager", None)
+        out: dict[int, int] = {}
+        for ch in getattr(char_manager, "_character_list", None) or ():
+            character_id = getattr(ch, "character_id", None)
+            corporation_id = getattr(ch, "corporation_id", None)
+            if character_id is not None and corporation_id is not None:
+                out[int(character_id)] = int(corporation_id)
+        return out
+
+    def _query_own_sell_volume(
+        self, type_id: int, corp_ids: set[int], character_ids: set[int], *, region_id: int,
+        character_corporation_ids: dict[int, int] | None = None,
+    ) -> int:
         """Total volume_remain of the open sell orders of every tracked
-        corporation and character for this type_id. A failed read raises
+        corporation and character for this type_id in `region_id`, the
+        region whose order book the competitor units are taken from (an
+        order elsewhere is not on that book). A pilot's order placed for a
+        tracked corporation (`is_corporation`) is the corporation's order,
+        counted once from the corporation endpoint. An order without a
+        region is left out, with a WARNING. A failed read raises
         (SQLAlchemyError): the caller keeps the previous row, marked stale."""
         if not corp_ids and not character_ids:
             return 0
@@ -195,24 +220,40 @@ class MarketDepthCollector:
             CharacterMarketOrdersModel,
             CorporationMarketOrdersModel,
         )
+        character_corporation_ids = (
+            self._character_corporation_ids() if character_corporation_ids is None else character_corporation_ids)
         app_session = self._sessions.app_session()
         try:
-            total = 0
+            rows: list[Any] = []
             if corp_ids:
-                rows = app_session.query(CorporationMarketOrdersModel).filter(
+                rows += app_session.query(CorporationMarketOrdersModel).filter(
                     CorporationMarketOrdersModel.corporation_id.in_(sorted(corp_ids)),
                     CorporationMarketOrdersModel.type_id == type_id,
                     CorporationMarketOrdersModel.is_buy_order == False,  # noqa: E712
                 ).all()
-                total += sum(int(getattr(r, "volume_remain", 0) or 0) for r in rows)
             if character_ids:
-                rows = app_session.query(CharacterMarketOrdersModel).filter(
+                for r in app_session.query(CharacterMarketOrdersModel).filter(
                     CharacterMarketOrdersModel.character_id.in_(sorted(character_ids)),
                     CharacterMarketOrdersModel.type_id == type_id,
                     CharacterMarketOrdersModel.is_buy_order == False,  # noqa: E712
-                ).all()
-                total += sum(int(getattr(r, "volume_remain", 0) or 0) for r in rows)
-            return total
+                ).all():
+                    if getattr(r, "is_corporation", None) and (
+                        character_corporation_ids.get(int(r.character_id)) in corp_ids
+                    ):
+                        continue  # the tracked corporation's order: counted from its endpoint
+                    rows.append(r)
+            no_region = [r for r in rows if getattr(r, "region_id", None) is None]
+            if no_region:
+                logging.warning(
+                    "MarketDepthCollector: type_id=%s: %d own sell order(s) (order_ids %s) have no region and "
+                    "are not counted as own volume", type_id, len(no_region),
+                    sorted(int(getattr(r, "order_id", 0) or 0) for r in no_region),
+                )
+            return sum(
+                int(getattr(r, "volume_remain", 0) or 0)
+                for r in rows
+                if getattr(r, "region_id", None) is not None and int(r.region_id) == int(region_id)
+            )
         finally:
             try:
                 app_session.close()
@@ -326,7 +367,7 @@ class MarketDepthCollector:
         # competitor_units = total volume_remain minus our own (every tracked corp and character)
         total_units = sum(o["volume_remain"] for o in orders)
         try:
-            own_units = self._query_own_sell_volume(type_id, corp_ids, character_ids)
+            own_units = self._query_own_sell_volume(type_id, corp_ids, character_ids, region_id=region_id)
         except SQLAlchemyError as exc:
             # competitor_units would silently include our own orders: keep the previous row instead
             self._mark_stale(type_id, hub, f"own sell orders unreadable: {exc}")

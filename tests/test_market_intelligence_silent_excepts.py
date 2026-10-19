@@ -152,7 +152,7 @@ def test_effective_velocity_propagates_a_programming_error_in_the_sales_history(
 def test_own_volume_read_failure_raises_for_the_caller_to_mark_the_row_stale():
     # F1 item 2: no silent 0 (competitor_units would include our own orders); run() keeps the old row
     with pytest.raises(OperationalError):
-        _collector()._query_own_sell_volume(34, {98000001}, set())
+        _collector()._query_own_sell_volume(34, {98000001}, set(), region_id=10000002)
 
 
 def test_the_corporation_set_is_read_without_indexing(monkeypatch):
