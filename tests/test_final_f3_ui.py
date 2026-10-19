@@ -368,6 +368,35 @@ def test_order_rows_carry_the_pricing_note():
     assert sells[1].get("Pricing Note", "") == ""
 
 
+def test_order_rows_carry_the_history_note_next_to_the_pricing_note():
+    from streamlit_ui.pages import marketorders as page
+
+    orders = [
+        {"type_name": "Tritanium", "price": 5.0, "is_buy_order": False, "advised_price": 6.5,
+         "history_unavailable_reason": "ESI market history unavailable: fake 502"},
+        {"type_name": "Mexallon", "price": 7.0, "is_buy_order": False, "advised_price": 6.5,
+         "history_unavailable_reason": None},
+    ]
+    sells, _buys = page._build_order_rows(orders)
+    assert sells[0]["History Note"] == (
+        "market history not refreshed (ESI market history unavailable: fake 502): "
+        "the advised price uses the stored history")
+    keys = list(sells[0])
+    assert keys.index("History Note") == keys.index("Expires In") + 1   # where a Pricing Note goes
+    assert "History Note" not in sells[1]
+    assert page._order_history_note(orders[1]) is None
+
+
+def test_the_history_note_follows_the_pricing_note():
+    from streamlit_ui.pages import marketorders as page
+
+    (sell,), _ = page._build_order_rows([
+        {"type_name": "Tritanium", "price": 5.0, "is_buy_order": False,
+         "pricing_error": "pricing suggestion unavailable: x", "history_unavailable_reason": "fake 502"}])
+    keys = list(sell)
+    assert keys.index("History Note") == keys.index("Pricing Note") + 1
+
+
 def test_pricing_issue_summary_counts_the_orders():
     from streamlit_ui.pages import marketorders as page
 

@@ -113,6 +113,16 @@ def _order_pricing_issue(order: dict) -> str | None:
     return "; ".join(reasons) or None
 
 
+def _order_history_note(order: dict) -> str | None:
+    """Why the order's market history was not refreshed (the backend's
+    history_unavailable_reason): its advised price then uses the stored
+    history. None when it was refreshed."""
+    reason = order.get("history_unavailable_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return f"market history not refreshed ({reason.strip()}): the advised price uses the stored history"
+
+
 def _isk_total_label(known_total: float, unknown_count: int) -> str:
     """A sum of ISK amounts that names the amounts that are unknown."""
     if unknown_count and not known_total:
@@ -326,6 +336,9 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
         pricing_issue = _order_pricing_issue(order)
         if pricing_issue:
             core["Pricing Note"] = pricing_issue
+        history_note = _order_history_note(order)
+        if history_note:
+            core["History Note"] = history_note
         if order.get("is_buy_order"):
             buy_orders.append({**core, "Min. Volume": order.get("min_volume", 0), "Escrow Remaining": order.get("escrow_remaining", 0), **location})
         else:
@@ -491,6 +504,9 @@ def _render_pricing_analysis(selected_order: dict) -> None:
     pricing_issue = _order_pricing_issue(selected_order)
     if pricing_issue:
         st.warning(f"No advised price for this order: {pricing_issue}.")
+    history_note = _order_history_note(selected_order)
+    if history_note:
+        st.info(f"{history_note[:1].upper()}{history_note[1:]}.")
     if not selected_order.get("pricing_breakdown"):
         st.info("No pricing analysis available for this order yet.")
         return

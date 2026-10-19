@@ -134,6 +134,9 @@ class CharactersService:
         # Initialize pricing suggestion service for sell price analysis
         pricing_svc = PricingSuggestionService(state=self._state)
         market_history_svc = MarketHistoryService(state=self._state)
+        # {type_id: why its market history was not refreshed}: the pricing
+        # suggestion of those sell orders then uses the stored history.
+        history_unavailable: dict[int, str] = {}
 
         if include_orderbook_comparison:
             buy_type_ids: set[int] = set()
@@ -168,7 +171,7 @@ class CharactersService:
                 sell_order_book = {}
 
             # Fetch and cache market history for sell orders
-            refresh_market_history(market_history_svc, sell_type_ids, label="Market orders")
+            history_unavailable = refresh_market_history(market_history_svc, sell_type_ids, label="Market orders")
 
         for character in refreshed_data:
             for order in (character or {}).get("market_orders", []):
@@ -260,6 +263,10 @@ class CharactersService:
                     "type_name": order.get("type_name"),
                     "price": order.get("price") if order_price is not None else None,
                     "price_unknown_reason": price_unknown_reason,
+                    "history_unavailable_reason": (
+                        history_unavailable.get(type_id)
+                        if not order.get("is_buy_order") and isinstance(type_id, int) else None
+                    ),
                     "price_status": price_status,
                     "price_difference": price_difference,
                     "volume": str(order.get("volume_remain")) + "/" + str(order.get("volume_total")),

@@ -245,6 +245,36 @@ def test_a_bug_in_the_history_fetch_propagates(monkeypatch, kind):
         _enrich(monkeypatch, kind, _orders(5.5), history=history)
 
 
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_failed_history_refresh_is_named_on_the_sell_orders_of_that_type(monkeypatch, kind):
+    reason = "ESI market history unavailable: fake 502"
+
+    def history(self, *, type_id, region_id):
+        return reason if type_id == 35 else None
+
+    orders = _orders(5.5)
+    orders[0]["market_orders"].append(
+        {"order_id": 9, "type_id": 35, "is_buy_order": True, "price": 4.0, "volume_remain": 10,
+         "volume_total": 10, "issued": "2026-10-01T00:00:00Z", "duration": 90})
+    rows, _ = _enrich(monkeypatch, kind, orders, history=history)
+    by_id = {r["order_id"]: r for r in rows}
+    assert by_id[7]["history_unavailable_reason"] == reason
+    assert by_id[7]["advised_price"] == 8.5          # still advised, from the stored history
+    assert by_id[8]["history_unavailable_reason"] is None
+    assert by_id[9]["history_unavailable_reason"] is None   # a buy order uses no history
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_history_refresh_that_raised_is_named_on_the_order(monkeypatch, kind):
+    def history(self, *, type_id, region_id):
+        if type_id == 35:
+            raise OperationalError("INSERT", {}, Exception("database is locked"))
+
+    rows, _ = _enrich(monkeypatch, kind, _orders(5.5), history=history)
+    row = next(r for r in rows if r["order_id"] == 7)
+    assert "database is locked" in row["history_unavailable_reason"]
+
+
 # --- market history rows ---------------------------------------------------------------------------
 
 def test_a_history_row_with_a_none_field_is_skipped_with_a_counted_warning(app_session, caplog):

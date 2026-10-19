@@ -177,7 +177,10 @@ class CorporationsService:
         except ESI_REQUEST_ERRORS as exc:
             logging.warning("Corporation market orders: sell order book unavailable, no price comparison: %s", exc)
             sell_order_book = {}
-        refresh_market_history(market_history_svc, sell_type_ids, label="Corporation market orders")
+        # {type_id: why its market history was not refreshed}: the pricing
+        # suggestion of those sell orders then uses the stored history.
+        history_unavailable = refresh_market_history(
+            market_history_svc, sell_type_ids, label="Corporation market orders")
 
         for corp_data in raw_corp_data:
             corp_orders = (corp_data or {}).get("market_orders", [])
@@ -254,6 +257,10 @@ class CorporationsService:
                     "type_name": order.get("type_name"),
                     "price": order.get("price") if order_price is not None else None,
                     "price_unknown_reason": price_unknown_reason,
+                    "history_unavailable_reason": (
+                        history_unavailable.get(type_id)
+                        if not order.get("is_buy_order") and isinstance(type_id, int) else None
+                    ),
                     "price_status": price_status,
                     "price_difference": price_difference,
                     "volume": str(order.get("volume_remain")) + "/" + str(order.get("volume_total")),
