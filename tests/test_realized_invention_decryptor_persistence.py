@@ -435,6 +435,102 @@ def test_the_re_snapshot_after_an_empty_publish_names_that_case(session_provider
         assert "the last product overview planned no invention" in job.invention_cost_unknown_reason
 
 
+_ACTUAL_JOB_REASON = (
+    "; the corp's own invention jobs give no cost either: the corp's 1 delivered invention job(s) had no "
+    "successful attempt (10 attempts)"
+)
+#: Science 4 + 4, encryption 4: the pilot of _state().
+_SKILL_FACTOR = 1 + 8 / 30 + 4 / 40
+_TWIN = DecryptorOption(type_id=990042, type_name="Fake Symmetry", probability_multiplier=1.0,
+                        me_modifier=1, te_modifier=8, max_run_modifier=2)
+
+
+def _store_invention_job(session_provider, *, job_id=4001, successful_runs=0, probability=None) -> None:
+    raw = {
+        "job_id": job_id, "activity_id": 8, "status": "delivered", "runs": 10, "licensed_runs": 300,
+        "successful_runs": successful_runs, "blueprint_type_id": _SOURCE_BP, "product_type_id": _TARGET_BP,
+        "cost": 100.0, "completed_date": "2026-09-20T00:00:00Z",
+        "probability": probability if probability is not None else 0.34 * _SKILL_FACTOR,
+    }
+    with session_provider.app_session() as session:
+        session.add(CharacterIndustryJobsModel(
+            character_id=_PILOT, job_id=job_id, status="delivered", activity_id=8, runs=10,
+            blueprint_type_id=_SOURCE_BP, product_type_id=_TARGET_BP, cost=100.0,
+            completed_date="2026-09-20T00:00:00Z", raw=raw,
+        ))
+        session.commit()
+
+
+def _sde_decryptors(monkeypatch, *options: DecryptorOption) -> None:
+    rows = [{
+        "type_id": o.type_id, "type_name": o.type_name,
+        "invention_probability_multiplier": o.probability_multiplier, "invention_me_modifier": o.me_modifier,
+        "invention_te_modifier": o.te_modifier, "invention_max_run_modifier": o.max_run_modifier,
+    } for o in options]
+    monkeypatch.setattr(ap, "get_t2_invention_decryptors", lambda session, language: rows)
+
+
+def test_the_re_snapshot_keeps_the_actual_invention_jobs_part_of_the_reason(
+    session_provider, sde_engine, monkeypatch,
+):
+    """The job's reason named both sources; the re-snapshot re-reads the
+    owner's stored invention jobs, so the actual part stays."""
+    _seed_sde(sde_engine)
+    _sde_decryptors(monkeypatch, _DECRYPTOR)
+    _store_invention_job(session_provider, successful_runs=0)
+    _store_job_without_a_choice(session_provider, reason=(
+        f"invention cost unknown: no decryptor choice for blueprint {_TARGET_BP} "
+        "(no product overview has planned it yet)" + _ACTUAL_JOB_REASON
+    ))
+    _service(_state(), session_provider).publish_decryptor_choices({990004: DecryptorChoice(NO_DECRYPTOR, "x")})
+    with session_provider.app_session() as session:
+        reason = session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one().invention_cost_unknown_reason
+    assert "this blueprint is not planned by the overview" in reason
+    assert reason.endswith(_ACTUAL_JOB_REASON)
+
+
+def test_the_re_snapshot_costs_from_the_actual_jobs_the_overview_choice_disambiguates(
+    session_provider, sde_engine, monkeypatch,
+):
+    """The stored invention job's chance fits no decryptor and Fake
+    Symmetry; the published choice (no decryptor) settles it, so the
+    re-snapshot uses the actual source: (10 x 350 + 100) / (4 x 10) = 90 ISK
+    per run, 2 runs."""
+    _seed_sde(sde_engine)
+    _sde_decryptors(monkeypatch, _DECRYPTOR, _TWIN)
+    _store_invention_job(session_provider, successful_runs=4)
+    _store_job_without_a_choice(session_provider, reason=(
+        f"invention cost unknown: no decryptor choice for blueprint {_TARGET_BP} "
+        "(no product overview has planned it yet); the corp's own invention jobs give no cost either: "
+        "no usable invention job (job 4001: decryptor unknown: candidates Fake Symmetry, No decryptor)"
+    ))
+    _service(_state(), session_provider).publish_decryptor_choices({_TARGET_BP: DecryptorChoice(NO_DECRYPTOR, "x")})
+    with session_provider.app_session() as session:
+        job = session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one()
+        assert job.invention_cost_unknown_reason is None
+        assert job.invention_cost == pytest.approx(2 * 90.0)
+        assert job.build_cost_source.endswith("+actual_invention_job")
+
+
+def test_the_re_snapshot_reads_only_the_owners_own_invention_jobs(session_provider, sde_engine):
+    """Another character's invention job is not this pilot's cost source
+    (as in the job refresh, which reads the owner's own jobs)."""
+    _seed_sde(sde_engine)
+    with session_provider.app_session() as session:
+        session.add(CharacterIndustryJobsModel(
+            character_id=_PILOT + 1, job_id=4002, status="delivered", activity_id=8, runs=10,
+            blueprint_type_id=_SOURCE_BP, product_type_id=_TARGET_BP, cost=100.0,
+            raw={"job_id": 4002, "activity_id": 8, "status": "delivered", "runs": 10, "successful_runs": 0,
+                 "product_type_id": _TARGET_BP, "cost": 100.0, "probability": 0.34 * _SKILL_FACTOR},
+        ))
+        session.commit()
+    _store_job_without_a_choice(session_provider)
+    _service(_state(), session_provider).publish_decryptor_choices({990004: DecryptorChoice(NO_DECRYPTOR, "x")})
+    with session_provider.app_session() as session:
+        reason = session.query(CharacterIndustryJobsModel).filter_by(job_id=5001).one().invention_cost_unknown_reason
+    assert "own invention jobs" not in reason
+
+
 def test_the_migration_adds_the_reason_column_and_the_choices_table():
     conn = sqlite3.connect(":memory:")
     for table in ("character_industry_jobs", "corporation_industry_jobs"):

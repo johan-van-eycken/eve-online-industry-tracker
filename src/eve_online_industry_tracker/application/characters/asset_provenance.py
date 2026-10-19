@@ -514,6 +514,9 @@ def resnapshot_jobs_without_decryptor_choice(
     job's build cost and its historical acquisition are updated; the job
     keeps a reason when the estimate is still unknown (for a blueprint the
     overview does not plan: "this blueprint is not planned by the overview").
+    The actual-invention source is re-evaluated too, from the owner's stored
+    invention jobs with this publish's choices (they may now settle an
+    ambiguous decryptor), so a reason naming both sources keeps both.
     Commits; returns the number of jobs re-snapshotted."""
     from eve_online_industry_tracker.application.characters.asset_history import (
         _owner_models,
@@ -526,6 +529,27 @@ def resnapshot_jobs_without_decryptor_choice(
         ("corporation", CorporationIndustryJobsModel, "corporation_id"),
     ):
         _, history_model, _, _ = _owner_models(owner_kind)
+        invention_sources_by_owner: dict[int, dict[int, dict[str, Any]]] = {}
+
+        def _invention_sources(owner_id: int) -> dict[int, dict[str, Any]]:
+            """The owner's actual-invention sources from its stored invention
+            jobs, as its job refresh reads them from ESI, with this
+            publish's decryptor choices."""
+            if owner_id not in invention_sources_by_owner:
+                stored = (
+                    app_session.query(model.raw)
+                    .filter(getattr(model, owner_field) == owner_id)
+                    .filter(model.activity_id == 8)
+                    .all()
+                )
+                invention_sources_by_owner[owner_id] = build_invention_cost_per_run_by_blueprint_type(
+                    jobs=[dict(raw) for (raw,) in stored if isinstance(raw, dict)],
+                    sde_session=sde_session,
+                    market_price_map=dict(market_price_map),
+                    invention_refresh=invention_refresh,
+                )
+            return invention_sources_by_owner[owner_id]
+
         rows = (
             app_session.query(model)
             .filter(model.invention_cost_unknown_reason.like(f"%{NO_DECRYPTOR_CHOICE_REASON}%"))
@@ -562,6 +586,7 @@ def resnapshot_jobs_without_decryptor_choice(
                 },
                 owned_input_unit_cost_by_type_id=owned_costs,
                 invention_refresh=invention_refresh,
+                **invention_cost_source_for(_invention_sources(owner_id), row.blueprint_type_id),
             )
             row.output_quantity = snapshot.get("output_quantity")
             row.materials_cost = snapshot.get("materials_cost")
