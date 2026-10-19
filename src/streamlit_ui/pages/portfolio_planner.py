@@ -35,6 +35,7 @@ from streamlit_ui.state.industry_snapshot_page import (
 )
 from streamlit_ui.eve_constants import ACTIVITY_LAB_IDS, ACTIVITY_REACTION_IDS
 from eve_online_industry_tracker.application.industry.overview_row import get_profit_upper_bound_reason
+from eve_online_industry_tracker.application.industry.portfolio_service import IndustryPortfolioService
 
 _ALL_META_GROUPS = {"Tech I", "Tech II", "Tech III", "Faction", "Storyline", "Other"}
 _DEFAULT_META_GROUPS_ON = {"Tech I", "Tech II", "Faction", "Storyline", "Other"}
@@ -794,6 +795,28 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
                     st.caption(f"**Anomaly:** {'; '.join(anomaly_reasons)}")
 
 
+def confidence_capped_hint(rows: list[dict[str, Any]], *, shown: int) -> str | None:
+    """The API's "N rows capped: job fees unknown" hint (portfolio_service)
+    for this page (Task A item 4): the rows whose pricing confidence is held
+    at Medium because their job fees are unknown (their profit is an upper
+    bound), said only when the result is empty or filtered (`shown`, the
+    rows left after the filters and disqualifiers, is below `rows`)."""
+    if shown >= len(rows):
+        return None
+    capped = sum(
+        1 for row in rows
+        if str(row.get("pricing_confidence") or "").strip().lower() == "medium"
+        and get_profit_upper_bound_reason(row) is not None
+    )
+    return IndustryPortfolioService.confidence_capped_hint(capped)
+
+
+def _render_confidence_capped_hint(rows: list[dict[str, Any]], *, shown: int) -> None:
+    hint = confidence_capped_hint(rows, shown=shown)
+    if hint:
+        st.info(f"{hint} (their pricing confidence is held at Medium)")
+
+
 def _render_excluded_section(disqualified: list[tuple[dict[str, Any], str]]) -> None:
     if not disqualified:
         return
@@ -1100,6 +1123,7 @@ def render() -> None:
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
+        _render_confidence_capped_hint(overview_rows, shown=len(eligible_rows))
         _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts, objective=scoring_objective, track_record=track_record)
         _render_excluded_section(disqualified)
 
