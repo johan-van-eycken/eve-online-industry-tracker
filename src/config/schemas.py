@@ -27,7 +27,8 @@ CONFIG_SCHEMA = {
         "headers": {
             "Accept": "application/json",  # Required
             "Accept-Language": "en",  # Default language
-            "X-Compatibility-Date": "2025-08-26",  # Required compatibility date
+            # Informational: ESI requests always send esi_versions.ESI_COMPATIBILITY_DATE.
+            "X-Compatibility-Date": "2025-08-26",
             "X-Tenant": "tranquility",  # Tenant identifier
         },
     },

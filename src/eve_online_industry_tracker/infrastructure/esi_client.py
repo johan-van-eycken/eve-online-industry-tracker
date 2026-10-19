@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert  # pyright: ignore[reportMissingModuleSource]
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
+from eve_online_industry_tracker.infrastructure.esi_versions import ESI_COMPATIBILITY_DATE
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.models import EsiCache, OAuthCharacter
 from eve_online_industry_tracker.infrastructure.oauth import OAuthHandler, OAuthServer
@@ -315,7 +316,16 @@ class ESIClient:
         self.auth_url = self.cfg.get("esi")["auth_url"]
         self.esi_header_accept = self.cfg.get("esi").get("headers")["Accept"]
         self.esi_header_acceptlanguage = self.cfg.get("esi").get("headers")["Accept-Language"]
-        self.esi_header_xcompatibilitydate = self.cfg.get("esi").get("headers")["X-Compatibility-Date"]
+        # The compatibility date pins every ESI response shape the code parses, so it is
+        # the code's (esi_versions.ESI_COMPATIBILITY_DATE), not a config choice.
+        _configured_date = (self.cfg.get("esi").get("headers") or {}).get("X-Compatibility-Date")
+        if _configured_date and _configured_date != ESI_COMPATIBILITY_DATE:
+            logging.warning(
+                "config esi.headers.X-Compatibility-Date=%s ignored; ESI requests use the pinned %s",
+                _configured_date,
+                ESI_COMPATIBILITY_DATE,
+            )
+        self.esi_header_xcompatibilitydate = ESI_COMPATIBILITY_DATE
         self.esi_header_xtenant = self.cfg.get("esi").get("headers")["X-Tenant"]
         self.client_id = self.cfg.get("oauth")["client_id"]
         self.client_secret = self.cfg.get("client_secret")

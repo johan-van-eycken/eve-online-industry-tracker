@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
 from eve_online_industry_tracker.infrastructure.esi_versions import (
+    ESI_COMPATIBILITY_DATE,
     ESI_MARKETS_ORDERS,
     ESI_MARKETS_HISTORY,
     ESI_MARKETS_PRICES,
@@ -126,7 +127,7 @@ class ESIService:
             "Accept": getattr(self._esi_client, "esi_header_accept", "application/json"),
             "Accept-Language": getattr(self._esi_client, "esi_header_acceptlanguage", "en"),
             "User-Agent": getattr(self._esi_client, "user_agent", "eve-online-industry-tracker"),
-            "X-Compatibility-Date": getattr(self._esi_client, "esi_header_xcompatibilitydate", "2025-08-26"),
+            "X-Compatibility-Date": ESI_COMPATIBILITY_DATE,
             "X-Tenant": getattr(self._esi_client, "esi_header_xtenant", "tranquility"),
         }
 

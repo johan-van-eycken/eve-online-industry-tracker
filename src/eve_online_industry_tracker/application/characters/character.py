@@ -61,6 +61,16 @@ JITA_4_4_STATION_ID = 60003760
 SKILL_ID_ACCOUNTING = 16622
 SKILL_ID_BROKER_RELATIONS = 3446
 
+
+def industry_job_location_id(job: Dict[str, Any]) -> Optional[int]:
+    """The facility location of an ESI industry job: 'station_id' on
+    /characters/{id}/industry/jobs, 'location_id' on the corporation route."""
+    value = job.get("location_id")
+    if value is None:
+        value = job.get("station_id")
+    return value
+
+
 class Character:
     """Ingame entity of a character."""
 
@@ -1130,7 +1140,7 @@ class Character:
                         "successful_runs": j.get("successful_runs"),
                         "installer_id": j.get("installer_id"),
                         "facility_id": j.get("facility_id"),
-                        "location_id": j.get("location_id"),
+                        "location_id": industry_job_location_id(j),
                         "output_location_id": j.get("output_location_id"),
                         "blueprint_item_id": snapshot.get("blueprint_item_id"),
                         "blueprint_is_blueprint_copy": snapshot.get("blueprint_is_blueprint_copy"),
