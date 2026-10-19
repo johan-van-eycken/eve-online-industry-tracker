@@ -51,20 +51,15 @@ class MarketPricingService:
 
     def _market_hub_context(self, hub: str | None) -> dict[str, Any]:
         normalized_hub = self.normalize_market_hub(hub)
-        configured = dict(self._MARKET_HUBS.get(normalized_hub) or {})
-
-        esi_service = getattr(self._state, "esi_service", None)
-        admin = getattr(self._state, "admin_settings", None)
-        fallback_region = int(admin.get("market_defaults", "default_region_id")) if admin else 10000002
-        fallback_station = int(admin.get("market_defaults", "default_station_id")) if admin else 60003760
-        default_region_id = int(getattr(esi_service, "_region_id", fallback_region) or fallback_region)
-        default_station_id = int(getattr(esi_service, "_station_id", fallback_station) or fallback_station)
+        # Every hub has its region and station (the removed market_defaults/default_region_id and
+        # default_station_id never applied).
+        configured = self._MARKET_HUBS[normalized_hub]
 
         return {
             "hub": normalized_hub,
             "label": str(configured.get("label") or normalized_hub.title()),
-            "region_id": int(configured.get("region_id") or default_region_id),
-            "station_id": int(configured.get("station_id") or default_station_id),
+            "region_id": int(configured["region_id"]),
+            "station_id": int(configured["station_id"]),
         }
 
     def _market_pricing_cfg(self) -> dict[str, Any]:

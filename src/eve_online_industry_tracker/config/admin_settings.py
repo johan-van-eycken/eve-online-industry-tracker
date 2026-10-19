@@ -168,22 +168,9 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Orderbook smoothing depth",
                 "help": "Number of best orders used for volume-weighted price calculation.",
             },
-            "default_region_id": {
-                "type": "int",
-                "default": 10000002,
-                "min": 10000000,
-                "max": 19999999,
-                "label": "Default region ID",
-                "help": "Default trade region (10000002 = The Forge / Jita).",
-            },
-            "default_station_id": {
-                "type": "int",
-                "default": 60003760,
-                "min": 60000000,
-                "max": 69999999,
-                "label": "Default station ID",
-                "help": "Default trade station (60003760 = Jita 4-4 CNAP).",
-            },
+            # default_region_id / default_station_id were removed: every market hub has its own region
+            # and station (MarketPricingService._MARKET_HUBS), so they never had an effect. A value still
+            # stored is ignored with an INFO at load.
         },
     },
     "industry": {
