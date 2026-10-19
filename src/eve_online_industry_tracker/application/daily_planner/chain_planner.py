@@ -432,6 +432,57 @@ class ChainPlanner:
                 _annotate(decision)
 
         names = {int(d.type_id): f"{d.type_name} ({d.type_id})" for d in build_decisions}
+        by_type = {int(d.type_id): d for d in build_decisions}
+        # Task A fix round 1 (M4): every release of the compute, across the
+        # assigner's passes: {key: (the releasing job's label, its row)}.
+        release_history: dict[Any, tuple[str, int]] = {}
+        undo_state: dict[int, tuple[Any, ...]] = {}
+
+        def _reword_blocked(decision: ItemDecision) -> None:
+            """A row still not built names its blueprint's holder from the
+            current ledger; with none (fix round 1, I3), it says the
+            blueprint is free and why the row still does nothing (the
+            assigner's cause of an undone re-plan)."""
+            row = decision.overview_row
+            replan_on = row.get("replan_on")
+            suffix = row.get("not_built_suffix")
+            if not isinstance(replan_on, dict) or not suffix or suffix not in (decision.decision_reason or ""):
+                return
+            cause = row.get("replan_cause")
+            if replan_on.get("kind") == "t2":
+                t1 = int(replan_on["t1"])
+                blocked = str(replan_on.get("blocked"))
+                labels = ledger.bpo_claim_labels(t1) if blocked == "bpo" else ledger.bpc_claim_labels(t1)
+                if labels:
+                    text = _t2_blocked_reason(blocked, t1, _holders(labels))
+                elif cause:
+                    what = "BPO" if blocked == "bpo" else "BPCs"
+                    text = f"T1 {what} ({t1}) free (its holder does not use it today), but {cause}"
+                else:
+                    return
+                new = f"; not built: {text}"
+            else:
+                ctx = state.get(id(decision)) or {}
+                bpo_plan, keys = ctx.get("bpo_plan"), ctx.get("bpo_keys")
+                old_cause = replan_on.get("cause")
+                if not bpo_plan or not keys or not old_cause:
+                    return
+                held = ledger.claim_of(keys[bpo_plan["priced"]])
+                if held is not None and held[0] != int(decision.type_id):
+                    new_cause = f"BPO used by {held[1]} today"
+                elif cause:
+                    new_cause = f"BPO free (its holder does not use it today), but {cause}"
+                else:
+                    return
+                new = suffix.replace(old_cause, new_cause, 1)
+                replan_on["cause"] = new_cause
+            if new == suffix:
+                return
+            decision.decision_reason = decision.decision_reason.replace(suffix, new, 1)
+            row["not_built_suffix"] = new
+            first = row.get("research_first")
+            if isinstance(first, dict):
+                first["note"] = f"{new[len('; not built: '):]}: not built from it in this plan"
 
         def _replan(
             release: dict[int, list[int]], used_by: dict[int, int], eligible: set[int],
@@ -443,13 +494,13 @@ class ChainPlanner:
             from); `eligible`: the rows with no action yet. The claims are
             released, the uses booked, and the eligible rows not built for a
             blueprint now free are planned again, in score order. Returns
-            those rows (the same objects, re-planned)."""
-            released: dict[Any, str] = {}
+            those rows (the same objects, re-planned). The rows still not
+            built are reworded from the ledger."""
             for owner, items in release.items():
                 for item in items:
                     held = ledger.claim_of(item)
                     if held is not None and held[0] == int(owner):
-                        released[item] = held[1]
+                        release_history[item] = (held[1], int(owner))
                         ledger.release(item, owner)
             for item, user in used_by.items():
                 held = ledger.claim_of(item)
@@ -472,30 +523,50 @@ class ChainPlanner:
                     done = self._replan_t2(decision, ledger, replan_on, lambda d: _t2_chain(d, []))
                 else:
                     done = self._replan_t1(decision, ledger, ctx)
-                if done:
-                    gained = [k for k, _l in ledger.claims_of(decision.type_id) if k not in before]
-                    _append_reason(decision, _released_wording(decision, ledger, gained, released))
-                    undo_state[id(decision)] = (*snapshot, gained)
-                    revived.append(decision)
-                    _annotate(decision)
-                elif replan_on.get("kind") == "t2":
-                    self._reword_t2_blocked(decision, ledger, replan_on)
+                if not done:
+                    continue
+                gained = [k for k, _l in ledger.claims_of(decision.type_id) if k not in before]
+                labels = {k: release_history[k][0] for k in gained if k in release_history}
+                _append_reason(decision, _released_wording(decision, ledger, gained, labels))
+                # M3: the releasing row says where its blueprint went (a
+                # released BPC of an invention is worded by the assigner).
+                handed: list[tuple[ItemDecision, str]] = []
+                for key in gained:
+                    if key not in release_history or _claim_category(release_history[key][0]) == "invention":
+                        continue
+                    releaser = by_type.get(release_history[key][1])
+                    held = ledger.claim_of(key)
+                    if releaser is None or releaser is decision or held is None:
+                        continue
+                    kind = "BPO" if (ledger.type_of(key) or ("bpo", 0))[0] == "bpo" else "BPC"
+                    phrase = f"its {kind} {key} goes to {held[1]}"
+                    _append_reason(releaser, phrase)
+                    handed.append((releaser, phrase))
+                undo_state[id(decision)] = (*snapshot, gained, handed)
+                revived.append(decision)
+                _annotate(decision)
+            for decision in ordered:
+                _reword_blocked(decision)
             return revived
 
-        undo_state: dict[int, tuple[Any, ...]] = {}
-
-        def _undo_replan(decision: ItemDecision) -> None:
+        def _undo_replan(decision: ItemDecision, cause: str | None = None) -> None:
             """A re-planned row that still got no action: back to its
-            not-built plan and reason, and the blueprints it gained are free."""
+            not-built plan, the blueprints it gained are free, and its reason
+            says so with the assigner's `cause` (fix round 1, I3)."""
             saved = undo_state.pop(id(decision), None)
             if saved is None:
                 return
-            reason, stage, skip_reason, row, gained = saved
+            reason, stage, skip_reason, row, gained, handed = saved
             decision.decision_reason, decision.pipeline_stage, decision.bpo_analysis_skip_reason = reason, stage, skip_reason
             decision.overview_row.clear()
             decision.overview_row.update(row)
             for key in gained:
                 ledger.release(key, decision.type_id)
+            for releaser, phrase in handed:
+                releaser.decision_reason = (releaser.decision_reason or "").replace(f"; {phrase}", "", 1)
+            if cause:
+                decision.overview_row["replan_cause"] = cause
+            _reword_blocked(decision)
 
         # Each parent's sub-manufacture requests, in order, and (research
         # first) the ones its kept BPO row would make instead. Sub-builds
@@ -552,10 +623,13 @@ class ChainPlanner:
                 for type_id in [t for t in reasons if bought_need.get(t, 0) <= max(0, int(stock.get(t, 0)))]:
                     del reasons[type_id]
 
-        def _sub_decisions(fallen: set[int]) -> list[ItemDecision]:
+        def _sub_decisions(fallen: set[int], dropped: set[int] | frozenset[int] = frozenset()) -> list[ItemDecision]:
+            # `dropped` (Task A fix round 1, I2): parents CharacterAssigner
+            # gives no manufacture (e.g. owner binding): no sub-builds for them.
             per_parent = [
                 (parent, fallback_requests[parent] if parent in fallen and parent in fallback_requests else requests)
                 for parent, requests in requests_by_parent
+                if parent not in dropped
             ]
             buy_reasons: dict[int, dict[int, str]] = {}
             subs = self._resolve_sub_requests(
@@ -622,6 +696,7 @@ class ChainPlanner:
         if not ledger.free_bpcs(t1) and not ledger.free_bpos(t1):
             return False
         self._unmark_not_built(decision)
+        decision.overview_row.pop("replan_cause", None)
         plan(decision)
         return decision.pipeline_stage != NOT_BUILT_STAGE
 
@@ -657,24 +732,6 @@ class ChainPlanner:
         )
         _append_reason(decision, "its components are bought: they were not sub-built in this plan")
         return True
-
-    @staticmethod
-    def _reword_t2_blocked(decision: ItemDecision, ledger: BlueprintLedger, replan_on: dict[str, Any]) -> None:
-        """A T2 row still not built after a re-plan names who holds its T1
-        blueprints now (a released one may have gone to another row)."""
-        t1 = int(replan_on["t1"])
-        labels = ledger.bpo_claim_labels(t1) if replan_on.get("blocked") == "bpo" else ledger.bpc_claim_labels(t1)
-        if not labels:
-            return
-        row = decision.overview_row
-        old = row.get("not_built_suffix")
-        new = f"; not built: {_t2_blocked_reason(str(replan_on.get('blocked')), t1, _holders(labels))}"
-        if old and old != new and old in (decision.decision_reason or ""):
-            decision.decision_reason = decision.decision_reason.replace(old, new, 1)
-            row["not_built_suffix"] = new
-            first = row.get("research_first")
-            if isinstance(first, dict):
-                first["note"] = f"{new[len('; not built: '):]}: not built from it in this plan"
 
     @staticmethod
     def _merge_sub_requests(
@@ -1449,7 +1506,7 @@ class ChainPlanner:
                     if priced in taken:
                         # Task A item 6: another row's job holds the BPO; when
                         # that job gets no slot the row is re-planned.
-                        row["replan_on"] = {"kind": "t1_bpo"}
+                        row["replan_on"] = {"kind": "t1_bpo", "cause": cause}
             note = row["research_first"]["note"]
         _log(note)
 

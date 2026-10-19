@@ -147,26 +147,42 @@ class CharacterAssigner:
                 for _pass in range(MAX_REPLAN_PASSES if callable(replan) else 0):
                     release, used_by = _unused_claims(top_level, emitted, bpc_pool)
                     eligible = {int(d.type_id) for d in top_level if not emitted.get(id(d)) and id(d) not in tried}
-                    revived = replan(release, used_by, eligible) if (release or used_by) else []
+                    revived = replan(release, used_by, eligible)
                     if not revived:
                         break
                     for decision in revived:
                         tried.add(id(decision))
                         actions = _assign_one(decision)
                         if not actions and callable(undo):
-                            # Still nothing to do today (no free slot): keep
-                            # its not-built plan and reason as they were.
-                            undo(decision)
+                            # Still nothing to do today: back to its
+                            # not-built plan, saying why (fix round 1, I3).
+                            undo(decision, _replan_cause(decision, char_slots))
                             bpc_pool["releases"] = [e for e in bpc_pool.get("releases") or [] if e[0] is not decision]
                             continue
                         logger.info("CharacterAssigner: type_id=%s re-planned after a blueprint release", decision.type_id)
                         emitted[id(decision)] = actions
                         assigned_actions.extend(actions)
-                if fell_back and callable(resize):
+                else:
+                    if callable(replan):
+                        # The last pass may have undone a re-plan: reword
+                        # the rows still not built from the final ledger.
+                        replan({}, {}, set())
+                # Task A fix round 1 (I2): a parent with no manufacture action
+                # (owner binding, no slot) gets no sub-builds either: a
+                # component's quantity is its parents' need.
+                requesters = {
+                    int(p) for d in sub_components for p in d.overview_row.get("requested_by_type_ids") or []
+                }
+                no_build = {
+                    int(d.type_id) for d in top_level
+                    if d.decision == "build" and int(d.type_id) in requesters
+                    and not any(a.action_type == "manufacture" for a in emitted.get(id(d)) or [])
+                }
+                if (fell_back or no_build) and callable(resize):
                     # Their components were sized for the research-first
                     # batch: re-plan them for the batch actually built (fix
                     # round 5), before any sub-component takes a slot.
-                    resized = resize(set(fell_back))
+                    resized = resize(set(fell_back), dropped=no_build) if no_build else resize(set(fell_back))
                     sub_components = [d for d in resized if d.decision in ("build", "pause")]
                     rebuild = getattr(chain_plan, "rebuild_decisions", None)
                     # One ItemDecision per type_id (Task 14): the planner's own merge.
@@ -174,8 +190,9 @@ class CharacterAssigner:
                         *(d for d in chain_plan.decisions if not d.is_sub_component), *sub_components,
                     ]
                     logger.info(
-                        "CharacterAssigner: re-sized the sub-components for type_id(s) %s, "
-                        "built from their kept BPO row", sorted(fell_back),
+                        "CharacterAssigner: re-sized the sub-components for type_id(s) %s (built from "
+                        "their kept BPO row) and dropped those of %s (no manufacture today)",
+                        sorted(fell_back), sorted(no_build),
                     )
                 pass_decisions = sub_components
             for decision in pass_decisions:
@@ -910,12 +927,11 @@ class CharacterAssigner:
                 row, lanes=[(cid, char_slots[cid].get("skills_by_id")) for cid in lanes],
                 probability_floor=probability_floor, price_map=price_map,
             ), len(lanes)
-        if only is not None and not lanes:
-            return [], 0
-        char_id, _name = (
-            (lanes[0], None) if only is not None and len(lanes) == 1
-            else self._best_invention_char(char_slots, characters, row)
-        )
+        # One lane or none: the single best free pilot (A4), among the owners
+        # when every BPC is a pilot's own (Task A fix round 1, M1: an owner
+        # whose skills are not loaded invents at the base chance, as for a
+        # corp BPC).
+        char_id, _name = self._best_invention_char(char_slots, characters, row, only=only)
         if char_id is None:
             return [], 0
         return [(char_id, assigned_invention(
@@ -1207,6 +1223,7 @@ class CharacterAssigner:
 
     def _best_invention_char(
         self, char_slots: dict[int, dict], characters: list[dict], row: dict[str, Any] | None = None,
+        only: list[int] | None = None,
     ) -> tuple[int | None, str | None]:
         """The free pilot with the highest invention skill factor for this
         item: the producer's invention_chance skills (D2, the same rule as the
@@ -1234,6 +1251,8 @@ class CharacterAssigner:
         for slot in char_slots.values():
             if slot.get("free_research", 0) <= 0:
                 continue
+            if only is not None and slot["character_id"] not in only:
+                continue  # Task A: a pilot's own BPC is that pilot's job
             loaded = slot.get("skills_by_id")
             if required is not None and loaded is not None and not can_run_invention(required, loaded):
                 continue
@@ -1293,6 +1312,24 @@ def _unused_claims(
         if idle:
             release[int(decision.type_id)] = idle
     return release, used_by
+
+
+_OWNER_NO_SLOT = re.compile(r"owner [^;]+? has no free slot")
+
+
+def _replan_cause(decision: ItemDecision, char_slots: dict[int, dict[str, Any]]) -> str:
+    """Why a re-planned row still got no action (fix round 1, I3), for its
+    reason once the re-plan is undone."""
+    match = _OWNER_NO_SLOT.search(decision.decision_reason or "")
+    if match:
+        return match.group(0)
+    row = decision.overview_row
+    if row.get("needs_invention") and row.get("has_t1_bpo"):
+        return "no free research slot for the copy"
+    if row.get("needs_invention"):
+        free = any(int(s.get("free_research", 0)) > 0 for s in char_slots.values())
+        return NO_FREE_SKILLED_INVENTOR_REASON if free else NO_FREE_RESEARCH_SLOT_REASON
+    return "no free manufacturing slot"
 
 
 def _owner_by_item(decision: ItemDecision) -> dict[int, int]:

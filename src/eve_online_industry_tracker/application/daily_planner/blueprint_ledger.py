@@ -56,14 +56,21 @@ class BlueprintLedger:
     """The free BPOs and BPCs of one plan, and who has claimed each."""
 
     def __init__(self, bpo_assets_by_type_id: dict[int, list], bpc_assets_by_type_id: dict[int, list]) -> None:
-        self._bpos: dict[int, list[tuple[Hashable, Any]]] = {
-            int(t): [(self._key(a, "bpo", t, i), a) for i, a in enumerate(assets or [])]
-            for t, assets in (bpo_assets_by_type_id or {}).items()
-        }
-        self._bpcs: dict[int, list[tuple[Hashable, Any]]] = {
-            int(t): [(self._key(a, "bpc", t, i), a) for i, a in enumerate(assets or [])]
-            for t, assets in (bpc_assets_by_type_id or {}).items()
-        }
+        # One entry per key (Task A fix round 1, I1): an item listed twice (a
+        # stale corp + pilot snapshot) is one blueprint, the pilot's
+        # (owner-bound) entry wins. {key: (kind, type_id, asset)}.
+        self._index: dict[Hashable, tuple[str, int, Any]] = {}
+        for kind, source in (("bpo", bpo_assets_by_type_id), ("bpc", bpc_assets_by_type_id)):
+            for t, assets in (source or {}).items():
+                for i, asset in enumerate(assets or []):
+                    key = self._key(asset, kind, t, i)
+                    held = self._index.get(key)
+                    if held is None or (owner_character_id(held[2]) is None and owner_character_id(asset) is not None):
+                        self._index[key] = (kind, int(t), asset)
+        self._bpos: dict[int, list[tuple[Hashable, Any]]] = {}
+        self._bpcs: dict[int, list[tuple[Hashable, Any]]] = {}
+        for key, (kind, t, asset) in self._index.items():
+            (self._bpos if kind == "bpo" else self._bpcs).setdefault(t, []).append((key, asset))
         #: {key: (owner type_id, label)}; the label names the job, for reasons.
         self._claims: dict[Hashable, tuple[int, str]] = {}
 
@@ -89,12 +96,8 @@ class BlueprintLedger:
 
     def owner_of(self, key: Hashable) -> int | None:
         """The pilot who owns this blueprint (owner-bound), or None (corp)."""
-        for index in (self._bpos, self._bpcs):
-            for entries in index.values():
-                for k, asset in entries:
-                    if k == key:
-                        return owner_character_id(asset)
-        return None
+        entry = self._index.get(key)
+        return owner_character_id(entry[2]) if entry is not None else None
 
     def claim_of(self, key: Hashable) -> tuple[int, str] | None:
         return self._claims.get(key)
@@ -171,11 +174,8 @@ class BlueprintLedger:
 
     def type_of(self, key: Hashable) -> tuple[str, int] | None:
         """("bpo" | "bpc", blueprint type_id) of a ledger key, or None."""
-        for kind, index in (("bpo", self._bpos), ("bpc", self._bpcs)):
-            for type_id, entries in index.items():
-                if any(k == key for k, _a in entries):
-                    return kind, type_id
-        return None
+        entry = self._index.get(key)
+        return (entry[0], entry[1]) if entry is not None else None
 
     def claim_bpcs_of_row(self, type_id: int, item_ids: set[int] | None, owner_type_id: int, label: str) -> None:
         """Book the BPCs a manufacture builds on: the named items, or every

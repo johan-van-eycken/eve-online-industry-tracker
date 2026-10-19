@@ -47,8 +47,8 @@ def test_an_unknown_copy_time_keeps_the_old_cap_only():
 
 def test_a_ship_blueprint_copy_job_no_longer_exceeds_30_days():
     """The SDE's Rifter-like blueprint: max 30 runs per copy, 4800 s copy
-    time per run. 30 copies x 30 runs would take 300 days; 30 days hold 540
-    copied runs, so 18 copies of 30 runs."""
+    time per run. 30 copies x 30 runs (900 runs) would take 50 days; 30 days
+    hold 540 copied runs, so 18 copies of 30 runs."""
     assert MAX_JOB_SECONDS // (30 * 4800) == 18
     (job,) = _shape_copy_jobs(30 * 30, [30] * 30, 1, 30, 4800)
     assert job == {"copies": 18, "runs_per_copy": 30, "short": 12}

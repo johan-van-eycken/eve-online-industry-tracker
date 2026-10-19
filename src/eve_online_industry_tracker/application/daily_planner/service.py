@@ -1595,16 +1595,40 @@ def busy_blueprint_item_ids(industry_jobs: list[Any]) -> set[int]:
 
 
 def merge_blueprint_indexes(
-    *indexes: tuple[dict[int, list[Any]], dict[int, list[Any]]],
+    corp_index: tuple[dict[int, list[Any]], dict[int, list[Any]]],
+    character_index: tuple[dict[int, list[Any]], dict[int, list[Any]]],
 ) -> tuple[dict[int, list[Any]], dict[int, list[Any]]]:
-    """One (BPOs, BPCs) index from several (corp, then character), each
-    keyed by blueprint type_id, the assets in the given order."""
+    """One (BPOs, BPCs) index, keyed by blueprint type_id: the corp's
+    assets, then the pilots'.
+
+    One item_id in both (Task A fix round 1, I1: a blueprint moved between
+    a pilot's and the corp hangar while one snapshot is stale) is one
+    blueprint: the pilot's entry is kept, as it is owner-bound (only that
+    pilot can install it: the conservative reading), and a WARNING names
+    the items. Without the dedupe the ledger would book it twice."""
+    character_items = {
+        int(_asset_attr(a, "item_id") or 0)
+        for index in character_index for assets in (index or {}).values() for a in assets
+    }
+    character_items.discard(0)
+    dropped: set[int] = set()
     bpos: dict[int, list[Any]] = {}
     bpcs: dict[int, list[Any]] = {}
-    for index_bpos, index_bpcs in indexes:
+    for (index_bpos, index_bpcs), is_corp in ((corp_index, True), (character_index, False)):
         for target, source in ((bpos, index_bpos), (bpcs, index_bpcs)):
             for type_id, assets in (source or {}).items():
-                target.setdefault(type_id, []).extend(assets)
+                for asset in assets:
+                    item = int(_asset_attr(asset, "item_id") or 0)
+                    if is_corp and item in character_items:
+                        dropped.add(item)
+                        continue
+                    target.setdefault(type_id, []).append(asset)
+    if dropped:
+        logger.warning(
+            "DailyPlannerService: blueprint item(s) %s are in both the corp and a pilot's assets "
+            "(a stale snapshot); planned once, as the pilot's (owner-bound)",
+            ", ".join(str(i) for i in sorted(dropped)),
+        )
     return bpos, bpcs
 
 

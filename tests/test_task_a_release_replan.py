@@ -12,6 +12,7 @@ Fake ids, pilots and numbers throughout.
 """
 from __future__ import annotations
 
+import copy
 import os
 import sys
 
@@ -88,10 +89,10 @@ def _planned_t2(type_id, name, score, encryption):
     return L._dec(row, type_id, name, score, 2, "invention")
 
 
-def _plan_and_assign(decisions, bpos, bpcs, chars, jobs=()):
+def _plan_and_assign(decisions, bpos, bpcs, chars, jobs=(), blueprints=None):
     plan = L._planner(0).plan_chain(decisions, {
         "bpo_assets_by_type_id": bpos, "bpc_assets_by_type_id": bpcs,
-        "blueprint_data": L.BP_B, "market_depth_cache": A.PRICES, "variant_rows_by_type_id": {},
+        "blueprint_data": blueprints or L.BP_B, "market_depth_cache": A.PRICES, "variant_rows_by_type_id": {},
     })
     return plan, _assign(plan, chars, jobs)
 
@@ -195,19 +196,25 @@ def test_a_used_bpo_is_not_released():
 
 
 def test_a_re_planned_invention_is_bought_like_the_same_row_planned_alone():
-    """The re-planned row's invent action and its purchase equal those of
-    the same row planned with the BPC free from the start."""
+    """The re-planned row's invent action and its purchase, datacores
+    included (blueprint 1999 also makes 12346 here), equal those of the
+    same row planned with the BPC free from the start."""
+    bp = copy.deepcopy(L.BP_B)
+    bp[1999]["manufacturing"]["products"] = [{"type_id": 12345, "quantity": 1}, {"type_id": 12346, "quantity": 1}]
     high = _planned_t2(12345, "Widget II", 2.0, A.ENCRYPTION)
     low = _planned_t2(12346, "Widget II b", 1.0, OTHER_ENCRYPTION)
     _plan, actions = _plan_and_assign([high, low], {}, {998: [L._bpc(701, 998, 10)]},
-                                      [_pilot(2, "Lo", OTHER_ENCRYPTION)])
+                                      [_pilot(2, "Lo", OTHER_ENCRYPTION)], blueprints=bp)
     alone = _planned_t2(12346, "Widget II b", 1.0, OTHER_ENCRYPTION)
     _plan2, alone_actions = _plan_and_assign([alone], {}, {998: [L._bpc(701, 998, 10)]},
-                                             [_pilot(2, "Lo", OTHER_ENCRYPTION)])
+                                             [_pilot(2, "Lo", OTHER_ENCRYPTION)], blueprints=bp)
     (invent,), (alone_invent,) = actions, alone_actions
     assert (invent.runs, invent.blueprint_item_id, invent.estimated_job_fee_isk) == (5, 701, 20.0)
     assert (invent.runs, invent.estimated_job_fee_isk) == (alone_invent.runs, alone_invent.estimated_job_fee_isk)
-    assert L._shop(actions, A.PRICES, L.BP_B) == L._shop(alone_actions, A.PRICES, L.BP_B)
+    shop = L._shop(actions, A.PRICES, bp)
+    assert shop == L._shop(alone_actions, A.PRICES, bp)
+    # 2 + 2 datacores per attempt, 5 attempts.
+    assert (shop[A.DATACORE_A], shop[A.DATACORE_B]) == (10, 10)
 
 
 def test_a_re_plan_that_still_gets_no_slot_keeps_the_not_built_reason():
@@ -220,6 +227,9 @@ def test_a_re_plan_that_still_gets_no_slot_keeps_the_not_built_reason():
     assert actions == []
     assert low.pipeline_stage == "blocked"
     assert "re-planned" not in low.decision_reason
-    assert ("not built: T1 BPCs (998) used by invention for Widget II (12345) (which ended up not inventing) "
-            "today and no T1 BPO to copy") in low.decision_reason
+    # Fix round 1 (I3): worded from the final ledger, with the assigner's cause.
+    assert low.decision_reason == (
+        "test; not built: T1 BPCs (998) free (its holder does not use it today), "
+        "but no free pilot with the invention skills"
+    )
     assert "its T1 BPC(s) 701 stay unused today" in high.decision_reason

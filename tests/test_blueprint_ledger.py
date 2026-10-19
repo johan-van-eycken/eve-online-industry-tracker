@@ -803,8 +803,11 @@ def test_p3_no_manufacture_emitted_keeps_the_research_wording_with_no_slot():
     _thing, widget, actions = _thing_and_widget_ii(research_busy=True, mfg_busy=True)
     assert [a.action_type for a in actions] == []
     assert "manufacture of Thing" not in widget.decision_reason
-    assert ("T1 BPO (999) kept for TE research for Thing (12345), which got no free slot today: "
-            "no copy in this plan") in widget.decision_reason
+    # Task A fix round 1 (I3): Thing's idle claims are released and Widget II
+    # is re-planned, but no research slot is free either: undone, and the
+    # reason says the blueprint is free and why nothing runs.
+    assert ("not built: T1 BPO (999) free (its holder does not use it today), "
+            "but no free research slot today") in widget.decision_reason
 
 
 def test_m8_the_component_reason_checks_stock_pooled_across_parents():
