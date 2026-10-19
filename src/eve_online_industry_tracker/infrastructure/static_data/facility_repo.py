@@ -129,7 +129,8 @@ SDE_NAME_NOTE = ("name composed from the SDE: it may lack the unique name of the
 def npc_station_name(session: Any, station_id: int, language: str = "en",
                      esi_service: Any = None) -> tuple[str | None, str | None, str | None]:
     """(name, problem, note) for an NPC station. The official name from ESI
-    /universe/stations/{id} (ESIService.get_station_name, cached) first;
+    /universe/stations/{id} (ESIService.get_station_name, cached) in
+    `language` first, with ESI's note when it gave the English name instead;
     without ESI, or when it fails, the SDE composition
     (locations.npc_station_name) with a note that it may lack the unique
     name of the planet or moon (mapPlanets/mapMoons are not imported).
@@ -137,7 +138,8 @@ def npc_station_name(session: Any, station_id: int, language: str = "en",
     esi_problem = "ESI unavailable"
     if esi_service is not None and hasattr(esi_service, "get_station_name"):
         try:
-            return esi_service.get_station_name(int(station_id)), None, None
+            esi_name, esi_note = esi_service.get_station_name(int(station_id), language)
+            return esi_name, None, esi_note
         except Exception as exc:   # any ESI failure: the SDE name stands in, with the note
             esi_problem = f"ESI failed: {exc}"
     if session is None:

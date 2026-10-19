@@ -259,11 +259,12 @@ class _StationEsi:
     def __init__(self, names=None, error=None):
         self._names, self._error, self.calls = names or {}, error, []
 
-    def get_station_name(self, station_id):
+    def get_station_name(self, station_id, language="en"):
         self.calls.append(station_id)
         if self._error:
             raise RuntimeError(self._error)
-        return self._names[station_id]
+        # (name, note): the language note is tested in tests/test_esi_station_name_language.py
+        return self._names[station_id], None
 
 
 def test_the_station_name_prefers_esi(monkeypatch):
@@ -297,13 +298,14 @@ def test_the_esi_station_name_is_cached():
 
     def fake_get(endpoint, *args, **kwargs):
         calls.append(endpoint)
-        return {"station_id": 60008494, "name": "Amarr VIII (Oris) - Emperor Family Academy"}
+        payload = {"station_id": 60008494, "name": "Amarr VIII (Oris) - Emperor Family Academy"}
+        return SimpleNamespace(json=lambda: payload, headers={"Content-Language": "en"})
 
     svc._public_esi_get = fake_get
-    assert svc.get_station_name(60008494) == "Amarr VIII (Oris) - Emperor Family Academy"
-    assert svc.get_station_name(60008494) == "Amarr VIII (Oris) - Emperor Family Academy"
+    assert svc.get_station_name(60008494) == ("Amarr VIII (Oris) - Emperor Family Academy", None)
+    assert svc.get_station_name(60008494) == ("Amarr VIII (Oris) - Emperor Family Academy", None)
     assert len(calls) == 1 and "60008494" in calls[0]
-    svc._public_esi_get = lambda endpoint, *a, **k: {}
+    svc._public_esi_get = lambda endpoint, *a, **k: SimpleNamespace(json=lambda: {}, headers={})
     with pytest.raises(RuntimeError, match="no name"):
         svc.get_station_name(60000001)
 
@@ -357,7 +359,8 @@ def test_a_down_esi_costs_one_short_lookup_per_window(monkeypatch):
     monkeypatch.setattr(esi_module.time, "time", lambda: now[0])
     with pytest.raises(RuntimeError, match="unreachable"):
         svc.get_station_name(60008494)
-    assert calls == [{"timeout_seconds": 3.0, "max_retries": 0}]   # short, no retries
+    assert calls == [{"headers": {"Accept-Language": "en"}, "timeout_seconds": 3.0, "max_retries": 0,
+                      "return_response": True}]                   # short, no retries
     with pytest.raises(RuntimeError, match="unreachable"):
         svc.get_station_name(60008494)                            # within the window: cached failure
     assert len(calls) == 1

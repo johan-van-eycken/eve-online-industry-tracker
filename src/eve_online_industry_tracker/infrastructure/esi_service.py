@@ -89,10 +89,11 @@ class ESIService:
         self._public_structures_cache: Dict[tuple, tuple] = {}
         # (timestamp, [facilities])
         self._industry_facilities_cache: Optional[tuple] = None
-        # {station_id: name}: NPC station names do not change, cached for the process
-        self._station_name_cache: Dict[int, str] = {}
-        # {station_id: (failed_at, message)}: a failed lookup, not retried for STATION_NAME_FAILURE_TTL_SECONDS
-        self._station_name_failures: Dict[int, tuple] = {}
+        # {(station_id, language): (name, note)}: NPC station names do not change, cached for the process
+        self._station_name_cache: Dict[tuple, tuple] = {}
+        # {(station_id, language): (failed_at, message)}: a failed lookup, not retried for
+        # STATION_NAME_FAILURE_TTL_SECONDS
+        self._station_name_failures: Dict[tuple, tuple] = {}
 
     def set_market_context(self, *, region_id: Optional[int] = None, station_id: Optional[int] = None) -> None:
         if region_id is not None:
@@ -154,7 +155,11 @@ class ESIService:
         paginate: bool = False,
         timeout_seconds: Optional[float] = None,
         max_retries: Optional[int] = None,
+        headers: Optional[Dict[str, str]] = None,
+        return_response: bool = False,
     ) -> Any:
+        # headers: added to the session's for this request (e.g. Accept-Language).
+        # return_response: the requests.Response instead of its JSON (not with paginate).
         # None: the admin settings esi_resilience/esi_request_timeout_seconds and esi_max_retries,
         # read at each request (a caller with its own, like the station name lookup, keeps it).
         if timeout_seconds is None:
@@ -180,6 +185,7 @@ class ESIService:
                         url,
                         params=request_params,
                         timeout=float(timeout_seconds),
+                        headers=headers,
                     )
                     try:
                         if get_esi_monitor is not None:
@@ -262,7 +268,9 @@ class ESIService:
 
         if not paginate:
             response = issue_request(request_params=params)
-            return response.json()
+            return response if return_response else response.json()
+        if return_response:
+            raise ValueError("_public_esi_get: return_response is not supported with paginate")
 
         all_data: List[Dict[str, Any]] = []
         page = 1
@@ -574,34 +582,68 @@ class ESIService:
     STATION_NAME_TIMEOUT_SECONDS = 3.0
     STATION_NAME_FAILURE_TTL_SECONDS = 300.0
 
-    def get_station_name(self, station_id: int) -> str:
-        """An NPC station's official name from ESI /universe/stations/{id}/
-        (e.g. "Amarr VIII (Oris) - Emperor Family Academy"), cached for the
-        process. One try with a 3 s timeout and no retries; a failure is
-        cached for STATION_NAME_FAILURE_TTL_SECONDS and raised again without
-        an ESI call meanwhile. RuntimeError when ESI fails or gives no name."""
+    #: The Accept-Language values ESI has names in (its OpenAPI spec).
+    ESI_LANGUAGES = ("en", "de", "fr", "ja", "ru", "zh", "ko", "es")
+
+    def get_station_name(self, station_id: int, language: str = "en") -> tuple[str, str | None]:
+        """(name, note): an NPC station's official name from ESI
+        /universe/stations/{id} (e.g. "Amarr VIII (Oris) - Emperor Family
+        Academy") in `language` (the SDE language the app uses), asked with
+        the Accept-Language header and cached per (station, language) for the
+        process. The note is None when ESI gave the name in that language;
+        otherwise it says the name is ESI's English one: a language ESI does
+        not have is asked in English, and a reply whose Content-Language is
+        another language (no translation) or missing is used as given. One
+        try with a 3 s timeout and no retries; a failure is cached for
+        STATION_NAME_FAILURE_TTL_SECONDS and raised again without an ESI call
+        meanwhile. RuntimeError when ESI fails or gives no name."""
         station_id = int(station_id)
-        cached = self._station_name_cache.get(station_id)
+        language = str(language or "en").strip().lower()
+        key = (station_id, language)
+        cached = self._station_name_cache.get(key)
         if cached:
             return cached
-        failure = self._station_name_failures.get(station_id)
+        failure = self._station_name_failures.get(key)
         if failure is not None and time.time() - failure[0] < self.STATION_NAME_FAILURE_TTL_SECONDS:
             raise RuntimeError(failure[1])
+        asked = language if language in self.ESI_LANGUAGES else "en"
         try:
-            payload = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id),
-                                           timeout_seconds=self.STATION_NAME_TIMEOUT_SECONDS, max_retries=0)
+            response = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id),
+                                            headers={"Accept-Language": asked},
+                                            timeout_seconds=self.STATION_NAME_TIMEOUT_SECONDS, max_retries=0,
+                                            return_response=True)
+            payload = response.json()
         except Exception as e:
             message = f"ESI request failed for station {station_id}: {e}"
-            self._station_name_failures[station_id] = (time.time(), message)
+            self._station_name_failures[key] = (time.time(), message)
             raise RuntimeError(message) from e
         name = payload.get("name") if isinstance(payload, dict) else None
         if not name:
-            message = f"ESI /universe/stations/{station_id}/ gave no name"
-            self._station_name_failures[station_id] = (time.time(), message)
+            message = f"ESI /universe/stations/{station_id} gave no name"
+            self._station_name_failures[key] = (time.time(), message)
             raise RuntimeError(message)
-        self._station_name_failures.pop(station_id, None)
-        self._station_name_cache[station_id] = str(name)
-        return str(name)
+        note = self._station_name_note(language, asked, response)
+        self._station_name_failures.pop(key, None)
+        self._station_name_cache[key] = (str(name), note)
+        return str(name), note
+
+    @staticmethod
+    def _station_name_note(language: str, asked: str, response: Any) -> str | None:
+        """Why a station name is not in `language`, or None when it is."""
+        if language == "en":
+            return None
+        if asked != language:
+            return f"ESI has no names in the SDE language {language!r}: the English name"
+        try:
+            given = str((getattr(response, "headers", None) or {}).get("Content-Language") or "").strip().lower()
+        except Exception:
+            given = ""
+        if given.split("-")[0] == language:
+            return None
+        if not given:
+            return (f"ESI did not confirm a {language!r} name (no Content-Language): the name as ESI gave it, "
+                    "English when it has no translation")
+        return f"ESI has no {language!r} name for this station (it answered in {given!r}): the English name"
 
     def get_universe_structure(
         self,
