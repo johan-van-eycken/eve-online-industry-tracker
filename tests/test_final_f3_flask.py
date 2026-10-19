@@ -149,9 +149,9 @@ def test_industry_profile_context_route_returns_the_resolved_context(industry_cl
         def __init__(self, state):
             pass
 
-        def _resolve_industry_profile_context(self, *, character_id, industry_profile_id):
-            calls.append((character_id, industry_profile_id))
-            return {"id": industry_profile_id, "cost_index_unknown_reason": "no manufacturing index",
+        def industry_profile_context(self, profile_id):
+            calls.append(profile_id)
+            return {"id": profile_id, "cost_index_unknown_reason": "no manufacturing index",
                     "industry_system": {"lookup_error": "ESI down"}}
 
     monkeypatch.setattr(routes, "IndustryService", _FakeService)
@@ -159,7 +159,7 @@ def test_industry_profile_context_route_returns_the_resolved_context(industry_cl
     assert body["status"] == "success"
     assert body["data"]["cost_index_unknown_reason"] == "no manufacturing index"
     assert body["data"]["industry_system"]["lookup_error"] == "ESI down"
-    assert calls == [(None, 7)]
+    assert calls == [7]
 
 
 def test_industry_profile_context_route_passes_a_service_error_on(industry_client, monkeypatch):
@@ -169,7 +169,7 @@ def test_industry_profile_context_route_passes_a_service_error_on(industry_clien
         def __init__(self, state):
             pass
 
-        def _resolve_industry_profile_context(self, *, character_id, industry_profile_id):
+        def industry_profile_context(self, profile_id):
             raise ServiceError("Industry profile ID 7 not found", status_code=400)
 
     monkeypatch.setattr(routes, "IndustryService", _FakeService)
@@ -185,12 +185,27 @@ def test_industry_profile_context_route_answers_404_for_no_profile(industry_clie
         def __init__(self, state):
             pass
 
-        def _resolve_industry_profile_context(self, *, character_id, industry_profile_id):
+        def industry_profile_context(self, profile_id):
             return None
 
     monkeypatch.setattr(routes, "IndustryService", _FakeService)
     resp = industry_client.get("/industry_profile_context/7")
     assert resp.status_code == 404
+
+
+def test_the_public_industry_profile_context_wraps_the_resolver():
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    svc = IndustryService.__new__(IndustryService)
+    calls = []
+
+    def _resolve(*, character_id, industry_profile_id):
+        calls.append((character_id, industry_profile_id))
+        return {"id": industry_profile_id}
+
+    svc._resolve_industry_profile_context = _resolve
+    assert svc.industry_profile_context(7) == {"id": 7}
+    assert calls == [(None, 7)]
 
 
 # --- flask_app/db.py teardown ----------------------------------------------------------------

@@ -544,7 +544,7 @@ def industry_profile_context(profile_id: int):
     profile page can show them."""
     require_ready(get_state())
     svc = IndustryService(state=get_state())
-    context = svc._resolve_industry_profile_context(character_id=None, industry_profile_id=int(profile_id))
+    context = svc.industry_profile_context(int(profile_id))
     if context is None:
         return error(message=f"Industry profile ID {profile_id} not found", status_code=404)
     return ok(data=context)

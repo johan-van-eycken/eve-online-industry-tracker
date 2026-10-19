@@ -1521,6 +1521,13 @@ class IndustryService:
             "implants": implants,
         }
 
+    def industry_profile_context(self, profile_id: int) -> dict[str, Any] | None:
+        """The industry profile as the producer resolves it: the profile plus
+        its system cost indices, facility and structure bonuses, with the
+        reasons a part could not be read (lookup_error,
+        cost_index_unknown_reason). An unknown profile raises ServiceError."""
+        return self._resolve_industry_profile_context(character_id=None, industry_profile_id=int(profile_id))
+
     def _resolve_industry_profile_context(
         self,
         *,
