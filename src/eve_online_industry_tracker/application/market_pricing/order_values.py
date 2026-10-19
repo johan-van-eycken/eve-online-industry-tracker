@@ -80,7 +80,8 @@ def refresh_market_history(market_history_svc: Any, type_ids: Iterable[int], *, 
             reason = market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
-        except ESI_REQUEST_ERRORS + (SQLAlchemyError,) as exc:
+        except ESI_REQUEST_ERRORS + (SQLAlchemyError, ValueError) as exc:
+            # A malformed value skips this type only.
             reason = f"market history refresh failed: {exc}"
             logging.warning("%s: market history refresh of type %s failed, its stored history is used: %s",
                             label, type_id, exc)

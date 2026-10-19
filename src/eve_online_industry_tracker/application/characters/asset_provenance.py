@@ -2011,7 +2011,8 @@ def _get_or_fetch_market_price_on_date(
                 "(None, no date, or a price, volume or order count that is not a number)", type_id, skipped,
             )
         app_session.flush()
-    except ESI_REQUEST_ERRORS + (SQLAlchemyError,) as e:
+    except ESI_REQUEST_ERRORS + (SQLAlchemyError, ValueError) as e:
+        # A malformed history payload is a failed fetch for this type, with its reason.
         logging.warning("Failed to fetch market history for type_id=%s: %s", type_id, e)
         _record(f"market history fetch failed: {e}", is_transient=True)
         return None
@@ -2199,7 +2200,8 @@ def backfill_historical_market_costs(
             job.unit_build_cost = total_build_cost / float(output_quantity)
             job.build_cost_source = "historical_market_price_on_start_date"
 
-        except ESI_REQUEST_ERRORS + (SQLAlchemyError,) as e:
+        except ESI_REQUEST_ERRORS + (SQLAlchemyError, ValueError) as e:
+            # A malformed value skips this job only.
             logging.warning(
                 "backfill_historical_market_costs: skipping job_id=%s: %s",
                 getattr(job, "job_id", "?"),

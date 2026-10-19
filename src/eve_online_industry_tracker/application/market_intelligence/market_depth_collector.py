@@ -13,6 +13,10 @@ from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ER
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
 
+#: A malformed value in one type's data: that type is skipped (kept stale),
+#: the others are still refreshed.
+_DATA_ERRORS: tuple[type[Exception], ...] = (ValueError,)   # a TypeError is a bug: it propagates
+
 HUB_REGION: dict[str, int] = {
     "jita": 10000002,
 }
@@ -421,7 +425,7 @@ class MarketDepthCollector:
                 history_reason = history_svc.fetch_and_store_history(type_id=type_id, region_id=region_id)
             except AdminSettingInvalid:
                 raise  # a stored invalid setting fails loudly, naming it
-            except (*ESI_REQUEST_ERRORS, SQLAlchemyError) as e:
+            except (*ESI_REQUEST_ERRORS, SQLAlchemyError, *_DATA_ERRORS) as e:
                 history_reason = f"history refresh failed: {e}"
             if history_reason:
                 # The VWAP and outlier filter then use the history already stored.
@@ -455,7 +459,7 @@ class MarketDepthCollector:
                 )
             except AdminSettingInvalid:
                 raise  # a stored invalid setting fails loudly, naming it
-            except (*ESI_REQUEST_ERRORS, SQLAlchemyError) as e:
-                # Data, ESI and DB errors only: a programming error propagates.
+            except (*ESI_REQUEST_ERRORS, SQLAlchemyError, *_DATA_ERRORS) as e:
+                # Data (a malformed value), ESI and DB errors skip this type only.
                 logging.warning("MarketDepthCollector: failed for type_id=%s: %s", type_id, e)
                 self._mark_stale_logged(type_id, hub, f"market depth refresh failed: {e}")
