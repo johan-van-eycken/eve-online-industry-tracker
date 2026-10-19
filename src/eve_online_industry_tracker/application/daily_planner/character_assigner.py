@@ -308,6 +308,7 @@ class CharacterAssigner:
             used_bpos: set[Any] = pools.setdefault("bpos", set())
             # None: a row without BPC data (not from ChainPlanner): uncapped.
             bpcs = _row_bpcs(row, t1_blueprint_type_id, used_bpcs, carries_bpcs=wants_copy)
+            own_bpcs = list(bpcs or [])
             # Task 15 fix round 4: T1 BPCs a higher row of the same source
             # could not invent from today (no qualifying pilot free) are
             # this row's too; used_bpcs keeps each in one job.
@@ -387,6 +388,19 @@ class CharacterAssigner:
                         if bpc is not None:
                             takers.setdefault(bpc[0], decision)
                 notes = _fewer_lanes_note(row, free_lanes)
+                if results and bpcs is not None:
+                    # Task A item 3: fewer lanes than the BPCs this row
+                    # claimed: the rest go to the lower rows of the source,
+                    # as when the row invents nothing (worded after the loop).
+                    in_lanes = {bpc[0] for _cid, _inv, bpc in lanes if bpc is not None}
+                    leftover = [e for e in own_bpcs if e[0] not in in_lanes]
+                    if leftover:
+                        released.setdefault(t1_blueprint_type_id, []).extend(leftover)
+                        placeholder = _released_placeholder(type_id)
+                        pools.setdefault("releases", []).append((decision, list(leftover), placeholder))
+                        decision.decision_reason = (
+                            f"{decision.decision_reason}; fewer invent lanes than T1 BPCs today: {placeholder}"
+                        )
                 if not results:
                     # I1 (Task 15 fix round 1): never an unqualified pilot,
                     # whose chance and attempts would be another pilot's.
