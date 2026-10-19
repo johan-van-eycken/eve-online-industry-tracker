@@ -2098,8 +2098,13 @@ class IndustryService:
                 "Loading regional market history and hub liquidity",
                 {"stage": "market_activity", "type_count": len(product_type_ids)},
             )
+        # The types whose region history could not be fetched: unknown volume, with the reason.
+        volume_unavailable: dict[int, str] = {}
         with ThreadPoolExecutor(max_workers=2) as pool:
-            volume_future = pool.submit(pricing_service.get_region_daily_volume_map, type_ids=product_type_ids, hub=market_hub)
+            volume_future = pool.submit(
+                pricing_service.get_region_daily_volume_map,
+                type_ids=product_type_ids, hub=market_hub, unavailable=volume_unavailable,
+            )
             liquidity_future = pool.submit(pricing_service.get_hub_liquidity_map, type_ids=product_type_ids, hub=market_hub)
             region_daily_volume_map = volume_future.result()
             hub_liquidity_map = liquidity_future.result()
@@ -2114,22 +2119,30 @@ class IndustryService:
             type_id = int(row.get("type_id") or 0)
             daily_volume = region_daily_volume_map.get(type_id) or {}
             hub_liquidity = hub_liquidity_map.get(type_id) or {}
+            # No region history for the type: its volume is unknown (None), not 0.
+            volume_known = type_id in region_daily_volume_map
+            volume_reason = None if volume_known else (
+                volume_unavailable.get(type_id) or "region market history unavailable: daily volume unknown")
+            region_volume = int(daily_volume.get("daily_volume") or 0) if volume_known else None
+            region_order_count = int(daily_volume.get("daily_order_count") or 0) if volume_known else None
 
-            manufacturing_job["region_daily_volume"] = int(daily_volume.get("daily_volume") or 0)
+            manufacturing_job["region_daily_volume"] = region_volume
             manufacturing_job["region_daily_volume_7d_avg"] = self._as_float(daily_volume.get("daily_volume_7d_avg"))
             manufacturing_job["region_daily_volume_7d_sample_size"] = int(daily_volume.get("daily_volume_7d_sample_size") or 0)
-            manufacturing_job["region_daily_order_count"] = int(daily_volume.get("daily_order_count") or 0)
+            manufacturing_job["region_daily_order_count"] = region_order_count
             manufacturing_job["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
+            manufacturing_job["region_daily_volume_unavailable_reason"] = volume_reason
             manufacturing_job["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
             manufacturing_job["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
             manufacturing_job["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
             manufacturing_job["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
 
-            row["region_daily_volume"] = int(daily_volume.get("daily_volume") or 0)
+            row["region_daily_volume"] = region_volume
             row["region_daily_volume_7d_avg"] = self._as_float(daily_volume.get("daily_volume_7d_avg"))
             row["region_daily_volume_7d_sample_size"] = int(daily_volume.get("daily_volume_7d_sample_size") or 0)
-            row["region_daily_order_count"] = int(daily_volume.get("daily_order_count") or 0)
+            row["region_daily_order_count"] = region_order_count
             row["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
+            row["region_daily_volume_unavailable_reason"] = volume_reason
             row["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
             row["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
             row["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
@@ -2216,6 +2229,8 @@ class IndustryService:
             if not stats.get("has_data"):
                 missing.append(tid)
 
+        # Why a type has no history to compare with: shown on its row, not a silent skip.
+        history_unavailable: dict[int, str] = {}
         if missing:
             with ThreadPoolExecutor(max_workers=20) as pool:
                 futures = {
@@ -2224,10 +2239,13 @@ class IndustryService:
                 }
                 for f in as_completed(futures):
                     try:
-                        f.result()
+                        reason = f.result()
                     except (*_ESI_ERRORS, SQLAlchemyError) as exc:
                         logger.warning("Price anomaly: the market history of type_id=%s could not be fetched (%s)",
                                        futures[f], exc)
+                        reason = f"market history could not be fetched: {exc}"
+                    if reason:
+                        history_unavailable[futures[f]] = str(reason)
 
         # Load price stats for all type_ids
         price_stats: dict[int, dict[str, Any]] = {}
@@ -2238,6 +2256,7 @@ class IndustryService:
                 logger.warning("Price anomaly: the price stats of type_id=%s cannot be read (%s); no anomaly check for "
                                "it", tid, exc)
                 price_stats[tid] = {"has_data": False}
+                history_unavailable.setdefault(tid, f"price stats unreadable (DB error: {type(exc).__name__})")
 
         _risk_order: dict[str, int] = {"High": 3, "Medium": 2, "Low": 1}
 
@@ -2318,8 +2337,15 @@ class IndustryService:
                                 f"Price is {price_vs_history_ratio:.2f}× 7-day historical average — significantly below historical norm"
                             )
                             risk_level = upgrade("Medium")
+                elif history_unavailable.get(type_id):
+                    anomaly_reasons.append(
+                        f"No historical price check: {history_unavailable[type_id]}"
+                    )
 
             row["price_anomaly_risk"] = risk_level
+            row["price_history_unavailable_reason"] = (
+                history_unavailable.get(type_id) if not (price_stats.get(type_id) or {}).get("has_data") else None
+            )
             row["price_anomaly_reasons"] = anomaly_reasons
             row["price_vs_material_ratio"] = price_vs_material_ratio
             row["price_vs_history_ratio"] = price_vs_history_ratio
@@ -2644,7 +2670,11 @@ class IndustryService:
             else:
                 reasons.append(f"No {normalized_product_price_side}-side hub liquidity is currently visible.")
 
-            if (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg >= 20.0) or region_daily_volume >= 20:
+            volume_unknown_reason = row.get("region_daily_volume_unavailable_reason")
+            if volume_unknown_reason:
+                # No region history: the volume is unknown, not absent.
+                reasons.append(f"Regional trade volume is unknown ({volume_unknown_reason}).")
+            elif (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg >= 20.0) or region_daily_volume >= 20:
                 score += 2
                 reasons.append("Regional trade volume is active.")
             elif (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg > 0.0) or region_daily_volume > 0:
@@ -3402,8 +3432,10 @@ class IndustryService:
             "elapsed_time_seconds": _elapsed_time_seconds,
             "manufacturing_time_seconds": manufacturing_time_seconds,
             "preparation_time_seconds": preparation_time_seconds,
-            "region_daily_volume": region_daily_volume,
+            # Unknown (no region history) stays None; the absorption above then assumes nothing sellable.
+            "region_daily_volume": None if row.get("region_daily_volume") is None else region_daily_volume,
             "region_daily_volume_7d_avg": region_daily_volume_7d_avg,
+            "region_daily_volume_unavailable_reason": row.get("region_daily_volume_unavailable_reason"),
             "hub_buy_liquidity": int(row.get("hub_buy_liquidity") or 0),
             "hub_sell_liquidity": int(row.get("hub_sell_liquidity") or 0),
             "days_of_supply": cls._calculate_days_of_supply(

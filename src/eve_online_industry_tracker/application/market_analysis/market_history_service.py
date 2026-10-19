@@ -45,18 +45,34 @@ class MarketHistoryService:
         *,
         type_id: int,
         region_id: int = 10000002,  # Jita region by default
-    ) -> None:
+    ) -> str | None:
         """Fetch market history from ESI and store in database. A malformed
         row (None, no date, a None or non-numeric field) is skipped, never
-        stored as 0, with one WARNING per call counting the skipped rows."""
+        stored as 0, with one WARNING per call counting the skipped rows.
+
+        Returns None when the history was fetched (an empty history included),
+        or why it was not (no ESI service, or the ESI fetch failed and the type
+        was left out), with a WARNING: the stored history then stays as it was,
+        and a caller can show the reason."""
+        esi_service = getattr(self._state, "esi_service", None)
+        if esi_service is None:
+            reason = "no ESI service: market history not refreshed"
+            logging.warning("Market history: type_id=%s region_id=%s not refreshed (%s)", type_id, region_id, reason)
+            return reason
+
+        history_rows = esi_service.get_market_history([type_id], region_id=region_id)
+        if not isinstance(history_rows, dict) or int(type_id) not in history_rows:
+            # ESIService leaves a type whose fetch failed out of the result.
+            reader = getattr(esi_service, "market_history_unavailable_reason", None)
+            reason = (reader(int(type_id), region_id=region_id) if reader is not None else None) or (
+                f"ESI returned no market history for type_id={type_id}")
+            logging.warning("Market history: type_id=%s region_id=%s not refreshed, the stored history is kept (%s)",
+                            type_id, region_id, reason)
+            return reason
+
         app_session = self._sessions.app_session()
         try:
-            esi_service = getattr(self._state, "esi_service", None)
-            if esi_service is None:
-                return
-
-            history_rows = esi_service.get_market_history([type_id], region_id=region_id)
-            items = history_rows.get(int(type_id), []) if isinstance(history_rows, dict) else []
+            items = history_rows.get(int(type_id), [])
             if not isinstance(items, list):
                 logging.warning("Market history: the ESI history of type_id=%s region_id=%s is not a list (%r); "
                                 "nothing stored", type_id, region_id, type(items).__name__)
@@ -92,6 +108,7 @@ class MarketHistoryService:
                     "(None, no date, or a price, volume or order count that is not a number)",
                     skipped, skipped, len(items), type_id, region_id,
                 )
+            return None
         finally:
             try:
                 app_session.close()

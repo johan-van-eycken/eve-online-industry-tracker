@@ -63,24 +63,30 @@ def order_total_price(order_price: float | None, order: dict[str, Any]) -> float
     return order_price * volume
 
 
-def refresh_market_history(market_history_svc: Any, type_ids: Iterable[int], *, label: str) -> None:
+def refresh_market_history(market_history_svc: Any, type_ids: Iterable[int], *, label: str) -> dict[int, str]:
     """Fetch and store the market history of each type. One failed type is a
     WARNING and the loop goes on with the next (the pricing suggestions then use
-    the history already stored for it). A stored invalid admin setting and a
+    the history already stored for it). Returns why each failed type was not
+    refreshed, {type_id: reason}. A stored invalid admin setting and a
     programming error propagate."""
     from sqlalchemy.exc import SQLAlchemyError
 
     from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
     from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 
+    unavailable: dict[int, str] = {}
     for type_id in sorted(type_ids):
         try:
-            market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
+            reason = market_history_svc.fetch_and_store_history(type_id=type_id, region_id=10000002)
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
         except ESI_REQUEST_ERRORS + (SQLAlchemyError,) as exc:
+            reason = f"market history refresh failed: {exc}"
             logging.warning("%s: market history refresh of type %s failed, its stored history is used: %s",
                             label, type_id, exc)
+        if reason:
+            unavailable[int(type_id)] = str(reason)
+    return unavailable
 
 
 def book_comparison(

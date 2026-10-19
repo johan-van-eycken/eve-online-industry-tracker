@@ -491,13 +491,25 @@ class MarketPricingService:
         type_ids: list[int],
         hub: str = "jita",
         progress_callback: ProgressCallback | None = None,
+        unavailable: dict[int, str] | None = None,
     ) -> dict[int, dict[str, Any]]:
+        """The latest and 7-day average daily volume of each type in the hub's
+        region, from the ESI market history. A type whose history could not
+        be fetched is unknown: absent from the result (and not cached), its
+        reason put in `unavailable` when given, never a volume of 0. A type
+        with a real, empty history is present with no volume."""
         normalized_type_ids = sorted({int(type_id) for type_id in (type_ids or []) if int(type_id) > 0})
         if not normalized_type_ids:
             return {}
+        if unavailable is None:
+            unavailable = {}
 
         esi_service = getattr(self._state, "esi_service", None)
         if esi_service is None:
+            for type_id in normalized_type_ids:
+                unavailable[type_id] = "no ESI service: region daily volume unknown"
+            logging.warning("Region daily volume (%s): no ESI service, the volume of %d type(s) is unknown",
+                            hub, len(normalized_type_ids))
             return {}
 
         hub_context = self._market_hub_context(hub)
@@ -530,7 +542,21 @@ class MarketPricingService:
         skipped_rows = 0
         skipped_type_ids: set[int] = set()
 
+        history_reason = getattr(esi_service, "market_history_unavailable_reason", None)
+        failed_type_ids: list[int] = []
         for index, type_id in enumerate(missing_type_ids, start=1):
+            if not isinstance(history_by_type_id, dict) or int(type_id) not in history_by_type_id:
+                # The fetch failed (ESIService leaves the type out): unknown, not a volume of 0.
+                reason = history_reason(int(type_id), region_id=region_id) if history_reason is not None else None
+                unavailable[int(type_id)] = reason or "ESI market history not returned: region daily volume unknown"
+                failed_type_ids.append(int(type_id))
+                if progress_callback is not None:
+                    progress_callback(
+                        index / max(1, total_ids),
+                        f"Fetched {normalized_hub.title()} region history",
+                        {"completed": index, "total": total_ids},
+                    )
+                continue
             # A day without a readable volume is skipped (counted), not read as 0.
             history_rows: list[dict[str, Any]] = []
             for row in history_by_type_id.get(int(type_id)) or []:
@@ -564,6 +590,14 @@ class MarketPricingService:
                     {"completed": index, "total": total_ids},
                 )
 
+        if failed_type_ids:
+            logging.warning(
+                "Region daily volume (%s): the market history of %d type(s) could not be fetched, their volume is "
+                "unknown: %s",
+                normalized_hub,
+                len(failed_type_ids),
+                sorted(failed_type_ids)[:20],
+            )
         if skipped_rows:
             logging.warning(
                 "Region daily volume (%s): skipped %d unreadable history row(s) (no readable volume) of %d type(s): %s",

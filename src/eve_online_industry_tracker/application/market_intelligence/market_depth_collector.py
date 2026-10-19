@@ -7,7 +7,9 @@ from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from eve_online_industry_tracker.application.market_pricing.order_values import readable_int, readable_number
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
 
@@ -270,6 +272,87 @@ class MarketDepthCollector:
             except SQLAlchemyError:
                 pass
 
+    def _order_book_unavailable_reason(self, esi_service: Any, type_id: int, region_id: int) -> str | None:
+        """Why the sell order book fetch of type_id failed (ESIService leaves
+        a failed type out of the book), or None when it did not fail."""
+        reader = getattr(esi_service, "order_book_unavailable_reason", None)
+        if reader is None:
+            return None
+        return reader(int(type_id), side="sell", region_id=region_id)
+
+    def _mark_stale_logged(self, type_id: int, hub: str, reason: str) -> None:
+        """_mark_stale, with a failed write itself logged (the row stays as it was)."""
+        try:
+            self._mark_stale(type_id, hub, reason)
+        except SQLAlchemyError as exc:
+            logging.warning("MarketDepthCollector: type_id=%s could not be marked stale (%s): %s",
+                            type_id, reason, exc)
+
+    def _process_type(
+        self, *, type_id: int, orders: list[dict], hub: str, region_id: int, sigma: float, vwap_days: int,
+        corp_ids: set[int], character_ids: set[int],
+    ) -> None:
+        # An order without a readable price or volume is skipped (counted), never read as 0.
+        readable: list[dict] = []
+        for order in orders:
+            price = readable_number(order.get("price")) if isinstance(order, dict) else None
+            units = readable_int(order.get("volume_remain")) if isinstance(order, dict) else None
+            if price is None or price <= 0 or units is None:
+                continue
+            readable.append({"price": price, "volume_remain": units})
+        if len(readable) < len(orders):
+            logging.warning("MarketDepthCollector: type_id=%s skipped %d of %d sell order(s) with an unreadable "
+                            "price or volume", type_id, len(orders) - len(readable), len(orders))
+        orders = readable
+
+        avg_30d, std_30d = self._get_avg_30d_stats(type_id, region_id)
+
+        # Outlier filter — two-sided: removes both high-price and low-price anomalies
+        if avg_30d is not None and std_30d is not None:
+            upper = avg_30d + sigma * std_30d
+            lower = max(1.0, avg_30d - sigma * std_30d)
+            filtered = [o for o in orders if lower <= o["price"] <= upper]
+            if len(filtered) < len(orders) * 0.5:
+                logging.warning(
+                    "MarketDepthCollector: >50%% outliers for type_id=%s, skipping filter",
+                    type_id,
+                )
+                filtered = orders
+            orders = filtered
+
+        # Spot price = lowest price
+        spot_sell_price: float | None = min(o["price"] for o in orders) if orders else None
+
+        # competitor_units = total volume_remain minus our own (every tracked corp and character)
+        total_units = sum(o["volume_remain"] for o in orders)
+        try:
+            own_units = self._query_own_sell_volume(type_id, corp_ids, character_ids)
+        except SQLAlchemyError as exc:
+            # competitor_units would silently include our own orders: keep the previous row instead
+            self._mark_stale(type_id, hub, f"own sell orders unreadable: {exc}")
+            return
+        competitor_units = max(0, total_units - own_units)
+
+        # VWAP
+        vwap_5d = self._compute_vwap_5d(type_id, region_id, days=vwap_days)
+        if vwap_5d is None:
+            vwap_5d = spot_sell_price  # fallback
+
+        # effective_velocity for competition_index
+        ev = self._get_effective_velocity(type_id, corp_ids, character_ids)
+        competition_index: float | None = None
+        if ev is not None and ev > 0:
+            competition_index = competitor_units / (ev * 30)
+
+        self._write_market_depth(
+            type_id=type_id,
+            hub=hub,
+            competitor_units=competitor_units,
+            vwap_5d=vwap_5d,
+            spot_sell_price=spot_sell_price,
+            competition_index=competition_index,
+        )
+
     def run(self) -> None:
         hub, region_id = self._get_hub_and_region()
         sigma = self._get_outlier_sigma()
@@ -294,73 +377,44 @@ class MarketDepthCollector:
 
         for type_id in type_ids:
             try:
-                history_svc.fetch_and_store_history(type_id=type_id, region_id=region_id)
+                history_reason = history_svc.fetch_and_store_history(type_id=type_id, region_id=region_id)
             except AdminSettingInvalid:
                 raise  # a stored invalid setting fails loudly, naming it
-            except Exception as e:
-                logging.warning("MarketDepthCollector: history refresh failed for type_id=%s: %s", type_id, e)
+            except (*ESI_REQUEST_ERRORS, SQLAlchemyError) as e:
+                history_reason = f"history refresh failed: {e}"
+            if history_reason:
+                # The VWAP and outlier filter then use the history already stored.
+                logging.warning("MarketDepthCollector: market history of type_id=%s not refreshed (%s); "
+                                "the stored history is used", type_id, history_reason)
 
         # Step 2: Fetch sell orders for all type_ids
         try:
             sell_orders: dict[int, list[dict]] = esi_service.get_sell_order_book(type_ids, region_id=region_id)
         except AdminSettingInvalid:
             raise  # a stored invalid setting fails loudly, naming it
-        except Exception as e:
+        except ESI_REQUEST_ERRORS as e:
+            # No book at all is not an empty book: keep every previous row, marked stale.
             logging.warning("MarketDepthCollector: sell order fetch failed: %s", e)
-            sell_orders = {}
+            for type_id in type_ids:
+                self._mark_stale_logged(type_id, hub, f"ESI sell order book unavailable: {e}")
+            return
 
         # Step 3: Process each type_id
         for type_id in type_ids:
+            book_reason = None if type_id in sell_orders else (
+                self._order_book_unavailable_reason(esi_service, type_id, region_id))
+            if book_reason:
+                # The fetch failed: not an empty book, so keep the previous row, marked stale.
+                self._mark_stale_logged(type_id, hub, book_reason)
+                continue
             try:
-                orders = sell_orders.get(type_id) or []
-                avg_30d, std_30d = self._get_avg_30d_stats(type_id, region_id)
-
-                # Outlier filter — two-sided: removes both high-price and low-price anomalies
-                if avg_30d is not None and std_30d is not None:
-                    upper = avg_30d + sigma * std_30d
-                    lower = max(1.0, avg_30d - sigma * std_30d)
-                    filtered = [o for o in orders if lower <= float(o.get("price", 0)) <= upper]
-                    if len(filtered) < len(orders) * 0.5:
-                        logging.warning(
-                            "MarketDepthCollector: >50%% outliers for type_id=%s, skipping filter",
-                            type_id,
-                        )
-                        filtered = orders
-                    orders = filtered
-
-                # Spot price = lowest price
-                spot_sell_price: float | None = None
-                if orders:
-                    spot_sell_price = min(float(o.get("price", 0)) for o in orders if o.get("price"))
-
-                # competitor_units = total volume_remain minus our own (every tracked corp and character)
-                total_units = sum(int(o.get("volume_remain", 0)) for o in orders)
-                try:
-                    own_units = self._query_own_sell_volume(type_id, corp_ids, character_ids)
-                except SQLAlchemyError as exc:
-                    # competitor_units would silently include our own orders: keep the previous row instead
-                    self._mark_stale(type_id, hub, f"own sell orders unreadable: {exc}")
-                    continue
-                competitor_units = max(0, total_units - own_units)
-
-                # VWAP
-                vwap_5d = self._compute_vwap_5d(type_id, region_id, days=vwap_days)
-                if vwap_5d is None:
-                    vwap_5d = spot_sell_price  # fallback
-
-                # effective_velocity for competition_index
-                ev = self._get_effective_velocity(type_id, corp_ids, character_ids)
-                competition_index: float | None = None
-                if ev is not None and ev > 0:
-                    competition_index = competitor_units / (ev * 30)
-
-                self._write_market_depth(
-                    type_id=type_id,
-                    hub=hub,
-                    competitor_units=competitor_units,
-                    vwap_5d=vwap_5d,
-                    spot_sell_price=spot_sell_price,
-                    competition_index=competition_index,
+                self._process_type(
+                    type_id=type_id, orders=sell_orders.get(type_id) or [], hub=hub, region_id=region_id,
+                    sigma=sigma, vwap_days=vwap_days, corp_ids=corp_ids, character_ids=character_ids,
                 )
-            except Exception as e:
+            except AdminSettingInvalid:
+                raise  # a stored invalid setting fails loudly, naming it
+            except (*ESI_REQUEST_ERRORS, SQLAlchemyError) as e:
+                # Data, ESI and DB errors only: a programming error propagates.
                 logging.warning("MarketDepthCollector: failed for type_id=%s: %s", type_id, e)
+                self._mark_stale_logged(type_id, hub, f"market depth refresh failed: {e}")
