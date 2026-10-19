@@ -14,7 +14,9 @@ from collections.abc import Collection, Mapping
 from typing import Any, Callable, cast
 import uuid
 
+import requests  # pyright: ignore[reportMissingModuleSource]
 from sqlalchemy import bindparam, func, text
+from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.db_models import (
     Blueprints,
     CharacterAssetHistoryModel,
@@ -137,6 +139,9 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
 
 
 logger = logging.getLogger(__name__)
+
+# ESI failures: esi_client raises RuntimeError after its retries; requests raises its own.
+_ESI_ERRORS: tuple[type[Exception], ...] = (RuntimeError, requests.RequestException)
 
 
 def _payload_from_skill_levels(levels: Mapping[str, int]) -> dict[str, Any]:
@@ -895,6 +900,7 @@ class IndustryService:
                 result_meta=((payload.get("pricing_batch") or {}) if isinstance(payload, dict) else {}),
             )
         except Exception as e:
+            logger.exception("Overview refresh job %s failed: %s", job_id, e)
             self._update_overview_refresh_job(
                 job_id,
                 status="failed",
@@ -1059,6 +1065,7 @@ class IndustryService:
                 },
             )
         except Exception as e:
+            logger.exception("Portfolio candidate build job %s failed: %s", job_id, e)
             self._update_portfolio_candidates_job(
                 job_id,
                 status="failed",
@@ -1127,7 +1134,9 @@ class IndustryService:
         role_raw = row.get("roleBonuses")
         try:
             role = json.loads(role_raw) if isinstance(role_raw, str) else (role_raw or [])
-        except Exception:
+        except (TypeError, ValueError) as exc:
+            logger.warning("Structure type %s: roleBonuses cannot be parsed (%s); no structure bonus applies",
+                           row.get("id"), exc)
             role = []
 
         material_pct = 0.0
@@ -1142,7 +1151,8 @@ class IndustryService:
                 continue
             try:
                 bonus_val = abs(float(bonus))
-            except Exception:
+            except (TypeError, ValueError):
+                logger.warning("Structure type %s: role bonus %r is not a number; it is left out", row.get("id"), bonus)
                 continue
 
             txt_obj = b.get("bonusText") or {}
@@ -1224,10 +1234,12 @@ class IndustryService:
 
         owner_name_map: dict[int, str] = {}
         try:
-            if owner_ids:
+            if owner_ids and self._state.esi_service is not None:
                 resolved = self._state.esi_service.get_universe_names(owner_ids)
                 owner_name_map = {int(k): ((v or {}).get("name") or "") for k, v in resolved.items()}
-        except Exception:
+        except _ESI_ERRORS as exc:
+            logger.warning("Public structures: owner names cannot be resolved (%s); the structures keep their "
+                           "owner IDs", exc)
             owner_name_map = {}
 
         enriched_structures = []
@@ -1264,7 +1276,7 @@ class IndustryService:
                     continue
                 try:
                     type_ids.append(int(tid))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
             type_ids = sorted(set(type_ids))
             if type_ids:
@@ -1275,8 +1287,9 @@ class IndustryService:
                     tid = s.get("type_id")
                     extra = type_map.get(int(tid), {}) if tid is not None else {}
                     s.update(extra)
-        except Exception:
-            pass
+        except SQLAlchemyError as exc:
+            logger.warning("Corporation structures: type data cannot be read (%s); the structures keep their type IDs",
+                           exc)
 
         try:
             corp_ids: list[int] = []
@@ -1286,7 +1299,7 @@ class IndustryService:
                     continue
                 try:
                     corp_ids.append(int(cid))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
             corp_ids = sorted(set(corp_ids))
             if corp_ids and self._state.esi_service is not None:
@@ -1297,8 +1310,9 @@ class IndustryService:
                     if cid is None:
                         continue
                     s["owner_name"] = corp_name_map.get(int(cid))
-        except Exception:
-            pass
+        except _ESI_ERRORS as exc:
+            logger.warning("Corporation structures: owner names cannot be resolved (%s); the structures keep their IDs",
+                           exc)
 
         return out
 
@@ -1366,7 +1380,7 @@ class IndustryService:
         for raw_implant_id in raw_implants:
             try:
                 implant_type_id = int(raw_implant_id)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if implant_type_id > 0:
                 implant_type_ids.append(implant_type_id)
@@ -1389,7 +1403,9 @@ class IndustryService:
             attr_map: dict[int, float] = {}
             try:
                 attributes = json.loads(attributes_raw) if isinstance(attributes_raw, str) else (attributes_raw or [])
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logger.warning("Implants: the dogma attributes of type %s cannot be parsed (%s); its industry bonuses "
+                               "are left out", type_id, exc)
                 attributes = []
             for attribute in attributes or []:
                 if not isinstance(attribute, dict):
@@ -1401,7 +1417,7 @@ class IndustryService:
                 try:
                     parsed_attribute_id = int(attribute_id)
                     parsed_value = float(raw_value)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 attr_map[parsed_attribute_id] = parsed_value
                 attribute_ids.add(parsed_attribute_id)
@@ -1526,8 +1542,11 @@ class IndustryService:
         if profile.system_id is not None:
             try:
                 system_payload = self.industry_system_cost_index(system_id=int(profile.system_id))
-            except Exception:
-                system_payload = {"solar_system_id": int(profile.system_id), "cost_indices": []}
+            except (ServiceError, *_ESI_ERRORS) as exc:
+                logger.warning("Industry profile: the cost indices of system %s cannot be read (%s); job fees are "
+                               "unknown", profile.system_id, exc)
+                system_payload = {"solar_system_id": int(profile.system_id), "cost_indices": [],
+                                  "lookup_error": str(exc)}
             try:
                 solar_system_payload = next(
                     (
@@ -1537,7 +1556,9 @@ class IndustryService:
                     ),
                     None,
                 )
-            except Exception:
+            except SQLAlchemyError as exc:
+                logger.warning("Industry profile: solar system %s cannot be read from the SDE (%s); its security band "
+                               "is unknown", profile.system_id, exc)
                 solar_system_payload = None
             profile_payload["industry_system"] = system_payload
             profile_payload["system_cost_indices"] = system_payload.get("cost_indices") or []
@@ -1558,14 +1579,20 @@ class IndustryService:
         if profile.facility_id is not None:
             try:
                 profile_payload["facility"] = self.industry_facility(facility_id=int(profile.facility_id))
-            except Exception:
-                profile_payload["facility"] = {"facility_id": int(profile.facility_id), "tax": profile.facility_tax}
+            except (ServiceError, *_ESI_ERRORS) as exc:
+                logger.warning("Industry profile: facility %s cannot be read (%s); using the profile's own tax",
+                               profile.facility_id, exc)
+                profile_payload["facility"] = {"facility_id": int(profile.facility_id), "tax": profile.facility_tax,
+                                               "lookup_error": str(exc)}
 
         if profile.structure_type_id is not None:
             try:
                 structure_bonus_payload = self.structure_type_bonuses(type_id=int(profile.structure_type_id))
-            except Exception:
-                structure_bonus_payload = {"type_id": int(profile.structure_type_id), "bonuses": {}}
+            except (ServiceError, SQLAlchemyError) as exc:
+                logger.warning("Industry profile: the bonuses of structure type %s cannot be read (%s); no structure "
+                               "bonus applies", profile.structure_type_id, exc)
+                structure_bonus_payload = {"type_id": int(profile.structure_type_id), "bonuses": {},
+                                           "lookup_error": str(exc)}
             profile_payload["structure_type_bonuses"] = structure_bonus_payload.get("bonuses") or {}
             try:
                 profile_payload["structure_service_fits"] = self._structure_service_fits(int(profile.structure_type_id))
@@ -1833,13 +1860,13 @@ class IndustryService:
                 continue
             try:
                 skill_type_id = int(entry.get("skill_id") or entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if skill_type_id <= 0:
                 continue
             try:
                 trained_skill_level = int(entry.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 trained_skill_level = 0
             trained_skill_levels[skill_type_id] = max(trained_skill_level, trained_skill_levels.get(skill_type_id, 0))
 
@@ -1863,7 +1890,7 @@ class IndustryService:
                 if int(standing.get("from_id") or 0) != int(from_id):
                     continue
                 return float(standing.get("standing") or 0.0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
         return 0.0
 
@@ -1905,7 +1932,7 @@ class IndustryService:
             if station is not None:
                 try:
                     owner_corp_id = int(station.ownerID)
-                except Exception:
+                except (TypeError, ValueError):
                     owner_corp_id = None
             if owner_corp_id is not None:
                 corporation = (
@@ -1916,7 +1943,7 @@ class IndustryService:
                 if corporation is not None and getattr(corporation, "factionID", None) is not None:
                     try:
                         owner_faction_id = int(corporation.factionID)
-                    except Exception:
+                    except (TypeError, ValueError):
                         owner_faction_id = None
 
             faction_standing = self._get_character_standing(
@@ -2176,15 +2203,18 @@ class IndustryService:
                 for f in as_completed(futures):
                     try:
                         f.result()
-                    except Exception:
-                        pass
+                    except (*_ESI_ERRORS, SQLAlchemyError) as exc:
+                        logger.warning("Price anomaly: the market history of type_id=%s could not be fetched (%s)",
+                                       futures[f], exc)
 
         # Load price stats for all type_ids
         price_stats: dict[int, dict[str, Any]] = {}
         for tid in type_ids:
             try:
                 price_stats[tid] = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
-            except Exception:
+            except SQLAlchemyError as exc:
+                logger.warning("Price anomaly: the price stats of type_id=%s cannot be read (%s); no anomaly check for "
+                               "it", tid, exc)
                 price_stats[tid] = {"has_data": False}
 
         _risk_order: dict[str, int] = {"High": 3, "Medium": 2, "Low": 1}
@@ -2311,8 +2341,9 @@ class IndustryService:
                 stats = market_history_svc.get_price_stats(type_id=tid, region_id=region_id)
                 if stats.get("has_data"):
                     price_stats_map[tid] = stats
-            except Exception:
-                pass
+            except SQLAlchemyError as exc:
+                logger.warning("Market trends: the price stats of type_id=%s cannot be read (%s); no trend for it",
+                               tid, exc)
 
         # Pipeline query — batch for all type_ids
         pipeline_jobs: dict[int, int] = {}
@@ -3011,7 +3042,7 @@ class IndustryService:
     def _format_timestamp(value: Any) -> str | None:
         try:
             timestamp = float(value or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             return None
         if timestamp <= 0:
             return None
@@ -3531,7 +3562,7 @@ class IndustryService:
     def _normalize_fraction(value: Any) -> float:
         try:
             normalized = abs(float(value or 0.0))
-        except Exception:
+        except (TypeError, ValueError):
             return 0.0
         while normalized >= 1.0:
             normalized /= 100.0
@@ -3584,7 +3615,7 @@ class IndustryService:
                 continue
             try:
                 trained_skill_level = int(entry.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 trained_skill_level = 0
             out[skill_name] = max(trained_skill_level, out.get(skill_name, 0))
         return out
@@ -3600,7 +3631,7 @@ class IndustryService:
                 continue
             try:
                 trained_skill_level = int(entry.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 trained_skill_level = 0
             if trained_skill_level <= 0:
                 continue
@@ -3870,7 +3901,9 @@ class IndustryService:
                 continue
             try:
                 return max(0.0, float(entry.get("cost_index") or 0.0))
-            except Exception:
+            except (TypeError, ValueError):
+                logger.warning("System cost index: the %s cost_index %r of system %s is not a number; the job fee uses "
+                               "0", activity, entry.get("cost_index"), profile_payload.get("system_id"))
                 return 0.0
         return 0.0
 
@@ -3890,7 +3923,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(row.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if type_id <= 0:
                 continue
@@ -3915,18 +3948,18 @@ class IndustryService:
         if adjusted_price is not None:
             try:
                 return float(adjusted_price), "esi_adjusted_price"
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                pass  # try the next price source
         if average_price is not None:
             try:
                 return float(average_price), "esi_average_price"
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                pass  # try the next price source
         if isinstance(type_payload, dict) and type_payload.get("base_price") is not None:
             try:
                 return float(type_payload.get("base_price")), "sde_base_price"
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                pass  # try the next price source
         return None, None
 
     @classmethod
@@ -3964,7 +3997,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 type_id = 0
             if type_id <= 0:
                 continue
@@ -3979,7 +4012,9 @@ class IndustryService:
                 continue
             try:
                 quantity = int(entry.get(quantity_key) or 0)
-            except Exception:
+            except (TypeError, ValueError):
+                logger.warning("EIV: type_id=%s has a non-numeric %s %r; it counts as 0 units in the job fee",
+                               type_id, quantity_key, entry.get(quantity_key))
                 quantity = 0
             total += float(unit_value) * quantity
             priced_count += 1
@@ -4043,7 +4078,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 type_id = 0
             if type_id <= 0:
                 continue
@@ -4057,7 +4092,9 @@ class IndustryService:
                 continue
             try:
                 quantity = int(entry.get(quantity_key) or 0)
-            except Exception:
+            except (TypeError, ValueError):
+                logger.warning("Item value: type_id=%s has a non-numeric %s %r; the line is left out of the value",
+                               type_id, quantity_key, entry.get(quantity_key))
                 quantity = 0
             if quantity <= 0:
                 continue
@@ -4424,7 +4461,7 @@ class IndustryService:
             if value is None:
                 return None
             return float(value)
-        except Exception:
+        except (TypeError, ValueError):
             return None
 
     @staticmethod
@@ -4486,7 +4523,7 @@ class IndustryService:
             # Combined score: 70% DOS, 30% order count
             liquidity_score = (dos_score * 0.7) + (order_count_score * 0.3)
             return round(liquidity_score, 2)
-        except Exception:
+        except (TypeError, ValueError):
             return 0.0
 
     @classmethod
@@ -4553,7 +4590,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 type_id = 0
             if type_id <= 0:
                 continue
@@ -4626,7 +4663,7 @@ class IndustryService:
                     continue
                 try:
                     product_type_id = int(product.get("type_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     product_type_id = 0
                 if product_type_id > 0:
                     _keep_lowest(manufacturing_row_by_product_type_id, product_type_id, row)
@@ -4635,7 +4672,7 @@ class IndustryService:
                     continue
                 try:
                     product_type_id = int(product.get("type_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     product_type_id = 0
                 if product_type_id > 0:
                     _keep_lowest(reaction_row_by_product_type_id, product_type_id, row)
@@ -4647,7 +4684,7 @@ class IndustryService:
                     invention_product = {}
                 try:
                     product_type_id = int(invention_product.get("type_id") or product.get("type_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     product_type_id = 0
                 if product_type_id > 0:
                     _keep_lowest(invention_row_by_blueprint_type_id, product_type_id, row)
@@ -6186,7 +6223,7 @@ class IndustryService:
         ):
             try:
                 item_id = int(getattr(row, "item_id", 0) or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 item_id = 0
             if item_id <= 0 or item_id in latest_by_item_id:
                 continue
@@ -6202,7 +6239,7 @@ class IndustryService:
         try:
             item_id = int(getattr(row, "item_id", 0) or 0)
             type_id = int(getattr(row, "type_id", 0) or 0)
-        except Exception:
+        except (TypeError, ValueError):
             return None
         if item_id <= 0 or type_id <= 0:
             return None
@@ -6455,11 +6492,11 @@ class IndustryService:
                     continue
                 try:
                     character_id = int(character.get("character_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     character_id = 0
                 try:
                     corporation_id = int(character.get("corporation_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     corporation_id = 0
                 if character_id > 0:
                     character_ids.append(character_id)
@@ -6474,22 +6511,20 @@ class IndustryService:
                     continue
                 try:
                     character_id = int(character.get("character_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     character_id = 0
                 character_name = str(character.get("character_name") or character.get("name") or "").strip()
                 if character_id > 0 and character_name:
                     character_name_by_id[character_id] = character_name
 
-            try:
-                corporations = self._state.corp_manager.get_corporations() or []
-            except Exception:
-                corporations = []
+            corp_manager = getattr(self._state, "corp_manager", None)
+            corporations = (corp_manager.get_corporations() or []) if corp_manager is not None else []
             for corporation in corporations:
                 if not isinstance(corporation, dict):
                     continue
                 try:
                     corporation_id = int(corporation.get("corporation_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     corporation_id = 0
                 corporation_name = str(corporation.get("corporation_name") or corporation.get("name") or "").strip()
                 if corporation_id > 0 and corporation_name:
@@ -6516,8 +6551,8 @@ class IndustryService:
                             suppress_forbidden_log=True,
                             suppress_not_found_log=True,
                         )
-                    except Exception:
-                        continue
+                    except _ESI_ERRORS:
+                        continue  # cosmetic: the location keeps its ID
                     if not isinstance(location_info, dict):
                         continue
                     name = location_info.get("name")
@@ -6529,7 +6564,9 @@ class IndustryService:
             if normalized_scope.startswith("character:"):
                 try:
                     selected_character_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_character_id = 0
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
                 historical_character_assets, _ = self._load_historical_blueprint_assets(
@@ -6552,11 +6589,15 @@ class IndustryService:
                 parts = normalized_scope.split(":")
                 try:
                     selected_character_id = int(parts[1]) if len(parts) > 1 else 0
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_character_id = 0
                 try:
                     selected_corporation_id = int(parts[2]) if len(parts) > 2 else 0
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_corporation_id = 0
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
@@ -6583,7 +6624,9 @@ class IndustryService:
             if normalized_scope.startswith("corporation:"):
                 try:
                     selected_corporation_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_corporation_id = 0
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
                 _, historical_corporation_assets = self._load_historical_blueprint_assets(
@@ -6704,11 +6747,11 @@ class IndustryService:
         finally:
             try:
                 session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
             try:
                 sde_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _get_owned_item_inventory(
@@ -6729,11 +6772,11 @@ class IndustryService:
                     continue
                 try:
                     character_id = int(character.get("character_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     character_id = 0
                 try:
                     corporation_id = int(character.get("corporation_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     corporation_id = 0
                 if character_id > 0:
                     character_ids.append(character_id)
@@ -6773,25 +6816,33 @@ class IndustryService:
             if normalized_scope.startswith("character:"):
                 try:
                     selected_character_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_character_id = 0
                 character_assets = query_character_assets([selected_character_id])
             elif normalized_scope.startswith("character_and_corporation:"):
                 parts = normalized_scope.split(":")
                 try:
                     selected_character_id = int(parts[1]) if len(parts) > 1 else 0
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_character_id = 0
                 try:
                     selected_corporation_id = int(parts[2]) if len(parts) > 2 else 0
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_corporation_id = 0
                 character_assets = query_character_assets([selected_character_id])
                 corporation_assets = query_corporation_assets([selected_corporation_id])
             elif normalized_scope.startswith("corporation:"):
                 try:
                     selected_corporation_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
+                except ValueError:
+                    logger.warning("Owned assets: owned_blueprints_scope %r has a non-numeric owner ID; it selects no "
+                                   "assets", owned_blueprints_scope)
                     selected_corporation_id = 0
                 corporation_assets = query_corporation_assets([selected_corporation_id])
             elif normalized_scope == "all_characters":
@@ -6812,13 +6863,13 @@ class IndustryService:
             for asset in [*character_assets, *corporation_assets]:
                 try:
                     type_id = int(asset.type_id or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     type_id = 0
                 if type_id <= 0 or str(getattr(asset, "type_category_name", "") or "") == "Blueprint":
                     continue
                 try:
                     quantity = int(getattr(asset, "quantity", 0) or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     quantity = 0
                 if quantity <= 0:
                     continue
@@ -6894,7 +6945,7 @@ class IndustryService:
             for asset in [*character_assets, *corporation_assets]:
                 try:
                     a_type_id = int(asset.type_id or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     a_type_id = 0
                 if a_type_id <= 0 or a_type_id not in quantity_by_type_id:
                     continue
@@ -6903,7 +6954,7 @@ class IndustryService:
                     continue
                 try:
                     a_qty = int(getattr(asset, "quantity", 0) or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     a_qty = 0
                 if a_qty <= 0:
                     continue
@@ -6944,13 +6995,13 @@ class IndustryService:
                 for asset in [*character_assets, *corporation_assets]:
                     try:
                         type_id = int(asset.type_id or 0)
-                    except Exception:
+                    except (TypeError, ValueError):
                         type_id = 0
                     if type_id not in fallback_needed:
                         continue
                     try:
                         quantity = int(getattr(asset, "quantity", 0) or 0)
-                    except Exception:
+                    except (TypeError, ValueError):
                         quantity = 0
                     if quantity <= 0:
                         continue
@@ -7001,11 +7052,11 @@ class IndustryService:
         finally:
             try:
                 session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
             try:
                 sde_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     # ----------------------------------------------------------------
@@ -7068,7 +7119,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if type_id <= 0:
                 continue
@@ -7088,7 +7139,7 @@ class IndustryService:
             if probability is None:
                 try:
                     probability = float(entry.get("probability_pct") or 0.0) / 100.0
-                except Exception:
+                except (TypeError, ValueError):
                     probability = None
             out.append({"probability": probability, "quantity": entry.get("quantity"), "type_id": product.get("type_id"), "type_name": product.get("type_name")})
         return out
@@ -7505,7 +7556,7 @@ class IndustryService:
         for asset in [*character_blueprint_assets, *corporation_blueprint_assets]:
             try:
                 bp_type_id = int(asset.type_id)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if bp_type_id <= 0:
                 continue
@@ -7741,7 +7792,7 @@ class IndustryService:
         if isinstance(target_entry, dict):
             try:
                 base_probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
-            except Exception:
+            except (TypeError, ValueError):
                 base_probability = 0.0
         # EVE: base x (1 + (sci1 + sci2)/30 + enc/40) x decryptor, for the
         # corp's best inventor of this blueprint (D2). Resolved only when
@@ -10585,9 +10636,11 @@ class IndustryService:
         for type_id, name_json in rows:
             try:
                 name_obj = json.loads(name_json) if isinstance(name_json, str) else {}
-                name_by_type_id[int(type_id)] = name_obj.get(language) or name_obj.get("en") or str(type_id)
-            except Exception:
-                name_by_type_id[int(type_id)] = str(type_id)
+            except ValueError:
+                name_obj = {}  # cosmetic: the rig is named by its type ID
+            if not isinstance(name_obj, dict):
+                name_obj = {}
+            name_by_type_id[int(type_id)] = name_obj.get(language) or name_obj.get("en") or str(type_id)
 
         rigs_out: list[dict] = [
             {**rig, "name": name_by_type_id.get(int(rig["type_id"]), str(rig["type_id"]))}
@@ -10637,8 +10690,8 @@ class IndustryService:
 
         try:
             characters = char_manager.get_characters() or []
-        except Exception:
-            return {}
+        except ValueError:
+            return {}  # get_characters: "No characters available in the manager."
 
         slot_skill_ids = {
             self._SKILL_MASS_PRODUCTION,
@@ -10766,8 +10819,8 @@ class IndustryService:
                         cid = c.get("character_id")
                         if cid and int(cid) in char_ids:
                             char_name_map[int(cid)] = c.get("character_name") or str(cid)
-                except Exception:
-                    pass
+                except (TypeError, ValueError):
+                    pass  # cosmetic: no characters (ValueError) or an odd ID leaves the job with its ID
 
         rows: list[dict[str, Any]] = []
 
@@ -10880,7 +10933,9 @@ class IndustryService:
                 char_skill_levels[character_id] = self._get_character_trained_skill_levels(
                     character_id=character_id
                 )
-            except Exception:
+            except ServiceError as exc:
+                logger.warning("Blueprint skill qualification: the skills of character %s cannot be read (%s); it "
+                               "counts as having none", character_id, exc)
                 char_skill_levels[character_id] = {}
 
         # Query blueprints from SDE
