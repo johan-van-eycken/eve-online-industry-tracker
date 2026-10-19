@@ -61,6 +61,14 @@ class CharactersService:
         rows = ledger_service.list_rows(character_id=character_id)
         if refresh or not rows:
             rows = ledger_service.rebuild(character_id=character_id)
+        else:
+            # A character whose rows predate a fee settings, skills or standings change is rebuilt
+            # here (local data only, no ESI), so the persisted ledger never shows stale fees.
+            stale = ledger_service.stale_character_ids(rows)
+            for stale_character_id in sorted(stale):
+                ledger_service.rebuild(character_id=stale_character_id)
+            if stale:
+                rows = ledger_service.list_rows(character_id=character_id)
 
         return {
             "rows": rows,

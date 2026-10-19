@@ -776,7 +776,7 @@ def render() -> None:
                 )
                 st.caption(
                     "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support."
+                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
                 )
                 st.caption("Coverage excludes rows with missing historical cost basis.")
         else:
@@ -791,7 +791,7 @@ def render() -> None:
                 )
                 st.caption(
                     "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support."
+                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
                 )
                 st.caption("Coverage excludes rows with missing historical cost basis.")
 

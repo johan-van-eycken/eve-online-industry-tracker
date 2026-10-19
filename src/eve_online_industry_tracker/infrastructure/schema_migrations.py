@@ -586,11 +586,14 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "fee_capture_mode TEXT NULL,"
             "confidence TEXT NULL,"
             "notes JSON NULL,"
+            "fee_inputs TEXT NULL,"
             "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
             "UNIQUE(character_id, transaction_id)"
             ")"
         ),
     )
+    # The fee estimate's inputs per row (realized profit: a row whose inputs changed is rebuilt on read).
+    _ensure_column(db_app, table="character_realized_sales_ledger", column="fee_inputs", ddl_type="TEXT")
     _ensure_index(
         db_app,
         name="idx_character_realized_sales_ledger_character_date",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
@@ -381,6 +383,24 @@ def _corp_journal_fee_breakdown(
 ASSUMED_FEE_CAPTURE_MODES = ("assumed_market_fees", "journal_plus_assumed_broker_fee")
 
 
+def fee_inputs_fingerprint(raw_market_fees: Any, settings: market_fees.MarketFeeSettings) -> str:
+    """The inputs of a character's fee estimate, as a string a ledger row
+    keeps (fee_inputs): the seven industry/* fee settings, and the stored
+    skills and standings (Jita 4-4) or, without them, why the fees are
+    assumed. Equal fingerprints give equal fees."""
+    payload = raw_market_fees
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = None
+    jita = payload.get("jita_4_4") if isinstance(payload, dict) else None
+    jita = jita if isinstance(jita, dict) else {}
+    reason = market_fees.fees_from_stored_market_fees(raw_market_fees, settings)[2]
+    return json.dumps({"settings": asdict(settings), "skills": jita.get("skills"), "standings": jita.get("standings"),
+                       "assumed": reason}, sort_keys=True, default=str)
+
+
 def _character_market_fees(raw_market_fees: Any, admin_settings: Any) -> tuple[float, float, str | None]:
     """(sales tax, broker fee, reason) for a character: from its stored
     skills and standings (Character.refresh_market_fees) with the current
@@ -449,6 +469,8 @@ def _apply_estimated_market_fees(
 def _confidence(*, priced_quantity: int, unpriced_quantity: int, fee_capture_mode: str) -> str:
     if unpriced_quantity > 0:
         return "Low"
+    if fee_capture_mode in ASSUMED_FEE_CAPTURE_MODES:
+        return "Low"   # the fees are the assumed highest ones (the character's skills unknown)
     if fee_capture_mode in ("journal_amount", "journal_matched", "journal_partial"):
         return "High"
     return "Medium"
@@ -767,6 +789,7 @@ class _BaseRealizedProfitLedgerService:
                         fee_capture_mode=fee_capture_mode,
                     ),
                     notes=notes,
+                    **self._extra_row_fields(owner_context),
                 )
                 self._app_session.add(row)
                 persisted_rows.append(row)
@@ -792,6 +815,9 @@ class _BaseRealizedProfitLedgerService:
         return {}
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
+        return {}
+
+    def _extra_row_fields(self, owner_context: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     def _owner_fields(self, *, owner_id: int) -> dict[str, Any]:
@@ -829,6 +855,8 @@ class _BaseRealizedProfitLedgerService:
             "notes": row.notes or [],
             "updated_at": row.updated_at.isoformat() if row.updated_at is not None else None,
         }
+        if hasattr(row, "fee_inputs"):
+            payload["fee_inputs"] = row.fee_inputs
         if hasattr(row, "character_id"):
             payload["character_id"] = int(row.character_id)
         if hasattr(row, "corporation_id"):
@@ -848,6 +876,29 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def list_rows(self, *, character_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=character_id)
+
+    def stale_character_ids(self, rows: list[dict[str, Any]]) -> set[int]:
+        """The characters with a row whose fee inputs (fee_inputs) differ
+        from the current ones: an industry/* fee setting, or the character's
+        stored skills or standings, changed since the row was built. A row
+        without them (built before they were kept) is stale."""
+        settings = market_fees.MarketFeeSettings.from_admin(self._admin_settings)
+        current: dict[int, str] = {}
+        stale: set[int] = set()
+        for row in rows:
+            character_id = _safe_int(row.get("character_id"))
+            if character_id is None or character_id in stale:
+                continue
+            if character_id not in current:
+                character = self._app_session.query(CharacterModel).filter_by(character_id=character_id).first()
+                current[character_id] = fee_inputs_fingerprint(
+                    getattr(character, "market_fees", None) if character is not None else None, settings)
+            if row.get("fee_inputs") != current[character_id]:
+                stale.add(character_id)
+        return stale
+
+    def _extra_row_fields(self, owner_context: dict[str, Any]) -> dict[str, Any]:
+        return {"fee_inputs": owner_context.get("fee_inputs")}
 
     def _load_wallet_transactions(self, *, owner_id: int) -> list[Any]:
         return (
@@ -869,12 +920,15 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         character = self._app_session.query(CharacterModel).filter_by(character_id=int(owner_id)).first()
+        raw_market_fees = getattr(character, "market_fees", None) if character is not None else None
         sales_tax_fraction, broker_fee_fraction, fee_reason = _character_market_fees(
-            getattr(character, "market_fees", None) if character is not None else None, self._admin_settings)
+            raw_market_fees, self._admin_settings)
         return {
             "sales_tax_fraction": sales_tax_fraction,
             "broker_fee_fraction": broker_fee_fraction,
             "fee_reason": fee_reason,
+            "fee_inputs": fee_inputs_fingerprint(
+                raw_market_fees, market_fees.MarketFeeSettings.from_admin(self._admin_settings)),
         }
 
     def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:

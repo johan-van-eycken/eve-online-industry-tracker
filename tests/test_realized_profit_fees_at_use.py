@@ -169,3 +169,87 @@ def test_the_page_names_the_assumed_fees_per_character():
     warnings = _assumed_fee_warnings(rows, {1: "Fake Trader", 2: "Other"})
     assert warnings == [f"Fake Trader: 2 sale(s) with assumed fees. {note}"]
     assert _assumed_fee_warnings(rows[2:], {}) == []
+
+
+# --- review round 1: M4 (assumed fees are Low confidence) and I2 (stale persisted fees) ----------
+
+def test_assumed_fees_are_low_confidence():
+    from eve_online_industry_tracker.application.characters.realized_profit import _confidence
+
+    assert _rebuild(None)["confidence"] == "Low"
+    # A fully priced sale: Medium with the character's own fee estimate, Low with assumed fees.
+    assert _confidence(priced_quantity=10, unpriced_quantity=0, fee_capture_mode="estimated_market_fees") == "Medium"
+    for mode in ("assumed_market_fees", "journal_plus_assumed_broker_fee"):
+        assert _confidence(priced_quantity=10, unpriced_quantity=0, fee_capture_mode=mode) == "Low"
+
+
+def _ledger(app_session, sde_session, admin_settings=None):
+    return CharacterRealizedProfitLedgerService(app_session=app_session, sde_session=sde_session,
+                                                market_prices=[], admin_settings=admin_settings)
+
+
+def _persisted_sale(tmp_path, market_fees=None, industry=None):
+    app_session, sde_session = _sessions()
+    _sale(app_session, market_fees=_stored_fees() if market_fees is None else market_fees)
+    mgr = _manager(tmp_path, industry)
+    _ledger(app_session, sde_session, mgr).rebuild(character_id=1)
+    return app_session, sde_session, mgr
+
+
+def test_each_row_carries_its_fee_inputs_and_is_fresh_while_they_hold(tmp_path):
+    app_session, sde_session, mgr = _persisted_sale(tmp_path)
+    ledger = _ledger(app_session, sde_session, mgr)
+    rows = ledger.list_rows(character_id=1)
+    assert rows[0]["fee_inputs"]
+    assert ledger.stale_character_ids(rows) == set()
+
+
+def test_a_settings_change_makes_the_rows_stale(tmp_path):
+    app_session, sde_session, mgr = _persisted_sale(tmp_path)
+    mgr.set("industry", "broker_fee_base", 0.05)
+    ledger = _ledger(app_session, sde_session, mgr)
+    assert ledger.stale_character_ids(ledger.list_rows(character_id=1)) == {1}
+
+
+def test_a_skills_or_standings_change_makes_the_rows_stale(tmp_path):
+    app_session, sde_session, mgr = _persisted_sale(tmp_path)
+    character = app_session.query(CharacterModel).filter_by(character_id=1).one()
+    character.market_fees = _stored_fees(accounting=5)
+    app_session.commit()
+    ledger = _ledger(app_session, sde_session, mgr)
+    assert ledger.stale_character_ids(ledger.list_rows(character_id=1)) == {1}
+
+
+def test_a_row_without_fee_inputs_is_stale(tmp_path):
+    app_session, sde_session, mgr = _persisted_sale(tmp_path)
+    from eve_online_industry_tracker.infrastructure.models import CharacterRealizedSalesLedgerModel
+
+    app_session.query(CharacterRealizedSalesLedgerModel).update({"fee_inputs": None})
+    app_session.commit()
+    ledger = _ledger(app_session, sde_session, mgr)
+    assert ledger.stale_character_ids(ledger.list_rows(character_id=1)) == {1}
+
+
+def test_reading_the_ledger_rebuilds_a_stale_character(tmp_path):
+    from eve_online_industry_tracker.application.characters.service import CharactersService
+
+    app_session, sde_session, mgr = _persisted_sale(tmp_path)
+    state = SimpleNamespace(admin_settings=mgr, db_app=SimpleNamespace(session=app_session),
+                            db_sde=SimpleNamespace(session=sde_session),
+                            esi_service=SimpleNamespace(get_market_prices=lambda: []))
+    before = CharactersService(state=state).get_realized_profit_ledger(character_id=1)["rows"]
+    assert before[0]["sales_tax_amount"] == pytest.approx(1000.0 * 0.075 * 0.56)
+    mgr.set("industry", "base_sales_tax_rate", 0.05)
+    after = CharactersService(state=state).get_realized_profit_ledger(character_id=1)["rows"]
+    assert after[0]["sales_tax_amount"] == pytest.approx(1000.0 * 0.05 * 0.56)
+    ledger = _ledger(app_session, sde_session, mgr)
+    assert ledger.stale_character_ids(ledger.list_rows(character_id=1)) == set()
+
+
+def test_the_fee_inputs_column_is_migrated():
+    import inspect
+
+    from eve_online_industry_tracker.infrastructure import schema_migrations
+
+    source = inspect.getsource(schema_migrations.ensure_app_schema)
+    assert 'table="character_realized_sales_ledger", column="fee_inputs"' in source

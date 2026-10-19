@@ -173,6 +173,9 @@ class CharacterRealizedSalesLedgerModel(BaseApp):
     fee_capture_mode: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     confidence: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     notes: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
+    # The fee estimate's inputs (realized_profit.fee_inputs_fingerprint): a row whose inputs differ
+    # from the current ones is stale and rebuilt on read. NULL (a row from before it): stale.
+    fee_inputs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
