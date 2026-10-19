@@ -222,10 +222,14 @@ class FeedbackProcessor:
         #
         # Realized = materials + the manufacturing install fee (job.cost)
         #   + for an invented T2 item, the invention cost per run:
-        #     - when the corp's own invention job for the blueprint was seen at
-        #       refresh: that job's install fee + ONE attempt's datacores (SDE
-        #       quantities at ESI prices) over its licensed runs (else the
-        #       runs the SDE invention yields);
+        #     - when the corp's own delivered invention jobs for the blueprint
+        #       were seen at refresh: sum(runs x one attempt's datacores (SDE
+        #       quantities at ESI prices) + the decryptor read from the
+        #       licensed runs + install fee) / sum(successful_runs x
+        #       licensed_runs), so failed attempts are paid for
+        #       (asset_provenance.build_invention_cost_per_run_by_blueprint_type);
+        #       a job whose decryptor the licensed runs do not name is left
+        #       out, never guessed;
         #     - otherwise the expected invention inputs, sized like the
         #       producer (asset_provenance.estimate_invention_cost_per_run):
         #       one attempt's datacores + the producer's decryptor, over the
@@ -259,8 +263,6 @@ class FeedbackProcessor:
         #    - the expected estimate has no invention install fee and no
         #      source-copy fee, while predicted carries both: towards > 1
         #      (small, fees are a few % of the datacores);
-        #    - an actual invention job counts one attempt per licensed BPC,
-        #      not the failed attempts: towards > 1.
         # 2. BPC-copied T1 and SDE-fallback rows, towards > 1: predicted
         #    includes copy/research job fees that the realized side never has.
         #    Probably small (job fees are a few % of materials).

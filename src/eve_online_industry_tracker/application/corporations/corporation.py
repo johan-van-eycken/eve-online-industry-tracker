@@ -22,7 +22,8 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     build_market_price_map,
     build_cost_map_for_assets,
     build_invention_cost_per_run_by_blueprint_type,
-    current_realized_invention_inputs,
+    RealizedInventionRefresh,
+    invention_cost_source_for,
     industry_job_material_type_ids,
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
@@ -923,12 +924,14 @@ class Corporation:
 
             market_prices = self._default_esi_character._esi_client.esi_get(ESI_MARKETS_PRICES)
             market_price_map = build_market_price_map(market_prices)
-            # Read once per refresh, not per job (None: each snapshot asks and says why).
-            realized_invention_inputs, _ = current_realized_invention_inputs()
+            # The producer's inputs (or why they are missing) read once per
+            # refresh and passed to every snapshot, with the SDE memoized.
+            invention_refresh = RealizedInventionRefresh.read()
             invention_cost_by_blueprint_type = build_invention_cost_per_run_by_blueprint_type(
                 jobs=jobs,
                 sde_session=self._db_sde.session,
                 market_price_map=market_price_map,
+                invention_refresh=invention_refresh,
             )
 
             clear_historical_backfill(
@@ -1040,18 +1043,10 @@ class Corporation:
                     job=type("IndustryJobPayload", (), j)(),
                     sde_session=self._db_sde.session,
                     market_price_map=market_price_map,
-                    invention_unit_cost_per_run=(
-                        float((invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run"))
-                        if (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run") is not None
-                        else None
-                    ),
-                    invention_cost_source=str(
-                        (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("source") or ""
-                    )
-                    or None,
+                    **invention_cost_source_for(invention_cost_by_blueprint_type, j.get("blueprint_type_id")),
                     blueprint_provenance=blueprint_provenance,
                     owned_input_unit_cost_by_type_id=historical_input_costs,
-                    invention_inputs=realized_invention_inputs,
+                    invention_refresh=invention_refresh,
                 )
                 rows.append(
                     {

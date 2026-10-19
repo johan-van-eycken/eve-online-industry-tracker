@@ -1,0 +1,249 @@
+"""The corp's own invention jobs as the realized invention cost source.
+
+Cost per invented run = sum(runs x one attempt's inputs + job cost) /
+sum(successful_runs x licensed_runs) over the delivered jobs for the
+blueprint: every attempt is paid for, failed ones included, and only the
+successful attempts yield runs. The decryptor of a job is read from
+licensed_runs minus the SDE base runs when that names one decryptor; it is
+never guessed.
+
+Fake ids and prices only; the SDE rows are built in memory.
+"""
+from __future__ import annotations
+
+import pytest
+from sqlalchemy.orm import Session
+
+from eve_online_industry_tracker.application.characters import asset_provenance as ap
+from eve_online_industry_tracker.application.characters.asset_provenance import (
+    RealizedInventionRefresh,
+    build_invention_cost_per_run_by_blueprint_type,
+    invention_cost_source_for,
+    resolve_industry_job_cost_snapshot,
+)
+from eve_online_industry_tracker.application.industry.invention_model import NO_DECRYPTOR, DecryptorOption
+from eve_online_industry_tracker.infrastructure.models import Blueprints, Groups, Types
+
+_SOURCE_BP = 990001
+_TARGET_BP = 990002
+_PRODUCT = 990003
+_DATACORE_A = 990011
+_DATACORE_B = 990012
+_MINERAL = 990021
+_DECRYPTOR_PLUS_1 = 990041
+_DECRYPTOR_PLUS_2A = 990042
+_DECRYPTOR_PLUS_2B = 990043
+
+#: One attempt: 2 x 100 + 3 x 50 = 350 ISK.
+_PRICES = {_DATACORE_A: 100.0, _DATACORE_B: 50.0, _MINERAL: 5.0, _DECRYPTOR_PLUS_1: 300.0,
+           _DECRYPTOR_PLUS_2A: 400.0, _DECRYPTOR_PLUS_2B: 500.0}
+_PER_ATTEMPT = 350.0
+_BASE_RUNS = 10
+
+_OPTIONS = (
+    NO_DECRYPTOR,
+    DecryptorOption(type_id=_DECRYPTOR_PLUS_1, type_name="Fake +1", probability_multiplier=1.2, max_run_modifier=1),
+    DecryptorOption(type_id=_DECRYPTOR_PLUS_2A, type_name="Fake +2 A", probability_multiplier=1.9, max_run_modifier=2),
+    DecryptorOption(type_id=_DECRYPTOR_PLUS_2B, type_name="Fake +2 B", probability_multiplier=1.0, max_run_modifier=2),
+)
+
+
+@pytest.fixture()
+def sde(sde_engine):
+    with Session(sde_engine) as session:
+        session.add(Groups(id=990900, name={"en": "Fake Group"}, categoryID=990, published=True))
+        for type_id, name in (
+            (_SOURCE_BP, "Fake T1 Blueprint"), (_TARGET_BP, "Fake T2 Blueprint"), (_PRODUCT, "Fake T2 Item"),
+            (_DATACORE_A, "Fake Datacore A"), (_DATACORE_B, "Fake Datacore B"), (_MINERAL, "Fake Mineral"),
+        ):
+            session.add(Types(id=type_id, name={"en": name}, groupID=990900, published=True))
+        session.add(Blueprints(
+            id=1, blueprintTypeID=_SOURCE_BP, maxProductionLimit=300,
+            activities={"invention": {
+                "time": 1000,
+                "materials": [{"typeID": _DATACORE_A, "quantity": 2}, {"typeID": _DATACORE_B, "quantity": 3}],
+                "products": [{"typeID": _TARGET_BP, "quantity": _BASE_RUNS, "probability": 0.34}],
+                "skills": [],
+            }},
+        ))
+        session.add(Blueprints(
+            id=2, blueprintTypeID=_TARGET_BP, maxProductionLimit=10,
+            activities={"manufacturing": {
+                "time": 600,
+                "materials": [{"typeID": _MINERAL, "quantity": 10}],
+                "products": [{"typeID": _PRODUCT, "quantity": 1}],
+            }},
+        ))
+        session.commit()
+    with Session(sde_engine) as session:
+        yield session
+
+
+def _job(job_id=1, *, runs=10, successful_runs=4, licensed_runs=10, cost=100.0, status="delivered", **extra):
+    job = {
+        "job_id": job_id, "activity_id": 8, "status": status,
+        "blueprint_type_id": _SOURCE_BP, "product_type_id": _TARGET_BP,
+        "runs": runs, "licensed_runs": licensed_runs, "cost": cost,
+        "completed_date": "2026-10-01T00:00:00Z",
+    }
+    if successful_runs is not None:
+        job["successful_runs"] = successful_runs
+    job.update(extra)
+    return job
+
+
+def _refresh(options=_OPTIONS) -> RealizedInventionRefresh:
+    return RealizedInventionRefresh(inputs=None, inputs_unknown_reason="no inputs in this test",
+                                    decryptor_options=options)
+
+
+def _sources(sde, jobs, *, options=_OPTIONS, prices=None):
+    return build_invention_cost_per_run_by_blueprint_type(
+        jobs=jobs, sde_session=sde, market_price_map=dict(_PRICES if prices is None else prices),
+        invention_refresh=_refresh(options),
+    )
+
+
+def test_ten_attempts_four_successes_cost_every_attempt_over_the_successful_runs(sde):
+    """The worked example: 10 attempts, 4 successes, 10 runs per BPC, 350 ISK
+    per attempt, fee 100. Before: (350 + 100) / 10 = 45 ISK per run (one
+    attempt per licensed BPC, the failed attempts free). Now: (10 x 350 +
+    100) / (4 x 10) = 90 ISK per run."""
+    source = _sources(sde, [_job()])[_TARGET_BP]
+    assert source["source"] == "actual_invention_job"
+    assert source["unit_cost_per_run"] == pytest.approx((10 * _PER_ATTEMPT + 100.0) / (4 * 10))
+    assert source["unit_cost_per_run"] == pytest.approx(90.0)
+    assert source["attempts"] == 10 and source["successful_runs"] == 4 and source["invented_runs"] == 40
+
+
+def test_the_jobs_of_a_blueprint_are_summed_and_a_failed_job_still_costs(sde):
+    jobs = [_job(1), _job(2, runs=5, successful_runs=0, cost=50.0)]
+    source = _sources(sde, jobs)[_TARGET_BP]
+    assert source["unit_cost_per_run"] == pytest.approx(
+        (10 * _PER_ATTEMPT + 100.0 + 5 * _PER_ATTEMPT + 50.0) / (4 * 10)
+    )
+
+
+def test_undelivered_jobs_and_jobs_without_an_outcome_are_skipped(sde):
+    jobs = [
+        _job(1),
+        _job(2, status="active", successful_runs=None),
+        _job(3, status="ready", successful_runs=2),
+        _job(4, successful_runs=None),
+    ]
+    source = _sources(sde, jobs)[_TARGET_BP]
+    assert source["unit_cost_per_run"] == pytest.approx(90.0)
+    assert source["jobs"] == 1
+
+
+def test_zero_successes_is_no_cost_source_and_says_why(sde):
+    source = _sources(sde, [_job(successful_runs=0)])[_TARGET_BP]
+    assert source.get("unit_cost_per_run") is None
+    assert "no successful" in source["unknown_reason"]
+
+
+def test_the_decryptor_is_read_from_the_licensed_runs_and_bought_per_attempt(sde):
+    source = _sources(sde, [_job(licensed_runs=11)])[_TARGET_BP]
+    assert source["unit_cost_per_run"] == pytest.approx((10 * (_PER_ATTEMPT + 300.0) + 100.0) / (4 * 11))
+
+
+def test_an_ambiguous_decryptor_is_never_guessed(sde):
+    source = _sources(sde, [_job(licensed_runs=12)])[_TARGET_BP]
+    assert source.get("unit_cost_per_run") is None
+    assert "decryptor unknown" in source["unknown_reason"]
+    assert "Fake +2 A" in source["unknown_reason"] and "Fake +2 B" in source["unknown_reason"]
+
+
+def test_a_job_with_an_unknown_decryptor_is_left_out_of_the_sum(sde):
+    source = _sources(sde, [_job(1), _job(2, licensed_runs=12)])[_TARGET_BP]
+    assert source["unit_cost_per_run"] == pytest.approx(90.0)
+    assert source["jobs"] == 1
+
+
+def test_without_sde_decryptor_data_no_decryptor_is_assumed(sde):
+    source = _sources(sde, [_job()], options=(NO_DECRYPTOR,))[_TARGET_BP]
+    assert source.get("unit_cost_per_run") is None
+    assert "decryptor unknown" in source["unknown_reason"]
+
+
+def test_an_unpriced_input_is_no_cost_source(sde):
+    prices = {k: v for k, v in _PRICES.items() if k != _DATACORE_B}
+    source = _sources(sde, [_job()], prices=prices)[_TARGET_BP]
+    assert source.get("unit_cost_per_run") is None
+    assert str(_DATACORE_B) in source["unknown_reason"]
+
+
+def test_the_sde_invention_is_read_once_per_refresh(sde, monkeypatch):
+    calls: list[list[int]] = []
+    real = ap.get_invention_source_blueprint_ids
+
+    def _counting(session, ids):
+        calls.append(list(ids))
+        return real(session, ids)
+
+    monkeypatch.setattr(ap, "get_invention_source_blueprint_ids", _counting)
+    refresh = _refresh()
+    sources = build_invention_cost_per_run_by_blueprint_type(
+        jobs=[_job(1), _job(2), _job(3)], sde_session=sde, market_price_map=dict(_PRICES),
+        invention_refresh=refresh,
+    )
+    job = _ManufacturingJob(blueprint_type_id=_TARGET_BP, product_type_id=_PRODUCT, runs=2, cost=10.0)
+    for _ in range(3):
+        resolve_industry_job_cost_snapshot(
+            job=job, sde_session=sde, market_price_map=dict(_PRICES), invention_refresh=refresh,
+            **invention_cost_source_for(sources, 990099),
+        )
+    assert calls == [[_TARGET_BP]]
+
+
+class _ManufacturingJob:
+    def __init__(self, **fields):
+        self.raw = {"activity_id": 1, "runs": fields.get("runs")}
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+
+def test_a_manufacturing_job_uses_the_actual_cost_per_run(sde):
+    sources = _sources(sde, [_job()])
+    job = _ManufacturingJob(blueprint_type_id=_TARGET_BP, product_type_id=_PRODUCT, runs=3, cost=10.0)
+    snapshot = resolve_industry_job_cost_snapshot(
+        job=job, sde_session=sde, market_price_map=dict(_PRICES), invention_refresh=_refresh(),
+        **invention_cost_source_for(sources, _TARGET_BP),
+    )
+    assert snapshot["invention_cost"] == pytest.approx(3 * 90.0)
+    assert snapshot["invention_cost_unknown_reason"] is None
+    assert snapshot["source"].endswith("+actual_invention_job")
+
+
+def test_the_refresh_reason_is_passed_down_and_the_provider_is_not_asked_again(sde, monkeypatch):
+    def _boom():
+        raise AssertionError("the provider is read once per refresh, not per job")
+
+    monkeypatch.setattr(ap, "_REALIZED_INVENTION_INPUTS_PROVIDER", _boom)
+    refresh = RealizedInventionRefresh(inputs=None, inputs_unknown_reason="the producer's inputs could not be read (X)")
+    job = _ManufacturingJob(blueprint_type_id=_TARGET_BP, product_type_id=_PRODUCT, runs=1, cost=10.0)
+    snapshot = resolve_industry_job_cost_snapshot(
+        job=job, sde_session=sde, market_price_map=dict(_PRICES), invention_refresh=refresh,
+    )
+    assert "could not be read (X)" in snapshot["invention_cost_unknown_reason"]
+
+
+def test_without_an_actual_source_or_estimate_both_reasons_are_named(sde):
+    sources = _sources(sde, [_job(successful_runs=0)])
+    job = _ManufacturingJob(blueprint_type_id=_TARGET_BP, product_type_id=_PRODUCT, runs=1, cost=10.0)
+    snapshot = resolve_industry_job_cost_snapshot(
+        job=job, sde_session=sde, market_price_map=dict(_PRICES), invention_refresh=_refresh(),
+        **invention_cost_source_for(sources, _TARGET_BP),
+    )
+    reason = snapshot["invention_cost_unknown_reason"]
+    assert "no inputs in this test" in reason
+    assert "no successful" in reason
+
+
+def test_read_takes_the_provider_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(ap, "_REALIZED_INVENTION_INPUTS_PROVIDER", lambda: calls.append(1))
+    refresh = RealizedInventionRefresh.read()
+    assert calls == [1]
+    assert refresh.inputs is None
+    assert "no inventor skills or decryptor choice" in refresh.inputs_unknown_reason

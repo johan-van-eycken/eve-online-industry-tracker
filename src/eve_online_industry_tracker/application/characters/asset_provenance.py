@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import logging
 import math
@@ -12,6 +12,7 @@ from sqlalchemy import desc
 from eve_online_industry_tracker.application.industry.invention_model import (
     DecryptorOption,
     InventionContext,
+    decryptor_options_from_rows,
     effective_invention_probability,
     invented_runs_per_blueprint,
     invention_attempts,
@@ -22,6 +23,7 @@ from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_blueprint_manufacturing_data,
     get_invention_source_blueprint_ids,
 )
+from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
 
 
 ASSET_SOURCE_INDUSTRY_BUILD = "industry_build"
@@ -330,6 +332,9 @@ NO_REALIZED_INVENTION_INPUTS_REASON = (
     "no inventor skills or decryptor choice available (the app has not registered the producer's invention inputs)"
 )
 
+#: The ESI status of a finished invention job whose successful_runs is final.
+_DELIVERED_STATUS = "delivered"
+
 
 @dataclass(frozen=True)
 class RealizedInventionInputs:
@@ -376,6 +381,31 @@ def current_realized_invention_inputs() -> tuple[RealizedInventionInputs | None,
     return inputs, None
 
 
+@dataclass
+class RealizedInventionRefresh:
+    """One job refresh's view of invention: the producer's inputs read once
+    (with why they are missing, passed down to every snapshot), the SDE
+    invention activities memoized per invented blueprint, and the SDE
+    decryptors (loaded on first use). Not shared across refreshes."""
+
+    inputs: RealizedInventionInputs | None
+    inputs_unknown_reason: str | None = None
+    #: (NO_DECRYPTOR, the SDE's T2 decryptors); None: loaded on first use.
+    decryptor_options: tuple[DecryptorOption, ...] | None = None
+    source_activity_by_target: dict[int, tuple[int | None, Mapping[str, Any] | None]] = field(default_factory=dict)
+
+    @classmethod
+    def read(cls) -> "RealizedInventionRefresh":
+        inputs, reason = current_realized_invention_inputs()
+        return cls(inputs=inputs, inputs_unknown_reason=reason)
+
+    def decryptors(self, sde_session: Any) -> tuple[DecryptorOption, ...]:
+        if self.decryptor_options is None:
+            rows = get_t2_invention_decryptors(sde_session, language="en") if sde_session is not None else []
+            self.decryptor_options = decryptor_options_from_rows(rows)
+        return self.decryptor_options
+
+
 def _invention_target_product(invention: Mapping[str, Any], target_blueprint_type_id: int) -> Mapping[str, Any] | None:
     for product in invention.get("products") or []:
         if isinstance(product, Mapping) and _safe_int(product.get("type_id")) == int(target_blueprint_type_id):
@@ -385,27 +415,77 @@ def _invention_target_product(invention: Mapping[str, Any], target_blueprint_typ
 
 def _invention_source_activity(
     sde_session: Any, target_blueprint_type_id: int,
+    memo: dict[int, tuple[int | None, Mapping[str, Any] | None]] | None = None,
 ) -> tuple[int | None, Mapping[str, Any] | None]:
     """(source blueprint id, its SDE invention activity in the producer's
     shape), or (None, None) when nothing invents into the blueprint. The
-    lowest source id wins, as in the producer."""
-    source_by_target = get_invention_source_blueprint_ids(sde_session, [int(target_blueprint_type_id)])
-    source_id = source_by_target.get(int(target_blueprint_type_id))
+    lowest source id wins, as in the producer. `memo` (one refresh's
+    RealizedInventionRefresh.source_activity_by_target) reads each blueprint
+    from the SDE once."""
+    target = int(target_blueprint_type_id)
+    if memo is not None and target in memo:
+        return memo[target]
+    source_by_target = get_invention_source_blueprint_ids(sde_session, [target])
+    source_id = source_by_target.get(target)
     if source_id is None:
-        return None, None
-    data = get_blueprint_manufacturing_data(sde_session, "en", [int(source_id)]).get(int(source_id)) or {}
-    invention = data.get("invention") if isinstance(data, Mapping) else None
-    return int(source_id), (invention if isinstance(invention, Mapping) else {})
+        result: tuple[int | None, Mapping[str, Any] | None] = (None, None)
+    else:
+        data = get_blueprint_manufacturing_data(sde_session, "en", [int(source_id)]).get(int(source_id)) or {}
+        invention = data.get("invention") if isinstance(data, Mapping) else None
+        result = (int(source_id), (invention if isinstance(invention, Mapping) else {}))
+    if memo is not None:
+        memo[target] = result
+    return result
 
 
-def _invented_runs_per_success(sde_session: Any, *, target_blueprint_type_id: int) -> int | None:
+def _invented_runs_per_success(
+    sde_session: Any, *, target_blueprint_type_id: int,
+    memo: dict[int, tuple[int | None, Mapping[str, Any] | None]] | None = None,
+) -> int | None:
     """Runs on one invented BPC: the SDE invention product quantity (not the
     T2 blueprint's maxProductionLimit; capital T2 modules invent 5 runs of a
     10-run limit). None when nothing invents into it or the SDE has no runs."""
-    _, invention = _invention_source_activity(sde_session, int(target_blueprint_type_id))
+    _, invention = _invention_source_activity(sde_session, int(target_blueprint_type_id), memo)
     product = _invention_target_product(invention or {}, int(target_blueprint_type_id))
     runs = _safe_int((product or {}).get("quantity"))
     return int(runs) if runs and runs > 0 else None
+
+
+def _invention_attempt_inputs(
+    invention: Mapping[str, Any] | None, decryptor: DecryptorOption,
+) -> list[tuple[int, int]]:
+    """[(type_id, quantity)] one invention attempt consumes: the SDE
+    materials (datacores) and, with a decryptor, one decryptor."""
+    inputs: list[tuple[int, int]] = []
+    for material in (invention or {}).get("materials") or []:
+        if not isinstance(material, Mapping):
+            continue
+        type_id = _safe_int(material.get("type_id"))
+        quantity = _safe_int(material.get("quantity"))
+        if type_id and quantity and quantity > 0:
+            inputs.append((int(type_id), int(quantity)))
+    if decryptor.type_id is not None:
+        inputs.append((int(decryptor.type_id), 1))
+    return inputs
+
+
+def _price_invention_inputs(
+    inputs: Iterable[tuple[int, int]], *,
+    market_price_map: Mapping[int, float], owned_cost_map: Mapping[int, float] | None = None,
+) -> tuple[float | None, list[int]]:
+    """(the inputs' cost, []), or (None, the unpriced type ids): the owned
+    unit cost when known, else the market price. Never a partial sum."""
+    total = 0.0
+    unpriced: list[int] = []
+    for type_id, quantity in inputs:
+        unit_price = (owned_cost_map or {}).get(type_id) or market_price_map.get(type_id)
+        if unit_price is None or float(unit_price) <= 0:
+            unpriced.append(int(type_id))
+            continue
+        total += float(quantity) * float(unit_price)
+    if unpriced:
+        return None, sorted(unpriced)
+    return total, []
 
 
 def estimate_invention_cost_per_run(
@@ -416,6 +496,7 @@ def estimate_invention_cost_per_run(
     owned_cost_map: Mapping[int, float] | None = None,
     invention_inputs: RealizedInventionInputs | None,
     inputs_unknown_reason: str = NO_REALIZED_INVENTION_INPUTS_REASON,
+    memo: dict[int, tuple[int | None, Mapping[str, Any] | None]] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """The expected invention inputs one run of an invented blueprint costs,
     sized like the producer's _expected_invention_costs: one attempt's
@@ -429,7 +510,7 @@ def estimate_invention_cost_per_run(
     decryptor choice, no SDE runs or chance, an unpriced input. Never a
     constant or a partial sum."""
     target = int(target_blueprint_type_id)
-    source_id, invention = _invention_source_activity(sde_session, target)
+    source_id, invention = _invention_source_activity(sde_session, target, memo)
     if source_id is None:
         return None, None
     product = _invention_target_product(invention or {}, target)
@@ -459,28 +540,14 @@ def estimate_invention_cost_per_run(
     if expected_attempts_per_run <= 0:
         return None, f"no positive invention success chance for blueprint {target}"
 
-    inputs: list[tuple[int, int]] = []
-    for material in (invention or {}).get("materials") or []:
-        if not isinstance(material, Mapping):
-            continue
-        type_id = _safe_int(material.get("type_id"))
-        quantity = _safe_int(material.get("quantity"))
-        if type_id and quantity and quantity > 0:
-            inputs.append((int(type_id), int(quantity)))
-    if decryptor.type_id is not None:
-        inputs.append((int(decryptor.type_id), 1))
-    material_cost = 0.0
-    unpriced: list[int] = []
-    for type_id, quantity in inputs:
-        unit_price = (owned_cost_map or {}).get(type_id) or market_price_map.get(type_id)
-        if unit_price is None or float(unit_price) <= 0:
-            unpriced.append(type_id)
-            continue
-        material_cost += float(quantity) * float(unit_price)
-    if unpriced:
-        return None, f"invention input(s) {sorted(unpriced)} of blueprint {target} have no price"
+    inputs = _invention_attempt_inputs(invention, decryptor)
     if not inputs:
         return None, f"the SDE invention of blueprint {source_id} lists no inputs"
+    material_cost, unpriced = _price_invention_inputs(
+        inputs, market_price_map=market_price_map, owned_cost_map=owned_cost_map,
+    )
+    if material_cost is None:
+        return None, f"invention input(s) {unpriced} of blueprint {target} have no price"
     return {
         "source_blueprint_type_id": source_id,
         "material_cost_per_attempt": float(material_cost),
@@ -492,31 +559,30 @@ def estimate_invention_cost_per_run(
     }, None
 
 
-def _invention_material_cost_per_attempt(
-    *, sde_session: Any, target_blueprint_type_id: int, market_price_map: Mapping[int, float],
-) -> tuple[float | None, str | None]:
-    """One attempt's SDE invention materials at `market_price_map`; (None,
-    why) when nothing invents into it or an input has no price."""
-    source_id, invention = _invention_source_activity(sde_session, int(target_blueprint_type_id))
-    if source_id is None:
-        return None, f"nothing in the SDE invents blueprint {target_blueprint_type_id}"
-    total = 0.0
-    unpriced: list[int] = []
-    for material in (invention or {}).get("materials") or []:
-        if not isinstance(material, Mapping):
-            continue
-        type_id = _safe_int(material.get("type_id"))
-        quantity = _safe_int(material.get("quantity"))
-        if not type_id or not quantity or quantity <= 0:
-            continue
-        unit_price = market_price_map.get(int(type_id))
-        if unit_price is None or float(unit_price) <= 0:
-            unpriced.append(int(type_id))
-            continue
-        total += float(quantity) * float(unit_price)
-    if unpriced:
-        return None, f"invention input(s) {sorted(unpriced)} have no price"
-    return total, None
+def _infer_job_decryptor(
+    *, licensed_runs: int, base_runs: int, options: tuple[DecryptorOption, ...],
+) -> tuple[DecryptorOption | None, str | None]:
+    """The decryptor an invention job used, read from its licensed runs: the
+    SDE base runs plus the decryptor's run modifier. (option, None) when
+    exactly one option (no decryptor included) explains the runs; (None,
+    "decryptor unknown: ...") otherwise. Never guessed: no decryptor (+0)
+    and the Process decryptor (+0) cannot be told apart this way."""
+    if len(options) <= 1:
+        return None, "decryptor unknown: the SDE gave no decryptor data"
+    modifier = int(licensed_runs) - int(base_runs)
+    matches = [o for o in options if int(o.max_run_modifier) == modifier]
+    if len(matches) == 1:
+        return matches[0], None
+    if not matches:
+        return None, (
+            f"decryptor unknown: {licensed_runs} licensed runs over {base_runs} SDE base runs (+{modifier}) "
+            "match no decryptor"
+        )
+    names = ", ".join(sorted(str(o.type_name) for o in matches))
+    return None, (
+        f"decryptor unknown: {licensed_runs} licensed runs over {base_runs} SDE base runs (+{modifier}) "
+        f"match {len(matches)} options ({names})"
+    )
 
 
 def build_invention_cost_per_run_by_blueprint_type(
@@ -524,57 +590,111 @@ def build_invention_cost_per_run_by_blueprint_type(
     jobs: Iterable[dict[str, Any]] | None,
     sde_session: Any,
     market_price_map: dict[int, float],
+    invention_refresh: RealizedInventionRefresh | None = None,
 ) -> dict[int, dict[str, Any]]:
-    rows_by_target_blueprint_type: dict[int, dict[str, Any]] = {}
+    """{invented blueprint type_id: its invention cost per invented run from
+    the corp's own delivered invention jobs}.
+
+    cost per run = sum(runs x one attempt's inputs + job cost) /
+    sum(successful_runs x licensed_runs): every attempt is paid for (failed
+    ones and failed jobs included), only successes yield runs. A job is left
+    out when it is not delivered, has no successful_runs or licensed_runs,
+    its decryptor cannot be read from its licensed runs (_infer_job_decryptor)
+    or an input has no price. A blueprint without a usable job, or with zero
+    successes over its usable jobs, maps to {"unknown_reason": why} and no
+    unit_cost_per_run: the caller then uses the expected estimate."""
+    refresh = invention_refresh or RealizedInventionRefresh(inputs=None)
+    memo = refresh.source_activity_by_target
+    totals: dict[int, dict[str, Any]] = {}
     for job in jobs or []:
         if not isinstance(job, dict):
             continue
         raw = job.get("raw") if isinstance(job.get("raw"), dict) else job
-        activity_id = _safe_int((raw or {}).get("activity_id"))
-        if activity_id != 8:
+        if _safe_int((raw or {}).get("activity_id")) != 8:
             continue
-        target_blueprint_type_id = _safe_int(job.get("product_type_id"))
-        if not target_blueprint_type_id or target_blueprint_type_id <= 0:
+        target = _safe_int(job.get("product_type_id"))
+        if not target or target <= 0:
             continue
-        # The invented BPC's runs: ESI's licensed_runs, else the runs the SDE
-        # invention yields (never the T2 blueprint's maxProductionLimit).
-        licensed_runs = _safe_int((raw or {}).get("licensed_runs")) or _invented_runs_per_success(
-            sde_session,
-            target_blueprint_type_id=int(target_blueprint_type_id),
-        )
-        if not licensed_runs or licensed_runs <= 0:
-            logging.info(
-                "Invention job %s for blueprint %s skipped as a cost source: no licensed runs and no SDE runs",
-                job.get("job_id"), target_blueprint_type_id,
-            )
-            continue
-        invention_material_cost, unknown_reason = _invention_material_cost_per_attempt(
-            sde_session=sde_session,
-            target_blueprint_type_id=int(target_blueprint_type_id),
-            market_price_map=market_price_map,
-        )
-        if invention_material_cost is None:
-            # Not a cost source: the expected estimate covers the blueprint.
-            logging.info(
-                "Invention job %s for blueprint %s skipped as a cost source: %s",
-                job.get("job_id"), target_blueprint_type_id, unknown_reason,
-            )
-            continue
-        total_cost = float(invention_material_cost) + float(_safe_float(job.get("cost")) or 0.0)
-        completed_date = _parse_date(job.get("completed_date") or job.get("end_date"))
-        current = rows_by_target_blueprint_type.get(int(target_blueprint_type_id))
-        if current is not None:
-            current_dt = _parse_date(current.get("completed_date") or current.get("end_date"))
-            if current_dt is not None and completed_date is not None and current_dt >= completed_date:
-                continue
-        rows_by_target_blueprint_type[int(target_blueprint_type_id)] = {
-            "total_cost": float(total_cost),
-            "unit_cost_per_run": float(total_cost) / float(licensed_runs),
-            "source": "actual_invention_job",
-            "completed_date": job.get("completed_date") or job.get("end_date"),
-        }
+        entry = totals.setdefault(int(target), {
+            "cost": 0.0, "attempts": 0, "successful_runs": 0, "invented_runs": 0, "jobs": 0, "skipped": [],
+        })
+        job_id = job.get("job_id")
 
-    return rows_by_target_blueprint_type
+        def _skip(why: str) -> None:
+            entry["skipped"].append(f"job {job_id}: {why}")
+            logging.info("Invention job %s for blueprint %s skipped as a cost source: %s", job_id, target, why)
+
+        if str((raw or {}).get("status") or "").lower() != _DELIVERED_STATUS:
+            continue  # not finished: its outcome is not known yet (not a reason, just not yet)
+        runs = _safe_int((raw or {}).get("runs"))
+        successful_runs = _safe_int((raw or {}).get("successful_runs"))
+        licensed_runs = _safe_int((raw or {}).get("licensed_runs"))
+        if successful_runs is None or successful_runs < 0:
+            _skip("no successful_runs")
+            continue
+        if not runs or runs <= 0 or not licensed_runs or licensed_runs <= 0:
+            _skip("no runs or licensed runs")
+            continue
+        source_id, invention = _invention_source_activity(sde_session, int(target), memo)
+        product = _invention_target_product(invention or {}, int(target)) if source_id is not None else None
+        base_runs = _safe_int((product or {}).get("quantity"))
+        if not base_runs or base_runs <= 0:
+            _skip("the SDE gives no runs per invented BPC")
+            continue
+        decryptor, decryptor_reason = _infer_job_decryptor(
+            licensed_runs=int(licensed_runs), base_runs=int(base_runs), options=refresh.decryptors(sde_session),
+        )
+        if decryptor is None:
+            _skip(str(decryptor_reason))
+            continue
+        per_attempt, unpriced = _price_invention_inputs(
+            _invention_attempt_inputs(invention, decryptor), market_price_map=market_price_map,
+        )
+        if per_attempt is None:
+            _skip(f"invention input(s) {unpriced} have no price")
+            continue
+        entry["cost"] += float(runs) * float(per_attempt) + float(_safe_float(job.get("cost")) or 0.0)
+        entry["attempts"] += int(runs)
+        entry["successful_runs"] += int(successful_runs)
+        entry["invented_runs"] += int(successful_runs) * int(licensed_runs)
+        entry["jobs"] += 1
+
+    out: dict[int, dict[str, Any]] = {}
+    for target, entry in totals.items():
+        if entry["jobs"] == 0:
+            if entry["skipped"]:
+                out[target] = {"unknown_reason": "no usable invention job (" + "; ".join(entry["skipped"]) + ")"}
+            continue  # only unfinished jobs: nothing to say yet
+        if entry["invented_runs"] <= 0:
+            out[target] = {"unknown_reason": (
+                f"the corp's {entry['jobs']} delivered invention job(s) had no successful attempt "
+                f"({entry['attempts']} attempts)"
+            )}
+            continue
+        out[target] = {
+            "total_cost": float(entry["cost"]),
+            "unit_cost_per_run": float(entry["cost"]) / float(entry["invented_runs"]),
+            "source": "actual_invention_job",
+            "jobs": int(entry["jobs"]),
+            "attempts": int(entry["attempts"]),
+            "successful_runs": int(entry["successful_runs"]),
+            "invented_runs": int(entry["invented_runs"]),
+        }
+    return out
+
+
+def invention_cost_source_for(
+    invention_cost_by_blueprint_type: Mapping[int, Mapping[str, Any]], blueprint_type_id: Any,
+) -> dict[str, Any]:
+    """resolve_industry_job_cost_snapshot's actual-invention arguments for a
+    manufacturing job of `blueprint_type_id`."""
+    entry = invention_cost_by_blueprint_type.get(int(_safe_int(blueprint_type_id) or 0)) or {}
+    unit = _safe_float(entry.get("unit_cost_per_run"))
+    return {
+        "invention_unit_cost_per_run": unit,
+        "invention_cost_source": (str(entry.get("source") or "") or None) if unit is not None else None,
+        "invention_source_unknown_reason": entry.get("unknown_reason") if unit is None else None,
+    }
 
 
 def resolve_industry_job_cost_snapshot(
@@ -587,7 +707,19 @@ def resolve_industry_job_cost_snapshot(
     blueprint_provenance: dict[str, Any] | None = None,
     owned_input_unit_cost_by_type_id: dict[int, dict[str, Any]] | None = None,
     invention_inputs: RealizedInventionInputs | None = None,
+    invention_refresh: RealizedInventionRefresh | None = None,
+    invention_source_unknown_reason: str | None = None,
 ) -> dict[str, Any]:
+    """The build cost snapshot of one industry job.
+
+    For a manufacturing job of an invented blueprint the invention cost per
+    run is the corp's actual invention jobs' (`invention_unit_cost_per_run`,
+    build_invention_cost_per_run_by_blueprint_type) when known, else the
+    expected estimate. `invention_refresh` carries the producer's inputs and
+    the reason they are missing, read once per refresh (else they are read
+    here, or `invention_inputs` is used). When neither source gives a cost,
+    `invention_cost_unknown_reason` names both reasons
+    (`invention_source_unknown_reason` is why the actual jobs gave none)."""
     blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
     product_type_id = _safe_int(getattr(job, "product_type_id", None))
     raw = _industry_job_raw_payload(job)
@@ -685,10 +817,12 @@ def resolve_industry_job_cost_snapshot(
                     for tid, payload in owned_input_unit_cost_by_type_id.items()
                     if (uc := _safe_float((payload or {}).get("unit_cost"))) and uc > 0
                 } or None
-            if invention_inputs is None:
+            inputs_unknown_reason: str | None = None
+            if invention_inputs is None and invention_refresh is not None:
+                invention_inputs = invention_refresh.inputs
+                inputs_unknown_reason = invention_refresh.inputs_unknown_reason
+            elif invention_inputs is None:
                 invention_inputs, inputs_unknown_reason = current_realized_invention_inputs()
-            else:
-                inputs_unknown_reason = None
             estimate, unknown_reason = estimate_invention_cost_per_run(
                 sde_session=sde_session,
                 target_blueprint_type_id=int(blueprint_type_id),
@@ -696,12 +830,17 @@ def resolve_industry_job_cost_snapshot(
                 owned_cost_map=_invention_owned_cost_map,
                 invention_inputs=invention_inputs,
                 inputs_unknown_reason=inputs_unknown_reason or NO_REALIZED_INVENTION_INPUTS_REASON,
+                memo=invention_refresh.source_activity_by_target if invention_refresh is not None else None,
             )
             if estimate is not None:
                 invention_cost = float(estimate["cost_per_run"]) * float(runs)
                 resolved_invention_source = "expected_invention_material_cost"
             elif unknown_reason is not None:
                 invention_cost_unknown_reason = f"invention cost unknown: {unknown_reason}"
+                if invention_source_unknown_reason:
+                    invention_cost_unknown_reason += (
+                        f"; the corp's own invention jobs give no cost either: {invention_source_unknown_reason}"
+                    )
                 logging.info(
                     "Industry job %s (blueprint %s): %s; its build cost is a lower bound and "
                     "feedback skips the cost update for sales of it",
