@@ -77,18 +77,24 @@ def test_a_bug_in_the_public_structure_scan_surfaces():
         svc.get_public_structures(30000142, max_workers=1)
 
 
-# --- ESI monitor: no longer wrapped in except-pass ------------------------------------------
+# --- ESI monitor: telemetry, a failure is a WARNING (not swallowed silently, not fatal) --------
 
-def test_a_bug_in_the_esi_monitor_is_not_swallowed(monkeypatch):
+def test_a_bug_in_the_esi_monitor_is_a_warning_not_a_failed_request(monkeypatch, caplog):
     class _BrokenMonitor:
         def record_sleep(self, **kwargs):
             raise TypeError("record_sleep() got an unexpected keyword argument")
 
+    slept = []
+    monkeypatch.setattr(esi_client_module, "_ESI_MONITOR_WARNING_LIMITER",
+                        esi_client_module._EsiRequestErrorLogLimiter(window_seconds=300.0, max_logs_per_key=1))
     monkeypatch.setattr(esi_client_module, "get_esi_monitor", lambda: _BrokenMonitor())
     monkeypatch.setattr(esi_client_module._ESI_ERROR_LIMITER, "suggested_sleep_seconds", lambda: 0.5)
-    monkeypatch.setattr(esi_client_module, "_sleep_seconds", lambda s: None)
-    with pytest.raises(TypeError):
+    monkeypatch.setattr(esi_client_module, "_sleep_seconds", lambda s: slept.append(s))
+    with caplog.at_level(logging.WARNING):
         esi_client_module._esi_gate("test")
+    assert slept == [0.5]
+    assert any(r.levelno == logging.WARNING and "ESI monitor record_sleep failed" in r.getMessage()
+               and "unexpected keyword argument" in r.getMessage() for r in caplog.records)
 
 
 def test_esi_request_errors_do_not_include_programming_errors():

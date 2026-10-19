@@ -10,7 +10,7 @@ import requests
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
-from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient, call_esi_monitor
 from eve_online_industry_tracker.infrastructure.esi_versions import (
     ESI_COMPATIBILITY_DATE,
     ESI_MARKETS_ORDERS,
@@ -33,6 +33,12 @@ try:
     from utils.esi_monitor import get_esi_monitor
 except ImportError:  # pragma: no cover
     get_esi_monitor = None  # type: ignore
+
+
+def _monitor(fn: str, **kw: Any) -> None:
+    """The ESI monitor call of the public requests: a monitor failure is a
+    rate-limited WARNING, never a failed fetch (esi_client.call_esi_monitor)."""
+    call_esi_monitor(get_esi_monitor, fn, **kw)
 
 
 class ESIService:
@@ -186,50 +192,50 @@ class ESIService:
                         timeout=float(timeout_seconds),
                         headers=headers,
                     )
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_http_attempt(
-                            method="GET",
-                            endpoint=str(endpoint),
-                            url=str(getattr(response, "url", url)),
-                            status_code=int(response.status_code) if response is not None else None,
-                            elapsed_ms=(time.time() - request_started_at) * 1000.0,
-                            headers=getattr(response, "headers", None),
-                            exception=None,
-                            cache_mode="off",
-                            page=page,
-                        )
+                    _monitor(
+                        "record_http_attempt",
+                        method="GET",
+                        endpoint=str(endpoint),
+                        url=str(getattr(response, "url", url)),
+                        status_code=int(response.status_code) if response is not None else None,
+                        elapsed_ms=(time.time() - request_started_at) * 1000.0,
+                        headers=getattr(response, "headers", None),
+                        exception=None,
+                        cache_mode="off",
+                        page=page,
+                    )
                 except requests.RequestException:
                     exc = None
                     try:
                         raise
                     except requests.RequestException as caught:
                         exc = caught
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_http_attempt(
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                                status_code=None,
-                                elapsed_ms=(time.time() - request_started_at) * 1000.0,
-                                headers=None,
-                                exception=caught,
-                                cache_mode="off",
-                                page=page,
-                            )
+                        _monitor(
+                            "record_http_attempt",
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                            status_code=None,
+                            elapsed_ms=(time.time() - request_started_at) * 1000.0,
+                            headers=None,
+                            exception=caught,
+                            cache_mode="off",
+                            page=page,
+                        )
                     if exc is None:
                         raise
                     attempts += 1
                     if attempts > max_retries:
                         raise exc
                     wait_seconds = min(8.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_retry_event(
-                            reason=type(exc).__name__,
-                            sleep_seconds=float(wait_seconds),
-                            method="GET",
-                            endpoint=str(endpoint),
-                            url=str(url),
-                        )
+                    _monitor(
+                        "record_retry_event",
+                        reason=type(exc).__name__,
+                        sleep_seconds=float(wait_seconds),
+                        method="GET",
+                        endpoint=str(endpoint),
+                        url=str(url),
+                    )
                     time.sleep(wait_seconds)
                     continue
 
@@ -243,14 +249,14 @@ class ESIService:
                 retry_after = self._retry_after_seconds(response)
                 backoff = min(12.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
                 wait_seconds = max(retry_after, backoff)
-                if get_esi_monitor is not None:
-                    get_esi_monitor().record_retry_event(
-                        reason=str(response.status_code),
-                        sleep_seconds=float(wait_seconds),
-                        method="GET",
-                        endpoint=str(endpoint),
-                        url=str(getattr(response, "url", url)),
-                    )
+                _monitor(
+                    "record_retry_event",
+                    reason=str(response.status_code),
+                    sleep_seconds=float(wait_seconds),
+                    method="GET",
+                    endpoint=str(endpoint),
+                    url=str(getattr(response, "url", url)),
+                )
                 time.sleep(wait_seconds)
 
         if not paginate:
