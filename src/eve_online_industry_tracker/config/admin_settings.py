@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -836,6 +838,11 @@ class AdminSettingsManager:
         self._data: dict[str, dict[str, Any]] = {}
         self._invalid: dict[tuple[str, str], str] = {}
         self._notices: list[str] = []
+        # Why the stored file (or a category in it) could not be read: every
+        # setting it holds reads as its default until the first save, which
+        # backs the file up first (_backed_up names the backup from then on).
+        self._load_problems: list[str] = []
+        self._backed_up: list[str] = []
         self._load()
 
     # -- public API ---------------------------------------------------------
@@ -883,21 +890,25 @@ class AdminSettingsManager:
         return out
 
     def notices(self) -> list[str]:
-        """What the load changed in memory (the single-rig migration), until
-        the next save writes it to the file."""
+        """The load problems (an unreadable file or category, prefixed
+        ERROR) or the backup the first save made of it, then what the load
+        changed in memory (the single-rig migration), until the next save
+        writes it to the file. The Admin Settings page shows each one."""
         with self._lock:
-            return list(self._notices)
+            return list(self._load_problems) + list(self._backed_up) + list(self._notices)
 
     def problems(self) -> list[str]:
-        """One line per stored invalid value, then the notices (the /health
-        warnings)."""
+        """The load problems first (ERROR), one line per stored invalid
+        value, then the other notices (the /health warnings)."""
         lines = []
         for category, values in self.invalid().items():
             for key, entry in values.items():
                 spec = ADMIN_SETTINGS_SCHEMA[category]["settings"][key]
                 lines.append(f"admin setting {category}/{key}={entry['value']!r} is invalid ({entry['problem']}): "
                              f"{_invalid_consequence(spec)}; fix it on the Admin Settings page")
-        return lines + self.notices()
+        notices = self.notices()
+        errors = [n for n in notices if n.startswith("ERROR")]
+        return errors + lines + [n for n in notices if not n.startswith("ERROR")]
 
     def set(self, category: str, key: str, value: Any) -> None:
         """Update a single setting and persist to disk."""
@@ -995,11 +1006,20 @@ class AdminSettingsManager:
             return
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception:
-            logging.warning("Failed to load admin settings from %s; using defaults", self._path)
+        except (OSError, UnicodeDecodeError, ValueError) as exc:   # JSONDecodeError is a ValueError
             self._data = {}
+            self._load_problem(f"file {self._path} could not be read ({exc})")
             return
-        self._data, self._invalid = self._coerce_stored(payload if isinstance(payload, dict) else {})
+        if not isinstance(payload, dict):
+            self._data = {}
+            self._load_problem(f"file {self._path} could not be read (not a JSON object: "
+                               f"{type(payload).__name__})")
+            return
+        for category, values in payload.items():
+            if category in ADMIN_SETTINGS_SCHEMA and not isinstance(values, dict):
+                self._load_problem(f"category {category!r} in {self._path} could not be read (not a JSON object: "
+                                   f"{values!r})")
+        self._data, self._invalid = self._coerce_stored(payload)
         notice = _migrate_single_athanor_rig(self._data)
         self._notices = [notice] if notice else []
 
@@ -1016,7 +1036,9 @@ class AdminSettingsManager:
         invalid: dict[tuple[str, str], str] = {}
         for category, values in payload.items():
             cat_schema = ADMIN_SETTINGS_SCHEMA.get(category)
-            if cat_schema is None or not isinstance(values, dict):
+            if cat_schema is not None and not isinstance(values, dict):
+                continue   # a load problem (ERROR), see _load
+            if cat_schema is None:
                 logging.info("Admin settings: ignoring stored category %r, not in the schema", category)
                 continue
             for key, raw in values.items():
@@ -1043,10 +1065,37 @@ class AdminSettingsManager:
         return data, invalid
 
     def _persist(self) -> None:
+        """Write the settings (under self._lock). While the stored file
+        could not be read (whole or a category), it is first copied to a
+        timestamped .bak next to it, so the save does not silently destroy
+        what was in it; a failed backup raises and nothing is written."""
+        if self._load_problems:
+            backup = self._backup_unreadable_file()
+            self._load_problems = []
+            if backup is not None:
+                self._backed_up = [f"admin settings: the unreadable file was backed up to {backup} "
+                                   "before this save; the settings in it are not restored (copy them back on the "
+                                   "Admin Settings page)"]
+                logging.warning("Admin settings: %s", self._backed_up[0])
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self._path)
+
+
+    def _backup_unreadable_file(self) -> Path | None:
+        if not self._path.exists():
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = self._path.with_name(f"{self._path.name}.unreadable-{stamp}.bak")
+        shutil.copy2(self._path, backup)
+        return backup
+
+    def _load_problem(self, problem: str) -> None:
+        line = (f"ERROR: admin settings {problem}; those settings read as their defaults until it is fixed. "
+                "The next save on the Admin Settings page backs the file up first, then writes the settings")
+        logging.error("Admin settings: %s", line)
+        self._load_problems.append(line)
 
 
 def _invalid_consequence(spec: dict[str, Any]) -> str:
