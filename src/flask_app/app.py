@@ -11,6 +11,7 @@ from flask_app.http import error
 from flask_app.state import state
 
 from eve_online_industry_tracker.application.characters.character_manager import UnknownCharacterError
+from eve_online_industry_tracker.application.corporations.corporation_manager import UnknownCorporationError
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.infrastructure.sde.industry import REIMPORT_HINT, SdeIndustryDataMissing
 
@@ -52,6 +53,12 @@ def create_app() -> Flask:
         # A character_id or name the app does not have: nothing was refreshed.
         logging.warning("%s", e)
         return error(message=str(e), status_code=404, code="unknown_character")
+
+    @app.errorhandler(UnknownCorporationError)
+    def _handle_unknown_corporation(e: UnknownCorporationError):
+        # A corporation_id or name the app does not manage: nothing was refreshed or read.
+        logging.warning("%s", e)
+        return error(message=str(e), status_code=404, code="unknown_corporation")
 
     @app.errorhandler(SdeIndustryDataMissing)
     def _handle_sde_reimport_required(e: SdeIndustryDataMissing):

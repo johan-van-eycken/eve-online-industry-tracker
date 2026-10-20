@@ -27,6 +27,7 @@ from utils.app_init import (
 
 from eve_online_industry_tracker.application.characters.asset_provenance import set_realized_invention_inputs_provider
 from eve_online_industry_tracker.application.characters.character_manager import CharacterRefreshError
+from eve_online_industry_tracker.application.corporations.corporation_manager import CorporationRefreshError
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
@@ -172,6 +173,12 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         )
         try:
             state.corp_manager.refresh_all()
+        except CorporationRefreshError as e:
+            # Every corporation was refreshed but these; one line each.
+            for name, message in e.errors.items():
+                state.init_warnings.append(f"Corporation refresh failed for {name}: {message}")
+            logging.warning("Corporation refresh failed for %d corporation(s); startup continues: %s",
+                            len(e.errors), ", ".join(e.errors))
         except Exception as e:
             state.init_warnings.append(f"Corporation refresh failed: {e}")
             friendly = _user_friendly_error(e)
