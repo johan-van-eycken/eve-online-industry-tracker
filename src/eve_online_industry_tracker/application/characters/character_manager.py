@@ -29,6 +29,16 @@ class CharacterRefreshError(Exception):
         super().__init__(f"{method_name} failed for {len(self.errors)} character(s): {details}")
 
 
+class UnknownCharacterError(CharacterRefreshError):
+    """A refresh asked for a character_id or name the manager does not have:
+    nothing was refreshed. `errors` names the unknown selector; the routes
+    answer 404."""
+
+    def __init__(self, method_name: str, selector: str):
+        self.selector = selector
+        super().__init__(method_name, {selector: "no such character in this manager"})
+
+
 class CharacterManager:
     """Manages multiple Character objects and provides batch utilities."""
 
@@ -173,6 +183,8 @@ class CharacterManager:
                 self._refresh_batch("refresh_wallet_balance", character_name, character_id)
                 balance = char.get_wallet_balance()
                 balances.append(balance)
+            except UnknownCharacterError:
+                raise   # names the unknown character, not the one of this loop
             except Exception as e:
                 error_message = f"Error retrieving wallet balance for {char.character_name}: {str(e)}"
                 logging.error(error_message)
@@ -186,6 +198,8 @@ class CharacterManager:
                 self._refresh_batch("refresh_assets", character_name, character_id)
                 assets = char.get_assets()
                 assets_list.append(assets)
+            except UnknownCharacterError:
+                raise   # names the unknown character, not the one of this loop
             except Exception as e:
                 error_message = f"Error retrieving assets for {char.character_name}: {str(e)}"
                 logging.error(error_message)
@@ -206,6 +220,8 @@ class CharacterManager:
                     self._refresh_batch("refresh_market_orders", character_name, character_id)
                 orders = char.get_market_orders()
                 orders_list.append(orders)
+            except UnknownCharacterError:
+                raise   # names the unknown character, not the one of this loop
             except Exception as e:
                 error_message = f"Error retrieving market orders for {char.character_name}: {str(e)}"
                 logging.error(error_message)
@@ -215,14 +231,20 @@ class CharacterManager:
     def _refresh_batch(self, method_name: str, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
         """Run `method_name` on each selected character. Every character is
         tried: one that fails is logged as an ERROR and the others go on;
-        then CharacterRefreshError names each failed character."""
+        then CharacterRefreshError names each failed character. An unknown
+        character_id or name raises UnknownCharacterError before any refresh."""
         if character_id is not None:
-            chars = [self.get_character_by_id(character_id)]
+            char = self.get_character_by_id(character_id)
+            if char is None:
+                raise UnknownCharacterError(method_name, f"character_id {character_id}")
+            chars = [char]
         elif character_name:
-            chars = [self.get_character_by_name(character_name)]
+            char = self.get_character_by_name(character_name)
+            if char is None:
+                raise UnknownCharacterError(method_name, f"character_name {character_name!r}")
+            chars = [char]
         else:
             chars = self._character_list
-        chars = [c for c in chars if c is not None]
 
         errors: Dict[str, str] = {}
         for char in chars:
@@ -267,6 +289,8 @@ class CharacterManager:
         for refresh in (self.refresh_wallet_journal, self.refresh_wallet_transactions, self.refresh_industry_jobs):
             try:
                 refresh(character_name=character_name, character_id=character_id)
+            except UnknownCharacterError:
+                raise   # nothing was refreshed: the same unknown character for every kind
             except CharacterRefreshError as exc:
                 for name, message in exc.errors.items():
                     errors[f"{name} ({exc.method_name})"] = message

@@ -10,6 +10,7 @@ from flask_app.db import close_request_sessions
 from flask_app.http import error
 from flask_app.state import state
 
+from eve_online_industry_tracker.application.characters.character_manager import UnknownCharacterError
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.infrastructure.sde.industry import REIMPORT_HINT, SdeIndustryDataMissing
 
@@ -45,6 +46,12 @@ def create_app() -> Flask:
         if e.meta is not None:
             extra["meta"] = e.meta
         return error(message=e.message, status_code=e.status_code, **extra)
+
+    @app.errorhandler(UnknownCharacterError)
+    def _handle_unknown_character(e: UnknownCharacterError):
+        # A character_id or name the app does not have: nothing was refreshed.
+        logging.warning("%s", e)
+        return error(message=str(e), status_code=404, code="unknown_character")
 
     @app.errorhandler(SdeIndustryDataMissing)
     def _handle_sde_reimport_required(e: SdeIndustryDataMissing):
