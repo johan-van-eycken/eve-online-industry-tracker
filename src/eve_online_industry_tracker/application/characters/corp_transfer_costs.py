@@ -17,17 +17,22 @@ names no job, so the ledger cannot price it from its job's current cost.
 restamp_blended_corp_transfer_lots re-runs the same industry-job matching for
 the product types whose character jobs were re-costed (the decryptor
 re-snapshot, a job refresh, the historical market backfill) and writes it to
-their blended rows.
+their blended rows. restamp_all_blended_corp_transfer_lots_once does so
+once over every type with a blended row (run at startup, guarded by an
+app_meta marker), so the stamps are consistent from that deploy on and a
+later per-type re-stamp moves only the stamps of its own re-cost.
 """
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from sqlalchemy import or_
 
 from eve_online_industry_tracker.infrastructure.models import (
+    AppMetaModel,
     CharacterIndustryJobsModel,
     CharacterWalletTransactionsModel,
     CorporationAssetHistoryModel,
@@ -434,6 +439,49 @@ def restamp_blended_corp_transfer_lots(session, type_ids: Iterable[int]) -> int:
                 changed += 1
     if changed:
         logging.info("Re-stamped %d blended corp transfer lot(s) of %d type(s)", changed, len(rows_by_type))
+    return changed
+
+
+#: The app_meta key of the one-time re-stamp of every blended type.
+BLENDED_RESTAMP_MARKER_KEY = "corp_transfer_blended_restamp_v1"
+
+
+def restamp_all_blended_corp_transfer_lots_once(session) -> int | None:
+    """Re-stamp the blended corp transfer lots of every type that has one,
+    once: the stamps written before the per-type re-stamp existed may be from
+    job costs since changed, so the first per-type re-stamp of a type would
+    move many stamps unrelated to its re-cost. Run at startup; the app_meta
+    marker (BLENDED_RESTAMP_MARKER_KEY, its value the number of rows changed)
+    is written in the same transaction, so it runs again at the next start
+    when it fails. Returns the number of rows changed (logged), None when
+    the marker says it already ran. Commits."""
+    if session.get(AppMetaModel, BLENDED_RESTAMP_MARKER_KEY) is not None:
+        return None
+    type_ids = sorted({
+        int(type_id)
+        for (type_id,) in session.query(CorporationAssetHistoryModel.type_id)
+        .filter(
+            CorporationAssetHistoryModel.acquisition_source.in_(
+                (SOURCE_TRANSFERRED_BUILD, SOURCE_TRANSFERRED_BUILD_AVG)
+            ),
+            or_(
+                CorporationAssetHistoryModel.acquisition_reference_type.is_(None),
+                CorporationAssetHistoryModel.acquisition_reference_type != "industry_job",
+            ),
+        )
+        .distinct()
+        .all()
+        if type_id is not None
+    })
+    changed = restamp_blended_corp_transfer_lots(session, type_ids)
+    session.merge(AppMetaModel(
+        key=BLENDED_RESTAMP_MARKER_KEY, value=str(changed), updated_at=datetime.now(timezone.utc),
+    ))
+    session.commit()
+    logging.info(
+        "One-time re-stamp of the blended corp transfer lots: %d row(s) changed over %d type(s) with a "
+        "blended lot (marker %s set)", changed, len(type_ids), BLENDED_RESTAMP_MARKER_KEY,
+    )
     return changed
 
 

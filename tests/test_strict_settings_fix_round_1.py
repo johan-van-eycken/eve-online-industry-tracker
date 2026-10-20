@@ -131,7 +131,7 @@ def test_the_market_orders_page_api_raises_with_the_backends_message(monkeypatch
 
     message = "admin setting performance/market_order_max_workers=99 is invalid (99 is outside 1 to 20)"
     monkeypatch.setattr(api, "api_get_or_error", lambda path, timeout_seconds=None: (None, message))
-    for call in (lambda: api.fetch_market_orders.__wrapped__(),
+    for call in (lambda: api._fetch_market_orders_reply.__wrapped__(),
                  lambda: api.fetch_corp_market_orders_enriched.__wrapped__(2),
                  lambda: api.fetch_corp_market_orders.__wrapped__(2),
                  api.refresh_market_orders, lambda: api.refresh_corp_market_orders(2)):
@@ -140,7 +140,7 @@ def test_the_market_orders_page_api_raises_with_the_backends_message(monkeypatch
     monkeypatch.setattr(api, "api_get_or_error", lambda path, timeout_seconds=None: (
         {"status": "success", "data": [{"order_id": 1}]}, None))
     assert api.fetch_corp_market_orders_enriched.__wrapped__(2) == [{"order_id": 1}]
-    assert api.fetch_market_orders.__wrapped__()["data"] == [{"order_id": 1}]
+    assert api._fetch_market_orders_reply.__wrapped__()["response"]["data"] == [{"order_id": 1}]
 
 
 # --- M1: the startup-critical settings ---------------------------------------------------------

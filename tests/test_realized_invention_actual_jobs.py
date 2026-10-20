@@ -425,3 +425,21 @@ def test_read_takes_the_provider_once(monkeypatch):
     assert calls == [1]
     assert refresh.inputs is None
     assert "no inventor skills or decryptor choice" in refresh.inputs_unknown_reason
+
+
+def test_the_jobs_left_out_of_a_known_cost_are_counted_with_their_reasons(sde):
+    """J3.2: a cost from some of a blueprint's jobs names the ones it left out
+    (a count and each reason), not only an INFO log."""
+    source = _sources(sde, [_job(1), _job(2, probability=0.123), _job(3, cost=None)])[_TARGET_BP]
+    assert source["unit_cost_per_run"] == pytest.approx(90.0)
+    assert source["jobs"] == 1
+    assert source["skipped_jobs"] == 2
+    reasons = source["skipped_job_reasons"]
+    assert len(reasons) == 2
+    assert any(r.startswith("job 2: ") and "decryptor unknown" in r for r in reasons)
+    assert any(r.startswith("job 3: ") and "no readable install cost" in r for r in reasons)
+
+
+def test_a_cost_from_every_job_has_no_skipped_jobs(sde):
+    source = _sources(sde, [_job(1)])[_TARGET_BP]
+    assert source["skipped_jobs"] == 0 and source["skipped_job_reasons"] == []

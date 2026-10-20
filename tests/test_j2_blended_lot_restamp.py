@@ -241,3 +241,74 @@ def test_a_character_job_refresh_restamps_the_types_it_recosts(app_session, monk
     rows = _rows(app_session)
     assert rows[3].acquisition_unit_cost == pytest.approx(96.0)
     assert rows[4].acquisition_unit_cost == 10.0
+
+
+# --- J3.1: the one-time re-stamp of every blended type ---------------------------------
+
+
+def _stale_seed(s):
+    """PRODUCT and OTHER both stamped from costs their jobs no longer have
+    (blended rows at 85.0 and 10.0, jobs since re-costed to 90 and 12)."""
+    _seed(s)
+    _resolve_5001(s)
+    other = s.query(CharacterIndustryJobsModel).filter_by(job_id=5003).one()
+    other.unit_build_cost, other.total_build_cost = 12.0, 12.0
+    s.commit()
+
+
+def test_the_one_time_restamp_covers_every_blended_type_and_logs(app_session, caplog):
+    import logging
+
+    from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+        restamp_all_blended_corp_transfer_lots_once,
+    )
+    from eve_online_industry_tracker.infrastructure.models import AppMetaModel
+
+    _stale_seed(app_session)
+    with caplog.at_level(logging.INFO):
+        changed = restamp_all_blended_corp_transfer_lots_once(app_session)
+
+    rows = _rows(app_session)
+    assert changed == 3
+    assert rows[1].acquisition_unit_cost == 70.0                     # names its job: untouched
+    assert rows[2].acquisition_unit_cost == pytest.approx(95.0)
+    assert rows[3].acquisition_unit_cost == pytest.approx(96.0)
+    assert rows[4].acquisition_unit_cost == pytest.approx(12.0)      # the other type too
+    marker = app_session.get(AppMetaModel, "corp_transfer_blended_restamp_v1")
+    assert marker is not None and marker.value == "3"
+    assert any("One-time re-stamp" in r.getMessage() and "3" in r.getMessage() for r in caplog.records)
+
+
+def test_the_one_time_restamp_runs_once_and_the_per_type_restamp_still_works(app_session, caplog):
+    import logging
+
+    from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+        restamp_all_blended_corp_transfer_lots_once,
+    )
+
+    _stale_seed(app_session)
+    assert restamp_all_blended_corp_transfer_lots_once(app_session) == 3
+    other = app_session.query(CharacterIndustryJobsModel).filter_by(job_id=5003).one()
+    other.unit_build_cost, other.total_build_cost = 14.0, 14.0
+    app_session.commit()
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert restamp_all_blended_corp_transfer_lots_once(app_session) is None   # the marker: done
+    assert _rows(app_session)[4].acquisition_unit_cost == pytest.approx(12.0)
+    assert not any("One-time re-stamp" in r.getMessage() for r in caplog.records)
+
+    assert restamp_blended_corp_transfer_lots(app_session, [OTHER]) == 1
+    app_session.commit()
+    assert _rows(app_session)[4].acquisition_unit_cost == pytest.approx(14.0)
+
+
+def test_the_one_time_restamp_on_an_empty_history_still_sets_the_marker(app_session):
+    from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+        restamp_all_blended_corp_transfer_lots_once,
+    )
+    from eve_online_industry_tracker.infrastructure.models import AppMetaModel
+
+    assert restamp_all_blended_corp_transfer_lots_once(app_session) == 0
+    assert app_session.get(AppMetaModel, "corp_transfer_blended_restamp_v1").value == "0"
+    assert restamp_all_blended_corp_transfer_lots_once(app_session) is None

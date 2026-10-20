@@ -21,9 +21,13 @@ def require_known_character(state: Any, character_id: int | None, method_name: s
 
 
 def require_known_corporation(state: Any, corporation_id: int | None, method_name: str) -> None:
-    """UnknownCorporationError when `corporation_id` is given and the
-    corporation manager does not have it."""
+    """UnknownCorporationError naming `method_name` (the caller's method, not
+    the manager's get_corporation) when `corporation_id` is given and the
+    corporation manager does not have it: get_corporation raises for an
+    unknown id, re-raised here with the caller's name."""
     if corporation_id is None:
         return
-    if state.corp_manager.get_corporation(corporation_id=int(corporation_id)) is None:
-        raise UnknownCorporationError(method_name, f"corporation_id {int(corporation_id)}")
+    try:
+        state.corp_manager.get_corporation(corporation_id=int(corporation_id))
+    except UnknownCorporationError as exc:
+        raise UnknownCorporationError(method_name, f"corporation_id {int(corporation_id)}") from exc

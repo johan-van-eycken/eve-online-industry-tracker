@@ -1266,3 +1266,14 @@ class RealizedInventionDecryptorPublishModel(BaseApp):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     published_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     choice_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AppMetaModel(BaseApp):
+    """Small persisted key/value markers of the app DB, e.g. that a one-time
+    data fix ran (corp_transfer_costs.restamp_all_blended_corp_transfer_lots_once)."""
+
+    __tablename__ = "app_meta"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

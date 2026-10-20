@@ -570,6 +570,18 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             ")"
         ),
     )
+    # Persisted markers (key/value), e.g. that a one-time data fix ran.
+    _ensure_table(
+        db_app,
+        table="app_meta",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS app_meta ("
+            "key VARCHAR PRIMARY KEY,"
+            "value VARCHAR,"
+            "updated_at DATETIME NOT NULL"
+            ")"
+        ),
+    )
 
     _ensure_index(
         db_app,

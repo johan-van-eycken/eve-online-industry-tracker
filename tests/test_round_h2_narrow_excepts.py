@@ -155,10 +155,12 @@ def test_a_failed_prune_is_a_warning_and_a_bug_propagates(monkeypatch, caplog):
     cfg = SimpleNamespace(all=lambda: {"app": {"database_oauth_uri": "x", "database_app_uri": "y",
                                                 "database_sde_uri": "z"}})
     monkeypatch.setattr(app_init, "init_db_oauth", lambda cfg: db_oauth)
-    monkeypatch.setattr(app_init, "init_db_app", lambda cfg: SimpleNamespace())
+    monkeypatch.setattr(app_init, "init_db_app", lambda cfg: SimpleNamespace(session=None))
     monkeypatch.setattr(app_init, "init_db_sde", lambda cfg: SimpleNamespace())
     from eve_online_industry_tracker.infrastructure import schema_migrations
     monkeypatch.setattr(schema_migrations, "ensure_app_schema", lambda db: None)
+    from eve_online_industry_tracker.application.characters import corp_transfer_costs
+    monkeypatch.setattr(corp_transfer_costs, "restamp_all_blended_corp_transfer_lots_once", lambda session: None)
 
     monkeypatch.setattr(esi_client_module, "prune_stale_esi_cache", _throw(_db_error()))
     with caplog.at_level(logging.WARNING):

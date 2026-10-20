@@ -376,7 +376,21 @@ class ESIService:
                 return int(type_id), None, f"ESI {order_type} order book unavailable: {e}"
 
             if not isinstance(orders, list):
-                return int(type_id), [], None
+                # Not an empty book: the reply cannot be read, so the type is
+                # unavailable with a reason (and not cached), like a failed fetch.
+                reason = (
+                    f"ESI {order_type} order book unavailable: unexpected reply "
+                    f"({type(orders).__name__}), not a list of orders"
+                )
+                logging.warning(
+                    "ESI market orders reply unreadable (order_type=%s, region_id=%s, type_id=%s), "
+                    "the type is left out of the order book: %s",
+                    order_type,
+                    region_id,
+                    type_id,
+                    reason,
+                )
+                return int(type_id), None, reason
 
             # Defensive filter by is_buy_order.
             if order_type == "sell":

@@ -173,6 +173,18 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
 
         # Forward-migrate app DB schema (SQLite) for new columns.
         ensure_app_schema(db_app)
+        # One-off, marker-guarded: re-stamp every blended corp transfer lot (logged).
+        try:
+            from eve_online_industry_tracker.application.characters import corp_transfer_costs
+            corp_transfer_costs.restamp_all_blended_corp_transfer_lots_once(db_app.session)
+        except SQLAlchemyError as exc:   # startup goes on; no marker is written, so the next start retries it
+            logging.warning(
+                "One-time re-stamp of the blended corp transfer lots failed (retried at the next start): %s", exc,
+            )
+            try:
+                db_app.session.rollback()
+            except SQLAlchemyError as rollback_exc:
+                logging.warning("Blended corp transfer lot re-stamp: rollback failed: %s", rollback_exc)
 
         logging.debug(f"Database URI for SDE: {cfg['app']['database_sde_uri']}")
         db_sde = init_db_sde(cfgManager)

@@ -1193,7 +1193,8 @@ def build_invention_cost_per_run_by_blueprint_type(
     `decryptor_from_me_te_evidence_job_ids`; evidence that disagrees settles
     nothing; `known_invention_jobs`, every owner's stored invention jobs, only
     widen who can have made a BPC; load_owner_invention_evidence reads both)
-    or an input has no price. A
+    or an input has no price; a known cost names the jobs it left out
+    (`skipped_jobs`, `skipped_job_reasons`: "job <id>: why"). A
     blueprint without a usable job, or with zero successes over its usable
     jobs, maps to {"unknown_reason": why} and no unit_cost_per_run: the
     caller then uses the expected estimate."""
@@ -1360,6 +1361,9 @@ def build_invention_cost_per_run_by_blueprint_type(
             "decryptor_from_runs_evidence_job_ids": list(entry["runs_evidence_job_ids"]),
             # Tied jobs whose decryptor the ME/TE of a later BPC settled.
             "decryptor_from_me_te_evidence_job_ids": list(entry["me_te_evidence_job_ids"]),
+            # The jobs of the blueprint left out of this cost, each "job <id>: why".
+            "skipped_jobs": len(entry["skipped"]),
+            "skipped_job_reasons": list(entry["skipped"]),
         }
     return out
 

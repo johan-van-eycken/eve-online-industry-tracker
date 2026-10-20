@@ -4649,13 +4649,18 @@ class IndustryService:
             return "Unknown"
 
     @staticmethod
-    def _calculate_liquidity_score(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float, hub_sell_orders: int | None) -> float | None:
+    def _calculate_liquidity_score(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None, hub_sell_orders: int | None) -> float | None:
         """Calculate combined liquidity score (0-100) based on DOS and order count;
-        None when the hub's sell book could not be fetched (unknown, not 0)."""
+        None when the hub's sell book could not be fetched or the region volume
+        is unknown or unreadable (unknown, not 0; the row's
+        region_daily_volume_unavailable_reason says why). A known zero volume
+        (nothing sold) scores 0."""
         try:
             if hub_sell_liquidity is None or hub_sell_orders is None:
                 return None
-            if region_daily_volume_7d_avg is None or region_daily_volume_7d_avg <= 0:
+            if region_daily_volume_7d_avg is None:
+                return None
+            if float(region_daily_volume_7d_avg) <= 0:
                 return 0.0
 
             dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
@@ -4670,7 +4675,7 @@ class IndustryService:
             liquidity_score = (dos_score * 0.7) + (order_count_score * 0.3)
             return round(liquidity_score, 2)
         except (TypeError, ValueError):
-            return 0.0
+            return None  # an unreadable input: unknown, not 0
 
     @classmethod
     def _apply_material_pricing_to_job_tree(
@@ -11000,10 +11005,15 @@ class IndustryService:
         corporation-scope jobs (CorporationIndustryJobsModel).  Corp jobs are
         attributed to the character who installed them via installer_id so that
         per-character slot counting works correctly.
+
+        An unknown character_id is UnknownCharacterError (a 404,
+        unknown_character), not an empty job list.
         """
+        from eve_online_industry_tracker.application.unknown_owner import require_known_character
         from eve_online_industry_tracker.infrastructure.sde.activities import activity_label
         from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
+        require_known_character(self._state, character_id, "industry_active_jobs")
         session: Any = self._sessions.app_session()
 
         # --- Character-scope jobs ---

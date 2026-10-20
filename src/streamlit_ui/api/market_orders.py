@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import streamlit as st
@@ -22,9 +23,27 @@ def _get(path: str, timeout_seconds: int, what: str) -> dict[str, Any]:
     return response
 
 
+#: How long a partial reply (some characters failed, `errors` non-empty) is
+#: kept: a complete reply is cached for the hour, a partial one is fetched
+#: again after this, so a failed character's orders come back soon.
+PARTIAL_REPLY_TTL_SECONDS = 60
+
+
 @st.cache_data(ttl=3600)
+def _fetch_market_orders_reply() -> dict[str, Any]:
+    """{"response": the API reply, "fetched_at": epoch seconds}."""
+    return {"response": _get("/characters/market_orders?refresh=0", 60, "Market orders"),
+            "fetched_at": time.time()}
+
+
 def fetch_market_orders() -> dict[str, Any]:
-    return _get("/characters/market_orders?refresh=0", 60, "Market orders")
+    """Every character's orders: cached for an hour, a partial reply (with
+    `errors`) for PARTIAL_REPLY_TTL_SECONDS only. A failure is not cached."""
+    cached = _fetch_market_orders_reply()
+    if batch_errors(cached["response"]) and time.time() - cached["fetched_at"] > PARTIAL_REPLY_TTL_SECONDS:
+        _fetch_market_orders_reply.clear()
+        cached = _fetch_market_orders_reply()
+    return cached["response"]
 
 
 def refresh_market_orders() -> dict[str, str]:
@@ -34,7 +53,7 @@ def refresh_market_orders() -> dict[str, str]:
 
 
 def clear_market_orders_cache() -> None:
-    fetch_market_orders.clear()
+    _fetch_market_orders_reply.clear()
 
 
 @st.cache_data(ttl=3600)

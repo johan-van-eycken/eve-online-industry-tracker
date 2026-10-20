@@ -35,12 +35,13 @@ def _state(**managers):
 
 
 def _corp_manager(known):
-    return SimpleNamespace(
-        get_corporation=lambda corporation_id=None, corporation_name=None: (
-            object() if corporation_id in known else None
-        ),
-        refresh_realized_profit_inputs=lambda **_: None,
-    )
+    """Like CorporationManager.get_corporation: an unknown id raises."""
+    def get_corporation(corporation_id=None, corporation_name=None):
+        if corporation_id not in known:
+            raise UnknownCorporationError("get_corporation", f"corporation_id {corporation_id}")
+        return object()
+
+    return SimpleNamespace(get_corporation=get_corporation, refresh_realized_profit_inputs=lambda **_: None)
 
 
 def _char_manager(known):
@@ -54,8 +55,9 @@ def _char_manager(known):
 def test_an_unknown_corporation_id_raises(monkeypatch, refresh):
     monkeypatch.setattr(corporations_service, "CorporationRealizedProfitLedgerService", _Ledger)
     svc = corporations_service.CorporationsService(state=_state(corp_manager=_corp_manager({98000001})))
-    with pytest.raises(UnknownCorporationError, match="corporation_id 98000002"):
+    with pytest.raises(UnknownCorporationError, match="corporation_id 98000002") as info:
         svc.get_realized_profit_ledger(corporation_id=98000002, refresh=refresh)
+    assert info.value.method_name == "get_realized_profit_ledger"
 
 
 def test_a_known_corporation_id_and_no_id_read_as_before(monkeypatch):
