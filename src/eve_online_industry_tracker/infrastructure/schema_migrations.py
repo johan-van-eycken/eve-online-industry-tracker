@@ -46,10 +46,13 @@ def _ensure_table(db: DatabaseManager, *, ddl: str, table: str) -> None:
 
 
 def _ensure_index(db: DatabaseManager, *, ddl: str, name: str) -> None:
+    """CREATE INDEX IF NOT EXISTS. A DB error (locked, read-only, duplicate
+    rows under a unique index) is a WARNING and startup goes on; a
+    programming error propagates."""
     try:
         db.execute(ddl)
         logging.info("Ensured index %s", name)
-    except Exception as e:
+    except _SCHEMA_ERRORS as e:
         logging.warning("Failed ensuring index %s: %s", name, str(e))
 
 
