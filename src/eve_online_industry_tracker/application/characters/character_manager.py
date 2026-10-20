@@ -177,35 +177,11 @@ class CharacterManager:
             raise CharacterDataError(error_message) from e
 
     def get_wallet_balances(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> Optional[List[Dict[str, float]]]:
-        balances = []
-        for char in self._character_list:
-            try:
-                self._refresh_batch("refresh_wallet_balance", character_name, character_id)
-                balance = char.get_wallet_balance()
-                balances.append(balance)
-            except UnknownCharacterError:
-                raise   # names the unknown character, not the one of this loop
-            except Exception as e:
-                error_message = f"Error retrieving wallet balance for {char.character_name}: {str(e)}"
-                logging.error(error_message)
-                raise Exception(error_message)
-        return balances
-    
+        return self._get_each("refresh_wallet_balance", "get_wallet_balance", "wallet balance", character_name, character_id)
+
     def get_assets(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> Optional[List[Dict[str, object]]]:
-        assets_list = []
-        for char in self._character_list:
-            try:
-                self._refresh_batch("refresh_assets", character_name, character_id)
-                assets = char.get_assets()
-                assets_list.append(assets)
-            except UnknownCharacterError:
-                raise   # names the unknown character, not the one of this loop
-            except Exception as e:
-                error_message = f"Error retrieving assets for {char.character_name}: {str(e)}"
-                logging.error(error_message)
-                raise Exception(error_message)
-        return assets_list
-    
+        return self._get_each("refresh_assets", "get_assets", "assets", character_name, character_id)
+
     def get_market_orders(
         self,
         character_name: Optional[str] = None,
@@ -213,38 +189,66 @@ class CharacterManager:
         *,
         refresh: bool = True,
     ) -> Optional[List[Dict[str, object]]]:
-        orders_list = []
-        for char in self._character_list:
+        return self._get_each("refresh_market_orders", "get_market_orders", "market orders", character_name, character_id,
+                              refresh=refresh)
+
+    def _get_each(
+        self,
+        refresh_method: str,
+        getter: str,
+        what: str,
+        character_name: Optional[str],
+        character_id: Optional[int],
+        *,
+        refresh: bool = True,
+    ) -> List[Any]:
+        """`getter` of each character, after `refresh_method`. With a
+        character_id or name: that character only, refreshed once
+        (UnknownCharacterError when it does not exist, CharacterRefreshError
+        naming it when its refresh fails). Without one, every character, and
+        the whole batch is refreshed before each read as before."""
+        selected = character_id is not None or bool(character_name)
+        if selected:
+            chars = self._select_characters(refresh_method, character_name, character_id)
+            if refresh:
+                self._refresh_batch(refresh_method, character_name, character_id)
+        else:
+            chars = self._character_list
+
+        results = []
+        for char in chars:
             try:
-                if refresh:
-                    self._refresh_batch("refresh_market_orders", character_name, character_id)
-                orders = char.get_market_orders()
-                orders_list.append(orders)
-            except UnknownCharacterError:
-                raise   # names the unknown character, not the one of this loop
+                if refresh and not selected:
+                    self._refresh_batch(refresh_method)
+                results.append(getattr(char, getter)())
             except Exception as e:
-                error_message = f"Error retrieving market orders for {char.character_name}: {str(e)}"
+                error_message = f"Error retrieving {what} for {char.character_name}: {str(e)}"
                 logging.error(error_message)
                 raise Exception(error_message)
-        return orders_list
+        return results
+
+    def _select_characters(self, method_name: str, character_name: Optional[str] = None,
+                           character_id: Optional[int] = None) -> List[Character]:
+        """The character with this id, else with this name, else every
+        character. UnknownCharacterError when the id or name matches none."""
+        if character_id is not None:
+            char = self.get_character_by_id(character_id)
+            if char is None:
+                raise UnknownCharacterError(method_name, f"character_id {character_id}")
+            return [char]
+        if character_name:
+            char = self.get_character_by_name(character_name)
+            if char is None:
+                raise UnknownCharacterError(method_name, f"character_name {character_name!r}")
+            return [char]
+        return list(self._character_list)
 
     def _refresh_batch(self, method_name: str, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
         """Run `method_name` on each selected character. Every character is
         tried: one that fails is logged as an ERROR and the others go on;
         then CharacterRefreshError names each failed character. An unknown
         character_id or name raises UnknownCharacterError before any refresh."""
-        if character_id is not None:
-            char = self.get_character_by_id(character_id)
-            if char is None:
-                raise UnknownCharacterError(method_name, f"character_id {character_id}")
-            chars = [char]
-        elif character_name:
-            char = self.get_character_by_name(character_name)
-            if char is None:
-                raise UnknownCharacterError(method_name, f"character_name {character_name!r}")
-            chars = [char]
-        else:
-            chars = self._character_list
+        chars = self._select_characters(method_name, character_name, character_id)
 
         errors: Dict[str, str] = {}
         for char in chars:
