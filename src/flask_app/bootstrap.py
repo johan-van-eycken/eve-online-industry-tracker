@@ -166,6 +166,10 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
             state.db_sde,
             state.char_manager,
         )
+        # A director's corporation that could not be initialised is named, not only logged.
+        state.init_warnings.extend(
+            f"Corporation initialisation failed: {message}" for message in getattr(state.corp_manager, "init_errors", None) or []
+        )
         try:
             state.corp_manager.refresh_all()
         except Exception as e:

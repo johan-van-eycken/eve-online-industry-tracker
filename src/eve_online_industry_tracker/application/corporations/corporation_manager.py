@@ -30,6 +30,8 @@ class CorporationManager:
             self._corporations: List[Corporation] = []
             self._corp_by_id: Dict[int, Corporation] = {}
             self._corp_by_name: Dict[str, Corporation] = {}
+            # One line per corporation that could not be initialised (bootstrap: init_warnings).
+            self.init_errors: List[str] = []
 
             # Determine unique corporation IDs of player owned corporations
             self._corporation_ids = {
@@ -45,23 +47,23 @@ class CorporationManager:
             raise Exception(error_message)
     
     def _initialize_corporations(self) -> None:
+        """One Corporation per director's corporation. A corporation whose
+        CharacterManager or Corporation cannot be built is logged as an
+        ERROR, named in init_errors (bootstrap: init_warnings) and skipped;
+        the other corporations go on."""
         for corp_id in self._corporation_ids:
+            label = self._corporation_label(corp_id)
             try:
                 char_manager_corp = CharacterManager(self._cfgManager, self._db_oauth, self._db_app, self._db_sde, corp_id, self._char_manager,
                                                      admin_settings=getattr(self._char_manager, "admin_settings", None))
-            except KeyError as e:
-                logging.error(f"Failed to initialize character manager for corporation ID {corp_id}. Missing key: {e}")
-            except Exception as e:
-                logging.error(f"Error initializing character manager for corporation ID {corp_id}: {e}")
+            except Exception as e:   # one corporation's failure does not stop the others; named in init_errors
+                self._init_failed(f"Error initializing the character manager of {label}", e)
+                continue
 
             try:
                 corp = Corporation(self._cfgManager, self._db_app, self._db_sde, corp_id, char_manager_corp)
-            except KeyError as e:
-                logging.error(f"Failed to initialize corporation {corp_id}. Missing key: {e}")
-            except Exception as e:
-                logging.error(f"Error initializing corporation {corp_id}: {e}")
-
-            if corp is None:
+            except Exception as e:   # one corporation's failure does not stop the others; named in init_errors
+                self._init_failed(f"Error initializing {label}", e)
                 continue
 
             # Constructor is cheap now; refresh is handled explicitly (e.g., by Flask bootstrap).
@@ -71,6 +73,21 @@ class CorporationManager:
                 self._corp_by_name[corp.corporation_name.lower()] = corp
 
         return None
+
+    def _corporation_label(self, corp_id: int) -> str:
+        """'corporation <id> (director <name>)': the corporation's name is not known before it is built."""
+        directors = sorted(
+            char.character_name
+            for char in self._char_manager._character_list
+            if char.corporation_id == corp_id and char.is_corp_director is True
+        )
+        return f"corporation {corp_id} (director {', '.join(directors)})" if directors else f"corporation {corp_id}"
+
+    def _init_failed(self, what: str, exc: Exception) -> None:
+        detail = f"missing key {exc}" if isinstance(exc, KeyError) else str(exc)
+        message = f"{what}: {type(exc).__name__}: {detail}"
+        logging.error(message, exc_info=True)
+        self.init_errors.append(message)
 
     def get_corporation(self, corporation_id: Optional[int] = None, corporation_name: Optional[str] = None) -> Optional[Corporation]:
         """Return the Corporation object for a given ID or name, or None if not found."""
