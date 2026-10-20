@@ -15,7 +15,11 @@ def _load_settings() -> tuple[dict, dict, dict] | None:
         return None
     data = response.get("data") or {}
     for notice in data.get("notices") or []:
-        st.warning(notice)
+        # "ERROR:": admin_settings.json is unreadable, so its settings read as their defaults.
+        if str(notice).startswith("ERROR:"):
+            st.error(notice)
+        else:
+            st.warning(notice)
     return data.get("schema") or {}, data.get("values") or {}, data.get("invalid") or {}
 
 
