@@ -14,7 +14,7 @@ from eve_online_industry_tracker.application.industry.portfolio_service import (
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from flask_app.bootstrap import require_ready, require_sde_ready
 from flask_app.deps import get_state
-from flask_app.http import error, ok
+from flask_app.http import error, ok, optional_id_param
 
 
 industry_bp = Blueprint("industry", __name__)
@@ -583,8 +583,7 @@ def delete_industry_profile(profile_id: int):
 @industry_bp.get("/industry_active_jobs")
 def industry_active_jobs():
     require_ready(get_state())
-    character_id_raw = (request.args.get("character_id") or "").strip()
-    character_id = int(character_id_raw) if character_id_raw.isdigit() else None
+    character_id = optional_id_param("character_id")
     svc = IndustryService(state=get_state())
     return ok(data=svc.industry_active_jobs(character_id=character_id))
 
