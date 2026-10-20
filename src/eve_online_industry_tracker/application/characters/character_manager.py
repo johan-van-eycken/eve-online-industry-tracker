@@ -205,21 +205,15 @@ class CharacterManager:
         """`getter` of each character, after `refresh_method`. With a
         character_id or name: that character only, refreshed once
         (UnknownCharacterError when it does not exist, CharacterRefreshError
-        naming it when its refresh fails). Without one, every character, and
-        the whole batch is refreshed before each read as before."""
-        selected = character_id is not None or bool(character_name)
-        if selected:
-            chars = self._select_characters(refresh_method, character_name, character_id)
-            if refresh:
-                self._refresh_batch(refresh_method, character_name, character_id)
-        else:
-            chars = self._character_list
+        naming it when its refresh fails). Without one, every character, each
+        refreshed once (one batch) before the reads."""
+        chars = self._select_characters(refresh_method, character_name, character_id)
+        if refresh:
+            self._refresh_batch(refresh_method, character_name, character_id)
 
         results = []
         for char in chars:
             try:
-                if refresh and not selected:
-                    self._refresh_batch(refresh_method)
                 results.append(getattr(char, getter)())
             except Exception as e:
                 error_message = f"Error retrieving {what} for {char.character_name}: {str(e)}"

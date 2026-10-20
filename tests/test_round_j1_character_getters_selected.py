@@ -81,11 +81,18 @@ def test_a_selected_character_is_refreshed_once_and_returned_alone(method, refre
 
 
 @pytest.mark.parametrize("method,refresh,getter", _GETTERS)
-def test_without_a_selector_every_character_is_returned(method, refresh, getter):
+def test_without_a_selector_every_character_is_refreshed_once_and_returned(method, refresh, getter):
+    # Before, the whole batch was refreshed before each read: N x N refreshes.
     mgr, chars = _manager()
     result = getattr(mgr, method)()
     assert [r["character_id"] for r in result] == [90000001, 90000002, 90000003]
-    assert all(c.calls[getter] == 1 and c.calls[refresh] >= 1 for c in chars)
+    assert all(c.calls == Counter({refresh: 1, getter: 1}) for c in chars)
+
+
+def test_market_orders_without_a_selector_or_refresh_only_reads():
+    mgr, chars = _manager()
+    assert len(mgr.get_market_orders(refresh=False)) == 3
+    assert all(c.calls == Counter({"get_market_orders": 1}) for c in chars)
 
 
 def test_market_orders_without_refresh_does_not_refresh_the_selected_character():
