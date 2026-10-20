@@ -235,7 +235,9 @@ class FeedbackProcessor:
         #       a job whose chance fits several decryptors is settled only
         #       by runs evidence (a later BPC of the blueprint only it can
         #       have made, used for more runs than all but one candidate
-        #       gives), else it is left out, never guessed;
+        #       gives) or ME/TE evidence (a later BPC only it can have
+        #       made, whose ME/TE only one candidate gives), else it is
+        #       left out, never guessed;
         #     - otherwise the expected invention inputs, sized like the
         #       producer (asset_provenance.estimate_invention_cost_per_run):
         #       one attempt's datacores + the producer's decryptor, over the

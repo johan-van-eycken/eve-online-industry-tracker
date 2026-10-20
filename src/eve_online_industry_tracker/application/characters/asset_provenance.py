@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import math
 from typing import Any, Callable, Iterable, Mapping, Optional
 
-from sqlalchemy import desc
+from sqlalchemy import desc, func, or_
 
 from eve_online_industry_tracker.application.industry.invention_model import (
     NO_DECRYPTOR,
@@ -15,6 +15,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     InventionContext,
     decryptor_options_from_rows,
     effective_invention_probability,
+    invented_blueprint_efficiency,
     invented_runs_per_blueprint,
     invention_attempts,
     invention_skill_set,
@@ -23,7 +24,9 @@ from eve_online_industry_tracker.application.industry.invention_model import (
 )
 from eve_online_industry_tracker.infrastructure.models import (
     Blueprints,
+    CharacterAssetHistoryModel,
     CharacterIndustryJobsModel,
+    CorporationAssetHistoryModel,
     CorporationIndustryJobsModel,
     MarketHistoryModel,
     RealizedInventionDecryptorChoiceModel,
@@ -508,7 +511,8 @@ def resnapshot_jobs_without_decryptor_choice(
     overview does not plan: "this blueprint is not planned by the overview").
     The actual-invention source is re-evaluated too, from the owner's stored
     invention jobs (a decryptor tie settled only by the runs on the owner's
-    stored manufacturing jobs, never by the overview's choice), so a reason
+    stored manufacturing jobs or the ME/TE of its BPCs, never by the
+    overview's choice), so a reason
     naming both sources keeps both. The blended corp transfer lots of every
     character job type re-costed here are re-stamped
     (corp_transfer_costs.restamp_blended_corp_transfer_lots).
@@ -534,8 +538,9 @@ def resnapshot_jobs_without_decryptor_choice(
 
         def _invention_sources(owner_id: int) -> dict[int, dict[str, Any]]:
             """The owner's actual-invention sources from its stored invention
-            jobs, with its stored manufacturing jobs as the runs evidence for
-            a decryptor tie, as its job refresh reads them from ESI. The
+            jobs, with its stored manufacturing jobs as the runs evidence and
+            its BPCs as the ME/TE evidence for a decryptor tie, as its job
+            refresh reads them from ESI. The
             stored jobs can reach further back than ESI's job history (the
             refresh's set), so the re-snapshot may see more evidence."""
             if owner_id not in invention_sources_by_owner:
@@ -550,6 +555,7 @@ def resnapshot_jobs_without_decryptor_choice(
                     sde_session=sde_session,
                     market_price_map=dict(market_price_map),
                     invention_refresh=invention_refresh,
+                    **load_owner_invention_evidence(app_session, owner_kind=owner_kind, owner_id=owner_id),
                 )
             return invention_sources_by_owner[owner_id]
 
@@ -941,12 +947,231 @@ def _settle_decryptor_from_runs(
     return None, "no runs evidence settles it (no later BPC of this blueprint that only this job can have made)"
 
 
+@dataclass(frozen=True)
+class BlueprintCopySighting:
+    """One of the owner's blueprint copies as its asset history saw it: the
+    ME/TE (fixed: a copy cannot be researched), the most runs seen on it (a
+    lower bound on the runs it was made with: runs only go down) and when it
+    was first seen."""
+
+    item_id: int
+    blueprint_type_id: int
+    material_efficiency: int
+    time_efficiency: int
+    runs: int
+    first_seen_at: str
+
+
+def _bpc_fits(option: DecryptorOption, base_runs: int, bpc: BlueprintCopySighting) -> bool:
+    """`bpc` can have been invented with `option`: the invented ME/TE (2 / 4
+    plus the decryptor's modifiers) and no more runs than it gives."""
+    return (
+        invented_blueprint_efficiency(option) == (int(bpc.material_efficiency), int(bpc.time_efficiency))
+        and 1 <= int(bpc.runs) <= invented_runs_per_blueprint(int(base_runs), option)
+    )
+
+
+def _utc(value: Any) -> datetime | None:
+    """_parse_date in UTC (a stamp without a zone is read as UTC), so ESI and
+    asset history stamps compare."""
+    parsed = _parse_date(value)
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _describe_bpc(bpc: BlueprintCopySighting) -> str:
+    return (
+        f"BPC {bpc.item_id} (ME {bpc.material_efficiency} / TE {bpc.time_efficiency}, {bpc.runs} runs, "
+        f"first seen {bpc.first_seen_at})"
+    )
+
+
+def _settle_decryptor_from_me_te(
+    *,
+    finished_at: str | None,
+    candidates: tuple[DecryptorOption, ...],
+    base_runs: int,
+    successful_runs: int,
+    blueprint_copies: list[BlueprintCopySighting],
+    other_producers: list[tuple[str | None, tuple[DecryptorOption, ...] | None]],
+) -> tuple[DecryptorOption | None, str]:
+    """Settle a decryptor tie from the ME/TE of the owner's BPCs of the blueprint.
+
+    A BPC is this job's evidence when it was first seen after the job
+    finished, its ME/TE and runs fit a candidate (_bpc_fits) and no other
+    stored invention job of the blueprint (`other_producers`, of any owner: a
+    BPC moves between a pilot and the corp; (finished at, its possible
+    decryptors; None: unknown, any)) that finished before it was seen can
+    have made it. More such BPCs than the job's successful runs cannot all be
+    its own, so another source made some and none is evidence. (decryptor,
+    the evidence) when the evidence leaves exactly one candidate, else (None,
+    why no ME/TE evidence settles it). A BPC whose ME/TE or runs fit no
+    candidate (a bought or researched copy, or another job's) gives no
+    evidence. A bought copy with an invented ME/TE would look like this
+    job's: the evidence assumes the owner's T2 BPCs of the blueprint seen
+    after the job are its own inventions."""
+    done = _utc(finished_at)
+    if done is None:
+        return None, "no ME/TE evidence settles it (the job has no completion date)"
+    evidence: list[tuple[BlueprintCopySighting, tuple[DecryptorOption, ...]]] = []
+    unfit: list[BlueprintCopySighting] = []
+    shared = 0
+    for bpc in sorted(blueprint_copies, key=lambda b: (str(b.first_seen_at), int(b.item_id))):
+        seen = _utc(bpc.first_seen_at)
+        if seen is None or seen <= done:
+            continue  # seen before this job's BPCs existed
+        fits = tuple(c for c in candidates if _bpc_fits(c, base_runs, bpc))
+        if not fits:
+            unfit.append(bpc)
+            continue
+        if any(
+            (_utc(other_done) is None or _utc(other_done) < seen)
+            and (options is None or any(_bpc_fits(o, base_runs, bpc) for o in options))
+            for other_done, options in other_producers
+        ):
+            shared += 1  # another invention job may have made this BPC
+            continue
+        evidence.append((bpc, fits))
+    if len(evidence) > int(successful_runs):
+        return None, (
+            f"no ME/TE evidence settles it ({len(evidence)} later BPCs fit, more than the job's "
+            f"{int(successful_runs)} successful run(s): some come from elsewhere)"
+        )
+    if evidence:
+        remaining = [c for c in candidates if all(c in fits for _, fits in evidence)]
+        if len(remaining) == 1:
+            first = evidence[0][0]
+            more = f" and {len(evidence) - 1} more" if len(evidence) > 1 else ""
+            return remaining[0], f"{_describe_bpc(first)}{more} has the ME/TE it gives"
+        if not remaining:
+            return None, (
+                "no ME/TE evidence settles it (the BPCs only this job can have made contradict each other: "
+                + "; ".join(_describe_bpc(b) for b, _ in evidence[:3]) + ")"
+            )
+        names = ", ".join(sorted(str(c.type_name) for c in remaining))
+        return None, f"no ME/TE evidence settles it ({_describe_bpc(evidence[0][0])} fits several: {names})"
+    parts: list[str] = []
+    if unfit:
+        listed = "; ".join(_describe_bpc(b) for b in unfit[:3])
+        more = f" and {len(unfit) - 3} more" if len(unfit) > 3 else ""
+        parts.append(f"{listed}{more} fits no candidate (bought, researched or not invented by this job)")
+    if shared:
+        parts.append(f"{shared} later BPC(s) another invention job may have made")
+    if not parts:
+        parts.append("no BPC of this blueprint seen after the job")
+    return None, "no ME/TE evidence settles it (" + "; ".join(parts) + ")"
+
+
+#: Asset history rows written by a refresh snapshot, not the historical backfill.
+_HISTORY_BACKFILL_SOURCE = "historical_backfill"
+_SQL_IN_CHUNK = 500
+
+
+def load_owner_invention_evidence(app_session: Any, *, owner_kind: str, owner_id: int) -> dict[str, Any]:
+    """build_invention_cost_per_run_by_blueprint_type's decryptor evidence for
+    one owner: `blueprint_copies`, its BPCs from its asset history (refresh
+    snapshots only, with ME, TE and positive runs; a copy whose ME/TE changed
+    between snapshots is left out: copies cannot be researched, so it is not
+    one item), each first seen at its earliest snapshot in either owner
+    kind's history (a BPC moved from a pilot to the corp keeps its item id),
+    and `known_invention_jobs`, the stored invention jobs (raw) of every
+    character and corporation, so a job no longer in ESI's job list, or
+    another owner's whose BPC was moved here, still counts as a possible
+    maker of a BPC. A database error propagates."""
+    if owner_kind == "character":
+        history, other_history, owner_field = CharacterAssetHistoryModel, CorporationAssetHistoryModel, "character_id"
+    elif owner_kind == "corporation":
+        history, other_history, owner_field = CorporationAssetHistoryModel, CharacterAssetHistoryModel, "corporation_id"
+    else:
+        raise ValueError(f"Unsupported owner_kind: {owner_kind}")
+    rows = (
+        app_session.query(
+            history.item_id,
+            history.type_id,
+            func.min(history.observed_at),
+            func.max(history.blueprint_runs),
+            func.min(history.blueprint_material_efficiency),
+            func.max(history.blueprint_material_efficiency),
+            func.min(history.blueprint_time_efficiency),
+            func.max(history.blueprint_time_efficiency),
+        )
+        .filter(getattr(history, owner_field) == int(owner_id))
+        .filter(history.is_blueprint_copy.is_(True))
+        .filter(or_(history.snapshot_source.is_(None), history.snapshot_source != _HISTORY_BACKFILL_SOURCE))
+        .filter(history.blueprint_material_efficiency.isnot(None))
+        .filter(history.blueprint_time_efficiency.isnot(None))
+        .filter(history.blueprint_runs > 0)
+        .group_by(history.item_id, history.type_id)
+        .all()
+    )
+    usable = [
+        row for row in rows
+        if row[0] is not None and row[1] is not None and row[2] and row[4] == row[5] and row[6] == row[7]
+    ]
+    elsewhere: dict[int, str] = {}
+    item_ids = sorted({int(row[0]) for row in usable})
+    for start in range(0, len(item_ids), _SQL_IN_CHUNK):
+        for item_id, first_seen in (
+            app_session.query(other_history.item_id, func.min(other_history.observed_at))
+            .filter(other_history.item_id.in_(item_ids[start:start + _SQL_IN_CHUNK]))
+            .filter(or_(other_history.snapshot_source.is_(None),
+                        other_history.snapshot_source != _HISTORY_BACKFILL_SOURCE))
+            .group_by(other_history.item_id)
+            .all()
+        ):
+            if first_seen:
+                elsewhere[int(item_id)] = str(first_seen)
+    copies: list[BlueprintCopySighting] = []
+    for item_id, type_id, first_seen, runs, me, _, te, _ in usable:
+        seen_here, seen_elsewhere = _utc(first_seen), _utc(elsewhere.get(int(item_id)))
+        earliest = elsewhere[int(item_id)] if (
+            seen_elsewhere is not None and (seen_here is None or seen_elsewhere < seen_here)
+        ) else str(first_seen)
+        copies.append(BlueprintCopySighting(
+            item_id=int(item_id), blueprint_type_id=int(type_id), material_efficiency=int(me),
+            time_efficiency=int(te), runs=int(runs), first_seen_at=earliest,
+        ))
+    known = [
+        dict(raw)
+        for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel)
+        for (raw,) in app_session.query(model.raw).filter(model.activity_id == 8).all()
+        if isinstance(raw, dict)
+    ]
+    return {"blueprint_copies": copies, "known_invention_jobs": known}
+
+
+def _possible_invention_decryptors(
+    job: Mapping[str, Any], *, sde_session: Any, refresh: RealizedInventionRefresh,
+) -> tuple[int, str | None, tuple[DecryptorOption, ...] | None] | None:
+    """(invented blueprint, finished at, the decryptors its success chance
+    allows; None: unknown, any) for a delivered invention job with a
+    success, which can have made a BPC of the blueprint; else None."""
+    raw = job.get("raw") if isinstance(job.get("raw"), Mapping) else job
+    if _safe_int(raw.get("activity_id")) != 8 or str(raw.get("status") or "").lower() != _DELIVERED_STATUS:
+        return None
+    target = _safe_int(job.get("product_type_id") or raw.get("product_type_id"))
+    if not target or target <= 0 or not (_safe_int(raw.get("successful_runs")) or 0) > 0:
+        return None
+    source_id, invention = _invention_source_activity(sde_session, int(target), refresh.source_activity_by_target)
+    product = _invention_target_product(invention or {}, int(target)) if source_id is not None else None
+    decryptor, _, candidates = _infer_job_decryptor(
+        probability=_safe_float(raw.get("probability")),
+        base_probability=_safe_float((product or {}).get("probability")),
+        skill_factors=_feasible_invention_skill_factors(invention, refresh.encryption_skills(sde_session)),
+        options=refresh.decryptors(sde_session),
+    )
+    return int(target), _job_finished_at(raw), (candidates or None) if decryptor is None else (decryptor,)
+
+
 def build_invention_cost_per_run_by_blueprint_type(
     *,
     jobs: Iterable[dict[str, Any]] | None,
     sde_session: Any,
     market_price_map: dict[int, float],
     invention_refresh: RealizedInventionRefresh | None = None,
+    blueprint_copies: Iterable[BlueprintCopySighting] | None = None,
+    known_invention_jobs: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[int, dict[str, Any]]:
     """{invented blueprint type_id: its invention cost per invented run from
     the corp's own delivered invention jobs}.
@@ -960,7 +1185,12 @@ def build_invention_cost_per_run_by_blueprint_type(
     chance (_infer_job_decryptor; several candidates are settled only by runs
     evidence from the owner's manufacturing jobs in `jobs`,
     _settle_decryptor_from_runs, listed in
-    `decryptor_from_runs_evidence_job_ids`) or an input has no price. A
+    `decryptor_from_runs_evidence_job_ids`, and by the ME/TE of the owner's
+    `blueprint_copies`, _settle_decryptor_from_me_te, listed in
+    `decryptor_from_me_te_evidence_job_ids`; evidence that disagrees settles
+    nothing; `known_invention_jobs`, every owner's stored invention jobs, only
+    widen who can have made a BPC; load_owner_invention_evidence reads both)
+    or an input has no price. A
     blueprint without a usable job, or with zero successes over its usable
     jobs, maps to {"unknown_reason": why} and no unit_cost_per_run: the
     caller then uses the expected estimate."""
@@ -972,6 +1202,14 @@ def build_invention_cost_per_run_by_blueprint_type(
     #: Every delivered invention job with a success, per invented blueprint:
     #: (the job, finished at, the most runs per BPC it can give or None).
     producers: dict[int, list[tuple[dict[str, Any], str | None, int | None]]] = defaultdict(list)
+    #: The same jobs, and the stored ones (any owner) not in `jobs`, with their
+    #: possible decryptors (None: unknown, any) for the ME/TE evidence.
+    me_te_producers: dict[int, list[tuple[Any, str | None, tuple[DecryptorOption, ...] | None]]] = defaultdict(list)
+    copies_by_target: dict[int, list[BlueprintCopySighting]] | None = None
+    if blueprint_copies is not None:
+        copies_by_target = defaultdict(list)
+        for bpc in blueprint_copies:
+            copies_by_target[int(bpc.blueprint_type_id)].append(bpc)
     readings: list[tuple[int, dict[str, Any], Mapping[str, Any], Mapping[str, Any] | None, int,
                          DecryptorOption | None, str | None, tuple[DecryptorOption, ...]]] = []
 
@@ -989,7 +1227,7 @@ def build_invention_cost_per_run_by_blueprint_type(
         target = int(target)
         totals.setdefault(target, {
             "cost": 0.0, "attempts": 0, "successful_runs": 0, "invented_runs": 0, "jobs": 0, "skipped": [],
-            "runs_evidence_job_ids": [],
+            "runs_evidence_job_ids": [], "me_te_evidence_job_ids": [],
         })
         job_id = job.get("job_id")
         if str((raw or {}).get("status") or "").lower() != _DELIVERED_STATUS:
@@ -1019,26 +1257,56 @@ def build_invention_cost_per_run_by_blueprint_type(
                 max(invented_runs_per_blueprint(int(base_runs), c) for c in candidates) if candidates else None
             )
             producers[target].append((job, _job_finished_at(raw or {}), most_runs))
+            me_te_producers[target].append((job, _job_finished_at(raw or {}), candidates or None))
         readings.append((target, job, raw or {}, invention, int(base_runs), decryptor, decryptor_reason, candidates))
+
+    if copies_by_target is not None:
+        listed_ids = {_safe_int(job.get("job_id")) for job in job_list}
+        for known in known_invention_jobs or []:
+            if not isinstance(known, Mapping) or _safe_int(known.get("job_id")) in listed_ids:
+                continue
+            reading = _possible_invention_decryptors(known, sde_session=sde_session, refresh=refresh)
+            if reading is not None:
+                me_te_producers[reading[0]].append((known, reading[1], reading[2]))
 
     for target, job, raw, invention, base_runs, decryptor, decryptor_reason, candidates in readings:
         entry = totals[target]
         job_id = job.get("job_id")
         by_runs_evidence = False
+        by_me_te_evidence = False
         if decryptor is None and len(candidates) > 1:
-            decryptor, evidence = _settle_decryptor_from_runs(
+            by_runs, runs_evidence = _settle_decryptor_from_runs(
                 finished_at=_job_finished_at(raw), candidates=candidates, base_runs=base_runs,
                 bpc_lower_bounds=bpc_lower_bounds.get(target, []),
                 other_producers=[(done, most) for other, done, most in producers[target] if other is not job],
             )
-            if decryptor is None:
-                decryptor_reason = f"{decryptor_reason}; {evidence}"
-            else:
-                by_runs_evidence = True
+            by_me_te: DecryptorOption | None = None
+            me_te_evidence: str | None = None
+            if copies_by_target is not None:
+                by_me_te, me_te_evidence = _settle_decryptor_from_me_te(
+                    finished_at=_job_finished_at(raw), candidates=candidates, base_runs=base_runs,
+                    successful_runs=int(_safe_int(raw.get("successful_runs")) or 0),
+                    blueprint_copies=copies_by_target.get(target, []),
+                    other_producers=[
+                        (done, options) for other, done, options in me_te_producers[target] if other is not job
+                    ],
+                )
+            if by_runs is not None and by_me_te is not None and by_runs != by_me_te:
+                decryptor_reason = (
+                    f"{decryptor_reason}; the runs evidence ({runs_evidence}: {by_runs.type_name}) and the "
+                    f"ME/TE evidence ({me_te_evidence}: {by_me_te.type_name}) disagree"
+                )
+            elif by_runs is not None or by_me_te is not None:
+                decryptor = by_runs or by_me_te
+                by_runs_evidence = by_runs is not None
+                by_me_te_evidence = by_me_te is not None
+                used = [e for e, ok in ((runs_evidence, by_runs_evidence), (me_te_evidence, by_me_te_evidence)) if ok]
                 logging.info(
                     "Invention job %s for blueprint %s: its success chance fits several decryptors; %s, which "
-                    "rules out all but %s", job_id, target, evidence, decryptor.type_name,
+                    "rules out all but %s", job_id, target, "; ".join(str(e) for e in used), decryptor.type_name,
                 )
+            else:
+                decryptor_reason = "; ".join(str(r) for r in (decryptor_reason, runs_evidence, me_te_evidence) if r)
         if decryptor is None:
             _skip(target, job_id, str(decryptor_reason))
             continue
@@ -1062,6 +1330,8 @@ def build_invention_cost_per_run_by_blueprint_type(
         entry["jobs"] += 1
         if by_runs_evidence:
             entry["runs_evidence_job_ids"].append(job_id)
+        if by_me_te_evidence:
+            entry["me_te_evidence_job_ids"].append(job_id)
 
     out: dict[int, dict[str, Any]] = {}
     for target, entry in totals.items():
@@ -1085,6 +1355,8 @@ def build_invention_cost_per_run_by_blueprint_type(
             "invented_runs": int(entry["invented_runs"]),
             # Tied jobs whose decryptor the runs on a later BPC settled.
             "decryptor_from_runs_evidence_job_ids": list(entry["runs_evidence_job_ids"]),
+            # Tied jobs whose decryptor the ME/TE of a later BPC settled.
+            "decryptor_from_me_te_evidence_job_ids": list(entry["me_te_evidence_job_ids"]),
         }
     return out
 

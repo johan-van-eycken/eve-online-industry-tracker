@@ -27,6 +27,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     RealizedInventionRefresh,
     invention_cost_source_for,
     industry_job_material_type_ids,
+    load_owner_invention_evidence,
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
 )
@@ -1026,6 +1027,10 @@ class Character:
                 sde_session=self._db_sde.session,
                 market_price_map=market_price_map,
                 invention_refresh=invention_refresh,
+                # The ME/TE of the character's BPCs settles a decryptor tie.
+                **load_owner_invention_evidence(
+                    self._db_app.session, owner_kind="character", owner_id=int(self.character_id),
+                ),
             )
 
             clear_historical_backfill(
