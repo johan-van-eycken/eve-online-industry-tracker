@@ -1226,7 +1226,10 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         A blended lot (scripts/backfill_corp_transfer_costs.py: the
         quantity-weighted average, or a FIFO match over several jobs) names no
         job, so it is flagged whenever any character job of its type, the jobs
-        the blend is taken from, has a partly unknown build cost."""
+        the blend is taken from, has a partly unknown build cost. A re-costed
+        job re-stamps the blended lots of its type
+        (corp_transfer_costs.restamp_blended_corp_transfer_lots); a resolved
+        reason then makes the ledger stale (stale_resolved_cost_owner_ids)."""
         rows = (
             self._app_session.query(
                 CharacterIndustryJobsModel.product_type_id,

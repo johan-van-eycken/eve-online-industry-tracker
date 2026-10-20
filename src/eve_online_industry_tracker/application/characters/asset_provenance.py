@@ -509,14 +509,22 @@ def resnapshot_jobs_without_decryptor_choice(
     The actual-invention source is re-evaluated too, from the owner's stored
     invention jobs (a decryptor tie settled only by the runs on the owner's
     stored manufacturing jobs, never by the overview's choice), so a reason
-    naming both sources keeps both.
+    naming both sources keeps both. The blended corp transfer lots of every
+    character job type re-costed here are re-stamped
+    (corp_transfer_costs.restamp_blended_corp_transfer_lots).
     Commits; returns the number of jobs re-snapshotted."""
     from eve_online_industry_tracker.application.characters.asset_history import (
         _owner_models,
         build_historical_input_cost_lookup,
     )
+    from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+        restamp_blended_corp_transfer_lots,
+    )
 
     count = 0
+    #: Product types of the character jobs re-costed here: their blended corp
+    #: transfer lots are re-stamped (the corp lots are built from character jobs).
+    recosted_character_types: set[int] = set()
     for owner_kind, model, owner_field in (
         ("character", CharacterIndustryJobsModel, "character_id"),
         ("corporation", CorporationIndustryJobsModel, "corporation_id"),
@@ -594,6 +602,10 @@ def resnapshot_jobs_without_decryptor_choice(
             row.invention_cost = snapshot.get("invention_cost")
             row.invention_cost_unknown_reason = snapshot.get("invention_cost_unknown_reason")
             row.total_build_cost = snapshot.get("total_cost")
+            if owner_kind == "character" and row.product_type_id is not None and (
+                _safe_float(row.unit_build_cost) != _safe_float(snapshot.get("unit_cost"))
+            ):
+                recosted_character_types.add(int(row.product_type_id))
             row.unit_build_cost = snapshot.get("unit_cost")
             row.build_cost_source = snapshot.get("source")
             unit_cost = _safe_float(snapshot.get("unit_cost"))
@@ -610,6 +622,8 @@ def resnapshot_jobs_without_decryptor_choice(
                     }, synchronize_session=False)
                 )
             count += 1
+    app_session.flush()
+    restamp_blended_corp_transfer_lots(app_session, recosted_character_types)
     app_session.commit()
     if count:
         logging.info("Re-snapshotted %d industry job(s) stored without the overview's decryptor choice", count)

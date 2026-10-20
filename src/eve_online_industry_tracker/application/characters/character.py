@@ -30,6 +30,11 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
 )
+from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+    character_job_unit_costs,
+    recosted_product_type_ids,
+    restamp_blended_corp_transfer_lots,
+)
 from eve_online_industry_tracker.infrastructure.esi_versions import (
     ESI_CHAR_PUBLIC,
     ESI_CHAR_WALLET,
@@ -1041,6 +1046,9 @@ class Character:
             )
 
             completed_statuses = {"delivered", "ready", "completed"}
+            # The jobs' costs before this refresh: a re-costed job re-stamps
+            # the blended corp transfer lots of its type below.
+            unit_costs_before = character_job_unit_costs(self._db_app.session, character_id=int(self.character_id))
             existing_jobs = (
                 self._db_app.session.query(CharacterIndustryJobsModel)
                 .filter_by(character_id=int(self.character_id))
@@ -1213,6 +1221,13 @@ class Character:
                 job_model=CharacterIndustryJobsModel,
                 owner_filter={"character_id": int(self.character_id)},
             )
+            recosted_types = recosted_product_type_ids(
+                unit_costs_before,
+                character_job_unit_costs(self._db_app.session, character_id=int(self.character_id)),
+            )
+            if recosted_types:
+                restamp_blended_corp_transfer_lots(self._db_app.session, recosted_types)
+                self._db_app.session.commit()
         except Exception as e:
             logging.warning(
                 "Skipping industry jobs refresh for %s (%s): %s",
