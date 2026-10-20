@@ -24,6 +24,7 @@ from eve_online_industry_tracker.application.market_analysis.market_order_enrich
     order_type_ids,
 )
 from eve_online_industry_tracker.application.market_pricing.order_values import refresh_market_history
+from eve_online_industry_tracker.application.unknown_owner import require_known_character
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.oauth_character_repository import (
     OAuthCharacterRepository,
@@ -63,6 +64,8 @@ class CharactersService:
         refresh: bool = False,
         character_id: int | None = None,
     ) -> dict[str, Any]:
+        # An unknown character is a 404, not an empty ledger.
+        require_known_character(self._state, character_id, "get_realized_profit_ledger")
         if refresh:
             self._state.char_manager.refresh_realized_profit_inputs(character_id=character_id)
 

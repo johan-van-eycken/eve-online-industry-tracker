@@ -13,6 +13,7 @@ from flask_app.state import state
 from eve_online_industry_tracker.application.characters.character_manager import UnknownCharacterError
 from eve_online_industry_tracker.application.corporations.corporation_manager import UnknownCorporationError
 from eve_online_industry_tracker.application.errors import ServiceError
+from eve_online_industry_tracker.application.unknown_owner import UnknownCharacterError, UnknownCorporationError
 from eve_online_industry_tracker.infrastructure.sde.industry import REIMPORT_HINT, SdeIndustryDataMissing
 
 from flask_app.routes.admin import admin_bp

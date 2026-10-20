@@ -33,6 +33,8 @@ _PILOT = 7001
 _PRODUCT = 990003
 _TARGET_BP = 990002
 _REASON = "invention cost unknown: no corp character has its skills loaded"
+#: Every character id is one the character manager has (J2.4 checks it).
+_KNOWN_CHARACTERS = SimpleNamespace(get_character_by_id=lambda character_id: object())
 
 
 def _seed(session, *, reason=_REASON):
@@ -92,7 +94,7 @@ def _state(engine):
     return SimpleNamespace(
         esi_service=SimpleNamespace(get_market_prices=lambda: []),
         db_app=SimpleNamespace(session=session), db_sde=SimpleNamespace(session=None),
-        admin_settings=None,
+        admin_settings=None, char_manager=_KNOWN_CHARACTERS,
     )
 
 
@@ -173,6 +175,7 @@ def test_two_reads_of_an_empty_character_ledger_rebuild_it_once(monkeypatch):
     state = SimpleNamespace(
         esi_service=SimpleNamespace(get_market_prices=lambda: []),
         db_app=SimpleNamespace(session=None), db_sde=SimpleNamespace(session=None), admin_settings=None,
+        char_manager=_KNOWN_CHARACTERS,
     )
     svc = characters_service.CharactersService(state=state)
     _race(lambda: svc.get_realized_profit_ledger(character_id=1))
@@ -188,6 +191,7 @@ def test_two_reads_of_an_empty_corporation_ledger_rebuild_it_once(monkeypatch):
     state = SimpleNamespace(
         esi_service=SimpleNamespace(get_market_prices=lambda: []),
         db_app=SimpleNamespace(session=None), db_sde=SimpleNamespace(session=None),
+        corp_manager=SimpleNamespace(get_corporation=lambda corporation_id=None, corporation_name=None: object()),
     )
     svc = corporations_service.CorporationsService(state=state)
     _race(lambda: svc.get_realized_profit_ledger(corporation_id=1))

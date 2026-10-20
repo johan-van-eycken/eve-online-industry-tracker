@@ -37,6 +37,10 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
 )
 
 
+
+#: Every character id is one the character manager has (J2.4 checks it).
+_KNOWN_CHARACTERS = SimpleNamespace(get_character_by_id=lambda character_id: object())
+
 def _sessions():
     app_engine, sde_engine = create_engine("sqlite:///:memory:"), create_engine("sqlite:///:memory:")
     BaseApp.metadata.create_all(bind=app_engine)
@@ -146,6 +150,7 @@ def test_the_character_service_passes_the_settings(tmp_path):
     app_session, sde_session = _sessions()
     _sale(app_session, market_fees=_stored_fees())
     state = SimpleNamespace(
+        char_manager=_KNOWN_CHARACTERS,
         admin_settings=_manager(tmp_path, {"base_sales_tax_rate": 0.05}),
         db_app=SimpleNamespace(session=app_session), db_sde=SimpleNamespace(session=sde_session),
         esi_service=SimpleNamespace(get_market_prices=lambda: []),
@@ -234,7 +239,7 @@ def test_reading_the_ledger_rebuilds_a_stale_character(tmp_path):
     from eve_online_industry_tracker.application.characters.service import CharactersService
 
     app_session, sde_session, mgr = _persisted_sale(tmp_path)
-    state = SimpleNamespace(admin_settings=mgr, db_app=SimpleNamespace(session=app_session),
+    state = SimpleNamespace(char_manager=_KNOWN_CHARACTERS, admin_settings=mgr, db_app=SimpleNamespace(session=app_session),
                             db_sde=SimpleNamespace(session=sde_session),
                             esi_service=SimpleNamespace(get_market_prices=lambda: []))
     before = CharactersService(state=state).get_realized_profit_ledger(character_id=1)["rows"]
@@ -298,6 +303,7 @@ def test_concurrent_reads_rebuild_a_stale_character_once(monkeypatch):
     monkeypatch.setattr(characters_service, "CharacterRealizedProfitLedgerService", _Ledger)
     monkeypatch.setattr(characters_service, "summarize_realized_profit_rows", lambda rows: {})
     state = SimpleNamespace(
+        char_manager=_KNOWN_CHARACTERS,
         esi_service=SimpleNamespace(get_market_prices=lambda: []),
         db_app=SimpleNamespace(session=None), db_sde=SimpleNamespace(session=None),
         admin_settings=None,

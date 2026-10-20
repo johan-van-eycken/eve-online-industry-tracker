@@ -17,6 +17,7 @@ from eve_online_industry_tracker.application.market_analysis.market_order_enrich
     order_type_ids,
 )
 from eve_online_industry_tracker.application.market_pricing.order_values import refresh_market_history
+from eve_online_industry_tracker.application.unknown_owner import require_known_corporation
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.esi_versions import ESI_CORP_PUBLIC
 
@@ -184,6 +185,8 @@ class CorporationsService:
         refresh: bool = False,
         corporation_id: int | None = None,
     ) -> dict[str, Any]:
+        # An unknown corporation is a 404, not an empty ledger.
+        require_known_corporation(self._state, corporation_id, "get_realized_profit_ledger")
         if refresh:
             self._state.corp_manager.refresh_realized_profit_inputs(corporation_id=corporation_id)
 
