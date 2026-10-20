@@ -69,6 +69,9 @@ class FifoLot:
     #: build cost is unknown (an invention estimate that had no inputs).
     #: Feedback then skips the cost update for a sale that consumes it.
     cost_unknown_reason: Optional[str] = None
+    #: The corp asset history row of a blended transfer lot (it names no
+    #: job): the ledger's stale check compares its stamped cost.
+    asset_history_id: Optional[int] = None
 
 
 def _parse_date(value: Any) -> Optional[datetime]:

@@ -164,6 +164,7 @@ def _consume_lots(
                 "reference_id": head.reference_id,
                 "reference_type": head.reference_type,
                 **({"cost_unknown_reason": cost_unknown_reason} if cost_unknown_reason else {}),
+                **({"asset_history_id": int(head.asset_history_id)} if head.asset_history_id is not None else {}),
             }
         )
         remaining -= int(take)
@@ -172,15 +173,7 @@ def _consume_lots(
 
         new_quantity = lot_quantity - int(take)
         if new_quantity > 0:
-            lots[0] = FifoLot(
-                quantity=int(new_quantity),
-                unit_price=float(head.unit_price),
-                acquisition_date=head.acquisition_date,
-                reference_id=head.reference_id,
-                reference_type=head.reference_type,
-                source=head.source,
-                cost_unknown_reason=head.cost_unknown_reason,
-            )
+            lots[0] = replace(head, quantity=int(new_quantity))
         else:
             lots.pop(0)
 
@@ -196,6 +189,31 @@ def _consume_lots(
 #: Transfer lots whose cost is a character job's build cost
 #: (scripts/backfill_corp_transfer_costs.py).
 _TRANSFERRED_BUILD_SOURCES = frozenset({"industry_build_transferred", "industry_build_transferred_avg"})
+
+
+#: Relative tolerance of the cost-basis comparison (float round trips through JSON).
+_COST_BASIS_TOLERANCE = 1e-9
+_SQL_IN_CHUNK = 500
+
+
+def _same_cost(a: Any, b: Any) -> bool:
+    a, b = _safe_float(a), _safe_float(b)
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= _COST_BASIS_TOLERANCE * max(1.0, abs(a), abs(b))
+
+
+def _with_cost_basis(allocations: list[dict[str, Any]], unit_cost_by_job_id: dict[int, float]) -> None:
+    """Record on each allocation the cost its lot was priced from
+    (`cost_basis`): the job's current positive unit_build_cost (None: none)
+    for a lot naming an industry job, the stamped cost for a blended transfer
+    lot (`asset_history_id`). stale_resolved_cost_owner_ids compares it."""
+    for entry in allocations:
+        job_id = _safe_int(entry.get("reference_id"))
+        if entry.get("reference_type") == "industry_job" and job_id:
+            entry["cost_basis"] = unit_cost_by_job_id.get(int(job_id))
+        elif entry.get("asset_history_id") is not None:
+            entry["cost_basis"] = _safe_float(entry.get("unit_cost"))
 
 
 def _is_blended_transfer_lot(source: Any, reference_type: Any) -> bool:
@@ -626,7 +644,52 @@ class _BaseRealizedProfitLedgerService:
                 if current.get(int(_safe_int(entry.get("reference_id")) or 0)) != entry.get("cost_unknown_reason"):
                     stale.add(int(owner_id))
                     break
+        return stale | self._stale_cost_basis_owner_ids(rows, skip=stale)
+
+    def _stale_cost_basis_owner_ids(self, rows: list[dict[str, Any]], *, skip: set[int]) -> set[int]:
+        """The owners with a row whose lot cost changed since it was built:
+        an allocation's `cost_basis` against its job's current unit_build_cost
+        or its blended lot's current stamped cost. Only the jobs and asset
+        history rows the rows name are read. A job-referenced or blended
+        allocation without a basis (a ledger built before it was recorded)
+        is stale once."""
+        stale: set[int] = set()
+        job_bases: list[tuple[int, int, Any]] = []
+        history_bases: list[tuple[int, int, Any]] = []
+        for row in rows:
+            owner_id = _safe_int(row.get(self.owner_id_field))
+            if owner_id is None or owner_id in skip or owner_id in stale:
+                continue
+            for entry in row.get("allocation_details") or []:
+                if not isinstance(entry, dict):
+                    continue
+                job_id = _safe_int(entry.get("reference_id"))
+                is_job = entry.get("reference_type") == "industry_job" and bool(job_id)
+                history_id = _safe_int(entry.get("asset_history_id"))
+                if (is_job or history_id is not None or self._needs_cost_basis(entry)) and "cost_basis" not in entry:
+                    stale.add(int(owner_id))
+                    break
+                if is_job:
+                    job_bases.append((int(owner_id), int(job_id), entry.get("cost_basis")))
+                elif history_id is not None:
+                    history_bases.append((int(owner_id), int(history_id), entry.get("cost_basis")))
+        if job_bases:
+            current = self._load_job_unit_cost_by_job_id(job_ids={job_id for _, job_id, _ in job_bases})
+            stale |= {o for o, job_id, basis in job_bases if not _same_cost(current.get(job_id), basis)}
+        if history_bases:
+            current_history = self._current_asset_history_unit_costs({h for _, h, _ in history_bases})
+            stale |= {o for o, h, basis in history_bases if not _same_cost(current_history.get(h), basis)}
         return stale
+
+    def _needs_cost_basis(self, entry: dict[str, Any]) -> bool:
+        """An allocation that should carry a cost basis beyond the job
+        references (the corp's blended transfer lots)."""
+        return False
+
+    def _current_asset_history_unit_costs(self, history_ids: set[int]) -> dict[int, float | None]:
+        """{asset history row id: its current acquisition_unit_cost}; the
+        owner kinds with blended lots override it."""
+        return {}
 
     def list_rows(self, *, owner_id: int | None = None) -> list[dict[str, Any]]:
         query = self._app_session.query(self.ledger_model)
@@ -818,6 +881,7 @@ class _BaseRealizedProfitLedgerService:
                 allocation = _consume_lots(
                     lots, quantity=int(quantity), cost_unknown_reason_by_job_id=cost_unknown_reason_by_job_id,
                 )
+                _with_cost_basis(allocation["allocations"], job_unit_cost_by_job_id)
                 if int(allocation["unpriced_quantity"]) > 0:
                     slot = allocation["by_source"].setdefault(ASSET_SOURCE_UNTRACKED, {"quantity": 0, "cost": 0.0})
                     slot["quantity"] = int(slot.get("quantity") or 0) + int(allocation["unpriced_quantity"])
@@ -924,20 +988,26 @@ class _BaseRealizedProfitLedgerService:
                     out[int(job_id)] = reason
         return out
 
-    def _load_job_unit_cost_by_job_id(self) -> dict[int, float]:
+    def _load_job_unit_cost_by_job_id(self, *, job_ids: set[int] | None = None) -> dict[int, float]:
         """{job_id: current positive unit_build_cost} over character and
-        corporation jobs (EVE job ids are unique across both)."""
+        corporation jobs (EVE job ids are unique across both); only `job_ids`
+        when given."""
         out: dict[int, float] = {}
+        chunks: list[list[int] | None] = [None]
+        if job_ids is not None:
+            ids = sorted(job_ids)
+            chunks = [ids[i:i + _SQL_IN_CHUNK] for i in range(0, len(ids), _SQL_IN_CHUNK)]
         for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
-            rows = (
-                self._app_session.query(model.job_id, model.unit_build_cost)
-                .filter(model.unit_build_cost.isnot(None))
-                .all()
-            )
-            for job_id, unit_build_cost in rows:
-                unit_cost = _safe_float(unit_build_cost)
-                if job_id is not None and unit_cost is not None and unit_cost > 0:
-                    out[int(job_id)] = unit_cost
+            for chunk in chunks:
+                query = self._app_session.query(model.job_id, model.unit_build_cost).filter(
+                    model.unit_build_cost.isnot(None)
+                )
+                if chunk is not None:
+                    query = query.filter(model.job_id.in_(chunk))
+                for job_id, unit_build_cost in query.all():
+                    unit_cost = _safe_float(unit_build_cost)
+                    if job_id is not None and unit_cost is not None and unit_cost > 0:
+                        out[int(job_id)] = unit_cost
         return out
 
     def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
@@ -1217,9 +1287,27 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     reference_type=reference_type,
                     source=source,
                     cost_unknown_reason=cost_unknown_reason,
+                    asset_history_id=(
+                        _safe_int(getattr(row, "id", None)) if _is_blended_transfer_lot(source, reference_type) else None
+                    ),
                 )
             )
         return lots_by_type
+
+    def _needs_cost_basis(self, entry: dict[str, Any]) -> bool:
+        return _is_blended_transfer_lot(entry.get("source"), entry.get("reference_type"))
+
+    def _current_asset_history_unit_costs(self, history_ids: set[int]) -> dict[int, float | None]:
+        ids = sorted(history_ids)
+        out: dict[int, float | None] = {}
+        for start in range(0, len(ids), _SQL_IN_CHUNK):
+            for row_id, unit_cost in (
+                self._app_session.query(CorporationAssetHistoryModel.id, CorporationAssetHistoryModel.acquisition_unit_cost)
+                .filter(CorporationAssetHistoryModel.id.in_(ids[start:start + _SQL_IN_CHUNK]))
+                .all()
+            ):
+                out[int(row_id)] = _safe_float(unit_cost)
+        return out
 
     def _blended_cost_unknown_reason_by_type_id(self) -> dict[int, str]:
         """{product type: why a blended transfer lot of it is a lower bound}.
