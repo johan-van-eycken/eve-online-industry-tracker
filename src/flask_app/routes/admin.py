@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import threading
+from typing import Optional
 
 from flask import Blueprint, jsonify, request
 
 from flask_app.deps import get_state
 from flask_app.http import ok, error
+
+from eve_online_industry_tracker.application.errors import ServiceError
 
 from eve_online_industry_tracker.application.admin.service import AdminService
 from flask_app.bootstrap import require_ready
@@ -26,6 +30,33 @@ from utils.esi_monitor import get_esi_monitor
 
 
 admin_bp = Blueprint("admin", __name__)
+
+
+def _int_arg(name: str, default: Optional[int]) -> Optional[int]:
+    """A whole-number query value; `default` when absent or blank. Anything
+    else is a 400 naming the parameter and the value, not a 500."""
+    raw = (request.args.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ServiceError(f"Invalid {name}: must be a whole number, got {raw!r}.", status_code=400) from None
+
+
+def _float_arg(name: str, default: float) -> float:
+    """A finite number query value; `default` when absent or blank. Anything
+    else (nan and inf included) is a 400 naming the parameter and the value."""
+    raw = (request.args.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value):
+        raise ServiceError(f"Invalid {name}: must be a number, got {raw!r}.", status_code=400)
+    return value
 
 
 @admin_bp.get("/health")
@@ -74,8 +105,7 @@ def shutdown():
 @admin_bp.get("/public_structures_status")
 def public_structures_status():
     """Return cached public structures status + last refresh diagnostics."""
-    system_id_param = request.args.get("system_id")
-    system_id = int(system_id_param) if system_id_param not in (None, "") else None
+    system_id = _int_arg("system_id", None)
     svc = AdminService(state=get_state())
     data = svc.public_structures_status(system_id=system_id)
     return ok(data=data)
@@ -91,22 +121,9 @@ def refresh_public_structures():
     if require_ready_flag == "1":
         require_ready(get_state())
 
-    system_id_param = request.args.get("system_id")
-    if system_id_param in (None, ""):
+    system_id = _int_arg("system_id", None)
+    if system_id is None:
         return error(message="system_id query parameter is required", status_code=400)
-    system_id = int(system_id_param)
-
-    def _int_arg(name: str, default: int) -> int:
-        raw = request.args.get(name)
-        if raw in (None, ""):
-            return default
-        return int(raw)
-
-    def _float_arg(name: str, default: float) -> float:
-        raw = request.args.get(name)
-        if raw in (None, ""):
-            return default
-        return float(raw)
 
     scan = _int_arg("scan", 250)
     workers = _int_arg("workers", 5)
@@ -133,18 +150,6 @@ def refresh_public_structures():
 def start_public_structures_scan():
     """Start (or no-op if already running) the global public_structures scan."""
     require_ready(get_state())
-
-    def _int_arg(name: str, default: int) -> int:
-        raw = request.args.get(name)
-        if raw in (None, ""):
-            return default
-        return int(raw)
-
-    def _float_arg(name: str, default: float) -> float:
-        raw = request.args.get(name)
-        if raw in (None, ""):
-            return default
-        return float(raw)
 
     scan = _int_arg("scan", public_structures_startup_scan_scan_cap())
     workers = _int_arg("workers", public_structures_startup_scan_max_workers())
@@ -181,12 +186,6 @@ def esi_metrics():
     This endpoint is intentionally available even while the app is initializing,
     so developers can observe startup ESI traffic.
     """
-
-    def _int_arg(name: str, default: int) -> int:
-        raw = request.args.get(name)
-        if raw in (None, ""):
-            return int(default)
-        return int(raw)
 
     window = _int_arg("window", 900)
     bucket = _int_arg("bucket", 5)

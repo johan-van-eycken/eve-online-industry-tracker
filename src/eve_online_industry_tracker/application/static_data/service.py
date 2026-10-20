@@ -12,6 +12,7 @@ from eve_online_industry_tracker.infrastructure.static_data_adapter import (
     build_all_materials,
     build_all_ores,
     get_all_facilities,
+    npc_station_name,
     run_optimize,
 )
 
@@ -22,7 +23,18 @@ class StaticDataService:
         self._sessions = sessions or StateSessionProvider(state=state)
 
     def list_facilities(self) -> Any:
-        return get_all_facilities(getattr(self._state, "admin_settings", None), self._sessions.sde_session())
+        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+        return get_all_facilities(getattr(self._state, "admin_settings", None), self._sessions.sde_session(),
+                                  language=language, esi_service=getattr(self._state, "esi_service", None))
+
+    def npc_station_name(self, station_id: int) -> dict:
+        """{"station_id", "name", "problem", "note"}: the NPC station's name
+        (ESI first, else the SDE with a note), or None with the reason (never
+        an error)."""
+        language = getattr(getattr(self._state, "db_sde", None), "language", None) or "en"
+        name, problem, note = npc_station_name(self._sessions.sde_session(), station_id, language,
+                                               getattr(self._state, "esi_service", None))
+        return {"station_id": station_id, "name": name, "problem": problem, "note": note}
 
     def optimize_ore_plan(self, payload: dict) -> Any:
         character_id = payload["character_id"]

@@ -73,3 +73,19 @@ def test_the_stored_rig_bonuses_are_labelled_unscaled_before_the_security_band()
         "**Rig Material Bonus (stored, unscaled, before security band):** 2.00%",
         "**Rig Time Bonus (stored, unscaled, before security band):** 20.00%",
     ]
+
+
+def test_an_invalid_stored_rate_is_not_shown_as_the_stored_setting(monkeypatch):
+    """A stored invalid admin setting comes back as stored with its problem in
+    "invalid": the page does not show it as the rate, says which one is
+    invalid, and shows the default rate for it."""
+    payload = {"status": "success", "data": {
+        "values": {"industry": {"npc_station_facility_tax": 0.003, "scc_surcharge": 0.9,
+                                "research_scc_surcharge": 0.02}},
+        "invalid": {"industry": {"scc_surcharge": {"value": 0.9, "problem": "0.9 is outside 0.0 to 0.2",
+                                                   "startup_critical": False}}}}}
+    monkeypatch.setattr(page, "api_get", lambda path, *a, **k: payload)
+    values, caption = page._admin_industry_values()
+    assert page._job_scc_rates(values) == (page.DEFAULT_SCC_SURCHARGE, 0.02)
+    assert page._npc_admin_defaults(values)[0] == 0.003
+    assert caption is not None and "industry/scc_surcharge" in caption and "0.9" in caption and "default" in caption

@@ -8,6 +8,14 @@ from streamlit_ui.api.client import api_get, api_post
 from streamlit_ui.api.streamlit_client import cached_api_get
 
 
+def _profile_id_payload(industry_profile_id: int | None) -> int | None:
+    """The page's "no profile" (None or 0) is sent as None: the API refuses
+    a non-positive industry_profile_id."""
+    if industry_profile_id is None or int(industry_profile_id) <= 0:
+        return None
+    return int(industry_profile_id)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_product_overview(
     *,
@@ -82,7 +90,7 @@ def start_product_overview_refresh(
             "market_hub": str(market_hub),
             "material_price_side": str(material_price_side),
             "product_price_side": str(product_price_side),
-            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
+            "industry_profile_id": _profile_id_payload(industry_profile_id),
             "owned_blueprints_scope": str(owned_blueprints_scope),
         },
     ) or {}
@@ -120,7 +128,7 @@ def start_portfolio_candidates_refresh(
             "market_hub": str(market_hub),
             "material_price_side": str(material_price_side),
             "product_price_side": str(product_price_side),
-            "industry_profile_id": int(industry_profile_id) if industry_profile_id is not None else None,
+            "industry_profile_id": _profile_id_payload(industry_profile_id),
             "owned_blueprints_scope": str(owned_blueprints_scope),
             "planning_horizon_hours": float(planning_horizon_hours),
             "have_skills_only": bool(have_skills_only),
@@ -259,11 +267,21 @@ def fetch_solar_system_security_map() -> dict[int, float]:
         try:
             system_id = int(entry.get("id") or 0)
             security_status = float(entry.get("security_status") or 0.0)
-        except Exception:
+        except (ValueError, TypeError):
             continue
         if system_id > 0:
             out[system_id] = security_status
     return out
+
+
+def _optional_payload_data(response: Any, what: str) -> dict:
+    """The `data` dict of a successful response; raises RuntimeError with the
+    reason otherwise, so a failure is neither cached nor read as "no data"."""
+    if not isinstance(response, dict) or response.get("status", "success") != "success":
+        message = response.get("message") if isinstance(response, dict) else None
+        raise RuntimeError(f"Failed to load {what}: {message or 'API request failed (see the logs)'}")
+    data = response.get("data") or {}
+    return data if isinstance(data, dict) else {}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -272,8 +290,8 @@ def fetch_blueprint_skill_qualification(blueprint_type_ids: tuple[int, ...]) -> 
     if not blueprint_type_ids:
         return {}
     ids_str = ",".join(str(i) for i in blueprint_type_ids)
-    response = api_get(f"/industry/blueprint_skill_qualification?blueprint_type_ids={ids_str}") or {}
-    return (response.get("data") or {}) if isinstance(response, dict) else {}
+    response = api_get(f"/industry/blueprint_skill_qualification?blueprint_type_ids={ids_str}")
+    return _optional_payload_data(response, "blueprint skill qualification")
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -282,8 +300,8 @@ def fetch_reorder_alerts(type_ids: tuple[int, ...]) -> dict[str, dict]:
     if not type_ids:
         return {}
     ids_str = ",".join(str(i) for i in type_ids)
-    response = api_get(f"/industry/reorder_alerts?type_ids={ids_str}") or {}
-    return (response.get("data") or {}) if isinstance(response, dict) else {}
+    response = api_get(f"/industry/reorder_alerts?type_ids={ids_str}")
+    return _optional_payload_data(response, "reorder alerts")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -292,8 +310,8 @@ def fetch_type_track_record(type_ids: tuple[int, ...]) -> dict[str, dict]:
     if not type_ids:
         return {}
     ids_str = ",".join(str(i) for i in type_ids)
-    response = api_get(f"/industry/track_record?type_ids={ids_str}") or {}
-    return (response.get("data") or {}) if isinstance(response, dict) else {}
+    response = api_get(f"/industry/track_record?type_ids={ids_str}")
+    return _optional_payload_data(response, "track record")
 
 
 def clear_industry_builder_caches() -> None:

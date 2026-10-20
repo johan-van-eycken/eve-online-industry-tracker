@@ -5,6 +5,14 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
+
+
+def _schema_default(key: str) -> Any:
+    """A daily_planner setting's schema default (the fallback without a settings store)."""
+    return ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"][key]["default"]
 
 TRITANIUM_TYPE_ID = 34
 
@@ -18,17 +26,25 @@ class MarginCorrelator:
         if self._admin:
             try:
                 return int(self._admin.get("daily_planner", "planner_mineral_correlation_min_days"))
-            except Exception:
-                pass
-        return 30
+            except AdminSettingInvalid:
+                raise  # a stored invalid value fails loudly, naming it
+            except (TypeError, ValueError) as exc:
+                logging.warning("MarginCorrelator: daily_planner/planner_mineral_correlation_min_days is not "
+                                "a number (%s); using its schema default %s", exc,
+                                _schema_default("planner_mineral_correlation_min_days"))
+        return int(_schema_default("planner_mineral_correlation_min_days"))
 
     def _get_threshold(self) -> float:
         if self._admin:
             try:
                 return float(self._admin.get("daily_planner", "planner_mineral_correlation_threshold"))
-            except Exception:
-                pass
-        return -0.7
+            except AdminSettingInvalid:
+                raise  # a stored invalid value fails loudly, naming it
+            except (TypeError, ValueError) as exc:
+                logging.warning("MarginCorrelator: daily_planner/planner_mineral_correlation_threshold is not "
+                                "a number (%s); using its schema default %s", exc,
+                                _schema_default("planner_mineral_correlation_threshold"))
+        return float(_schema_default("planner_mineral_correlation_threshold"))
 
     def _is_due(self) -> bool:
         """Returns True if last computation was > 24h ago (or never ran)."""
@@ -43,12 +59,14 @@ class MarginCorrelator:
                 return True
             last = datetime.fromisoformat(str(row[0]))
             return (datetime.utcnow() - last).total_seconds() > 86400
-        except Exception:
+        except (SQLAlchemyError, ValueError) as exc:
+            logging.warning("MarginCorrelator: could not read the last margin_correlation_cache run (%s); "
+                            "recomputing", exc)
             return True
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def run_if_due(self) -> None:
@@ -82,7 +100,7 @@ class MarginCorrelator:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         if len(trit_rows) < min_days:
@@ -105,7 +123,7 @@ class MarginCorrelator:
             finally:
                 try:
                     app_session2.close()
-                except Exception:
+                except SQLAlchemyError:
                     pass
         except Exception as e:
             logging.warning("MarginCorrelator: could not load realized profit rows: %s", e)
@@ -122,8 +140,8 @@ class MarginCorrelator:
                 try:
                     date_str = str(completed)[:10]  # ISO date portion
                     margins_by_type[int(tid)][date_str].append(float(margin))
-                except Exception:
-                    pass
+                except (TypeError, ValueError):
+                    pass  # a ledger row without a numeric type_id/margin carries no correlation point
 
         # Get active plan type_ids for cleanup
         app_session3 = sessions.app_session()
@@ -134,12 +152,14 @@ class MarginCorrelator:
                     "JOIN build_plan bp ON bp.id = bpi.plan_id WHERE bp.status = 'active'"
                 )).fetchall()
             )
-        except Exception:
+        except SQLAlchemyError as exc:
+            logging.warning("MarginCorrelator: could not read the active build plan type_ids (%s); "
+                            "correlating every type with realized margins instead", exc)
             active_type_ids = set(margins_by_type.keys())
         finally:
             try:
                 app_session3.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         if not active_type_ids:
@@ -196,7 +216,7 @@ class MarginCorrelator:
         finally:
             try:
                 write_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         logging.info("MarginCorrelator: updated %d type_ids", len(active_type_ids))

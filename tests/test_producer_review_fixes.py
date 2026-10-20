@@ -17,6 +17,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 import test_industry_service_calculations as h
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.daily_planner.assigned_invention import assigned_invention
 from eve_online_industry_tracker.application.industry import invention_model as im
 from eve_online_industry_tracker.application.industry.invention_model import (
@@ -388,7 +389,8 @@ def test_m2_one_research_level_table():
 
 def test_m3_copy_process_value_helper():
     service = object.__new__(IndustryService)
-    service._adm = MethodType(lambda self, category, key, fallback=None: fallback, service)
+    service._adm = MethodType(
+        lambda self, category, key: ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"], service)
     assert service._copy_process_value(50.0, 3) == pytest.approx(50.0 * 3 * 0.02)
     assert service._copy_process_value(None, 3) is None
     assert service._copy_process_value(50.0, -1) == 0.0

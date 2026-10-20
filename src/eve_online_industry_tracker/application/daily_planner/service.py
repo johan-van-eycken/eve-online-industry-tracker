@@ -16,8 +16,9 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
@@ -89,6 +90,38 @@ def _unavailable_input_notes(
     ):
         notes.append(trend)
     return notes
+
+
+def _market_depth_stale_note(entry: Any) -> str | None:
+    """The decision-reason note of a stale market depth row (the collector
+    kept the previous snapshot and marked it with stale_reason), or None for
+    a fresh row or no row."""
+    if entry is None:
+        return None
+    reason = _get_attr(entry, "stale_reason")
+    if not reason:
+        return None
+    snapshot_at = _get_attr(entry, "snapshot_at")
+    since = f" since {snapshot_at}" if snapshot_at else ""
+    return f"market depth stale{since} ({reason}): scored with the previous snapshot"
+
+
+def _market_depth_stale_inputs(market_depth: dict[int, Any]) -> dict[str, str]:
+    """The plan-level unavailable input for the stale market depth rows,
+    {} when every row is fresh."""
+    stale = {
+        int(type_id): str(_get_attr(entry, "stale_reason"))
+        for type_id, entry in sorted((market_depth or {}).items())
+        if entry is not None and _get_attr(entry, "stale_reason")
+    }
+    if not stale:
+        return {}
+    listed = "; ".join(f"type_id {type_id}: {reason}" for type_id, reason in stale.items())
+    return {
+        "market_depth_stale": (
+            f"market depth stale for {len(stale)} type(s) ({listed}): scored with the previous snapshot"
+        ),
+    }
 
 
 def _plan_unavailable_inputs(plan: Any) -> dict[str, str]:
@@ -194,8 +227,13 @@ def compute_freshness_score(
     return score
 
 
-def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
-    """A daily_planner setting, or `fallback` when there is no settings store.
+def _schema_default(key: str) -> Any:
+    """A daily_planner setting's schema default (the fallback without a settings store)."""
+    return ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"][key]["default"]
+
+
+def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
+    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
 
     AttributeError covers stub/None admin objects; KeyError is what
     AdminSettingsManager.get raises for an unknown key (every key read here is
@@ -403,6 +441,10 @@ class DailyPlannerService:
     def set_action_status(self, action_id: int, status: str) -> None:
         self._repo.set_action_status(action_id, status)
 
+    def _mineral_squeeze_factor(self) -> float:
+        """daily_planner/planner_mineral_squeeze_factor, read per compute."""
+        return float(_adm(self._admin, "planner_mineral_squeeze_factor", _schema_default("planner_mineral_squeeze_factor")))
+
     def get_analytics(self) -> dict[str, Any]:
         """Fetch self-learning accuracy stats for all tracked type_ids."""
         plan = self._repo.get_active_plan()
@@ -411,6 +453,7 @@ class DailyPlannerService:
 
         items = self._repo.get_plan_items(int(plan.id))
         type_ids = [int(i.type_id) for i in items]
+        batch_window = int(_adm(self._admin, "planner_analytics_batch_window", _schema_default("planner_analytics_batch_window")))
         weights = self._repo.get_weights(type_ids)
         invention_rates = self._repo.get_invention_success_rates(type_ids)
 
@@ -420,7 +463,7 @@ class DailyPlannerService:
 
         # Competition data
         try:
-            hub = str(_adm(self._admin, "planner_market_hub", "jita"))
+            hub = str(_adm(self._admin, "planner_market_hub"))
             market_depth = self._repo.get_market_depth(type_ids, hub)
         except SQLAlchemyError as exc:
             _warn_read_failed("get_analytics/market_depth", exc)
@@ -482,7 +525,7 @@ class DailyPlannerService:
         for item in items:
             tid = int(item.type_id)
             w = weights.get(tid)
-            outcomes = self._repo.get_outcomes(tid, limit=20)
+            outcomes = self._repo.get_outcomes(tid, limit=batch_window)
             md = market_depth.get(tid)
             mc = margin_by_type.get(tid)
             result.append({
@@ -497,9 +540,14 @@ class DailyPlannerService:
                 "invention_success_rate": invention_rates.get(tid),
                 "recent_outcomes": [_model_to_dict(o) for o in outcomes],
                 # Competition data
-                "competition_index": float(getattr(md, "competition_index", None) or 0.0) if md else None,
+                # None stays None (unknown: no velocity to divide by), not 0.0.
+                "competition_index": (
+                    float(md.competition_index) if md and md.competition_index is not None else None
+                ),
                 "competitor_units": int(getattr(md, "competitor_units", 0) or 0) if md else None,
                 "market_snapshot_at": str(getattr(md, "snapshot_at", None) or "") if md else None,
+                # Set when the collector kept the previous snapshot: why it was not refreshed.
+                "market_stale_reason": (getattr(md, "stale_reason", None) or None) if md else None,
                 # Margin correlation data
                 "pearson_correlation": (
                     float(getattr(mc, "pearson_correlation", None))
@@ -517,7 +565,7 @@ class DailyPlannerService:
         # and SQLite silently rejects (rather than coerces) a string compared
         # against it, so a bare `except` around this used to hide a permanently
         # empty plan_history. Let a genuinely broken query raise instead.
-        history_days = int(_adm(self._admin, "planner_history_days", 90))
+        history_days = int(_adm(self._admin, "planner_history_days"))
         cutoff = _now() - timedelta(days=history_days)
         ph_session = self._session_provider.app_session()
         try:
@@ -670,13 +718,13 @@ class DailyPlannerService:
             sell_velocities, sell_velocity_unavailable = self._get_sell_velocities(type_ids)
 
         # Market depth cache (from pre-populated tables written by MarketIntelligenceJob)
-        hub = str(_adm(self._admin, "planner_market_hub", "jita"))
+        hub = str(_adm(self._admin, "planner_market_hub"))
         with _ComputeStep(self, "reading market depth"):
             market_depth = self._repo.get_market_depth(type_ids, hub) if type_ids else {}
 
         margin_correlations, margin_unavailable = self._get_margin_correlations(type_ids)
 
-        min_attempts = int(_adm(self._admin, "planner_invention_min_attempts", 10))
+        min_attempts = int(_adm(self._admin, "planner_invention_min_attempts"))
         with _ComputeStep(self, "reading invention success rates"):
             invention_rates = (
                 self._repo.get_invention_success_rates(type_ids, min_attempts) if type_ids else {}
@@ -694,9 +742,23 @@ class DailyPlannerService:
             )
             if reason
         }
+        # A stale market depth row is still scored (the previous snapshot is
+        # the best there is), but named on the plan and on its row (Phase 4).
+        unavailable_inputs.update(_market_depth_stale_inputs(market_depth))
 
         with _ComputeStep(self, "indexing corp blueprints"):
-            bpo_assets_by_type_id, bpc_assets_by_type_id = self._index_blueprint_assets(corp_assets)
+            corp_index = self._index_blueprint_assets(corp_assets)
+        # Task A item 1: the pilots' own blueprints, from the producer's
+        # source (owned_blueprints_scope "all_characters", its default). The
+        # ledger binds each to its owner (its character_id): only that pilot
+        # can install a job from it.
+        with _ComputeStep(self, "reading character blueprints"):
+            character_blueprints = self._get_character_blueprint_assets()
+        with _ComputeStep(self, "indexing character blueprints"):
+            character_index = (
+                index_blueprint_assets(character_blueprints, self._meta_resolver) if character_blueprints else ({}, {})
+            )
+        bpo_assets_by_type_id, bpc_assets_by_type_id = merge_blueprint_indexes(corp_index, character_index)
         # Blueprints installed in an active job: chain planning neither
         # researches nor builds from them (Task 8c fix round 5).
         busy_item_ids = busy_blueprint_item_ids(industry_jobs)
@@ -803,6 +865,7 @@ class DailyPlannerService:
         logger.info("DailyPlannerService: Phase 3 — profitability scoring")
         input_by_type = {r.type_id: r for r in phase1["input_rows"]}
         trit_trend_7d: float | None = phase1.get("trit_trend_7d")
+        squeeze_factor = self._mineral_squeeze_factor()
         scored = []
         for ps in pipeline_states:
             row = input_by_type.get(ps.type_id)
@@ -824,6 +887,7 @@ class DailyPlannerService:
                     market_depth=market_depth,
                     margin_correlation=margin_corr,
                     trit_trend_7d=trit_trend_7d,
+                    mineral_squeeze_factor=squeeze_factor,
                 )
                 scored.append(scored_item)
             except (TypeError, ValueError):
@@ -843,6 +907,7 @@ class DailyPlannerService:
         input_by_type = {r.type_id: r for r in phase1["input_rows"]}
         unavailable: dict[str, str] = phase1.get("unavailable_inputs") or {}
         margin_correlations: dict[int, Any] = phase1.get("margin_correlations") or {}
+        market_depth_cache: dict[int, Any] = phase1.get("market_depth_cache") or {}
         decisions = []
         for scored in scored_items:
             ps = pipeline_by_type.get(scored.type_id)
@@ -862,6 +927,9 @@ class DailyPlannerService:
                     meta_group_id=input_row.meta_group_id if input_row is not None else None,
                 )
                 notes = _unavailable_input_notes(scored.type_id, unavailable, margin_correlations)
+                stale_note = _market_depth_stale_note(market_depth_cache.get(scored.type_id))
+                if stale_note:
+                    notes.append(stale_note)
                 if notes:
                     decision.decision_reason = "; ".join(
                         part for part in (decision.decision_reason, *notes) if part
@@ -990,7 +1058,7 @@ class DailyPlannerService:
         # DetachedInstanceError.
         plan_items = self._build_plan_items(plan_id, chain_plan.decisions, market_depth_cache)
 
-        drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0))
+        drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct"))
         freshness = compute_freshness_score(plan_items, market_depth_cache, drift_threshold_pct)
 
         if plan_items:
@@ -1008,7 +1076,7 @@ class DailyPlannerService:
             self._repo.insert_actions(action_log_rows)
 
         # Cleanup old action log rows
-        cutoff_days = int(_adm(self._admin, "planner_history_days", 90))
+        cutoff_days = int(_adm(self._admin, "planner_history_days"))
         deleted = self._repo.purge_old_action_log_rows(cutoff_days)
         if deleted > 0:
             logger.info("DailyPlannerService: purged %d old action log rows", deleted)
@@ -1121,6 +1189,20 @@ class DailyPlannerService:
         try:
             from eve_online_industry_tracker.infrastructure.models import CorporationAssetsModel
             return session.query(CorporationAssetsModel).all()
+        finally:
+            session.close()
+
+    def _get_character_blueprint_assets(self) -> list[Any]:
+        """Every pilot's blueprint assets: the producer's owned-blueprint
+        source for its default scope (blueprints_repo.get_character_blueprints).
+
+        No error handler (like _get_corp_assets): an empty list would plan a
+        row the producer priced from a pilot's blueprint as not built, or
+        tell the user to buy a blueprint a pilot owns."""
+        session = self._session_provider.app_session()
+        try:
+            from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
+            return list(blueprints_repo.get_character_blueprints(session))
         finally:
             session.close()
 
@@ -1461,10 +1543,10 @@ class DailyPlannerService:
             if not plan_items:
                 return 1.0, 0, 0
 
-            hub = str(_adm(self._admin, "planner_market_hub", "jita"))
+            hub = str(_adm(self._admin, "planner_market_hub"))
             type_ids = [int(i.type_id) for i in plan_items]
             market_depth = self._repo.get_market_depth(type_ids, hub)
-            drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct", 5.0))
+            drift_threshold_pct = float(_adm(self._admin, "planner_price_drift_threshold_pct"))
 
             return compute_freshness_stats(plan_items, market_depth, drift_threshold_pct)
         except (KeyError, TypeError, ValueError, AttributeError):
@@ -1554,6 +1636,44 @@ def busy_blueprint_item_ids(industry_jobs: list[Any]) -> set[int]:
         if item_id > 0:
             out.add(item_id)
     return out
+
+
+def merge_blueprint_indexes(
+    corp_index: tuple[dict[int, list[Any]], dict[int, list[Any]]],
+    character_index: tuple[dict[int, list[Any]], dict[int, list[Any]]],
+) -> tuple[dict[int, list[Any]], dict[int, list[Any]]]:
+    """One (BPOs, BPCs) index, keyed by blueprint type_id: the corp's
+    assets, then the pilots'.
+
+    One item_id in both (Task A fix round 1, I1: a blueprint moved between
+    a pilot's and the corp hangar while one snapshot is stale) is one
+    blueprint: the pilot's entry is kept, as it is owner-bound (only that
+    pilot can install it: the conservative reading), and a WARNING names
+    the items. Without the dedupe the ledger would book it twice."""
+    character_items = {
+        int(_asset_attr(a, "item_id") or 0)
+        for index in character_index for assets in (index or {}).values() for a in assets
+    }
+    character_items.discard(0)
+    dropped: set[int] = set()
+    bpos: dict[int, list[Any]] = {}
+    bpcs: dict[int, list[Any]] = {}
+    for (index_bpos, index_bpcs), is_corp in ((corp_index, True), (character_index, False)):
+        for target, source in ((bpos, index_bpos), (bpcs, index_bpcs)):
+            for type_id, assets in (source or {}).items():
+                for asset in assets:
+                    item = int(_asset_attr(asset, "item_id") or 0)
+                    if is_corp and item in character_items:
+                        dropped.add(item)
+                        continue
+                    target.setdefault(type_id, []).append(asset)
+    if dropped:
+        logger.warning(
+            "DailyPlannerService: blueprint item(s) %s are in both the corp and a pilot's assets "
+            "(a stale snapshot); planned once, as the pilot's (owner-bound)",
+            ", ".join(str(i) for i in sorted(dropped)),
+        )
+    return bpos, bpcs
 
 
 def index_blueprint_assets(

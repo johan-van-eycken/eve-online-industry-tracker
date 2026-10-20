@@ -4,6 +4,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
+
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
@@ -18,7 +22,10 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     build_market_price_map,
     build_cost_map_for_assets,
     build_invention_cost_per_run_by_blueprint_type,
+    RealizedInventionRefresh,
+    invention_cost_source_for,
     industry_job_material_type_ids,
+    load_owner_invention_evidence,
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
 )
@@ -804,8 +811,8 @@ class Corporation:
                     npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
                     if npc_corp:
                         resolved[cid] = npc_corp.name[self._db_sde.language]
-                except Exception:
-                    pass
+                except (SQLAlchemyError, KeyError, TypeError) as exc:
+                    logging.warning("NPC corporation %s: no SDE name either (%s)", cid, exc)
         return resolved
 
     def _backfill_wallet_transaction_client_names(self) -> None:
@@ -918,10 +925,18 @@ class Corporation:
 
             market_prices = self._default_esi_character._esi_client.esi_get(ESI_MARKETS_PRICES)
             market_price_map = build_market_price_map(market_prices)
+            # The producer's inputs (or why they are missing) read once per
+            # refresh and passed to every snapshot, with the SDE memoized.
+            invention_refresh = RealizedInventionRefresh.read()
             invention_cost_by_blueprint_type = build_invention_cost_per_run_by_blueprint_type(
                 jobs=jobs,
                 sde_session=self._db_sde.session,
                 market_price_map=market_price_map,
+                invention_refresh=invention_refresh,
+                # The ME/TE of the corporation's BPCs settles a decryptor tie.
+                **load_owner_invention_evidence(
+                    self._db_app.session, owner_kind="corporation", owner_id=int(self.corporation_id),
+                ),
             )
 
             clear_historical_backfill(
@@ -1033,17 +1048,10 @@ class Corporation:
                     job=type("IndustryJobPayload", (), j)(),
                     sde_session=self._db_sde.session,
                     market_price_map=market_price_map,
-                    invention_unit_cost_per_run=(
-                        float((invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run"))
-                        if (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run") is not None
-                        else None
-                    ),
-                    invention_cost_source=str(
-                        (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("source") or ""
-                    )
-                    or None,
+                    **invention_cost_source_for(invention_cost_by_blueprint_type, j.get("blueprint_type_id")),
                     blueprint_provenance=blueprint_provenance,
                     owned_input_unit_cost_by_type_id=historical_input_costs,
+                    invention_refresh=invention_refresh,
                 )
                 rows.append(
                     {
@@ -1078,6 +1086,7 @@ class Corporation:
                         "historical_input_costs": snapshot.get("historical_input_costs"),
                         "copy_cost": snapshot.get("copy_cost"),
                         "invention_cost": snapshot.get("invention_cost"),
+                        "invention_cost_unknown_reason": snapshot.get("invention_cost_unknown_reason"),
                         "total_build_cost": snapshot.get("total_cost"),
                         "unit_build_cost": snapshot.get("unit_cost"),
                         "build_cost_source": snapshot.get("source"),
@@ -1184,8 +1193,8 @@ class Corporation:
                         if isinstance(name, str) and name:
                             region_name_cache[region_id] = name
                             return name
-                except Exception:
-                    pass
+                except ESI_REQUEST_ERRORS as exc:
+                    logging.warning("Corporation market orders: region %s name unavailable: %s", region_id, exc)
                 region_name_cache[region_id] = None
                 return None
 
@@ -1215,8 +1224,10 @@ class Corporation:
                                             region_id = region_id_val
                     if region_id:
                         region_name = resolve_region_name(region_id)
-                except Exception:
-                    pass
+                except ESI_REQUEST_ERRORS as exc:
+                    logging.warning(
+                        "Corporation market orders: location %s name/region unavailable: %s", location_id, exc
+                    )
                 resolved = (location_name, region_id, region_name)
                 location_region_cache[location_id] = resolved
                 return resolved

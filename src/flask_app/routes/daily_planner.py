@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, request
 
 from flask_app.bootstrap import require_ready
 from flask_app.deps import get_state
@@ -86,9 +86,11 @@ def analytics():
 def market_intel_status():
     state = get_state()
     mij = getattr(state, "_market_intelligence_job", None)
+    # In the API envelope: the planner page reads data (the raw status had no "status": "success",
+    # so the page always saw an empty status).
     if mij is None:
-        return jsonify({"status": "not_started", "last_completed_at": None, "last_error": None})
-    return jsonify(mij.get_status())
+        return ok(data={"running": False, "not_started": True, "last_completed_at": None, "last_error": None})
+    return ok(data=mij.get_status())
 
 
 @daily_planner_bp.get("/planner/debug/overview-fixture")

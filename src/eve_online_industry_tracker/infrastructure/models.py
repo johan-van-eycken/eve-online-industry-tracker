@@ -173,6 +173,9 @@ class CharacterRealizedSalesLedgerModel(BaseApp):
     fee_capture_mode: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     confidence: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     notes: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
+    # The fee estimate's inputs (realized_profit.fee_inputs_fingerprint): a row whose inputs differ
+    # from the current ones is stale and rebuilt on read. NULL (a row from before it): stale.
+    fee_inputs: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -491,6 +494,12 @@ class CharacterIndustryJobsModel(BaseApp):
     historical_input_costs: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     copy_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     invention_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Why invention_cost is unknown (the realized estimate had no inputs):
+    # the build cost is then a lower bound and feedback skips its sales.
+    invention_cost_unknown_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Why materials_cost is a lower bound (the historical backfill found no
+    # market history price for a material): realized profit names it.
+    materials_cost_lower_bound_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     total_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     unit_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     build_cost_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -538,6 +547,12 @@ class CorporationIndustryJobsModel(BaseApp):
     historical_input_costs: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     copy_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     invention_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Why invention_cost is unknown (the realized estimate had no inputs):
+    # the build cost is then a lower bound and feedback skips its sales.
+    invention_cost_unknown_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Why materials_cost is a lower bound (the historical backfill found no
+    # market history price for a material): realized profit names it.
+    materials_cost_lower_bound_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     total_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     unit_build_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     build_cost_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -1188,6 +1203,9 @@ class MarketDepthCacheModel(BaseApp):
     spot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     competition_index: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     snapshot_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # NULL on a fresh snapshot; on a kept, stale one why it was not refreshed
+    # (the collector marks it, every reader shows it).
+    stale_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 class InventionOutcomeLogModel(BaseApp):
@@ -1215,3 +1233,47 @@ class MarginCorrelationCacheModel(BaseApp):
     is_squeeze_sensitive: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     data_points: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     computed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RealizedInventionDecryptorChoiceModel(BaseApp):
+    """The decryptor the last published product overview invents each
+    blueprint with (IndustryService.realized_invention_inputs), kept so the
+    realized invention estimate knows it after a restart. Replaced as a
+    whole on every publish; a blueprint the overview does not plan has no row."""
+
+    __tablename__ = "realized_invention_decryptor_choices"
+
+    blueprint_type_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    #: None: invented without a decryptor.
+    decryptor_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    decryptor_type_name: Mapped[str] = mapped_column(String, nullable=False)
+    probability_multiplier: Mapped[float] = mapped_column(Float, nullable=False)
+    me_modifier: Mapped[int] = mapped_column(Integer, nullable=False)
+    te_modifier: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_run_modifier: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: The producer's DecryptorChoice.reason.
+    choice_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    set_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class RealizedInventionDecryptorPublishModel(BaseApp):
+    """The marker of the last decryptor-choice publish (one row, id 1), so an
+    overview that planned no invention (no choice rows) is told apart from no
+    overview yet (no marker), also after a restart."""
+
+    __tablename__ = "realized_invention_decryptor_publish"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    choice_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AppMetaModel(BaseApp):
+    """Small persisted key/value markers of the app DB, e.g. that a one-time
+    data fix ran (corp_transfer_costs.restamp_all_blended_corp_transfer_lots_once)."""
+
+    __tablename__ = "app_meta"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

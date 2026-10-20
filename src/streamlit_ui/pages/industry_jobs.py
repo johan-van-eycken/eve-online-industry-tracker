@@ -40,7 +40,7 @@ def _parse_iso(value: Any) -> datetime | None:
         raw = raw[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -152,6 +152,8 @@ def _render_slot_card(job: dict[str, Any]) -> None:
         </div>""",
         unsafe_allow_html=True,
     )
+    for line in _job_cost_lines(job):
+        st.caption(line)
 
 
 def _render_summary_metrics(jobs: list[dict[str, Any]]) -> None:
@@ -402,14 +404,38 @@ def _render_card_view(jobs: list[dict[str, Any]], char_options: dict[int, str], 
         st.divider()
 
 
-def _render_table_view(jobs: list[dict[str, Any]]) -> None:
-    """Render an AG-Grid table view of active jobs."""
-    runtime = require_aggrid()
+#: The job's build cost and invention cost reason (asset provenance). Shown
+#: where the jobs payload carries them; /industry_active_jobs does not today,
+#: so nothing is shown (and nothing is shown as 0) until it does.
+_JOB_COST_KEYS = ("total_build_cost", "unit_build_cost", "invention_cost_unknown_reason")
 
+
+def _job_cost_lines(job: dict[str, Any]) -> list[str]:
+    """Card captions: the build cost (total, per unit) and why the invention
+    cost is unknown, for the keys present and set; [] otherwise."""
+    lines: list[str] = []
+    total = job.get("total_build_cost")
+    unit = job.get("unit_build_cost")
+    if total is not None:
+        per_unit = f" ({format_isk_eu(unit)} per unit)" if unit is not None else ""
+        lines.append(f"Build cost: {format_isk_eu(total)}{per_unit}")
+    elif unit is not None:
+        lines.append(f"Build cost: {format_isk_eu(unit)} per unit")
+    reason = job.get("invention_cost_unknown_reason")
+    if reason:
+        lines.append(f"Invention cost unknown: {reason}")
+    return lines
+
+
+def _table_rows(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The table view's rows; the Build Cost and Cost Note columns only when
+    a job in the payload carries the cost keys (None/"" for one that lacks
+    them: unknown, not 0)."""
+    with_costs = any(key in job for job in jobs for key in _JOB_COST_KEYS)
     rows = []
     for job in jobs:
         progress = _progress_fraction(job.get("start_date"), job.get("end_date"))
-        rows.append({
+        row = {
             "Icon": (
                 blueprint_image_url(job.get("blueprint_type_id"), is_bpc=True, size=32)
                 if job.get("activity_name") in {"Copying", "Invention"}
@@ -425,10 +451,21 @@ def _render_table_view(jobs: list[dict[str, Any]]) -> None:
             "Time Remaining": _format_time_remaining(job.get("end_date")),
             "Duration": _format_duration(job.get("duration_seconds", 0)),
             "Install Cost": float(job.get("cost", 0) or 0),
-            "Start": str(job.get("start_date") or "")[:16],
-            "End": str(job.get("end_date") or "")[:16],
-        })
+        }
+        if with_costs:
+            row["Build Cost"] = job.get("total_build_cost")
+            row["Cost Note"] = str(job.get("invention_cost_unknown_reason") or "")
+        row["Start"] = str(job.get("start_date") or "")[:16]
+        row["End"] = str(job.get("end_date") or "")[:16]
+        rows.append(row)
+    return rows
 
+
+def _render_table_view(jobs: list[dict[str, Any]]) -> None:
+    """Render an AG-Grid table view of active jobs."""
+    runtime = require_aggrid()
+
+    rows = _table_rows(jobs)
     df = pd.DataFrame(rows)
 
     render_aggrid_table(
@@ -437,9 +474,10 @@ def _render_table_view(jobs: list[dict[str, Any]]) -> None:
         key="industry_slots_table",
         image_cols=["Icon"],
         image_renderer=js_icon_cell_renderer(JsCode=runtime.js_code),
-        isk_cols=["Install Cost"],
+        isk_cols=[col for col in ("Install Cost", "Build Cost") if col in df.columns],
         number_cols_0=["Runs"],
         number_cols_2=["Progress"],
         height=min(700, 40 + len(rows) * 35),
         empty_message="No active industry jobs.",
     )
+

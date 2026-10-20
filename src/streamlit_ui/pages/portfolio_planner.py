@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from typing import Any, cast
+import logging
+from typing import Any, Callable, cast
 
 import pandas as pd
 import streamlit as st
@@ -20,7 +21,7 @@ from streamlit_ui.state.industry_builder_page import (
     overview_refresh_is_active,
     start_overview_refresh_job,
 )
-from streamlit_ui.state.industry_builder_ui import filter_overview_rows
+from streamlit_ui.state.industry_builder_ui import filter_overview_rows, unknown_value_hidden_notes
 from streamlit_ui.shopping_list import (
     DIFFERENT_REFRESHES_WARNING,
     aggregate_shopping_list_with_stale,
@@ -35,6 +36,7 @@ from streamlit_ui.state.industry_snapshot_page import (
 )
 from streamlit_ui.eve_constants import ACTIVITY_LAB_IDS, ACTIVITY_REACTION_IDS
 from eve_online_industry_tracker.application.industry.overview_row import get_profit_upper_bound_reason
+from eve_online_industry_tracker.application.industry.portfolio_service import IndustryPortfolioService
 
 _ALL_META_GROUPS = {"Tech I", "Tech II", "Tech III", "Faction", "Storyline", "Other"}
 _DEFAULT_META_GROUPS_ON = {"Tech I", "Tech II", "Faction", "Storyline", "Other"}
@@ -43,7 +45,9 @@ _HARD_DISQUALIFIERS = [
     (lambda r: bool(r.get("blueprint_sde_fallback")), "No owned blueprint (SDE fallback)"),
     (lambda r: str(r.get("price_anomaly_risk") or "").strip() == "High", "High price anomaly risk"),
     (lambda r: str(r.get("pricing_confidence") or "").strip().lower() == "low", "Low pricing confidence"),
-    (lambda r: float(r.get("profit_amount") or 0.0) <= 0.0, "Unprofitable"),
+    # An unknown profit is not a loss: it is named as unknown (the user ruled).
+    (lambda r: _known_float(r.get("profit_amount")) is None, "Profit unknown"),
+    (lambda r: float(r.get("profit_amount")) <= 0.0, "Unprofitable"),
 ]
 
 _LIQUIDITY_SCORES: dict[str, float] = {
@@ -60,6 +64,36 @@ _CONFIDENCE_SCORES: dict[str, float] = {
     "Medium": 0.5,
     "Low": 0.0,
 }
+
+
+def _known_float(value: Any) -> float | None:
+    """A known numeric value, or None when it is missing or not a number (unknown, not 0)."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+#: The scoring inputs of the Balanced composite: (label, row key).
+_SCORE_INPUTS: tuple[tuple[str, str], ...] = (
+    ("ISK/hour", "isk_per_hour"),
+    ("return on capital", "return_on_capital"),
+    ("profit", "profit_amount"),
+)
+
+
+def _unknown_score_inputs(row: dict[str, Any], objective: str = "Balanced") -> list[str]:
+    """The labels of the row's unknown scoring inputs for `objective`; its
+    score is unknown when any is (not scored as 0)."""
+    if objective == "Max ISK/hr":
+        inputs: tuple[tuple[str, str], ...] = (("ISK/hour", "isk_per_hour"),)
+    elif objective == "Capital Turnover":
+        inputs = (("cycle ISK/day", "isk_per_cycle_day"),)
+    else:
+        inputs = _SCORE_INPUTS
+    return [label for label, key in inputs if _known_float(row.get(key)) is None]
 
 
 def _row_blueprint_type_id(row: dict) -> int:
@@ -123,15 +157,14 @@ def _apply_hard_disqualifiers(
 # ---------------------------------------------------------------------------
 
 def _compute_normalization_context(rows: list[dict[str, Any]]) -> dict[str, float]:
-    def safe_float(v: Any) -> float:
-        try:
-            return float(v or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+    """The min/max of each scoring input over the rows where it is known (an
+    unknown value is left out, not counted as 0)."""
+    def known(key: str) -> list[float]:
+        return [value for r in rows if (value := _known_float(r.get(key))) is not None]
 
-    isk_vals = [safe_float(r.get("isk_per_hour")) for r in rows]
-    profit_vals = [safe_float(r.get("profit_amount")) for r in rows]
-    roc_vals = [min(safe_float(r.get("return_on_capital")), 5.0) for r in rows]
+    isk_vals = known("isk_per_hour")
+    profit_vals = known("profit_amount")
+    roc_vals = [min(value, 5.0) for value in known("return_on_capital")]
     return {
         "isk_min": min(isk_vals, default=0.0),
         "isk_max": max(isk_vals, default=1.0),
@@ -149,16 +182,14 @@ def _normalize(value: float, lo: float, hi: float) -> float:
     return max(0.0, min(1.0, (value - lo) / span))
 
 
-def _score_row(row: dict[str, Any], ctx: dict[str, float]) -> float:
-    def sf(v: Any) -> float:
-        try:
-            return float(v or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    isk_score = _normalize(sf(row.get("isk_per_hour")), ctx["isk_min"], ctx["isk_max"])
-    roc_score = _normalize(min(sf(row.get("return_on_capital")), 5.0), ctx["roc_min"], ctx["roc_max"])
-    profit_score = _normalize(sf(row.get("profit_amount")), ctx["profit_min"], ctx["profit_max"])
+def _score_row(row: dict[str, Any], ctx: dict[str, float]) -> float | None:
+    """The Balanced composite, or None (unknown) when an input is unknown:
+    an unknown ISK/hour, return on capital or profit is not scored as 0."""
+    if _unknown_score_inputs(row):
+        return None
+    isk_score = _normalize(float(row["isk_per_hour"]), ctx["isk_min"], ctx["isk_max"])
+    roc_score = _normalize(min(float(row["return_on_capital"]), 5.0), ctx["roc_min"], ctx["roc_max"])
+    profit_score = _normalize(float(row["profit_amount"]), ctx["profit_min"], ctx["profit_max"])
     liq_score = _LIQUIDITY_SCORES.get(str(row.get("liquidity_indicator") or "Unknown").strip(), 0.0)
     conf_score = _CONFIDENCE_SCORES.get(str(row.get("pricing_confidence") or "Low").strip().title(), 0.0)
 
@@ -197,35 +228,29 @@ def _score_row(row: dict[str, Any], ctx: dict[str, float]) -> float:
 SCORING_OBJECTIVES = ["Balanced", "Max ISK/hr", "Capital Turnover"]
 
 
+def _sort_scored(scored: list[tuple[dict[str, Any], float | None]]) -> list[tuple[dict[str, Any], float | None]]:
+    """Highest score first; the unknown scores (None) last, never ranked as 0."""
+    return sorted(scored, key=lambda pair: (pair[1] is not None, pair[1] or 0.0), reverse=True)
+
+
+def _per_million(value: Any) -> float | None:
+    known = _known_float(value)
+    return None if known is None else round(known / 1_000_000, 1)
+
+
 def _rank_candidates(
     rows: list[dict[str, Any]],
     objective: str = "Balanced",
-) -> list[tuple[dict[str, Any], float]]:
+) -> list[tuple[dict[str, Any], float | None]]:
     if not rows:
         return []
     if objective == "Max ISK/hr":
-        def _isk_key(row: dict) -> float:
-            try:
-                return float(row.get("isk_per_hour") or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-        scored = [(row, round(_isk_key(row) / 1_000_000, 1)) for row in rows]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored
+        return _sort_scored([(row, _per_million(row.get("isk_per_hour"))) for row in rows])
     if objective == "Capital Turnover":
-        def _ct_key(row: dict) -> float:
-            try:
-                return float(row.get("isk_per_cycle_day") or 0.0)
-            except (TypeError, ValueError):
-                return 0.0
-        scored = [(row, round(_ct_key(row) / 1_000_000, 1)) for row in rows]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
-        return scored
+        return _sort_scored([(row, _per_million(row.get("isk_per_cycle_day"))) for row in rows])
     # Default: Balanced composite
     ctx = _compute_normalization_context(rows)
-    scored = [(row, _score_row(row, ctx)) for row in rows]
-    scored.sort(key=lambda pair: pair[1], reverse=True)
-    return scored
+    return _sort_scored([(row, _score_row(row, ctx)) for row in rows])
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +327,10 @@ def _warnings(row: dict[str, Any]) -> list[str]:
     me = row.get("blueprint_me")
     prep_pct = row.get("prep_time_fraction_pct")
     margin = sf(row.get("profit_margin_fraction"))
+
+    unknown_inputs = _unknown_score_inputs(row)
+    if unknown_inputs:
+        warns.append(f"Score unknown: {', '.join(f'{label} unknown' for label in unknown_inputs)}")
 
     upper_bound = get_profit_upper_bound_reason(row)
     if upper_bound is not None:
@@ -425,12 +454,60 @@ _LAB_ACTIVITY_IDS = ACTIVITY_LAB_IDS
 _REACTION_ACTIVITY_IDS = ACTIVITY_REACTION_IDS
 
 
-def _fetch_jobs_data() -> dict[str, Any]:
-    """Fetch active industry jobs; returns empty structure on error."""
+def _fetch_jobs_data() -> dict[str, Any] | None:
+    """The active industry jobs, or None after an st.error with the reason.
+
+    The user ruled: without the running jobs the slot summary, the Active?
+    column and the character assignment would be wrong, so the page shows
+    no recommendations until the jobs load."""
     try:
         return fetch_active_industry_jobs()
-    except Exception:
-        return {"jobs": [], "slot_capacities": {}}
+    except RuntimeError as exc:
+        logging.warning("Portfolio planner: active industry jobs could not be loaded: %s", exc)
+        st.error(
+            f"Active industry jobs could not be loaded ({exc}). No recommendations are shown until they "
+            "load: the free slots and the character assignment depend on the running jobs."
+        )
+        return None
+
+
+def _fetch_optional(
+    fetch_fn: Callable[[tuple[int, ...]], dict],
+    ids: tuple[int, ...],
+    *,
+    what: str,
+    failed: set[str] | None = None,
+) -> dict:
+    """Run an optional per-candidate fetch; on an API error, warn with the reason and return {}.
+
+    `failed` (one set per page run) remembers the fetches that failed, so a
+    second fetch of the same kind in the run neither repeats the request nor
+    the warning."""
+    if failed is not None and what in failed:
+        return {}
+    try:
+        return fetch_fn(ids)
+    except RuntimeError as exc:
+        logging.warning("Portfolio planner: %s could not be loaded: %s", what, exc)
+        st.warning(f"The {what} could not be loaded ({exc}); the recommendations are shown without it.")
+        if failed is not None:
+            failed.add(what)
+        return {}
+
+
+def _reuse_or_fetch(
+    fetch_fn: Callable[[tuple[int, ...]], dict],
+    ids: tuple[int, ...],
+    *,
+    previous_ids: tuple[int, ...],
+    previous: dict,
+    what: str,
+    failed: set[str],
+) -> dict:
+    """The earlier result of this run when it already covers `ids`, else a fetch."""
+    if set(ids) <= set(previous_ids):
+        return previous
+    return _fetch_optional(fetch_fn, ids, what=what, failed=failed)
 
 
 def _parse_end_date(end_date: Any) -> datetime | None:
@@ -444,7 +521,7 @@ def _parse_end_date(end_date: Any) -> datetime | None:
         else:
             dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
         return dt.replace(tzinfo=timezone.utc)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -665,7 +742,9 @@ def _reorder_tag(row: dict, reorder_alerts: dict) -> str:
     return ""   # no_data or missing → don't show
 
 
-def _apply_track_record_multiplier(score: float, row: dict, track_record: dict) -> float:
+def _apply_track_record_multiplier(score: float | None, row: dict, track_record: dict) -> float | None:
+    if score is None:
+        return None  # unknown stays unknown
     type_id_str = str(int(row.get("type_id") or 0))
     rec = track_record.get(type_id_str) or {}
     status = rec.get("status")
@@ -693,7 +772,7 @@ _SCORE_COLUMN_LABELS: dict[str, str] = {
 }
 
 
-def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None, objective: str = "Balanced", track_record: dict | None = None) -> None:
+def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float | None]], active_type_ids: set[int] | None = None, assignment: dict[str, str] | None = None, reorder_alerts: dict | None = None, objective: str = "Balanced", track_record: dict | None = None) -> None:
     if not ranked:
         st.info("No eligible products to recommend with current filters and disqualification rules.")
         return
@@ -733,10 +812,13 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
             "Product": str(row.get("type_name") or row.get("type_id") or "Unknown"),
             score_col_label: score,
             "Assign to": assigned_char,
-            "Profit (M)": round(sf(row.get("profit_amount")) / 1_000_000, 1),
-            "ISK/Hr (M)": round(sf(row.get("isk_per_hour")) / 1_000_000, 1),
-            "Margin %": round(sf(row.get("profit_margin_fraction")) * 100, 1),
-            "ROC %": round(sf(row.get("return_on_capital")) * 100, 0),
+            # None (an empty cell) where the value is unknown, never 0.
+            "Profit (M)": _per_million(row.get("profit_amount")),
+            "ISK/Hr (M)": _per_million(row.get("isk_per_hour")),
+            "Margin %": (None if (margin := _known_float(row.get("profit_margin_fraction"))) is None
+                         else round(margin * 100, 1)),
+            "ROC %": (None if (roc := _known_float(row.get("return_on_capital"))) is None
+                      else round(roc * 100, 0)),
             "Liquidity": str(row.get("liquidity_indicator") or "Unknown"),
             "DOS": round(dos, 1) if dos is not None else None,
             "BPC": _bpc_label(row),
@@ -777,7 +859,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
                 ci = row.get("manufacturing_cost_index")
                 anomaly_reasons = row.get("price_anomaly_reasons")
 
-                st.caption(f"**Score:** {score}")
+                st.caption(f"**Score:** {'unknown' if score is None else score}")
                 # Task 12: the parallel invention/copy lanes the build time assumes.
                 lane_notes = [str(n) for n in (mj.get("elapsed_lane_notes") or []) if n]
                 st.caption(
@@ -792,6 +874,34 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float]], ac
                     st.caption(f"**Cost index:** {float(ci) * 100:.2f}%")
                 if isinstance(anomaly_reasons, list) and anomaly_reasons:
                     st.caption(f"**Anomaly:** {'; '.join(anomaly_reasons)}")
+
+
+def _row_key(row: dict[str, Any]) -> tuple[Any, Any]:
+    """One overview row: the producer's row id, with the type as a fallback."""
+    return row.get("overview_row_id"), row.get("type_id")
+
+
+def confidence_capped_hint(rows: list[dict[str, Any]], *, shown_rows: list[dict[str, Any]]) -> str | None:
+    """The API's "N rows capped: job fees unknown" hint (portfolio_service)
+    for this page (Task A item 4): the rows the filters or disqualifiers
+    left out of the result (not in `shown_rows`, Task A fix round 1 M2)
+    whose pricing confidence is held at Medium because their job fees are
+    unknown (their profit is an upper bound)."""
+    # By key, not identity: filter_overview_rows (st.cache_data) returns copies.
+    shown = {_row_key(row) for row in shown_rows}
+    capped = sum(
+        1 for row in rows
+        if _row_key(row) not in shown
+        and str(row.get("pricing_confidence") or "").strip().lower() == "medium"
+        and get_profit_upper_bound_reason(row) is not None
+    )
+    return IndustryPortfolioService.confidence_capped_hint(capped)
+
+
+def _render_confidence_capped_hint(rows: list[dict[str, Any]], *, shown_rows: list[dict[str, Any]]) -> None:
+    hint = confidence_capped_hint(rows, shown_rows=shown_rows)
+    if hint:
+        st.info(f"{hint} (their pricing confidence is held at Medium)")
 
 
 def _render_excluded_section(disqualified: list[tuple[dict[str, Any], str]]) -> None:
@@ -1009,7 +1119,7 @@ def render() -> None:
         return
 
     fs = _read_industry_builder_filter_state()
-    filtered_rows = filter_overview_rows(
+    filter_args = (
         overview_rows,
         tuple(sorted(fs["enabled_meta_groups"])),
         fs["have_skills_only"],
@@ -1020,6 +1130,9 @@ def render() -> None:
         tuple(sorted(fs["excluded_liquidity_indicators"])),
         tuple(sorted(fs["excluded_anomaly_risks"])),
     )
+    filtered_rows = filter_overview_rows(*filter_args)
+    for hidden_note in unknown_value_hidden_notes(*filter_args):
+        st.info(hidden_note)
 
     eligible_rows, disqualified = _apply_hard_disqualifiers(filtered_rows)
 
@@ -1031,6 +1144,20 @@ def render() -> None:
 
     ranked = _rank_candidates(eligible_rows, objective=scoring_objective)
 
+    _render_header_banner(overview_rows, filtered_rows, eligible_rows, overview_meta)
+
+    if overview_refresh_is_active():
+        return
+
+    # Fetch active jobs once for the slot summary header and the "Active?"
+    # column; without them the page stops (the user ruled).
+    jobs_data = _fetch_jobs_data()
+    if jobs_data is None:
+        return
+
+    # One failed optional fetch is warned once per run and not repeated.
+    failed_fetches: set[str] = set()
+
     # Apply track record multipliers after ranking
     # (track_record is fetched below after top_candidates are determined,
     # but we need to apply it before final re-sort — so we fetch it on top_15 type_ids)
@@ -1041,23 +1168,14 @@ def render() -> None:
     }))
     _track_record_pre: dict[str, dict] = {}
     if _pre_type_ids:
-        try:
-            _track_record_pre = fetch_type_track_record(_pre_type_ids)
-        except Exception:
-            _track_record_pre = {}
+        _track_record_pre = _fetch_optional(fetch_type_track_record, _pre_type_ids, what="track record",
+                                            failed=failed_fetches)
     ranked = [
         (row, _apply_track_record_multiplier(score, row, _track_record_pre))
         for row, score in ranked
     ]
-    ranked.sort(key=lambda pair: pair[1], reverse=True)
+    ranked = _sort_scored(ranked)
 
-    _render_header_banner(overview_rows, filtered_rows, eligible_rows, overview_meta)
-
-    if overview_refresh_is_active():
-        return
-
-    # Fetch active jobs once for the slot summary header and the "Active?" column
-    jobs_data = _fetch_jobs_data()
     _render_slot_summary_header(jobs_data)
     active_type_ids = _build_active_type_ids(jobs_data)
 
@@ -1072,10 +1190,10 @@ def render() -> None:
     )
     skill_qual: dict[str, dict[str, bool]] = {}
     if blueprint_type_ids_for_qual:
-        try:
-            skill_qual = fetch_blueprint_skill_qualification(blueprint_type_ids_for_qual)
-        except Exception:
-            skill_qual = {}
+        skill_qual = _fetch_optional(
+            fetch_blueprint_skill_qualification, blueprint_type_ids_for_qual, what="blueprint skill qualification",
+            failed=failed_fetches,
+        )
     assignment = _compute_character_assignment(top_candidates, skill_qual, jobs_data)
 
     candidate_type_ids = tuple(sorted({
@@ -1085,21 +1203,19 @@ def render() -> None:
     }))
     reorder_alerts: dict[str, dict] = {}
     if candidate_type_ids:
-        try:
-            reorder_alerts = fetch_reorder_alerts(candidate_type_ids)
-        except Exception:
-            reorder_alerts = {}
+        reorder_alerts = _fetch_optional(fetch_reorder_alerts, candidate_type_ids, what="reorder alerts",
+                                         failed=failed_fetches)
 
     track_record: dict[str, dict] = {}
     if candidate_type_ids:
-        try:
-            track_record = fetch_type_track_record(candidate_type_ids)
-        except Exception:
-            track_record = {}
+        # Reuses the pre-ranking result when it covers these ids.
+        track_record = _reuse_or_fetch(fetch_type_track_record, candidate_type_ids, previous_ids=_pre_type_ids,
+                                       previous=_track_record_pre, what="track record", failed=failed_fetches)
 
     tab_recommendations, tab_shopping = st.tabs(["Recommendations", "Shopping List"])
 
     with tab_recommendations:
+        _render_confidence_capped_hint(overview_rows, shown_rows=eligible_rows)
         _render_recommendations_table(ranked[:15], active_type_ids=active_type_ids, assignment=assignment, reorder_alerts=reorder_alerts, objective=scoring_objective, track_record=track_record)
         _render_excluded_section(disqualified)
 

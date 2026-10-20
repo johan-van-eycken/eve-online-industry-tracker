@@ -19,6 +19,10 @@ def get_admin_settings():
     return ok(data={
         "schema": ADMIN_SETTINGS_SCHEMA,
         "values": mgr.get_all(),
+        # The stored invalid values (shown as errors on the settings page, never replaced).
+        "invalid": mgr.invalid(),
+        # What the load changed in memory (the single-rig migration) until the next save.
+        "notices": mgr.notices(),
     })
 
 

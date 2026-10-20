@@ -170,8 +170,12 @@ FAKE_GAS_COMPRESSED = 980008
 
 SKILL_SIMPLE_ORE_PROCESSING = 60377
 SKILL_COMPLEX_ORE_PROCESSING = 60380
+SKILL_UBIQUITOUS_MOON_ORE_PROCESSING = 46152
+SKILL_ICE_PROCESSING = 18025
 SKILL_NAMES: dict[int, str] = {SKILL_SIMPLE_ORE_PROCESSING: "Simple Ore Processing",
-                               SKILL_COMPLEX_ORE_PROCESSING: "Complex Ore Processing"}
+                               SKILL_COMPLEX_ORE_PROCESSING: "Complex Ore Processing",
+                               SKILL_UBIQUITOUS_MOON_ORE_PROCESSING: "Ubiquitous Moon Ore Processing",
+                               SKILL_ICE_PROCESSING: "Ice Processing"}
 
 COMPRESSIBLE_TYPES: dict[int, dict[str, Any]] = {
     FAKE_ORE_BASE: {"compressedTypeID": FAKE_ORE_COMPRESSED},
@@ -180,8 +184,32 @@ COMPRESSIBLE_TYPES: dict[int, dict[str, Any]] = {
 }
 
 
-def _dogma(*attributes: tuple[int, float]) -> dict[str, Any]:
-    return {"dogmaAttributes": [{"attributeID": a, "value": v} for a, v in attributes]}
+def _dogma(*attributes: tuple[int, float], effects: tuple[int, ...] = ()) -> dict[str, Any]:
+    row: dict[str, Any] = {"dogmaAttributes": [{"attributeID": a, "value": v} for a, v in attributes]}
+    if effects:
+        row["dogmaEffects"] = [{"effectID": e, "isDefault": e == 2663} for e in effects]
+    return row
+
+
+# The reprocessing rigs' effects (CCP's dogmaEffects, build 3607705): 6673 applies the
+# security modifier to the rig's own 717; 6674/6675/6678 pre-assign the rig's 717 to the
+# reprocessing service's (group 1322) refiningYieldNormalOres 2444 / MoonOres 2445 / Ice 2448.
+DOGMA_EFFECTS: dict[int, dict[str, Any]] = {
+    2663: {"name": "rigSlot", "effectCategoryID": 0},
+    6673: {"name": "structureReprocessingRigSecurityModification", "effectCategoryID": 0,
+           "modifierInfo": [{"domain": "itemID", "func": "ItemModifier", "modifiedAttributeID": 717,
+                             "modifyingAttributeID": 2358, "operation": 4}]},
+    **{effect: {"name": name, "effectCategoryID": 0,
+                "modifierInfo": [{"domain": "structureID", "func": "LocationGroupModifier", "groupID": 1322,
+                                  "modifiedAttributeID": attribute, "modifyingAttributeID": 717,
+                                  "operation": -1}]}
+       for effect, name, attribute in [(6674, "structureRigAsteroidOreYield", 2444),
+                                       (6675, "structureRigMoonOreYield", 2445),
+                                       (6678, "structureRigIceYield", 2448)]},
+    16: {"name": "online", "effectCategoryID": 4},   # an effect without modifiers
+}
+_RIG_EFFECTS = {46633: (6674,), 46634: (6674,), 46635: (6678,), 46636: (6678,), 46637: (6675,), 46638: (6675,),
+                46639: (6674, 6675, 6678), 46640: (6674, 6675, 6678)}
 
 
 TYPE_DOGMA: dict[int, dict[str, Any]] = {
@@ -201,12 +229,16 @@ TYPE_DOGMA: dict[int, dict[str, Any]] = {
     3389: _dogma((181, 165.0), (379, 2.0)),                 # Reprocessing Efficiency
     SKILL_SIMPLE_ORE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
     SKILL_COMPLEX_ORE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
+    SKILL_UBIQUITOUS_MOON_ORE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
+    SKILL_ICE_PROCESSING: _dogma((181, 165.0), (379, 2.0)),
     27174: _dogma((331, 8.0), (379, 4.0)),                  # Zainou 'Beancounter' Reprocessing RX-804
     35835: _dogma((2339, -20.0), (2722, 2.0)),              # Athanor
     35836: _dogma((2339, -25.0), (2722, 5.5)),              # Tatara
-    35899: _dogma((717, 0.5), (2444, 0.5)),                 # Standup Reprocessing Facility I
-    **{rig: _dogma((717, base), (2355, 1.0), (2356, 1.06), (2357, 1.12), (2358, 1.0))
-       for rig, base in [(46633, 0.51), (46634, 0.53), (46639, 0.51), (46640, 0.53)]},
+    35899: _dogma((717, 0.5), (2444, 0.5), (2445, 0.5), (2448, 0.5), effects=(16,)),  # Standup Reprocessing Facility I
+    **{rig: _dogma((717, base), (2355, 1.0), (2356, 1.06), (2357, 1.12), (2358, 1.0),
+                   effects=(2663, 6673, *_RIG_EFFECTS[rig]))
+       for rig, base in [(46633, 0.51), (46634, 0.53), (46635, 0.51), (46636, 0.53), (46637, 0.51),
+                         (46638, 0.53), (46639, 0.51), (46640, 0.53)]},
 }
 
 # npcStations: made-up station ids with the SDE's reprocessing columns
@@ -241,7 +273,8 @@ def fake_ore_data():
     """OreData built from the tables above, through the production builder."""
     from eve_online_industry_tracker.infrastructure.sde.ore import ore_data_from_tables
 
-    return ore_data_from_tables(compressible_types=COMPRESSIBLE_TYPES, type_dogma=TYPE_DOGMA)
+    return ore_data_from_tables(compressible_types=COMPRESSIBLE_TYPES, type_dogma=TYPE_DOGMA,
+                                dogma_effects=DOGMA_EFFECTS)
 
 
 @cache

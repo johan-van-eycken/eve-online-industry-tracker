@@ -27,6 +27,48 @@ def section_empty_message(analytics: dict | None, key: str, default: str) -> tup
     return (str(reason), True) if reason else (default, False)
 
 
+def market_depth_stale_caption(items: list[dict] | None) -> str | None:
+    """Caption naming the items whose market depth row is stale (the collector
+    kept the previous snapshot) and why, or None when every row is fresh."""
+    stale = [i for i in (items or []) if i.get("market_stale_reason")]
+    if not stale:
+        return None
+    return "Stale market depth (previous snapshot kept): " + "; ".join(
+        f"{i.get('type_name') or i.get('type_id')}: {i.get('market_stale_reason')}"
+        + (f" (snapshot {i.get('market_snapshot_at')})" if i.get("market_snapshot_at") else "")
+        for i in stale
+    )
+
+
+def competition_rows(items: list[dict] | None) -> list[dict]:
+    """The Competition Monitor rows: every item with a market depth row. An
+    unknown competition index (no velocity) shows as unknown, not 0; a stale
+    row names its reason next to its snapshot time."""
+    rows = []
+    for i in items or []:
+        if i.get("competitor_units") is None:
+            continue   # no market depth row
+        raw_ci = i.get("competition_index")
+        if raw_ci is None:
+            ci_display, supply_display = "unknown (no sales velocity)", "unknown"
+        else:
+            ci = float(raw_ci)
+            badge = "🔴" if ci > 4.0 else ("🟡" if ci >= 2.0 else "🟢")
+            ci_display, supply_display = f"{badge} {ci:.2f}", f"{ci * 30:.0f}d"
+        updated = str(i.get("market_snapshot_at") or "—")
+        if i.get("market_stale_reason"):
+            updated = f"{updated} (stale: {i.get('market_stale_reason')})"
+        rows.append({
+            "Item": str(i.get("type_name") or i.get("type_id") or ""),
+            "Decision": str(i.get("decision") or ""),
+            "Competition Index": ci_display,
+            "Supply Days (est.)": supply_display,
+            "Competitor Units": int(i.get("competitor_units") or 0),
+            "Market Last Updated": updated,
+        })
+    return rows
+
+
 def _render_empty_section(analytics: dict, key: str, default: str) -> None:
     message, failed = section_empty_message(analytics, key, default)
     if failed:
@@ -85,32 +127,17 @@ def render_tab_analytics(page_state: DailyPlannerPageState) -> None:
     # Section 2: Competition Monitor
     # ------------------------------------------------------------------
     with st.expander("Competition Monitor", expanded=True):
-        items_with_comp = [i for i in items if i.get("competition_index") is not None]
-        if not items_with_comp:
+        rows = competition_rows(items)
+        if not rows:
             _render_empty_section(
                 analytics, "market_depth",
                 "No market depth data yet — run MarketIntelligenceJob first "
                 "(starts automatically every 3h).",
             )
         else:
-            rows = []
-            for i in items_with_comp:
-                ci = float(i.get("competition_index") or 0.0)
-                if ci > 4.0:
-                    ci_badge = "🔴"
-                elif ci >= 2.0:
-                    ci_badge = "🟡"
-                else:
-                    ci_badge = "🟢"
-                supply_days = ci * 30
-                rows.append({
-                    "Item": str(i.get("type_name") or i.get("type_id") or ""),
-                    "Decision": str(i.get("decision") or ""),
-                    "Competition Index": f"{ci_badge} {ci:.2f}",
-                    "Supply Days (est.)": f"{supply_days:.0f}d",
-                    "Competitor Units": int(i.get("competitor_units") or 0),
-                    "Market Last Updated": str(i.get("market_snapshot_at") or "—"),
-                })
+            stale_caption = market_depth_stale_caption(items)
+            if stale_caption:
+                st.caption(stale_caption)
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ------------------------------------------------------------------

@@ -25,7 +25,11 @@ from utils.app_init import (
     _user_friendly_error,
 )
 
+from eve_online_industry_tracker.application.characters.asset_provenance import set_realized_invention_inputs_provider
+from eve_online_industry_tracker.application.characters.character_manager import CharacterRefreshError
+from eve_online_industry_tracker.application.corporations.corporation_manager import CorporationRefreshError
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
+from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.config.admin_settings import AdminSettingsManager
 
@@ -96,6 +100,14 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Loading admin settings...")
         from config.paths import admin_settings_path
         state.admin_settings = AdminSettingsManager(admin_settings_path())
+        # The admin ESI settings apply from the first ESI request (the startup
+        # refresh below), not only after it: the error limiter is a
+        # module-level singleton, and a service kept from an earlier
+        # initialisation is re-wired too.
+        from eve_online_industry_tracker.infrastructure.esi_client import _ESI_ERROR_LIMITER
+        _ESI_ERROR_LIMITER._admin_settings = state.admin_settings
+        if getattr(state, "esi_service", None) is not None:
+            state.esi_service._admin_settings = state.admin_settings
 
         if getattr(state, "shutdown_event", None) is not None and state.shutdown_event.is_set():
             state.init_state = "Shutdown"
@@ -116,15 +128,26 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Initializing characters...")
         state.init_state = "Initializing Characters"
         state.char_manager = init_char_manager(
-            state.cfg_manager, state.db_oauth, state.db_app, state.db_sde
+            state.cfg_manager, state.db_oauth, state.db_app, state.db_sde,
+            admin_settings=state.admin_settings,
         )
+        # A configured character that could not be initialised is named, not only logged.
+        state.init_warnings.extend(
+            f"Character initialisation failed: {message}" for message in getattr(state.char_manager, "init_errors", None) or []
+        )
+        # The realized invention estimate (job cost snapshots, refreshed below)
+        # sizes inventions with the producer's inputs.
+        set_realized_invention_inputs_provider(lambda: IndustryService(state=state).realized_invention_inputs())
         try:
             state.char_manager.refresh_all()
+        except CharacterRefreshError as e:
+            # Every character was refreshed but these; one line each.
+            for name, message in e.errors.items():
+                state.init_warnings.append(f"Character refresh failed for {name}: {message}")
+            logging.warning("Character refresh failed for %d character(s); startup continues: %s",
+                            len(e.errors), ", ".join(e.errors))
         except Exception as e:
-            try:
-                state.init_warnings.append(f"Character refresh failed: {e}")
-            except Exception:
-                pass
+            state.init_warnings.append(f"Character refresh failed: {e}")
             friendly = _user_friendly_error(e)
             if friendly:
                 logging.warning("Character refresh warning (startup continues):\n  %s", friendly.replace("\n", "\n  "))
@@ -144,13 +167,20 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
             state.db_sde,
             state.char_manager,
         )
+        # A director's corporation that could not be initialised is named, not only logged.
+        state.init_warnings.extend(
+            f"Corporation initialisation failed: {message}" for message in getattr(state.corp_manager, "init_errors", None) or []
+        )
         try:
             state.corp_manager.refresh_all()
+        except CorporationRefreshError as e:
+            # Every corporation was refreshed but these; one line each.
+            for name, message in e.errors.items():
+                state.init_warnings.append(f"Corporation refresh failed for {name}: {message}")
+            logging.warning("Corporation refresh failed for %d corporation(s); startup continues: %s",
+                            len(e.errors), ", ".join(e.errors))
         except Exception as e:
-            try:
-                state.init_warnings.append(f"Corporation refresh failed: {e}")
-            except Exception:
-                pass
+            state.init_warnings.append(f"Corporation refresh failed: {e}")
             friendly = _user_friendly_error(e)
             if friendly:
                 logging.warning("Corporation refresh warning (startup continues):\n  %s", friendly.replace("\n", "\n  "))
@@ -164,12 +194,7 @@ def initialize_application(app_state: AppState | None = None, *, refresh_metadat
         logging.info("Initializing data adapters...")
         state.init_state = "Initializing Data Adapters"
         main_character = state.char_manager.get_main_character()
-        state.esi_service = ESIService(main_character.esi_client)
-        state.esi_service._admin_settings = state.admin_settings
-
-        # Wire admin settings into ESI error rate limiter (module-level singleton).
-        from eve_online_industry_tracker.infrastructure.esi_client import _ESI_ERROR_LIMITER
-        _ESI_ERROR_LIMITER._admin_settings = state.admin_settings
+        state.esi_service = ESIService(main_character.esi_client, admin_settings=state.admin_settings)
 
         state.industry_job_manager = IndustryJobManager(state=state)
         state.industry_job_manager.start()

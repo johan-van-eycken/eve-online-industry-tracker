@@ -4,7 +4,7 @@ from flask import Blueprint, request
 
 from flask_app.deps import get_state
 from flask_app.bootstrap import require_ready
-from flask_app.http import ok
+from flask_app.http import ok, ok_batch, optional_id_param
 
 from eve_online_industry_tracker.application.characters.service import CharactersService
 
@@ -35,16 +35,15 @@ def characters_oauth():
 def characters_get_wallet_balances():
     require_ready(get_state())
     svc = CharactersService(state=get_state())
-    return ok(data=svc.get_wallet_balances())
+    return ok_batch(data=svc.get_wallet_balances())
 
 
 @characters_bp.get("/characters/assets")
 def characters_get_assets():
     require_ready(get_state())
     svc = CharactersService(state=get_state())
-    character_id_raw = (request.args.get("character_id") or "").strip()
-    character_id = int(character_id_raw) if character_id_raw.isdigit() else None
-    return ok(data=svc.get_assets(character_id=character_id))
+    character_id = optional_id_param("character_id")
+    return ok_batch(data=svc.get_assets(character_id=character_id))
 
 
 @characters_bp.get("/characters/market_orders")
@@ -60,7 +59,7 @@ def characters_get_market_orders():
         refresh=refresh,
         include_orderbook_comparison=compare,
     )
-    return ok(data=refreshed_orders)
+    return ok_batch(data=refreshed_orders)
 
 
 @characters_bp.get("/characters/realized_profit")
@@ -70,7 +69,6 @@ def characters_get_realized_profit():
     refresh_raw = (request.args.get("refresh") or "0").strip().lower()
     refresh = refresh_raw in {"1", "true", "yes", "y", "on"}
 
-    character_id_raw = (request.args.get("character_id") or "").strip()
-    character_id = int(character_id_raw) if character_id_raw.isdigit() else None
+    character_id = optional_id_param("character_id")
 
     return ok(data=svc.get_realized_profit_ledger(refresh=refresh, character_id=character_id))

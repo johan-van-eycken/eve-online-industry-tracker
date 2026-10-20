@@ -306,9 +306,9 @@ class DailyPlannerRepository:
                     text(
                         "INSERT OR REPLACE INTO market_depth_cache "
                         "(type_id, hub, competitor_units, vwap_5d, spot_sell_price, "
-                        "competition_index, snapshot_at) "
+                        "competition_index, snapshot_at, stale_reason) "
                         "VALUES (:type_id, :hub, :competitor_units, :vwap_5d, "
-                        ":spot_sell_price, :competition_index, :snapshot_at)"
+                        ":spot_sell_price, :competition_index, :snapshot_at, :stale_reason)"
                     ),
                     {
                         "type_id": row.type_id,
@@ -318,6 +318,7 @@ class DailyPlannerRepository:
                         "spot_sell_price": row.spot_sell_price,
                         "competition_index": row.competition_index,
                         "snapshot_at": row.snapshot_at,
+                        "stale_reason": getattr(row, "stale_reason", None),
                     },
                 )
             session.commit()

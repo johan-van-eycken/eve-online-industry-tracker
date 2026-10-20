@@ -21,7 +21,7 @@ def build_character_options(characters: list[dict]) -> dict[int, str]:
             continue
         try:
             character_id = int(raw_id)
-        except Exception:
+        except (ValueError, TypeError):
             continue
 
         label = c.get("character_name") or c.get("name") or raw_id
@@ -51,7 +51,7 @@ def build_owned_blueprint_character_scope_options(
             continue
         try:
             character_id = int(raw_id)
-        except Exception:
+        except (ValueError, TypeError):
             continue
         if character_id <= 0:
             continue
@@ -79,11 +79,11 @@ def build_owned_blueprint_character_corporation_scope_options(
 
         try:
             character_id = int(character.get("character_id") or 0)
-        except Exception:
+        except (ValueError, TypeError):
             character_id = 0
         try:
             corporation_id = int(character.get("corporation_id") or 0)
-        except Exception:
+        except (ValueError, TypeError):
             corporation_id = 0
         if character_id <= 0 or corporation_id <= 0:
             continue
@@ -107,7 +107,7 @@ def build_scope_refreshed_at_map(characters: list[dict[str, Any]]) -> dict[str, 
             continue
         try:
             character_id = int(character.get("character_id") or 0)
-        except Exception:
+        except (ValueError, TypeError):
             character_id = 0
         if character_id <= 0:
             continue
@@ -115,7 +115,7 @@ def build_scope_refreshed_at_map(characters: list[dict[str, Any]]) -> dict[str, 
         result[f"character:{character_id}"] = updated_at
         try:
             corporation_id = int(character.get("corporation_id") or 0)
-        except Exception:
+        except (ValueError, TypeError):
             corporation_id = 0
         if corporation_id > 0:
             result[f"character_and_corporation:{character_id}:{corporation_id}"] = updated_at

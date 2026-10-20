@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
@@ -22,7 +24,7 @@ def _parse_iso_date(value: Any) -> datetime | None:
         raw_value = raw_value[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw_value)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -42,30 +44,77 @@ def camel_case_header(column_name: str) -> str:
     return "".join(part[:1].upper() + part[1:] for part in raw.split("_") if part)
 
 
+#: How long a failed /locations lookup is remembered: the reruns in between
+#: (each widget change) show the same warning without asking again.
+LOCATION_NAMES_FAILURE_MEMO_SECONDS = 60.0
+
+#: id tuple -> (monotonic time of the failure, reason), per process.
+_location_names_failures: dict[tuple[int, ...], tuple[float, str]] = {}
+
+
+class _LocationNamesFailed(RuntimeError):
+    pass
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _location_names_cached(location_ids: tuple[int, ...]) -> dict[int, str]:
+    """One /locations request for these ids; a failure raises, and
+    st.cache_data keeps no result of a call that raised."""
+    response = api_post("/locations", payload={"location_ids": list(location_ids)})
+    if not isinstance(response, dict):
+        # api_post logged the HTTP failure.
+        raise _LocationNamesFailed("the /locations request failed")
+    if response.get("status") not in (None, "success"):
+        raise _LocationNamesFailed(str(response.get("message") or "the /locations request failed"))
+    data = response.get("data") or {}
+    if not isinstance(data, dict):
+        raise _LocationNamesFailed("the /locations response is malformed")
+    resolved: dict[int, str] = {}
+    for location_id in location_ids:
+        info = data.get(str(location_id)) or {}
+        resolved[int(location_id)] = str((info.get("name") if isinstance(info, dict) else None) or location_id)
+    return resolved
+
+
+def reset_location_names_cache() -> None:
+    _location_names_cached.clear()
+    _location_names_failures.clear()
+
+
 def fetch_location_name_map(location_ids: Iterable[Any]) -> dict[int, str]:
+    """{location id: name} for the wallet tables, one /locations request per
+    id set (cached). A failure warns with its reason and is remembered for
+    LOCATION_NAMES_FAILURE_MEMO_SECONDS (not cached as a result), so the
+    reruns in between do not ask again; {} then (the ids are shown)."""
     normalized_ids: list[int] = []
     for value in location_ids:
         try:
             if value is None or str(value).strip() == "":
                 continue
             normalized_ids.append(int(value))
-        except Exception:
+        except (ValueError, TypeError):
             continue
-    if not normalized_ids:
+    key = tuple(sorted(set(normalized_ids)))
+    if not key:
         return {}
 
-    try:
-        response = api_post("/locations", payload={"location_ids": normalized_ids}) or {}
-    except Exception:
-        return {}
-
-    data = response.get("data") or {}
-    resolved: dict[int, str] = {}
-    for location_id in normalized_ids:
-        info = data.get(str(location_id)) or {}
-        name = str(info.get("name") or location_id)
-        resolved[int(location_id)] = name
-    return resolved
+    failure = _location_names_failures.get(key)
+    if failure is not None and _monotonic() - failure[0] < LOCATION_NAMES_FAILURE_MEMO_SECONDS:
+        reason = failure[1]
+    else:
+        _location_names_failures.pop(key, None)
+        try:
+            return _location_names_cached(key)
+        except _LocationNamesFailed as exc:
+            reason = str(exc)
+            _location_names_failures[key] = (_monotonic(), reason)
+            logging.warning("Wallet location names could not be loaded for %d location(s): %s", len(key), reason)
+    st.warning(f"Location names could not be loaded ({reason}); showing location IDs instead.")
+    return {}
 
 
 def apply_wallet_location_names(

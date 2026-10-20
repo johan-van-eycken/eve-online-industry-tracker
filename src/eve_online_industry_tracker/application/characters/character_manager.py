@@ -1,10 +1,44 @@
 import logging
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
+from eve_online_industry_tracker.application.batch import PartialResult
 from eve_online_industry_tracker.application.characters.character import Character
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.models import OAuthCharacter
+
+
+class CharacterDataError(Exception):
+    """A character's data could not be read (get_characters). Not a
+    RuntimeError, so the ESI catch sites do not take it for an ESI failure;
+    the cause is chained."""
+
+
+class CharacterRefreshError(Exception):
+    """A batch refresh in which one or more characters failed. Every
+    character was tried; `errors` is {character name: error message}, each
+    named in the message. Not a RuntimeError, so the ESI catch sites do not
+    take it for an ESI failure."""
+
+    def __init__(self, method_name: str, errors: Dict[str, str]):
+        self.method_name = method_name
+        self.errors = dict(errors)
+        details = "; ".join(f"{name}: {message}" for name, message in self.errors.items())
+        super().__init__(f"{method_name} failed for {len(self.errors)} character(s): {details}")
+
+
+class UnknownCharacterError(CharacterRefreshError):
+    """A refresh asked for a character_id or name the manager does not have:
+    nothing was refreshed. `errors` names the unknown selector; the routes
+    answer 404."""
+
+    def __init__(self, method_name: str, selector: str):
+        self.selector = selector
+        super().__init__(method_name, {selector: "no such character in this manager"})
+
 
 class CharacterManager:
     """Manages multiple Character objects and provides batch utilities."""
@@ -16,8 +50,11 @@ class CharacterManager:
         db_app: DatabaseManager,
         db_sde: DatabaseManager,
         corporation_id: Optional[int] = None,
-        char_manager: Optional["CharacterManager"] = None
+        char_manager: Optional["CharacterManager"] = None,
+        admin_settings: Any = None,
     ) -> None:
+        # The admin settings for the characters' market fees (industry/*); None: the schema defaults.
+        self.admin_settings = admin_settings
         # Private arguments
         self._cfgManager = cfgManager
         self._cfg = cfgManager.all()
@@ -28,6 +65,8 @@ class CharacterManager:
         self._character_list: List[Character] = []
         self._char_by_id: Dict[int, Character] = {}
         self._char_by_name: Dict[str, Character] = {}
+        # One line per configured character that could not be initialised (bootstrap: init_warnings).
+        self.init_errors: List[str] = []
 
         if corporation_id is None and char_manager is None:
             self._validate_cfg_characters()
@@ -93,12 +132,17 @@ class CharacterManager:
                     character_is_corp_director,
                     existing_token,
                     industry_enabled=character_industry_enabled,
+                    admin_settings=self.admin_settings,
                 )
                 self._character_list.append(char)
             except KeyError as e:
-                logging.error(f"Failed to initialize character {char_cfg}. Missing key: {e}")
-            except Exception as e:
-                logging.error(f"Error initializing character {char_cfg['character_name']}: {e}")
+                message = f"Failed to initialize character {character_name}. Missing key: {e}"
+                logging.error(message)
+                self.init_errors.append(message)
+            except Exception as e:   # one character's failure does not stop the others; named in init_errors
+                message = f"Error initializing character {character_name}: {e}"
+                logging.error(message)
+                self.init_errors.append(message)
         return None
 
     def get_main_character(self) -> Optional[Character]:
@@ -120,42 +164,25 @@ class CharacterManager:
         return self._char_by_id.get(character_id)
 
     def get_characters(self) -> Optional[List[Dict[str, object]]]:
+        """Every character, serialized. ValueError when there are none yet;
+        CharacterDataError when a character's data cannot be read (a DB
+        failure). A programming error propagates as is."""
         if not self._character_list:
             raise ValueError("No characters available in the manager.")
         try:
             characters_data = [c.get_character() for c in self._character_list]
             return characters_data
-        except Exception as e:
+        except SQLAlchemyError as e:
             error_message = f"Error retrieving characters: {str(e)}"
             logging.error(error_message)
-            raise Exception(error_message)
+            raise CharacterDataError(error_message) from e
 
     def get_wallet_balances(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> Optional[List[Dict[str, float]]]:
-        balances = []
-        for char in self._character_list:
-            try:
-                self._refresh_batch("refresh_wallet_balance", character_name, character_id)
-                balance = char.get_wallet_balance()
-                balances.append(balance)
-            except Exception as e:
-                error_message = f"Error retrieving wallet balance for {char.character_name}: {str(e)}"
-                logging.error(error_message)
-                raise Exception(error_message)
-        return balances
-    
+        return self._get_each("refresh_wallet_balance", "get_wallet_balance", "wallet balance", character_name, character_id)
+
     def get_assets(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> Optional[List[Dict[str, object]]]:
-        assets_list = []
-        for char in self._character_list:
-            try:
-                self._refresh_batch("refresh_assets", character_name, character_id)
-                assets = char.get_assets()
-                assets_list.append(assets)
-            except Exception as e:
-                error_message = f"Error retrieving assets for {char.character_name}: {str(e)}"
-                logging.error(error_message)
-                raise Exception(error_message)
-        return assets_list
-    
+        return self._get_each("refresh_assets", "get_assets", "assets", character_name, character_id)
+
     def get_market_orders(
         self,
         character_name: Optional[str] = None,
@@ -163,99 +190,120 @@ class CharacterManager:
         *,
         refresh: bool = True,
     ) -> Optional[List[Dict[str, object]]]:
-        orders_list = []
-        for char in self._character_list:
+        return self._get_each("refresh_market_orders", "get_market_orders", "market orders", character_name, character_id,
+                              refresh=refresh)
+
+    def _get_each(
+        self,
+        refresh_method: str,
+        getter: str,
+        what: str,
+        character_name: Optional[str],
+        character_id: Optional[int],
+        *,
+        refresh: bool = True,
+    ) -> PartialResult:
+        """`getter` of each selected character (one with a character_id or
+        name, else all), after one batch `refresh_method`. A character whose
+        refresh or read fails is logged as an ERROR and named in the
+        result's `errors`; the others' data is returned. When every selected
+        character fails (so always for a single selected one),
+        CharacterRefreshError names each. An unknown character_id or name
+        raises UnknownCharacterError."""
+        chars = self._select_characters(refresh_method, character_name, character_id)
+        errors: Dict[str, str] = {}
+        if refresh:
             try:
-                if refresh:
-                    self._refresh_batch("refresh_market_orders", character_name, character_id)
-                orders = char.get_market_orders()
-                orders_list.append(orders)
-            except Exception as e:
-                error_message = f"Error retrieving market orders for {char.character_name}: {str(e)}"
-                logging.error(error_message)
-                raise Exception(error_message)
-        return orders_list
+                self._refresh_batch(refresh_method, character_name, character_id)
+            except UnknownCharacterError:
+                raise
+            except CharacterRefreshError as exc:   # each failure is logged there; the others are read
+                errors.update(exc.errors)
+
+        results = []
+        for char in chars:
+            if char.character_name in errors:
+                continue   # its refresh failed: no stale read in its place
+            try:
+                results.append(getattr(char, getter)())
+            except Exception as e:   # the batch boundary: one character must not hide the others' data
+                logging.error("Error retrieving %s for %s: %s", what, char.character_name, e, exc_info=True)
+                errors[char.character_name] = f"{type(e).__name__}: {e}"
+        if errors and not results:
+            raise CharacterRefreshError(getter, errors)
+        return PartialResult(results, errors)
+
+    def _select_characters(self, method_name: str, character_name: Optional[str] = None,
+                           character_id: Optional[int] = None) -> List[Character]:
+        """The character with this id, else with this name, else every
+        character. UnknownCharacterError when the id or name matches none."""
+        if character_id is not None:
+            char = self.get_character_by_id(character_id)
+            if char is None:
+                raise UnknownCharacterError(method_name, f"character_id {character_id}")
+            return [char]
+        if character_name:
+            char = self.get_character_by_name(character_name)
+            if char is None:
+                raise UnknownCharacterError(method_name, f"character_name {character_name!r}")
+            return [char]
+        return list(self._character_list)
 
     def _refresh_batch(self, method_name: str, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
-        try:
-            # Filter characters
-            if character_id is not None:
-                chars = [self.get_character_by_id(character_id)]
-            elif character_name:
-                chars = [self.get_character_by_name(character_name)]
-            else:
-                chars = self._character_list
+        """Run `method_name` on each selected character. Every character is
+        tried: one that fails is logged as an ERROR and the others go on;
+        then CharacterRefreshError names each failed character. An unknown
+        character_id or name raises UnknownCharacterError before any refresh."""
+        chars = self._select_characters(method_name, character_name, character_id)
 
-            chars = [c for c in chars if c is not None]
-
-            def _run_one(char):
-                try:
-                    if method_name.startswith("refresh") and hasattr(char, "ensure_esi"):
-                        char.ensure_esi()
-                    getattr(char, method_name)()
-                except Exception as e:
-                    error_message = f"Error during {method_name} for {char.character_name}: {e}"
-                    logging.error(error_message)
-                    raise Exception(error_message)
-
-            for char in chars:
-                _run_one(char)
-        except Exception as e:
-            error_message = f"Batch refresh error in {method_name}: {e}"
-            logging.error(error_message)
-            raise Exception(error_message)
+        errors: Dict[str, str] = {}
+        for char in chars:
+            try:
+                if method_name.startswith("refresh") and hasattr(char, "ensure_esi"):
+                    char.ensure_esi()
+                getattr(char, method_name)()
+            except Exception as e:   # the batch boundary: one character must not stop the others
+                logging.error("Error during %s for %s: %s", method_name, char.character_name, e,
+                              exc_info=not isinstance(e, ESI_REQUEST_ERRORS))   # a traceback unless ESI failed
+                errors[char.character_name] = f"{type(e).__name__}: {e}"
+        if errors:
+            raise CharacterRefreshError(method_name, errors)
 
     def refresh_all(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
+        """refresh_all of each character (see _refresh_batch); the indexes are
+        rebuilt either way, so the characters that refreshed are found by id."""
         try:
             self._refresh_batch("refresh_all", character_name, character_id)
+        finally:
             self._rebuild_indexes()
-        except Exception as e:
-            error_message = f"Failed to refresh all data: {str(e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
 
     def refresh_profile(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
-        try:
-            self._refresh_batch("refresh_profile", character_name, character_id)
-        except Exception as e:
-            error_message = f"Failed to refresh profile: {str(e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
+        self._refresh_batch("refresh_profile", character_name, character_id)
 
     def refresh_skills(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
-        try:
-            self._refresh_batch("refresh_skills", character_name, character_id)
-        except Exception as e:
-            error_message = f"Failed to refresh skills: {str(e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
+        self._refresh_batch("refresh_skills", character_name, character_id)
 
     def refresh_wallet_journal(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
-        try:
-            self._refresh_batch("refresh_wallet_journal", character_name, character_id)
-        except Exception as e:
-            error_message = f"Failed to refresh wallet journal: {str(e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
+        self._refresh_batch("refresh_wallet_journal", character_name, character_id)
 
     def refresh_wallet_transactions(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
-        try:
-            self._refresh_batch("refresh_wallet_transactions", character_name, character_id)
-        except Exception as e:
-            error_message = f"Failed to refresh wallet transactions: {str(e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
+        self._refresh_batch("refresh_wallet_transactions", character_name, character_id)
 
     def refresh_industry_jobs(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
-        try:
-            self._refresh_batch("refresh_industry_jobs", character_name, character_id)
-        except Exception as e:
-            error_message = f"Failed to refresh industry jobs: {str(e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
+        self._refresh_batch("refresh_industry_jobs", character_name, character_id)
 
     def refresh_realized_profit_inputs(self, character_name: Optional[str] = None, character_id: Optional[int] = None) -> None:
-        self.refresh_wallet_journal(character_name=character_name, character_id=character_id)
-        self.refresh_wallet_transactions(character_name=character_name, character_id=character_id)
-        self.refresh_industry_jobs(character_name=character_name, character_id=character_id)
+        """The wallet journal, transactions and industry jobs, each for every
+        character; then one CharacterRefreshError naming each failure."""
+        errors: Dict[str, str] = {}
+        for refresh in (self.refresh_wallet_journal, self.refresh_wallet_transactions, self.refresh_industry_jobs):
+            try:
+                refresh(character_name=character_name, character_id=character_id)
+            except UnknownCharacterError:
+                raise   # nothing was refreshed: the same unknown character for every kind
+            except CharacterRefreshError as exc:
+                for name, message in exc.errors.items():
+                    errors[f"{name} ({exc.method_name})"] = message
+        if errors:
+            raise CharacterRefreshError("refresh_realized_profit_inputs", errors)
 

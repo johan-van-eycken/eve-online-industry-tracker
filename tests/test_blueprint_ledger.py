@@ -643,15 +643,16 @@ def test_s2_a_busy_bpc_row_gets_one_not_built_reason():
 
 
 def test_a_blueprint_outside_the_corp_hangar_is_not_planned_and_not_a_purchase():
-    """The producer priced the row from an owned BPO the corp hangar does not
-    hold (e.g. character-owned): not built, no buy advice."""
+    """The producer priced the row from an owned BPO neither the corp nor a
+    pilot holds in the planner's assets: not built, no buy advice."""
     t1 = _dec(_t1_row(20), 12344, "Widget I", 1.0, 1)
     plan = _planner(0).plan_chain([t1], {
         "bpo_assets_by_type_id": {}, "bpc_assets_by_type_id": {}, "blueprint_data": BP_B,
         "market_depth_cache": {**A.PRICES, 998: {"spot_sell_price": 1000.0}}, "variant_rows_by_type_id": {},
     })
     assert t1.decision_reason == (
-        "test; not built: blueprint outside the corp hangar (e.g. character-owned): not planned"
+        "test; not built: the owned blueprint it is priced from is in neither the corp's nor a pilot's "
+        "assets: not planned"
     )
     assert plan.bpo_opportunities == []
 
@@ -802,8 +803,11 @@ def test_p3_no_manufacture_emitted_keeps_the_research_wording_with_no_slot():
     _thing, widget, actions = _thing_and_widget_ii(research_busy=True, mfg_busy=True)
     assert [a.action_type for a in actions] == []
     assert "manufacture of Thing" not in widget.decision_reason
-    assert ("T1 BPO (999) kept for TE research for Thing (12345), which got no free slot today: "
-            "no copy in this plan") in widget.decision_reason
+    # Task A fix round 1 (I3): Thing's idle claims are released and Widget II
+    # is re-planned, but no research slot is free either: undone, and the
+    # reason says the blueprint is free and why nothing runs.
+    assert ("not built: T1 BPO (999) free (its holder does not use it today), "
+            "but no free research slot today") in widget.decision_reason
 
 
 def test_m8_the_component_reason_checks_stock_pooled_across_parents():

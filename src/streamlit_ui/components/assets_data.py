@@ -37,7 +37,7 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
     try:
         return int(value)
-    except Exception:
+    except (ValueError, TypeError, OverflowError):
         return default
 
 
@@ -46,7 +46,7 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
     try:
         return float(value)
-    except Exception:
+    except (ValueError, TypeError):
         return default
 
 

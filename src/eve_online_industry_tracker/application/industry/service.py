@@ -14,7 +14,9 @@ from collections.abc import Collection, Mapping
 from typing import Any, Callable, cast
 import uuid
 
+import requests  # pyright: ignore[reportMissingModuleSource]
 from sqlalchemy import bindparam, func, text
+from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.db_models import (
     Blueprints,
     CharacterAssetHistoryModel,
@@ -42,6 +44,8 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
+from eve_online_industry_tracker.application import market_fees
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from flask_app.background_jobs import register_thread
 from eve_online_industry_tracker.infrastructure.session_provider import (
     SessionProvider,
@@ -68,11 +72,6 @@ from eve_online_industry_tracker.infrastructure.industry_adapter import (
 )
 from eve_online_industry_tracker.application.industry.job_manager import IndustryJobManager
 from eve_online_industry_tracker.application.industry.job_cost import (
-    DEFAULT_COPY_COST_EIV_MULTIPLIER,
-    DEFAULT_INVENTION_COST_EIV_MULTIPLIER,
-    DEFAULT_RESEARCH_COST_EIV_MULTIPLIER,
-    DEFAULT_RESEARCH_SCC_SURCHARGE,
-    DEFAULT_SCC_SURCHARGE,
     JobSurchargeRates,
     job_install_cost,
     profile_facility_tax,
@@ -88,7 +87,6 @@ from eve_online_industry_tracker.application.industry.shopping_list import LATER
 from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
 from eve_online_industry_tracker.application.industry.invention_model import (
     ALL_INVENTORS_EXCLUDED,
-    DEFAULT_INVENTION_PROBABILITY_FLOOR,
     DECRYPTOR_SELECTION_OFF_REASON,
     NO_CHARACTER_SKILLS,
     NO_DECRYPTOR,
@@ -131,9 +129,22 @@ from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.domain import industry_facility as _industry_facility
 from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
+from eve_online_industry_tracker.application.characters.asset_provenance import (
+    RealizedInventionInputs,
+    RealizedInventionRefresh,
+    build_market_price_map,
+    load_published_decryptor_choices,
+    resnapshot_jobs_without_decryptor_choice,
+    save_published_decryptor_choices,
+)
+from eve_online_industry_tracker.application.characters.character_manager import CharacterDataError
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 
 
 logger = logging.getLogger(__name__)
+
+# ESI failures: esi_client raises RuntimeError after its retries; requests raises its own.
+_ESI_ERRORS: tuple[type[Exception], ...] = (RuntimeError, requests.RequestException)
 
 
 def _payload_from_skill_levels(levels: Mapping[str, int]) -> dict[str, Any]:
@@ -312,7 +323,6 @@ class _ProductPlanningContext:
 class IndustryService:
     _SKILL_ID_ACCOUNTING = 16622
     _SKILL_ID_BROKER_RELATIONS = 3446
-    _STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS = 24 * 3600
     _STRUCTURE_RIGS_CACHE_VERSION = 4
 
     _INDUSTRY_CHARACTER_MODIFIER_SKILL_NAMES: tuple[str, ...] = (
@@ -354,8 +364,6 @@ class IndustryService:
         "product": "Product Overview",
     }
     _MAX_RESEARCH_LEVEL = 10
-    _MAX_BLUEPRINT_MATERIAL_EFFICIENCY = 10
-    _MAX_BLUEPRINT_TIME_EFFICIENCY = 20
 
     def __init__(self, *, state: Any, sessions: SessionProvider | None = None):
         self._state = state
@@ -365,12 +373,25 @@ class IndustryService:
     def _admin(self):
         return getattr(self._state, "admin_settings", None)
 
-    def _adm(self, category: str, key: str, fallback: Any = None) -> Any:
-        """Read an admin setting, returning *fallback* when the manager is unavailable."""
+    def _adm(self, category: str, key: str) -> Any:
+        """Read an admin setting; its schema default when the manager is
+        unavailable (no duplicated constant that can drift from it)."""
         admin = self._admin
         if admin is None:
-            return fallback
+            return ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"]
         return admin.get(category, key)
+
+    def _relist_broker_fee_fraction(self, row: dict[str, Any]) -> tuple[float, str | None]:
+        """(the broker fee fraction of a relist, the note when it is assumed).
+        The product's own broker fee (market_fee_context) when known, 0.0
+        included; otherwise admin setting market_defaults/default_broker_fee,
+        with a note naming it (it was a hidden 3.5% before)."""
+        own = self._as_float((row.get("market_fee_context") or {}).get("broker_fee_fraction"))
+        if own is not None:
+            return own, None
+        assumed = float(self._adm("market_defaults", "default_broker_fee"))
+        return assumed, (f"relist cost as if the broker fee is {assumed:.2%} (its own is unknown; admin setting "
+                         "market_defaults/default_broker_fee)")
 
     def _ensure_industry_job_manager(self) -> IndustryJobManager:
         mgr = getattr(self._state, "industry_job_manager", None)
@@ -879,6 +900,7 @@ class IndustryService:
                 result_meta=((payload.get("pricing_batch") or {}) if isinstance(payload, dict) else {}),
             )
         except Exception as e:
+            logger.exception("Overview refresh job %s failed: %s", job_id, e)
             self._update_overview_refresh_job(
                 job_id,
                 status="failed",
@@ -1043,6 +1065,7 @@ class IndustryService:
                 },
             )
         except Exception as e:
+            logger.exception("Portfolio candidate build job %s failed: %s", job_id, e)
             self._update_portfolio_candidates_job(
                 job_id,
                 status="failed",
@@ -1111,7 +1134,9 @@ class IndustryService:
         role_raw = row.get("roleBonuses")
         try:
             role = json.loads(role_raw) if isinstance(role_raw, str) else (role_raw or [])
-        except Exception:
+        except (TypeError, ValueError) as exc:
+            logger.warning("Structure type %s: roleBonuses cannot be parsed (%s); no structure bonus applies",
+                           row.get("id"), exc)
             role = []
 
         material_pct = 0.0
@@ -1126,7 +1151,8 @@ class IndustryService:
                 continue
             try:
                 bonus_val = abs(float(bonus))
-            except Exception:
+            except (TypeError, ValueError):
+                logger.warning("Structure type %s: role bonus %r is not a number; it is left out", row.get("id"), bonus)
                 continue
 
             txt_obj = b.get("bonusText") or {}
@@ -1208,10 +1234,12 @@ class IndustryService:
 
         owner_name_map: dict[int, str] = {}
         try:
-            if owner_ids:
+            if owner_ids and self._state.esi_service is not None:
                 resolved = self._state.esi_service.get_universe_names(owner_ids)
                 owner_name_map = {int(k): ((v or {}).get("name") or "") for k, v in resolved.items()}
-        except Exception:
+        except _ESI_ERRORS as exc:
+            logger.warning("Public structures: owner names cannot be resolved (%s); the structures keep their "
+                           "owner IDs", exc)
             owner_name_map = {}
 
         enriched_structures = []
@@ -1248,7 +1276,7 @@ class IndustryService:
                     continue
                 try:
                     type_ids.append(int(tid))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
             type_ids = sorted(set(type_ids))
             if type_ids:
@@ -1259,8 +1287,9 @@ class IndustryService:
                     tid = s.get("type_id")
                     extra = type_map.get(int(tid), {}) if tid is not None else {}
                     s.update(extra)
-        except Exception:
-            pass
+        except SQLAlchemyError as exc:
+            logger.warning("Corporation structures: type data cannot be read (%s); the structures keep their type IDs",
+                           exc)
 
         try:
             corp_ids: list[int] = []
@@ -1270,7 +1299,7 @@ class IndustryService:
                     continue
                 try:
                     corp_ids.append(int(cid))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
             corp_ids = sorted(set(corp_ids))
             if corp_ids and self._state.esi_service is not None:
@@ -1281,8 +1310,9 @@ class IndustryService:
                     if cid is None:
                         continue
                     s["owner_name"] = corp_name_map.get(int(cid))
-        except Exception:
-            pass
+        except _ESI_ERRORS as exc:
+            logger.warning("Corporation structures: owner names cannot be resolved (%s); the structures keep their IDs",
+                           exc)
 
         return out
 
@@ -1350,7 +1380,7 @@ class IndustryService:
         for raw_implant_id in raw_implants:
             try:
                 implant_type_id = int(raw_implant_id)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if implant_type_id > 0:
                 implant_type_ids.append(implant_type_id)
@@ -1373,7 +1403,9 @@ class IndustryService:
             attr_map: dict[int, float] = {}
             try:
                 attributes = json.loads(attributes_raw) if isinstance(attributes_raw, str) else (attributes_raw or [])
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logger.warning("Implants: the dogma attributes of type %s cannot be parsed (%s); its industry bonuses "
+                               "are left out", type_id, exc)
                 attributes = []
             for attribute in attributes or []:
                 if not isinstance(attribute, dict):
@@ -1385,7 +1417,7 @@ class IndustryService:
                 try:
                     parsed_attribute_id = int(attribute_id)
                     parsed_value = float(raw_value)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 attr_map[parsed_attribute_id] = parsed_value
                 attribute_ids.add(parsed_attribute_id)
@@ -1480,6 +1512,13 @@ class IndustryService:
             "implants": implants,
         }
 
+    def industry_profile_context(self, profile_id: int) -> dict[str, Any] | None:
+        """The industry profile as the producer resolves it: the profile plus
+        its system cost indices, facility and structure bonuses, with the
+        reasons a part could not be read (lookup_error,
+        cost_index_unknown_reason). An unknown profile raises ServiceError."""
+        return self._resolve_industry_profile_context(character_id=None, industry_profile_id=int(profile_id))
+
     def _resolve_industry_profile_context(
         self,
         *,
@@ -1510,8 +1549,11 @@ class IndustryService:
         if profile.system_id is not None:
             try:
                 system_payload = self.industry_system_cost_index(system_id=int(profile.system_id))
-            except Exception:
-                system_payload = {"solar_system_id": int(profile.system_id), "cost_indices": []}
+            except (ServiceError, *_ESI_ERRORS) as exc:
+                logger.warning("Industry profile: the cost indices of system %s cannot be read (%s); job fees are "
+                               "unknown", profile.system_id, exc)
+                system_payload = {"solar_system_id": int(profile.system_id), "cost_indices": [],
+                                  "lookup_error": str(exc)}
             try:
                 solar_system_payload = next(
                     (
@@ -1521,7 +1563,9 @@ class IndustryService:
                     ),
                     None,
                 )
-            except Exception:
+            except SQLAlchemyError as exc:
+                logger.warning("Industry profile: solar system %s cannot be read from the SDE (%s); its security band "
+                               "is unknown", profile.system_id, exc)
                 solar_system_payload = None
             profile_payload["industry_system"] = system_payload
             profile_payload["system_cost_indices"] = system_payload.get("cost_indices") or []
@@ -1538,18 +1582,30 @@ class IndustryService:
             band, _ = _security_band.profile_security_band(profile_payload)
             if band is not None:
                 profile_payload["system_security_band"] = band
+        # The manufacturing cost index, or why it is unknown (the page shows it; the fees are then unknown).
+        _index, profile_payload["cost_index_unknown_reason"] = (
+            self._system_cost_index_with_reason(profile_payload=profile_payload, activity="manufacturing")
+            if profile.system_id is not None
+            else (None, "the industry profile has no solar system, so no manufacturing cost index")
+        )
 
         if profile.facility_id is not None:
             try:
                 profile_payload["facility"] = self.industry_facility(facility_id=int(profile.facility_id))
-            except Exception:
-                profile_payload["facility"] = {"facility_id": int(profile.facility_id), "tax": profile.facility_tax}
+            except (ServiceError, *_ESI_ERRORS) as exc:
+                logger.warning("Industry profile: facility %s cannot be read (%s); using the profile's own tax",
+                               profile.facility_id, exc)
+                profile_payload["facility"] = {"facility_id": int(profile.facility_id), "tax": profile.facility_tax,
+                                               "lookup_error": str(exc)}
 
         if profile.structure_type_id is not None:
             try:
                 structure_bonus_payload = self.structure_type_bonuses(type_id=int(profile.structure_type_id))
-            except Exception:
-                structure_bonus_payload = {"type_id": int(profile.structure_type_id), "bonuses": {}}
+            except (ServiceError, SQLAlchemyError) as exc:
+                logger.warning("Industry profile: the bonuses of structure type %s cannot be read (%s); no structure "
+                               "bonus applies", profile.structure_type_id, exc)
+                structure_bonus_payload = {"type_id": int(profile.structure_type_id), "bonuses": {},
+                                           "lookup_error": str(exc)}
             profile_payload["structure_type_bonuses"] = structure_bonus_payload.get("bonuses") or {}
             try:
                 profile_payload["structure_service_fits"] = self._structure_service_fits(int(profile.structure_type_id))
@@ -1817,13 +1873,13 @@ class IndustryService:
                 continue
             try:
                 skill_type_id = int(entry.get("skill_id") or entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if skill_type_id <= 0:
                 continue
             try:
                 trained_skill_level = int(entry.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 trained_skill_level = 0
             trained_skill_levels[skill_type_id] = max(trained_skill_level, trained_skill_levels.get(skill_type_id, 0))
 
@@ -1847,7 +1903,7 @@ class IndustryService:
                 if int(standing.get("from_id") or 0) != int(from_id):
                     continue
                 return float(standing.get("standing") or 0.0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
         return 0.0
 
@@ -1877,7 +1933,8 @@ class IndustryService:
             trained_skill_levels = self._get_character_trained_skill_levels(character_id=int(character_id))
             accounting_level = int(trained_skill_levels.get(self._SKILL_ID_ACCOUNTING, 0) or 0)
             broker_relations_level = int(trained_skill_levels.get(self._SKILL_ID_BROKER_RELATIONS, 0) or 0)
-            sales_tax_fraction = max(0.0, min(1.0, float(self._adm("industry", "base_sales_tax_rate", 0.075)) * (1.0 - (float(self._adm("industry", "accounting_skill_reduction", 0.11)) * float(accounting_level)))))
+            fee_settings = market_fees.MarketFeeSettings.from_admin(self._admin)
+            sales_tax_fraction = market_fees.sales_tax_fraction(fee_settings, accounting_level=accounting_level)
 
             sde_session: Any = self._sessions.sde_session()
             station = (
@@ -1888,7 +1945,7 @@ class IndustryService:
             if station is not None:
                 try:
                     owner_corp_id = int(station.ownerID)
-                except Exception:
+                except (TypeError, ValueError):
                     owner_corp_id = None
             if owner_corp_id is not None:
                 corporation = (
@@ -1899,7 +1956,7 @@ class IndustryService:
                 if corporation is not None and getattr(corporation, "factionID", None) is not None:
                     try:
                         owner_faction_id = int(corporation.factionID)
-                    except Exception:
+                    except (TypeError, ValueError):
                         owner_faction_id = None
 
             faction_standing = self._get_character_standing(
@@ -1912,21 +1969,9 @@ class IndustryService:
                 from_type="npc_corp",
                 from_id=owner_corp_id,
             )
-            _fee_min = float(self._adm("industry", "broker_fee_min", 0.01))
-            _fee_base = float(self._adm("industry", "broker_fee_base", 0.03))
-            _br_red = float(self._adm("industry", "broker_relations_reduction_per_level", 0.003))
-            _fac_red = float(self._adm("industry", "faction_standing_reduction_per_point", 0.0003))
-            _corp_red = float(self._adm("industry", "corp_standing_reduction_per_point", 0.0002))
-            broker_fee_fraction = max(
-                _fee_min,
-                min(
-                    _fee_base,
-                    _fee_base
-                    - (_br_red * float(broker_relations_level))
-                    - (_fac_red * float(faction_standing))
-                    - (_corp_red * float(corp_standing)),
-                ),
-            )
+            broker_fee_fraction = market_fees.broker_fee_fraction(
+                fee_settings, broker_relations_level=broker_relations_level,
+                faction_standing=faction_standing, corp_standing=corp_standing)
 
         return {
             "market_hub": hub_context.get("hub"),
@@ -2044,8 +2089,13 @@ class IndustryService:
                 "Loading regional market history and hub liquidity",
                 {"stage": "market_activity", "type_count": len(product_type_ids)},
             )
+        # The types whose region history could not be fetched: unknown volume, with the reason.
+        volume_unavailable: dict[int, str] = {}
         with ThreadPoolExecutor(max_workers=2) as pool:
-            volume_future = pool.submit(pricing_service.get_region_daily_volume_map, type_ids=product_type_ids, hub=market_hub)
+            volume_future = pool.submit(
+                pricing_service.get_region_daily_volume_map,
+                type_ids=product_type_ids, hub=market_hub, unavailable=volume_unavailable,
+            )
             liquidity_future = pool.submit(pricing_service.get_hub_liquidity_map, type_ids=product_type_ids, hub=market_hub)
             region_daily_volume_map = volume_future.result()
             hub_liquidity_map = liquidity_future.result()
@@ -2060,26 +2110,38 @@ class IndustryService:
             type_id = int(row.get("type_id") or 0)
             daily_volume = region_daily_volume_map.get(type_id) or {}
             hub_liquidity = hub_liquidity_map.get(type_id) or {}
+            # No region history for the type: its volume is unknown (None), not 0.
+            volume_known = type_id in region_daily_volume_map
+            volume_reason = None if volume_known else (
+                volume_unavailable.get(type_id) or "region market history unavailable: daily volume unknown")
+            region_volume = int(daily_volume.get("daily_volume") or 0) if volume_known else None
+            region_order_count = int(daily_volume.get("daily_order_count") or 0) if volume_known else None
 
-            manufacturing_job["region_daily_volume"] = int(daily_volume.get("daily_volume") or 0)
+            manufacturing_job["region_daily_volume"] = region_volume
             manufacturing_job["region_daily_volume_7d_avg"] = self._as_float(daily_volume.get("daily_volume_7d_avg"))
             manufacturing_job["region_daily_volume_7d_sample_size"] = int(daily_volume.get("daily_volume_7d_sample_size") or 0)
-            manufacturing_job["region_daily_order_count"] = int(daily_volume.get("daily_order_count") or 0)
+            manufacturing_job["region_daily_order_count"] = region_order_count
             manufacturing_job["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
-            manufacturing_job["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
-            manufacturing_job["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
-            manufacturing_job["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
-            manufacturing_job["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
+            manufacturing_job["region_daily_volume_unavailable_reason"] = volume_reason
+            # A failed order-book side is unknown (None, with the reason), not 0 units.
+            liquidity_fields = {
+                "hub_buy_liquidity": self._optional_int(hub_liquidity, "buy_volume_total"),
+                "hub_sell_liquidity": self._optional_int(hub_liquidity, "sell_volume_total"),
+                "hub_buy_order_count": self._optional_int(hub_liquidity, "buy_order_count"),
+                "hub_sell_order_count": self._optional_int(hub_liquidity, "sell_order_count"),
+                "liquidity_unavailable_reason": hub_liquidity.get("liquidity_unavailable_reason") or (
+                    None if type_id in hub_liquidity_map else "hub liquidity unknown: no order book data returned"
+                ),
+            }
+            manufacturing_job.update(liquidity_fields)
 
-            row["region_daily_volume"] = int(daily_volume.get("daily_volume") or 0)
+            row["region_daily_volume"] = region_volume
             row["region_daily_volume_7d_avg"] = self._as_float(daily_volume.get("daily_volume_7d_avg"))
             row["region_daily_volume_7d_sample_size"] = int(daily_volume.get("daily_volume_7d_sample_size") or 0)
-            row["region_daily_order_count"] = int(daily_volume.get("daily_order_count") or 0)
+            row["region_daily_order_count"] = region_order_count
             row["region_daily_volume_date"] = daily_volume.get("daily_volume_date")
-            row["hub_buy_liquidity"] = int(hub_liquidity.get("buy_volume_total") or 0)
-            row["hub_sell_liquidity"] = int(hub_liquidity.get("sell_volume_total") or 0)
-            row["hub_buy_order_count"] = int(hub_liquidity.get("buy_order_count") or 0)
-            row["hub_sell_order_count"] = int(hub_liquidity.get("sell_order_count") or 0)
+            row["region_daily_volume_unavailable_reason"] = volume_reason
+            row.update(liquidity_fields)
 
         if progress_callback is not None:
             progress_callback(
@@ -2102,9 +2164,10 @@ class IndustryService:
                 continue
 
             manufacturing_job = row.get("manufacturing_job") or {}
-            hub_sell_liquidity = int(manufacturing_job.get("hub_sell_liquidity") or 0)
+            # None: the hub's sell book could not be fetched, every metric is unknown.
+            hub_sell_liquidity = self._optional_int(manufacturing_job, "hub_sell_liquidity")
             region_daily_volume_7d_avg = self._as_float(manufacturing_job.get("region_daily_volume_7d_avg"))
-            hub_sell_orders = int(manufacturing_job.get("hub_sell_order_count") or 0)
+            hub_sell_orders = self._optional_int(manufacturing_job, "hub_sell_order_count")
 
             row["days_of_supply"] = self._calculate_days_of_supply(
                 hub_sell_liquidity=hub_sell_liquidity,
@@ -2162,6 +2225,8 @@ class IndustryService:
             if not stats.get("has_data"):
                 missing.append(tid)
 
+        # Why a type has no history to compare with: shown on its row, not a silent skip.
+        history_unavailable: dict[int, str] = {}
         if missing:
             with ThreadPoolExecutor(max_workers=20) as pool:
                 futures = {
@@ -2170,17 +2235,24 @@ class IndustryService:
                 }
                 for f in as_completed(futures):
                     try:
-                        f.result()
-                    except Exception:
-                        pass
+                        reason = f.result()
+                    except (*_ESI_ERRORS, SQLAlchemyError) as exc:
+                        logger.warning("Price anomaly: the market history of type_id=%s could not be fetched (%s)",
+                                       futures[f], exc)
+                        reason = f"market history could not be fetched: {exc}"
+                    if reason:
+                        history_unavailable[futures[f]] = str(reason)
 
         # Load price stats for all type_ids
         price_stats: dict[int, dict[str, Any]] = {}
         for tid in type_ids:
             try:
                 price_stats[tid] = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
-            except Exception:
+            except SQLAlchemyError as exc:
+                logger.warning("Price anomaly: the price stats of type_id=%s cannot be read (%s); no anomaly check for "
+                               "it", tid, exc)
                 price_stats[tid] = {"has_data": False}
+                history_unavailable.setdefault(tid, f"price stats unreadable (DB error: {type(exc).__name__})")
 
         _risk_order: dict[str, int] = {"High": 3, "Medium": 2, "Low": 1}
 
@@ -2196,7 +2268,7 @@ class IndustryService:
             market_unit_price = self._as_float(row.get("market_unit_price"))
             quantity = max(1, int(row.get("quantity") or 1))
             material_cost = self._as_float(manufacturing_job.get("material_cost"))
-            hub_sell_order_count = int(row.get("hub_sell_order_count") or 0)
+            hub_sell_order_count = self._optional_int(row, "hub_sell_order_count")
 
             anomaly_reasons: list[str] = []
             risk_level: str | None = None
@@ -2230,8 +2302,13 @@ class IndustryService:
                         anomaly_reasons.append("Market price is below manufacturing material cost")
                         risk_level = upgrade("Medium")
 
-                # Tier 1b: thin orderbook
-                if hub_sell_order_count < 3:
+                # Tier 1b: thin orderbook (unknown when the hub's sell book could not be fetched)
+                if hub_sell_order_count is None:
+                    anomaly_reasons.append(
+                        "Hub sell orders unknown, the thin-market check is skipped: "
+                        f"{row.get('liquidity_unavailable_reason') or 'no hub order book data'}"
+                    )
+                elif hub_sell_order_count < 3:
                     anomaly_reasons.append(
                         f"Only {hub_sell_order_count} sell order(s) at hub — thin market, easy to manipulate"
                     )
@@ -2261,8 +2338,15 @@ class IndustryService:
                                 f"Price is {price_vs_history_ratio:.2f}× 7-day historical average — significantly below historical norm"
                             )
                             risk_level = upgrade("Medium")
+                elif history_unavailable.get(type_id):
+                    anomaly_reasons.append(
+                        f"No historical price check: {history_unavailable[type_id]}"
+                    )
 
             row["price_anomaly_risk"] = risk_level
+            row["price_history_unavailable_reason"] = (
+                history_unavailable.get(type_id) if not (price_stats.get(type_id) or {}).get("has_data") else None
+            )
             row["price_anomaly_reasons"] = anomaly_reasons
             row["price_vs_material_ratio"] = price_vs_material_ratio
             row["price_vs_history_ratio"] = price_vs_history_ratio
@@ -2306,8 +2390,9 @@ class IndustryService:
                 stats = market_history_svc.get_price_stats(type_id=tid, region_id=region_id)
                 if stats.get("has_data"):
                     price_stats_map[tid] = stats
-            except Exception:
-                pass
+            except SQLAlchemyError as exc:
+                logger.warning("Market trends: the price stats of type_id=%s cannot be read (%s); no trend for it",
+                               tid, exc)
 
         # Pipeline query — batch for all type_ids
         pipeline_jobs: dict[int, int] = {}
@@ -2375,7 +2460,6 @@ class IndustryService:
                 else:
                     historical_margins[tid] = None
 
-        DEFAULT_BROKER_FEE = 0.035
         ORDER_DURATION_DAYS = 90.0
 
         for row in rows:
@@ -2476,10 +2560,8 @@ class IndustryService:
             row["selling_time_days"] = selling_days
 
             # Extra relist broker fee if selling_days > ORDER_DURATION_DAYS
-            broker_fee_frac = (
-                self._as_float((row.get("market_fee_context") or {}).get("broker_fee_fraction"))
-                or DEFAULT_BROKER_FEE
-            )
+            broker_fee_frac, broker_fee_assumed = self._relist_broker_fee_fraction(row)
+            row["relist_broker_fee_assumed"] = broker_fee_assumed
             if selling_days and selling_days > ORDER_DURATION_DAYS and market_price:
                 extra_listings = int(selling_days / ORDER_DURATION_DAYS)
                 relist_cost_per_unit = market_price * broker_fee_frac * extra_listings
@@ -2538,12 +2620,13 @@ class IndustryService:
             if market_price_fetched_at is not None and market_price_fetched_at > 0:
                 market_price_age_minutes = max(0.0, (float(now) - float(market_price_fetched_at)) / 60.0)
 
+            # None: that side's hub order book could not be fetched (unknown, not 0 units).
             if normalized_product_price_side == "buy":
-                relevant_liquidity = int(row.get("hub_buy_liquidity") or 0)
-                relevant_order_count = int(row.get("hub_buy_order_count") or 0)
+                relevant_liquidity = self._optional_int(row, "hub_buy_liquidity")
+                relevant_order_count = self._optional_int(row, "hub_buy_order_count")
             else:
-                relevant_liquidity = int(row.get("hub_sell_liquidity") or 0)
-                relevant_order_count = int(row.get("hub_sell_order_count") or 0)
+                relevant_liquidity = self._optional_int(row, "hub_sell_liquidity")
+                relevant_order_count = self._optional_int(row, "hub_sell_order_count")
 
             region_daily_volume = int(row.get("region_daily_volume") or 0)
             region_daily_volume_7d_avg = self._as_float(row.get("region_daily_volume_7d_avg"))
@@ -2574,9 +2657,14 @@ class IndustryService:
             else:
                 reasons.append("Orderbook sample size is missing.")
 
-            _liq_threshold = int(self._adm("industry", "portfolio_liquidity_threshold", 100))
-            _ord_threshold = int(self._adm("industry", "portfolio_order_count_threshold", 5))
-            if relevant_liquidity >= _liq_threshold or relevant_order_count >= _ord_threshold:
+            _liq_threshold = int(self._adm("industry", "portfolio_liquidity_threshold"))
+            _ord_threshold = int(self._adm("industry", "portfolio_order_count_threshold"))
+            if relevant_liquidity is None or relevant_order_count is None:
+                reasons.append(
+                    f"{normalized_product_price_side.title()}-side hub liquidity is unknown "
+                    f"({row.get('liquidity_unavailable_reason') or 'no hub order book data'})."
+                )
+            elif relevant_liquidity >= _liq_threshold or relevant_order_count >= _ord_threshold:
                 score += 2
                 reasons.append(
                     f"{normalized_product_price_side.title()}-side hub liquidity is healthy ({relevant_liquidity:,} units / {relevant_order_count} orders)."
@@ -2589,7 +2677,11 @@ class IndustryService:
             else:
                 reasons.append(f"No {normalized_product_price_side}-side hub liquidity is currently visible.")
 
-            if (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg >= 20.0) or region_daily_volume >= 20:
+            volume_unknown_reason = row.get("region_daily_volume_unavailable_reason")
+            if volume_unknown_reason:
+                # No region history: the volume is unknown, not absent.
+                reasons.append(f"Regional trade volume is unknown ({volume_unknown_reason}).")
+            elif (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg >= 20.0) or region_daily_volume >= 20:
                 score += 2
                 reasons.append("Regional trade volume is active.")
             elif (region_daily_volume_7d_avg is not None and region_daily_volume_7d_avg > 0.0) or region_daily_volume > 0:
@@ -3009,7 +3101,7 @@ class IndustryService:
     def _format_timestamp(value: Any) -> str | None:
         try:
             timestamp = float(value or 0.0)
-        except Exception:
+        except (TypeError, ValueError):
             return None
         if timestamp <= 0:
             return None
@@ -3347,27 +3439,32 @@ class IndustryService:
             "elapsed_time_seconds": _elapsed_time_seconds,
             "manufacturing_time_seconds": manufacturing_time_seconds,
             "preparation_time_seconds": preparation_time_seconds,
-            "region_daily_volume": region_daily_volume,
+            # Unknown (no region history) stays None; the absorption above then assumes nothing sellable.
+            "region_daily_volume": None if row.get("region_daily_volume") is None else region_daily_volume,
             "region_daily_volume_7d_avg": region_daily_volume_7d_avg,
-            "hub_buy_liquidity": int(row.get("hub_buy_liquidity") or 0),
-            "hub_sell_liquidity": int(row.get("hub_sell_liquidity") or 0),
+            "region_daily_volume_unavailable_reason": row.get("region_daily_volume_unavailable_reason"),
+            # Unknown hub liquidity (a failed order-book fetch) stays None, with its reason.
+            "hub_buy_liquidity": cls._optional_int(row, "hub_buy_liquidity"),
+            "hub_sell_liquidity": cls._optional_int(row, "hub_sell_liquidity"),
+            "liquidity_unavailable_reason": row.get("liquidity_unavailable_reason"),
+            "price_unavailable_reason": row.get("price_unavailable_reason"),
             "days_of_supply": cls._calculate_days_of_supply(
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
             ),
             "sell_through_rate": cls._calculate_sell_through_rate(
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
             ),
             "liquidity_indicator": cls._calculate_liquidity_indicator(
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
-                hub_sell_orders=int(row.get("hub_sell_order_count") or 0),
+                hub_sell_orders=cls._optional_int(row, "hub_sell_order_count"),
             ),
             "liquidity_score": cls._calculate_liquidity_score(
-                hub_sell_liquidity=int(row.get("hub_sell_liquidity") or 0),
+                hub_sell_liquidity=cls._optional_int(row, "hub_sell_liquidity"),
                 region_daily_volume_7d_avg=cls._as_float(region_daily_volume_7d_avg),
-                hub_sell_orders=int(row.get("hub_sell_order_count") or 0),
+                hub_sell_orders=cls._optional_int(row, "hub_sell_order_count"),
             ),
             "pricing_confidence": row.get("pricing_confidence"),
             "pricing_confidence_reasons": row.get("pricing_confidence_reasons") or [],
@@ -3529,7 +3626,7 @@ class IndustryService:
     def _normalize_fraction(value: Any) -> float:
         try:
             normalized = abs(float(value or 0.0))
-        except Exception:
+        except (TypeError, ValueError):
             return 0.0
         while normalized >= 1.0:
             normalized /= 100.0
@@ -3582,7 +3679,7 @@ class IndustryService:
                 continue
             try:
                 trained_skill_level = int(entry.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 trained_skill_level = 0
             out[skill_name] = max(trained_skill_level, out.get(skill_name, 0))
         return out
@@ -3598,7 +3695,7 @@ class IndustryService:
                 continue
             try:
                 trained_skill_level = int(entry.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 trained_skill_level = 0
             if trained_skill_level <= 0:
                 continue
@@ -3682,8 +3779,8 @@ class IndustryService:
         (job_cost.profile_facility_tax). A tax the profile does not determine
         is unknown, never 0 %: every fee then reads unknown with the reason,
         and a WARNING is logged once per reason."""
-        scc = max(0.0, float(self._adm("industry", "scc_surcharge", DEFAULT_SCC_SURCHARGE)))
-        research_scc = max(0.0, float(self._adm("industry", "research_scc_surcharge", DEFAULT_RESEARCH_SCC_SURCHARGE)))
+        scc = max(0.0, float(self._adm("industry", "scc_surcharge")))
+        research_scc = max(0.0, float(self._adm("industry", "research_scc_surcharge")))
         facility_tax, reason = profile_facility_tax(profile_payload, scc=scc)
         if reason is not None and isinstance(profile_payload, dict):
             warned = self.__dict__.setdefault("_facility_tax_warned", set())
@@ -3857,20 +3954,46 @@ class IndustryService:
             logger.warning("Rig bonus security multiplier: %s", reason)
 
     @classmethod
-    def _system_cost_index(cls, *, profile_payload: dict[str, Any] | None, activity: str) -> float:
+    def _system_cost_index(cls, *, profile_payload: dict[str, Any] | None, activity: str) -> float | None:
+        """The activity's system cost index; None when it is unknown (see
+        _system_cost_index_with_reason): never a silent 0."""
+        index, _reason = cls._system_cost_index_with_reason(profile_payload=profile_payload, activity=activity)
+        return index
+
+    @classmethod
+    def _system_cost_index_with_reason(
+        cls, *, profile_payload: dict[str, Any] | None, activity: str,
+    ) -> tuple[float | None, str | None]:
+        """(index, None), or (None, why) when the profile has no index for
+        the activity (no profile, a failed lookup, a system without the
+        entry, a null or non-numeric value). The job fee is then unknown,
+        with this reason (job_fee_unknown_reasons), never 0."""
+        missing = f"the industry profile has no {activity} cost index"
         if not isinstance(profile_payload, dict):
-            return 0.0
+            return None, missing
         aliases = set(cls._ACTIVITY_COST_INDEX_ALIASES.get(activity, (activity,)))
+        system_id = profile_payload.get("system_id")
         for entry in profile_payload.get("system_cost_indices") or []:
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("activity") or "") not in aliases:
                 continue
+            raw = entry.get("cost_index")
+            if raw is None:
+                return None, f"{missing} (the ESI entry has no value)"
             try:
-                return max(0.0, float(entry.get("cost_index") or 0.0))
-            except Exception:
-                return 0.0
-        return 0.0
+                return max(0.0, float(raw)), None
+            except (TypeError, ValueError):
+                where = f" of system {system_id}" if system_id is not None else ""
+                reason = f"the {activity} cost index {raw!r}{where} is not a number"
+                logger.warning("System cost index: %s; the job fee is unknown", reason)
+                return None, reason
+        industry_system = profile_payload.get("industry_system")
+        lookup_error = industry_system.get("lookup_error") if isinstance(industry_system, dict) else None
+        if lookup_error:
+            where = f" of system {system_id}" if system_id is not None else ""
+            return None, f"{missing} (the cost indices{where} could not be read: {lookup_error})"
+        return None, missing
 
     def _get_adjusted_market_price_map(self) -> dict[int, dict[str, Any]]:
         now = time.time()
@@ -3888,7 +4011,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(row.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if type_id <= 0:
                 continue
@@ -3906,25 +4029,48 @@ class IndustryService:
         type_id: int,
         type_payload: dict[str, Any] | None,
         adjusted_price_map: dict[int, dict[str, Any]],
+        unknown_reasons: list[str] | None = None,
     ) -> tuple[float | None, str | None]:
+        """(unit EIV, "esi_adjusted_price"): EVE's estimated item value is the
+        ESI adjusted price. Without a readable one it is unknown, (None,
+        None), its reason appended to `unknown_reasons` when given: no
+        average or SDE base price stands in (that would price the job fee on
+        another basis and pass as exact). `type_payload` is not read."""
         pricing = adjusted_price_map.get(int(type_id)) or {}
         adjusted_price = pricing.get("adjusted_price")
-        average_price = pricing.get("average_price")
-        if adjusted_price is not None:
+        value: float | None = None
+        if adjusted_price is not None and not isinstance(adjusted_price, bool):
             try:
-                return float(adjusted_price), "esi_adjusted_price"
-            except Exception:
-                pass
-        if average_price is not None:
-            try:
-                return float(average_price), "esi_average_price"
-            except Exception:
-                pass
-        if isinstance(type_payload, dict) and type_payload.get("base_price") is not None:
-            try:
-                return float(type_payload.get("base_price")), "sde_base_price"
-            except Exception:
-                pass
+                value = float(adjusted_price)
+            except (TypeError, ValueError):
+                value = None
+        if value is not None and math.isfinite(value):
+            return value, "esi_adjusted_price"
+        reason = (
+            f"type_id={type_id} has no ESI adjusted price: its estimated item value is unknown"
+            if adjusted_price is None
+            else f"the ESI adjusted price {adjusted_price!r} of type_id={type_id} is not a number: its estimated "
+                 "item value is unknown"
+        )
+        if unknown_reasons is not None:
+            unknown_reasons.append(reason)
+        return None, None
+
+    @classmethod
+    def _reference_unit_price(
+        cls, *, type_id: int, type_payload: dict[str, Any] | None, adjusted_price_map: dict[int, dict[str, Any]],
+    ) -> tuple[float | None, str | None]:
+        """A labelled reference value for an item (not an EIV): the ESI
+        adjusted, else average, else the SDE base price, with its source."""
+        pricing = adjusted_price_map.get(int(type_id)) or {}
+        for value, source in (
+            (pricing.get("adjusted_price"), "esi_adjusted_price"),
+            (pricing.get("average_price"), "esi_average_price"),
+            ((type_payload or {}).get("base_price") if isinstance(type_payload, dict) else None, "sde_base_price"),
+        ):
+            number = cls._as_float(value)
+            if number is not None:
+                return number, source
         return None, None
 
     @classmethod
@@ -3934,12 +4080,15 @@ class IndustryService:
         *,
         quantity_key: str,
         adjusted_price_map: dict[int, dict[str, Any]],
+        unknown_reasons: list[str] | None = None,
     ) -> tuple[float | None, int]:
         """(EIV, priced line count). The EIV is None when no line, or ANY line,
-        lacks a price (fix round 1): a partial sum would price a job fee low
-        and pass as exact, so the fee reads unknown instead."""
+        lacks a price or has a non-numeric quantity (fix round 1, F1): a
+        partial sum would price a job fee low and pass as exact, so the fee
+        reads unknown instead."""
         total, priced_count, _line_count = cls._sum_estimated_item_value_counted(
             entries, quantity_key=quantity_key, adjusted_price_map=adjusted_price_map,
+            unknown_reasons=unknown_reasons,
         )
         return total, priced_count
 
@@ -3950,9 +4099,12 @@ class IndustryService:
         *,
         quantity_key: str,
         adjusted_price_map: dict[int, dict[str, Any]],
+        unknown_reasons: list[str] | None = None,
     ) -> tuple[float | None, int, int]:
         """_sum_estimated_item_value plus the number of lines it counted
-        (priced or not): the M of "N of M priced"."""
+        (priced or not): the M of "N of M priced". A non-numeric quantity
+        makes the EIV unknown; its reason is appended to `unknown_reasons`
+        (when given), for the job fee's fee_unknown_reason."""
         total = 0.0
         priced_count = 0
         line_count = 0
@@ -3962,7 +4114,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 type_id = 0
             if type_id <= 0:
                 continue
@@ -3971,14 +4123,20 @@ class IndustryService:
                 type_id=type_id,
                 type_payload=entry,
                 adjusted_price_map=adjusted_price_map,
+                unknown_reasons=unknown_reasons,
             )
             if unit_value is None:
                 unpriced = True
                 continue
             try:
                 quantity = int(entry.get(quantity_key) or 0)
-            except Exception:
-                quantity = 0
+            except (TypeError, ValueError):
+                reason = f"the {quantity_key} {entry.get(quantity_key)!r} of type_id={type_id} is not a number"
+                logger.warning("EIV: %s; the EIV and the job fee are unknown", reason)
+                if unknown_reasons is not None:
+                    unknown_reasons.append(reason)
+                unpriced = True
+                continue
             total += float(unit_value) * quantity
             priced_count += 1
         if priced_count == 0:
@@ -4019,7 +4177,7 @@ class IndustryService:
         if adjusted_price is not None and adjusted_price > 0:
             return adjusted_price, "asset_adjusted_price"
 
-        return cls._resolve_eiv_pricing(
+        return cls._reference_unit_price(
             type_id=type_id,
             type_payload=payload,
             adjusted_price_map=adjusted_price_map,
@@ -4041,7 +4199,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 type_id = 0
             if type_id <= 0:
                 continue
@@ -4055,7 +4213,9 @@ class IndustryService:
                 continue
             try:
                 quantity = int(entry.get(quantity_key) or 0)
-            except Exception:
+            except (TypeError, ValueError):
+                logger.warning("Item value: type_id=%s has a non-numeric %s %r; the line is left out of the value",
+                               type_id, quantity_key, entry.get(quantity_key))
                 quantity = 0
             if quantity <= 0:
                 continue
@@ -4358,16 +4518,20 @@ class IndustryService:
         *,
         activity: str,
         process_value: float | None,
-        system_index: float,
+        system_index: float | None,
         structure_cost_reduction: float,
         surcharge_rates: JobSurchargeRates,
+        index_unknown_reason: str | None = None,
+        eiv_unknown_reason: str | None = None,
     ) -> dict[str, Any]:
         """The one install-cost model of every activity (job_cost.py): job
         value x index x (1 - reduction) + job value x the activity's
-        surcharge rate. `process_value` is the activity's job value."""
+        surcharge rate. `process_value` is the activity's job value; an
+        unknown value or index names its reason in fee_unknown_reason."""
         return job_install_cost(
             activity=activity, process_value=process_value, system_index=system_index,
             structure_cost_reduction=structure_cost_reduction, surcharge_rates=surcharge_rates,
+            index_unknown_reason=index_unknown_reason, eiv_unknown_reason=eiv_unknown_reason,
         )
 
     #: Row labels of the activities whose fee can be unknown (I1).
@@ -4422,13 +4586,28 @@ class IndustryService:
             if value is None:
                 return None
             return float(value)
-        except Exception:
+        except (TypeError, ValueError):
             return None
 
     @staticmethod
-    def _calculate_days_of_supply(hub_sell_liquidity: int, region_daily_volume_7d_avg: float | None) -> float | None:
-        """Calculate Days of Supply (DOS) = Hub Sell Liquidity / Region Daily Volume (7d avg)"""
+    def _optional_int(mapping: Any, key: str) -> int | None:
+        """mapping[key] as an int; None when it is absent, None or not a
+        number (unknown, never 0)."""
+        value = mapping.get(key) if isinstance(mapping, dict) else None
+        if value is None or isinstance(value, bool):
+            return None
         try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _calculate_days_of_supply(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None) -> float | None:
+        """Calculate Days of Supply (DOS) = Hub Sell Liquidity / Region Daily Volume (7d avg).
+        None when either is unknown."""
+        try:
+            if hub_sell_liquidity is None:
+                return None
             if region_daily_volume_7d_avg is None or float(region_daily_volume_7d_avg) <= 0:
                 return None
             return float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
@@ -4446,9 +4625,12 @@ class IndustryService:
             return None
 
     @staticmethod
-    def _calculate_liquidity_indicator(hub_sell_liquidity: int, region_daily_volume_7d_avg: float | None, hub_sell_orders: int) -> str:
-        """Calculate liquidity indicator based on DOS ranges: Very High, High, Medium, Low, Very Low"""
+    def _calculate_liquidity_indicator(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None, hub_sell_orders: int | None) -> str:
+        """Calculate liquidity indicator based on DOS ranges: Very High, High, Medium, Low, Very Low;
+        Unknown when the hub liquidity or the region volume is unknown."""
         try:
+            if hub_sell_liquidity is None:
+                return "Unknown"
             if region_daily_volume_7d_avg is None or float(region_daily_volume_7d_avg) <= 0:
                 return "Unknown"
             dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
@@ -4467,10 +4649,18 @@ class IndustryService:
             return "Unknown"
 
     @staticmethod
-    def _calculate_liquidity_score(hub_sell_liquidity: int, region_daily_volume_7d_avg: float, hub_sell_orders: int) -> float:
-        """Calculate combined liquidity score (0-100) based on DOS and order count"""
+    def _calculate_liquidity_score(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None, hub_sell_orders: int | None) -> float | None:
+        """Calculate combined liquidity score (0-100) based on DOS and order count;
+        None when the hub's sell book could not be fetched or the region volume
+        is unknown or unreadable (unknown, not 0; the row's
+        region_daily_volume_unavailable_reason says why). A known zero volume
+        (nothing sold) scores 0."""
         try:
-            if region_daily_volume_7d_avg is None or region_daily_volume_7d_avg <= 0:
+            if hub_sell_liquidity is None or hub_sell_orders is None:
+                return None
+            if region_daily_volume_7d_avg is None:
+                return None
+            if float(region_daily_volume_7d_avg) <= 0:
                 return 0.0
 
             dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
@@ -4484,8 +4674,8 @@ class IndustryService:
             # Combined score: 70% DOS, 30% order count
             liquidity_score = (dos_score * 0.7) + (order_count_score * 0.3)
             return round(liquidity_score, 2)
-        except Exception:
-            return 0.0
+        except (TypeError, ValueError):
+            return None  # an unreadable input: unknown, not 0
 
     @classmethod
     def _apply_material_pricing_to_job_tree(
@@ -4551,7 +4741,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 type_id = 0
             if type_id <= 0:
                 continue
@@ -4624,7 +4814,7 @@ class IndustryService:
                     continue
                 try:
                     product_type_id = int(product.get("type_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     product_type_id = 0
                 if product_type_id > 0:
                     _keep_lowest(manufacturing_row_by_product_type_id, product_type_id, row)
@@ -4633,7 +4823,7 @@ class IndustryService:
                     continue
                 try:
                     product_type_id = int(product.get("type_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     product_type_id = 0
                 if product_type_id > 0:
                     _keep_lowest(reaction_row_by_product_type_id, product_type_id, row)
@@ -4645,7 +4835,7 @@ class IndustryService:
                     invention_product = {}
                 try:
                     product_type_id = int(invention_product.get("type_id") or product.get("type_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     product_type_id = 0
                 if product_type_id > 0:
                     _keep_lowest(invention_row_by_blueprint_type_id, product_type_id, row)
@@ -4821,8 +5011,8 @@ class IndustryService:
                     blueprint_time_efficiency = int(matched_blueprint_originals[0].blueprint_time_efficiency or 0)
                     blueprint_source_kind = "owned_blueprint_original"
                 else:
-                    blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency", self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY))
-                    blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency", self._MAX_BLUEPRINT_TIME_EFFICIENCY))
+                    blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency"))
+                    blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency"))
                     blueprint_source_kind = "blueprint_sde_fallback"
                     include_sde_research_chain = True
 
@@ -4923,12 +5113,16 @@ class IndustryService:
             adjusted_material_entries.append(material)
             base_material_entries.append({**material, "quantity": base_total_quantity})
 
+        eiv_unknown_reasons: list[str] = []
         process_value, priced_material_count, eiv_material_count = self._sum_estimated_item_value_counted(
             base_material_entries,
             quantity_key="quantity",
             adjusted_price_map=adjusted_market_price_map,
+            unknown_reasons=eiv_unknown_reasons,
         )
-        cost_index = self._system_cost_index(profile_payload=selected_industry_profile, activity=activity)
+        cost_index, cost_index_unknown_reason = self._system_cost_index_with_reason(
+            profile_payload=selected_industry_profile, activity=activity,
+        )
         surcharge_rates = self._profile_job_surcharge_rates(selected_industry_profile)
         job_cost = self._job_install_cost(
             activity=activity,
@@ -4936,6 +5130,8 @@ class IndustryService:
             system_index=cost_index,
             structure_cost_reduction=cost_reduction,
             surcharge_rates=surcharge_rates,
+            index_unknown_reason=cost_index_unknown_reason,
+            eiv_unknown_reason="; ".join(eiv_unknown_reasons) or None,
         )
         direct_duration_seconds = sum(int(job_segment["duration_seconds"]) for job_segment in job_segments)
 
@@ -6184,7 +6380,7 @@ class IndustryService:
         ):
             try:
                 item_id = int(getattr(row, "item_id", 0) or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 item_id = 0
             if item_id <= 0 or item_id in latest_by_item_id:
                 continue
@@ -6200,7 +6396,7 @@ class IndustryService:
         try:
             item_id = int(getattr(row, "item_id", 0) or 0)
             type_id = int(getattr(row, "type_id", 0) or 0)
-        except Exception:
+        except (TypeError, ValueError):
             return None
         if item_id <= 0 or type_id <= 0:
             return None
@@ -6431,6 +6627,22 @@ class IndustryService:
 
         return out
 
+    @staticmethod
+    def _scope_owner_id(owned_blueprints_scope: str, raw: str | None, kind: str) -> int:
+        """The positive {kind} ID of an owned_blueprints_scope part. A missing,
+        non-numeric or non-positive ID is the caller's error: a 400 naming
+        it, instead of a scope that silently selects no assets."""
+        try:
+            owner_id = int(str(raw).strip()) if raw is not None else 0
+        except ValueError:
+            owner_id = 0
+        if owner_id <= 0:
+            raise ServiceError(
+                f"owned_blueprints_scope {owned_blueprints_scope!r}: {raw!r} is not a valid {kind} ID",
+                status_code=400,
+            )
+        return owner_id
+
     def _get_owned_blueprint_assets(
         self,
         *,
@@ -6453,11 +6665,11 @@ class IndustryService:
                     continue
                 try:
                     character_id = int(character.get("character_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     character_id = 0
                 try:
                     corporation_id = int(character.get("corporation_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     corporation_id = 0
                 if character_id > 0:
                     character_ids.append(character_id)
@@ -6472,22 +6684,26 @@ class IndustryService:
                     continue
                 try:
                     character_id = int(character.get("character_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     character_id = 0
                 character_name = str(character.get("character_name") or character.get("name") or "").strip()
                 if character_id > 0 and character_name:
                     character_name_by_id[character_id] = character_name
 
+            corp_manager = getattr(self._state, "corp_manager", None)
             try:
-                corporations = self._state.corp_manager.get_corporations() or []
-            except Exception:
+                corporations = (corp_manager.get_corporations() or []) if corp_manager is not None else []
+            except SQLAlchemyError as exc:
+                # Cosmetic (the corporation names): the overview refresh must not fail on it.
+                logger.warning("Owned assets: the corporation names cannot be read (%s); the blueprints keep their "
+                               "corporation IDs", exc)
                 corporations = []
             for corporation in corporations:
                 if not isinstance(corporation, dict):
                     continue
                 try:
                     corporation_id = int(corporation.get("corporation_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     corporation_id = 0
                 corporation_name = str(corporation.get("corporation_name") or corporation.get("name") or "").strip()
                 if corporation_id > 0 and corporation_name:
@@ -6514,8 +6730,8 @@ class IndustryService:
                             suppress_forbidden_log=True,
                             suppress_not_found_log=True,
                         )
-                    except Exception:
-                        continue
+                    except _ESI_ERRORS:
+                        continue  # cosmetic: the location keeps its ID
                     if not isinstance(location_info, dict):
                         continue
                     name = location_info.get("name")
@@ -6525,10 +6741,7 @@ class IndustryService:
 
             normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
             if normalized_scope.startswith("character:"):
-                try:
-                    selected_character_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
-                    selected_character_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
                 historical_character_assets, _ = self._load_historical_blueprint_assets(
                     app_session=session,
@@ -6548,14 +6761,8 @@ class IndustryService:
                 )
             if normalized_scope.startswith("character_and_corporation:"):
                 parts = normalized_scope.split(":")
-                try:
-                    selected_character_id = int(parts[1]) if len(parts) > 1 else 0
-                except Exception:
-                    selected_character_id = 0
-                try:
-                    selected_corporation_id = int(parts[2]) if len(parts) > 2 else 0
-                except Exception:
-                    selected_corporation_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
                 character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
                 historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
@@ -6579,10 +6786,7 @@ class IndustryService:
                     top_location_name_by_id,
                 )
             if normalized_scope.startswith("corporation:"):
-                try:
-                    selected_corporation_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
-                    selected_corporation_id = 0
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
                 corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
                 _, historical_corporation_assets = self._load_historical_blueprint_assets(
                     app_session=session,
@@ -6702,11 +6906,11 @@ class IndustryService:
         finally:
             try:
                 session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
             try:
                 sde_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def _get_owned_item_inventory(
@@ -6727,11 +6931,11 @@ class IndustryService:
                     continue
                 try:
                     character_id = int(character.get("character_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     character_id = 0
                 try:
                     corporation_id = int(character.get("corporation_id") or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     corporation_id = 0
                 if character_id > 0:
                     character_ids.append(character_id)
@@ -6769,28 +6973,16 @@ class IndustryService:
             character_assets: list[CharacterAssetsModel] = []
             corporation_assets: list[CorporationAssetsModel] = []
             if normalized_scope.startswith("character:"):
-                try:
-                    selected_character_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
-                    selected_character_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
                 character_assets = query_character_assets([selected_character_id])
             elif normalized_scope.startswith("character_and_corporation:"):
                 parts = normalized_scope.split(":")
-                try:
-                    selected_character_id = int(parts[1]) if len(parts) > 1 else 0
-                except Exception:
-                    selected_character_id = 0
-                try:
-                    selected_corporation_id = int(parts[2]) if len(parts) > 2 else 0
-                except Exception:
-                    selected_corporation_id = 0
+                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
                 character_assets = query_character_assets([selected_character_id])
                 corporation_assets = query_corporation_assets([selected_corporation_id])
             elif normalized_scope.startswith("corporation:"):
-                try:
-                    selected_corporation_id = int(normalized_scope.split(":", 1)[1])
-                except Exception:
-                    selected_corporation_id = 0
+                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
                 corporation_assets = query_corporation_assets([selected_corporation_id])
             elif normalized_scope == "all_characters":
                 character_assets = query_character_assets(character_ids)
@@ -6810,13 +7002,13 @@ class IndustryService:
             for asset in [*character_assets, *corporation_assets]:
                 try:
                     type_id = int(asset.type_id or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     type_id = 0
                 if type_id <= 0 or str(getattr(asset, "type_category_name", "") or "") == "Blueprint":
                     continue
                 try:
                     quantity = int(getattr(asset, "quantity", 0) or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     quantity = 0
                 if quantity <= 0:
                     continue
@@ -6892,7 +7084,7 @@ class IndustryService:
             for asset in [*character_assets, *corporation_assets]:
                 try:
                     a_type_id = int(asset.type_id or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     a_type_id = 0
                 if a_type_id <= 0 or a_type_id not in quantity_by_type_id:
                     continue
@@ -6901,7 +7093,7 @@ class IndustryService:
                     continue
                 try:
                     a_qty = int(getattr(asset, "quantity", 0) or 0)
-                except Exception:
+                except (TypeError, ValueError):
                     a_qty = 0
                 if a_qty <= 0:
                     continue
@@ -6942,13 +7134,13 @@ class IndustryService:
                 for asset in [*character_assets, *corporation_assets]:
                     try:
                         type_id = int(asset.type_id or 0)
-                    except Exception:
+                    except (TypeError, ValueError):
                         type_id = 0
                     if type_id not in fallback_needed:
                         continue
                     try:
                         quantity = int(getattr(asset, "quantity", 0) or 0)
-                    except Exception:
+                    except (TypeError, ValueError):
                         quantity = 0
                     if quantity <= 0:
                         continue
@@ -6999,11 +7191,11 @@ class IndustryService:
         finally:
             try:
                 session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
             try:
                 sde_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     # ----------------------------------------------------------------
@@ -7066,7 +7258,7 @@ class IndustryService:
                 continue
             try:
                 type_id = int(entry.get("type_id") or 0)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if type_id <= 0:
                 continue
@@ -7086,7 +7278,7 @@ class IndustryService:
             if probability is None:
                 try:
                     probability = float(entry.get("probability_pct") or 0.0) / 100.0
-                except Exception:
+                except (TypeError, ValueError):
                     probability = None
             out.append({"probability": probability, "quantity": entry.get("quantity"), "type_id": product.get("type_id"), "type_name": product.get("type_name")})
         return out
@@ -7133,8 +7325,10 @@ class IndustryService:
             self._profile_rig_reduction(profile_payload=selected_industry_profile, activity=activity, metric="cost", manufacturing_group=manufacturing_group),
             self._implant_reduction(character_modifier_payload=selected_character_modifiers, activity=activity, metric="cost"),
         ])
-        cost_index = self._system_cost_index(profile_payload=selected_industry_profile, activity=activity)
-        job_cost = self._job_install_cost(activity=activity, process_value=process_value, system_index=cost_index, structure_cost_reduction=cost_reduction, surcharge_rates=surcharge_rates)
+        cost_index, cost_index_unknown_reason = self._system_cost_index_with_reason(
+            profile_payload=selected_industry_profile, activity=activity,
+        )
+        job_cost = self._job_install_cost(activity=activity, process_value=process_value, system_index=cost_index, structure_cost_reduction=cost_reduction, surcharge_rates=surcharge_rates, index_unknown_reason=cost_index_unknown_reason)
         duration_seconds = self._round_duration_seconds(base_time_seconds * runs * max(0.0, 1.0 - time_reduction))
         result: dict[str, Any] = {
             "activity": activity, "duration_seconds": duration_seconds,
@@ -7448,7 +7642,7 @@ class IndustryService:
             character_id=character_id, market_hub=normalized_market_hub,
             product_price_side=normalized_product_price_side,
         )
-        decryptor_selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled", True))
+        decryptor_selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled"))
         decryptor_options = self._load_decryptor_options() if decryptor_selection_enabled else (NO_DECRYPTOR,)
         inventor_skill_levels = self._get_inventor_skill_levels()
         material_price_type_ids = sorted({
@@ -7475,7 +7669,7 @@ class IndustryService:
             progress_callback(0.45, "Loading owned item inventory", {"stage": "inventory"})
         blueprint_copy_assets_by_type_id: dict[int, list] = {}
         blueprint_original_assets_by_type_id: dict[int, list] = {}
-        _admin_hangar_flag = self._adm("industry", "industry_hangar_flag", None)
+        _admin_hangar_flag = self._adm("industry", "industry_hangar_flag")
         _corporation_hangar_flags: list[str] | None = (
             [str(_admin_hangar_flag)] if _admin_hangar_flag is not None else None
         )
@@ -7503,7 +7697,7 @@ class IndustryService:
         for asset in [*character_blueprint_assets, *corporation_blueprint_assets]:
             try:
                 bp_type_id = int(asset.type_id)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if bp_type_id <= 0:
                 continue
@@ -7739,7 +7933,7 @@ class IndustryService:
         if isinstance(target_entry, dict):
             try:
                 base_probability = float(target_entry.get("probability_pct") or 0.0) / 100.0
-            except Exception:
+            except (TypeError, ValueError):
                 base_probability = 0.0
         # EVE: base x (1 + (sci1 + sci2)/30 + enc/40) x decryptor, for the
         # corp's best inventor of this blueprint (D2). Resolved only when
@@ -7756,7 +7950,7 @@ class IndustryService:
             chance.probability if chance is not None
             else invention_probability(base_probability, None, decryptor.probability_multiplier)
         )
-        probability_floor = float(self._adm("industry", "invention_probability_floor", DEFAULT_INVENTION_PROBABILITY_FLOOR))
+        probability_floor = float(self._adm("industry", "invention_probability_floor"))
         runs_per_invented_blueprint = int((target_entry or {}).get("quantity") or 0)
         if invented_runs > 0:
             # Once per blueprint per refresh: batch 1, the later batches and
@@ -7832,7 +8026,7 @@ class IndustryService:
         # Job value per attempt: 0.02 x the invented blueprint's per-run
         # manufacturing EIV (EVE), times the attempts.
         per_attempt_process_value = (
-            float(invented_blueprint_eiv) * float(self._adm("industry", "invention_cost_eiv_multiplier", DEFAULT_INVENTION_COST_EIV_MULTIPLIER))
+            float(invented_blueprint_eiv) * float(self._adm("industry", "invention_cost_eiv_multiplier"))
             if invented_blueprint_eiv is not None else None
         )
         invention_process_value = float(per_attempt_process_value) * invention_attempts if per_attempt_process_value is not None else None
@@ -7993,9 +8187,10 @@ class IndustryService:
         if source_base_time <= 0:
             return None, "the T1 source blueprint has no copy time in the SDE"
         source_mfg_materials = [dict(e) for e in ((invention_source_row.get("manufacturing_job") or {}).get("materials") or []) if isinstance(e, dict)]
-        source_pv, _ = self._sum_estimated_item_value(source_mfg_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map)
+        eiv_reasons: list[str] = []
+        source_pv, _ = self._sum_estimated_item_value(source_mfg_materials, quantity_key="quantity", adjusted_price_map=adjusted_price_map, unknown_reasons=eiv_reasons)
         if source_pv is None:
-            return None, "no priced EIV for the source copy (a material has no adjusted price)"
+            return None, f"no priced EIV for the source copy ({'; '.join(eiv_reasons) or 'a material has no adjusted price'})"
         fee = compute_activity(
             activity="copying", base_time_seconds=source_base_time, runs=1,
             process_value=self._copy_process_value(source_pv, 1),
@@ -8815,11 +9010,13 @@ class IndustryService:
         if base_time <= 0:
             return None, "the component's blueprint has no manufacturing time in the SDE"
         materials = [dict(e) for e in (job.get("materials") or []) if isinstance(e, dict)]
+        eiv_reasons: list[str] = []
         process_value, _ = self._sum_estimated_item_value(
             materials, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map,
+            unknown_reasons=eiv_reasons,
         )
         if process_value is None:
-            return None, "no priced EIV for the component (a material has no adjusted price)"
+            return None, f"no priced EIV for the component ({'; '.join(eiv_reasons) or 'a material has no adjusted price'})"
         product = next(
             (p for p in (job.get("products") or []) if isinstance(p, dict) and int(p.get("type_id") or 0) == int(component_type_id)),
             {},
@@ -8839,7 +9036,7 @@ class IndustryService:
             return None
         return (
             float(per_run_material_eiv) * max(0.0, float(copied_runs))
-            * float(self._adm("industry", "copy_cost_eiv_multiplier", DEFAULT_COPY_COST_EIV_MULTIPLIER))
+            * float(self._adm("industry", "copy_cost_eiv_multiplier"))
         )
 
     def _research_process_value(self, per_run_material_eiv: float | None, target_level: int) -> float | None:
@@ -8855,7 +9052,7 @@ class IndustryService:
         level_multiplier = research_level_multiplier(0, int(target_level))
         if level_multiplier <= 0:
             return None
-        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier", DEFAULT_RESEARCH_COST_EIV_MULTIPLIER)) * level_multiplier
+        return float(per_run_material_eiv) * float(self._adm("industry", "research_cost_eiv_multiplier")) * level_multiplier
 
     def _research_job_cost_by_level(
         self,
@@ -9340,8 +9537,8 @@ class IndustryService:
                 blueprint_time_efficiency = int(blueprint_original_asset.blueprint_time_efficiency or 0)
                 blueprint_source_kind = "owned_blueprint_original"
             else:
-                blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency", self._MAX_BLUEPRINT_MATERIAL_EFFICIENCY))
-                blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency", self._MAX_BLUEPRINT_TIME_EFFICIENCY))
+                blueprint_material_efficiency = int(self._adm("industry", "max_blueprint_material_efficiency"))
+                blueprint_time_efficiency = int(self._adm("industry", "max_blueprint_time_efficiency"))
                 blueprint_source_kind = "blueprint_sde_fallback"
                 include_sde_research_chain = True
 
@@ -9379,14 +9576,15 @@ class IndustryService:
         base_material_entries = cast(list[dict[str, Any]], sized_batch["base_material_entries"])
 
         # EIV calculations
-        base_material_eiv_total, base_material_eiv_priced_count, base_material_eiv_line_count = self._sum_estimated_item_value_counted(base_material_entries, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map)
+        base_material_eiv_unknown_reasons: list[str] = []
+        base_material_eiv_total, base_material_eiv_priced_count, base_material_eiv_line_count = self._sum_estimated_item_value_counted(base_material_entries, quantity_key="quantity", adjusted_price_map=ctx.adjusted_market_price_map, unknown_reasons=base_material_eiv_unknown_reasons)
         per_run_material_eiv, _ = self._sum_estimated_item_value(adjusted_material_entries, quantity_key="quantity_per_run", adjusted_price_map=ctx.adjusted_market_price_map)
         product_eiv_unit, product_eiv_source = self._resolve_eiv_pricing(type_id=product_type_id, type_payload=compact_product, adjusted_price_map=ctx.adjusted_market_price_map)
         product_eiv_total = float(product_eiv_unit) * int(compact_product.get("quantity") or 0) if product_eiv_unit is not None else None
 
         # Recompute manufacturing job cost with actual process value
-        manufacturing_cost_index = self._system_cost_index(profile_payload=ctx.selected_industry_profile, activity="manufacturing")
-        manufacturing_job_cost = self._job_install_cost(activity="manufacturing", process_value=base_material_eiv_total, system_index=manufacturing_cost_index, structure_cost_reduction=manufacturing_cost_reduction, surcharge_rates=ctx.surcharge_rates)
+        manufacturing_cost_index, manufacturing_cost_index_unknown_reason = self._system_cost_index_with_reason(profile_payload=ctx.selected_industry_profile, activity="manufacturing")
+        manufacturing_job_cost = self._job_install_cost(activity="manufacturing", process_value=base_material_eiv_total, system_index=manufacturing_cost_index, structure_cost_reduction=manufacturing_cost_reduction, surcharge_rates=ctx.surcharge_rates, index_unknown_reason=manufacturing_cost_index_unknown_reason, eiv_unknown_reason="; ".join(base_material_eiv_unknown_reasons) or None)
         direct_manufacturing_time_seconds = sum(int(segment["duration_seconds"]) for segment in job_segments)
 
         # Activity breakdown
@@ -9871,6 +10069,7 @@ class IndustryService:
                 "product_market_price_fetched_at": product_market_pricing.get("fetched_at"),
                 "product_market_price_sample_size": product_market_pricing.get("sample_size"),
                 "product_market_volume_total": product_market_pricing.get("volume_total"),
+                "product_market_price_unavailable_reason": product_market_pricing.get("price_unavailable_reason"),
                 "activity_breakdown": activity_breakdown,
                 "recursive_activity_breakdown": recursive_prerequisite_plan.get("activity_breakdown") or {},
                 "procurement_materials": self._overview_keyed_entries(top_level_procurement_materials, compactor=lambda e: e),
@@ -9900,6 +10099,8 @@ class IndustryService:
             "market_price_fetched_at": product_market_pricing.get("fetched_at"),
             "market_price_sample_size": product_market_pricing.get("sample_size"),
             "market_volume_total": product_market_pricing.get("volume_total"),
+            # Why the product price is unknown: its hub order-book fetch failed.
+            "price_unavailable_reason": product_market_pricing.get("price_unavailable_reason"),
             "bpc_count": len(ctx.blueprint_copy_assets_by_type_id.get(blueprint_type_id, [])),
             "has_bpo": bool(ctx.blueprint_original_assets_by_type_id.get(blueprint_type_id)),
         }
@@ -10294,7 +10495,136 @@ class IndustryService:
         self._state._overview_result_cache = {
             "hash": overview_input_hash, "rows": product_rows, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION,
         }
+        # The realized invention estimate uses the same decryptor (realized_invention_inputs).
+        self.publish_decryptor_choices(ctx.decryptor_choice_by_blueprint_type_id)
         return product_rows
+
+    @staticmethod
+    def _published_decryptor_choices(choices: Mapping[int, DecryptorChoice]) -> dict[int, DecryptorOption]:
+        """{invented blueprint type_id: the decryptor this overview invents it
+        with}. A "no decryptor data" fallback (NO_DECRYPTOR_DATA_REASON) is
+        published as NO_DECRYPTOR: the producer plans and prices that
+        invention without a decryptor, so the realized side does too."""
+        return {int(bp_type_id): choice.option for bp_type_id, choice in choices.items()}
+
+    def publish_decryptor_choices(self, choices: Mapping[int, DecryptorChoice]) -> dict[int, DecryptorOption]:
+        """Publish this overview's decryptor choices for the realized side:
+        in memory (the overview cache), persisted in the app DB (read after a
+        restart, before the first overview), and, after the first publish of
+        the process or one that plans a blueprint the earlier ones did not,
+        the stored jobs that had no choice are re-snapshotted.
+        A database or ESI failure here is a WARNING: the overview stands."""
+        published = self._published_decryptor_choices(choices)
+        cached = getattr(self._state, "_overview_result_cache", None)
+        if not isinstance(cached, dict):
+            cached = {}
+            self._state._overview_result_cache = cached
+        cached["decryptor_by_blueprint_type_id"] = published
+        if self._sessions is None:  # no databases in this process (tests)
+            return published
+        try:
+            session = self._sessions.app_session()
+        except RuntimeError as exc:  # no app DB in this process
+            logger.warning("Invention: the decryptor choices are not persisted (%s); a restart forgets them", exc)
+            return published
+        try:
+            save_published_decryptor_choices(
+                session,
+                {bp: (published[bp], choices[bp].reason) for bp in published},
+                now=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+        except SQLAlchemyError as exc:
+            session.rollback()
+            logger.warning("Invention: the decryptor choices could not be persisted (%s); a restart forgets them", exc)
+        finally:
+            session.close()
+        self._resnapshot_jobs_after_publish(frozenset(int(bp) for bp in published))
+        return published
+
+    def _resnapshot_jobs_after_publish(self, planned: frozenset[int]) -> None:
+        """After the first publish of the process, and after any later one
+        that plans a blueprint no earlier re-snapshot had a choice for:
+        re-snapshot the stored jobs whose invention cost was unknown for want
+        of a decryptor choice (the startup job refresh runs before any
+        overview; a blueprint the overview starts planning later leaves its
+        jobs so too). A failure is a WARNING and the next publish tries again."""
+        covered = getattr(self._state, "_realized_invention_resnapshot_blueprints", None)
+        if covered is not None and planned <= covered:
+            return
+        esi_service = getattr(self._state, "esi_service", None)
+        if esi_service is None:
+            logger.warning("Invention: no ESI service, so no re-snapshot of the jobs without a decryptor choice")
+            return
+        try:
+            market_price_map = build_market_price_map(esi_service.get_market_prices())
+        except ESI_REQUEST_ERRORS as exc:
+            logger.warning(
+                "Invention: market prices unavailable (%s); the jobs without a decryptor choice keep their "
+                "reason, the re-snapshot is retried at the next overview", exc,
+            )
+            return
+        app_session = sde_session = None
+        try:
+            app_session = self._sessions.app_session()
+            sde_session = self._sessions.sde_session()
+            resnapshot_jobs_without_decryptor_choice(
+                app_session=app_session, sde_session=sde_session, market_price_map=market_price_map,
+                invention_refresh=RealizedInventionRefresh(inputs=self.realized_invention_inputs()),
+            )
+            self._state._realized_invention_resnapshot_blueprints = frozenset(covered or ()) | planned
+        except (SQLAlchemyError, RuntimeError) as exc:  # RuntimeError: a database is not initialized
+            if app_session is not None:
+                app_session.rollback()
+            logger.warning(
+                "Invention: the re-snapshot of the jobs without a decryptor choice failed (%s); it is "
+                "retried at the next overview", exc,
+            )
+        finally:
+            if sde_session is not None:
+                sde_session.close()
+            if app_session is not None:
+                app_session.close()
+
+    def realized_invention_inputs(self) -> RealizedInventionInputs:
+        """The inputs the realized side sizes an invention with, the producer's
+        own: the corp's inventors (_get_inventor_skill_levels), the SDE
+        encryption skills, the admin floor, and per invented blueprint the
+        decryptor the last overview chose. Decryptor selection off: every
+        blueprint is invented without one, as in the producer. On and no
+        overview choice: unknown (the estimate then gives a reason)."""
+        levels = self._get_inventor_skill_levels()
+        context = InventionContext(
+            inventor_skill_levels_by_character_id=levels,
+            encryption_skill_type_ids=self._load_encryption_skill_type_ids(),
+            no_inventor_reason=NO_CHARACTER_SKILLS if levels else self._no_inventor_reason(),
+        )
+        selection_enabled = bool(self._adm("industry", "invention_decryptor_selection_enabled"))
+        published = self._last_published_decryptor_choices() if selection_enabled else None
+        return RealizedInventionInputs(
+            invention_context=context,
+            decryptor_by_blueprint_type_id=dict(published or {}) if selection_enabled else {},
+            default_decryptor=None if selection_enabled else NO_DECRYPTOR,
+            probability_floor=float(self._adm("industry", "invention_probability_floor")),
+            decryptor_choices_published=published is not None,
+        )
+
+    def _last_published_decryptor_choices(self) -> dict[int, DecryptorOption] | None:
+        """The in-memory overview's decryptor choices, else the persisted
+        ones (after a restart), else None. A database error propagates (the
+        provider caller turns it into a reason)."""
+        cached = getattr(self._state, "_overview_result_cache", None)
+        if isinstance(cached, dict) and isinstance(cached.get("decryptor_by_blueprint_type_id"), dict):
+            return dict(cached["decryptor_by_blueprint_type_id"])
+        if self._sessions is None:  # no databases in this process (tests)
+            return None
+        try:
+            session = self._sessions.app_session()
+        except RuntimeError:  # no app DB in this process: nothing was persisted
+            return None
+        try:
+            return load_published_decryptor_choices(session)
+        finally:
+            session.close()
 
     def get_cached_overview_rows(self) -> list[dict] | None:
         """Return the most recent product overview rows from in-memory cache, or None if not yet computed
@@ -10489,8 +10819,14 @@ class IndustryService:
         systems = self._state.esi_service.get_industry_systems()
         row = next((s for s in systems if s.get("solar_system_id") == system_id), None)
         if not row:
-            return {"solar_system_id": system_id, "cost_indices": []}
-        return row
+            return {"solar_system_id": system_id, "cost_indices": [],
+                    "cost_index_unknown_reason": f"ESI reports no cost indices for system {system_id}"}
+        out = dict(row)   # a copy: the ESI rows are cached
+        _index, out["cost_index_unknown_reason"] = self._system_cost_index_with_reason(
+            profile_payload={"system_id": system_id, "system_cost_indices": out.get("cost_indices") or []},
+            activity="manufacturing",
+        )
+        return out
 
     def industry_facility(self, *, facility_id: int) -> dict:
         if not facility_id:
@@ -10516,7 +10852,7 @@ class IndustryService:
             and isinstance(cache, tuple)
             and len(cache) == 3
             and cache[1] == self._STRUCTURE_RIGS_CACHE_VERSION
-            and (now - cache[0] < int(self._adm("cache_ttl", "structure_rig_cache_ttl_seconds", self._STRUCTURE_RIG_MFG_CACHE_TTL_SECONDS)))
+            and (now - cache[0] < int(self._adm("cache_ttl", "structure_rig_cache_ttl_seconds")))
         ):
             return cache[2]
 
@@ -10545,9 +10881,11 @@ class IndustryService:
         for type_id, name_json in rows:
             try:
                 name_obj = json.loads(name_json) if isinstance(name_json, str) else {}
-                name_by_type_id[int(type_id)] = name_obj.get(language) or name_obj.get("en") or str(type_id)
-            except Exception:
-                name_by_type_id[int(type_id)] = str(type_id)
+            except ValueError:
+                name_obj = {}  # cosmetic: the rig is named by its type ID
+            if not isinstance(name_obj, dict):
+                name_obj = {}
+            name_by_type_id[int(type_id)] = name_obj.get(language) or name_obj.get("en") or str(type_id)
 
         rigs_out: list[dict] = [
             {**rig, "name": name_by_type_id.get(int(rig["type_id"]), str(rig["type_id"]))}
@@ -10597,8 +10935,9 @@ class IndustryService:
 
         try:
             characters = char_manager.get_characters() or []
-        except Exception:
-            return {}
+        except ValueError:
+            return {}  # get_characters: "No characters available in the manager."
+        # CharacterDataError (the characters cannot be read) propagates: the slots are planning input.
 
         slot_skill_ids = {
             self._SKILL_MASS_PRODUCTION,
@@ -10648,6 +10987,17 @@ class IndustryService:
 
         return capacities
 
+    @classmethod
+    def _active_job_build_cost_fields(cls, job: Any) -> dict[str, Any]:
+        """The stored job's build cost (total and per unit) and why it is
+        partly unknown; each None when the row has none."""
+        return {
+            "total_build_cost": cls._as_float(getattr(job, "total_build_cost", None)),
+            "unit_build_cost": cls._as_float(getattr(job, "unit_build_cost", None)),
+            "invention_cost_unknown_reason": getattr(job, "invention_cost_unknown_reason", None) or None,
+            "materials_cost_lower_bound_reason": getattr(job, "materials_cost_lower_bound_reason", None) or None,
+        }
+
     def industry_active_jobs(self, *, character_id: int | None = None) -> dict[str, Any]:
         """Return active industry jobs and slot capacities, optionally filtered by character.
 
@@ -10655,10 +11005,15 @@ class IndustryService:
         corporation-scope jobs (CorporationIndustryJobsModel).  Corp jobs are
         attributed to the character who installed them via installer_id so that
         per-character slot counting works correctly.
+
+        An unknown character_id is UnknownCharacterError (a 404,
+        unknown_character), not an empty job list.
         """
+        from eve_online_industry_tracker.application.unknown_owner import require_known_character
         from eve_online_industry_tracker.infrastructure.sde.activities import activity_label
         from eve_online_industry_tracker.infrastructure.sde.types import get_type_data
 
+        require_known_character(self._state, character_id, "industry_active_jobs")
         session: Any = self._sessions.app_session()
 
         # --- Character-scope jobs ---
@@ -10726,8 +11081,11 @@ class IndustryService:
                         cid = c.get("character_id")
                         if cid and int(cid) in char_ids:
                             char_name_map[int(cid)] = c.get("character_name") or str(cid)
-                except Exception:
-                    pass
+                except (TypeError, ValueError):
+                    pass  # cosmetic: no characters (ValueError) or an odd ID leaves the job with its ID
+                except CharacterDataError as exc:
+                    logger.warning("Active jobs: the character names cannot be read (%s); the jobs keep their "
+                                   "character IDs", exc)
 
         rows: list[dict[str, Any]] = []
 
@@ -10763,9 +11121,10 @@ class IndustryService:
                 "facility_id": int(getattr(job, "facility_id", 0) or 0),
                 "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
                 "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
-                "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
+                "location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
                 "is_corp_job": False,
+                **self._active_job_build_cost_fields(job),
             })
 
         # Build rows for corporation-scope jobs — attribute to installer_id
@@ -10808,9 +11167,10 @@ class IndustryService:
                 "facility_id": int(getattr(job, "facility_id", 0) or 0),
                 "station_id": int(raw.get("station_id", 0) or 0) if isinstance(raw, dict) else 0,
                 "duration_seconds": int(raw.get("duration", 0) or 0) if isinstance(raw, dict) else 0,
-                "blueprint_location_id": int(getattr(job, "location_id", 0) or 0),
+                "location_id": int(getattr(job, "location_id", 0) or 0),
                 "output_location_id": int(getattr(job, "output_location_id", 0) or 0),
                 "is_corp_job": True,
+                **self._active_job_build_cost_fields(job),
             })
 
         rows.sort(key=lambda r: r.get("end_date") or "")
@@ -10840,7 +11200,9 @@ class IndustryService:
                 char_skill_levels[character_id] = self._get_character_trained_skill_levels(
                     character_id=character_id
                 )
-            except Exception:
+            except ServiceError as exc:
+                logger.warning("Blueprint skill qualification: the skills of character %s cannot be read (%s); it "
+                               "counts as having none", character_id, exc)
                 char_skill_levels[character_id] = {}
 
         # Query blueprints from SDE

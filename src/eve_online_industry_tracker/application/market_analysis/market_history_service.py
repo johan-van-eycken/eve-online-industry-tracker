@@ -1,12 +1,36 @@
 from __future__ import annotations
 
+import logging
 import statistics
 from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_
+from sqlalchemy.exc import SQLAlchemyError
+from eve_online_industry_tracker.application.market_pricing.order_values import readable_int, readable_number
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
+
+
+def _history_row_values(item: Any) -> dict[str, Any] | None:
+    """The stored values of one ESI market history row, or None when the
+    row is malformed (not a dict, no date, a missing/None or non-numeric
+    price, volume or order count): the caller skips and counts it, never
+    storing it as 0."""
+    if not isinstance(item, dict):
+        return None
+    date_str = str(item.get("date") or "").strip()
+    if not date_str:
+        return None
+    close = readable_number(item.get("average", item.get("close")))
+    high = readable_number(item.get("highest"))
+    low = readable_number(item.get("lowest"))
+    volume = readable_int(item.get("volume"))
+    order_count = readable_int(item.get("order_count"))
+    if None in (close, high, low, volume, order_count):
+        return None
+    return {"date": date_str, "close": close, "high": high, "low": low, "volume": volume,
+            "order_count": order_count}
 
 
 class MarketHistoryService:
@@ -21,24 +45,46 @@ class MarketHistoryService:
         *,
         type_id: int,
         region_id: int = 10000002,  # Jita region by default
-    ) -> None:
-        """Fetch market history from ESI and store in database."""
+    ) -> str | None:
+        """Fetch market history from ESI and store in database. A malformed
+        row (None, no date, a None or non-numeric field) is skipped, never
+        stored as 0, with one WARNING per call counting the skipped rows.
+
+        Returns None when the history was fetched (an empty history included),
+        or why it was not (no ESI service, or the ESI fetch failed and the type
+        was left out), with a WARNING: the stored history then stays as it was,
+        and a caller can show the reason."""
+        esi_service = getattr(self._state, "esi_service", None)
+        if esi_service is None:
+            reason = "no ESI service: market history not refreshed"
+            logging.warning("Market history: type_id=%s region_id=%s not refreshed (%s)", type_id, region_id, reason)
+            return reason
+
+        history_rows = esi_service.get_market_history([type_id], region_id=region_id)
+        if not isinstance(history_rows, dict) or int(type_id) not in history_rows:
+            # ESIService leaves a type whose fetch failed out of the result.
+            reader = getattr(esi_service, "market_history_unavailable_reason", None)
+            reason = (reader(int(type_id), region_id=region_id) if reader is not None else None) or (
+                f"ESI returned no market history for type_id={type_id}")
+            logging.warning("Market history: type_id=%s region_id=%s not refreshed, the stored history is kept (%s)",
+                            type_id, region_id, reason)
+            return reason
+
         app_session = self._sessions.app_session()
         try:
-            esi_service = getattr(self._state, "esi_service", None)
-            if esi_service is None:
-                return
+            items = history_rows.get(int(type_id), [])
+            if not isinstance(items, list):
+                logging.warning("Market history: the ESI history of type_id=%s region_id=%s is not a list (%r); "
+                                "nothing stored", type_id, region_id, type(items).__name__)
+                items = []
 
-            history_rows = esi_service.get_market_history([type_id], region_id=region_id)
-            items = history_rows.get(int(type_id), []) if isinstance(history_rows, dict) else []
-
+            skipped = 0
             for item in items:
-                if not isinstance(item, dict):
+                values = _history_row_values(item)
+                if values is None:
+                    skipped += 1
                     continue
-
-                date_str = str(item.get("date", "")).strip()
-                if not date_str:
-                    continue
+                date_str = values["date"]
 
                 existing = app_session.query(MarketHistoryModel).filter(
                     and_(
@@ -49,29 +95,24 @@ class MarketHistoryService:
                 ).first()
 
                 if existing:
-                    existing.close = float(item.get("average", item.get("close", 0)))
-                    existing.high = float(item.get("highest", 0))
-                    existing.low = float(item.get("lowest", 0))
-                    existing.volume = int(item.get("volume", 0))
-                    existing.order_count = int(item.get("order_count", 0))
+                    for field, value in values.items():
+                        if field != "date":
+                            setattr(existing, field, value)
                 else:
-                    record = MarketHistoryModel(
-                        type_id=type_id,
-                        region_id=region_id,
-                        date=date_str,
-                        close=float(item.get("average", item.get("close", 0))),
-                        high=float(item.get("highest", 0)),
-                        low=float(item.get("lowest", 0)),
-                        volume=int(item.get("volume", 0)),
-                        order_count=int(item.get("order_count", 0)),
-                    )
-                    app_session.add(record)
+                    app_session.add(MarketHistoryModel(type_id=type_id, region_id=region_id, **values))
 
             app_session.commit()
+            if skipped:
+                logging.warning(
+                    "Market history: skipped %d unreadable history row(s) (%d of %d) for type_id=%s region_id=%s "
+                    "(None, no date, or a price, volume or order count that is not a number)",
+                    skipped, skipped, len(items), type_id, region_id,
+                )
+            return None
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def get_price_stats(
@@ -163,7 +204,7 @@ class MarketHistoryService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
     def get_volume_stats(
@@ -214,5 +255,5 @@ class MarketHistoryService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass

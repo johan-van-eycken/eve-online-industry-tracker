@@ -45,6 +45,14 @@ class PortfolioPlanRequest:
 
 class IndustryPortfolioService:
     _CONFIDENCE_CAPPED_NOTE = "capped: job fees unknown"
+
+    @classmethod
+    def confidence_capped_hint(cls, count: int) -> str | None:
+        """ "N rows capped: job fees unknown", or None for none. Shared by the
+        API result and the Streamlit Portfolio page (Task A item 4)."""
+        if not count:
+            return None
+        return f"{int(count)} {'row' if int(count) == 1 else 'rows'} {cls._CONFIDENCE_CAPPED_NOTE}"
     _CONFIDENCE_RANK = {
         "low": 1,
         "medium": 2,
@@ -60,7 +68,7 @@ class IndustryPortfolioService:
     def _safe_float(value: Any) -> float | None:
         try:
             parsed = float(value)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
         if math.isnan(parsed) or math.isinf(parsed):
             return None
@@ -70,7 +78,7 @@ class IndustryPortfolioService:
     def _safe_int(value: Any) -> int:
         try:
             return int(value or 0)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     @staticmethod
@@ -87,7 +95,7 @@ class IndustryPortfolioService:
     def _override_or_none(value: Any) -> int | None:
         try:
             parsed = int(value)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             return None
         return parsed if parsed > 0 else None
 
@@ -585,8 +593,7 @@ class IndustryPortfolioService:
             "candidate_scope_count": len(filtered_candidates),
             # Why a confidence filter emptied the plan: rows capped for unknown job fees.
             "confidence_capped_hint": (
-                f"{capped_by_confidence} rows capped: job fees unknown"
-                if capped_by_confidence and not selected_items else None
+                cls.confidence_capped_hint(capped_by_confidence) if not selected_items else None
             ),
             "minimum_pricing_confidence": str(plan_request.minimum_pricing_confidence or "low"),
             "operator_decisions": {

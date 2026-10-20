@@ -79,5 +79,27 @@ def api_put(path, payload):
     return _request("PUT", path, payload=payload)
 
 
+def api_put_or_error(path, payload, timeout_seconds=None):
+    """(body, None) on success; (None, the API's error message) on failure,
+    e.g. the settings route's 400 naming a refused setting and its range."""
+    timeout = api_request_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    try:
+        response = requests.put(f"{api_base()}{path}", json=payload, timeout=timeout)
+    except requests_exceptions.RequestException as exc:
+        logging.error("%s request failed: %s", path, exc)
+        return None, f"request failed: {exc}"
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not (200 <= response.status_code < 300):
+        _handle_failure(path, response)
+        message = (body or {}).get("message") if isinstance(body, dict) else None
+        return None, message or f"HTTP {response.status_code}"
+    if body is None:
+        return None, "invalid JSON"
+    return body, None
+
+
 def api_delete(path):
     return _request("DELETE", path)

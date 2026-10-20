@@ -16,12 +16,37 @@ MODE_OPTIONS = {
 }
 
 
+def _fee_unknown_warning(opt_display: dict) -> str | None:
+    """The warning shown above the cost metrics when the reprocessing fee is
+    unknown (also in their tooltips)."""
+    reason = opt_display.get("reprocessing_fee_unknown_reason")
+    if not reason:
+        return None
+    return f"Reprocessing fee unknown: {reason}. The total cost and the savings are unknown too."
+
+
+def _facility_station_name_messages(facility: dict | None) -> list[tuple[str, str]]:
+    """[(kind, text)] for the facility's NPC station name (/facilities):
+    npc_station_name_problem (no name could be read) as a warning,
+    npc_station_name_note (e.g. the SDE name stands in for ESI's) as a
+    caption; [] when neither is set."""
+    facility = facility if isinstance(facility, dict) else {}
+    messages: list[tuple[str, str]] = []
+    problem = facility.get("npc_station_name_problem")
+    if problem:
+        messages.append(("warning", f"NPC station name: {problem}"))
+    note = facility.get("npc_station_name_note")
+    if note:
+        messages.append(("caption", f"NPC station name: {note}"))
+    return messages
+
+
 def _format_timestamp(ts: float | int | None) -> str:
     if ts is None:
         return "N/A"
     try:
         return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
+    except (ValueError, TypeError, OverflowError, OSError):
         return "N/A"
 
 
@@ -100,6 +125,9 @@ def render():
             format_func=lambda fid: facility_options[fid],
             key="opt_facility_id"
         )
+        selected_facility = next((f for f in all_facilities if f.get("id") == facility_id), None)
+        for kind, text in _facility_station_name_messages(selected_facility):
+            (st.warning if kind == "warning" else st.caption)(text)
 
         mode = st.selectbox(
             "Mode",
@@ -205,7 +233,7 @@ def render():
                 )
 
             tiered_total_cost = result.get("tiered_total_cost", 0.0)
-            # None when the fee is unknown (a produced mineral has no price): shown as unknown, not as 0.
+            # None when the fee is unknown (a produced mineral has no adjusted price): shown as unknown, not as 0.
             total_cost_with_reprocessing = result.get("total_cost_with_reprocessing")
             if total_cost_with_reprocessing is None:
                 savings, savings_pct = None, None
@@ -265,6 +293,10 @@ def render():
     reprocessing_fee = opt_display.get("reprocessing_fee")
     fee_unknown_reason = opt_display.get("reprocessing_fee_unknown_reason")
 
+    fee_warning = _fee_unknown_warning(opt_display)
+    if fee_warning:
+        st.warning(fee_warning)
+
     colc1, colc2, colc3 = st.columns(3)
     colc1.metric(
         "Total Cost incl. Reprocessing (ISK)",
@@ -275,7 +307,9 @@ def render():
     colc1.metric(
         "Reprocessing Fee (ISK)",
         f"{reprocessing_fee:,.2f}" if reprocessing_fee is not None else "unknown",
-        help=fee_unknown_reason or "The facility's tax on the estimated value of the minerals produced (ESI sell prices).",
+        help=fee_unknown_reason or ("The facility's tax on the minerals produced, valued at ESI's adjusted price "
+                                     "(the price the industry job cost uses; per community testing, not an official "
+                                     "CCP statement)."),
     )
 
     colc2.metric("Direct Minerals Cost (ISK)", f"{tiered_cost:,.2f}", help="Total ISK if you buy all minerals directly from the market.")
@@ -467,13 +501,17 @@ def render():
                     × (1 + 0.02·the ore's processing skill)
                     × (1 + Implant)
 
-            Rm: rig (T1 +1, T2 +3); Sec: the rig's security modifier (only with a rig);
+            Rm: the rig of the ore's class (T1 +1, T2 +3): on an Athanor one M-Set rig per class
+            (asteroid ore, moon ore, ice), on a Tatara the L-Set monitor for all three;
+            Sec: that rig's security modifier (only for a class with a rig);
             Sm: the structure's bonus (Athanor 2%, Tatara 5.5%). Each material is rounded
             down per batch. Values shown are final batch yields.
         """)
         facility = opt_display.get("facility") or {}
         if facility:
-            st.write(f"Facility: {facility.get('name')} (multiplier {facility.get('multiplier', 0):.4f})")
+            multipliers = facility.get("multipliers") or {}
+            st.write(f"Facility: {facility.get('name')} (multiplier "
+                     + ", ".join(f"{cls} {m:.4f}" for cls, m in multipliers.items()) + ")")
         # Show multipliers for the first ore as an example
         if opt_display["ore_yields"]:
             ore = opt_display["ore_yields"][0]

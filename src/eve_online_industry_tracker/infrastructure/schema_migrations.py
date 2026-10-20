@@ -16,20 +16,43 @@ from eve_online_industry_tracker.infrastructure.database_manager import Database
 #: than a bare `except Exception` while working against either backend.
 _DB_ERRORS = (SQLAlchemyError, sqlite3.OperationalError)
 
+#: The DB errors a schema change can fail with (sqlite3.DatabaseError covers a
+#: malformed or read-only file on the raw sqlite3 stand-in).
+_SCHEMA_ERRORS = (SQLAlchemyError, sqlite3.DatabaseError)
+
+
+class SchemaMigrationError(RuntimeError):
+    """A table or column the app's models map could not be created: startup
+    fails with this message (the ORM would otherwise fail obscurely, "no such
+    column", on every read of the model). Shown on /health as the
+    initialisation error."""
+
+    def __init__(self, what: str, exc: BaseException):
+        super().__init__(
+            f"App database schema migration failed: {what} ({type(exc).__name__}: {exc}). The app's models need "
+            "it, so startup stops here. Check that database/eve_app.db is writable, not locked by another process "
+            "and not corrupt (restore a backup if it is), then restart."
+        )
+
 
 def _ensure_table(db: DatabaseManager, *, ddl: str, table: str) -> None:
+    """CREATE TABLE IF NOT EXISTS; SchemaMigrationError when it fails."""
     try:
         db.execute(ddl)
         logging.info("Ensured table %s", table)
-    except Exception as e:
-        logging.warning("Failed ensuring table %s: %s", table, str(e))
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed ensuring table %s: %s", table, str(e))
+        raise SchemaMigrationError(f"could not create table {table}", e) from e
 
 
 def _ensure_index(db: DatabaseManager, *, ddl: str, name: str) -> None:
+    """CREATE INDEX IF NOT EXISTS. A DB error (locked, read-only, duplicate
+    rows under a unique index) is a WARNING and startup goes on; a
+    programming error propagates."""
     try:
         db.execute(ddl)
         logging.info("Ensured index %s", name)
-    except Exception as e:
+    except _SCHEMA_ERRORS as e:
         logging.warning("Failed ensuring index %s: %s", name, str(e))
 
 
@@ -47,7 +70,8 @@ def _ensure_market_orderbook_view_cache_unique_key(db: DatabaseManager) -> None:
                 names = [str(col[2]) for col in cols]
                 if names == ["hub", "region_id", "station_id", "side", "type_id", "at_hub"]:
                     return
-        except Exception:
+        except _DB_ERRORS + (IndexError, TypeError, ValueError) as e:
+            logging.warning("Failed reading market_orderbook_view_cache index %r: %s", row, str(e))
             continue
 
     try:
@@ -72,32 +96,41 @@ def _ensure_market_orderbook_view_cache_unique_key(db: DatabaseManager) -> None:
 
 
 def _table_columns(db: DatabaseManager, table: str) -> set[str]:
+    """The columns of `table` (empty: the table does not exist);
+    SchemaMigrationError when they cannot be read."""
     try:
         rows = db.query(f"PRAGMA table_info({table});")
-    except Exception:
-        return set()
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed reading columns of %s: %s", table, str(e))
+        raise SchemaMigrationError(f"could not read the columns of {table}", e) from e
 
     cols: set[str] = set()
     for r in rows:
         # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
         try:
             cols.add(str(r[1]))
-        except Exception:
+        except (IndexError, TypeError):
             continue
     return cols
 
 
 def _ensure_column(db: DatabaseManager, *, table: str, column: str, ddl_type: str) -> None:
+    """ALTER TABLE ADD COLUMN when `table` exists without `column`;
+    SchemaMigrationError when that fails. A table that does not exist is
+    skipped: create_all (or its _ensure_table) makes it with every column."""
     cols = _table_columns(db, table)
     if column in cols:
+        return
+    if not cols:
+        logging.debug("Schema migration: table %s does not exist (yet); column %s is not added", table, column)
         return
 
     try:
         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
         logging.info("Added column %s.%s", table, column)
-    except Exception as e:
-        # SQLite only supports limited ALTER TABLE; this should be safe for ADD COLUMN.
-        logging.warning("Failed adding column %s.%s: %s", table, column, str(e))
+    except _SCHEMA_ERRORS as e:
+        logging.error("Failed adding column %s.%s: %s", table, column, str(e))
+        raise SchemaMigrationError(f"could not add column {table}.{column}", e) from e
 
 
 def _backfill_activity_id_sql(db: DatabaseManager, *, table: str) -> None:
@@ -270,10 +303,12 @@ def normalize_double_encoded_json_column(db: DatabaseManager, *, table: str, col
 
 
 def ensure_app_schema(db_app: DatabaseManager) -> None:
-    """Best-effort forward migrations for the app DB.
+    """Forward migrations for the app DB.
 
     SQLAlchemy's create_all does not alter existing tables; this adds new columns
-    used by newer app versions.
+    used by newer app versions. A table or column that cannot be created raises
+    SchemaMigrationError (startup fails with it); the indexes and backfills
+    stay best-effort, logged.
     """
 
     # Character assets cost-basis/provenance columns
@@ -496,10 +531,57 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
         _ensure_column(db_app, table=table, column="historical_input_costs", ddl_type="JSON")
         _ensure_column(db_app, table=table, column="copy_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="invention_cost", ddl_type="REAL")
+        _ensure_column(db_app, table=table, column="invention_cost_unknown_reason", ddl_type="TEXT")
+        _ensure_column(db_app, table=table, column="materials_cost_lower_bound_reason", ddl_type="TEXT")
         _ensure_column(db_app, table=table, column="total_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="unit_build_cost", ddl_type="REAL")
         _ensure_column(db_app, table=table, column="build_cost_source", ddl_type="TEXT")
         _ensure_column(db_app, table=table, column="activity_id", ddl_type="INTEGER")
+
+    # The decryptor the last published overview invents each blueprint with,
+    # read by the realized invention estimate after a restart.
+    _ensure_table(
+        db_app,
+        table="realized_invention_decryptor_choices",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS realized_invention_decryptor_choices ("
+            "blueprint_type_id INTEGER PRIMARY KEY,"
+            "decryptor_type_id INTEGER,"
+            "decryptor_type_name TEXT NOT NULL,"
+            "probability_multiplier REAL NOT NULL,"
+            "me_modifier INTEGER NOT NULL,"
+            "te_modifier INTEGER NOT NULL,"
+            "max_run_modifier INTEGER NOT NULL,"
+            "choice_reason TEXT,"
+            "set_at DATETIME NOT NULL"
+            ")"
+        ),
+    )
+    # The marker of the last publish: no choice rows with a marker is an
+    # overview that planned no invention, without one no overview yet.
+    _ensure_table(
+        db_app,
+        table="realized_invention_decryptor_publish",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS realized_invention_decryptor_publish ("
+            "id INTEGER PRIMARY KEY,"
+            "published_at DATETIME NOT NULL,"
+            "choice_count INTEGER NOT NULL"
+            ")"
+        ),
+    )
+    # Persisted markers (key/value), e.g. that a one-time data fix ran.
+    _ensure_table(
+        db_app,
+        table="app_meta",
+        ddl=(
+            "CREATE TABLE IF NOT EXISTS app_meta ("
+            "key VARCHAR PRIMARY KEY,"
+            "value VARCHAR,"
+            "updated_at DATETIME NOT NULL"
+            ")"
+        ),
+    )
 
     _ensure_index(
         db_app,
@@ -586,11 +668,14 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "fee_capture_mode TEXT NULL,"
             "confidence TEXT NULL,"
             "notes JSON NULL,"
+            "fee_inputs TEXT NULL,"
             "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
             "UNIQUE(character_id, transaction_id)"
             ")"
         ),
     )
+    # The fee estimate's inputs per row (realized profit: a row whose inputs changed is rebuilt on read).
+    _ensure_column(db_app, table="character_realized_sales_ledger", column="fee_inputs", ddl_type="TEXT")
     _ensure_index(
         db_app,
         name="idx_character_realized_sales_ledger_character_date",
@@ -784,10 +869,13 @@ def ensure_app_schema(db_app: DatabaseManager) -> None:
             "spot_sell_price REAL NULL,"
             "competition_index REAL NULL,"
             "snapshot_at DATETIME NOT NULL,"
+            "stale_reason TEXT NULL,"
             "UNIQUE(type_id, hub)"
             ")"
         ),
     )
+    # NULL on a fresh snapshot, the reason on a kept, stale one.
+    _ensure_column(db_app, table="market_depth_cache", column="stale_reason", ddl_type="TEXT")
 
     _ensure_table(
         db_app,

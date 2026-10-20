@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import altair as alt
+import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
+from eve_online_industry_tracker.application.characters.realized_profit import ASSUMED_FEE_CAPTURE_MODES
 from streamlit_ui.components.aggrid_formatters import js_flag_text_style, js_icon_cell_renderer
 from streamlit_ui.api.characters import build_character_options, fetch_characters, filter_industry_characters
 from streamlit_ui.components.formatters import format_isk_eu, format_isk_short, format_pct_eu, type_icon_url
@@ -34,7 +36,7 @@ def _parse_iso_date(value: Any) -> datetime | None:
         raw_value = raw_value[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw_value)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -50,14 +52,62 @@ def _safe_float(value: Any) -> float | None:
         if value is None:
             return None
         return float(value)
-    except Exception:
+    except (ValueError, TypeError):
         return None
+
+
+_LOAD_WARNINGS_KEY = "realized_profit_load_warnings_shown"
+
+
+def _reset_load_warnings() -> None:
+    """Called at the start of each render: a load failure is shown once per run."""
+    st.session_state[_LOAD_WARNINGS_KEY] = set()
+
+
+def _warn_load_failure(what: str, exc: Exception) -> None:
+    """Record a wallet owner load failure, shown once per run as an st.error.
+
+    The user ruled: without every owner's wallet the trade purchases are
+    incomplete, so the page stops (render checks _owner_load_failures) and
+    shows no rolling profit until they load."""
+    logging.warning("Realized profit: %s could not be loaded: %s", what, exc)
+    shown = st.session_state.setdefault(_LOAD_WARNINGS_KEY, set())
+    if what in shown:
+        return
+    shown.add(what)
+    st.error(
+        f"The {what} could not be loaded ({exc}). Realized profit is not shown until they load: "
+        "the owner list and the trade purchases would leave them out, overstating the rolling trade profit."
+    )
+
+
+def _owner_load_failures() -> list[str]:
+    """The wallet owner loads that failed in this run, sorted."""
+    return sorted(st.session_state.get(_LOAD_WARNINGS_KEY) or ())
+
+
+def _lower_bound_cost_warning(rows: list[dict[str, Any]]) -> str | None:
+    """The summary of the sales whose allocated cost is a lower bound (a
+    lot's cost was partly unknown: the row's cost_lower_bound_reason), or
+    None when no row has one (or the key is absent)."""
+    count_by_reason: dict[str, int] = {}
+    for row in rows:
+        reason = row.get("cost_lower_bound_reason")
+        if isinstance(reason, str) and reason.strip():
+            count_by_reason[reason.strip()] = count_by_reason.get(reason.strip(), 0) + 1
+    if not count_by_reason:
+        return None
+    total = sum(count_by_reason.values())
+    reasons = "; ".join(f"{reason} ({n})" for reason, n in sorted(count_by_reason.items()))
+    return (f"{total} sales use a lower-bound cost: {reasons}. Their realized profit and margin are "
+            "upper bounds.")
 
 
 def _character_name_map() -> dict[int, str]:
     try:
         characters = filter_industry_characters(fetch_characters())
-    except Exception:
+    except RuntimeError as exc:
+        _warn_load_failure("characters", exc)
         return {}
     return build_character_options(characters)
 
@@ -65,16 +115,19 @@ def _character_name_map() -> dict[int, str]:
 def _character_payloads() -> list[dict[str, Any]]:
     try:
         characters = filter_industry_characters(fetch_characters())
-    except Exception:
+    except RuntimeError as exc:
+        _warn_load_failure("characters", exc)
         return []
     return characters if isinstance(characters, list) else []
 
 
 def _corporation_payloads() -> list[dict[str, Any]]:
-    from streamlit_ui.api.corporations import fetch_director_corporations
+    from streamlit_ui.api import corporations
+
     try:
-        corps = fetch_director_corporations()
-    except Exception:
+        corps = corporations.fetch_director_corporations()
+    except RuntimeError as exc:
+        _warn_load_failure("director corporations", exc)
         return []
     return corps if isinstance(corps, list) else []
 
@@ -622,6 +675,45 @@ def _overview_payload(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: The backend's fee capture modes of a sale whose fees were assumed (one definition, the backend's).
+_ASSUMED_FEE_CAPTURE_MODES = ASSUMED_FEE_CAPTURE_MODES
+
+
+def _ledger_rows(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """The ledger's rows; a malformed payload raises with the reason
+    (an empty list is "no sales", a malformed one is not)."""
+    payload = response.get("data")
+    if payload is None:
+        return []
+    if not isinstance(payload, dict):
+        raise RuntimeError("The realized profit ledger response is malformed (data is not an object)")
+    rows = payload.get("rows")
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise RuntimeError("The realized profit ledger response is malformed (rows is not a list)")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _assumed_fee_warnings(rows: list[dict[str, Any]], owner_name_by_id: dict[int, str]) -> list[str]:
+    """One line per character whose sales have assumed fees (its skills
+    unknown, so the highest, untrained fees are deducted): the count and the
+    reason the ledger noted ("Fees assumed ...")."""
+    count_by_owner: dict[int, int] = {}
+    reason_by_owner: dict[int, str] = {}
+    for row in rows:
+        if row.get("fee_capture_mode") not in _ASSUMED_FEE_CAPTURE_MODES or row.get("character_id") is None:
+            continue
+        owner_id = int(row["character_id"])
+        count_by_owner[owner_id] = count_by_owner.get(owner_id, 0) + 1
+        reason = next((str(note) for note in (row.get("notes") or []) if str(note).startswith("Fees assumed")), None)
+        if reason and owner_id not in reason_by_owner:
+            reason_by_owner[owner_id] = reason
+    return [f"{owner_name_by_id.get(owner_id, str(owner_id))}: {count} sale(s) with assumed fees. "
+            f"{reason_by_owner.get(owner_id, 'Fees assumed (no reason noted).')}"
+            for owner_id, count in sorted(count_by_owner.items())]
+
+
 def _table_frame(
     rows: list[dict[str, Any]],
     owner_name_by_id: dict[int, str],
@@ -656,6 +748,7 @@ def _table_frame(
                 "Unpriced Qty": int(row.get("unpriced_quantity") or 0),
                 "Transaction ID": int(row.get("transaction_id") or 0),
                 "Profit Type": _profit_type_label(row.get("source_mix")),
+                "Cost Lower Bound": str(row.get("cost_lower_bound_reason") or ""),
                 "_negative_flag": bool(negative_flag),
             }
         )
@@ -676,6 +769,7 @@ def _table_frame(
             "Unpriced Qty",
             "Transaction ID",
             "Profit Type",
+            "Cost Lower Bound",
             "_negative_flag",
         ]
         frame = frame[[column for column in desired_columns if column in frame.columns]]
@@ -685,9 +779,14 @@ def _table_frame(
 def render() -> None:
     st.header("Realized Profit")
     runtime = require_aggrid()
+    _reset_load_warnings()
 
     character_name_by_id = _character_name_map()
     owner_selector_options = _owner_selector_options()
+    # Both loads ran above (characters, director corporations).
+    if _owner_load_failures():
+        # The st.error naming each failure is already shown.
+        return
 
     controls_owner, controls_range, controls_refresh, controls_about = st.columns([2.5, 4.5, 1.5, 1.0])
     with controls_owner:
@@ -727,16 +826,23 @@ def render() -> None:
         st.write("")
         st.write("")
         if st.button("Refresh Ledger", type="primary", width="stretch"):
+            refresh_failure = None
             with st.spinner("Rebuilding realized profit ledger..."):
-                if selected_owner_type == "all":
-                    refresh_realized_profit(owner_scope="character", owner_id=None)
-                    refresh_realized_profit(owner_scope="corporation", owner_id=None)
-                else:
-                    refresh_realized_profit(
-                        owner_scope=selected_owner_type,
-                        owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
-                    )
+                try:
+                    if selected_owner_type == "all":
+                        refresh_realized_profit(owner_scope="character", owner_id=None)
+                        refresh_realized_profit(owner_scope="corporation", owner_id=None)
+                    else:
+                        refresh_realized_profit(
+                            owner_scope=selected_owner_type,
+                            owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
+                        )
+                except RuntimeError as exc:
+                    refresh_failure = str(exc)
             clear_realized_profit_cache()
+            if refresh_failure:
+                st.error(refresh_failure)
+                return
             st.rerun()
     with controls_about:
         st.write("")
@@ -753,7 +859,7 @@ def render() -> None:
                 )
                 st.caption(
                     "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support."
+                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
                 )
                 st.caption("Coverage excludes rows with missing historical cost basis.")
         else:
@@ -768,32 +874,33 @@ def render() -> None:
                 )
                 st.caption(
                     "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support."
+                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
                 )
                 st.caption("Coverage excludes rows with missing historical cost basis.")
 
-    if selected_owner_type == "all":
-        char_response = fetch_realized_profit(owner_scope="character", owner_id=None)
-        corp_response = fetch_realized_profit(owner_scope="corporation", owner_id=None)
-        char_rows = [{**row, "owner_id": row.get("character_id")} for row in ((char_response.get("data") or {}).get("rows") or [])]
-        corp_rows = [{**row, "owner_id": row.get("corporation_id")} for row in ((corp_response.get("data") or {}).get("rows") or [])]
-        rows = char_rows + corp_rows
-        if not rows:
-            st.info("No realized sales have been recorded yet for the selected scope.")
-            return
-    else:
-        response = fetch_realized_profit(
-            owner_scope=selected_owner_type,
-            owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
-        )
-        if response.get("status") not in {None, "success"}:
-            st.error(response.get("message") or "Failed to load realized profit data")
-            return
-        payload = response.get("data") or {}
-        rows = payload.get("rows") or []
-        if not isinstance(rows, list) or not rows:
-            st.info("No realized sales have been recorded yet for the selected scope.")
-            return
+    # A failed ledger read (either scope of "All") stops the page with the
+    # reason: it is not "no realized sales".
+    try:
+        if selected_owner_type == "all":
+            char_rows = [{**row, "owner_id": row.get("character_id")}
+                         for row in _ledger_rows(fetch_realized_profit(owner_scope="character", owner_id=None))]
+            corp_rows = [{**row, "owner_id": row.get("corporation_id")}
+                         for row in _ledger_rows(fetch_realized_profit(owner_scope="corporation", owner_id=None))]
+            rows = char_rows + corp_rows
+        else:
+            rows = _ledger_rows(fetch_realized_profit(
+                owner_scope=selected_owner_type,
+                owner_id=(None if int(selected_owner_id) == 0 else int(selected_owner_id)),
+            ))
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return
+    if not rows:
+        st.info("No realized sales have been recorded yet for the selected scope.")
+        return
+
+    for fee_warning in _assumed_fee_warnings(rows, owner_name_by_id):
+        st.warning(fee_warning)
 
     min_available_date, max_available_date = _available_date_span(rows)
     start_date, end_date = _resolve_range_preset(
@@ -813,6 +920,10 @@ def render() -> None:
     if not filtered_rows:
         st.warning("No sales match the current filters.")
         return
+
+    lower_bound_warning = _lower_bound_cost_warning(filtered_rows)
+    if lower_bound_warning:
+        st.warning(lower_bound_warning)
 
     overview = _overview_payload(filtered_rows)
     period_label = _period_label(str(range_preset))

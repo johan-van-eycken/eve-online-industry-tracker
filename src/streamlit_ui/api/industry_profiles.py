@@ -28,7 +28,7 @@ def build_industry_profile_options(
             continue
         try:
             profile_id = int(raw_id)
-        except Exception:
+        except (ValueError, TypeError):
             continue
         if profile_id <= 0:
             continue

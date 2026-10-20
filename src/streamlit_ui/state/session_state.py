@@ -27,7 +27,7 @@ def ensure_valid_state_value(
     if coerce is not None:
         try:
             current_value = coerce(current_value)
-        except Exception:
+        except (ValueError, TypeError):
             current_value = default_value
 
     if valid_values is not None:

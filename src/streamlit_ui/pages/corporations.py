@@ -1,3 +1,5 @@
+import logging
+
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
 import json
@@ -13,6 +15,7 @@ from streamlit_ui.components.assets_ui import (
     summarize_asset_items,
 )
 from streamlit_ui.api.client import api_get
+from streamlit_ui.components.batch_errors import show_batch_errors
 from streamlit_ui.components.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age, type_icon_url
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
 from streamlit_ui.api.streamlit_client import cached_api_get
@@ -123,18 +126,44 @@ def _wallet_transactions_view(transactions_data: list[dict[str, Any]], *, range_
     return transactions_df
 
 
-def _extract_master_wallet_balance(wallets_raw) -> float:
-    if not wallets_raw:
-        return 0.0
+NO_WALLETS_REPORTED = "No wallets reported"
+WALLETS_UNREADABLE = "Unavailable (wallet data unreadable, see the logs)"
+NO_MASTER_WALLET = "No master wallet (division 1) reported"
 
+
+def _master_wallet_balance_and_reason(wallets_raw) -> tuple[float | None, str | None]:
+    """(master wallet (division 1) balance, None), or (None, why there is
+    none): no wallets reported at all, unreadable wallet data, or no
+    division 1 among them. Never ISK 0 for a balance nobody reported."""
     try:
-        wallets = json.loads(wallets_raw) if isinstance(wallets_raw, str) else wallets_raw
+        if isinstance(wallets_raw, str):
+            wallets = json.loads(wallets_raw) if wallets_raw.strip() else None
+        else:
+            wallets = wallets_raw
+        if not wallets:
+            return None, NO_WALLETS_REPORTED
         master_wallet = next((wallet for wallet in wallets if str(wallet.get("division")) == "1"), None)
-        if master_wallet:
-            return float(master_wallet.get("balance", 0.0) or 0.0)
-    except Exception:
-        return 0.0
-    return 0.0
+        if master_wallet is None:
+            return None, NO_MASTER_WALLET
+        balance = master_wallet.get("balance")
+        if balance is None:
+            return None, WALLETS_UNREADABLE
+        return float(balance), None
+    except (ValueError, TypeError, AttributeError) as exc:
+        # Malformed JSON, a non-list or a non-dict wallet entry.
+        logging.warning("Corporation wallets could not be read for the master wallet balance: %s", exc)
+        return None, WALLETS_UNREADABLE
+
+
+def _extract_master_wallet_balance(wallets_raw) -> float | None:
+    """The master wallet (division 1) balance; None when there is none to show."""
+    return _master_wallet_balance_and_reason(wallets_raw)[0]
+
+
+def _master_wallet_label(balance: float | None, reason: str | None = None) -> str:
+    if balance is None:
+        return reason or WALLETS_UNREADABLE
+    return format_isk(balance)
 
 
 def _render_asset_table(
@@ -202,6 +231,7 @@ def _fetch_current_corporation_assets(corporation_id: int) -> list[dict]:
     response = api_get(f"/corporations/assets?corporation_id={int(corporation_id)}", timeout_seconds=180) or {}
     if response.get("status") != "success":
         raise RuntimeError(response.get("message") or "Failed to refresh corporation assets")
+    show_batch_errors(response, "Corporation")
 
     data = response.get("data") or []
     if not isinstance(data, list):
@@ -214,7 +244,7 @@ def _fetch_current_corporation_assets(corporation_id: int) -> list[dict]:
             if int(row.get("corporation_id") or 0) == int(corporation_id):
                 assets = row.get("assets") or []
                 return assets if isinstance(assets, list) else []
-        except Exception:
+        except (ValueError, TypeError):
             continue
 
     return []
@@ -233,7 +263,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
             try:
                 st.session_state[override_key] = _fetch_current_corporation_assets(selected_corporation_id)
                 st.session_state[status_key] = ("success", "Showing refreshed current assets.")
-            except Exception as exc:
+            except RuntimeError as exc:
                 st.session_state[status_key] = ("error", f"Failed to refresh current assets: {exc}")
     with status_col:
         status_payload = st.session_state.get(status_key)
@@ -587,12 +617,12 @@ def render():
             has_director = bool(row.get("has_director_access", True))
 
             # --- Extract Master Wallet balance ---
-            master_wallet_balance = _extract_master_wallet_balance(row.get("wallets", None))
+            master_wallet_balance, master_wallet_reason = _master_wallet_balance_and_reason(row.get("wallets", None))
 
             border_style = "2px solid #444" if has_director else "2px dashed #666"
             access_badge = "" if has_director else '<div style="font-size:11px; color:#f59e0b; margin-bottom:6px;">⚠ Limited Access</div>'
             ceo_html = f"CEO: {ceo_name}<br>" if ceo_name else ""
-            wallet_html = f"<b>Master Wallet Balance:</b><br><b>{format_isk(master_wallet_balance)}</b>" if has_director else ""
+            wallet_html = f"<b>Master Wallet Balance:</b><br><b>{_master_wallet_label(master_wallet_balance, master_wallet_reason)}</b>" if has_director else ""
 
             tile_html = (
                 f'<div style="background-color: rgba(30,30,30,0.95); padding: 20px; border-radius: 10px; border: {border_style}; box-shadow: 2px 2px 10px rgba(0,0,0,0.5); text-align: center; margin-bottom: 10px;">'
@@ -693,7 +723,7 @@ def render():
                     if isinstance(titles, str):
                         try:
                             titles = json.loads(titles)
-                        except Exception:
+                        except ValueError:
                             return titles
                     if isinstance(titles, dict):
                         return titles.get("title_name", "")

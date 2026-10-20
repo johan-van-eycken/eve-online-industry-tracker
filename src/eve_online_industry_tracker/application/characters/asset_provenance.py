@@ -1,15 +1,43 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import logging
 import math
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
-from sqlalchemy import desc
+from sqlalchemy import desc, func, or_
 
-from eve_online_industry_tracker.infrastructure.models import Blueprints, MarketHistoryModel
+from eve_online_industry_tracker.application.industry.invention_model import (
+    NO_DECRYPTOR,
+    DecryptorOption,
+    InventionContext,
+    decryptor_options_from_rows,
+    effective_invention_probability,
+    invented_blueprint_efficiency,
+    invented_runs_per_blueprint,
+    invention_attempts,
+    invention_skill_set,
+    required_invention_skill_levels,
+    resolve_invention_chance,
+)
+from eve_online_industry_tracker.infrastructure.models import (
+    Blueprints,
+    CharacterAssetHistoryModel,
+    CharacterIndustryJobsModel,
+    CorporationAssetHistoryModel,
+    CorporationIndustryJobsModel,
+    MarketHistoryModel,
+    RealizedInventionDecryptorChoiceModel,
+    RealizedInventionDecryptorPublishModel,
+)
+from eve_online_industry_tracker.infrastructure.sde.blueprints import (
+    get_blueprint_manufacturing_data,
+    get_invention_source_blueprint_ids,
+)
+from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
+from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
 ASSET_SOURCE_INDUSTRY_BUILD = "industry_build"
@@ -18,9 +46,6 @@ ASSET_SOURCE_UNKNOWN = "unknown"
 
 REFERENCE_TYPE_INDUSTRY_JOB = "industry_job"
 REFERENCE_TYPE_WALLET_TRANSACTION = "wallet_transaction"
-
-_INVENTION_SOURCE_BLUEPRINT_CACHE: dict[int, dict[str, Any]] | None = None
-
 
 @dataclass(frozen=True)
 class CostInfo:
@@ -40,6 +65,13 @@ class FifoLot:
     reference_id: Optional[int] = None
     reference_type: Optional[str] = None
     source: Optional[str] = None
+    #: Set when the lot's unit price is a lower bound because part of its
+    #: build cost is unknown (an invention estimate that had no inputs).
+    #: Feedback then skips the cost update for a sale that consumes it.
+    cost_unknown_reason: Optional[str] = None
+    #: The corp asset history row of a blended transfer lot (it names no
+    #: job): the ledger's stale check compares its stamped cost.
+    asset_history_id: Optional[int] = None
 
 
 def _parse_date(value: Any) -> Optional[datetime]:
@@ -58,7 +90,7 @@ def _parse_date(value: Any) -> Optional[datetime]:
         s = s[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(s)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -312,102 +344,827 @@ def industry_job_material_type_ids(
     return out
 
 
-def _invention_probability(invention: dict[str, Any]) -> Optional[float]:
-    probability = _safe_float(invention.get("probability"))
-    if probability is not None and probability > 0:
-        return probability
-    products = invention.get("products") or []
-    raw_probs: list[float] = []
-    for product in products:
-        if not isinstance(product, dict):
-            continue
-        prob = _safe_float(product.get("probability"))
-        if prob is not None and prob > 0:
-            raw_probs.append(float(prob))
-    if not raw_probs:
-        return None
-    if len(raw_probs) == 1:
-        return raw_probs[0]
-    if max(raw_probs) - min(raw_probs) < 1e-9:
-        return raw_probs[0]
+#: Why there is no RealizedInventionInputs when no provider is registered.
+NO_REALIZED_INVENTION_INPUTS_REASON = (
+    "no inventor skills or decryptor choice available (the app has not registered the producer's invention inputs)"
+)
+
+#: The start of the reason a job's invention cost is unknown for want of the
+#: producer's decryptor; the first overview of a process re-snapshots them
+#: (resnapshot_jobs_without_decryptor_choice).
+NO_DECRYPTOR_CHOICE_REASON = "no decryptor choice"
+
+#: The ESI status of a finished invention job whose successful_runs is final.
+_DELIVERED_STATUS = "delivered"
+
+
+@dataclass(frozen=True)
+class RealizedInventionInputs:
+    """What the realized side needs to size an invention like the producer.
+
+    `invention_context` carries the corp's inventors (skills by character)
+    and the SDE encryption skills, the same InventionContext the producer's
+    resolve_invention_chance reads. The decryptor is the producer's choice
+    for the invented blueprint (`decryptor_by_blueprint_type_id`, from the
+    last overview), or `default_decryptor` for every blueprint when the
+    producer does not choose (decryptor selection off: NO_DECRYPTOR). None
+    for both: no choice known, so no estimate.
+
+    `decryptor_choices_published`: an overview has published its choices
+    (in memory, or persisted before a restart, the publish marker), so a
+    blueprint missing from them is one the overview does not plan, not one
+    it has not reached yet; published and empty: it planned no invention."""
+
+    invention_context: InventionContext
+    decryptor_by_blueprint_type_id: Mapping[int, DecryptorOption]
+    default_decryptor: DecryptorOption | None
+    probability_floor: float
+    decryptor_choices_published: bool = False
+
+    def decryptor_for(self, blueprint_type_id: int) -> DecryptorOption | None:
+        return self.decryptor_by_blueprint_type_id.get(int(blueprint_type_id), self.default_decryptor)
+
+
+_REALIZED_INVENTION_INPUTS_PROVIDER: Callable[[], RealizedInventionInputs | None] | None = None
+
+
+def set_realized_invention_inputs_provider(provider: Callable[[], RealizedInventionInputs | None] | None) -> None:
+    """Register how the realized side gets the producer's invention inputs
+    (flask bootstrap: IndustryService.realized_invention_inputs). None clears it."""
+    global _REALIZED_INVENTION_INPUTS_PROVIDER
+    _REALIZED_INVENTION_INPUTS_PROVIDER = provider
+
+
+def current_realized_invention_inputs() -> tuple[RealizedInventionInputs | None, str | None]:
+    """(inputs, None), or (None, why) when no provider is registered or it
+    returns nothing."""
+    provider = _REALIZED_INVENTION_INPUTS_PROVIDER
+    try:
+        inputs = provider() if provider is not None else None
+    except Exception as exc:  # the snapshot goes on without an estimate, and says why
+        logging.warning("Realized invention inputs could not be read: %s", exc)
+        return None, f"the producer's invention inputs could not be read ({exc})"
+    if inputs is None:
+        return None, NO_REALIZED_INVENTION_INPUTS_REASON
+    return inputs, None
+
+
+@dataclass
+class RealizedInventionRefresh:
+    """One job refresh's view of invention: the producer's inputs read once
+    (with why they are missing, passed down to every snapshot), the SDE
+    invention activities memoized per invented blueprint, and the SDE
+    decryptors (loaded on first use). Not shared across refreshes."""
+
+    inputs: RealizedInventionInputs | None
+    inputs_unknown_reason: str | None = None
+    #: (NO_DECRYPTOR, the SDE's T2 decryptors); None: loaded on first use.
+    decryptor_options: tuple[DecryptorOption, ...] | None = None
+    source_activity_by_target: dict[int, tuple[int | None, Mapping[str, Any] | None]] = field(default_factory=dict)
+    #: The SDE encryption skills (the producer's, when its inputs are read);
+    #: None: loaded on first use.
+    encryption_skill_type_ids: frozenset[int] | None = None
+
+    @classmethod
+    def read(cls) -> "RealizedInventionRefresh":
+        inputs, reason = current_realized_invention_inputs()
+        return cls(inputs=inputs, inputs_unknown_reason=reason)
+
+    def decryptors(self, sde_session: Any) -> tuple[DecryptorOption, ...]:
+        if self.decryptor_options is None:
+            rows = get_t2_invention_decryptors(sde_session, language="en") if sde_session is not None else []
+            self.decryptor_options = decryptor_options_from_rows(rows)
+        return self.decryptor_options
+
+    def encryption_skills(self, sde_session: Any) -> frozenset[int]:
+        if self.encryption_skill_type_ids is None:
+            known = self.inputs.invention_context.encryption_skill_type_ids if self.inputs is not None else None
+            if known:
+                self.encryption_skill_type_ids = frozenset(known)
+            else:
+                self.encryption_skill_type_ids = (
+                    get_encryption_skill_type_ids(sde_session) if sde_session is not None else frozenset()
+                )
+        return self.encryption_skill_type_ids
+
+
+def save_published_decryptor_choices(
+    app_session: Any, choices: Mapping[int, tuple[DecryptorOption, str | None]], *, now: datetime,
+) -> None:
+    """Replace the persisted decryptor choices with `choices` ({invented
+    blueprint: (decryptor, the producer's reason)}), the last published
+    overview's, and the publish marker (also for no choices: an overview
+    that planned no invention). Commits; a database error propagates."""
+    app_session.query(RealizedInventionDecryptorChoiceModel).delete(synchronize_session=False)
+    app_session.query(RealizedInventionDecryptorPublishModel).delete(synchronize_session=False)
+    app_session.add(RealizedInventionDecryptorPublishModel(id=1, published_at=now, choice_count=len(choices)))
+    for blueprint_type_id, (option, reason) in sorted(choices.items()):
+        app_session.add(RealizedInventionDecryptorChoiceModel(
+            blueprint_type_id=int(blueprint_type_id),
+            decryptor_type_id=int(option.type_id) if option.type_id is not None else None,
+            decryptor_type_name=str(option.type_name),
+            probability_multiplier=float(option.probability_multiplier),
+            me_modifier=int(option.me_modifier),
+            te_modifier=int(option.te_modifier),
+            max_run_modifier=int(option.max_run_modifier),
+            choice_reason=reason,
+            set_at=now,
+        ))
+    app_session.commit()
+
+
+def load_published_decryptor_choices(app_session: Any) -> dict[int, DecryptorOption] | None:
+    """The persisted decryptor choices: {} after a publish that planned no
+    invention (the publish marker without rows), None when nothing was ever
+    published (no marker and no rows; rows without a marker were stored
+    before the marker existed and are a publish). A database error
+    propagates."""
+    rows = app_session.query(RealizedInventionDecryptorChoiceModel).all()
+    if not rows:
+        published = app_session.query(RealizedInventionDecryptorPublishModel.id).first() is not None
+        return {} if published else None
+    return {
+        int(row.blueprint_type_id): (
+            NO_DECRYPTOR if row.decryptor_type_id is None else DecryptorOption(
+                type_id=int(row.decryptor_type_id),
+                type_name=str(row.decryptor_type_name),
+                probability_multiplier=float(row.probability_multiplier),
+                me_modifier=int(row.me_modifier),
+                te_modifier=int(row.te_modifier),
+                max_run_modifier=int(row.max_run_modifier),
+            )
+        )
+        for row in rows
+    }
+
+
+def resnapshot_jobs_without_decryptor_choice(
+    *,
+    app_session: Any,
+    sde_session: Any,
+    market_price_map: Mapping[int, float],
+    invention_refresh: RealizedInventionRefresh,
+) -> int:
+    """Re-snapshot the stored manufacturing jobs whose invention cost was
+    unknown for want of the producer's decryptor (NO_DECRYPTOR_CHOICE_REASON),
+    with `invention_refresh`'s inputs: a job refresh that ran before the
+    first overview of the process (the startup refresh) stored them so. The
+    job's build cost and its historical acquisition are updated; the job
+    keeps a reason when the estimate is still unknown (for a blueprint the
+    overview does not plan: "this blueprint is not planned by the overview").
+    The actual-invention source is re-evaluated too, from the owner's stored
+    invention jobs (a decryptor tie settled only by the runs on the owner's
+    stored manufacturing jobs or the ME/TE of its BPCs, never by the
+    overview's choice), so a reason
+    naming both sources keeps both. The blended corp transfer lots of every
+    character job type re-costed here are re-stamped
+    (corp_transfer_costs.restamp_blended_corp_transfer_lots).
+    Commits; returns the number of jobs re-snapshotted."""
+    from eve_online_industry_tracker.application.characters.asset_history import (
+        _owner_models,
+        build_historical_input_cost_lookup,
+    )
+    from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+        restamp_blended_corp_transfer_lots,
+    )
+
+    count = 0
+    #: Product types of the character jobs re-costed here: their blended corp
+    #: transfer lots are re-stamped (the corp lots are built from character jobs).
+    recosted_character_types: set[int] = set()
+    for owner_kind, model, owner_field in (
+        ("character", CharacterIndustryJobsModel, "character_id"),
+        ("corporation", CorporationIndustryJobsModel, "corporation_id"),
+    ):
+        _, history_model, _, _ = _owner_models(owner_kind)
+        invention_sources_by_owner: dict[int, dict[int, dict[str, Any]]] = {}
+
+        def _invention_sources(owner_id: int) -> dict[int, dict[str, Any]]:
+            """The owner's actual-invention sources from its stored invention
+            jobs, with its stored manufacturing jobs as the runs evidence and
+            its BPCs as the ME/TE evidence for a decryptor tie, as its job
+            refresh reads them from ESI. The
+            stored jobs can reach further back than ESI's job history (the
+            refresh's set), so the re-snapshot may see more evidence."""
+            if owner_id not in invention_sources_by_owner:
+                stored = (
+                    app_session.query(model.raw)
+                    .filter(getattr(model, owner_field) == owner_id)
+                    .filter(model.activity_id.in_((1, 8)))
+                    .all()
+                )
+                invention_sources_by_owner[owner_id] = build_invention_cost_per_run_by_blueprint_type(
+                    jobs=[dict(raw) for (raw,) in stored if isinstance(raw, dict)],
+                    sde_session=sde_session,
+                    market_price_map=dict(market_price_map),
+                    invention_refresh=invention_refresh,
+                    **load_owner_invention_evidence(app_session, owner_kind=owner_kind, owner_id=owner_id),
+                )
+            return invention_sources_by_owner[owner_id]
+
+        rows = (
+            app_session.query(model)
+            .filter(model.invention_cost_unknown_reason.like(f"%{NO_DECRYPTOR_CHOICE_REASON}%"))
+            .all()
+        )
+        for row in rows:
+            raw = row.raw if isinstance(row.raw, dict) else None
+            if raw is None:
+                logging.warning(
+                    "Industry job %s: no stored ESI payload, so it cannot be re-snapshotted with the "
+                    "overview's decryptor; it keeps its reason until the next job refresh", row.job_id,
+                )
+                continue
+            owner_id = int(getattr(row, owner_field))
+            completed_at = row.completed_date or row.end_date
+            owned_costs = build_historical_input_cost_lookup(
+                app_session=app_session, owner_kind=owner_kind, owner_id=owner_id, as_of=completed_at,
+                type_ids=industry_job_material_type_ids(
+                    sde_session=sde_session, blueprint_type_id=int(row.blueprint_type_id or 0),
+                ),
+            )
+            snapshot = resolve_industry_job_cost_snapshot(
+                job=type("IndustryJobPayload", (), dict(raw))(),
+                sde_session=sde_session,
+                market_price_map=dict(market_price_map),
+                blueprint_provenance={
+                    "item_id": row.blueprint_item_id,
+                    "is_blueprint_copy": row.blueprint_is_blueprint_copy,
+                    "blueprint_runs": row.blueprint_runs,
+                    "blueprint_time_efficiency": row.blueprint_time_efficiency,
+                    "blueprint_material_efficiency": row.blueprint_material_efficiency,
+                    "source": row.blueprint_provenance_source,
+                    "reference_id": row.blueprint_provenance_ref_id,
+                },
+                owned_input_unit_cost_by_type_id=owned_costs,
+                invention_refresh=invention_refresh,
+                **invention_cost_source_for(_invention_sources(owner_id), row.blueprint_type_id),
+            )
+            row.output_quantity = snapshot.get("output_quantity")
+            row.materials_cost = snapshot.get("materials_cost")
+            row.historical_materials_cost = snapshot.get("historical_materials_cost")
+            row.historical_material_cost_source = snapshot.get("historical_material_cost_source")
+            row.historical_material_coverage_fraction = snapshot.get("historical_material_coverage_fraction")
+            row.historical_input_costs = snapshot.get("historical_input_costs")
+            # The materials cost is replaced: a backfill's lower bound no longer applies.
+            row.materials_cost_lower_bound_reason = None
+            row.invention_cost = snapshot.get("invention_cost")
+            row.invention_cost_unknown_reason = snapshot.get("invention_cost_unknown_reason")
+            row.total_build_cost = snapshot.get("total_cost")
+            if owner_kind == "character" and row.product_type_id is not None and (
+                _safe_float(row.unit_build_cost) != _safe_float(snapshot.get("unit_cost"))
+            ):
+                recosted_character_types.add(int(row.product_type_id))
+            row.unit_build_cost = snapshot.get("unit_cost")
+            row.build_cost_source = snapshot.get("source")
+            unit_cost = _safe_float(snapshot.get("unit_cost"))
+            output_quantity = _safe_int(snapshot.get("output_quantity"))
+            if unit_cost is not None and unit_cost > 0 and output_quantity and output_quantity > 0:
+                (
+                    app_session.query(history_model)
+                    .filter(getattr(history_model, owner_field) == owner_id)
+                    .filter(history_model.acquisition_reference_type == REFERENCE_TYPE_INDUSTRY_JOB)
+                    .filter(history_model.acquisition_reference_id == int(row.job_id))
+                    .update({
+                        "acquisition_unit_cost": float(unit_cost),
+                        "acquisition_total_cost": float(unit_cost) * float(output_quantity),
+                    }, synchronize_session=False)
+                )
+            count += 1
+    app_session.flush()
+    restamp_blended_corp_transfer_lots(app_session, recosted_character_types)
+    app_session.commit()
+    if count:
+        logging.info("Re-snapshotted %d industry job(s) stored without the overview's decryptor choice", count)
+    return count
+
+
+def _invention_target_product(invention: Mapping[str, Any], target_blueprint_type_id: int) -> Mapping[str, Any] | None:
+    for product in invention.get("products") or []:
+        if isinstance(product, Mapping) and _safe_int(product.get("type_id")) == int(target_blueprint_type_id):
+            return product
     return None
 
 
-def _invention_source_blueprint_by_target_type(sde_session: Any) -> dict[int, dict[str, Any]]:
-    global _INVENTION_SOURCE_BLUEPRINT_CACHE
-    if _INVENTION_SOURCE_BLUEPRINT_CACHE is not None:
-        return _INVENTION_SOURCE_BLUEPRINT_CACHE
+def _invention_source_activity(
+    sde_session: Any, target_blueprint_type_id: int,
+    memo: dict[int, tuple[int | None, Mapping[str, Any] | None]] | None = None,
+) -> tuple[int | None, Mapping[str, Any] | None]:
+    """(source blueprint id, its SDE invention activity in the producer's
+    shape), or (None, None) when nothing invents into the blueprint. The
+    lowest source id wins, as in the producer. `memo` (one refresh's
+    RealizedInventionRefresh.source_activity_by_target) reads each blueprint
+    from the SDE once."""
+    target = int(target_blueprint_type_id)
+    if memo is not None and target in memo:
+        return memo[target]
+    source_by_target = get_invention_source_blueprint_ids(sde_session, [target])
+    source_id = source_by_target.get(target)
+    if source_id is None:
+        result: tuple[int | None, Mapping[str, Any] | None] = (None, None)
+    else:
+        data = get_blueprint_manufacturing_data(sde_session, "en", [int(source_id)]).get(int(source_id)) or {}
+        invention = data.get("invention") if isinstance(data, Mapping) else None
+        result = (int(source_id), (invention if isinstance(invention, Mapping) else {}))
+    if memo is not None:
+        memo[target] = result
+    return result
 
-    mapping: dict[int, dict[str, Any]] = {}
-    for blueprint in sde_session.query(Blueprints).all():
-        activities = getattr(blueprint, "activities", None)
-        if not isinstance(activities, dict):
+
+def _invented_runs_per_success(
+    sde_session: Any, *, target_blueprint_type_id: int,
+    memo: dict[int, tuple[int | None, Mapping[str, Any] | None]] | None = None,
+) -> int | None:
+    """Runs on one invented BPC: the SDE invention product quantity (not the
+    T2 blueprint's maxProductionLimit; capital T2 modules invent 5 runs of a
+    10-run limit). None when nothing invents into it or the SDE has no runs."""
+    _, invention = _invention_source_activity(sde_session, int(target_blueprint_type_id), memo)
+    product = _invention_target_product(invention or {}, int(target_blueprint_type_id))
+    runs = _safe_int((product or {}).get("quantity"))
+    return int(runs) if runs and runs > 0 else None
+
+
+def _invention_attempt_inputs(
+    invention: Mapping[str, Any] | None, decryptor: DecryptorOption,
+) -> list[tuple[int, int]]:
+    """[(type_id, quantity)] one invention attempt consumes: the SDE
+    materials (datacores) and, with a decryptor, one decryptor."""
+    inputs: list[tuple[int, int]] = []
+    for material in (invention or {}).get("materials") or []:
+        if not isinstance(material, Mapping):
             continue
-        invention = activities.get("invention")
-        if not isinstance(invention, dict):
+        type_id = _safe_int(material.get("type_id"))
+        quantity = _safe_int(material.get("quantity"))
+        if type_id and quantity and quantity > 0:
+            inputs.append((int(type_id), int(quantity)))
+    if decryptor.type_id is not None:
+        inputs.append((int(decryptor.type_id), 1))
+    return inputs
+
+
+def _price_invention_inputs(
+    inputs: Iterable[tuple[int, int]], *,
+    market_price_map: Mapping[int, float], owned_cost_map: Mapping[int, float] | None = None,
+) -> tuple[float | None, list[int]]:
+    """(the inputs' cost, []), or (None, the unpriced type ids): the owned
+    unit cost when known, else the market price. Never a partial sum."""
+    total = 0.0
+    unpriced: list[int] = []
+    for type_id, quantity in inputs:
+        unit_price = (owned_cost_map or {}).get(type_id) or market_price_map.get(type_id)
+        if unit_price is None or float(unit_price) <= 0:
+            unpriced.append(int(type_id))
             continue
-        for product in invention.get("products") or []:
-            if not isinstance(product, dict):
-                continue
-            target_blueprint_type_id = _safe_int(product.get("typeID"))
-            if not target_blueprint_type_id or target_blueprint_type_id <= 0:
-                continue
-            if int(target_blueprint_type_id) in mapping:
-                continue
-            mapping[int(target_blueprint_type_id)] = {
-                "source_blueprint_type_id": int(getattr(blueprint, "blueprintTypeID", 0) or 0),
-                "invention": invention,
-            }
-    _INVENTION_SOURCE_BLUEPRINT_CACHE = mapping
-    return mapping
+        total += float(quantity) * float(unit_price)
+    if unpriced:
+        return None, sorted(unpriced)
+    return total, []
 
 
-def _target_blueprint_runs_per_success(sde_session: Any, *, target_blueprint_type_id: int) -> int:
-    blueprint = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(target_blueprint_type_id)).first()
-    if blueprint is None:
-        return 1
-    runs = _safe_int(getattr(blueprint, "maxProductionLimit", None)) or 1
-    return max(1, int(runs))
-
-
-def _estimate_invention_material_cost(
+def estimate_invention_cost_per_run(
     *,
     sde_session: Any,
     target_blueprint_type_id: int,
-    market_price_map: dict[int, float],
-    owned_cost_map: dict[int, float] | None = None,
-) -> Optional[dict[str, Any]]:
-    mapping = _invention_source_blueprint_by_target_type(sde_session)
-    payload = mapping.get(int(target_blueprint_type_id))
-    if not isinstance(payload, dict):
-        return None
-    invention = payload.get("invention")
-    if not isinstance(invention, dict):
-        return None
-    material_cost = 0.0
-    has_material_price = False
-    for material in invention.get("materials") or []:
-        if not isinstance(material, dict):
-            continue
-        material_type_id = _safe_int(material.get("typeID"))
-        quantity = _safe_int(material.get("quantity"))
-        if not material_type_id or not quantity or quantity <= 0:
-            continue
-        unit_price = (owned_cost_map or {}).get(int(material_type_id)) or market_price_map.get(int(material_type_id))
-        if unit_price is None:
-            continue
-        has_material_price = True
-        material_cost += float(quantity) * float(unit_price)
-    if not has_material_price:
-        return None
+    market_price_map: Mapping[int, float],
+    owned_cost_map: Mapping[int, float] | None = None,
+    invention_inputs: RealizedInventionInputs | None,
+    inputs_unknown_reason: str = NO_REALIZED_INVENTION_INPUTS_REASON,
+    memo: dict[int, tuple[int | None, Mapping[str, Any] | None]] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The expected invention inputs one run of an invented blueprint costs,
+    sized like the producer's _expected_invention_costs: one attempt's
+    datacores (and the producer's decryptor, one per attempt) over the runs
+    one invented BPC yields (SDE product quantity + the decryptor's runs)
+    times EVE's chance for the corp's best qualifying inventor
+    (resolve_invention_chance), after the admin floor.
+
+    (estimate, None); (None, None) when nothing invents into the blueprint;
+    (None, why) when an input is unknown: no inputs, unknown skills, no
+    decryptor choice, no SDE runs or chance, an unpriced input. Never a
+    constant or a partial sum."""
+    target = int(target_blueprint_type_id)
+    source_id, invention = _invention_source_activity(sde_session, target, memo)
+    if source_id is None:
+        return None, None
+    product = _invention_target_product(invention or {}, target)
+    if product is None:
+        return None, f"the SDE invention of blueprint {source_id} lists no product {target}"
+    base_runs = _safe_int(product.get("quantity"))
+    if not base_runs or base_runs <= 0:
+        return None, f"the SDE gives no runs per invented BPC for blueprint {target}"
+    base_probability = _safe_float(product.get("probability"))
+    if base_probability is None or base_probability <= 0:
+        return None, f"the SDE gives no invention success chance for blueprint {target}"
+    if invention_inputs is None:
+        return None, inputs_unknown_reason
+    decryptor = invention_inputs.decryptor_for(target)
+    if decryptor is None:
+        if invention_inputs.decryptor_choices_published and not invention_inputs.decryptor_by_blueprint_type_id:
+            return None, (
+                f"blueprint {target}: {NO_DECRYPTOR_CHOICE_REASON} (the last product overview planned no invention)"
+            )
+        if invention_inputs.decryptor_choices_published:
+            return None, f"blueprint {target}: {NO_DECRYPTOR_CHOICE_REASON} (this blueprint is not planned by the overview)"
+        return None, f"{NO_DECRYPTOR_CHOICE_REASON} for blueprint {target} (no product overview has planned it yet)"
+    chance = resolve_invention_chance(
+        invention_inputs.invention_context, blueprint_type_id=target,
+        skill_entries=[e for e in ((invention or {}).get("skills") or []) if isinstance(e, Mapping)],
+        base_probability=float(base_probability), decryptor=decryptor,
+    )
+    if chance.skills_unknown_reason is not None:
+        return None, f"invention chance unknown: {chance.skills_unknown_reason}"
+    probability = effective_invention_probability(chance.probability, invention_inputs.probability_floor)
+    runs_per_bpc = invented_runs_per_blueprint(int(base_runs), decryptor)
+    expected_attempts_per_run, _ = invention_attempts(1, runs_per_bpc, probability)
+    if expected_attempts_per_run <= 0:
+        return None, f"no positive invention success chance for blueprint {target}"
+
+    inputs = _invention_attempt_inputs(invention, decryptor)
+    if not inputs:
+        return None, f"the SDE invention of blueprint {source_id} lists no inputs"
+    material_cost, unpriced = _price_invention_inputs(
+        inputs, market_price_map=market_price_map, owned_cost_map=owned_cost_map,
+    )
+    if material_cost is None:
+        return None, f"invention input(s) {unpriced} of blueprint {target} have no price"
     return {
-        "material_cost": float(material_cost),
-        "probability": _invention_probability(invention),
-        "target_runs_per_success": _target_blueprint_runs_per_success(
-            sde_session,
-            target_blueprint_type_id=int(target_blueprint_type_id),
-        ),
-    }
+        "source_blueprint_type_id": source_id,
+        "material_cost_per_attempt": float(material_cost),
+        "probability": float(probability),
+        "runs_per_invented_blueprint": int(runs_per_bpc),
+        "decryptor_type_id": decryptor.type_id,
+        "inventor_character_id": chance.inventor_character_id,
+        "cost_per_run": float(material_cost) * float(expected_attempts_per_run),
+    }, None
+
+
+#: An ESI success chance is a float32: a decryptor fits when the skill factor
+#: it implies is a whole-level factor within this relative tolerance (the
+#: factors are 1/120 apart, about 0.6%).
+_SUCCESS_CHANCE_RELATIVE_TOLERANCE = 1e-4
+
+
+def _feasible_invention_skill_factors(
+    invention: Mapping[str, Any] | None, encryption_skill_type_ids: frozenset[int],
+) -> tuple[float, ...]:
+    """Every skill factor 1 + (sci1 + sci2)/30 + enc/40 an installer of this
+    invention can have: whole levels from the SDE's required level (at least
+    1) to 5. When the SDE skills cannot be read as 2 science + 1 encryption,
+    every level from 0 (wider: more candidates, never fewer)."""
+    entries = [e for e in ((invention or {}).get("skills") or []) if isinstance(e, Mapping)]
+    skill_set = invention_skill_set(entries, encryption_skill_type_ids)[0] if entries else None
+    if skill_set is None:
+        science_min, encryption_levels = 0, range(0, 6)
+    else:
+        required = required_invention_skill_levels(skill_set, entries)
+        science_min = sum(int(required[type_id]) for type_id in skill_set.science_skill_type_ids)
+        encryption_levels = (
+            range(int(required[skill_set.encryption_skill_type_id]), 6)
+            if skill_set.encryption_skill_type_id is not None else range(0, 1)
+        )
+    return tuple(sorted({
+        1.0 + science / 30.0 + encryption / 40.0
+        for science in range(min(science_min, 10), 11) for encryption in encryption_levels
+    }))
+
+
+def _infer_job_decryptor(
+    *,
+    probability: float | None,
+    base_probability: float | None,
+    skill_factors: tuple[float, ...],
+    options: tuple[DecryptorOption, ...],
+) -> tuple[DecryptorOption | None, str | None, tuple[DecryptorOption, ...]]:
+    """The decryptor an invention job used, read from its ESI success chance:
+    SDE base x skill factor x decryptor multiplier, the skill factor one of
+    `skill_factors` (whole levels). ESI's licensed_runs on an invention job is
+    the source T1 copy's runs, so it is no evidence.
+
+    (option, None, (option,)) when exactly one option (no decryptor
+    included) fits; (None, "decryptor unknown: candidates ...", candidates)
+    when several fit, for the caller to settle from runs evidence
+    (_settle_decryptor_from_runs); else (None, "decryptor unknown: ...", ()).
+    Never guessed, and never the overview's choice: what the producer plans
+    now is no evidence of what an earlier job used."""
+    if len(options) <= 1:
+        return None, "decryptor unknown: the SDE gave no decryptor data", ()
+    if probability is None or probability <= 0:
+        return None, "decryptor unknown: the job gives no success chance to read it from", ()
+    if probability >= 1.0 - 1e-9:
+        return None, "decryptor unknown: the job's success chance is capped at 100%", ()
+    if base_probability is None or base_probability <= 0:
+        return None, "decryptor unknown: the SDE gives no base success chance", ()
+
+    def _fits(option: DecryptorOption) -> bool:
+        multiplier = float(option.probability_multiplier)
+        if multiplier <= 0:
+            return False
+        implied = float(probability) / (float(base_probability) * multiplier)
+        return any(abs(factor - implied) <= _SUCCESS_CHANCE_RELATIVE_TOLERANCE * factor for factor in skill_factors)
+
+    matches = tuple(o for o in options if _fits(o))
+    chance = f"the job's {float(probability):.4f} success chance over the SDE base {float(base_probability):g}"
+    if len(matches) == 1:
+        return matches[0], None, matches
+    if not matches:
+        return None, f"decryptor unknown: {chance} matches no decryptor at any skill level", ()
+    names = ", ".join(sorted(str(o.type_name) for o in matches))
+    return None, f"decryptor unknown: candidates {names} ({chance} fits each)", matches
+
+
+def _job_finished_at(raw: Mapping[str, Any]) -> str | None:
+    """When a job's output could first be used: its completed date, else its
+    end date (ESI ISO strings, which compare in time order)."""
+    value = raw.get("completed_date") or raw.get("end_date")
+    return str(value) if value else None
+
+
+def _bpc_runs_lower_bounds(jobs: Iterable[Mapping[str, Any]]) -> dict[int, list[tuple[str, int]]]:
+    """{blueprint type: [(first use, runs used), one per blueprint item]}
+    from the owner's manufacturing jobs. The runs of every job installed from
+    one blueprint item add up to at most that BPC's runs: a lower bound on
+    them. ESI's licensed_runs on a manufacturing job is no evidence: it is
+    the blueprint's maxProductionLimit, not the BPC's runs (all 1117 stored
+    manufacturing jobs, 2026-10-19). A job without a blueprint item, start
+    date or runs is left out."""
+    by_item: dict[tuple[int, int], list[Any]] = {}
+    for job in jobs:
+        raw = job.get("raw") if isinstance(job.get("raw"), dict) else job
+        if not isinstance(raw, Mapping) or _safe_int(raw.get("activity_id")) != 1:
+            continue
+        blueprint_type_id = _safe_int(raw.get("blueprint_type_id"))
+        item_id = _safe_int(raw.get("blueprint_id"))
+        runs = _safe_int(raw.get("runs"))
+        start = raw.get("start_date")
+        if not blueprint_type_id or not item_id or not runs or runs <= 0 or not start:
+            continue
+        slot = by_item.setdefault((int(blueprint_type_id), int(item_id)), [str(start), 0])
+        slot[0] = min(slot[0], str(start))
+        slot[1] += int(runs)
+    out: dict[int, list[tuple[str, int]]] = defaultdict(list)
+    for (blueprint_type_id, _), (first_use, runs) in by_item.items():
+        out[blueprint_type_id].append((first_use, runs))
+    return dict(out)
+
+
+def _settle_decryptor_from_runs(
+    *,
+    finished_at: str | None,
+    candidates: tuple[DecryptorOption, ...],
+    base_runs: int,
+    bpc_lower_bounds: list[tuple[str, int]],
+    other_producers: list[tuple[str | None, int | None]],
+) -> tuple[DecryptorOption | None, str]:
+    """Settle a decryptor tie from the runs used on the blueprint's later BPCs.
+
+    A BPC is this job's evidence when it was first used after the job
+    finished, this job can have made it (a candidate gives at least the runs
+    used on it) and no other of the owner's invention jobs of the blueprint
+    (`other_producers`: (finished at, the most runs per BPC it can give;
+    None: unknown, any)) that finished before that use can have. This job's
+    invented runs are then at least those runs, which rules out every
+    candidate giving fewer. (decryptor, the evidence) when exactly one
+    candidate remains, else (None, why no runs evidence settles it). A BPC
+    bought or received from outside would look like this job's: the
+    evidence assumes the owner's T2 BPCs of the blueprint are its own
+    inventions."""
+    if finished_at is None:
+        return None, "no runs evidence settles it (the job has no completion date)"
+    runs_by_candidate = [(c, invented_runs_per_blueprint(int(base_runs), c)) for c in candidates]
+    most = max(runs for _, runs in runs_by_candidate)
+    floor = 0
+    for first_use, runs in bpc_lower_bounds:
+        if first_use <= finished_at or runs > most:
+            continue  # used before this job's BPCs existed, or more runs than it can give
+        if any(
+            (done is None or done < first_use) and (max_runs is None or max_runs >= runs)
+            for done, max_runs in other_producers
+        ):
+            continue  # another invention job may have made this BPC
+        floor = max(floor, int(runs))
+    remaining = [c for c, runs in runs_by_candidate if runs >= floor]
+    if floor and len(remaining) == 1:
+        return remaining[0], f"a later BPC was used for {floor} runs"
+    if floor:
+        return None, f"no runs evidence settles it (a later BPC used for {floor} runs fits several)"
+    return None, "no runs evidence settles it (no later BPC of this blueprint that only this job can have made)"
+
+
+@dataclass(frozen=True)
+class BlueprintCopySighting:
+    """One of the owner's blueprint copies as its asset history saw it: the
+    ME/TE (fixed: a copy cannot be researched), the most runs seen on it (a
+    lower bound on the runs it was made with: runs only go down) and when it
+    was first seen."""
+
+    item_id: int
+    blueprint_type_id: int
+    material_efficiency: int
+    time_efficiency: int
+    runs: int
+    first_seen_at: str
+
+
+def _bpc_fits(option: DecryptorOption, base_runs: int, bpc: BlueprintCopySighting) -> bool:
+    """`bpc` can have been invented with `option`: the invented ME/TE (2 / 4
+    plus the decryptor's modifiers) and no more runs than it gives."""
+    return (
+        invented_blueprint_efficiency(option) == (int(bpc.material_efficiency), int(bpc.time_efficiency))
+        and 1 <= int(bpc.runs) <= invented_runs_per_blueprint(int(base_runs), option)
+    )
+
+
+def _utc(value: Any) -> datetime | None:
+    """_parse_date in UTC (a stamp without a zone is read as UTC), so ESI and
+    asset history stamps compare."""
+    parsed = _parse_date(value)
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _describe_bpc(bpc: BlueprintCopySighting) -> str:
+    return (
+        f"BPC {bpc.item_id} (ME {bpc.material_efficiency} / TE {bpc.time_efficiency}, {bpc.runs} runs, "
+        f"first seen {bpc.first_seen_at})"
+    )
+
+
+def _settle_decryptor_from_me_te(
+    *,
+    finished_at: str | None,
+    candidates: tuple[DecryptorOption, ...],
+    base_runs: int,
+    successful_runs: int,
+    blueprint_copies: list[BlueprintCopySighting],
+    other_producers: list[tuple[str | None, tuple[DecryptorOption, ...] | None]],
+) -> tuple[DecryptorOption | None, str]:
+    """Settle a decryptor tie from the ME/TE of the owner's BPCs of the blueprint.
+
+    A BPC is this job's evidence when it was first seen after the job
+    finished, its ME/TE and runs fit a candidate (_bpc_fits) and no other
+    stored invention job of the blueprint (`other_producers`, of any owner: a
+    BPC moves between a pilot and the corp; (finished at, its possible
+    decryptors; None: unknown, any)) that finished before it was seen can
+    have made it. More such BPCs than the job's successful runs cannot all be
+    its own, so another source made some and none is evidence. (decryptor,
+    the evidence) when the evidence leaves exactly one candidate, else (None,
+    why no ME/TE evidence settles it). A BPC whose ME/TE or runs fit no
+    candidate (a bought or researched copy, or another job's) gives no
+    evidence. A bought copy with an invented ME/TE would look like this
+    job's: the evidence assumes the owner's T2 BPCs of the blueprint seen
+    after the job are its own inventions."""
+    done = _utc(finished_at)
+    if done is None:
+        return None, "no ME/TE evidence settles it (the job has no completion date)"
+    evidence: list[tuple[BlueprintCopySighting, tuple[DecryptorOption, ...]]] = []
+    unfit: list[BlueprintCopySighting] = []
+    shared = 0
+    for bpc in sorted(blueprint_copies, key=lambda b: (str(b.first_seen_at), int(b.item_id))):
+        seen = _utc(bpc.first_seen_at)
+        if seen is None or seen <= done:
+            continue  # seen before this job's BPCs existed
+        fits = tuple(c for c in candidates if _bpc_fits(c, base_runs, bpc))
+        if not fits:
+            unfit.append(bpc)
+            continue
+        if any(
+            (_utc(other_done) is None or _utc(other_done) < seen)
+            and (options is None or any(_bpc_fits(o, base_runs, bpc) for o in options))
+            for other_done, options in other_producers
+        ):
+            shared += 1  # another invention job may have made this BPC
+            continue
+        evidence.append((bpc, fits))
+    if len(evidence) > int(successful_runs):
+        return None, (
+            f"no ME/TE evidence settles it ({len(evidence)} later BPCs fit, more than the job's "
+            f"{int(successful_runs)} successful run(s): some come from elsewhere)"
+        )
+    if evidence:
+        remaining = [c for c in candidates if all(c in fits for _, fits in evidence)]
+        if len(remaining) == 1:
+            first = evidence[0][0]
+            more = f" and {len(evidence) - 1} more" if len(evidence) > 1 else ""
+            return remaining[0], f"{_describe_bpc(first)}{more} has the ME/TE it gives"
+        if not remaining:
+            return None, (
+                "no ME/TE evidence settles it (the BPCs only this job can have made contradict each other: "
+                + "; ".join(_describe_bpc(b) for b, _ in evidence[:3]) + ")"
+            )
+        names = ", ".join(sorted(str(c.type_name) for c in remaining))
+        return None, f"no ME/TE evidence settles it ({_describe_bpc(evidence[0][0])} fits several: {names})"
+    parts: list[str] = []
+    if unfit:
+        listed = "; ".join(_describe_bpc(b) for b in unfit[:3])
+        more = f" and {len(unfit) - 3} more" if len(unfit) > 3 else ""
+        parts.append(f"{listed}{more} fits no candidate (bought, researched or not invented by this job)")
+    if shared:
+        parts.append(f"{shared} later BPC(s) another invention job may have made")
+    if not parts:
+        parts.append("no BPC of this blueprint seen after the job")
+    return None, "no ME/TE evidence settles it (" + "; ".join(parts) + ")"
+
+
+#: Asset history rows written by a refresh snapshot, not the historical backfill.
+_HISTORY_BACKFILL_SOURCE = "historical_backfill"
+_SQL_IN_CHUNK = 500
+
+
+def load_owner_invention_evidence(app_session: Any, *, owner_kind: str, owner_id: int) -> dict[str, Any]:
+    """build_invention_cost_per_run_by_blueprint_type's decryptor evidence for
+    one owner: `blueprint_copies`, its BPCs from its asset history (refresh
+    snapshots only, with ME, TE and positive runs; a copy whose ME/TE changed
+    between snapshots is left out: copies cannot be researched, so it is not
+    one item), each first seen at its earliest snapshot in either owner
+    kind's history (a BPC moved from a pilot to the corp keeps its item id),
+    and `known_invention_jobs`, the stored invention jobs (raw) of every
+    character and corporation, so a job no longer in ESI's job list, or
+    another owner's whose BPC was moved here, still counts as a possible
+    maker of a BPC. A database error propagates."""
+    if owner_kind == "character":
+        history, other_history, owner_field = CharacterAssetHistoryModel, CorporationAssetHistoryModel, "character_id"
+    elif owner_kind == "corporation":
+        history, other_history, owner_field = CorporationAssetHistoryModel, CharacterAssetHistoryModel, "corporation_id"
+    else:
+        raise ValueError(f"Unsupported owner_kind: {owner_kind}")
+    rows = (
+        app_session.query(
+            history.item_id,
+            history.type_id,
+            func.min(history.observed_at),
+            func.max(history.blueprint_runs),
+            func.min(history.blueprint_material_efficiency),
+            func.max(history.blueprint_material_efficiency),
+            func.min(history.blueprint_time_efficiency),
+            func.max(history.blueprint_time_efficiency),
+        )
+        .filter(getattr(history, owner_field) == int(owner_id))
+        .filter(history.is_blueprint_copy.is_(True))
+        .filter(or_(history.snapshot_source.is_(None), history.snapshot_source != _HISTORY_BACKFILL_SOURCE))
+        .filter(history.blueprint_material_efficiency.isnot(None))
+        .filter(history.blueprint_time_efficiency.isnot(None))
+        .filter(history.blueprint_runs > 0)
+        .group_by(history.item_id, history.type_id)
+        .all()
+    )
+    usable = [
+        row for row in rows
+        if row[0] is not None and row[1] is not None and row[2] and row[4] == row[5] and row[6] == row[7]
+    ]
+    elsewhere: dict[int, str] = {}
+    item_ids = sorted({int(row[0]) for row in usable})
+    for start in range(0, len(item_ids), _SQL_IN_CHUNK):
+        for item_id, first_seen in (
+            app_session.query(other_history.item_id, func.min(other_history.observed_at))
+            .filter(other_history.item_id.in_(item_ids[start:start + _SQL_IN_CHUNK]))
+            .filter(or_(other_history.snapshot_source.is_(None),
+                        other_history.snapshot_source != _HISTORY_BACKFILL_SOURCE))
+            .group_by(other_history.item_id)
+            .all()
+        ):
+            if first_seen:
+                elsewhere[int(item_id)] = str(first_seen)
+    copies: list[BlueprintCopySighting] = []
+    for item_id, type_id, first_seen, runs, me, _, te, _ in usable:
+        seen_here, seen_elsewhere = _utc(first_seen), _utc(elsewhere.get(int(item_id)))
+        earliest = elsewhere[int(item_id)] if (
+            seen_elsewhere is not None and (seen_here is None or seen_elsewhere < seen_here)
+        ) else str(first_seen)
+        copies.append(BlueprintCopySighting(
+            item_id=int(item_id), blueprint_type_id=int(type_id), material_efficiency=int(me),
+            time_efficiency=int(te), runs=int(runs), first_seen_at=earliest,
+        ))
+    known = [
+        dict(raw)
+        for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel)
+        for (raw,) in app_session.query(model.raw).filter(model.activity_id == 8).all()
+        if isinstance(raw, dict)
+    ]
+    return {"blueprint_copies": copies, "known_invention_jobs": known}
+
+
+def _possible_invention_decryptors(
+    job: Mapping[str, Any], *, sde_session: Any, refresh: RealizedInventionRefresh,
+) -> tuple[int, str | None, tuple[DecryptorOption, ...] | None] | None:
+    """(invented blueprint, finished at, the decryptors its success chance
+    allows; None: unknown, any) for a delivered invention job with a
+    success, which can have made a BPC of the blueprint; else None."""
+    raw = job.get("raw") if isinstance(job.get("raw"), Mapping) else job
+    if _safe_int(raw.get("activity_id")) != 8 or str(raw.get("status") or "").lower() != _DELIVERED_STATUS:
+        return None
+    target = _safe_int(job.get("product_type_id") or raw.get("product_type_id"))
+    if not target or target <= 0 or not (_safe_int(raw.get("successful_runs")) or 0) > 0:
+        return None
+    source_id, invention = _invention_source_activity(sde_session, int(target), refresh.source_activity_by_target)
+    product = _invention_target_product(invention or {}, int(target)) if source_id is not None else None
+    decryptor, _, candidates = _infer_job_decryptor(
+        probability=_safe_float(raw.get("probability")),
+        base_probability=_safe_float((product or {}).get("probability")),
+        skill_factors=_feasible_invention_skill_factors(invention, refresh.encryption_skills(sde_session)),
+        options=refresh.decryptors(sde_session),
+    )
+    return int(target), _job_finished_at(raw), (candidates or None) if decryptor is None else (decryptor,)
 
 
 def build_invention_cost_per_run_by_blueprint_type(
@@ -415,44 +1172,214 @@ def build_invention_cost_per_run_by_blueprint_type(
     jobs: Iterable[dict[str, Any]] | None,
     sde_session: Any,
     market_price_map: dict[int, float],
+    invention_refresh: RealizedInventionRefresh | None = None,
+    blueprint_copies: Iterable[BlueprintCopySighting] | None = None,
+    known_invention_jobs: Iterable[Mapping[str, Any]] | None = None,
 ) -> dict[int, dict[str, Any]]:
-    rows_by_target_blueprint_type: dict[int, dict[str, Any]] = {}
-    for job in jobs or []:
-        if not isinstance(job, dict):
-            continue
-        raw = job.get("raw") if isinstance(job.get("raw"), dict) else job
-        activity_id = _safe_int((raw or {}).get("activity_id"))
-        if activity_id != 8:
-            continue
-        target_blueprint_type_id = _safe_int(job.get("product_type_id"))
-        if not target_blueprint_type_id or target_blueprint_type_id <= 0:
-            continue
-        licensed_runs = _safe_int((raw or {}).get("licensed_runs")) or _target_blueprint_runs_per_success(
-            sde_session,
-            target_blueprint_type_id=int(target_blueprint_type_id),
-        )
-        licensed_runs = max(1, int(licensed_runs))
-        estimate = _estimate_invention_material_cost(
-            sde_session=sde_session,
-            target_blueprint_type_id=int(target_blueprint_type_id),
-            market_price_map=market_price_map,
-        )
-        invention_material_cost = float((estimate or {}).get("material_cost") or 0.0)
-        total_cost = float(invention_material_cost) + float(_safe_float(job.get("cost")) or 0.0)
-        completed_date = _parse_date(job.get("completed_date") or job.get("end_date"))
-        current = rows_by_target_blueprint_type.get(int(target_blueprint_type_id))
-        if current is not None:
-            current_dt = _parse_date(current.get("completed_date") or current.get("end_date"))
-            if current_dt is not None and completed_date is not None and current_dt >= completed_date:
-                continue
-        rows_by_target_blueprint_type[int(target_blueprint_type_id)] = {
-            "total_cost": float(total_cost),
-            "unit_cost_per_run": float(total_cost) / float(licensed_runs),
-            "source": "actual_invention_job",
-            "completed_date": job.get("completed_date") or job.get("end_date"),
-        }
+    """{invented blueprint type_id: its invention cost per invented run from
+    the corp's own delivered invention jobs}.
 
-    return rows_by_target_blueprint_type
+    cost per run = sum(runs x one attempt's inputs + job cost) /
+    sum(successful_runs x licensed_runs): every attempt is paid for (failed
+    ones and failed jobs included), only successes yield runs, each the SDE
+    runs plus the job's decryptor's (not ESI's licensed_runs: that is the
+    source T1 copy's runs). A job is left out when it is not delivered, has
+    no successful_runs or runs, its decryptor cannot be read from its success
+    chance (_infer_job_decryptor; several candidates are settled only by runs
+    evidence from the owner's manufacturing jobs in `jobs`,
+    _settle_decryptor_from_runs, listed in
+    `decryptor_from_runs_evidence_job_ids`, and by the ME/TE of the owner's
+    `blueprint_copies`, _settle_decryptor_from_me_te, listed in
+    `decryptor_from_me_te_evidence_job_ids`; evidence that disagrees settles
+    nothing; `known_invention_jobs`, every owner's stored invention jobs, only
+    widen who can have made a BPC; load_owner_invention_evidence reads both)
+    or an input has no price; a known cost names the jobs it left out
+    (`skipped_jobs`, `skipped_job_reasons`: "job <id>: why"). A
+    blueprint without a usable job, or with zero successes over its usable
+    jobs, maps to {"unknown_reason": why} and no unit_cost_per_run: the
+    caller then uses the expected estimate."""
+    refresh = invention_refresh or RealizedInventionRefresh(inputs=None)
+    memo = refresh.source_activity_by_target
+    job_list = [job for job in (jobs or []) if isinstance(job, dict)]
+    bpc_lower_bounds = _bpc_runs_lower_bounds(job_list)
+    totals: dict[int, dict[str, Any]] = {}
+    #: Every delivered invention job with a success, per invented blueprint:
+    #: (the job, finished at, the most runs per BPC it can give or None).
+    producers: dict[int, list[tuple[dict[str, Any], str | None, int | None]]] = defaultdict(list)
+    #: The same jobs, and the stored ones (any owner) not in `jobs`, with their
+    #: possible decryptors (None: unknown, any) for the ME/TE evidence.
+    me_te_producers: dict[int, list[tuple[Any, str | None, tuple[DecryptorOption, ...] | None]]] = defaultdict(list)
+    copies_by_target: dict[int, list[BlueprintCopySighting]] | None = None
+    if blueprint_copies is not None:
+        copies_by_target = defaultdict(list)
+        for bpc in blueprint_copies:
+            copies_by_target[int(bpc.blueprint_type_id)].append(bpc)
+    readings: list[tuple[int, dict[str, Any], Mapping[str, Any], Mapping[str, Any] | None, int,
+                         DecryptorOption | None, str | None, tuple[DecryptorOption, ...]]] = []
+
+    def _skip(target: int, job_id: Any, why: str) -> None:
+        totals[target]["skipped"].append(f"job {job_id}: {why}")
+        logging.info("Invention job %s for blueprint %s skipped as a cost source: %s", job_id, target, why)
+
+    for job in job_list:
+        raw = job.get("raw") if isinstance(job.get("raw"), dict) else job
+        if _safe_int((raw or {}).get("activity_id")) != 8:
+            continue
+        target = _safe_int(job.get("product_type_id"))
+        if not target or target <= 0:
+            continue
+        target = int(target)
+        totals.setdefault(target, {
+            "cost": 0.0, "attempts": 0, "successful_runs": 0, "invented_runs": 0, "jobs": 0, "skipped": [],
+            "runs_evidence_job_ids": [], "me_te_evidence_job_ids": [],
+        })
+        job_id = job.get("job_id")
+        if str((raw or {}).get("status") or "").lower() != _DELIVERED_STATUS:
+            continue  # not finished: its outcome is not known yet (not a reason, just not yet)
+        runs = _safe_int((raw or {}).get("runs"))
+        successful_runs = _safe_int((raw or {}).get("successful_runs"))
+        if successful_runs is None or successful_runs < 0:
+            _skip(target, job_id, "no successful_runs")
+            continue
+        if not runs or runs <= 0:
+            _skip(target, job_id, "no runs")
+            continue
+        source_id, invention = _invention_source_activity(sde_session, target, memo)
+        product = _invention_target_product(invention or {}, target) if source_id is not None else None
+        base_runs = _safe_int((product or {}).get("quantity"))
+        if not base_runs or base_runs <= 0:
+            _skip(target, job_id, "the SDE gives no runs per invented BPC")
+            continue
+        decryptor, decryptor_reason, candidates = _infer_job_decryptor(
+            probability=_safe_float((raw or {}).get("probability")),
+            base_probability=_safe_float((product or {}).get("probability")),
+            skill_factors=_feasible_invention_skill_factors(invention, refresh.encryption_skills(sde_session)),
+            options=refresh.decryptors(sde_session),
+        )
+        if successful_runs > 0:
+            most_runs = (
+                max(invented_runs_per_blueprint(int(base_runs), c) for c in candidates) if candidates else None
+            )
+            producers[target].append((job, _job_finished_at(raw or {}), most_runs))
+            me_te_producers[target].append((job, _job_finished_at(raw or {}), candidates or None))
+        readings.append((target, job, raw or {}, invention, int(base_runs), decryptor, decryptor_reason, candidates))
+
+    if copies_by_target is not None:
+        listed_ids = {_safe_int(job.get("job_id")) for job in job_list}
+        for known in known_invention_jobs or []:
+            if not isinstance(known, Mapping) or _safe_int(known.get("job_id")) in listed_ids:
+                continue
+            reading = _possible_invention_decryptors(known, sde_session=sde_session, refresh=refresh)
+            if reading is not None:
+                me_te_producers[reading[0]].append((known, reading[1], reading[2]))
+
+    for target, job, raw, invention, base_runs, decryptor, decryptor_reason, candidates in readings:
+        entry = totals[target]
+        job_id = job.get("job_id")
+        by_runs_evidence = False
+        by_me_te_evidence = False
+        if decryptor is None and len(candidates) > 1:
+            by_runs, runs_evidence = _settle_decryptor_from_runs(
+                finished_at=_job_finished_at(raw), candidates=candidates, base_runs=base_runs,
+                bpc_lower_bounds=bpc_lower_bounds.get(target, []),
+                other_producers=[(done, most) for other, done, most in producers[target] if other is not job],
+            )
+            by_me_te: DecryptorOption | None = None
+            me_te_evidence: str | None = None
+            if copies_by_target is not None:
+                by_me_te, me_te_evidence = _settle_decryptor_from_me_te(
+                    finished_at=_job_finished_at(raw), candidates=candidates, base_runs=base_runs,
+                    successful_runs=int(_safe_int(raw.get("successful_runs")) or 0),
+                    blueprint_copies=copies_by_target.get(target, []),
+                    other_producers=[
+                        (done, options) for other, done, options in me_te_producers[target] if other is not job
+                    ],
+                )
+            if by_runs is not None and by_me_te is not None and by_runs != by_me_te:
+                decryptor_reason = (
+                    f"{decryptor_reason}; the runs evidence ({runs_evidence}: {by_runs.type_name}) and the "
+                    f"ME/TE evidence ({me_te_evidence}: {by_me_te.type_name}) disagree"
+                )
+            elif by_runs is not None or by_me_te is not None:
+                decryptor = by_runs or by_me_te
+                by_runs_evidence = by_runs is not None
+                by_me_te_evidence = by_me_te is not None
+                used = [e for e, ok in ((runs_evidence, by_runs_evidence), (me_te_evidence, by_me_te_evidence)) if ok]
+                logging.info(
+                    "Invention job %s for blueprint %s: its success chance fits several decryptors; %s, which "
+                    "rules out all but %s", job_id, target, "; ".join(str(e) for e in used), decryptor.type_name,
+                )
+            else:
+                decryptor_reason = "; ".join(str(r) for r in (decryptor_reason, runs_evidence, me_te_evidence) if r)
+        if decryptor is None:
+            _skip(target, job_id, str(decryptor_reason))
+            continue
+        per_attempt, unpriced = _price_invention_inputs(
+            _invention_attempt_inputs(invention, decryptor), market_price_map=market_price_map,
+        )
+        if per_attempt is None:
+            _skip(target, job_id, f"invention input(s) {unpriced} have no price")
+            continue
+        install_cost = _safe_float(job.get("cost") if job.get("cost") is not None else raw.get("cost"))
+        if install_cost is None:
+            # Never a free install: the job's attempts would be under-costed.
+            _skip(target, job_id, "the job has no readable install cost (ESI cost)")
+            continue
+        runs = int(_safe_int(raw.get("runs")) or 0)
+        successful_runs = int(_safe_int(raw.get("successful_runs")) or 0)
+        entry["cost"] += float(runs) * float(per_attempt) + float(install_cost)
+        entry["attempts"] += runs
+        entry["successful_runs"] += successful_runs
+        entry["invented_runs"] += successful_runs * invented_runs_per_blueprint(base_runs, decryptor)
+        entry["jobs"] += 1
+        if by_runs_evidence:
+            entry["runs_evidence_job_ids"].append(job_id)
+        if by_me_te_evidence:
+            entry["me_te_evidence_job_ids"].append(job_id)
+
+    out: dict[int, dict[str, Any]] = {}
+    for target, entry in totals.items():
+        if entry["jobs"] == 0:
+            if entry["skipped"]:
+                out[target] = {"unknown_reason": "no usable invention job (" + "; ".join(entry["skipped"]) + ")"}
+            continue  # only unfinished jobs: nothing to say yet
+        if entry["invented_runs"] <= 0:
+            out[target] = {"unknown_reason": (
+                f"the corp's {entry['jobs']} delivered invention job(s) had no successful attempt "
+                f"({entry['attempts']} attempts)"
+            )}
+            continue
+        out[target] = {
+            "total_cost": float(entry["cost"]),
+            "unit_cost_per_run": float(entry["cost"]) / float(entry["invented_runs"]),
+            "source": "actual_invention_job",
+            "jobs": int(entry["jobs"]),
+            "attempts": int(entry["attempts"]),
+            "successful_runs": int(entry["successful_runs"]),
+            "invented_runs": int(entry["invented_runs"]),
+            # Tied jobs whose decryptor the runs on a later BPC settled.
+            "decryptor_from_runs_evidence_job_ids": list(entry["runs_evidence_job_ids"]),
+            # Tied jobs whose decryptor the ME/TE of a later BPC settled.
+            "decryptor_from_me_te_evidence_job_ids": list(entry["me_te_evidence_job_ids"]),
+            # The jobs of the blueprint left out of this cost, each "job <id>: why".
+            "skipped_jobs": len(entry["skipped"]),
+            "skipped_job_reasons": list(entry["skipped"]),
+        }
+    return out
+
+
+def invention_cost_source_for(
+    invention_cost_by_blueprint_type: Mapping[int, Mapping[str, Any]], blueprint_type_id: Any,
+) -> dict[str, Any]:
+    """resolve_industry_job_cost_snapshot's actual-invention arguments for a
+    manufacturing job of `blueprint_type_id`."""
+    entry = invention_cost_by_blueprint_type.get(int(_safe_int(blueprint_type_id) or 0)) or {}
+    unit = _safe_float(entry.get("unit_cost_per_run"))
+    return {
+        "invention_unit_cost_per_run": unit,
+        "invention_cost_source": (str(entry.get("source") or "") or None) if unit is not None else None,
+        "invention_source_unknown_reason": entry.get("unknown_reason") if unit is None else None,
+    }
 
 
 def resolve_industry_job_cost_snapshot(
@@ -464,7 +1391,20 @@ def resolve_industry_job_cost_snapshot(
     invention_cost_source: str | None = None,
     blueprint_provenance: dict[str, Any] | None = None,
     owned_input_unit_cost_by_type_id: dict[int, dict[str, Any]] | None = None,
+    invention_inputs: RealizedInventionInputs | None = None,
+    invention_refresh: RealizedInventionRefresh | None = None,
+    invention_source_unknown_reason: str | None = None,
 ) -> dict[str, Any]:
+    """The build cost snapshot of one industry job.
+
+    For a manufacturing job of an invented blueprint the invention cost per
+    run is the corp's actual invention jobs' (`invention_unit_cost_per_run`,
+    build_invention_cost_per_run_by_blueprint_type) when known, else the
+    expected estimate. `invention_refresh` carries the producer's inputs and
+    the reason they are missing, read once per refresh (else they are read
+    here, or `invention_inputs` is used). When neither source gives a cost,
+    `invention_cost_unknown_reason` names both reasons
+    (`invention_source_unknown_reason` is why the actual jobs gave none)."""
     blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
     product_type_id = _safe_int(getattr(job, "product_type_id", None))
     raw = _industry_job_raw_payload(job)
@@ -538,10 +1478,22 @@ def resolve_industry_job_cost_snapshot(
             output_quantity = int(qpr) * int(runs)
 
     resolved_invention_source = invention_cost_source
-    if invention_cost is None and activity_id in {None, 1} and blueprint_type_id and market_price_map:
+    # A persisted snapshot keeps the reason it was stored with; it is not
+    # re-estimated (its unit cost already holds what was known then).
+    invention_cost_unknown_reason: str | None = (
+        str(getattr(job, "invention_cost_unknown_reason", None) or raw.get("invention_cost_unknown_reason") or "")
+        or None
+    )
+    has_persisted_cost = (unit_cost is not None and unit_cost > 0) or (total_cost is not None and total_cost > 0)
+    if (
+        invention_cost is None and not has_persisted_cost and activity_id in {None, 1}
+        and blueprint_type_id and sde_session is not None
+    ):
         if invention_unit_cost_per_run is not None and invention_unit_cost_per_run > 0:
             invention_cost = float(invention_unit_cost_per_run) * float(runs)
             resolved_invention_source = invention_cost_source or "actual_invention_job"
+        elif blueprint_is_copy is False:
+            pass  # built from an original: no invention to cost
         else:
             _invention_owned_cost_map: dict[int, float] | None = None
             if owned_input_unit_cost_by_type_id:
@@ -550,19 +1502,35 @@ def resolve_industry_job_cost_snapshot(
                     for tid, payload in owned_input_unit_cost_by_type_id.items()
                     if (uc := _safe_float((payload or {}).get("unit_cost"))) and uc > 0
                 } or None
-            estimate = _estimate_invention_material_cost(
+            inputs_unknown_reason: str | None = None
+            if invention_inputs is None and invention_refresh is not None:
+                invention_inputs = invention_refresh.inputs
+                inputs_unknown_reason = invention_refresh.inputs_unknown_reason
+            elif invention_inputs is None:
+                invention_inputs, inputs_unknown_reason = current_realized_invention_inputs()
+            estimate, unknown_reason = estimate_invention_cost_per_run(
                 sde_session=sde_session,
                 target_blueprint_type_id=int(blueprint_type_id),
-                market_price_map=market_price_map,
+                market_price_map=market_price_map or {},
                 owned_cost_map=_invention_owned_cost_map,
+                invention_inputs=invention_inputs,
+                inputs_unknown_reason=inputs_unknown_reason or NO_REALIZED_INVENTION_INPUTS_REASON,
+                memo=invention_refresh.source_activity_by_target if invention_refresh is not None else None,
             )
-            probability = _safe_float((estimate or {}).get("probability"))
-            target_runs_per_success = _safe_int((estimate or {}).get("target_runs_per_success")) or 1
-            material_cost = _safe_float((estimate or {}).get("material_cost"))
-            if material_cost is not None and material_cost > 0 and probability is not None and probability > 0:
-                invention_cost_per_run = (float(material_cost) / float(probability)) / float(max(1, target_runs_per_success))
-                invention_cost = float(invention_cost_per_run) * float(runs)
+            if estimate is not None:
+                invention_cost = float(estimate["cost_per_run"]) * float(runs)
                 resolved_invention_source = "expected_invention_material_cost"
+            elif unknown_reason is not None:
+                invention_cost_unknown_reason = f"invention cost unknown: {unknown_reason}"
+                if invention_source_unknown_reason:
+                    invention_cost_unknown_reason += (
+                        f"; the corp's own invention jobs give no cost either: {invention_source_unknown_reason}"
+                    )
+                logging.info(
+                    "Industry job %s (blueprint %s): %s; its build cost is a lower bound and "
+                    "feedback skips the cost update for sales of it",
+                    getattr(job, "job_id", None), blueprint_type_id, invention_cost_unknown_reason,
+                )
 
     if unit_cost is None and total_cost is not None and output_quantity and output_quantity > 0:
         unit_cost = float(total_cost) / float(output_quantity)
@@ -579,6 +1547,7 @@ def resolve_industry_job_cost_snapshot(
             "historical_input_costs": getattr(job, "historical_input_costs", None) or raw.get("historical_input_costs"),
             "copy_cost": copy_cost,
             "invention_cost": invention_cost,
+            "invention_cost_unknown_reason": invention_cost_unknown_reason,
             "total_cost": float(total_cost or (float(unit_cost) * float(output_quantity))),
             "unit_cost": float(unit_cost),
             "source": build_cost_source or "persisted_job_cost_snapshot",
@@ -622,6 +1591,7 @@ def resolve_industry_job_cost_snapshot(
                 "historical_input_costs": estimated.get("historical_input_costs") or None,
                 "copy_cost": copy_cost,
                 "invention_cost": invention_cost,
+                "invention_cost_unknown_reason": invention_cost_unknown_reason,
                 "total_cost": float(total_cost),
                 "unit_cost": float(total_cost) / float(estimated_output_quantity),
                 "source": source,
@@ -643,6 +1613,7 @@ def resolve_industry_job_cost_snapshot(
         "historical_input_costs": getattr(job, "historical_input_costs", None) or raw.get("historical_input_costs"),
         "copy_cost": copy_cost,
         "invention_cost": invention_cost,
+        "invention_cost_unknown_reason": invention_cost_unknown_reason,
         "total_cost": total_cost,
         "unit_cost": unit_cost,
         "source": build_cost_source,
@@ -888,7 +1859,7 @@ def build_fifo_remaining_lots_by_type(
     for tid in (on_hand_quantities_by_type or {}).keys():
         try:
             tid_i = int(tid)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         lots_by_type.setdefault(tid_i, [])
 
@@ -1012,7 +1983,7 @@ def _build_price_map(market_prices: list[dict[str, Any]] | None) -> dict[int, fl
             continue
         try:
             type_id = int(raw_type_id)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         if type_id <= 0:
             continue
@@ -1023,7 +1994,7 @@ def _build_price_map(market_prices: list[dict[str, Any]] | None) -> dict[int, fl
             continue
         try:
             price_f = float(price)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         if price_f <= 0:
             continue
@@ -1036,7 +2007,7 @@ def _safe_float(x: Any) -> Optional[float]:
         if x is None:
             return None
         return float(x)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -1045,7 +2016,7 @@ def _safe_int(x: Any) -> Optional[int]:
         if x is None:
             return None
         return int(x)
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -1128,7 +2099,7 @@ def build_cost_map_for_assets(
             continue
         try:
             tid_int = int(tid)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         tx_by_type.setdefault(tid_int, []).append(r)
 
@@ -1261,33 +2232,63 @@ def _get_or_fetch_market_price_on_date(
     app_session: Any,
     esi_service: Any,
     region_id: int = 10000002,
+    unavailable: Optional[dict[int, str]] = None,
+    transient: Optional[set[int]] = None,
 ) -> Optional[float]:
     """Return the closest daily average price on or before target_date for type_id.
 
     Checks the market_history DB first; fetches from ESI and caches if missing.
+    None when no price is known; then `unavailable` (when given) gets why, and
+    `transient` (when given) gets the type when that reason can clear on a
+    retry: the ESI history fetch failed (market_history_unavailable_reason) or
+    raised an ESI or DB error (with a WARNING). No history day on or before
+    target_date is permanent. An unreadable ESI history row is skipped and
+    counted, never stored as 0. A programming error propagates.
     """
-    row = (
-        app_session.query(MarketHistoryModel)
-        .filter(
-            MarketHistoryModel.type_id == type_id,
-            MarketHistoryModel.region_id == region_id,
-            MarketHistoryModel.date <= target_date,
-        )
-        .order_by(MarketHistoryModel.date.desc())
-        .first()
-    )
-    if row and row.close and float(row.close) > 0:
-        return float(row.close)
+    from sqlalchemy.exc import SQLAlchemyError
 
+    from eve_online_industry_tracker.application.market_analysis.market_history_service import _history_row_values
+    from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
+
+    def _record(reason: str, *, is_transient: bool) -> None:
+        if unavailable is not None:
+            unavailable[int(type_id)] = reason
+        if is_transient and transient is not None:
+            transient.add(int(type_id))
+
+    def _stored_price() -> Optional[float]:
+        row = (
+            app_session.query(MarketHistoryModel)
+            .filter(
+                MarketHistoryModel.type_id == type_id,
+                MarketHistoryModel.region_id == region_id,
+                MarketHistoryModel.date <= target_date,
+            )
+            .order_by(MarketHistoryModel.date.desc())
+            .first()
+        )
+        return float(row.close) if row and row.close and float(row.close) > 0 else None
+
+    price = _stored_price()
+    if price is not None:
+        return price
+
+    fetch_failure: Optional[str] = None
     try:
         history_rows = esi_service.get_market_history([type_id], region_id=region_id)
-        items = (history_rows or {}).get(int(type_id), [])
-        for item in items:
-            if not isinstance(item, dict):
+        if not isinstance(history_rows, dict) or int(type_id) not in history_rows:
+            # ESIService leaves a type whose fetch failed out of the result.
+            reader = getattr(esi_service, "market_history_unavailable_reason", None)
+            fetch_failure = (reader(int(type_id), region_id=region_id) if reader is not None else None) or (
+                f"ESI returned no market history for type_id={type_id}")
+        items = (history_rows or {}).get(int(type_id), []) if isinstance(history_rows, dict) else []
+        skipped = 0
+        for item in items if isinstance(items, list) else []:
+            values = _history_row_values(item)
+            if values is None:
+                skipped += 1
                 continue
-            date_str = str(item.get("date", "")).strip()
-            if not date_str:
-                continue
+            date_str = values.pop("date")
             existing = (
                 app_session.query(MarketHistoryModel)
                 .filter(
@@ -1298,38 +2299,29 @@ def _get_or_fetch_market_price_on_date(
                 .first()
             )
             if existing:
-                existing.close = float(item.get("average", item.get("close", 0)))
-                existing.high = float(item.get("highest", 0))
-                existing.low = float(item.get("lowest", 0))
-                existing.volume = int(item.get("volume", 0))
-                existing.order_count = int(item.get("order_count", 0))
+                for field_name, value in values.items():
+                    setattr(existing, field_name, value)
             else:
-                app_session.add(MarketHistoryModel(
-                    type_id=type_id,
-                    region_id=region_id,
-                    date=date_str,
-                    close=float(item.get("average", item.get("close", 0))),
-                    high=float(item.get("highest", 0)),
-                    low=float(item.get("lowest", 0)),
-                    volume=int(item.get("volume", 0)),
-                    order_count=int(item.get("order_count", 0)),
-                ))
+                app_session.add(MarketHistoryModel(type_id=type_id, region_id=region_id, date=date_str, **values))
+        if skipped:
+            logging.warning(
+                "Market history for type_id=%s: skipped %d unreadable history row(s) "
+                "(None, no date, or a price, volume or order count that is not a number)", type_id, skipped,
+            )
         app_session.flush()
-    except Exception as e:
+    except ESI_REQUEST_ERRORS + (SQLAlchemyError, ValueError) as e:
+        # A malformed history payload is a failed fetch for this type, with its reason.
         logging.warning("Failed to fetch market history for type_id=%s: %s", type_id, e)
+        _record(f"market history fetch failed: {e}", is_transient=True)
         return None
 
-    row = (
-        app_session.query(MarketHistoryModel)
-        .filter(
-            MarketHistoryModel.type_id == type_id,
-            MarketHistoryModel.region_id == region_id,
-            MarketHistoryModel.date <= target_date,
-        )
-        .order_by(MarketHistoryModel.date.desc())
-        .first()
-    )
-    return float(row.close) if row and row.close and float(row.close) > 0 else None
+    price = _stored_price()
+    if price is None:
+        if fetch_failure is not None:
+            _record(fetch_failure, is_transient=True)
+        else:
+            _record(f"no market history price on or before {target_date} for type_id={type_id}", is_transient=False)
+    return price
 
 
 def backfill_historical_market_costs(
@@ -1347,7 +2339,20 @@ def backfill_historical_market_costs(
     job's start_date and stores a per-material breakdown in historical_input_costs.
     This makes cost estimates for jobs that completed while the tool was offline
     far more accurate than using current ESI prices.
+
+    A material whose price failed transiently (its ESI history fetch failed)
+    leaves the whole job as it was, with a WARNING: no partial lower-bound cost
+    is written as final, and the next refresh retries it. A material with no
+    history day on or before start_date (permanent) is in historical_input_costs
+    with unit_cost None and its unknown_reason, never counted as 0 ISK, and
+    materials_cost_lower_bound_reason says the materials cost is a lower bound.
+    A job with no priced material is left as it was. ESI, data and DB errors
+    skip the job with a WARNING; a programming error propagates.
     """
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
+
     jobs_to_fix = (
         app_session.query(job_model)
         .filter_by(**owner_filter)
@@ -1398,6 +2403,8 @@ def backfill_historical_market_costs(
             input_cost_details: dict[str, Any] = {}
             priced_quantity = 0
             total_quantity = 0
+            unpriced: dict[int, str] = {}
+            transient: set[int] = set()
 
             for m in materials:
                 if not isinstance(m, dict):
@@ -1419,8 +2426,19 @@ def backfill_historical_market_costs(
                     app_session=app_session,
                     esi_service=esi_service,
                     region_id=region_id,
+                    unavailable=unpriced,
+                    transient=transient,
                 )
                 if unit_price is None or unit_price <= 0:
+                    # Unknown, never 0 ISK: the material is named with why.
+                    input_cost_details[str(mat_type_id)] = {
+                        "unit_cost": None,
+                        "quantity": int(adjusted_qty),
+                        "source": "historical_market_daily_average",
+                        "reference_date": start_date,
+                        "unknown_reason": unpriced.get(int(mat_type_id))
+                        or f"no market history price on or before {start_date}",
+                    }
                     continue
 
                 line_cost = float(adjusted_qty) * float(unit_price)
@@ -1433,8 +2451,36 @@ def backfill_historical_market_costs(
                     "reference_date": start_date,
                 }
 
-            if not input_cost_details:
+            unknown_details = [d for d in input_cost_details.values() if d.get("unit_cost") is None]
+            unknown_reasons = sorted({str(d.get("unknown_reason")) for d in unknown_details})
+            if transient:
+                # A retry can price it: nothing is written, the job keeps its
+                # estimate and the next refresh's backfill picks it up again.
+                logging.warning(
+                    "backfill_historical_market_costs: job_id=%s not backfilled, %s material(s) have no "
+                    "historical price for now; the job keeps its cost estimate and is retried at the next "
+                    "refresh (%s)",
+                    getattr(job, "job_id", "?"), len(transient),
+                    "; ".join(sorted({unpriced[t] for t in transient if t in unpriced})),
+                )
                 continue
+            if priced_quantity <= 0:
+                if unknown_reasons:
+                    # No material priced: the job keeps its estimate.
+                    logging.warning(
+                        "backfill_historical_market_costs: job_id=%s has no historical material price, "
+                        "its cost estimate is kept (%s)",
+                        getattr(job, "job_id", "?"), "; ".join(unknown_reasons),
+                    )
+                continue
+            lower_bound_reason: Optional[str] = None
+            if unknown_details:
+                lower_bound_reason = (
+                    f"materials cost is a lower bound: {len(unknown_details)} material(s) unpriced "
+                    f"({'; '.join(unknown_reasons)})"
+                )
+                logging.warning("backfill_historical_market_costs: job_id=%s %s",
+                                getattr(job, "job_id", "?"), lower_bound_reason)
 
             coverage = float(priced_quantity) / float(total_quantity) if total_quantity > 0 else 0.0
             job_cost = float(getattr(job, "cost", 0) or 0)
@@ -1447,11 +2493,13 @@ def backfill_historical_market_costs(
             job.historical_material_cost_source = "historical_market_daily_average"
             job.historical_material_coverage_fraction = coverage
             job.historical_input_costs = input_cost_details
+            job.materials_cost_lower_bound_reason = lower_bound_reason
             job.total_build_cost = total_build_cost
             job.unit_build_cost = total_build_cost / float(output_quantity)
             job.build_cost_source = "historical_market_price_on_start_date"
 
-        except Exception as e:
+        except ESI_REQUEST_ERRORS + (SQLAlchemyError, ValueError) as e:
+            # A malformed value skips this job only.
             logging.warning(
                 "backfill_historical_market_costs: skipping job_id=%s: %s",
                 getattr(job, "job_id", "?"),
@@ -1461,6 +2509,6 @@ def backfill_historical_market_costs(
 
     try:
         app_session.commit()
-    except Exception as e:
+    except SQLAlchemyError as e:
         logging.warning("backfill_historical_market_costs: commit failed: %s", e)
         app_session.rollback()

@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
 from eve_online_industry_tracker.infrastructure.models import (
     PlanItemOutcomeModel,
     PlanLearningWeightsModel,
@@ -52,7 +52,10 @@ def _per_unit(total: Any, units: Any) -> float | None:
 #: unit_build_cost wins), also via corp asset history.
 #: industry_build_transferred(_avg): a character job's unit_build_cost, FIFO
 #: matched or quantity-weighted (realized_profit._load_character_source_lots,
-#: scripts/backfill_corp_transfer_costs.py). Market buys, opening inventory
+#: scripts/backfill_corp_transfer_costs.py). A lot naming its job is priced
+#: from the job's current cost and carries the job's reason; a blended lot
+#: (no job) carries a reason while any job of its type has one, so the
+#: cost_unknown_reason check below skips it. Market buys, opening inventory
 #: and untracked units are not build costs and are left out.
 _INDUSTRY_BUILD_SOURCES = frozenset({
     "industry_build", "industry_build_transferred", "industry_build_transferred_avg",
@@ -81,6 +84,10 @@ def _industry_build_unit_cost(allocation_details: Any) -> tuple[float | None, st
         if source not in _INDUSTRY_BUILD_SOURCES:
             continue
         build_lots += 1
+        # A lot whose invention cost was unknown carries only a lower bound:
+        # comparing it would teach cost_multiplier a made-up saving.
+        if entry.get("cost_unknown_reason"):
+            return None, f"an industry-built lot's cost is partly unknown ({entry['cost_unknown_reason']})"
         quantity = _positive_number(entry.get("quantity"))
         cost = _positive_number(entry.get("total_cost"))
         if quantity is None or cost is None:
@@ -124,7 +131,7 @@ class FeedbackProcessor:
         self._admin = admin_settings
         self._session_provider = session_provider
 
-    def _adm(self, key: str, fallback: Any) -> Any:
+    def _adm(self, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
         """A daily_planner setting, or `fallback` when there is no settings store.
 
         AttributeError covers stub/None admin objects; KeyError is what
@@ -138,9 +145,9 @@ class FeedbackProcessor:
 
         Returns the number of action rows processed.
         """
-        alpha: float = float(self._adm("planner_ema_alpha", 0.2))
-        slow_mover_timeout: float = float(self._adm("planner_slow_mover_timeout_days", 60))
-        invention_min_attempts: int = int(self._adm("planner_invention_min_attempts", 10))
+        alpha: float = float(self._adm("planner_ema_alpha"))
+        slow_mover_timeout: float = float(self._adm("planner_slow_mover_timeout_days"))
+        invention_min_attempts: int = int(self._adm("planner_invention_min_attempts"))
 
         done_actions = self._repo.get_unprocessed_done_actions()
         if not done_actions:
@@ -217,11 +224,30 @@ class FeedbackProcessor:
         # The two sides are closer, not identical. Accepted residual biases:
         #
         # Realized = materials + the manufacturing install fee (job.cost)
-        #   + for an invented T2 item, the invention cost: the matched actual
-        #     invention job's materials + install fee when the job snapshot was
-        #     persisted at refresh (corporation.py / character.py pass
-        #     invention_unit_cost_per_run), otherwise the expected invention
-        #     MATERIALS only (asset_provenance, the expected-invention estimate).
+        #   + for an invented T2 item, the invention cost per run:
+        #     - when the corp's own delivered invention jobs for the blueprint
+        #       were seen at refresh: sum(runs x one attempt's datacores (SDE
+        #       quantities at ESI prices) + the decryptor read from the
+        #       job's ESI success chance + install fee) / sum(successful_runs
+        #       x (SDE runs + the decryptor's runs)), so failed attempts are
+        #       paid for
+        #       (asset_provenance.build_invention_cost_per_run_by_blueprint_type);
+        #       a job whose chance fits several decryptors is settled only
+        #       by runs evidence (a later BPC of the blueprint only it can
+        #       have made, used for more runs than all but one candidate
+        #       gives) or ME/TE evidence (a later BPC only it can have
+        #       made, whose ME/TE only one candidate gives), else it is
+        #       left out, never guessed;
+        #     - otherwise the expected invention inputs, sized like the
+        #       producer (asset_provenance.estimate_invention_cost_per_run):
+        #       one attempt's datacores + the producer's decryptor, over the
+        #       runs one invented BPC yields (SDE product quantity + the
+        #       decryptor's runs) x EVE's chance for the corp's best
+        #       qualifying inventor (resolve_invention_chance), after the
+        #       admin floor. An unknown input (no skills, no decryptor choice
+        #       yet, an unpriced datacore) gives no estimate: the job carries
+        #       invention_cost_unknown_reason, its lots' allocations carry
+        #       cost_unknown_reason, and this sale's cost update is skipped.
         #   Copy cost is always 0: nothing writes copy_cost; asset_provenance
         #   only reads it back.
         # Predicted = materials + the producer's total_job_cost, which adds the
@@ -232,19 +258,19 @@ class FeedbackProcessor:
         #   SDE runs per invented BPC), amortized over the batch
         #   (manufacturing_job.invention_material_cost holds the inputs).
         #
-        # 1. T2: the producer used to drop the invention inputs from
-        #    material_cost, which biased T2 towards < 1; that is fixed. What
-        #    still differs:
-        #    - predicted uses the base SDE success chance (no skill or
-        #      decryptor bonus), so it expects more attempts than a skilled
-        #      inventor needs: towards > 1;
-        #    - without a persisted invention-job snapshot the realized side
-        #      carries the expected invention MATERIALS only, no invention
-        #      install fee and no source-copy fee, while predicted carries
-        #      both: towards > 1 (small, fees are a few % of the datacores);
-        #    - with a snapshot the realized side carries the attempts actually
-        #      made, so one lucky or unlucky streak moves a single outcome
-        #      either way.
+        # 1. T2: for the same skills, decryptor and prices the expected
+        #    invention inputs per run now agree on both sides (pinned in
+        #    tests/test_realized_invention_estimate.py). What still differs:
+        #    - prices: realized uses ESI average prices (or the owned cost),
+        #      predicted the hub price with take-or-buy against stock;
+        #    - the decryptor and the inventor are the producer's current
+        #      choice, not the ones of the past invention;
+        #    - with parallel invention lanes predicted mixes less skilled
+        #      pilots' attempts in; realized uses the best inventor only:
+        #      towards > 1 when lanes are known;
+        #    - the expected estimate has no invention install fee and no
+        #      source-copy fee, while predicted carries both: towards > 1
+        #      (small, fees are a few % of the datacores);
         # 2. BPC-copied T1 and SDE-fallback rows, towards > 1: predicted
         #    includes copy/research job fees that the realized side never has.
         #    Probably small (job fees are a few % of materials).

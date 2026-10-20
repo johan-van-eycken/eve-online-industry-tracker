@@ -80,13 +80,13 @@ def render() -> None:
         success_rate = success.get("success_rate")
         try:
             success_rate_pct = float(success_rate) * 100.0 if success_rate is not None else None
-        except Exception:
+        except (ValueError, TypeError):
             success_rate_pct = None
 
         p95_raw = latency.get("p95_ms")
         try:
             p95_ms = float(p95_raw) if p95_raw is not None else None
-        except Exception:
+        except (ValueError, TypeError):
             p95_ms = None
 
         st.markdown("#### Overview")
@@ -205,7 +205,7 @@ def render() -> None:
         ccols[2].metric("200 with cache", str(cache_200 if cache_200 is not None else "-"))
         try:
             ccols[3].metric("Hit ratio (304)", f"{float(cache_hit_ratio) * 100.0:.1f}%" if cache_hit_ratio is not None else "-")
-        except Exception:
+        except (ValueError, TypeError):
             ccols[3].metric("Hit ratio (304)", "-")
 
     def _render_details(snap: dict) -> None:

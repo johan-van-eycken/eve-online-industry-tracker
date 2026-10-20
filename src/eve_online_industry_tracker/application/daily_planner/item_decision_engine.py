@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner.models import (
     ItemDecision,
@@ -88,10 +88,10 @@ class ItemDecisionEngine:
                 overview_row=overview_row,
             )
 
-        min_isk_per_hour = float(_adm(admin_settings, "planner_min_isk_per_hour", 5_000_000))
-        min_profit_per_batch = float(_adm(admin_settings, "planner_min_profit_per_batch", 20_000_000))
-        competition_gate = float(_adm(admin_settings, "planner_competition_index_gate", 4.0))
-        momentum_pause_threshold = float(_adm(admin_settings, "planner_momentum_pause_threshold", -6.0))
+        min_isk_per_hour = float(_adm(admin_settings, "planner_min_isk_per_hour"))
+        min_profit_per_batch = float(_adm(admin_settings, "planner_min_profit_per_batch"))
+        competition_gate = float(_adm(admin_settings, "planner_competition_index_gate"))
+        momentum_pause_threshold = float(_adm(admin_settings, "planner_momentum_pause_threshold"))
 
         price_trend_7d = pipeline.price_trend_7d_pct
         momentum_signal = pipeline.momentum_signal
@@ -210,8 +210,8 @@ class ItemDecisionEngine:
         )
 
 
-def _adm(admin_settings: Any, key: str, fallback: Any) -> Any:
-    """A daily_planner setting, or `fallback` when there is no settings store.
+def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
+    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
 
     AttributeError covers stub/None admin objects; KeyError is what
     AdminSettingsManager.get raises for an unknown key (every key read here is

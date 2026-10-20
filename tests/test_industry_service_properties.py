@@ -390,23 +390,45 @@ class TestResolveEivPricing:
         assert price == 5.0
         assert source == "esi_adjusted_price"
 
-    def test_average_price_fallback(self):
+    def test_no_average_price_fallback(self):
+        """H1: the EIV is the adjusted price only; an average price is no
+        stand-in (the fee would be priced on another basis), so it is unknown
+        with a reason."""
+        reasons: list[str] = []
         price, source = IndustryService._resolve_eiv_pricing(
             type_id=34,
             type_payload={"base_price": 1.0},
             adjusted_price_map={34: {"adjusted_price": None, "average_price": 3.0}},
+            unknown_reasons=reasons,
         )
-        assert price == 3.0
-        assert source == "esi_average_price"
+        assert (price, source) == (None, None)
+        assert reasons == ["type_id=34 has no ESI adjusted price: its estimated item value is unknown"]
 
-    def test_base_price_fallback(self):
+    def test_no_base_price_fallback(self):
         price, source = IndustryService._resolve_eiv_pricing(
             type_id=34,
             type_payload={"base_price": 1.0},
             adjusted_price_map={},
         )
-        assert price == 1.0
-        assert source == "sde_base_price"
+        assert (price, source) == (None, None)
+
+    def test_a_non_numeric_adjusted_price_is_unknown_with_a_reason(self):
+        reasons: list[str] = []
+        price, _ = IndustryService._resolve_eiv_pricing(
+            type_id=34, type_payload={}, adjusted_price_map={34: {"adjusted_price": "n/a"}},
+            unknown_reasons=reasons,
+        )
+        assert price is None and "'n/a'" in reasons[0]
+
+    def test_the_eiv_sum_names_an_unpriced_line(self):
+        reasons: list[str] = []
+        total, priced = IndustryService._sum_estimated_item_value(
+            [{"type_id": 34, "quantity": 2}, {"type_id": 35, "quantity": 1, "base_price": 9.0}],
+            quantity_key="quantity", adjusted_price_map={34: {"adjusted_price": 5.0}},
+            unknown_reasons=reasons,
+        )
+        assert (total, priced) == (None, 1)
+        assert any("type_id=35" in r for r in reasons)
 
     def test_no_price_returns_none(self):
         price, source = IndustryService._resolve_eiv_pricing(
@@ -576,20 +598,21 @@ class TestSystemCostIndex:
         )
         assert math.isclose(result, 0.042, abs_tol=1e-9)
 
-    def test_missing_activity_returns_zero(self):
+    def test_missing_activity_is_unknown(self):
         profile = {
             "system_cost_indices": [
                 {"activity": "copying", "cost_index": 0.01},
             ],
         }
+        # F1 item 4: unknown (the fee is unknown, with the reason), never 0%
         assert IndustryService._system_cost_index(
             profile_payload=profile, activity="manufacturing",
-        ) == 0.0
+        ) is None
 
-    def test_none_profile_returns_zero(self):
+    def test_none_profile_is_unknown(self):
         assert IndustryService._system_cost_index(
             profile_payload=None, activity="manufacturing",
-        ) == 0.0
+        ) is None
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import streamlit as st
@@ -24,13 +25,31 @@ from streamlit_ui.api.client import api_post
 from flask_app.settings import api_base as _get_api_base
 
 
+class _LocationLookupFailed(RuntimeError):
+    """Raised inside the cached fetch so st.cache_data does not keep the error."""
+
+
 @st.cache_data(ttl=300)
+def _fetch_location_info_cached(location_ids: list[int]) -> dict[str, Any]:
+    response = api_post("/locations", payload={"location_ids": list(map(int, location_ids))})
+    if not isinstance(response, dict):
+        # api_post logged the HTTP failure; give the page a reason to show.
+        raise _LocationLookupFailed("the /locations request failed (see the logs)")
+    if response.get("status") == "error":
+        raise _LocationLookupFailed(str(response.get("message") or "the /locations request failed"))
+    return response
+
+
 def fetch_location_info(location_ids: list[int]) -> dict[str, Any]:
+    """The /locations response; a failure is an error dict with the reason,
+    which is not cached (the next run asks again)."""
     try:
-        response = api_post("/locations", payload={"location_ids": list(map(int, location_ids))})
-        return response if isinstance(response, dict) else {}
-    except Exception as e:
-        return {"status": "error", "message": str(e), "data": {}}
+        return _fetch_location_info_cached(location_ids)
+    except _LocationLookupFailed as exc:
+        return {"status": "error", "message": str(exc), "data": {}}
+
+
+fetch_location_info.clear = _fetch_location_info_cached.clear  # type: ignore[attr-defined]
 
 
 def apply_location_names(
@@ -44,6 +63,10 @@ def apply_location_names(
 
     location_ids = list(df[top_location_column].dropna().unique())
     location_info_map = fetch_location_info([int(location_id) for location_id in location_ids])
+    if (location_info_map or {}).get("status") == "error":
+        reason = location_info_map.get("message") or "unknown error"
+        logging.warning("Location names could not be loaded: %s", reason)
+        st.warning(f"Location names could not be loaded ({reason}); showing location IDs instead.")
     return apply_location_names_from_data(
         df,
         (location_info_map or {}).get("data", {}),

@@ -20,7 +20,7 @@ def _safe_int(value: Any) -> int | None:
         if value is None or value == "":
             return None
         return int(value)
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -29,7 +29,7 @@ def _safe_float(value: Any) -> float | None:
         if value is None or value == "":
             return None
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 

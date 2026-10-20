@@ -9,16 +9,17 @@ from typing import Any
 
 import streamlit as st
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+from streamlit_ui.api.admin_settings import planner_page_defaults
 from streamlit_ui.api.daily_planner import compute_plan, get_market_intel_status, get_plan, get_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 
 logger = logging.getLogger(__name__)
 
-# Default from spec: plan expires after 36 hours
-PLANNER_MAX_PLAN_AGE_HOURS: float = 36.0
-
-# Market intel refresh interval: green if fresher than this
-PLANNER_MARKET_REFRESH_INTERVAL_HOURS: float = 3.0
+# The plan's expiry, the market data age shown as fresh and the freshness
+# warning level are admin settings (daily_planner/planner_max_plan_age_hours,
+# planner_market_refresh_interval_hours, planner_freshness_warning_level), read
+# once per render by pages/daily_planner.py and passed in (render_status_bar).
 
 #: Action types Tab 1 (tab_actions) renders, in workflow order. Defined here,
 #: not in tab_actions, because tab_actions imports this module.
@@ -258,7 +259,7 @@ def _parse_dt(s: Any) -> datetime | None:
         if "." in ts:
             return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
         return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-    except Exception:
+    except ValueError:
         try:
             parsed = datetime.fromisoformat(str(s))
         except ValueError:
@@ -299,7 +300,8 @@ def _fmt_age(hours: float) -> str:
     return f"{hours / 24:.1f}d ago"
 
 
-def freshness_summary(plan_data: dict[str, Any] | None) -> tuple[str, float | None]:
+def freshness_summary(plan_data: dict[str, Any] | None,
+                      warning_level: float | None = None) -> tuple[str, float | None]:
     """(label, score) for the Freshness metric; score is None when unknown.
 
     Reads the LIVE top-level `freshness_score` that get_active_plan recomputes
@@ -326,8 +328,11 @@ def freshness_summary(plan_data: dict[str, Any] | None) -> tuple[str, float | No
     if comparable == 0:
         return f"unknown · {counts} comparable" if counts else "unknown", None
 
+    if warning_level is None:   # daily_planner/planner_freshness_warning_level's schema default
+        warning_level = float(ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]
+                              ["planner_freshness_warning_level"]["default"])
     pct = int(score * 100)
-    if score >= 0.90:
+    if score >= warning_level:
         label = f"{pct}% (fresh)"
     elif score >= 0.75:
         label = f"{pct}% (mild drift)"
@@ -407,12 +412,29 @@ def _render_plan_diff(
         st.success("Plan updated — no decision changes vs prior plan.")
 
 
+def market_intel_warning(market_status: dict) -> str | None:
+    """The warning for the market intelligence job's last_error
+    (/planner/market_intel/status), or for a job the backend never started
+    (not_started), or None when its last cycle was clean."""
+    last_error = (market_status or {}).get("last_error")
+    if not last_error:
+        if (market_status or {}).get("not_started"):
+            return ("Market data job not started: the market depth and margin data are not refreshed "
+                    "(see the backend logs).")
+        return None
+    return (f"Market data refresh failed: {last_error}. The market depth and margin data may be stale "
+            "until the next successful cycle.")
+
+
 # ---------------------------------------------------------------------------
 # Main render function
 # ---------------------------------------------------------------------------
 
-def render_status_bar(page_state: DailyPlannerPageState) -> None:
-    """Render the always-visible status bar at the top of the Daily Planner page."""
+def render_status_bar(page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None,
+                      settings_problems: list[str] | tuple[str, ...] = ()) -> None:
+    """Render the always-visible status bar at the top of the Daily Planner page.
+    planner_settings/settings_problems: the page's one admin settings read
+    (None: the schema defaults)."""
 
     # ------------------------------------------------------------------
     # 1. Poll compute status
@@ -514,8 +536,14 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
     if page_state.plan:
         plan_meta = page_state.plan.get("plan") or {}
 
+    if planner_settings is None:
+        planner_settings = planner_page_defaults()
+    for problem in settings_problems:
+        st.warning(problem)
+
     # Live freshness (top level of the GET payload), None when unknown.
-    freshness_display, freshness_score = freshness_summary(page_state.plan)
+    freshness_display, freshness_score = freshness_summary(
+        page_state.plan, warning_level=planner_settings["planner_freshness_warning_level"])
     corp_wallet = wallet_snapshot(plan_meta)
     created_at = plan_meta.get("created_at")
 
@@ -526,7 +554,7 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
         if created_dt:
             now_utc = datetime.now(tz=timezone.utc)
             plan_age_hours = (now_utc - created_dt).total_seconds() / 3600
-            plan_expired = plan_age_hours > PLANNER_MAX_PLAN_AGE_HOURS
+            plan_expired = plan_age_hours > planner_settings["planner_max_plan_age_hours"]
 
     # Expired banner
     if plan_expired and plan_age_hours is not None:
@@ -536,6 +564,17 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
             "Recompute to generate today's actions.\n\n"
             "Jobs that completed while you were away have been tracked automatically. "
             "Recomputing will plan from your current slot availability, stock, and market state."
+        )
+
+    # The market intelligence job's status: the Market Data metric and its last_error warning
+    # (shown with or without a plan).
+    try:
+        market_status = get_market_intel_status() or {}
+    except Exception as exc:
+        market_status = {}
+        st.warning(
+            f"Market data status could not be read ({exc}): whether the market depth and margin data "
+            "are current is unknown."
         )
 
     # Metrics row
@@ -556,10 +595,6 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
             if caption:
                 st.caption(caption)
         with c5:
-            try:
-                market_status = get_market_intel_status() or {}
-            except Exception:
-                market_status = {}
             last_completed = market_status.get("last_completed_at")
             market_dt = _parse_dt(last_completed)
             if market_dt is None:
@@ -568,7 +603,7 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
                 now_utc = datetime.now(tz=timezone.utc)
                 market_age_hours = (now_utc - market_dt).total_seconds() / 3600
                 age_text = _fmt_age(market_age_hours)
-                if market_age_hours < PLANNER_MARKET_REFRESH_INTERVAL_HOURS:
+                if market_age_hours < planner_settings["planner_market_refresh_interval_hours"]:
                     market_label = f"{age_text} ✓"
                 elif market_age_hours < 6.0:
                     market_label = f"{age_text} ⚠"
@@ -576,14 +611,20 @@ def render_status_bar(page_state: DailyPlannerPageState) -> None:
                     market_label = f"{age_text} 🔴"
             st.metric("Market Data", market_label)
 
+    market_warning = market_intel_warning(market_status)
+    if market_warning:
+        st.warning(market_warning)
+
     unavailable_caption = unavailable_inputs_caption(page_state.plan)
     if unavailable_caption:
-        st.caption(unavailable_caption)
+        # The plan was scored without these inputs: a warning, not a footnote.
+        st.warning(unavailable_caption)
 
     # Freshness warning
     if page_state.plan and freshness_score is not None and freshness_score < 0.75:
         st.warning("Market prices have drifted significantly — consider recomputing.")
-    elif page_state.plan and freshness_score is not None and freshness_score < 0.90:
+    elif (page_state.plan and freshness_score is not None
+          and freshness_score < planner_settings["planner_freshness_warning_level"]):
         st.caption("Some prices have drifted slightly — recomputing is recommended.")
 
     # ------------------------------------------------------------------

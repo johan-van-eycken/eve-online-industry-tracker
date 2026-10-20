@@ -36,13 +36,15 @@ from eve_online_industry_tracker.infrastructure.static_data.yield_calc import co
 ALL_FIVE = {3385: 5, 3389: 5, fakes.SKILL_SIMPLE_ORE_PROCESSING: 5}
 RX_804 = 0.04
 VELDSPAR = {"id": 1230, "name": "Veldspar", "portionSize": 100, "volume": 0.1, "compressed": False,
-            "reprocessingSkillTypeID": fakes.SKILL_SIMPLE_ORE_PROCESSING, "reprocessingSkill": "Simple Ore Processing",
+            "groupID": 462, "categoryID": 25, "reprocessingSkillTypeID": fakes.SKILL_SIMPLE_ORE_PROCESSING, "reprocessingSkill": "Simple Ore Processing",
             "materials": [{"name": "Tritanium", "quantity": 400}]}
 
 
 def _facility(facility_type, rig="none", band="high", tax=0.0, station=fakes.FAKE_NPC_STATION_ID):
+    """On an Athanor `rig` is the asteroid ore rig (Veldspar's class), on a Tatara the monitor."""
     return facility_repo.facility_from_choice(
-        facility_type=facility_type, rig=rig, security_band=band, tax=tax,
+        facility_type=facility_type, rig="none" if facility_type == "athanor" else rig, security_band=band, tax=tax,
+        athanor_rigs={"asteroid": rig, "moon": "none", "ice": "none"} if facility_type == "athanor" else None,
         npc_station_id=station if facility_type == "npc_station" else None,
         npc_station=fakes.fake_npc_station, data=fakes.fake_ore_data())
 
@@ -60,10 +62,12 @@ def _percent(facility):
     (0.53, 1.00, 0.0, 0.7669948),      # the same with a T2 rig, highsec
 ])
 def test_the_reference_numbers_without_a_structure_bonus(base, sec, sm, expected):
-    facility = reprocessing.ReprocessingFacility(name="x", base_yield=base, security_multiplier=sec,
-                                                 structure_bonus=sm, tax=0.0, tax_source="setting")
+    facility = reprocessing.ReprocessingFacility(
+        name="x", yields={"asteroid": reprocessing.ClassYield(base_yield=base, security_multiplier=sec)},
+        structure_bonus=sm, tax=0.0, tax_source="setting")
     bonuses = {3385: 0.03, 3389: 0.02, 60377: 0.02}
-    assert reprocessing.reprocessing_yield(facility, skill_bonuses=bonuses, skill_levels=ALL_FIVE | {60377: 5},
+    assert reprocessing.reprocessing_yield(facility, ore_class="asteroid", skill_bonuses=bonuses,
+                                           skill_levels=ALL_FIVE | {60377: 5},
                                            implant_bonus=RX_804) == pytest.approx(expected, abs=1e-9)
 
 
@@ -142,18 +146,21 @@ def test_an_ore_without_portion_size_or_volume_is_left_out_with_a_warning(caplog
 
 def test_the_facility_values_come_from_the_sde_attributes():
     athanor_t2_null = _facility("athanor", "t2", "null", tax=0.02)
-    assert (athanor_t2_null.base_yield, athanor_t2_null.security_multiplier, athanor_t2_null.structure_bonus,
+    asteroid = athanor_t2_null.yields["asteroid"]
+    assert (asteroid.base_yield, asteroid.security_multiplier, athanor_t2_null.structure_bonus,
             athanor_t2_null.tax) == (0.53, 1.12, pytest.approx(0.02), 0.02)
     tatara = _facility("tatara")
-    assert (tatara.base_yield, tatara.security_multiplier, tatara.structure_bonus) == (0.5, 1.0, pytest.approx(0.055))
+    assert (tatara.yields["asteroid"].base_yield, tatara.yields["asteroid"].security_multiplier,
+            tatara.structure_bonus) == (0.5, 1.0, pytest.approx(0.055))
     npc = _facility("npc_station", band="null")
-    assert (npc.base_yield, npc.security_multiplier, npc.structure_bonus) == (0.5, 1.0, 0.0)
+    assert (npc.yields["asteroid"].base_yield, npc.yields["asteroid"].security_multiplier,
+            npc.structure_bonus) == (0.5, 1.0, 0.0)
     assert not hasattr(reprocessing, "NPC_STATION_BASE_YIELD")
 
 
 def test_an_npc_stations_base_yield_is_its_sde_reprocessing_efficiency():
     poor = _facility("npc_station", station=fakes.FAKE_POOR_NPC_STATION_ID)
-    assert poor.base_yield == 0.3
+    assert poor.yields["asteroid"].base_yield == 0.3
     assert round(_percent(poor)["batch_yield_percent"], 2) == 43.41
     assert str(fakes.FAKE_POOR_NPC_STATION_ID) in poor.name
 
@@ -191,7 +198,7 @@ def test_a_missing_facility_attribute_raises_with_the_hint():
 
 @pytest.mark.parametrize("facility_type, rig, band, match", [
     ("citadel", "none", "high", "facility_type"),
-    ("athanor", "t3", "high", "rig"),
+    ("tatara", "t3", "high", "rig"),
     ("athanor", "t1", "wormhole", "security_band"),
     ("npc_station", "t1", "high", "NPC station"),
     (None, "none", "high", "facility_type"),
@@ -258,7 +265,7 @@ def test_the_configured_facility_reads_the_settings(tmp_path, sde_engine):
             facility_repo.configured_facility(mgr, session, fakes.fake_ore_data())   # the default: no station yet
         mgr.set("reprocessing", "npc_station_id", str(fakes.FAKE_NPC_STATION_ID))
         npc = facility_repo.configured_facility(mgr, session, fakes.fake_ore_data())
-        assert (npc.base_yield, npc.tax, npc.tax_source) == (0.5, 0.05, "sde_station_base")
+        assert (npc.yields["asteroid"].base_yield, npc.tax, npc.tax_source) == (0.5, 0.05, "sde_station_base")
         mgr.set_bulk({"reprocessing": {"facility_type": "tatara", "rig": "t2", "security_band": "null", "tax": 0.04}})
         tatara = facility_repo.configured_facility(mgr, session, fakes.fake_ore_data())
     assert round(_percent(tatara)["batch_yield_percent"], 2) == 90.63 and tatara.tax == 0.04
@@ -326,11 +333,14 @@ def test_the_admin_page_shows_a_stored_invalid_select_value_instead_of_preselect
 
 
 def test_the_admin_page_shows_an_unset_optional_number_as_empty():
-    from streamlit_ui.pages.admin_settings import _number_input_args
+    from streamlit_ui.pages.admin_settings import _number_choice
 
     spec = ADMIN_SETTINGS_SCHEMA["reprocessing"]["settings"]["tax"]
-    assert _number_input_args(spec, None)["value"] is None
-    assert _number_input_args(spec, 0.02)["value"] == 0.02
+    assert _number_choice(spec, None, None) == ({"value": None, "min_value": 0.0, "max_value": 0.5,
+                                                 "step": 0.0005, "format": "%.4f"}, None)
+    assert _number_choice(spec, 0.02, None)[0]["value"] == 0.02
+    args, problem = _number_choice(spec, 0.7, None)   # a stored tax outside its bounds: shown, not clamped
+    assert args["value"] is None and "0.7" in problem
 
 
 # --- the character's skills ----------------------------------------------------------------
@@ -374,11 +384,17 @@ def test_the_character_method_uses_the_id_keyed_levels(monkeypatch):
 # --- the optimizer -------------------------------------------------------------------------
 
 class _FakeEsi:
-    def __init__(self, prices):
+    """prices: the sell-order prices; adjusted: ESI /markets/prices adjusted_price."""
+
+    def __init__(self, prices, adjusted=None):
         self._prices = prices
+        self._adjusted = adjusted if adjusted is not None else {}
 
     def get_material_prices(self, ids):
         return {i: [{"price": p}] for i, p in self._prices.items() if i in ids}
+
+    def get_market_prices(self):
+        return [{"type_id": i, "adjusted_price": p, "average_price": 99.0} for i, p in self._adjusted.items()]
 
     def get_ore_prices(self, ids):
         return {i: [{"price": 10.0, "volume_remain": 10_000_000}] for i in ids}
@@ -387,7 +403,7 @@ class _FakeEsi:
         return {"region_id": 10000002}
 
 
-def _run(monkeypatch, tmp_path, prices, *, facility_id=None, solution_batches=10.0):
+def _run(monkeypatch, tmp_path, prices, *, adjusted=None, facility_id=None, solution_batches=10.0):
     from eve_online_industry_tracker.infrastructure.static_data import optimizer_service
 
     monkeypatch.setattr(optimizer_service, "build_all_ores", lambda session, language: [VELDSPAR])
@@ -404,24 +420,46 @@ def _run(monkeypatch, tmp_path, prices, *, facility_id=None, solution_batches=10
     character = SimpleNamespace(reprocessing_skills=ALL_FIVE)
     payload = {"demands": {"Tritanium": 2000}, "facility_id": facility_id or facility_repo.CONFIGURED_FACILITY_ID,
                "implant_pct": 4}
-    return optimizer_service.run_optimize(payload, character=character, esi_service=_FakeEsi(prices),
+    return optimizer_service.run_optimize(payload, character=character, esi_service=_FakeEsi(prices, adjusted),
                                           sde_session=None, language="en", admin_settings=mgr)
 
 
-def test_the_fee_taxes_the_value_of_the_minerals_produced(monkeypatch, tmp_path):
-    result = _run(monkeypatch, tmp_path, {34: 4.0})
-    # An unrigged Athanor (73.81%): 10 batches x 295 Tritanium x 4 ISK x 5% tax, not 5% of the 1000 ISK
-    # paid for the ore.
+def test_the_fee_taxes_the_minerals_produced_at_their_adjusted_price(monkeypatch, tmp_path):
+    result = _run(monkeypatch, tmp_path, {34: 4.0}, adjusted={34: 3.0})
+    # An unrigged Athanor (73.81%): 10 batches x 295 Tritanium x 3 ISK (the adjusted price, not the 4 ISK
+    # sell price) x 5% tax, not 5% of the 1000 ISK paid for the ore.
     assert result["demand_coverage"]["Tritanium"]["yielded"] == 2950
-    assert result["reprocessing_fee"] == pytest.approx(2950 * 4.0 * 0.05)
-    assert result["total_cost_with_reprocessing"] == pytest.approx(1000.0 + 2950 * 4.0 * 0.05)
+    assert result["reprocessing_fee"] == pytest.approx(2950 * 3.0 * 0.05)
+    assert result["total_cost_with_reprocessing"] == pytest.approx(1000.0 + 2950 * 3.0 * 0.05)
+    assert result["reprocessing_fee_unknown_reason"] is None
     assert result["ore_yields"][0]["batch_yields"] == {"Tritanium": 295}
+    # The mineral value the optimizer reports stays at the sell price.
+    assert result["raw_comparator"][0]["Unit Price (ISK)"] == 4.0
+    assert result["reprocessing_fee_basis"]["Tritanium"] == {"adjusted_price": 3.0, "quantity": 2950}
 
 
-def test_the_fee_without_a_mineral_price_is_unknown_with_a_reason(monkeypatch, tmp_path):
-    result = _run(monkeypatch, tmp_path, {})
+def test_the_fee_without_an_adjusted_price_is_unknown_with_a_reason(monkeypatch, tmp_path):
+    result = _run(monkeypatch, tmp_path, {34: 4.0}, adjusted={})   # a sell price, but no adjusted price
     assert result["reprocessing_fee"] is None and result["total_cost_with_reprocessing"] is None
-    assert "Tritanium" in result["reprocessing_fee_unknown_reason"]
+    reason = result["reprocessing_fee_unknown_reason"]
+    assert "Tritanium" in reason and "adjusted price" in reason
+
+
+def test_the_fee_when_esi_prices_fail_is_unknown_with_the_reason(monkeypatch, tmp_path, caplog):
+    def failing():
+        raise RuntimeError("ESI request failed: 503")
+
+    monkeypatch.setattr(_FakeEsi, "get_market_prices", lambda self: failing())
+    with caplog.at_level(logging.WARNING):
+        result = _run(monkeypatch, tmp_path, {34: 4.0}, adjusted={34: 3.0})
+    assert result["reprocessing_fee"] is None and result["total_cost_with_reprocessing"] is None
+    assert "503" in result["reprocessing_fee_unknown_reason"]
+    assert any("503" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+def test_the_fee_does_not_need_a_sell_price(monkeypatch, tmp_path):
+    result = _run(monkeypatch, tmp_path, {}, adjusted={34: 3.0})
+    assert result["reprocessing_fee"] == pytest.approx(2950 * 3.0 * 0.05)
 
 
 def test_an_unknown_facility_id_is_refused(monkeypatch, tmp_path):
@@ -459,7 +497,9 @@ def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers
     assert data.facility_attributes[ore.TATARA_TYPE_ID][ore.STR_REFINING_YIELD_BONUS_ATTRIBUTE_ID] == 5.5
     service = data.facility_attributes[ore.STANDUP_REPROCESSING_FACILITY_TYPE_ID]
     assert service[ore.REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID] == 0.5
-    for (_, tier), rig in ore.RIG_TYPE_IDS.items():
+    tiers = {**{rig: tier for (_, tier), rig in ore.ATHANOR_RIG_TYPE_IDS.items()},
+             **{rig: tier for tier, rig in ore.TATARA_RIG_TYPE_IDS.items()}}
+    for rig, tier in tiers.items():
         attrs = data.facility_attributes[rig]
         assert attrs[ore.REFINING_YIELD_MULTIPLIER_ATTRIBUTE_ID] == {"t1": 0.51, "t2": 0.53}[tier]
         assert [attrs[a] for a in (ore.HISEC_MODIFIER_ATTRIBUTE_ID, ore.LOWSEC_MODIFIER_ATTRIBUTE_ID,
@@ -479,9 +519,10 @@ def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers
 
     for facility_type, rig, band, percent in [("npc_station", "none", "high", 72.36), ("athanor", "t1", "high", 75.28),
                                               ("tatara", "t2", "null", 90.63)]:
-        facility = facility_repo.facility_from_choice(facility_type=facility_type, rig=rig, security_band=band,
-                                                      tax=0.0, npc_station_id=60003760, npc_station=station,
-                                                      data=data)
+        facility = facility_repo.facility_from_choice(
+            facility_type=facility_type, rig="none" if facility_type == "athanor" else rig, security_band=band,
+            athanor_rigs={"asteroid": rig, "moon": "none", "ice": "none"}, tax=0.0, npc_station_id=60003760,
+            npc_station=station, data=data)
         (row,) = compute_yields([VELDSPAR], {3385: 5, 3389: 5, 60377: 5}, facility, RX_804, data)
         assert round(row["batch_yield_percent"], 2) == percent
 
@@ -533,7 +574,7 @@ def test_a_stored_tax_outside_its_bounds_is_kept_and_fails_loudly_at_use(tmp_pat
     path.write_text(json.dumps({"reprocessing": {"facility_type": "athanor", "tax": 0.7}}), encoding="utf-8")
     with caplog.at_level(logging.ERROR):
         mgr = AdminSettingsManager(path)
-    assert mgr.get("reprocessing", "tax") == 0.7
+    assert mgr.get_all()["reprocessing"]["tax"] == 0.7   # kept as stored, shown on the settings page
     assert any("reprocessing/tax" in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
     with pytest.raises(facility_repo.ReprocessingSettingsInvalid, match="reprocessing/tax=0.7"):
         facility_repo.configured_facility(mgr, None, fakes.fake_ore_data())
@@ -545,7 +586,8 @@ def test_the_facility_tax_bound_is_the_settings_bound():
     assert _facility("athanor", tax=0.5).tax == 0.5
 
 
-def test_other_float_settings_still_clamp(tmp_path):
+def test_other_float_settings_are_refused_too_not_clamped(tmp_path):
     mgr = AdminSettingsManager(tmp_path / "admin_settings.json")
-    mgr.set("market_defaults", "default_sales_tax", 0.9)
-    assert mgr.get("market_defaults", "default_sales_tax") == 0.20
+    with pytest.raises(ValueError, match="market_defaults/default_broker_fee"):
+        mgr.set("market_defaults", "default_broker_fee", 0.9)
+    assert mgr.get("market_defaults", "default_broker_fee") == 0.03

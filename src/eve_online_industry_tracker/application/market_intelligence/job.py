@@ -5,6 +5,8 @@ import threading
 from datetime import datetime
 from typing import Any
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
+
 
 class MarketIntelligenceJob:
     """Background job that collects market depth data every N hours.
@@ -24,20 +26,29 @@ class MarketIntelligenceJob:
         self._last_error: str | None = None
 
     def start(self) -> None:
-        """Start the background daemon thread. Idempotent."""
+        """Start the background daemon thread. Idempotent.
+
+        _running is set only once the thread is registered (and started), all
+        under the lock: a registration that raises (e.g. a state without
+        background_threads_lock) propagates and leaves the job not running,
+        so a later start() can try again."""
         with self._lock:
             if self._running:
                 return
+            t = threading.Thread(target=self._loop, daemon=True, name=self.thread_name)
+            # Register with the app state's background threads for graceful shutdown tracking.
+            try:
+                from flask_app.background_jobs import register_thread
+            except ImportError:
+                register_thread = None  # no Flask package (scripts): nothing to register with
+            if register_thread is not None:
+                register_thread(self._state, self.thread_name, t)   # raises: not running, nothing started
             self._running = True
-
-        t = threading.Thread(target=self._loop, daemon=True, name=self.thread_name)
-        # Register with app state background threads for graceful shutdown tracking
-        try:
-            from flask_app.background_jobs import register_thread
-            register_thread(self._state, self.thread_name, t)
-        except Exception:
-            pass
-        t.start()
+            try:
+                t.start()
+            except RuntimeError:
+                self._running = False   # e.g. "can't start new thread"
+                raise
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -54,15 +65,8 @@ class MarketIntelligenceJob:
         try:
             while not self._stop_event.is_set():
                 self._run_cycle_safe()
-                # Sleep for configured interval (default 3h), waking every 60s to check stop
-                interval_hours = 3.0
-                try:
-                    admin = getattr(self._state, "admin_settings", None)
-                    if admin:
-                        interval_hours = float(admin.get("daily_planner", "planner_market_refresh_interval_hours"))
-                except Exception:
-                    pass
-                deadline = interval_hours * 3600
+                # Sleep for the configured interval, waking every 60s to check stop
+                deadline = self._refresh_interval_hours() * 3600
                 elapsed = 0.0
                 while elapsed < deadline and not self._stop_event.is_set():
                     self._stop_event.wait(timeout=min(60.0, deadline - elapsed))
@@ -71,25 +75,55 @@ class MarketIntelligenceJob:
             with self._lock:
                 self._running = False
 
-    def _run_cycle_safe(self) -> None:
-        try:
-            self._run_cycle()
-            with self._lock:
-                self._last_completed_at = datetime.utcnow()
-                self._last_error = None
-        except Exception as e:
-            logging.exception("MarketIntelligenceJob cycle failed: %s", e)
-            with self._lock:
-                self._last_error = str(e)
-
-    def _run_cycle(self) -> None:
-        from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import MarketDepthCollector
-        from eve_online_industry_tracker.application.market_intelligence.margin_correlator import MarginCorrelator
-
+    def _refresh_interval_hours(self) -> float:
+        """daily_planner/planner_market_refresh_interval_hours. The setting is
+        startup-critical: a stored invalid value reads as the schema default
+        (the user's choice), with the ERROR at load, a WARNING at first use,
+        /health and the Admin Settings page. Any other failure to read it is
+        logged as a WARNING and the schema default is used, so the loop keeps
+        running; without a settings store the default is used."""
+        default = float(ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]["planner_market_refresh_interval_hours"]
+                        ["default"])
         admin = getattr(self._state, "admin_settings", None)
+        if admin is None:
+            return default
+        try:
+            return float(admin.get("daily_planner", "planner_market_refresh_interval_hours"))
+        except AdminSettingInvalid as exc:
+            # Unreachable while the setting is startup_critical (get() then gives the default);
+            # kept so that dropping the flag still logs and keeps the loop on the default.
+            logging.warning("MarketIntelligenceJob: %s; using the default %g h", exc.message, default)
+        except Exception as exc:
+            logging.warning("MarketIntelligenceJob: reading daily_planner/planner_market_refresh_interval_hours "
+                            "failed (%s); using the default %g h", exc, default)
+        return default
 
-        collector = MarketDepthCollector(state=self._state, admin_settings=admin)
-        collector.run()
-
-        correlator = MarginCorrelator(state=self._state, admin_settings=admin)
-        correlator.run_if_due()
+    def _run_cycle_safe(self) -> None:
+        """One cycle: the market depth collector, then the margin correlator,
+        each in its own try so a collector failure (e.g. an invalid
+        daily_planner/planner_market_hub) does not skip the correlator. Each
+        failure is logged and named in last_error (the Daily Planner status
+        bar shows it); last_completed_at moves only when the collector, which
+        refreshes the market data, succeeded."""
+        admin = getattr(self._state, "admin_settings", None)
+        errors: list[str] = []
+        collected = False
+        try:
+            from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import (
+                MarketDepthCollector,
+            )
+            MarketDepthCollector(state=self._state, admin_settings=admin).run()
+            collected = True
+        except Exception as e:
+            logging.exception("MarketIntelligenceJob: the market depth collector failed: %s", e)
+            errors.append(f"market depth collector: {e}")
+        try:
+            from eve_online_industry_tracker.application.market_intelligence.margin_correlator import MarginCorrelator
+            MarginCorrelator(state=self._state, admin_settings=admin).run_if_due()
+        except Exception as e:
+            logging.exception("MarketIntelligenceJob: the margin correlation failed: %s", e)
+            errors.append(f"margin correlation: {e}")
+        with self._lock:
+            if collected:
+                self._last_completed_at = datetime.utcnow()
+            self._last_error = "; ".join(errors) or None

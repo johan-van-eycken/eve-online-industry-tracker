@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -7,7 +8,7 @@ import requests
 
 try:
     import truststore
-except Exception:
+except ImportError:
     truststore = None
 
 
@@ -17,7 +18,8 @@ if truststore is not None:
     try:
         truststore.inject_into_ssl()
         _TRUSTSTORE_ACTIVE = True
-    except Exception:
+    except Exception as exc:  # third-party, runs at import: any failure falls back to the certifi bundle
+        logging.warning("truststore.inject_into_ssl() failed, falling back to the certifi CA bundle: %s", exc)
         _TRUSTSTORE_ACTIVE = False
 
 
@@ -35,7 +37,7 @@ def get_requests_ssl_verify() -> bool | str:
 
     try:
         return requests.certs.where()
-    except Exception:
+    except (AttributeError, OSError):
         return True
 
 

@@ -4,9 +4,8 @@ This module is packaged under src/ so imports like:
 
     from config.schemas import CONFIG_SCHEMA
 
-work after `pip install -e .`.
-
-Keep this in sync with config/schemas.py.
+work after `pip install -e .`. It is the only copy (the repo-root
+config/schemas.py was a stale duplicate and is removed).
 """
 
 # schemas.py
@@ -27,7 +26,8 @@ CONFIG_SCHEMA = {
         "headers": {
             "Accept": "application/json",  # Required
             "Accept-Language": "en",  # Default language
-            "X-Compatibility-Date": "2025-08-26",  # Required compatibility date
+            # Informational: ESI requests always send esi_versions.ESI_COMPATIBILITY_DATE.
+            "X-Compatibility-Date": "2025-08-26",
             "X-Tenant": "tranquility",  # Tenant identifier
         },
     },
@@ -41,9 +41,9 @@ CONFIG_SCHEMA = {
             "material_price_source_default": "Jita Sell",
             "product_price_source_default": "Jita Sell",
             "orderbook_smoothing": "median_best_n",
-            "orderbook_depth": 5,
-            "sales_tax_fraction": 0.03375,
-            "broker_fee_fraction": 0.03,
+            # orderbook_depth and the material price cache TTL are admin settings
+            # (market_defaults/orderbook_depth, cache_ttl/material_price_cache_ttl_seconds);
+            # the sales tax and broker fee come from the character (industry/*).
         },
     },
 }

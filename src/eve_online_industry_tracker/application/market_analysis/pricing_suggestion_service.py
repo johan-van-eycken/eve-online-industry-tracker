@@ -8,6 +8,10 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_
+from sqlalchemy.exc import SQLAlchemyError
+from eve_online_industry_tracker.application import market_fees
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.application.industry.sales_history_service import SalesHistoryService
 from eve_online_industry_tracker.application.market_analysis.market_history_service import MarketHistoryService
 from eve_online_industry_tracker.application.market_pricing import MarketPricingService
@@ -48,7 +52,7 @@ class PricingSuggestionService:
         )
         hub_price = self._get_hub_price(type_id=type_id, hub=hub)
         hub_buy_price = self._get_hub_buy_price(type_id=type_id, hub=hub)
-        sales_tax, broker_fee = self._get_fees(character_id=character_id)
+        sales_tax, broker_fee, fees_assumed_reason = self._get_fees(character_id=character_id)
         raw_orderbook = self._get_orderbook_levels(type_id=type_id, region_id=region_id)
         orderbook_levels = self._filter_orderbook_outliers(raw_orderbook)
         min_target_margin = self._get_min_target_margin()
@@ -190,9 +194,10 @@ class PricingSuggestionService:
             "acquisition_source": acquisition_source,
             "cost_basis_source": cost_source,
             "breakdown": breakdown,
-            "reasoning": self._build_reasoning(breakdown, confidence),
+            "reasoning": self._with_fee_note(self._build_reasoning(breakdown, confidence), fees_assumed_reason),
             "sales_tax_fraction": sales_tax,
             "broker_fee_fraction": broker_fee,
+            "fees_assumed_reason": fees_assumed_reason,
             "min_target_margin_pct": round(min_target_margin * 100, 1),
             "break_even_price": break_even,
             "net_margin_pct_advised": net_margin_advised,
@@ -218,8 +223,11 @@ class PricingSuggestionService:
             price_map = self._market_pricing.get_type_price_map(type_ids=[type_id], hub=hub, side="sell")
             if type_id in price_map:
                 return float(price_map[type_id].get("unit_price") or 0) or None
-        except Exception as exc:
-            logging.debug(f"_get_hub_price error (type_id={type_id}): {exc}")
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
+        except (SQLAlchemyError, *ESI_REQUEST_ERRORS) as exc:   # a bug propagates
+            # The advised price is then worked out without the hub price.
+            logging.warning("Pricing suggestion: hub sell price of type %s unavailable: %s", type_id, exc)
         return None
 
     def _get_hub_buy_price(self, *, type_id: int, hub: str = "jita") -> float | None:
@@ -228,8 +236,10 @@ class PricingSuggestionService:
             price_map = self._market_pricing.get_type_price_map(type_ids=[type_id], hub=hub, side="buy")
             if type_id in price_map:
                 return float(price_map[type_id].get("unit_price") or 0) or None
-        except Exception as exc:
-            logging.debug(f"_get_hub_buy_price error (type_id={type_id}): {exc}")
+        except AdminSettingInvalid:
+            raise  # a stored invalid setting fails loudly, naming it
+        except (SQLAlchemyError, *ESI_REQUEST_ERRORS) as exc:   # a bug propagates
+            logging.warning("Pricing suggestion: hub buy price of type %s unavailable: %s", type_id, exc)
         return None
 
     def _get_cost_basis(
@@ -336,25 +346,37 @@ class PricingSuggestionService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
-    def _get_fees(self, *, character_id: int) -> tuple[float, float]:
+    def _stored_market_fees(self, *, character_id: int) -> Any:
+        """The character's stored market fees (CharacterModel.market_fees), or None."""
+        app_session = self._sessions.app_session()
         try:
-            app_session = self._sessions.app_session()
-            try:
-                char = app_session.query(CharacterModel).filter(
-                    CharacterModel.character_id == character_id
-                ).first()
-                if char and char.market_fees:
-                    fees = json.loads(char.market_fees) if isinstance(char.market_fees, str) else char.market_fees
-                    if isinstance(fees, dict):
-                        return float(fees.get("sales_tax_fraction", 0.075)), float(fees.get("broker_fee_fraction", 0.03))
-            finally:
-                app_session.close()
-        except Exception as exc:
-            logging.debug(f"_get_fees error (char_id={character_id}): {exc}")
-        return 0.075, 0.03
+            char = app_session.query(CharacterModel).filter(CharacterModel.character_id == character_id).first()
+            return char.market_fees if char is not None else None
+        finally:
+            app_session.close()
+
+    def _get_fees(self, *, character_id: int) -> tuple[float, float, str | None]:
+        """(sales tax, broker fee, None) from the character's stored skills and
+        standings with the current admin settings industry/* (the producer's
+        formula, application.market_fees); without them the fees of an
+        untrained character and the reason they are assumed."""
+        settings = market_fees.MarketFeeSettings.from_admin(getattr(self._state, "admin_settings", None))
+        try:
+            raw = self._stored_market_fees(character_id=character_id)
+        except SQLAlchemyError as exc:
+            return market_fees.fees_from_stored_market_fees(None, settings)[:2] + (
+                f"fees assumed: the character's stored market fees could not be read ({type(exc).__name__})",)
+        return market_fees.fees_from_stored_market_fees(raw, settings)
+
+    @staticmethod
+    def _with_fee_note(reasoning: Any, fee_reason: str | None) -> Any:
+        """The reasoning shown with the advised price, with the assumed-fees note appended."""
+        if not fee_reason:
+            return reasoning
+        return f"{reasoning} ({fee_reason})" if isinstance(reasoning, str) else reasoning
 
     def _get_orderbook_levels(self, *, type_id: int, region_id: int = 10000002) -> list[list[float]]:
         try:
@@ -371,8 +393,9 @@ class PricingSuggestionService:
                     return sorted(levels, key=lambda lv: lv[0])
             finally:
                 app_session.close()
-        except Exception as exc:
-            logging.debug(f"_get_orderbook_levels error (type_id={type_id}): {exc}")
+        except SQLAlchemyError as exc:   # the cached order book table; a bug propagates
+            # Without them there is no gap positioning, front-of-queue guard or seller concentration.
+            logging.warning("Pricing suggestion: cached order book levels of type %s unavailable: %s", type_id, exc)
         return []
 
     def _get_min_target_margin(self) -> float:
@@ -382,9 +405,18 @@ class PricingSuggestionService:
                 cfg = cfg_manager.all() or {}
                 advisory_cfg = ((cfg.get("defaults") or {}).get("market_advisory") or {})
                 if "min_target_margin_pct" in advisory_cfg:
-                    return max(0.0, min(0.50, float(advisory_cfg["min_target_margin_pct"]) / 100))
-        except Exception:
-            pass
+                    raw_fraction = float(advisory_cfg["min_target_margin_pct"]) / 100
+                    fraction = max(0.0, min(0.50, raw_fraction))
+                    if fraction != raw_fraction:
+                        logging.warning(
+                            "defaults.market_advisory.min_target_margin_pct=%s is outside 0-50; using %s%%",
+                            advisory_cfg["min_target_margin_pct"], f"{fraction * 100:g}",
+                        )
+                    return fraction
+        except (AttributeError, TypeError, ValueError) as exc:
+            logging.warning(
+                "defaults.market_advisory.min_target_margin_pct is unreadable (%s); using the default 8%%", exc
+            )
         return 0.08
 
     # ── Orderbook preprocessing ───────────────────────────────────────────────
@@ -553,7 +585,7 @@ class PricingSuggestionService:
             oldest = datetime.fromisoformat(str(dates[-1]).replace("Z", "+00:00"))
             newest = datetime.fromisoformat(str(dates[0]).replace("Z", "+00:00"))
             day_span = max(1.0, float((newest - oldest).days + 1))
-        except Exception:
+        except (IndexError, TypeError, ValueError):
             day_span = float(lookback_days)
 
         daily_velocity_raw = total_qty / day_span

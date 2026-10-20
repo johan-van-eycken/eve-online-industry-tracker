@@ -10,8 +10,14 @@ from typing import Any
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.learning_weights import read_weight
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState, ScoredItem
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 
 logger = logging.getLogger(__name__)
+
+
+#: The schema default of daily_planner/planner_mineral_squeeze_factor, for a caller without settings.
+DEFAULT_MINERAL_SQUEEZE_FACTOR: float = float(
+    ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]["planner_mineral_squeeze_factor"]["default"])
 
 
 class ProfitabilityScorer:
@@ -25,6 +31,7 @@ class ProfitabilityScorer:
         market_depth: Any | None,       # MarketDepthCacheModel | None (for absolute_profit)
         margin_correlation: Any | None, # MarginCorrelationCacheModel | None
         trit_trend_7d: float | None = None,  # Tritanium 7d price trend %
+        mineral_squeeze_factor: float = DEFAULT_MINERAL_SQUEEZE_FACTOR,  # daily_planner/planner_mineral_squeeze_factor
     ) -> ScoredItem:
         """Apply Phase 3 multipliers and return a ScoredItem."""
         type_id = pipeline.type_id
@@ -101,7 +108,7 @@ class ProfitabilityScorer:
         if margin_correlation is not None:
             is_sensitive = getattr(margin_correlation, "is_squeeze_sensitive", False) or False
             if is_sensitive and trit_trend_7d is not None and trit_trend_7d > 5.0:
-                mineral_squeeze_penalty = 0.85
+                mineral_squeeze_penalty = float(mineral_squeeze_factor)
 
         # ── Adjusted score ────────────────────────────────────────────────────
         # isk_per_hour is already 0.0 above when unscoreable, which naturally

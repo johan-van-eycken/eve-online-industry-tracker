@@ -1,4 +1,5 @@
-"""Unit tests for scripts/backfill_corp_transfer_costs.py."""
+"""Unit tests for the corp transfer cost backfill (scripts/backfill_corp_transfer_costs.py,
+application/characters/corp_transfer_costs.py)."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from eve_online_industry_tracker.infrastructure.models import (
     CorporationAssetHistoryModel,
 )
 
-from backfill_corp_transfer_costs import (
+from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
     backfill_corp_transfer_costs,
     build_character_buy_cost_map,
     build_character_job_cost_map,

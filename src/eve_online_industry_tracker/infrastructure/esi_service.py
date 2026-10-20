@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 import random
+import re
 import requests
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
-from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+from eve_online_industry_tracker.infrastructure.esi_client import (
+    ESI_REQUEST_ERRORS,
+    ESIClient,
+    EsiRequestError,
+    call_esi_monitor,
+    esi_total_pages,
+)
 from eve_online_industry_tracker.infrastructure.esi_versions import (
+    ESI_COMPATIBILITY_DATE,
     ESI_MARKETS_ORDERS,
     ESI_MARKETS_HISTORY,
     ESI_MARKETS_PRICES,
@@ -28,8 +38,15 @@ from utils.requests_ssl import get_requests_ssl_kwargs
 
 try:
     from utils.esi_monitor import get_esi_monitor
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     get_esi_monitor = None  # type: ignore
+
+
+def _monitor(fn: str, build_kwargs: Callable[[], Dict[str, Any]]) -> None:
+    """The ESI monitor call of the public requests: the arguments are built
+    inside the guard, and a failure is a rate-limited WARNING, never a failed
+    fetch (esi_client.call_esi_monitor)."""
+    call_esi_monitor(get_esi_monitor, fn, build_kwargs)
 
 
 class ESIService:
@@ -54,6 +71,7 @@ class ESIService:
         public_structures_cache_ttl_seconds: int = 600,
         industry_facilities_cache_ttl_seconds: int = 6 * 3600,
         market_history_cache_ttl_seconds: int = 6 * 3600,
+        admin_settings: Any = None,
     ):
         self._esi_client = esi_client
         self._region_id = region_id if region_id is not None else self.DEFAULT_REGION_ID
@@ -72,8 +90,8 @@ class ESIService:
         if "verify" in ssl_kwargs:
             self._http_session.verify = ssl_kwargs["verify"]
 
-        # Optional admin settings manager (set after construction).
-        self._admin_settings = None
+        # Optional admin settings manager (None: the schema defaults).
+        self._admin_settings = admin_settings
 
         # { (order_type, region_id, type_id): (timestamp, [orders]) }
         self._type_orders_cache: Dict[tuple, tuple] = {}
@@ -87,12 +105,63 @@ class ESIService:
         self._public_structures_cache: Dict[tuple, tuple] = {}
         # (timestamp, [facilities])
         self._industry_facilities_cache: Optional[tuple] = None
+        # {(station_id, asked language): name}: NPC station names do not change, cached for the process
+        self._station_name_cache: Dict[tuple, str] = {}
+        # {(station_id, language): (failed_at, message)}: a failed lookup, not retried for
+        # STATION_NAME_FAILURE_TTL_SECONDS
+        self._station_name_failures: Dict[tuple, tuple] = {}
+
+    # --- the types whose last order-book / history fetch failed -------------------------------
+    # {(order_type, region_id, type_id): reason} and {(region_id, type_id): reason}. A failed type
+    # is skipped (absent from the result, not cached), logged as a WARNING, and its reason kept
+    # here until a later fetch of it succeeds, so a caller can show why it has no data.
+
+    def _fetch_failures(self, name: str) -> Dict[tuple, str]:
+        # Lazily created: tests build the service with __new__.
+        lock = self.__dict__.setdefault("_fetch_failures_lock", threading.Lock())
+        with lock:
+            return self.__dict__.setdefault(name, {})
+
+    def _record_fetch_result(self, name: str, key: tuple, reason: Optional[str]) -> None:
+        failures = self._fetch_failures(name)
+        with self.__dict__["_fetch_failures_lock"]:
+            if reason is None:
+                failures.pop(key, None)
+            else:
+                failures[key] = reason
+
+    def order_book_unavailable_reason(
+        self, type_id: int, *, side: str = "sell", region_id: Optional[int] = None
+    ) -> Optional[str]:
+        """Why the last `side` order-book fetch of `type_id` failed (the type
+        was left out of the book), or None when it did not fail."""
+        region_id = region_id or self._region_id
+        return self._fetch_failures("_order_book_failures").get((str(side), int(region_id), int(type_id)))
+
+    def market_history_unavailable_reason(self, type_id: int, *, region_id: Optional[int] = None) -> Optional[str]:
+        """Why the last market history fetch of `type_id` failed (the type was
+        left out of the result), or None when it did not fail."""
+        region_id = region_id or self._region_id
+        return self._fetch_failures("_market_history_failures").get((int(region_id), int(type_id)))
 
     def set_market_context(self, *, region_id: Optional[int] = None, station_id: Optional[int] = None) -> None:
         if region_id is not None:
             self._region_id = region_id
         if station_id is not None:
             self._station_id = station_id
+
+    def _esi_resilience(self, key: str) -> Any:
+        """An esi_resilience admin setting at each request; the schema default
+        without a settings store."""
+        if self._admin_settings is None:
+            return ADMIN_SETTINGS_SCHEMA["esi_resilience"]["settings"][key]["default"]
+        return self._admin_settings.get("esi_resilience", key)
+
+    def _cache_ttl(self, key: str, fallback: int) -> int:
+        """A cache_ttl admin setting, read at each use so a change on the
+        settings page applies at once; the constructor value without a
+        settings store."""
+        return int(fallback if self._admin_settings is None else self._admin_settings.get("cache_ttl", key))
 
     def _validate_type_ids(self, type_ids: Iterable[int]) -> List[int]:
         if type_ids is None:
@@ -108,7 +177,7 @@ class ESIService:
             "Accept": getattr(self._esi_client, "esi_header_accept", "application/json"),
             "Accept-Language": getattr(self._esi_client, "esi_header_acceptlanguage", "en"),
             "User-Agent": getattr(self._esi_client, "user_agent", "eve-online-industry-tracker"),
-            "X-Compatibility-Date": getattr(self._esi_client, "esi_header_xcompatibilitydate", "2025-08-26"),
+            "X-Compatibility-Date": ESI_COMPATIBILITY_DATE,
             "X-Tenant": getattr(self._esi_client, "esi_header_xtenant", "tranquility"),
         }
 
@@ -118,13 +187,13 @@ class ESIService:
             return 0.0
         try:
             raw_value = response.headers.get("Retry-After")
-        except Exception:
+        except AttributeError:
             return 0.0
         if raw_value in {None, ""}:
             return 0.0
         try:
             return max(0.0, float(raw_value))
-        except Exception:
+        except (TypeError, ValueError):
             return 0.0
 
     def _public_esi_get(
@@ -133,9 +202,17 @@ class ESIService:
         *,
         params: Optional[Dict[str, Any]] = None,
         paginate: bool = False,
-        timeout_seconds: float = 15.0,
-        max_retries: int = 4,
+        timeout_seconds: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> Any:
+        # headers: added to the session's for this request (e.g. Accept-Language).
+        # None: the admin settings esi_resilience/esi_request_timeout_seconds and esi_max_retries,
+        # read at each request (a caller with its own, like the station name lookup, keeps it).
+        if timeout_seconds is None:
+            timeout_seconds = float(self._esi_resilience("esi_request_timeout_seconds"))
+        if max_retries is None:
+            max_retries = int(self._esi_resilience("esi_max_retries"))
         base_uri = str(getattr(self._esi_client, "esi_base_uri", "https://esi.evetech.net")).rstrip("/")
 
         def issue_request(*, request_params: Optional[Dict[str, Any]] = None) -> requests.Response:
@@ -146,7 +223,7 @@ class ESIService:
                 try:
                     raw_page = request_params.get("page")
                     page = int(raw_page) if raw_page is not None else None
-                except Exception:
+                except (TypeError, ValueError):
                     page = None
             while True:
                 request_started_at = time.time()
@@ -155,60 +232,51 @@ class ESIService:
                         url,
                         params=request_params,
                         timeout=float(timeout_seconds),
+                        headers=headers,
                     )
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_http_attempt(
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(getattr(response, "url", url)),
-                                status_code=int(response.status_code) if response is not None else None,
-                                elapsed_ms=(time.time() - request_started_at) * 1000.0,
-                                headers=getattr(response, "headers", None),
-                                exception=None,
-                                cache_mode="off",
-                                page=page,
-                            )
-                    except Exception:
-                        pass
-                except requests.RequestException:
-                    exc = None
-                    try:
-                        raise
-                    except requests.RequestException as caught:
-                        exc = caught
-                        try:
-                            if get_esi_monitor is not None:
-                                get_esi_monitor().record_http_attempt(
-                                    method="GET",
-                                    endpoint=str(endpoint),
-                                    url=str(url),
-                                    status_code=None,
-                                    elapsed_ms=(time.time() - request_started_at) * 1000.0,
-                                    headers=None,
-                                    exception=caught,
-                                    cache_mode="off",
-                                    page=page,
-                                )
-                        except Exception:
-                            pass
-                    if exc is None:
-                        raise
+                    _monitor(
+                        "record_http_attempt",
+                        lambda: dict(
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(getattr(response, "url", url)),
+                            status_code=int(response.status_code) if response is not None else None,
+                            elapsed_ms=(time.time() - request_started_at) * 1000.0,
+                            headers=getattr(response, "headers", None),
+                            exception=None,
+                            cache_mode="off",
+                            page=page,
+                        ),
+                    )
+                except requests.RequestException as exc:
+                    _monitor(
+                        "record_http_attempt",
+                        lambda: dict(
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                            status_code=None,
+                            elapsed_ms=(time.time() - request_started_at) * 1000.0,
+                            headers=None,
+                            exception=exc,
+                            cache_mode="off",
+                            page=page,
+                        ),
+                    )
                     attempts += 1
                     if attempts > max_retries:
-                        raise exc
+                        raise
                     wait_seconds = min(8.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
-                    try:
-                        if get_esi_monitor is not None:
-                            get_esi_monitor().record_retry_event(
-                                reason=type(exc).__name__,
-                                sleep_seconds=float(wait_seconds),
-                                method="GET",
-                                endpoint=str(endpoint),
-                                url=str(url),
-                            )
-                    except Exception:
-                        pass
+                    _monitor(
+                        "record_retry_event",
+                        lambda: dict(
+                            reason=type(exc).__name__,
+                            sleep_seconds=float(wait_seconds),
+                            method="GET",
+                            endpoint=str(endpoint),
+                            url=str(url),
+                        ),
+                    )
                     time.sleep(wait_seconds)
                     continue
 
@@ -222,17 +290,16 @@ class ESIService:
                 retry_after = self._retry_after_seconds(response)
                 backoff = min(12.0, float(2 ** attempts) + random.uniform(0.0, 0.5))
                 wait_seconds = max(retry_after, backoff)
-                try:
-                    if get_esi_monitor is not None:
-                        get_esi_monitor().record_retry_event(
-                            reason=str(response.status_code),
-                            sleep_seconds=float(wait_seconds),
-                            method="GET",
-                            endpoint=str(endpoint),
-                            url=str(getattr(response, "url", url)),
-                        )
-                except Exception:
-                    pass
+                _monitor(
+                    "record_retry_event",
+                    lambda: dict(
+                        reason=str(response.status_code),
+                        sleep_seconds=float(wait_seconds),
+                        method="GET",
+                        endpoint=str(endpoint),
+                        url=str(getattr(response, "url", url)),
+                    ),
+                )
                 time.sleep(wait_seconds)
 
         if not paginate:
@@ -252,7 +319,7 @@ class ESIService:
             else:
                 all_data.append(payload)
 
-            total_pages = int(response.headers.get("X-Pages", "1"))
+            total_pages = esi_total_pages(response.headers, str(getattr(response, "url", endpoint)))
             if page >= total_pages:
                 break
             page += 1
@@ -273,7 +340,7 @@ class ESIService:
         for type_id in type_ids_list:
             cache_key = (order_type, region_id, type_id)
             cached = self._type_orders_cache.get(cache_key)
-            if cached and (now - cached[0] < self._type_orders_cache_ttl_seconds):
+            if cached and (now - cached[0] < self._cache_ttl("type_orders_cache_ttl_seconds", self._type_orders_cache_ttl_seconds)):
                 all_orders.extend(cached[1])
             else:
                 to_fetch.append(int(type_id))
@@ -285,32 +352,45 @@ class ESIService:
         # downloading the entire region order book (which can be huge).
         to_fetch = sorted(set(to_fetch))
 
-        def _fetch_one(type_id: int) -> tuple[int, List[Dict[str, Any]]]:
+        def _fetch_one(type_id: int) -> tuple[int, Optional[List[Dict[str, Any]]], Optional[str]]:
+            # (type_id, orders, None), or (type_id, None, reason) when the ESI fetch failed.
             # Small jitter to avoid spiky bursts against ESI.
-            try:
-                time.sleep(random.uniform(0.0, 0.05))
-            except Exception:
-                pass
+            time.sleep(random.uniform(0.0, 0.05))
 
             try:
                 orders = self._public_esi_get(
                     ESI_MARKETS_ORDERS.format(region_id=region_id),
                     params={"order_type": order_type, "type_id": int(type_id)},
                     paginate=True,
-                    timeout_seconds=15.0,
                 )
-            except Exception as e:
+            except ESI_REQUEST_ERRORS as e:
+                # Only ESI failures: a bug propagates (through fut.result() below).
                 logging.warning(
-                    "ESI market orders fetch failed (order_type=%s, region_id=%s, type_id=%s): %s",
+                    "ESI market orders fetch failed (order_type=%s, region_id=%s, type_id=%s), "
+                    "the type is left out of the order book: %s",
                     order_type,
                     region_id,
                     type_id,
                     e,
                 )
-                orders = []
+                return int(type_id), None, f"ESI {order_type} order book unavailable: {e}"
 
             if not isinstance(orders, list):
-                return int(type_id), []
+                # Not an empty book: the reply cannot be read, so the type is
+                # unavailable with a reason (and not cached), like a failed fetch.
+                reason = (
+                    f"ESI {order_type} order book unavailable: unexpected reply "
+                    f"({type(orders).__name__}), not a list of orders"
+                )
+                logging.warning(
+                    "ESI market orders reply unreadable (order_type=%s, region_id=%s, type_id=%s), "
+                    "the type is left out of the order book: %s",
+                    order_type,
+                    region_id,
+                    type_id,
+                    reason,
+                )
+                return int(type_id), None, reason
 
             # Defensive filter by is_buy_order.
             if order_type == "sell":
@@ -322,23 +402,17 @@ class ESIService:
                     o for o in orders if isinstance(o, dict) and o.get("is_buy_order") is True
                 ]
 
-            return int(type_id), orders
+            return int(type_id), orders, None
 
         max_workers = min(self._PUBLIC_MARKET_ORDER_MAX_WORKERS if self._admin_settings is None else self._admin_settings.get("performance", "market_order_max_workers"), max(1, len(to_fetch)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_fetch_one, int(type_id)) for type_id in to_fetch]
             for fut in as_completed(futures):
-                try:
-                    type_id, orders = fut.result()
-                except Exception as e:
-                    logging.warning(
-                        "ESI market orders fetch task failed (order_type=%s, region_id=%s): %s",
-                        order_type,
-                        region_id,
-                        e,
-                    )
-                    continue
+                type_id, orders, reason = fut.result()   # a bug in _fetch_one propagates
                 cache_key = (order_type, region_id, int(type_id))
+                self._record_fetch_result("_order_book_failures", cache_key, reason)
+                if orders is None:
+                    continue  # failed: not cached, so the next call tries it again
                 self._type_orders_cache[cache_key] = (time.time(), orders)
                 all_orders.extend(orders)
 
@@ -422,13 +496,21 @@ class ESIService:
             orders = cached[1] if isinstance(cached[1], list) else []
             total_orders += len(orders)
 
+        unavailable = {
+            int(type_id): reason
+            for type_id in type_ids_list
+            if (reason := self.order_book_unavailable_reason(int(type_id), side="sell", region_id=region_id))
+        }
         return {
             "region_id": int(region_id),
             "order_type": "sell",
+            # The types whose last fetch failed (left out of the order book) and why.
+            "unavailable_type_ids": sorted(unavailable),
+            "unavailable_reasons": unavailable,
             "type_count": len(type_ids_list),
             "cached_type_count": cached_type_count,
             "total_orders": total_orders,
-            "cache_ttl_seconds": int(self._type_orders_cache_ttl_seconds),
+            "cache_ttl_seconds": int(self._cache_ttl("type_orders_cache_ttl_seconds", self._type_orders_cache_ttl_seconds)),
             "oldest_fetched_at": min(timestamps) if timestamps else None,
             "newest_fetched_at": max(timestamps) if timestamps else None,
         }
@@ -456,7 +538,7 @@ class ESIService:
         for type_id in type_ids_list:
             cache_key = (int(region_id), int(type_id))
             cached = self._market_history_cache.get(cache_key)
-            if cached and (now - cached[0] < self._market_history_cache_ttl_seconds):
+            if cached and (now - cached[0] < self._cache_ttl("market_history_cache_ttl_seconds", self._market_history_cache_ttl_seconds)):
                 result[int(type_id)] = cached[1] if isinstance(cached[1], list) else []
             else:
                 to_fetch.append(int(type_id))
@@ -464,44 +546,40 @@ class ESIService:
         if not to_fetch:
             return result
 
-        def _fetch_one(type_id: int) -> tuple[int, List[Dict[str, Any]]]:
+        def _fetch_one(type_id: int) -> tuple[int, Optional[List[Dict[str, Any]]], Optional[str]]:
+            # (type_id, rows, None), or (type_id, None, reason) when the ESI fetch failed.
             try:
                 payload = self._public_esi_get(
                     ESI_MARKETS_HISTORY.format(region_id=int(region_id)),
                     params={"type_id": int(type_id)},
                     paginate=False,
-                    timeout_seconds=15.0,
                 )
-            except Exception as e:
+            except ESI_REQUEST_ERRORS as e:
                 logging.warning(
-                    "ESI market history fetch failed (region_id=%s, type_id=%s): %s",
+                    "ESI market history fetch failed (region_id=%s, type_id=%s), the type is left out: %s",
                     region_id,
                     type_id,
                     e,
                 )
-                payload = []
+                return int(type_id), None, f"ESI market history unavailable: {e}"
 
             if not isinstance(payload, list):
-                return int(type_id), []
+                return int(type_id), [], None
 
             rows = [row for row in payload if isinstance(row, dict)]
             rows.sort(key=lambda row: str(row.get("date") or ""))
-            return int(type_id), rows
+            return int(type_id), rows, None
 
         max_workers = min(self._PUBLIC_MARKET_HISTORY_MAX_WORKERS if self._admin_settings is None else self._admin_settings.get("performance", "market_history_max_workers"), max(1, len(to_fetch)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_fetch_one, int(type_id)) for type_id in to_fetch]
             for fut in as_completed(futures):
-                try:
-                    type_id, rows = fut.result()
-                except Exception as e:
-                    logging.warning(
-                        "ESI market history fetch task failed (region_id=%s): %s",
-                        region_id,
-                        e,
-                    )
-                    continue
-                self._market_history_cache[(int(region_id), int(type_id))] = (time.time(), rows)
+                type_id, rows, reason = fut.result()   # a bug in _fetch_one propagates
+                cache_key = (int(region_id), int(type_id))
+                self._record_fetch_result("_market_history_failures", cache_key, reason)
+                if rows is None:
+                    continue  # failed: absent from the result (not an empty history), not cached
+                self._market_history_cache[cache_key] = (time.time(), rows)
                 result[int(type_id)] = rows
 
         return result
@@ -543,8 +621,81 @@ class ESIService:
             if id_type == "solar_system":
                 return self._public_esi_get(ESI_UNIVERSE_SYSTEMS.format(system_id=location_id))
             return {}
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed for location {location_id}: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            # Only ESI failures are wrapped; a bug in our code propagates as itself.
+            raise EsiRequestError(f"ESI request failed for location {location_id}: {e}") from e
+
+    # A station name is a display nicety: one short try, no retries, and a failure
+    # cached for a few minutes, so a down ESI never holds up /facilities or the ore page.
+    STATION_NAME_TIMEOUT_SECONDS = 3.0
+    STATION_NAME_FAILURE_TTL_SECONDS = 300.0
+
+    #: The Accept-Language values ESI has names in (its OpenAPI spec).
+    ESI_LANGUAGES = ("en", "de", "fr", "ja", "ru", "zh", "ko", "es")
+    STATION_NAME_ENGLISH_ONLY = "ESI gives this station name in English only"
+
+    def get_station_name(self, station_id: int, language: str = "en") -> tuple[str, str | None]:
+        """(name, note): an NPC station's official name from ESI
+        /universe/stations/{id} (e.g. "Amarr VIII (Oris) - Emperor Family
+        Academy") in `language` (the SDE language the app uses; its primary
+        subtag, so en-us is en), asked with the Accept-Language header.
+
+        ESI echoes the requested Content-Language but does not translate
+        station names, so the reply's language is not trusted: for another
+        language than English the English name is fetched too, and a name
+        equal to it, or one that cannot be compared with it (the English
+        lookup failed), comes with the note STATION_NAME_ENGLISH_ONLY. A
+        language ESI does not have is asked in English, with a note. The
+        note is None for an English name asked in English, or a real
+        translation.
+
+        Each (station, language) lookup is one try with a 3 s timeout and no
+        retries, cached for the process; a failure is cached for
+        STATION_NAME_FAILURE_TTL_SECONDS and raised again without an ESI call
+        meanwhile. EsiRequestError when ESI fails or gives no name in the
+        requested language."""
+        station_id = int(station_id)
+        language = re.split(r"[-_]", str(language or "en").strip().lower(), maxsplit=1)[0] or "en"
+        if language not in self.ESI_LANGUAGES:
+            return (self._fetch_station_name(station_id, "en"),
+                    f"ESI has no names in the SDE language {language!r}: the English name")
+        name = self._fetch_station_name(station_id, language)
+        if language == "en":
+            return name, None
+        try:
+            english = self._fetch_station_name(station_id, "en")
+        except EsiRequestError as exc:
+            return name, (f"{self.STATION_NAME_ENGLISH_ONLY}, perhaps (the English name could not be read to "
+                          f"compare: {exc})")
+        return name, (self.STATION_NAME_ENGLISH_ONLY if name == english else None)
+
+    def _fetch_station_name(self, station_id: int, language: str) -> str:
+        """The station's name as ESI gives it for Accept-Language `language`,
+        cached per (station, language), failures for a while (see
+        get_station_name)."""
+        key = (station_id, language)
+        cached = self._station_name_cache.get(key)
+        if cached:
+            return cached
+        failure = self._station_name_failures.get(key)
+        if failure is not None and time.time() - failure[0] < self.STATION_NAME_FAILURE_TTL_SECONDS:
+            raise EsiRequestError(failure[1])
+        try:
+            payload = self._public_esi_get(ESI_UNIVERSE_STATIONS.format(station_id=station_id),
+                                           headers={"Accept-Language": language},
+                                           timeout_seconds=self.STATION_NAME_TIMEOUT_SECONDS, max_retries=0)
+        except ESI_REQUEST_ERRORS as e:
+            message = f"ESI request failed for station {station_id}: {e}"
+            self._station_name_failures[key] = (time.time(), message)
+            raise EsiRequestError(message) from e
+        name = payload.get("name") if isinstance(payload, dict) else None
+        if not name:
+            message = f"ESI /universe/stations/{station_id} gave no name"
+            self._station_name_failures[key] = (time.time(), message)
+            raise EsiRequestError(message)
+        self._station_name_failures.pop(key, None)
+        self._station_name_cache[key] = str(name)
+        return str(name)
 
     def get_universe_structure(
         self,
@@ -571,23 +722,34 @@ class ESIService:
                 suppress_forbidden_log=suppress_forbidden_log,
                 suppress_not_found_log=suppress_not_found_log,
             )
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed for universe structure {structure_id}: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            raise EsiRequestError(f"ESI request failed for universe structure {structure_id}: {e}") from e
 
     def get_market_prices(self) -> List[Dict[str, Any]]:
         """Return market prices for all items (cached)."""
         now = time.time()
 
-        if self._market_prices_cache and (now - self._market_prices_cache[0] < self._market_prices_cache_ttl_seconds):
+        if self._market_prices_cache and (now - self._market_prices_cache[0] < self._cache_ttl("market_prices_cache_ttl_seconds", self._market_prices_cache_ttl_seconds)):
             return self._market_prices_cache[1]
 
         try:
             market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES, paginate=True)
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            raise EsiRequestError(f"ESI request failed: {e}") from e
+        # None is a 403/404, not "no prices": not cached, so the next call asks again.
+        market_prices = self._require_list(ESI_MARKETS_PRICES, market_prices)
 
         self._market_prices_cache = (now, market_prices)
         return market_prices
+
+    @staticmethod
+    def _require_list(endpoint: str, data: Any) -> List[Any]:
+        """`data` when it is a list; EsiRequestError naming `endpoint` and what
+        ESI gave otherwise (None: a 403/404, logged by ESIClient)."""
+        if isinstance(data, list):
+            return data
+        what = "no data (403/404)" if data is None else f"a {type(data).__name__}, not a list"
+        raise EsiRequestError(f"ESI request failed: {endpoint} gave {what}")
 
     def get_industry_facilities(self) -> List[Dict[str, Any]]:
         """Return public industry facilities.
@@ -596,15 +758,15 @@ class ESIService:
         structures per solar system than scanning /universe/structures.
         """
         now = time.time()
-        if self._industry_facilities_cache and (now - self._industry_facilities_cache[0] < self._industry_facilities_cache_ttl_seconds):
+        if self._industry_facilities_cache and (now - self._industry_facilities_cache[0] < self._cache_ttl("industry_facilities_cache_ttl_seconds", self._industry_facilities_cache_ttl_seconds)):
             return self._industry_facilities_cache[1]
 
         try:
             data = self._esi_client.esi_get(ESI_INDUSTRY_FACILITIES)
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            raise EsiRequestError(f"ESI request failed: {e}") from e
 
-        out = list(data) if isinstance(data, list) else []
+        out = list(self._require_list(ESI_INDUSTRY_FACILITIES, data))
         self._industry_facilities_cache = (now, out)
         return out
 
@@ -621,10 +783,10 @@ class ESIService:
 
         try:
             data = self._esi_client.esi_get(ESI_INDUSTRY_SYSTEMS, paginate=True)
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            raise EsiRequestError(f"ESI request failed: {e}") from e
 
-        out = list(data) if isinstance(data, list) else []
+        out = list(self._require_list(ESI_INDUSTRY_SYSTEMS, data))
         self._industry_systems_cache = (now, out)
         self._industry_systems_cache_ttl_seconds = ttl
         return out
@@ -648,8 +810,8 @@ class ESIService:
 
         try:
             data = self._esi_client.esi_get(ESI_UNIVERSE_TYPE.format(type_id=type_id))
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed for /universe/types/{type_id}/: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            raise EsiRequestError(f"ESI request failed for /universe/types/{type_id}/: {e}") from e
 
         out = dict(data) if isinstance(data, dict) else {}
         cache[type_id] = (now, out)
@@ -686,7 +848,10 @@ class ESIService:
             chunk = missing[i : i + chunk_size]
             try:
                 data = self._esi_client.esi_post(ESI_UNIVERSE_NAMES, json=chunk, use_cache=False)
-            except Exception:
+            except ESI_REQUEST_ERRORS as exc:
+                logging.warning(
+                    "ESI /universe/names/ failed for %d id(s); they stay unresolved: %s", len(chunk), exc
+                )
                 data = None
 
             rows = list(data) if isinstance(data, list) else []
@@ -717,8 +882,11 @@ class ESIService:
         for i in range(0, len(ids), chunk_size):
             chunk = ids[i : i + chunk_size]
             try:
-                resp = self._esi_client.esi_post(ESI_UNIVERSE_NAMES, json=chunk, timeout=15)
-            except Exception:
+                resp = self._esi_client.esi_post(ESI_UNIVERSE_NAMES, json=chunk)
+            except ESI_REQUEST_ERRORS as exc:
+                logging.warning(
+                    "ESI /universe/names/ failed for %d id(s); they stay unresolved: %s", len(chunk), exc
+                )
                 continue
 
             if not isinstance(resp, list):
@@ -745,7 +913,7 @@ class ESIService:
         params = {"filter": filter} if filter is not None else None
         data = self._esi_client.esi_get(ESI_UNIVERSE_STRUCTURES_LIST, params=params, use_cache=False)
         if data is None:
-            raise RuntimeError(
+            raise EsiRequestError(
                 "ESI returned no data for /universe/structures (likely 403 Forbidden). "
                 "Your character may be missing the scope 'esi-universe.read_structures.v1' or has no access."
             )
@@ -755,7 +923,7 @@ class ESIService:
         for x in data:
             try:
                 out.append(int(x))
-            except Exception:
+            except (TypeError, ValueError):
                 continue
         return out
 
@@ -788,7 +956,7 @@ class ESIService:
 
             # ESIClient returns None on 403/404; distinguish that from an empty list.
             if public_structure_ids is None:
-                raise RuntimeError(
+                raise EsiRequestError(
                     "ESI returned no data for /universe/structures (likely 403 Forbidden). "
                     "Your character may be missing the scope 'esi-universe.read_structures.v1' or has no access."
                 )
@@ -835,9 +1003,16 @@ class ESIService:
                             "type_id": structure_data.get("type_id"),
                             "services": structure_data.get("services"),
                         }
-                except Exception:
+                except ESI_REQUEST_ERRORS as exc:
+                    # get_universe_structure wraps ESI failures in EsiRequestError (ValueError: an
+                    # invalid id); one unreadable structure must not abort the scan. Counted and
+                    # summarised below. A bug (TypeError, AttributeError, ...) propagates.
+                    logging.debug("Public structure %s skipped: %s", structure_id, exc)
+                    failed_ids.append(structure_id)
                     return None
                 return None
+
+            failed_ids: List[int] = []
 
             results: List[Dict[str, Any]] = []
             max_workers = max(1, int(max_workers))
@@ -863,10 +1038,9 @@ class ESIService:
 
                     done, in_flight = wait(in_flight, timeout=min(0.25, remaining), return_when=FIRST_COMPLETED)
                     for fut in done:
-                        try:
-                            item = fut.result()
-                        except Exception:
-                            item = None
+                        # fetch_one already skips the expected per-structure failures;
+                        # anything else is a bug and propagates as itself.
+                        item = fut.result()
                         if item:
                             results.append(item)
                             if len(results) >= max_results:
@@ -881,7 +1055,15 @@ class ESIService:
                                 continue
                             in_flight.add(executor.submit(fetch_one, sid))
 
+            if failed_ids:
+                logging.warning(
+                    "Public structure scan for system %s: %d of %d structure(s) could not be read and were skipped",
+                    system_id,
+                    len(failed_ids),
+                    len(ids_to_scan),
+                )
             self._public_structures_cache[cache_key] = (now, results)
             return results
-        except Exception as e:
-            raise RuntimeError(f"ESI request failed for system {system_id}: {e}")
+        except ESI_REQUEST_ERRORS as e:
+            # The structure list's ESI failure (or its 403, raised above); a bug propagates.
+            raise EsiRequestError(f"ESI request failed for system {system_id}: {e}") from e

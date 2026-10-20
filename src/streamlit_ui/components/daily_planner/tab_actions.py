@@ -6,12 +6,12 @@ from typing import Any
 
 import streamlit as st
 
+from streamlit_ui.api.admin_settings import planner_page_defaults
 from streamlit_ui.api.daily_planner import mark_action_done, set_action_status
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState
 from streamlit_ui.components.daily_planner.status_bar import (
     CHARACTER_ACTION_TYPES,
     CORP_LEVEL_ACTION_TYPES,
-    PLANNER_MAX_PLAN_AGE_HOURS,
     _fmt_isk,
     _parse_dt,
     is_waiting,
@@ -361,7 +361,7 @@ def _render_character_section(
                         for a in pending_delivers:
                             try:
                                 mark_action_done(int(a.get("id") or 0))
-                            except Exception as exc:
+                            except RuntimeError as exc:
                                 errors.append(str(exc))
                         if errors:
                             st.error(f"Some actions failed: {'; '.join(errors)}")
@@ -378,7 +378,10 @@ def _render_character_section(
 # Main tab renderer
 # ---------------------------------------------------------------------------
 
-def render_tab_actions(page_state: DailyPlannerPageState) -> None:
+def render_tab_actions(page_state: DailyPlannerPageState, planner_settings: dict[str, float] | None = None) -> None:
+    """planner_settings: the page's one admin settings read (None: the schema defaults)."""
+    if planner_settings is None:
+        planner_settings = planner_page_defaults()
     if page_state.plan is None:
         st.info("No plan yet — click **Recompute Plan** to generate your first daily plan.")
         return
@@ -390,7 +393,8 @@ def render_tab_actions(page_state: DailyPlannerPageState) -> None:
         dt = _parse_dt(created_at)
         if dt:
             age_hours = (datetime.now(tz=timezone.utc) - dt).total_seconds() / 3600
-            plan_expired = age_hours > PLANNER_MAX_PLAN_AGE_HOURS
+            # daily_planner/planner_max_plan_age_hours (the status bar shows a problem reading it)
+            plan_expired = age_hours > planner_settings["planner_max_plan_age_hours"]
 
     if plan_expired:
         st.warning(

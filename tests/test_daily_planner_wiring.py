@@ -7,6 +7,8 @@ not surface until a live plan compute fails.
 """
 from __future__ import annotations
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+
 from types import SimpleNamespace
 
 import pytest
@@ -57,7 +59,8 @@ def _service(session_provider, overview_rows):
         market_pricing_service=SimpleNamespace(),
         realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),
-        admin_settings=SimpleNamespace(get=lambda *a, **k: None),
+        # Every setting at its schema default (the store of an untouched install).
+        admin_settings=SimpleNamespace(get=lambda section, key: ADMIN_SETTINGS_SCHEMA[section]["settings"][key]["default"]),
         session_provider=session_provider,
     )
 

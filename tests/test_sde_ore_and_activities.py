@@ -49,11 +49,12 @@ def imported_fake_sde(tmp_path):
     sde_dir = tmp_path / "sde"
     sde_dir.mkdir()
     for name, rows in {"compressibleTypes": fakes.COMPRESSIBLE_TYPES, "typeDogma": fakes.TYPE_DOGMA,
-                       "industryActivities": fakes.INDUSTRY_ACTIVITIES}.items():
+                       "dogmaEffects": fakes.DOGMA_EFFECTS, "industryActivities": fakes.INDUSTRY_ACTIVITIES}.items():
         (sde_dir / f"{name}.yaml").write_text(yaml.safe_dump(rows), encoding="utf-8")
     db = tmp_path / "eve_sde.db"
     _importer().import_sde_to_sqlite(str(sde_dir), db_uri=f"sqlite:///{db}",
-                                     tables_to_import=["compressibleTypes", "typeDogma", "industryActivities"])
+                                     tables_to_import=["compressibleTypes", "typeDogma", "dogmaEffects",
+                                                       "industryActivities"])
     engine = create_engine(f"sqlite:///{db}")
     try:
         yield engine
@@ -116,13 +117,13 @@ def test_a_batch_compressed_type_is_not_a_compressed_form():
 
 def test_a_compressed_type_listed_twice_is_unreadable():
     with pytest.raises(ValueError, match="compressed form of more than one"):
-        ore.ore_data_from_tables(compressible_types={1: {"compressedTypeID": 9}, 2: {"compressedTypeID": 9}},
+        ore.ore_data_from_tables(dogma_effects={}, compressible_types={1: {"compressedTypeID": 9}, 2: {"compressedTypeID": 9}},
                                  type_dogma={})
 
 
 def test_a_row_without_a_compressed_type_is_unreadable():
     with pytest.raises(ValueError, match="compressedTypeID"):
-        ore.ore_data_from_tables(compressible_types={1: {}}, type_dogma={})
+        ore.ore_data_from_tables(compressible_types={1: {}}, type_dogma={}, dogma_effects={})
 
 
 # --- the reprocessing skill ---------------------------------------------------------
@@ -198,6 +199,7 @@ def test_build_all_ores_without_the_ore_data_raises_with_the_hint(sde_engine):
 
 def _ore(type_id, name, skill_type_id, *, compressed=False):
     return {"id": type_id, "name": name, "portionSize": 100, "volume": 0.1, "compressed": compressed,
+            "groupID": 462, "categoryID": 25,
             "reprocessingSkillTypeID": skill_type_id,
             "reprocessingSkill": fakes.SKILL_NAMES.get(skill_type_id) if skill_type_id else None,
             "materials": [{"name": "Tritanium", "quantity": 400}]}

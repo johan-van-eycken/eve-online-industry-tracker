@@ -5,24 +5,36 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from eve_online_industry_tracker.application import market_fees
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
-from eve_online_industry_tracker.infrastructure.esi_client import ESIClient
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
 from eve_online_industry_tracker.infrastructure.models import CharacterModel, CharacterWalletJournalModel \
     , CharacterWalletTransactionsModel, CharacterMarketOrdersModel, CharacterAssetsModel \
     , CharacterIndustryJobsModel \
-    , NpcCorporations, Bloodlines, Races, Types \
+    , NpcCorporations, NpcStations, Bloodlines, Races, Types \
     , Groups, Categories, Factions
 
 from eve_online_industry_tracker.application.characters.asset_provenance import (
     build_market_price_map,
     build_cost_map_for_assets,
     build_invention_cost_per_run_by_blueprint_type,
+    RealizedInventionRefresh,
+    invention_cost_source_for,
     industry_job_material_type_ids,
+    load_owner_invention_evidence,
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
+)
+from eve_online_industry_tracker.application.characters.corp_transfer_costs import (
+    character_job_unit_costs,
+    recosted_product_type_ids,
+    restamp_blended_corp_transfer_lots,
 )
 from eve_online_industry_tracker.infrastructure.esi_versions import (
     ESI_CHAR_PUBLIC,
@@ -57,6 +69,23 @@ JITA_4_4_STATION_ID = 60003760
 SKILL_ID_ACCOUNTING = 16622
 SKILL_ID_BROKER_RELATIONS = 3446
 
+
+def industry_job_location_id(job: Dict[str, Any]) -> Optional[int]:
+    """The facility location of an ESI industry job: 'station_id' on
+    /characters/{id}/industry/jobs, 'location_id' on the corporation route."""
+    value = job.get("location_id")
+    if value is None:
+        value = job.get("station_id")
+    return value
+
+
+
+class CharacterSaveError(Exception):
+    """Character.save_character could not write the profile (the app DB
+    failed; the session is rolled back). An Exception, as before, so the
+    callers that catch Exception still do."""
+
+
 class Character:
     """Ingame entity of a character."""
 
@@ -70,9 +99,12 @@ class Character:
                  is_corp_director: bool = False,
                  refresh_token: Optional[str] = None,
                  industry_enabled: bool = True,
+                 admin_settings: Any = None,
         ) -> None:
         try:
             # Private properties
+            # The admin settings (industry/* market fee rates); None: the schema defaults.
+            self._admin_settings = admin_settings
             self._cfgManager = cfgManager
             self._cfg = cfgManager.all()
             self._db_oauth = db_oauth
@@ -137,7 +169,8 @@ class Character:
             self.is_corp_director,
             self._refresh_token,
         )
-        self._esi_service = ESIService(self._esi_client)
+        # The admin ESI settings (pacing, retries, cache TTLs) from the first request on.
+        self._esi_service = ESIService(self._esi_client, admin_settings=getattr(self, "_admin_settings", None))
         self.character_id = self._esi_client.character_id
 
     @property
@@ -255,10 +288,15 @@ class Character:
             self._db_app.session.commit()
             logging.debug(f"Character '{self.character_name}' saved to database.")
     
-        except Exception as e:
+        except SQLAlchemyError as e:
             error_message = f"Failed to save character '{self.character_name}' to database. Error: {str(e)}"
             logging.error(error_message)
-            raise Exception(error_message)
+            try:
+                self._db_app.session.rollback()
+            except SQLAlchemyError as rollback_exc:
+                logging.warning("Character %s: rollback after the failed save failed: %s", self.character_name,
+                                rollback_exc)
+            raise CharacterSaveError(error_message) from e
 
     # -------------------
     # Save Wallet Journal
@@ -288,7 +326,7 @@ class Character:
                             self._db_app.session.add(obj)
                             self._db_app.session.commit()
                             saved += 1
-                        except Exception:
+                        except SQLAlchemyError:  # a duplicate row: skipped, counted below
                             self._db_app.session.rollback()
                     logging.debug(
                         f"Wallet journal fallback insert: {saved}/{len(self.wallet_journal)} for {self.character_name} "
@@ -455,12 +493,9 @@ class Character:
             raise Exception(error_message)
 
     def _get_skill_level(self, *, skill_id: int, skill_name: str | None = None) -> int:
-        try:
-            skills_obj = self.skills or {}
-            skills_list = (skills_obj.get("skills") or []) if isinstance(skills_obj, dict) else []
-            if not isinstance(skills_list, list):
-                skills_list = []
-        except Exception:
+        skills_obj = self.skills or {}
+        skills_list = (skills_obj.get("skills") or []) if isinstance(skills_obj, dict) else []
+        if not isinstance(skills_list, list):
             skills_list = []
 
         for s in skills_list:
@@ -469,7 +504,8 @@ class Character:
             try:
                 if int(s.get("skill_id") or -1) == int(skill_id):
                     return int(s.get("trained_skill_level") or 0)
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logging.warning("Unreadable skill row for %s skipped (%s): %r", self.character_name, exc, s)
                 continue
 
         if skill_name:
@@ -480,7 +516,8 @@ class Character:
                 try:
                     if str(s.get("skill_name") or "").strip().lower() == skill_name_norm:
                         return int(s.get("trained_skill_level") or 0)
-                except Exception:
+                except (TypeError, ValueError) as exc:
+                    logging.warning("Unreadable skill row for %s skipped (%s): %r", self.character_name, exc, s)
                     continue
 
         return 0
@@ -496,26 +533,39 @@ class Character:
                 if int(s.get("from_id") or -1) != int(from_id):
                     continue
                 return float(s.get("standing") or 0.0)
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logging.warning("Unreadable standing row for %s skipped (%s): %r", self.character_name, exc, s)
                 continue
         return 0.0
 
     def refresh_market_fees(self) -> None:
         """Compute and persist character-specific market fees (Jita 4-4 only).
 
-        Uses character skills + standings plus SDE station ownership.
-
-        Sales tax (seller): 7.5% * (1 - 0.11 * AccountingLevel)
-        Broker fee (NPC station): 3% - 0.3%*BrokerRelationsLevel - 0.03%*factionStanding - 0.02%*corpStanding
-        """
+        Uses character skills + standings plus SDE station ownership, with the
+        admin settings industry/* through application.market_fees (the
+        producer's formula). Without loaded skills the rates are None with
+        an unknown_reason (an untrained character is not assumed)."""
         try:
-            # Skills may not be loaded yet (e.g. missing scopes). Treat as best-effort.
+            fee_settings = market_fees.MarketFeeSettings.from_admin(getattr(self, "_admin_settings", None))
+            skills_list = (self.skills or {}).get("skills") if isinstance(self.skills, dict) else None
+            if not isinstance(skills_list, list) or not skills_list:
+                self.market_fees = {
+                    "jita_4_4": {
+                        "station_id": int(JITA_4_4_STATION_ID),
+                        "rates": {"sales_tax_fraction": None, "broker_fee_fraction": None},
+                        "unknown_reason": "the character's skills are not loaded (missing scope or not refreshed yet)",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "source": "computed",
+                    }
+                }
+                logging.warning("Market fees of %s (%s) unknown: skills not loaded", self.character_name,
+                                self.character_id)
+                self.save_character()
+                return
+
             accounting_level = self._get_skill_level(skill_id=SKILL_ID_ACCOUNTING, skill_name="Accounting")
             broker_rel_level = self._get_skill_level(skill_id=SKILL_ID_BROKER_RELATIONS, skill_name="Broker Relations")
-
-            base_sales_tax = 0.075
-            sales_tax_fraction = float(base_sales_tax) * (1.0 - (0.11 * float(accounting_level)))
-            sales_tax_fraction = min(1.0, max(0.0, sales_tax_fraction))
+            sales_tax_fraction = market_fees.sales_tax_fraction(fee_settings, accounting_level=accounting_level)
 
             owner_corp_id: int | None = None
             owner_faction_id: int | None = None
@@ -527,7 +577,10 @@ class Character:
                 )
                 if station is not None:
                     owner_corp_id = int(station.ownerID)
-            except Exception:
+            except SQLAlchemyError as exc:
+                logging.warning("Market fees of %s: the Jita 4-4 station owner could not be read from the SDE (%s: %s); "
+                                "its corporation and faction standings count as 0", self.character_name,
+                                type(exc).__name__, exc)
                 owner_corp_id = None
 
             if owner_corp_id is not None:
@@ -539,7 +592,10 @@ class Character:
                     )
                     if corp is not None and corp.factionID is not None:
                         owner_faction_id = int(corp.factionID)
-                except Exception:
+                except SQLAlchemyError as exc:
+                    logging.warning("Market fees of %s: the faction of the Jita 4-4 owner %s could not be read from "
+                                    "the SDE (%s: %s); its faction standing counts as 0", self.character_name,
+                                    owner_corp_id, type(exc).__name__, exc)
                     owner_faction_id = None
 
             faction_standing = (
@@ -552,14 +608,9 @@ class Character:
                 if owner_corp_id is not None
                 else 0.0
             )
-
-            broker_fee_fraction = (
-                0.03
-                - (0.003 * float(broker_rel_level))
-                - (0.0003 * float(faction_standing))
-                - (0.0002 * float(corp_standing))
-            )
-            broker_fee_fraction = min(0.03, max(0.0, float(broker_fee_fraction)))
+            broker_fee_fraction = market_fees.broker_fee_fraction(
+                fee_settings, broker_relations_level=broker_rel_level,
+                faction_standing=faction_standing, corp_standing=corp_standing)
 
             self.market_fees = {
                 "jita_4_4": {
@@ -575,7 +626,7 @@ class Character:
                         "corp_standing": float(corp_standing),
                     },
                     "rates": {
-                        "base_sales_tax_fraction": float(base_sales_tax),
+                        "base_sales_tax_fraction": float(fee_settings.base_sales_tax_rate),
                         "sales_tax_fraction": float(sales_tax_fraction),
                         "broker_fee_fraction": float(broker_fee_fraction),
                     },
@@ -585,7 +636,15 @@ class Character:
             }
 
             self.save_character()
-        except Exception as e:
+        except AdminSettingInvalid as exc:
+            # An invalid industry/* fee setting: the fees are unknown, naming it (not a silent default).
+            logging.error("Market fees of %s (%s) unknown: %s", self.character_name, self.character_id, exc.message)
+            self.market_fees = {"jita_4_4": {"station_id": int(JITA_4_4_STATION_ID),
+                                             "rates": {"sales_tax_fraction": None, "broker_fee_fraction": None},
+                                             "unknown_reason": exc.message,
+                                             "updated_at": datetime.now(timezone.utc).isoformat(),
+                                             "source": "computed"}}
+        except (SQLAlchemyError, CharacterSaveError, *ESI_REQUEST_ERRORS) as e:   # a bug propagates
             logging.warning(
                 "Failed to compute market fees for %s (%s): %s",
                 self.character_name,
@@ -865,8 +924,8 @@ class Character:
                     npc_corp = self._db_sde.session.query(NpcCorporations).filter_by(id=cid).first()
                     if npc_corp:
                         resolved[cid] = npc_corp.name[self._db_sde.language]
-                except Exception:
-                    pass
+                except (SQLAlchemyError, KeyError, TypeError) as exc:
+                    logging.warning("NPC corporation %s: no SDE name either (%s)", cid, exc)
         return resolved
 
     def _backfill_wallet_transaction_client_names(self) -> None:
@@ -960,10 +1019,18 @@ class Character:
 
             market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES)
             market_price_map = build_market_price_map(market_prices)
+            # The producer's inputs (or why they are missing) read once per
+            # refresh and passed to every snapshot, with the SDE memoized.
+            invention_refresh = RealizedInventionRefresh.read()
             invention_cost_by_blueprint_type = build_invention_cost_per_run_by_blueprint_type(
                 jobs=jobs,
                 sde_session=self._db_sde.session,
                 market_price_map=market_price_map,
+                invention_refresh=invention_refresh,
+                # The ME/TE of the character's BPCs settles a decryptor tie.
+                **load_owner_invention_evidence(
+                    self._db_app.session, owner_kind="character", owner_id=int(self.character_id),
+                ),
             )
 
             clear_historical_backfill(
@@ -984,6 +1051,9 @@ class Character:
             )
 
             completed_statuses = {"delivered", "ready", "completed"}
+            # The jobs' costs before this refresh: a re-costed job re-stamps
+            # the blended corp transfer lots of its type below.
+            unit_costs_before = character_job_unit_costs(self._db_app.session, character_id=int(self.character_id))
             existing_jobs = (
                 self._db_app.session.query(CharacterIndustryJobsModel)
                 .filter_by(character_id=int(self.character_id))
@@ -1075,17 +1145,10 @@ class Character:
                     job=type("IndustryJobPayload", (), j)(),
                     sde_session=self._db_sde.session,
                     market_price_map=market_price_map,
-                    invention_unit_cost_per_run=(
-                        float((invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run"))
-                        if (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("unit_cost_per_run") is not None
-                        else None
-                    ),
-                    invention_cost_source=str(
-                        (invention_cost_by_blueprint_type.get(int(j.get("blueprint_type_id") or 0)) or {}).get("source") or ""
-                    )
-                    or None,
+                    **invention_cost_source_for(invention_cost_by_blueprint_type, j.get("blueprint_type_id")),
                     blueprint_provenance=blueprint_provenance,
                     owned_input_unit_cost_by_type_id=historical_input_costs,
+                    invention_refresh=invention_refresh,
                 )
                 rows.append(
                     {
@@ -1102,7 +1165,7 @@ class Character:
                         "successful_runs": j.get("successful_runs"),
                         "installer_id": j.get("installer_id"),
                         "facility_id": j.get("facility_id"),
-                        "location_id": j.get("location_id"),
+                        "location_id": industry_job_location_id(j),
                         "output_location_id": j.get("output_location_id"),
                         "blueprint_item_id": snapshot.get("blueprint_item_id"),
                         "blueprint_is_blueprint_copy": snapshot.get("blueprint_is_blueprint_copy"),
@@ -1120,6 +1183,7 @@ class Character:
                         "historical_input_costs": snapshot.get("historical_input_costs"),
                         "copy_cost": snapshot.get("copy_cost"),
                         "invention_cost": snapshot.get("invention_cost"),
+                        "invention_cost_unknown_reason": snapshot.get("invention_cost_unknown_reason"),
                         "total_build_cost": snapshot.get("total_cost"),
                         "unit_build_cost": snapshot.get("unit_cost"),
                         "build_cost_source": snapshot.get("source"),
@@ -1162,6 +1226,13 @@ class Character:
                 job_model=CharacterIndustryJobsModel,
                 owner_filter={"character_id": int(self.character_id)},
             )
+            recosted_types = recosted_product_type_ids(
+                unit_costs_before,
+                character_job_unit_costs(self._db_app.session, character_id=int(self.character_id)),
+            )
+            if recosted_types:
+                restamp_blended_corp_transfer_lots(self._db_app.session, recosted_types)
+                self._db_app.session.commit()
         except Exception as e:
             logging.warning(
                 "Skipping industry jobs refresh for %s (%s): %s",
@@ -1314,7 +1385,7 @@ class Character:
             for x in data:
                 try:
                     implant_ids.append(int(x))
-                except Exception:
+                except (TypeError, ValueError):
                     continue
 
             self.implants = sorted(set(implant_ids))
@@ -1364,8 +1435,8 @@ class Character:
                         if isinstance(name, str) and name:
                             region_name_cache[region_id] = name
                             return name
-                except Exception:
-                    pass
+                except ESI_REQUEST_ERRORS as exc:
+                    logging.warning("Market orders: region %s name unavailable: %s", region_id, exc)
 
                 region_name_cache[region_id] = None
                 return None
@@ -1403,9 +1474,9 @@ class Character:
 
                     if region_id:
                         region_name = resolve_region_name(region_id)
-                except Exception:
+                except ESI_REQUEST_ERRORS as exc:
                     # Do not fail refresh_market_orders if enrichment fails.
-                    pass
+                    logging.warning("Market orders: location %s name/region unavailable: %s", location_id, exc)
 
                 resolved = (location_name, region_id, region_name)
                 location_region_cache[location_id] = resolved

@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.industry.invention_model import (
     NO_DECRYPTOR,
     NO_QUALIFYING_INVENTOR_REASON,
@@ -978,7 +979,8 @@ def _invention_service(
     )
     if adm_overrides:
         service._adm = MethodType(  # type: ignore[attr-defined]
-            lambda self, category, key, fallback=None: adm_overrides.get(key, fallback), service,
+            lambda self, category, key: adm_overrides.get(key, ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"]),
+            service,
         )
     if real_confidence:
         monkeypatch.setattr(MarketPricingService, "orderbook_depth", lambda self: 5)

@@ -149,7 +149,7 @@ class ShoppingItem:
     type_id: int
     type_name: str
     quantity: int
-    shopping_category: str   # 'current_job' | 'future_stock' | 'invention_input'
+    shopping_category: str   # 'current_job' | 'invention_input'
     # None = no price (unknown, never 0): the line is still bought, and
     # Capital Reserved reads "unknown" (Task 8 fix round 1).
     estimated_unit_price: float | None
@@ -168,6 +168,15 @@ class ChainPlan:
     #: called with those parents' type_ids, returns the new sub-component
     #: decisions. None for a hand-built plan (the plan's sizes then stand).
     resize_sub_components: Any = field(default=None, repr=False, compare=False)
+    #: The parents with sub-manufacture requests (their batch's or their
+    #: research-first fallback's): the ones a re-size can drop.
+    sub_request_parent_type_ids: frozenset[int] = field(default_factory=frozenset)
     #: The plan's decisions for a new set of sub-component decisions, one
     #: ItemDecision per type_id (Task 14). None: top-level + subs as they are.
     rebuild_decisions: Any = field(default=None, repr=False, compare=False)
+    #: Task A items 2, 3 and 6: releases the blueprints the assigner found
+    #: unused and re-plans the rows not built for them (ChainPlanner's
+    #: _replan). None for a hand-built plan: nothing is re-planned.
+    replan_released: Any = field(default=None, repr=False, compare=False)
+    #: Puts a re-planned row that still got no action back as it was.
+    undo_replan: Any = field(default=None, repr=False, compare=False)

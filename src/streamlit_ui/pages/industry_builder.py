@@ -7,13 +7,14 @@ from streamlit_ui.state.industry_builder_ui import (
     build_overview_grid_frame,
     build_debug_payload_preview,
     filter_overview_rows,
+    unknown_value_hidden_notes,
 )
 from streamlit_ui.state.industry_snapshot_page import (
     format_scope_refreshed_at,
     prepare_shared_industry_snapshot_page,
     render_pricing_batch_panel,
 )
-from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, invention_summary_lines, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name, total_cost_label
+from streamlit_ui.state.industry_builder_ui import estimated_item_value_cell, hub_liquidity_note, hub_price_note, invention_summary_lines, region_volume_note, relist_note, row_assumes_owned_t2_bpo, meta_group_label, ordered_meta_group_names, get_meta_group_name, total_cost_label
 from streamlit_ui.components.webpage_ui import require_aggrid
 from streamlit_ui.api.industry_profiles import build_industry_profile_options
 from streamlit_ui.state.industry_builder_page import (
@@ -35,7 +36,7 @@ ASSUMES_OWNED_T2_BPO_CAPTION = (
 def _format_age_minutes(value: Any) -> str:
     try:
         minutes = float(value or 0.0)
-    except Exception:
+    except (ValueError, TypeError):
         return "N/A"
     if minutes <= 0:
         return "0 min"
@@ -131,6 +132,14 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
 
         if row_assumes_owned_t2_bpo(selected_row):
             st.caption(ASSUMES_OWNED_T2_BPO_CAPTION)
+        if region_volume_note(selected_row):
+            st.caption(region_volume_note(selected_row))
+        if hub_price_note(selected_row):
+            st.caption(hub_price_note(selected_row))
+        if hub_liquidity_note(selected_row):
+            st.caption(hub_liquidity_note(selected_row))
+        if relist_note(selected_row):
+            st.caption(relist_note(selected_row))
         for line in invention_summary_lines(selected_row):
             st.caption(line)
 
@@ -199,6 +208,22 @@ def _render_profitability_drilldown(filtered_overview_rows: list[dict[str, Any]]
                 st.dataframe(activity_rows, width="stretch", hide_index=True)
 
 
+#: The product-row columns where an empty cell means "unknown" (the producer
+#: could not price or read it), shown as such; on the other tree rows (the
+#: materials and sub-jobs) these columns may simply not apply and stay blank.
+_UNKNOWN_WHEN_EMPTY_COLUMNS = frozenset({
+    "Material Cost", "Job Cost", "Profit", "Market Unit Price",
+    "Region Daily Volume", "Hub Buy Liquidity", "Hub Sell Liquidity",
+})
+
+
+def _unknown_null_text(col: str) -> dict[str, str]:
+    """The formatter's null_text arguments for `col` (none for the other columns)."""
+    if col not in _UNKNOWN_WHEN_EMPTY_COLUMNS:
+        return {}
+    return {"null_text": "unknown", "null_text_flag_field": "_is_product_row"}
+
+
 def _render_overview_grid(
     *,
     runtime: Any,
@@ -238,6 +263,9 @@ def _render_overview_grid(
         ("Market Price Source", 180),
         ("Region Daily Volume", 150),
         ("Region Daily Volume (7d Avg)", 180),
+        ("Region Volume Note", 260),
+        ("Hub Liquidity Note", 260),
+        ("Price Note", 260),
         ("Hub Buy Liquidity", 150),
         ("Hub Sell Liquidity", 150),
         ("Hub Buy Orders", 135),
@@ -311,7 +339,8 @@ def _render_overview_grid(
             if col == "ID":
                 gb.configure_column(col, hide=True)
 
-    for col in ["_path", "_parent_path", "_depth", "_sort_order", "_has_children", "_total_cost_lower_bound"]:
+    for col in ["_path", "_parent_path", "_depth", "_sort_order", "_has_children", "_total_cost_lower_bound",
+                "_is_product_row"]:
         if col in df.columns:
             gb.configure_column(col, hide=True)
 
@@ -336,6 +365,7 @@ def _render_overview_grid(
                 valueFormatter=js_eu_isk_formatter(
                     JsCode=runtime.js_code, locale=runtime.locale, decimals=2,
                     lower_bound_field=("_total_cost_lower_bound" if col == "Total Cost" else None),
+                    **_unknown_null_text(col),
                 ),
                 minWidth=130,
                 wrapHeaderText=False,
@@ -481,7 +511,8 @@ function(params) {
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0),
+                valueFormatter=js_eu_number_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=0,
+                                                      **_unknown_null_text(col)),
                 minWidth=130,
                 wrapHeaderText=False,
                 autoHeaderHeight=False,
@@ -1222,7 +1253,7 @@ def render() -> None:
         st.rerun()
 
     enabled_meta_groups = {k for k, v in meta_group_selections.items() if v}
-    filtered_overview_rows = filter_overview_rows(
+    filter_args = (
         page_context.overview_rows,
         tuple(sorted(enabled_meta_groups)),
         have_skills,
@@ -1233,6 +1264,9 @@ def render() -> None:
         tuple(sorted(liquidity_exclude)) if liquidity_exclude else (),
         tuple(sorted(anomaly_exclude)) if anomaly_exclude else (),
     )
+    filtered_overview_rows = filter_overview_rows(*filter_args)
+    for hidden_note in unknown_value_hidden_notes(*filter_args):
+        st.info(hidden_note)
 
     if not filtered_overview_rows:
         st.info("No manufacturable product rows match the current filters.")

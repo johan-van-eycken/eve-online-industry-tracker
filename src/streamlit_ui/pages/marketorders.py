@@ -13,6 +13,7 @@ from streamlit_ui.api.market_orders import (
     fetch_corp_market_orders_enriched,
 )
 from streamlit_ui.api.client import api_get
+from streamlit_ui.components.batch_errors import show_batch_errors, show_errors
 from streamlit_ui.components.webpage_ui import AgGridRuntime, aggrid_height, require_aggrid
 
 
@@ -102,11 +103,69 @@ def _has_real_cost(o: dict) -> bool:
     return o.get("cost_basis_source") not in (None, "market_order_fallback")
 
 
+def _order_pricing_issue(order: dict) -> str | None:
+    """Why the order has no advised price or no known price: the backend's
+    pricing_error and/or price_unknown_reason (either may be absent)."""
+    reasons: list[str] = []
+    for key in ("pricing_error", "price_unknown_reason"):
+        reason = order.get(key)
+        if isinstance(reason, str) and reason.strip() and reason.strip() not in reasons:
+            reasons.append(reason.strip())
+    return "; ".join(reasons) or None
+
+
+def _order_history_note(order: dict) -> str | None:
+    """Why the order's market history was not refreshed (the backend's
+    history_unavailable_reason): its advised price then uses the stored
+    history. None when it was refreshed."""
+    reason = order.get("history_unavailable_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return f"market history not refreshed ({reason.strip()}): the advised price uses the stored history"
+
+
+def _isk_total_label(known_total: float, unknown_count: int) -> str:
+    """A sum of ISK amounts that names the amounts that are unknown."""
+    if unknown_count and not known_total:
+        return f"unknown ({unknown_count})"
+    label = format_isk_short(known_total)
+    return f"{label} + {unknown_count} unknown" if unknown_count else label
+
+
+def _with_unknown(label: str | None, unknown_count: int) -> str:
+    """A stat card's value that names the orders it could not include
+    (their price, margin or cost basis unknown): "X + N unknown",
+    "unknown (N)" when none is known, "—" without orders."""
+    if label is None:
+        return f"unknown ({unknown_count})" if unknown_count else "—"
+    return f"{label} + {unknown_count} unknown" if unknown_count else label
+
+
+def _order_price_label(price) -> str:
+    """The order price, or "unknown" when the backend could not read it (never 0)."""
+    return "unknown" if price is None else format_isk_short(price)
+
+
+def _pricing_issues_warning(orders: list[dict]) -> str | None:
+    """One summary line for the orders with a pricing issue, or None."""
+    issues = [
+        f"{order.get('type_name') or order.get('type_id') or 'unknown item'}: {issue}"
+        for order in orders
+        if (issue := _order_pricing_issue(order))
+    ]
+    if not issues:
+        return None
+    return f"{len(issues)} order(s) have no advised or known price: " + "; ".join(issues)
+
+
 # ── Summary stats computation ─────────────────────────────────────────────────
 
 def _compute_sell_stats(orders: list[dict]) -> dict:
     count = len(orders)
-    total_listed = sum(float(o.get("total_price") or 0) for o in orders)
+    # An order whose price is unknown (price_unknown_reason) has total_price
+    # None: it is counted as unknown, not as 0 ISK listed.
+    total_listed = sum(float(o["total_price"]) for o in orders if o.get("total_price") is not None)
+    total_listed_unknown = sum(1 for o in orders if o.get("total_price") is None)
 
     # Est. profit at current price: total_price × net_margin% / 100
     # (net_margin = (net_proceeds - cost) / price × 100, so cost-profit = price × qty × margin/100 = total_price × margin/100)
@@ -157,20 +216,30 @@ def _compute_sell_stats(orders: list[dict]) -> dict:
         and float(o["hub_price"]) < float(o["cost_basis"])
     )
     below_cost_isk = sum(
-        float(o.get("price", 0)) * float(o.get("volume_remain", 0))
+        float(o["price"]) * float(o.get("volume_remain") or 0)
         for o in orders
-        if _has_real_cost(o) and o.get("hub_price") and o.get("cost_basis")
+        # An order with an unknown price (price_unknown_reason) has no listed value to count.
+        if o.get("price") is not None
+        and _has_real_cost(o) and o.get("hub_price") and o.get("cost_basis")
         and float(o["hub_price"]) < float(o["cost_basis"])
     )
 
+    # The orders each estimate leaves out: an unknown price, margin or ISK/day,
+    # or no real cost basis (their profit is unknown, not 0).
     return {
         "count": count,
         "total_listed": total_listed,
+        "total_listed_unknown": total_listed_unknown,
         "est_profit_current": est_profit_current,
+        "est_profit_current_unknown": count - len(profit_cur_parts),
         "est_profit_advised": est_profit_advised,
+        "est_profit_advised_unknown": count - len(profit_adv_parts),
         "total_isk_day_current": total_isk_day_current,
+        "total_isk_day_current_unknown": count - len(isk_day_cur),
         "total_isk_day_advised": total_isk_day_advised,
+        "total_isk_day_advised_unknown": count - len(isk_day_adv),
         "avg_margin_current": avg_margin_current,
+        "avg_margin_current_unknown": count - len(margin_w) if avg_margin_current is not None else count,
         "below_breakeven": below_breakeven,
         "below_cost_count": below_cost_count,
         "below_cost_isk": below_cost_isk,
@@ -191,11 +260,14 @@ def _render_sell_stats_box(stats: dict) -> None:
 
     left_cards = [
         ("Active Orders", str(stats["count"])),
-        ("Total Listed ISK", format_isk_short(stats["total_listed"])),
+        ("Total Listed ISK", _isk_total_label(stats["total_listed"], stats.get("total_listed_unknown", 0))),
         (
             "Avg Margin % (Current)",
-            _colored(f"{stats['avg_margin_current']:.1f}%", color=margin_color)
-            if stats["avg_margin_current"] is not None else "—",
+            _with_unknown(
+                _colored(f"{stats['avg_margin_current']:.1f}%", color=margin_color)
+                if stats["avg_margin_current"] is not None else None,
+                stats.get("avg_margin_current_unknown", 0),
+            ),
         ),
         (
             "Orders at Risk",
@@ -212,23 +284,35 @@ def _render_sell_stats_box(stats: dict) -> None:
     right_cards = [
         (
             "Est. Profit (Current)",
-            _colored(format_isk_short(stats["est_profit_current"]), color=profit_color_cur)
-            if stats["est_profit_current"] is not None else "—",
+            _with_unknown(
+                _colored(format_isk_short(stats["est_profit_current"]), color=profit_color_cur)
+                if stats["est_profit_current"] is not None else None,
+                stats.get("est_profit_current_unknown", 0),
+            ),
         ),
         (
             "Est. Profit (Advised)",
-            _colored(format_isk_short(stats["est_profit_advised"]), color=profit_color_adv)
-            if stats["est_profit_advised"] is not None else "—",
+            _with_unknown(
+                _colored(format_isk_short(stats["est_profit_advised"]), color=profit_color_adv)
+                if stats["est_profit_advised"] is not None else None,
+                stats.get("est_profit_advised_unknown", 0),
+            ),
         ),
         (
             "Est. ISK/day (Current)",
-            format_isk_short(stats["total_isk_day_current"])
-            if stats["total_isk_day_current"] is not None else "—",
+            _with_unknown(
+                format_isk_short(stats["total_isk_day_current"])
+                if stats["total_isk_day_current"] is not None else None,
+                stats.get("total_isk_day_current_unknown", 0),
+            ),
         ),
         (
             "Est. ISK/day (Advised)",
-            format_isk_short(stats["total_isk_day_advised"])
-            if stats["total_isk_day_advised"] is not None else "—",
+            _with_unknown(
+                format_isk_short(stats["total_isk_day_advised"])
+                if stats["total_isk_day_advised"] is not None else None,
+                stats.get("total_isk_day_advised_unknown", 0),
+            ),
         ),
     ]
 
@@ -242,7 +326,10 @@ def _render_sell_stats_box(stats: dict) -> None:
 def _render_buy_stats_box(df: pd.DataFrame) -> None:
     cards = [
         ("Active Buy Orders", str(len(df))),
-        ("Total Buy Value", format_isk_short(df["Total Price"].sum())),
+        ("Total Buy Value", _isk_total_label(
+            float(pd.to_numeric(df["Total Price"], errors="coerce").sum()),
+            int(pd.to_numeric(df["Total Price"], errors="coerce").isna().sum()),
+        )),
         ("Total Escrow", format_isk_short(df["Escrow Remaining"].sum())),
     ]
     _render_stat_card_grid(cards)
@@ -259,9 +346,14 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
             "Owner": order.get("owner", ""),
             "Icon": get_item_image_url(order),
             "Type": order.get("type_name", ""),
+            # None (not 0) when the backend could not read the price
+            # (price_unknown_reason); the Pricing Note says why.
             "Price": order.get("price", 0),
             "Price Status": order.get("price_status") or "N/A",
-            "Price Difference": order.get("price_difference") or 0,
+            "Price Difference": (
+                None if order.get("price") is None or order.get("price_unknown_reason")
+                else (order.get("price_difference") or 0)
+            ),
             "Volume": order.get("volume", 0),
             "Total Price": order.get("total_price", 0),
             "Expires In": order.get("expires_in", ""),
@@ -273,6 +365,12 @@ def _build_order_rows(all_orders: list[dict], *, priority_map: dict | None = Non
             "Range": order.get("range", ""),
         }
 
+        pricing_issue = _order_pricing_issue(order)
+        if pricing_issue:
+            core["Pricing Note"] = pricing_issue
+        history_note = _order_history_note(order)
+        if history_note:
+            core["History Note"] = history_note
         if order.get("is_buy_order"):
             buy_orders.append({**core, "Min. Volume": order.get("min_volume", 0), "Escrow Remaining": order.get("escrow_remaining", 0), **location})
         else:
@@ -333,7 +431,12 @@ def _render_orders_grid(
             gb.configure_column(
                 col,
                 type=["numericColumn", "numberColumnFilter"],
-                valueFormatter=js_eu_isk_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=2),
+                # An order whose price the backend could not read has None
+                # there (price_unknown_reason): shown "unknown", not blank.
+                valueFormatter=js_eu_isk_formatter(
+                    JsCode=runtime.js_code, locale=runtime.locale, decimals=2,
+                    null_text=("unknown" if col in ("Price", "Total Price") else None),
+                ),
                 cellStyle=right,
                 minWidth=160,
             )
@@ -435,6 +538,12 @@ def _render_orders_grid(
 # ── Pricing analysis panel ────────────────────────────────────────────────────
 
 def _render_pricing_analysis(selected_order: dict) -> None:
+    pricing_issue = _order_pricing_issue(selected_order)
+    if pricing_issue:
+        st.warning(f"No advised price for this order: {pricing_issue}.")
+    history_note = _order_history_note(selected_order)
+    if history_note:
+        st.info(f"{history_note[:1].upper()}{history_note[1:]}.")
     if not selected_order.get("pricing_breakdown"):
         st.info("No pricing analysis available for this order yet.")
         return
@@ -442,13 +551,15 @@ def _render_pricing_analysis(selected_order: dict) -> None:
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("Current Price", format_isk_short(selected_order.get("price", 0)))
+        current_price = selected_order.get("price")
+        st.metric("Current Price", _order_price_label(current_price))
         if selected_order.get("advised_price"):
             advised = selected_order.get("advised_price", 0)
             st.metric("Advised Price", format_isk_short(advised))
-            diff = advised - selected_order.get("price", 0)
-            diff_pct = selected_order.get("price_difference_pct") or 0
-            st.metric("Difference", format_isk_short(diff), f"{diff_pct:+.1f}%")
+            if current_price is not None:
+                diff = advised - current_price
+                diff_pct = selected_order.get("price_difference_pct") or 0
+                st.metric("Difference", format_isk_short(diff), f"{diff_pct:+.1f}%")
 
     with col2:
         st.metric("Confidence", selected_order.get("advised_price_confidence", "N/A"))
@@ -627,7 +738,13 @@ def _render_pricing_analysis(selected_order: dict) -> None:
 
 # ── Corp order row builders ───────────────────────────────────────────────────
 
+#: {owner kind: {name: error}} of the last refresh, shown after the rerun it triggers.
+_REFRESH_ERRORS_KEY = "market_orders_refresh_errors"
+
+
 def _render_market_orders(runtime: object, img_renderer: object) -> None:
+    for owner_kind, errors in (st.session_state.pop(_REFRESH_ERRORS_KEY, None) or {}).items():
+        show_errors(errors, f"Refresh: {owner_kind}")
     all_orders = []
     try:
         response = fetch_market_orders()
@@ -635,10 +752,13 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
     except Exception as e:
         st.error(f"Error fetching market orders: {str(e)}")
         return
+    show_batch_errors(response, "Character")
 
-    # Merge corp orders from the ESI corporation endpoint (adds orders placed by other characters)
+    # Merge corp orders from the ESI corporation endpoint (adds orders placed by other characters).
+    # Read once per run: the refresh below reuses it (one warning when it fails).
+    director_corp_ids = _get_director_corp_ids()
     char_order_ids: set[int] = {int(o["order_id"]) for o in all_orders if o.get("order_id") is not None}
-    for corp_id in _get_director_corp_ids():
+    for corp_id in director_corp_ids:
         try:
             corp_orders = fetch_corp_market_orders_enriched(corp_id)
             for o in corp_orders:
@@ -646,8 +766,8 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
                 if oid is not None and int(oid) not in char_order_ids:
                     all_orders.append(o)
                     char_order_ids.add(int(oid))
-        except Exception:
-            pass
+        except Exception as e:
+            st.error(f"Error fetching corporation {corp_id} market orders: {str(e)}")
 
     # Build Relist Priority map: (type_name, price, station) → "High" / "Medium" / "Low" / ""
     sell_raw_all = [o for o in all_orders if not o.get("is_buy_order")]
@@ -677,15 +797,18 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
             st.write("<br>", unsafe_allow_html=True)
             if st.button("Refresh Market Orders"):
                 with st.spinner("Refreshing market orders..."):
+                    refresh_errors: dict[str, dict[str, str]] = {"Character": {}, "Corporation": {}}
                     try:
-                        refresh_market_orders()
+                        refresh_errors["Character"].update(refresh_market_orders() or {})
                     except Exception as e:
                         st.error(f"Refresh failed: {str(e)}")
-                    for corp_id in _get_director_corp_ids():
+                    for corp_id in director_corp_ids:
                         try:
-                            refresh_corp_market_orders(corp_id)
+                            refresh_errors["Corporation"].update(refresh_corp_market_orders(corp_id) or {})
                         except Exception as e:
                             st.error(f"Corp refresh failed: {str(e)}")
+                    # Partial failures: named after the rerun below.
+                    st.session_state[_REFRESH_ERRORS_KEY] = {k: v for k, v in refresh_errors.items() if v}
                 clear_market_orders_cache()
                 clear_corp_market_orders_cache()
                 _rerun()
@@ -693,6 +816,9 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
             st.write("")
 
         st.subheader("Selling")
+        pricing_warning = _pricing_issues_warning([o for o in all_orders if not o.get("is_buy_order")])
+        if pricing_warning:
+            st.warning(pricing_warning)
 
         sell_raw_filtered = [
             o for o in all_orders
@@ -714,6 +840,9 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
 
     if buy_orders:
         st.subheader("Buying")
+        buy_pricing_warning = _pricing_issues_warning([o for o in all_orders if o.get("is_buy_order")])
+        if buy_pricing_warning:
+            st.warning(buy_pricing_warning)
         df_buy = pd.DataFrame(buy_orders)
         df_buy = df_buy.reset_index(drop=True).sort_values(by=["Type", "Price"], ascending=[True, False])
         if selected_owner != "All":
@@ -733,7 +862,7 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
         full_sell_orders = [o for o in all_orders if not o.get("is_buy_order")]
         if full_sell_orders:
             order_options = [
-                f"{o.get('type_name', 'Unknown')} @ {o.get('station', 'Unknown')} - {format_isk_short(o.get('price', 0))}/unit"
+                f"{o.get('type_name', 'Unknown')} @ {o.get('station', 'Unknown')} - {_order_price_label(o.get('price'))}/unit"
                 for o in full_sell_orders
             ]
             selected_idx = st.selectbox(
@@ -745,8 +874,14 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
 
 
 def _get_director_corp_ids() -> list[int]:
-    from streamlit_ui.api.corporations import fetch_director_corporations
-    return [int(c["corporation_id"]) for c in fetch_director_corporations()]
+    from streamlit_ui.api import corporations
+
+    try:
+        corps = corporations.fetch_director_corporations()
+    except RuntimeError as exc:
+        st.warning(f"Corporation market orders are not shown: {exc}")
+        return []
+    return [int(c["corporation_id"]) for c in corps]
 
 
 

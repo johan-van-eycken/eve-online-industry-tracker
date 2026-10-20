@@ -24,7 +24,7 @@ def import_aggrid() -> AgGridImports:
 
     try:
         from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode, JsCode  # type: ignore
-    except Exception:  # pragma: no cover
+    except ImportError:  # pragma: no cover
         return AgGridImports(
             AgGrid=None,
             GridOptionsBuilder=None,

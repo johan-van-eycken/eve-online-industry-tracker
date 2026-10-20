@@ -20,12 +20,28 @@ blueprint). ChainPlanner claims in this order:
 
 An asset without an item_id (a hand-built fixture) is keyed by its type
 and position, so two such assets of one type stay two blueprints.
+
+A pilot's own blueprint (Task A item 1, a character asset) is booked like a
+corp one but bound to its owner (owner_of): only that pilot can install a
+job from it, which CharacterAssigner enforces. Sub-builds use corp BPOs only.
 """
 from __future__ import annotations
 
 from typing import Any, Hashable
 
 from eve_online_industry_tracker.application.daily_planner import research_first
+
+
+def owner_character_id(asset: Any) -> int | None:
+    """The pilot a blueprint belongs to (a character asset carries its
+    character_id), or None for a corp blueprint (Task A item 1). Only that
+    pilot can install a job from a character's blueprint."""
+    value = asset.get("character_id") if isinstance(asset, dict) else getattr(asset, "character_id", None)
+    try:
+        owner = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return owner if owner > 0 else None
 
 
 def _runs(asset: Any) -> int:
@@ -40,14 +56,21 @@ class BlueprintLedger:
     """The free BPOs and BPCs of one plan, and who has claimed each."""
 
     def __init__(self, bpo_assets_by_type_id: dict[int, list], bpc_assets_by_type_id: dict[int, list]) -> None:
-        self._bpos: dict[int, list[tuple[Hashable, Any]]] = {
-            int(t): [(self._key(a, "bpo", t, i), a) for i, a in enumerate(assets or [])]
-            for t, assets in (bpo_assets_by_type_id or {}).items()
-        }
-        self._bpcs: dict[int, list[tuple[Hashable, Any]]] = {
-            int(t): [(self._key(a, "bpc", t, i), a) for i, a in enumerate(assets or [])]
-            for t, assets in (bpc_assets_by_type_id or {}).items()
-        }
+        # One entry per key (Task A fix round 1, I1): an item listed twice (a
+        # stale corp + pilot snapshot) is one blueprint, the pilot's
+        # (owner-bound) entry wins. {key: (kind, type_id, asset)}.
+        self._index: dict[Hashable, tuple[str, int, Any]] = {}
+        for kind, source in (("bpo", bpo_assets_by_type_id), ("bpc", bpc_assets_by_type_id)):
+            for t, assets in (source or {}).items():
+                for i, asset in enumerate(assets or []):
+                    key = self._key(asset, kind, t, i)
+                    held = self._index.get(key)
+                    if held is None or (owner_character_id(held[2]) is None and owner_character_id(asset) is not None):
+                        self._index[key] = (kind, int(t), asset)
+        self._bpos: dict[int, list[tuple[Hashable, Any]]] = {}
+        self._bpcs: dict[int, list[tuple[Hashable, Any]]] = {}
+        for key, (kind, t, asset) in self._index.items():
+            (self._bpos if kind == "bpo" else self._bpcs).setdefault(t, []).append((key, asset))
         #: {key: (owner type_id, label)}; the label names the job, for reasons.
         self._claims: dict[Hashable, tuple[int, str]] = {}
 
@@ -71,6 +94,11 @@ class BlueprintLedger:
             keys.append(pool.pop(index)[0])
         return keys
 
+    def owner_of(self, key: Hashable) -> int | None:
+        """The pilot who owns this blueprint (owner-bound), or None (corp)."""
+        entry = self._index.get(key)
+        return owner_character_id(entry[2]) if entry is not None else None
+
     def claim_of(self, key: Hashable) -> tuple[int, str] | None:
         return self._claims.get(key)
 
@@ -80,6 +108,11 @@ class BlueprintLedger:
     def free_bpos(self, type_id: int) -> list[tuple[Hashable, Any]]:
         """This type's BPOs no one has claimed, in asset order."""
         return [(k, a) for k, a in self._bpos.get(int(type_id)) or [] if k not in self._claims]
+
+    def free_bpos_to_copy(self, type_id: int) -> list[tuple[Hashable, Any]]:
+        """free_bpos, the corp's first (any pilot can copy one), then the
+        pilots' own (only the owner can), each in asset order."""
+        return sorted(self.free_bpos(type_id), key=lambda e: owner_character_id(e[1]) is not None)
 
     def bpo_claim_labels(self, type_id: int) -> list[str]:
         """Who holds this type's BPOs, first claim first (for reasons)."""
@@ -129,6 +162,20 @@ class BlueprintLedger:
         held = self._claims.get(key)
         if held is not None and held[0] == int(owner_type_id):
             del self._claims[key]
+
+    def transfer(self, key: Hashable, owner_type_id: int, label: str) -> None:
+        """Book `key` for `owner_type_id`, whoever held it: the assigner
+        gave a released blueprint to that row's job (Task A items 2-3)."""
+        self._claims[key] = (int(owner_type_id), label)
+
+    def claims_of(self, owner_type_id: int) -> list[tuple[Hashable, str]]:
+        """(key, label) of every claim `owner_type_id` holds, in claim order."""
+        return [(k, c[1]) for k, c in self._claims.items() if c[0] == int(owner_type_id)]
+
+    def type_of(self, key: Hashable) -> tuple[str, int] | None:
+        """("bpo" | "bpc", blueprint type_id) of a ledger key, or None."""
+        entry = self._index.get(key)
+        return (entry[0], entry[1]) if entry is not None else None
 
     def claim_bpcs_of_row(self, type_id: int, item_ids: set[int] | None, owner_type_id: int, label: str) -> None:
         """Book the BPCs a manufacture builds on: the named items, or every

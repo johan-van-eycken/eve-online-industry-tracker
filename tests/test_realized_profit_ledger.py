@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,6 +32,15 @@ from eve_online_industry_tracker.application.characters.realized_profit import (
 )
 
 
+# The fee estimates come from the stored skills and standings with the admin settings
+# (tests/test_realized_profit_fees_at_use.py): Accounting 5 gives 7.5% x 0.45 = 3.375% sales tax,
+# Broker Relations 5 and standings 10/10 the 1% floor broker fee. The stored rates are not read.
+_MARKET_FEES = json.dumps({"jita_4_4": {
+    "skills": {"accounting_level": 5, "broker_relations_level": 5},
+    "standings": {"faction_standing": 10.0, "corp_standing": 10.0},
+    "rates": {"sales_tax_fraction": 0.5, "broker_fee_fraction": 0.5}}})
+
+
 def _make_sessions() -> tuple[Session, Session]:
     app_engine = create_engine("sqlite:///:memory:")
     sde_engine = create_engine("sqlite:///:memory:")
@@ -45,7 +56,7 @@ def test_realized_profit_ledger_builds_from_completed_industry_jobs() -> None:
         CharacterModel(
             character_id=1,
             character_name="Test Character",
-            market_fees='{"jita_4_4": {"rates": {"sales_tax_fraction": 0.02, "broker_fee_fraction": 0.01}}}',
+            market_fees=_MARKET_FEES,
         )
     )
 
@@ -141,7 +152,7 @@ def test_realized_profit_ledger_prefers_persisted_job_cost_snapshot() -> None:
         CharacterModel(
             character_id=1,
             character_name="Snapshot Character",
-            market_fees='{"jita_4_4": {"rates": {"sales_tax_fraction": 0.02, "broker_fee_fraction": 0.01}}}',
+            market_fees=_MARKET_FEES,
         )
     )
 
@@ -324,7 +335,9 @@ def test_realized_profit_ledger_marks_unpriced_sales_low_confidence() -> None:
     assert row["priced_quantity"] == 0
     assert row["unpriced_quantity"] == 5
     assert row["confidence"] == "Low"
-    assert row["realized_profit"] == 250.0
+    # No stored market fees: the highest (untrained) fees are assumed, 7.5% + 3% of 250.
+    assert row["fee_capture_mode"] == "assumed_market_fees"
+    assert row["realized_profit"] == pytest.approx(250.0 - 18.75 - 7.5)
     assert row["realized_margin_fraction"] == 1.0
     assert row["source_mix"]["untracked_inventory"]["quantity"] == 5
     assert any("could not be matched" in note.lower() for note in row["notes"])
@@ -337,7 +350,7 @@ def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_c
         CharacterModel(
             character_id=1,
             character_name="Opening Inventory Character",
-            market_fees='{"jita_4_4": {"rates": {"sales_tax_fraction": 0.02, "broker_fee_fraction": 0.01}}}',
+            market_fees=_MARKET_FEES,
         )
     )
 
@@ -488,7 +501,7 @@ def test_character_realized_profit_estimates_market_fees_without_journal() -> No
         CharacterModel(
             character_id=1,
             character_name="Trader",
-            market_fees='{"jita_4_4": {"rates": {"sales_tax_fraction": 0.02, "broker_fee_fraction": 0.01}}}',
+            market_fees=_MARKET_FEES,
         )
     )
     app_session.add(
@@ -521,10 +534,10 @@ def test_character_realized_profit_estimates_market_fees_without_journal() -> No
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["sales_tax_amount"] == 4.0
-    assert row["other_fees_amount"] == 2.0
-    assert row["net_revenue"] == 194.0
-    assert row["realized_profit"] == 194.0
+    assert row["sales_tax_amount"] == pytest.approx(6.75)
+    assert row["other_fees_amount"] == pytest.approx(2.0)
+    assert row["net_revenue"] == pytest.approx(191.25)
+    assert row["realized_profit"] == pytest.approx(191.25)
     assert row["fee_capture_mode"] == "estimated_market_fees"
 
 

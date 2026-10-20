@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, cast
@@ -39,6 +40,7 @@ from streamlit_ui.state.session_state import ensure_valid_state_value, ensure_st
 from streamlit_ui.state.industry_builder_ui import get_meta_group_name, meta_group_label, meta_group_toggle_key, ordered_meta_group_names
 from streamlit_ui.components.webpage_ui import render_job_status_panel
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SharedIndustrySnapshotContext:
@@ -86,7 +88,7 @@ def _parse_iso_timestamp(value: Any) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -420,7 +422,7 @@ def render_job_manager_status(job_manager_status: dict[str, Any]) -> None:
 def _format_age_minutes(value: Any) -> str:
     try:
         minutes = float(value or 0.0)
-    except Exception:
+    except (ValueError, TypeError):
         return "N/A"
     if minutes <= 0:
         return "just now"
@@ -439,7 +441,7 @@ def _format_iso_timestamp(iso_timestamp: Any) -> str:
             local_dt = dt.astimezone()
             return local_dt.strftime("%Y-%m-%d %H:%M:%S")
         return str(iso_timestamp)
-    except Exception:
+    except (ValueError, OverflowError, OSError):
         return str(iso_timestamp)
 
 
@@ -539,18 +541,28 @@ def render_pricing_batch_panel(pricing_batch: dict[str, Any], job_manager_status
             st.caption(f"Oldest market history: {_format_age_minutes(pricing_batch.get('oldest_market_history_age_minutes'))}")
 
 
-@st.fragment(run_every=1)
-def _refresh_status_fragment() -> None:
-    if not overview_refresh_is_active():
-        st.rerun()
-        return
+def _poll_overview_refresh_safely() -> None:
+    """One poll of the overview refresh job. A failed status read
+    (RuntimeError) or a malformed status (a non-numeric progress: ValueError,
+    TypeError) ends the job with the reason, instead of failing every poll."""
     try:
         poll_overview_refresh_job(
             fetch_status_fn=fetch_product_overview_refresh_status,
             fetch_job_manager_status_fn=fetch_job_manager_status,
         )
-    except Exception as exc:
+    except RuntimeError as exc:
         clear_overview_refresh_job(error_message=str(exc))
+    except (ValueError, TypeError) as exc:
+        logger.warning("Industry builder: malformed overview refresh status: %s", exc)
+        clear_overview_refresh_job(error_message=f"The overview refresh status was malformed ({exc}).")
+
+
+@st.fragment(run_every=1)
+def _refresh_status_fragment() -> None:
+    if not overview_refresh_is_active():
+        st.rerun()
+        return
+    _poll_overview_refresh_safely()
     if overview_refresh_is_active():
         render_refresh_in_progress(overview_refresh_view())
     else:
@@ -770,7 +782,7 @@ def prepare_shared_industry_snapshot_page(
         if bool(_char.get("is_main")):
             try:
                 _corp_id = int(_char.get("corporation_id") or 0)
-            except Exception:
+            except (ValueError, TypeError):
                 _corp_id = 0
             if _corp_id > 0:
                 _candidate = f"corporation:{_corp_id}"

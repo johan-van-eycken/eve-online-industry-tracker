@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import logging
 import statistics
 import time
 import threading
 from typing import Any, Callable
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from config.schemas import CONFIG_SCHEMA
+from eve_online_industry_tracker.application.errors import ServiceError
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
+from eve_online_industry_tracker.application.market_pricing.order_values import readable_int, readable_number
 from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo as market_orderbook_cache_repo
 from eve_online_industry_tracker.infrastructure.session_provider import SessionProvider, StateSessionProvider
 
@@ -21,7 +28,6 @@ class MarketPricingService:
         "hek": {"label": "Hek VIII - Moon 12", "region_id": 10000042, "station_id": 60005686},
     }
 
-    _REGION_VOLUME_CACHE_TTL_SECONDS = 6 * 3600
     _region_volume_cache_lock = threading.Lock()
     _region_volume_cache: dict[str, tuple[float, dict[int, dict[str, Any]]]] = {}
 
@@ -31,67 +37,85 @@ class MarketPricingService:
 
     @property
     def _region_volume_ttl(self) -> int:
-        admin = getattr(self._state, "admin_settings", None)
-        return int(admin.get("cache_ttl", "region_volume_cache_ttl_seconds")) if admin else self._REGION_VOLUME_CACHE_TTL_SECONDS
+        return int(self._admin_value("cache_ttl", "region_volume_cache_ttl_seconds"))
 
     @classmethod
     def normalize_market_hub(cls, hub: str | None) -> str:
+        """The hub key; jita when none is given. An unknown hub is refused (a
+        400 naming it), never priced as Jita."""
         normalized = str(hub or "").strip().lower()
-        return normalized if normalized in cls._MARKET_HUBS else "jita"
+        if not normalized:
+            return "jita"
+        if normalized not in cls._MARKET_HUBS:
+            raise ServiceError(
+                f"unknown market hub {normalized!r} (known: {', '.join(sorted(cls._MARKET_HUBS))})", status_code=400,
+            )
+        return normalized
 
     @staticmethod
     def normalize_order_side(side: str | None) -> str:
+        """buy or sell; sell when none is given. An unknown side is refused (a
+        400 naming it), never priced as sell."""
         normalized = str(side or "").strip().lower()
-        return normalized if normalized in {"buy", "sell"} else "sell"
+        if not normalized:
+            return "sell"
+        if normalized not in {"buy", "sell"}:
+            raise ServiceError(f"unknown order side {normalized!r} (known: buy, sell)", status_code=400)
+        return normalized
 
     def _market_hub_context(self, hub: str | None) -> dict[str, Any]:
         normalized_hub = self.normalize_market_hub(hub)
-        configured = dict(self._MARKET_HUBS.get(normalized_hub) or {})
-
-        esi_service = getattr(self._state, "esi_service", None)
-        admin = getattr(self._state, "admin_settings", None)
-        fallback_region = int(admin.get("market_defaults", "default_region_id")) if admin else 10000002
-        fallback_station = int(admin.get("market_defaults", "default_station_id")) if admin else 60003760
-        default_region_id = int(getattr(esi_service, "_region_id", fallback_region) or fallback_region)
-        default_station_id = int(getattr(esi_service, "_station_id", fallback_station) or fallback_station)
+        # Every hub has its region and station (the removed market_defaults/default_region_id and
+        # default_station_id never applied).
+        configured = self._MARKET_HUBS[normalized_hub]
 
         return {
             "hub": normalized_hub,
             "label": str(configured.get("label") or normalized_hub.title()),
-            "region_id": int(configured.get("region_id") or default_region_id),
-            "station_id": int(configured.get("station_id") or default_station_id),
+            "region_id": int(configured["region_id"]),
+            "station_id": int(configured["station_id"]),
         }
 
     def _market_pricing_cfg(self) -> dict[str, Any]:
         cfg_manager = getattr(self._state, "cfg_manager", None)
         if cfg_manager is None:
             return {}
-        try:
-            cfg = cfg_manager.all() or {}
-        except Exception:
-            return {}
+        cfg = cfg_manager.all() or {}
         market_pricing_cfg = ((cfg.get("defaults") or {}).get("market_pricing") or {})
         return market_pricing_cfg if isinstance(market_pricing_cfg, dict) else {}
 
+    def _admin_value(self, category: str, key: str) -> Any:
+        """An admin setting at each use; the schema default without a settings store."""
+        admin = getattr(self._state, "admin_settings", None)
+        if admin is None:
+            return ADMIN_SETTINGS_SCHEMA[category]["settings"][key]["default"]
+        return admin.get(category, key)
+
     def orderbook_depth(self) -> int:
-        raw_value = self._market_pricing_cfg().get("orderbook_depth", 5)
-        try:
-            return max(1, int(raw_value))
-        except Exception:
-            return 5
+        """market_defaults/orderbook_depth (formerly config.json market_pricing.orderbook_depth)."""
+        return int(self._admin_value("market_defaults", "orderbook_depth"))
+
+    _ORDERBOOK_SMOOTHINGS = frozenset({"mean_best_n", "median_best_n", "volume_weighted_mean_best_n"})
 
     def orderbook_smoothing(self) -> str:
-        raw_value = str(self._market_pricing_cfg().get("orderbook_smoothing") or "volume_weighted_mean_best_n").strip().lower()
-        if raw_value not in {"mean_best_n", "median_best_n", "volume_weighted_mean_best_n"}:
-            return "volume_weighted_mean_best_n"
+        """config defaults.market_pricing.orderbook_smoothing; the config
+        schema's default when it is not set. An invalid value is refused
+        (ValueError naming it), never silently replaced."""
+        raw = self._market_pricing_cfg().get("orderbook_smoothing")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return str(CONFIG_SCHEMA["defaults"]["market_pricing"]["orderbook_smoothing"])
+        raw_value = str(raw).strip().lower()
+        if raw_value not in self._ORDERBOOK_SMOOTHINGS:
+            raise ValueError(
+                f"config defaults.market_pricing.orderbook_smoothing={raw!r} is not one of "
+                f"{', '.join(sorted(self._ORDERBOOK_SMOOTHINGS))}"
+            )
         return raw_value
 
     def material_price_cache_ttl_seconds(self) -> int:
-        raw_value = self._market_pricing_cfg().get("material_price_cache_ttl_seconds", 3600)
-        try:
-            return max(60, int(raw_value))
-        except Exception:
-            return 3600
+        """cache_ttl/material_price_cache_ttl_seconds (formerly config.json
+        market_pricing.material_price_cache_ttl_seconds)."""
+        return int(self._admin_value("cache_ttl", "material_price_cache_ttl_seconds"))
 
     def _fetch_order_book(
         self,
@@ -109,6 +133,30 @@ class MarketPricingService:
             return esi_service.get_buy_order_book(type_ids, region_id=region_id)
         return esi_service.get_sell_order_book(type_ids, region_id=region_id)
 
+    def _order_book_unavailable_reasons(
+        self, *, type_ids: list[int], region_id: int, side: str, books: dict[int, Any] | None,
+    ) -> dict[int, str]:
+        """{type: why its `side` order-book fetch failed} for the requested
+        types left out of `books` with a reason (ESIService leaves a failed
+        type out; a type with no orders is left out without one). A failed
+        type's price and liquidity are unknown, not an empty book."""
+        reader = getattr(getattr(self._state, "esi_service", None), "order_book_unavailable_reason", None)
+        if reader is None:
+            return {}
+        out: dict[int, str] = {}
+        for type_id in type_ids:
+            if int(type_id) in (books or {}):
+                continue
+            reason = reader(int(type_id), side=side, region_id=region_id)
+            if reason:
+                out[int(type_id)] = str(reason)
+        if out:
+            logging.warning(
+                "Market order book (%s, region %s): the fetch of %d type(s) failed, their price and liquidity are "
+                "unknown: %s", side, region_id, len(out), sorted(out)[:20],
+            )
+        return out
+
     def _build_cached_views(
         self,
         *,
@@ -117,27 +165,43 @@ class MarketPricingService:
         side: str,
     ) -> dict[int, list[tuple[float, int]]]:
         normalized_side = self.normalize_order_side(side)
+        depth = self.orderbook_depth()
         out: dict[int, list[tuple[float, int]]] = {}
+        skipped = 0
+        skipped_type_ids: set[int] = set()
         for type_id, rows in (order_books or {}).items():
-            filtered_rows = [
-                row for row in (rows or []) if isinstance(row, dict) and int(row.get("location_id") or 0) == int(station_id)
-            ]
-            filtered_rows.sort(
-                key=lambda row: float(row.get("price") or 0.0),
-                reverse=normalized_side == "buy",
+            # Read every row at the station first: an unreadable one is skipped (counted),
+            # so it neither breaks the sort nor takes one of the `depth` levels.
+            readable: list[tuple[float, int]] = []
+            for row in rows or []:
+                location_id = readable_int(row.get("location_id")) if isinstance(row, dict) else None
+                if location_id is None:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
+                    continue
+                if location_id != int(station_id):
+                    continue
+                price = readable_number(row.get("price"))
+                volume = readable_int(row.get("volume_remain"))
+                if price is None or volume is None or price <= 0:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
+                    continue
+                if volume <= 0:
+                    continue  # a filled order: nothing left to buy or sell
+                readable.append((price, volume))
+            readable.sort(key=lambda level: level[0], reverse=normalized_side == "buy")
+            out[int(type_id)] = readable[:depth]
+        if skipped:
+            logging.warning(
+                "Market order book (%s, station %s): skipped %d unreadable row(s) (no readable location, "
+                "price or volume) of %d type(s): %s",
+                normalized_side,
+                station_id,
+                skipped,
+                len(skipped_type_ids),
+                sorted(skipped_type_ids)[:20],
             )
-
-            levels: list[tuple[float, int]] = []
-            for row in filtered_rows[: self.orderbook_depth()]:
-                try:
-                    price = float(row.get("price") or 0.0)
-                    volume = int(row.get("volume_remain") or 0)
-                except Exception:
-                    continue
-                if price <= 0 or volume <= 0:
-                    continue
-                levels.append((price, volume))
-            out[int(type_id)] = levels
         return out
 
     def _build_liquidity_summaries(
@@ -147,17 +211,23 @@ class MarketPricingService:
         station_id: int,
     ) -> dict[int, dict[str, int]]:
         out: dict[int, dict[str, int]] = {}
+        skipped = 0
+        skipped_type_ids: set[int] = set()
         for type_id, rows in (order_books or {}).items():
             total_volume = 0
             order_count = 0
             for row in rows or []:
-                if not isinstance(row, dict):
+                location_id = readable_int(row.get("location_id")) if isinstance(row, dict) else None
+                if location_id is None:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
                     continue
-                if int(row.get("location_id") or 0) != int(station_id):
+                if location_id != int(station_id):
                     continue
-                try:
-                    volume = int(row.get("volume_remain") or 0)
-                except Exception:
+                volume = readable_int(row.get("volume_remain"))
+                if volume is None:
+                    skipped += 1
+                    skipped_type_ids.add(int(type_id))
                     continue
                 if volume <= 0:
                     continue
@@ -167,19 +237,35 @@ class MarketPricingService:
                 "total_volume": int(total_volume),
                 "order_count": int(order_count),
             }
+        if skipped:
+            logging.warning(
+                "Market liquidity (station %s): skipped %d unreadable order book row(s) (no readable "
+                "location or volume) of %d type(s): %s",
+                station_id,
+                skipped,
+                len(skipped_type_ids),
+                sorted(skipped_type_ids)[:20],
+            )
         return out
 
     def _summarize_levels(self, levels: list[list[float | int]]) -> dict[str, Any]:
         prices: list[float] = []
         volumes: list[int] = []
+        skipped = 0
         for level in levels[: self.orderbook_depth()]:
-            if not isinstance(level, list) or len(level) < 2:
+            price = readable_number(level[0]) if isinstance(level, (list, tuple)) and len(level) >= 2 else None
+            volume = readable_int(level[1]) if price is not None else None
+            if price is None or volume is None:
+                skipped += 1
                 continue
-            try:
-                prices.append(float(level[0]))
-                volumes.append(int(level[1]))
-            except Exception:
-                continue
+            prices.append(price)
+            volumes.append(volume)
+        if skipped:
+            logging.warning(
+                "Market price levels: skipped %d unreadable price level(s) of %d (no readable price or volume)",
+                skipped,
+                len(levels[: self.orderbook_depth()]),
+            )
 
         if not prices:
             return {
@@ -226,10 +312,10 @@ class MarketPricingService:
             return {}
 
         hub_context = self._market_hub_context(hub)
-        normalized_hub = str(hub_context.get("hub") or "jita")
+        normalized_hub = str(hub_context["hub"])
         normalized_side = self.normalize_order_side(side)
-        region_id = int(hub_context.get("region_id") or 10000002)
-        station_id = int(hub_context.get("station_id") or 60003760)
+        region_id = int(hub_context["region_id"])
+        station_id = int(hub_context["station_id"])
         ttl_seconds = self.material_price_cache_ttl_seconds()
         depth = self.orderbook_depth()
         result: dict[int, dict[str, Any]] = {}
@@ -255,7 +341,8 @@ class MarketPricingService:
                 if cached_levels is None:
                     continue
                 result[int(type_id)] = {
-                    **self._summarize_levels([[float(price), int(volume)] for price, volume in cached_levels[:depth]]),
+                    **self._summarize_levels([list(level) if isinstance(level, (list, tuple)) else level
+                                              for level in cached_levels[:depth]]),
                     "cached": True,
                     "fetched_at": cached_view.get("fetched_at") if isinstance(cached_view, dict) else None,
                     "hub": normalized_hub,
@@ -263,6 +350,7 @@ class MarketPricingService:
                     "side": normalized_side,
                     "region_id": region_id,
                     "station_id": station_id,
+                    "price_unavailable_reason": None,
                 }
                 result[int(type_id)]["price_source"] = (
                     f"market_{normalized_hub}_{normalized_side}:{self.orderbook_smoothing()}:{self.orderbook_depth()}"
@@ -289,6 +377,10 @@ class MarketPricingService:
                     order_books=fetched_books,
                     station_id=station_id,
                 )
+                # A failed fetch is not in the book, so it is not cached either.
+                unavailable = self._order_book_unavailable_reasons(
+                    type_ids=missing_ids, region_id=region_id, side=normalized_side, books=fetched_books,
+                )
                 now = time.time()
                 market_orderbook_cache_repo.upsert_views(
                     app_session,
@@ -306,7 +398,7 @@ class MarketPricingService:
                 for index, type_id in enumerate(missing_ids, start=1):
                     fetched_levels = views_by_type_id.get(int(type_id), [])
                     result[int(type_id)] = {
-                        **self._summarize_levels([[float(price), int(volume)] for price, volume in fetched_levels[:depth]]),
+                        **self._summarize_levels([list(level) for level in fetched_levels[:depth]]),
                         "cached": False,
                         "fetched_at": now,
                         "hub": normalized_hub,
@@ -314,7 +406,11 @@ class MarketPricingService:
                         "side": normalized_side,
                         "region_id": region_id,
                         "station_id": station_id,
+                        "price_unavailable_reason": unavailable.get(int(type_id)),
                     }
+                    if int(type_id) in unavailable:
+                        # The fetch failed: the price is unknown, not an empty book's.
+                        result[int(type_id)]["unit_price"] = None
                     result[int(type_id)]["price_source"] = (
                         f"market_{normalized_hub}_{normalized_side}:{self.orderbook_smoothing()}:{self.orderbook_depth()}"
                     )
@@ -329,7 +425,7 @@ class MarketPricingService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         return result
@@ -349,9 +445,9 @@ class MarketPricingService:
             return {}
 
         hub_context = self._market_hub_context(hub)
-        normalized_hub = str(hub_context.get("hub") or "jita")
-        region_id = int(hub_context.get("region_id") or 10000002)
-        station_id = int(hub_context.get("station_id") or 60003760)
+        normalized_hub = str(hub_context["hub"])
+        region_id = int(hub_context["region_id"])
+        station_id = int(hub_context["station_id"])
         ttl_seconds = self.material_price_cache_ttl_seconds()
 
         app_session = self._sessions.app_session()
@@ -379,6 +475,8 @@ class MarketPricingService:
 
             missing_sell_ids = [type_id for type_id in normalized_type_ids if int(type_id) not in cached_sell_summary]
             missing_buy_ids = [type_id for type_id in normalized_type_ids if int(type_id) not in cached_buy_summary]
+            #: {side: {type: why its fetch failed}}: unknown liquidity, not 0 units.
+            unavailable: dict[str, dict[int, str]] = {"sell": {}, "buy": {}}
 
             if missing_sell_ids:
                 sell_books = self._fetch_order_book(type_ids=missing_sell_ids, region_id=region_id, side="sell")
@@ -386,6 +484,9 @@ class MarketPricingService:
                     progress_callback(0.5, f"Fetched {normalized_hub.title()} sell liquidity", {"type_count": len(missing_sell_ids)})
                 sell_views = self._build_cached_views(order_books=sell_books, station_id=station_id, side="sell")
                 sell_summary = self._build_liquidity_summaries(order_books=sell_books, station_id=station_id)
+                unavailable["sell"] = self._order_book_unavailable_reasons(
+                    type_ids=missing_sell_ids, region_id=region_id, side="sell", books=sell_books,
+                )
                 market_orderbook_cache_repo.upsert_views(
                     app_session,
                     hub=normalized_hub,
@@ -405,6 +506,9 @@ class MarketPricingService:
                     progress_callback(1.0, f"Fetched {normalized_hub.title()} buy liquidity", {"type_count": len(missing_buy_ids)})
                 buy_views = self._build_cached_views(order_books=buy_books, station_id=station_id, side="buy")
                 buy_summary = self._build_liquidity_summaries(order_books=buy_books, station_id=station_id)
+                unavailable["buy"] = self._order_book_unavailable_reasons(
+                    type_ids=missing_buy_ids, region_id=region_id, side="buy", books=buy_books,
+                )
                 market_orderbook_cache_repo.upsert_views(
                     app_session,
                     hub=normalized_hub,
@@ -422,22 +526,27 @@ class MarketPricingService:
         finally:
             try:
                 app_session.close()
-            except Exception:
+            except SQLAlchemyError:
                 pass
 
         result: dict[int, dict[str, Any]] = {}
         for type_id in normalized_type_ids:
             sell_metrics = cached_sell_summary.get(int(type_id)) or {}
             buy_metrics = cached_buy_summary.get(int(type_id)) or {}
+            sell_failed = unavailable["sell"].get(int(type_id))
+            buy_failed = unavailable["buy"].get(int(type_id))
+            reasons = [f"{side}: {why}" for side, why in (("sell", sell_failed), ("buy", buy_failed)) if why]
             result[int(type_id)] = {
                 "hub": normalized_hub,
                 "hub_label": str(hub_context.get("label") or normalized_hub.title()),
                 "region_id": region_id,
                 "station_id": station_id,
-                "sell_volume_total": int(sell_metrics.get("total_volume") or 0),
-                "sell_order_count": int(sell_metrics.get("order_count") or 0),
-                "buy_volume_total": int(buy_metrics.get("total_volume") or 0),
-                "buy_order_count": int(buy_metrics.get("order_count") or 0),
+                # A failed side is unknown (None), not an empty book's 0.
+                "sell_volume_total": None if sell_failed else int(sell_metrics.get("total_volume") or 0),
+                "sell_order_count": None if sell_failed else int(sell_metrics.get("order_count") or 0),
+                "buy_volume_total": None if buy_failed else int(buy_metrics.get("total_volume") or 0),
+                "buy_order_count": None if buy_failed else int(buy_metrics.get("order_count") or 0),
+                "liquidity_unavailable_reason": "; ".join(reasons) or None,
             }
 
         return result
@@ -448,18 +557,30 @@ class MarketPricingService:
         type_ids: list[int],
         hub: str = "jita",
         progress_callback: ProgressCallback | None = None,
+        unavailable: dict[int, str] | None = None,
     ) -> dict[int, dict[str, Any]]:
+        """The latest and 7-day average daily volume of each type in the hub's
+        region, from the ESI market history. A type whose history could not
+        be fetched is unknown: absent from the result (and not cached), its
+        reason put in `unavailable` when given, never a volume of 0. A type
+        with a real, empty history is present with no volume."""
         normalized_type_ids = sorted({int(type_id) for type_id in (type_ids or []) if int(type_id) > 0})
         if not normalized_type_ids:
             return {}
+        if unavailable is None:
+            unavailable = {}
 
         esi_service = getattr(self._state, "esi_service", None)
         if esi_service is None:
+            for type_id in normalized_type_ids:
+                unavailable[type_id] = "no ESI service: region daily volume unknown"
+            logging.warning("Region daily volume (%s): no ESI service, the volume of %d type(s) is unknown",
+                            hub, len(normalized_type_ids))
             return {}
 
         hub_context = self._market_hub_context(hub)
-        normalized_hub = str(hub_context.get("hub") or "jita")
-        region_id = int(hub_context.get("region_id") or 10000002)
+        normalized_hub = str(hub_context["hub"])
+        region_id = int(hub_context["region_id"])
 
         now = time.time()
         cache_key = f"{normalized_hub}:{region_id}"
@@ -484,16 +605,35 @@ class MarketPricingService:
         history_by_type_id = esi_service.get_market_history(missing_type_ids, region_id=region_id)
         total_ids = len(missing_type_ids)
         fetched_results: dict[int, dict[str, Any]] = {}
+        skipped_rows = 0
+        skipped_type_ids: set[int] = set()
 
+        history_reason = getattr(esi_service, "market_history_unavailable_reason", None)
+        failed_type_ids: list[int] = []
         for index, type_id in enumerate(missing_type_ids, start=1):
-            history_rows = history_by_type_id.get(int(type_id)) or []
+            if not isinstance(history_by_type_id, dict) or int(type_id) not in history_by_type_id:
+                # The fetch failed (ESIService leaves the type out): unknown, not a volume of 0.
+                reason = history_reason(int(type_id), region_id=region_id) if history_reason is not None else None
+                unavailable[int(type_id)] = reason or "ESI market history not returned: region daily volume unknown"
+                failed_type_ids.append(int(type_id))
+                if progress_callback is not None:
+                    progress_callback(
+                        index / max(1, total_ids),
+                        f"Fetched {normalized_hub.title()} region history",
+                        {"completed": index, "total": total_ids},
+                    )
+                continue
+            # A day without a readable volume is skipped (counted), not read as 0.
+            history_rows: list[dict[str, Any]] = []
+            for row in history_by_type_id.get(int(type_id)) or []:
+                if isinstance(row, dict) and readable_int(row.get("volume")) is not None:
+                    history_rows.append(row)
+                else:
+                    skipped_rows += 1
+                    skipped_type_ids.add(int(type_id))
             latest_row = history_rows[-1] if history_rows else {}
             trailing_rows = history_rows[-7:] if history_rows else []
-            trailing_volumes = [
-                int(row.get("volume") or 0)
-                for row in trailing_rows
-                if isinstance(row, dict)
-            ]
+            trailing_volumes = [int(readable_int(row.get("volume")) or 0) for row in trailing_rows]
             trailing_average_volume = (
                 float(sum(trailing_volumes)) / float(len(trailing_volumes))
                 if trailing_volumes
@@ -503,10 +643,10 @@ class MarketPricingService:
                 "hub": normalized_hub,
                 "hub_label": str(hub_context.get("label") or normalized_hub.title()),
                 "region_id": region_id,
-                "daily_volume": int(latest_row.get("volume") or 0) if latest_row else 0,
+                "daily_volume": int(readable_int(latest_row.get("volume")) or 0) if latest_row else 0,
                 "daily_volume_7d_avg": trailing_average_volume,
                 "daily_volume_7d_sample_size": len(trailing_volumes),
-                "daily_order_count": int(latest_row.get("order_count") or 0) if latest_row else 0,
+                "daily_order_count": int(readable_int(latest_row.get("order_count")) or 0) if latest_row else 0,
                 "daily_volume_date": latest_row.get("date") if latest_row else None,
             }
             if progress_callback is not None:
@@ -515,6 +655,23 @@ class MarketPricingService:
                     f"Fetched {normalized_hub.title()} region history",
                     {"completed": index, "total": total_ids},
                 )
+
+        if failed_type_ids:
+            logging.warning(
+                "Region daily volume (%s): the market history of %d type(s) could not be fetched, their volume is "
+                "unknown: %s",
+                normalized_hub,
+                len(failed_type_ids),
+                sorted(failed_type_ids)[:20],
+            )
+        if skipped_rows:
+            logging.warning(
+                "Region daily volume (%s): skipped %d unreadable history row(s) (no readable volume) of %d type(s): %s",
+                normalized_hub,
+                skipped_rows,
+                len(skipped_type_ids),
+                sorted(skipped_type_ids)[:20],
+            )
 
         with self._region_volume_cache_lock:
             cached_entry = self._region_volume_cache.get(cache_key)

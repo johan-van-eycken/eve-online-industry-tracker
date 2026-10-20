@@ -1,4 +1,7 @@
 import logging
+from typing import Any
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from config.schemas import CONFIG_SCHEMA
 from config.paths import app_config_path, app_secret_path
@@ -152,6 +155,16 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
         db_oauth = init_db_oauth(cfgManager)
         if refresh_metadata:
             BaseOauth.metadata.create_all(bind=db_oauth.engine)
+        # One-off, idempotent: drop the ESI cache rows no request reads any more (logged).
+        try:
+            from eve_online_industry_tracker.infrastructure.esi_client import prune_stale_esi_cache
+            prune_stale_esi_cache(db_oauth.session)
+        except SQLAlchemyError as exc:   # a cleanup: startup goes on, the orphaned rows stay until the next start
+            logging.warning("ESI cache cleanup failed: %s", exc)
+            try:
+                db_oauth.session.rollback()
+            except SQLAlchemyError as rollback_exc:
+                logging.warning("ESI cache cleanup: rollback failed: %s", rollback_exc)
 
         logging.debug(f"Database URI for App: {cfg['app']['database_app_uri']}")
         db_app = init_db_app(cfgManager)
@@ -160,6 +173,18 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
 
         # Forward-migrate app DB schema (SQLite) for new columns.
         ensure_app_schema(db_app)
+        # One-off, marker-guarded: re-stamp every blended corp transfer lot (logged).
+        try:
+            from eve_online_industry_tracker.application.characters import corp_transfer_costs
+            corp_transfer_costs.restamp_all_blended_corp_transfer_lots_once(db_app.session)
+        except SQLAlchemyError as exc:   # startup goes on; no marker is written, so the next start retries it
+            logging.warning(
+                "One-time re-stamp of the blended corp transfer lots failed (retried at the next start): %s", exc,
+            )
+            try:
+                db_app.session.rollback()
+            except SQLAlchemyError as rollback_exc:
+                logging.warning("Blended corp transfer lot re-stamp: rollback failed: %s", rollback_exc)
 
         logging.debug(f"Database URI for SDE: {cfg['app']['database_sde_uri']}")
         db_sde = init_db_sde(cfgManager)
@@ -173,12 +198,13 @@ def init_db_managers(cfgManager: ConfigManager, refresh_metadata: bool = False) 
             logging.error("Database initialization failed: %s", e, exc_info=True)
         raise
 
-def init_char_manager(cfgManager: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager) -> CharacterManager:
+def init_char_manager(cfgManager: ConfigManager, db_oauth: DatabaseManager, db_app: DatabaseManager, db_sde: DatabaseManager,
+                      admin_settings: Any = None) -> CharacterManager:
     """
     Initialize Character Manager
     """
     try:
-        char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde)
+        char_manager = CharacterManager(cfgManager, db_oauth, db_app, db_sde, admin_settings=admin_settings)
         return char_manager
     except ValueError as e:
         logging.error(f"Error encountered: {e}")

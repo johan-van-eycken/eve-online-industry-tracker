@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import datetime
 import json
+import threading
+from collections import defaultdict
+from dataclasses import asdict, replace
+from datetime import datetime
 from typing import Any
 
+from sqlalchemy import or_
+
+from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.application.characters.asset_provenance import (
     ASSET_SOURCE_INDUSTRY_BUILD,
     ASSET_SOURCE_MARKET_BUY,
@@ -28,6 +33,30 @@ from eve_online_industry_tracker.db_models import (
 
 
 ASSET_SOURCE_UNTRACKED = "untracked_inventory"
+
+# One lock per ledger owner for a rebuild: two requests that rebuild the same
+# owner at once race on UNIQUE(owner, transaction_id). The locks are per
+# process only: two app processes on one database are not serialized.
+_LEDGER_REBUILD_LOCKS: dict[tuple[str, int], threading.Lock] = {}
+_LEDGER_REBUILD_LOCKS_GUARD = threading.Lock()
+
+
+def ledger_rebuild_lock(owner_field: str, owner_id: int) -> threading.Lock:
+    """The one lock (per process) for rebuilding `owner_id`'s ledger;
+    `owner_field` is "character_id" or "corporation_id"."""
+    with _LEDGER_REBUILD_LOCKS_GUARD:
+        return _LEDGER_REBUILD_LOCKS.setdefault((str(owner_field), int(owner_id)), threading.Lock())
+
+
+def cost_lower_bound_reason(allocation_details: Any) -> str | None:
+    """Why a sale's allocated cost is a lower bound: the distinct
+    `cost_unknown_reason`s of its allocations, in order, or None."""
+    reasons: list[str] = []
+    for entry in allocation_details or []:
+        reason = entry.get("cost_unknown_reason") if isinstance(entry, dict) else None
+        if reason and str(reason) not in reasons:
+            reasons.append(str(reason))
+    return "; ".join(reasons) or None
 ASSET_SOURCE_OPENING_INVENTORY = "opening_inventory"
 
 
@@ -36,7 +65,7 @@ def _safe_float(value: Any) -> float | None:
         if value is None:
             return None
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
@@ -45,7 +74,7 @@ def _safe_int(value: Any) -> int | None:
         if value is None:
             return None
         return int(value)
-    except Exception:
+    except (OverflowError, TypeError, ValueError):
         return None
 
 
@@ -59,7 +88,7 @@ def _parse_date(value: Any) -> datetime | None:
         raw_value = raw_value[:-1] + "+00:00"
     try:
         return datetime.fromisoformat(raw_value)
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -97,7 +126,13 @@ def _append_lot(lots_by_type: dict[int, list[FifoLot]], *, type_id: int, lot: Fi
     lots_by_type.setdefault(int(type_id), []).append(lot)
 
 
-def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
+def _consume_lots(
+    lots: list[FifoLot], *, quantity: int, cost_unknown_reason_by_job_id: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    """FIFO-take `quantity` from `lots`. An allocation whose lot has a
+    partly unknown build cost carries `cost_unknown_reason`: the lot's own,
+    or its industry job's (`cost_unknown_reason_by_job_id`, which also covers
+    the asset-history and transferred lots that point at the job)."""
     remaining = max(0, int(quantity or 0))
     total_cost = 0.0
     priced_quantity = 0
@@ -113,6 +148,9 @@ def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
         take = min(remaining, lot_quantity)
         chunk_cost = float(take) * float(head.unit_price)
         source = str(head.source or "unknown")
+        cost_unknown_reason = head.cost_unknown_reason
+        if cost_unknown_reason is None and cost_unknown_reason_by_job_id and head.reference_type == "industry_job":
+            cost_unknown_reason = cost_unknown_reason_by_job_id.get(int(head.reference_id or 0))
         slot = by_source.setdefault(source, {"quantity": 0, "cost": 0.0})
         slot["quantity"] = int(slot.get("quantity") or 0) + int(take)
         slot["cost"] = float(slot.get("cost") or 0.0) + float(chunk_cost)
@@ -125,6 +163,8 @@ def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
                 "acquisition_date": head.acquisition_date,
                 "reference_id": head.reference_id,
                 "reference_type": head.reference_type,
+                **({"cost_unknown_reason": cost_unknown_reason} if cost_unknown_reason else {}),
+                **({"asset_history_id": int(head.asset_history_id)} if head.asset_history_id is not None else {}),
             }
         )
         remaining -= int(take)
@@ -133,14 +173,7 @@ def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
 
         new_quantity = lot_quantity - int(take)
         if new_quantity > 0:
-            lots[0] = FifoLot(
-                quantity=int(new_quantity),
-                unit_price=float(head.unit_price),
-                acquisition_date=head.acquisition_date,
-                reference_id=head.reference_id,
-                reference_type=head.reference_type,
-                source=head.source,
-            )
+            lots[0] = replace(head, quantity=int(new_quantity))
         else:
             lots.pop(0)
 
@@ -151,6 +184,54 @@ def _consume_lots(lots: list[FifoLot], *, quantity: int) -> dict[str, Any]:
         "by_source": by_source,
         "allocations": allocations,
     }
+
+
+#: Transfer lots whose cost is a character job's build cost
+#: (scripts/backfill_corp_transfer_costs.py).
+_TRANSFERRED_BUILD_SOURCES = frozenset({"industry_build_transferred", "industry_build_transferred_avg"})
+
+
+#: Relative tolerance of the cost-basis comparison (float round trips through JSON).
+_COST_BASIS_TOLERANCE = 1e-9
+_SQL_IN_CHUNK = 500
+
+
+def _same_cost(a: Any, b: Any) -> bool:
+    a, b = _safe_float(a), _safe_float(b)
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= _COST_BASIS_TOLERANCE * max(1.0, abs(a), abs(b))
+
+
+def _with_cost_basis(allocations: list[dict[str, Any]], unit_cost_by_job_id: dict[int, float]) -> None:
+    """Record on each allocation the cost its lot was priced from
+    (`cost_basis`): the job's current positive unit_build_cost (None: none)
+    for a lot naming an industry job, the stamped cost for a blended transfer
+    lot (`asset_history_id`). stale_resolved_cost_owner_ids compares it."""
+    for entry in allocations:
+        job_id = _safe_int(entry.get("reference_id"))
+        if entry.get("reference_type") == "industry_job" and job_id:
+            entry["cost_basis"] = unit_cost_by_job_id.get(int(job_id))
+        elif entry.get("asset_history_id") is not None:
+            entry["cost_basis"] = _safe_float(entry.get("unit_cost"))
+
+
+def _is_blended_transfer_lot(source: Any, reference_type: Any) -> bool:
+    """A transferred build lot that names no single job: the average
+    fallback, or a FIFO match spanning several jobs."""
+    return str(source or "") in _TRANSFERRED_BUILD_SOURCES and reference_type != "industry_job"
+
+
+def _reprice_job_lot(lot: FifoLot, unit_cost_by_job_id: dict[int, float]) -> FifoLot:
+    """`lot` at its industry job's current unit build cost when it points at
+    a job that has one; otherwise unchanged (the job's reason, if any, is
+    attached at allocation)."""
+    if lot.reference_type != "industry_job" or lot.reference_id is None:
+        return lot
+    current = unit_cost_by_job_id.get(int(lot.reference_id))
+    if current is None or current == lot.unit_price:
+        return lot
+    return replace(lot, unit_price=float(current))
 
 
 def _opening_inventory_lot(events: list[dict[str, Any]]) -> FifoLot | None:
@@ -255,7 +336,7 @@ def _parse_eve_date(date_str: Any) -> datetime | None:
         return date_str
     try:
         return datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-    except Exception:
+    except ValueError:
         return None
 
 
@@ -377,22 +458,39 @@ def _corp_journal_fee_breakdown(
     return broker_fee, tax_fee, net_revenue, mode, notes
 
 
-def _extract_market_fee_rates(raw_market_fees: Any) -> tuple[float | None, float | None]:
+#: The fee capture modes of a sale whose fees were assumed (the character's skills unknown).
+ASSUMED_FEE_CAPTURE_MODES = ("assumed_market_fees", "journal_plus_assumed_broker_fee")
+
+
+def fee_inputs_fingerprint(raw_market_fees: Any, settings: market_fees.MarketFeeSettings) -> str:
+    """The inputs of a character's fee estimate, as a string a ledger row
+    keeps (fee_inputs): the seven industry/* fee settings, and the stored
+    skills and standings (Jita 4-4) or, without them, why the fees are
+    assumed. Equal fingerprints give equal fees."""
     payload = raw_market_fees
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
-        except Exception:
+        except ValueError:
             payload = None
-    if not isinstance(payload, dict):
-        return None, None
-    jita = payload.get("jita_4_4") or {}
-    if not isinstance(jita, dict):
-        return None, None
-    rates = jita.get("rates") or {}
-    if not isinstance(rates, dict):
-        return None, None
-    return _safe_float(rates.get("sales_tax_fraction")), _safe_float(rates.get("broker_fee_fraction"))
+    jita = payload.get("jita_4_4") if isinstance(payload, dict) else None
+    jita = jita if isinstance(jita, dict) else {}
+    reason = market_fees.fees_from_stored_market_fees(raw_market_fees, settings)[2]
+    return json.dumps({"settings": asdict(settings), "skills": jita.get("skills"), "standings": jita.get("standings"),
+                       "assumed": reason}, sort_keys=True, default=str)
+
+
+def _character_market_fees(raw_market_fees: Any, admin_settings: Any) -> tuple[float, float, str | None]:
+    """(sales tax, broker fee, reason) for a character: from its stored
+    skills and standings (Character.refresh_market_fees) with the current
+    admin settings industry/*, through application.market_fees like the
+    price suggestion (not the stored rates, which lag a settings change).
+    Without known skills: the fees of an untrained character without
+    standings (the highest) and the reason, starting "Fees assumed". A
+    stored invalid fee setting raises AdminSettingInvalid naming it."""
+    settings = market_fees.MarketFeeSettings.from_admin(admin_settings)
+    sales_tax, broker_fee, reason = market_fees.fees_from_stored_market_fees(raw_market_fees, settings)
+    return sales_tax, broker_fee, (reason[:1].upper() + reason[1:]) if reason else None
 
 
 def _apply_estimated_market_fees(
@@ -405,28 +503,43 @@ def _apply_estimated_market_fees(
     sales_tax_fraction: float | None,
     broker_fee_fraction: float | None,
     journal: CharacterWalletJournalModel | None,
+    fee_reason: str | None = None,
 ) -> tuple[float, float, float, str, list[str]]:
+    """The sale's fees with the estimates added: sales tax when no journal
+    entry gives it, and the broker / order update fees. With `fee_reason`
+    (the character's skills unknown, so the fractions are the assumed
+    highest ones) the reason is noted once and the mode is an assumed one
+    (ASSUMED_FEE_CAPTURE_MODES)."""
     normalized_notes = list(notes)
     normalized_sales_tax = float(max(0.0, sales_tax_amount))
     normalized_other_fees = float(max(0.0, other_fees_amount))
     normalized_mode = str(fee_capture_mode or "gross_only")
+    estimated = "estimated_market_fees" if fee_reason is None else "assumed_market_fees"
+    source = "the character market fee profile" if fee_reason is None else "assumed fees (see below)"
+    applied = False
 
     if journal is None and sales_tax_fraction is not None and normalized_sales_tax <= 0.0:
         normalized_sales_tax = max(0.0, float(gross_revenue) * float(sales_tax_fraction))
-        normalized_notes.append("Sales tax was estimated from the character market fee profile.")
-        normalized_mode = "estimated_market_fees"
+        normalized_notes.append(f"Sales tax was estimated from {source}.")
+        normalized_mode = estimated
+        applied = True
 
     if broker_fee_fraction is not None and broker_fee_fraction > 0.0:
         estimated_broker_fee = max(0.0, float(gross_revenue) * float(broker_fee_fraction))
         if estimated_broker_fee > 0.0:
             normalized_other_fees += estimated_broker_fee
             normalized_notes.append(
-                "Broker / order update fees were estimated from the character market fee profile; exact relist history is not stored."
+                f"Broker / order update fees were estimated from {source}; exact relist history is not stored."
             )
+            applied = True
             if normalized_mode == "journal_amount":
-                normalized_mode = "journal_plus_estimated_broker_fee"
-            elif normalized_mode != "estimated_market_fees":
-                normalized_mode = "estimated_market_fees"
+                normalized_mode = ("journal_plus_estimated_broker_fee" if fee_reason is None
+                                   else "journal_plus_assumed_broker_fee")
+            elif normalized_mode != estimated:
+                normalized_mode = estimated
+
+    if applied and fee_reason:
+        normalized_notes.append(fee_reason)
 
     normalized_net_revenue = max(0.0, float(gross_revenue) - normalized_sales_tax - normalized_other_fees)
     return normalized_other_fees, normalized_sales_tax, normalized_net_revenue, normalized_mode, normalized_notes
@@ -435,6 +548,8 @@ def _apply_estimated_market_fees(
 def _confidence(*, priced_quantity: int, unpriced_quantity: int, fee_capture_mode: str) -> str:
     if unpriced_quantity > 0:
         return "Low"
+    if fee_capture_mode in ASSUMED_FEE_CAPTURE_MODES:
+        return "Low"   # the fees are the assumed highest ones (the character's skills unknown)
     if fee_capture_mode in ("journal_amount", "journal_matched", "journal_partial"):
         return "High"
     return "Medium"
@@ -487,16 +602,16 @@ class _BaseRealizedProfitLedgerService:
     industry_job_model: Any
     owner_model: Any
 
-    def __init__(self, *, app_session: Any, sde_session: Any, market_prices: list[dict[str, Any]] | None = None):
+    def __init__(self, *, app_session: Any, sde_session: Any, market_prices: list[dict[str, Any]] | None = None,
+                 admin_settings: Any = None):
         self._app_session = app_session
         self._sde_session = sde_session
         self._market_prices = market_prices or []
+        # The admin settings industry/* of the fee estimates, read at each rebuild (None: the schema defaults).
+        self._admin_settings = admin_settings
 
     def rebuild(self, *, owner_id: int | None = None) -> list[dict[str, Any]]:
-        if owner_id is not None:
-            owner_ids = [int(owner_id)]
-        else:
-            owner_ids = [int(getattr(row, self.owner_id_field)) for row in self._app_session.query(self.owner_model).all()]
+        owner_ids = [int(owner_id)] if owner_id is not None else self.owner_ids()
 
         persisted_rows: list[Any] = []
         for current_owner_id in owner_ids:
@@ -504,6 +619,77 @@ class _BaseRealizedProfitLedgerService:
 
         self._app_session.commit()
         return [self._serialize_row(row) for row in persisted_rows]
+
+    def owner_ids(self) -> list[int]:
+        """Every owner a rebuild of all owners covers."""
+        return [int(getattr(row, self.owner_id_field)) for row in self._app_session.query(self.owner_model).all()]
+
+    def stale_resolved_cost_owner_ids(self, rows: list[dict[str, Any]]) -> set[int]:
+        """The owners with a row whose lower-bound reason no longer matches
+        its industry job's (the job was re-snapshotted, e.g. once the
+        overview published its decryptor choices): rebuilt on read."""
+        current: dict[int, str] | None = None
+        stale: set[int] = set()
+        for row in rows:
+            owner_id = _safe_int(row.get(self.owner_id_field))
+            if owner_id is None or owner_id in stale:
+                continue
+            for entry in row.get("allocation_details") or []:
+                if not isinstance(entry, dict) or not entry.get("cost_unknown_reason"):
+                    continue
+                if entry.get("reference_type") != "industry_job":
+                    continue
+                if current is None:
+                    current = self._load_cost_unknown_reason_by_job_id()
+                if current.get(int(_safe_int(entry.get("reference_id")) or 0)) != entry.get("cost_unknown_reason"):
+                    stale.add(int(owner_id))
+                    break
+        return stale | self._stale_cost_basis_owner_ids(rows, skip=stale)
+
+    def _stale_cost_basis_owner_ids(self, rows: list[dict[str, Any]], *, skip: set[int]) -> set[int]:
+        """The owners with a row whose lot cost changed since it was built:
+        an allocation's `cost_basis` against its job's current unit_build_cost
+        or its blended lot's current stamped cost. Only the jobs and asset
+        history rows the rows name are read. A job-referenced or blended
+        allocation without a basis (a ledger built before it was recorded)
+        is stale once."""
+        stale: set[int] = set()
+        job_bases: list[tuple[int, int, Any]] = []
+        history_bases: list[tuple[int, int, Any]] = []
+        for row in rows:
+            owner_id = _safe_int(row.get(self.owner_id_field))
+            if owner_id is None or owner_id in skip or owner_id in stale:
+                continue
+            for entry in row.get("allocation_details") or []:
+                if not isinstance(entry, dict):
+                    continue
+                job_id = _safe_int(entry.get("reference_id"))
+                is_job = entry.get("reference_type") == "industry_job" and bool(job_id)
+                history_id = _safe_int(entry.get("asset_history_id"))
+                if (is_job or history_id is not None or self._needs_cost_basis(entry)) and "cost_basis" not in entry:
+                    stale.add(int(owner_id))
+                    break
+                if is_job:
+                    job_bases.append((int(owner_id), int(job_id), entry.get("cost_basis")))
+                elif history_id is not None:
+                    history_bases.append((int(owner_id), int(history_id), entry.get("cost_basis")))
+        if job_bases:
+            current = self._load_job_unit_cost_by_job_id(job_ids={job_id for _, job_id, _ in job_bases})
+            stale |= {o for o, job_id, basis in job_bases if not _same_cost(current.get(job_id), basis)}
+        if history_bases:
+            current_history = self._current_asset_history_unit_costs({h for _, h, _ in history_bases})
+            stale |= {o for o, h, basis in history_bases if not _same_cost(current_history.get(h), basis)}
+        return stale
+
+    def _needs_cost_basis(self, entry: dict[str, Any]) -> bool:
+        """An allocation that should carry a cost basis beyond the job
+        references (the corp's blended transfer lots)."""
+        return False
+
+    def _current_asset_history_unit_costs(self, history_ids: set[int]) -> dict[int, float | None]:
+        """{asset history row id: its current acquisition_unit_cost}; the
+        owner kinds with blended lots override it."""
+        return {}
 
     def list_rows(self, *, owner_id: int | None = None) -> list[dict[str, Any]]:
         query = self._app_session.query(self.ledger_model)
@@ -532,7 +718,19 @@ class _BaseRealizedProfitLedgerService:
         for supp_type_id, supp_lots in supplemental_lots.items():
             asset_history_lots.setdefault(int(supp_type_id), []).extend(supp_lots)
 
+        # A lot that points at an industry job is priced from the job's
+        # current unit_build_cost, not the cost stamped when the lot was
+        # written: a job re-snapshotted since (the decryptor re-snapshot, a
+        # later job refresh) would otherwise leave the lot at a stale lower
+        # bound with its reason gone.
+        job_unit_cost_by_job_id = self._load_job_unit_cost_by_job_id()
+        asset_history_lots = {
+            type_id: [_reprice_job_lot(lot, job_unit_cost_by_job_id) for lot in lots]
+            for type_id, lots in asset_history_lots.items()
+        }
+
         journal_by_id = self._load_journal_map(owner_id=int(owner_id))
+        cost_unknown_reason_by_job_id = self._load_cost_unknown_reason_by_job_id()
         owner_context = self._load_owner_context(owner_id=int(owner_id))
 
         lots_by_type: dict[int, list[FifoLot]] = {}
@@ -680,7 +878,10 @@ class _BaseRealizedProfitLedgerService:
                 if gross_revenue is None:
                     unit_price = _safe_float(getattr(tx, "unit_price", None)) or 0.0
                     gross_revenue = float(unit_price) * float(quantity)
-                allocation = _consume_lots(lots, quantity=int(quantity))
+                allocation = _consume_lots(
+                    lots, quantity=int(quantity), cost_unknown_reason_by_job_id=cost_unknown_reason_by_job_id,
+                )
+                _with_cost_basis(allocation["allocations"], job_unit_cost_by_job_id)
                 if int(allocation["unpriced_quantity"]) > 0:
                     slot = allocation["by_source"].setdefault(ASSET_SOURCE_UNTRACKED, {"quantity": 0, "cost": 0.0})
                     slot["quantity"] = int(slot.get("quantity") or 0) + int(allocation["unpriced_quantity"])
@@ -750,6 +951,7 @@ class _BaseRealizedProfitLedgerService:
                         fee_capture_mode=fee_capture_mode,
                     ),
                     notes=notes,
+                    **self._extra_row_fields(owner_context),
                 )
                 self._app_session.add(row)
                 persisted_rows.append(row)
@@ -766,6 +968,48 @@ class _BaseRealizedProfitLedgerService:
     def _load_journal_map(self, *, owner_id: int) -> dict[int, Any]:
         return {}
 
+    def _load_cost_unknown_reason_by_job_id(self) -> dict[int, str]:
+        """{job_id: why its build cost is partly unknown} over character and
+        corporation jobs (EVE job ids are unique across both): a corp sale
+        can consume a lot a character built. The invention cost reason and
+        the materials cost lower-bound reason, both when both are set."""
+        out: dict[int, str] = {}
+        for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
+            rows = (
+                self._app_session.query(
+                    model.job_id, model.invention_cost_unknown_reason, model.materials_cost_lower_bound_reason)
+                .filter(or_(model.invention_cost_unknown_reason.isnot(None),
+                            model.materials_cost_lower_bound_reason.isnot(None)))
+                .all()
+            )
+            for job_id, invention_reason, materials_reason in rows:
+                reason = "; ".join(str(r) for r in (invention_reason, materials_reason) if r)
+                if job_id is not None and reason:
+                    out[int(job_id)] = reason
+        return out
+
+    def _load_job_unit_cost_by_job_id(self, *, job_ids: set[int] | None = None) -> dict[int, float]:
+        """{job_id: current positive unit_build_cost} over character and
+        corporation jobs (EVE job ids are unique across both); only `job_ids`
+        when given."""
+        out: dict[int, float] = {}
+        chunks: list[list[int] | None] = [None]
+        if job_ids is not None:
+            ids = sorted(job_ids)
+            chunks = [ids[i:i + _SQL_IN_CHUNK] for i in range(0, len(ids), _SQL_IN_CHUNK)]
+        for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
+            for chunk in chunks:
+                query = self._app_session.query(model.job_id, model.unit_build_cost).filter(
+                    model.unit_build_cost.isnot(None)
+                )
+                if chunk is not None:
+                    query = query.filter(model.job_id.in_(chunk))
+                for job_id, unit_build_cost in query.all():
+                    unit_cost = _safe_float(unit_build_cost)
+                    if job_id is not None and unit_cost is not None and unit_cost > 0:
+                        out[int(job_id)] = unit_cost
+        return out
+
     def _load_asset_history_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Return FifoLots sourced from asset history, keyed by type_id. Subclasses may override."""
         return {}
@@ -775,6 +1019,9 @@ class _BaseRealizedProfitLedgerService:
         return {}
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
+        return {}
+
+    def _extra_row_fields(self, owner_context: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     def _owner_fields(self, *, owner_id: int) -> dict[str, Any]:
@@ -811,7 +1058,12 @@ class _BaseRealizedProfitLedgerService:
             "confidence": row.confidence,
             "notes": row.notes or [],
             "updated_at": row.updated_at.isoformat() if row.updated_at is not None else None,
+            # Contract: why allocated_cost is a lower bound (part of a build
+            # cost is unknown), None when it is not.
+            "cost_lower_bound_reason": cost_lower_bound_reason(row.allocation_details),
         }
+        if hasattr(row, "fee_inputs"):
+            payload["fee_inputs"] = row.fee_inputs
         if hasattr(row, "character_id"):
             payload["character_id"] = int(row.character_id)
         if hasattr(row, "corporation_id"):
@@ -831,6 +1083,29 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def list_rows(self, *, character_id: int | None = None) -> list[dict[str, Any]]:
         return super().list_rows(owner_id=character_id)
+
+    def stale_character_ids(self, rows: list[dict[str, Any]]) -> set[int]:
+        """The characters with a row whose fee inputs (fee_inputs) differ
+        from the current ones: an industry/* fee setting, or the character's
+        stored skills or standings, changed since the row was built. A row
+        without them (built before they were kept) is stale."""
+        settings = market_fees.MarketFeeSettings.from_admin(self._admin_settings)
+        current: dict[int, str] = {}
+        stale: set[int] = set()
+        for row in rows:
+            character_id = _safe_int(row.get("character_id"))
+            if character_id is None or character_id in stale:
+                continue
+            if character_id not in current:
+                character = self._app_session.query(CharacterModel).filter_by(character_id=character_id).first()
+                current[character_id] = fee_inputs_fingerprint(
+                    getattr(character, "market_fees", None) if character is not None else None, settings)
+            if row.get("fee_inputs") != current[character_id]:
+                stale.add(character_id)
+        return stale
+
+    def _extra_row_fields(self, owner_context: dict[str, Any]) -> dict[str, Any]:
+        return {"fee_inputs": owner_context.get("fee_inputs")}
 
     def _load_wallet_transactions(self, *, owner_id: int) -> list[Any]:
         return (
@@ -852,10 +1127,15 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
 
     def _load_owner_context(self, *, owner_id: int) -> dict[str, Any]:
         character = self._app_session.query(CharacterModel).filter_by(character_id=int(owner_id)).first()
-        sales_tax_fraction, broker_fee_fraction = _extract_market_fee_rates(getattr(character, "market_fees", None) if character is not None else None)
+        raw_market_fees = getattr(character, "market_fees", None) if character is not None else None
+        sales_tax_fraction, broker_fee_fraction, fee_reason = _character_market_fees(
+            raw_market_fees, self._admin_settings)
         return {
             "sales_tax_fraction": sales_tax_fraction,
             "broker_fee_fraction": broker_fee_fraction,
+            "fee_reason": fee_reason,
+            "fee_inputs": fee_inputs_fingerprint(
+                raw_market_fees, market_fees.MarketFeeSettings.from_admin(self._admin_settings)),
         }
 
     def _fee_breakdown(self, *, gross_revenue: float, journal: Any, owner_context: dict[str, Any]) -> tuple[float, float, float, str, list[str]]:
@@ -872,6 +1152,7 @@ class CharacterRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             sales_tax_fraction=_safe_float(owner_context.get("sales_tax_fraction")),
             broker_fee_fraction=_safe_float(owner_context.get("broker_fee_fraction")),
             journal=journal,
+            fee_reason=owner_context.get("fee_reason"),
         )
 
 
@@ -981,6 +1262,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             .all()
         )
         lots_by_type: dict[int, list[FifoLot]] = {}
+        blended_reason_by_type_id: dict[int, str] | None = None
         for row in rows:
             type_id = _safe_int(getattr(row, "type_id", None))
             unit_cost = _safe_float(getattr(row, "acquisition_unit_cost", None))
@@ -991,6 +1273,11 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             source = str(getattr(row, "acquisition_source", None) or "asset_history")
             reference_id = _safe_int(getattr(row, "acquisition_reference_id", None))
             reference_type = str(getattr(row, "acquisition_reference_type", None) or "asset_history")
+            cost_unknown_reason: str | None = None
+            if _is_blended_transfer_lot(source, reference_type):
+                if blended_reason_by_type_id is None:
+                    blended_reason_by_type_id = self._blended_cost_unknown_reason_by_type_id()
+                cost_unknown_reason = blended_reason_by_type_id.get(int(type_id))
             lots_by_type.setdefault(int(type_id), []).append(
                 FifoLot(
                     quantity=int(quantity),
@@ -999,9 +1286,84 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     reference_id=reference_id,
                     reference_type=reference_type,
                     source=source,
+                    cost_unknown_reason=cost_unknown_reason,
+                    asset_history_id=(
+                        _safe_int(getattr(row, "id", None)) if _is_blended_transfer_lot(source, reference_type) else None
+                    ),
                 )
             )
         return lots_by_type
+
+    def _needs_cost_basis(self, entry: dict[str, Any]) -> bool:
+        return _is_blended_transfer_lot(entry.get("source"), entry.get("reference_type"))
+
+    def _current_asset_history_unit_costs(self, history_ids: set[int]) -> dict[int, float | None]:
+        ids = sorted(history_ids)
+        out: dict[int, float | None] = {}
+        for start in range(0, len(ids), _SQL_IN_CHUNK):
+            for row_id, unit_cost in (
+                self._app_session.query(CorporationAssetHistoryModel.id, CorporationAssetHistoryModel.acquisition_unit_cost)
+                .filter(CorporationAssetHistoryModel.id.in_(ids[start:start + _SQL_IN_CHUNK]))
+                .all()
+            ):
+                out[int(row_id)] = _safe_float(unit_cost)
+        return out
+
+    def _blended_cost_unknown_reason_by_type_id(self) -> dict[int, str]:
+        """{product type: why a blended transfer lot of it is a lower bound}.
+        A blended lot (scripts/backfill_corp_transfer_costs.py: the
+        quantity-weighted average, or a FIFO match over several jobs) names no
+        job, so it is flagged whenever any character job of its type, the jobs
+        the blend is taken from, has a partly unknown build cost. A re-costed
+        job re-stamps the blended lots of its type
+        (corp_transfer_costs.restamp_blended_corp_transfer_lots); a resolved
+        reason then makes the ledger stale (stale_resolved_cost_owner_ids)."""
+        rows = (
+            self._app_session.query(
+                CharacterIndustryJobsModel.product_type_id,
+                CharacterIndustryJobsModel.job_id,
+                CharacterIndustryJobsModel.invention_cost_unknown_reason,
+                CharacterIndustryJobsModel.materials_cost_lower_bound_reason,
+            )
+            .filter(or_(CharacterIndustryJobsModel.invention_cost_unknown_reason.isnot(None),
+                        CharacterIndustryJobsModel.materials_cost_lower_bound_reason.isnot(None)))
+            .order_by(CharacterIndustryJobsModel.job_id)
+            .all()
+        )
+        by_type: dict[int, list[tuple[int, str]]] = defaultdict(list)
+        for product_type_id, job_id, invention_reason, materials_reason in rows:
+            reason = "; ".join(str(r) for r in (invention_reason, materials_reason) if r)
+            if product_type_id is not None and job_id is not None and reason:
+                by_type[int(product_type_id)].append((int(job_id), reason))
+        return {
+            type_id: (
+                f"blended transfer cost: {len(jobs)} character job(s) of this type have a partly unknown "
+                f"build cost (job {jobs[0][0]}: {jobs[0][1]})"
+            )
+            for type_id, jobs in by_type.items()
+        }
+
+    def stale_resolved_cost_owner_ids(self, rows: list[dict[str, Any]]) -> set[int]:
+        """Also stale: a row with a blended transfer lot whose lower-bound
+        reason no longer matches the current one for its type."""
+        stale = super().stale_resolved_cost_owner_ids(rows)
+        current: dict[int, str] | None = None
+        for row in rows:
+            owner_id = _safe_int(row.get(self.owner_id_field))
+            type_id = _safe_int(row.get("type_id"))
+            if owner_id is None or owner_id in stale or type_id is None:
+                continue
+            for entry in row.get("allocation_details") or []:
+                if not isinstance(entry, dict) or not entry.get("cost_unknown_reason"):
+                    continue
+                if not _is_blended_transfer_lot(entry.get("source"), entry.get("reference_type")):
+                    continue
+                if current is None:
+                    current = self._blended_cost_unknown_reason_by_type_id()
+                if current.get(int(type_id)) != entry.get("cost_unknown_reason"):
+                    stale.add(int(owner_id))
+                    break
+        return stale
 
     def _load_supplemental_lots(self, *, owner_id: int) -> dict[int, list[FifoLot]]:
         """Delegate to _load_character_source_lots for the corp service."""
