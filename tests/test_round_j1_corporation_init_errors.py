@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 import flask_app.bootstrap as bootstrap
 from flask_app.state import AppState
 from eve_online_industry_tracker.application.characters import asset_provenance as ap
@@ -131,3 +133,22 @@ def test_the_bootstrap_puts_corporation_init_errors_in_init_warnings(monkeypatch
 
     assert any("98000001" in w and "ESI down" in w and w.startswith("Corporation initialisation failed")
                for w in state.init_warnings)
+
+
+# --- CorporationManager.__init__ no longer wraps everything in a plain Exception ---------------
+
+def test_a_programming_error_during_setup_propagates_as_is(monkeypatch):
+    monkeypatch.setattr(corp_mod, "CharacterManager", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(corp_mod, "Corporation", _Corp)
+    cfg = SimpleNamespace(all=lambda: {})
+    with pytest.raises(AttributeError, match="_character_list"):
+        CorporationManager(cfg, None, None, None, SimpleNamespace(admin_settings=None))   # no character list
+
+
+def test_a_programming_error_in_the_config_propagates_as_is(monkeypatch):
+    def _broken():
+        raise TypeError("all() takes 0 positional arguments")
+
+    with pytest.raises(TypeError, match="all\\(\\)"):
+        CorporationManager(SimpleNamespace(all=_broken), None, None, None,
+                           SimpleNamespace(_character_list=[], admin_settings=None))

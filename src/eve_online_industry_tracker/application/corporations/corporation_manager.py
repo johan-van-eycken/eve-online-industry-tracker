@@ -43,33 +43,33 @@ class CorporationManager:
         db_sde: DatabaseManager,
         char_manager: CharacterManager
     ) -> None:
-        try:
-            # Private arguments
-            self._cfgManager = cfgManager
-            self._cfg = cfgManager.all()
-            self._db_oauth = db_oauth
-            self._db_app = db_app
-            self._db_sde = db_sde
-            self._char_manager = char_manager
-            self._corporations: List[Corporation] = []
-            self._corp_by_id: Dict[int, Corporation] = {}
-            self._corp_by_name: Dict[str, Corporation] = {}
-            # One line per corporation that could not be initialised (bootstrap: init_warnings).
-            self.init_errors: List[str] = []
+        # No catch-all here: what can fail per corporation (its character
+        # manager, its Corporation) is caught in _initialize_corporations and
+        # named in init_errors. The setup itself only reads objects already
+        # built (the config dict, the character list), so an error in it is a
+        # programming error and propagates as is.
+        # Private arguments
+        self._cfgManager = cfgManager
+        self._cfg = cfgManager.all()
+        self._db_oauth = db_oauth
+        self._db_app = db_app
+        self._db_sde = db_sde
+        self._char_manager = char_manager
+        self._corporations: List[Corporation] = []
+        self._corp_by_id: Dict[int, Corporation] = {}
+        self._corp_by_name: Dict[str, Corporation] = {}
+        # One line per corporation that could not be initialised (bootstrap: init_warnings).
+        self.init_errors: List[str] = []
 
-            # Determine unique corporation IDs of player owned corporations
-            self._corporation_ids = {
-                char.corporation_id
-                for char in self._char_manager._character_list
-                if char.corporation_id is not None and char.is_corp_director is True
-            }
+        # Determine unique corporation IDs of player owned corporations
+        self._corporation_ids = {
+            char.corporation_id
+            for char in self._char_manager._character_list
+            if char.corporation_id is not None and char.is_corp_director is True
+        }
 
-            self._initialize_corporations()
-        except Exception as e:
-            error_message = f"Failed to initialize CorporationManager: {str(e)}"
-            logging.error(error_message)
-            raise Exception(error_message)
-    
+        self._initialize_corporations()
+
     def _initialize_corporations(self) -> None:
         """One Corporation per director's corporation. A corporation whose
         CharacterManager or Corporation cannot be built is logged as an
