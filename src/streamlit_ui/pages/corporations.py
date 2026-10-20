@@ -15,6 +15,7 @@ from streamlit_ui.components.assets_ui import (
     summarize_asset_items,
 )
 from streamlit_ui.api.client import api_get
+from streamlit_ui.components.batch_errors import show_batch_errors
 from streamlit_ui.components.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age, type_icon_url
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
 from streamlit_ui.api.streamlit_client import cached_api_get
@@ -230,6 +231,7 @@ def _fetch_current_corporation_assets(corporation_id: int) -> list[dict]:
     response = api_get(f"/corporations/assets?corporation_id={int(corporation_id)}", timeout_seconds=180) or {}
     if response.get("status") != "success":
         raise RuntimeError(response.get("message") or "Failed to refresh corporation assets")
+    show_batch_errors(response, "Corporation")
 
     data = response.get("data") or []
     if not isinstance(data, list):

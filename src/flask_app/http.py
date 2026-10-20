@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from flask import jsonify, request
 
+from eve_online_industry_tracker.application.batch import batch_errors
 from eve_online_industry_tracker.application.errors import ServiceError
 
 
@@ -15,6 +16,16 @@ def ok(*, data: Any = None, message: Optional[str] = None, status_code: int = 20
         payload["data"] = data
     payload.update(extra)
     return jsonify(payload), status_code
+
+
+def ok_batch(*, data: Any, **extra: Any):
+    """ok() for a read over several characters or corporations: when some of
+    them failed (a PartialResult), `errors` is {owner name: error message}
+    next to the data of the others, so the page names each one."""
+    errors = batch_errors(data)
+    if errors:
+        extra["errors"] = errors
+    return ok(data=list(data) if data is not None else None, **extra)
 
 
 def optional_id_param(key: str) -> Optional[int]:

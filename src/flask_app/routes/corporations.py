@@ -4,7 +4,7 @@ from flask import Blueprint, request
 
 from flask_app.bootstrap import require_ready
 from flask_app.deps import get_state
-from flask_app.http import ok, optional_id_param
+from flask_app.http import ok, ok_batch, optional_id_param
 
 from eve_online_industry_tracker.application.corporations.service import CorporationsService
 
@@ -24,7 +24,7 @@ def corporations_assets():
     require_ready(get_state())
     svc = CorporationsService(state=get_state())
     corporation_id = optional_id_param("corporation_id")
-    return ok(data=svc.list_assets(corporation_id=corporation_id))
+    return ok_batch(data=svc.list_assets(corporation_id=corporation_id))
 
 
 @corporations_bp.get("/corporations/<int:corporation_id>/market_orders")
@@ -34,7 +34,7 @@ def corporations_get_market_orders(corporation_id: int):
     refresh_raw = (request.args.get("refresh") or "0").strip().lower()
     refresh = refresh_raw in {"1", "true", "yes", "y", "on"}
 
-    return ok(data=svc.get_market_orders(refresh=refresh, corporation_id=corporation_id))
+    return ok_batch(data=svc.get_market_orders(refresh=refresh, corporation_id=corporation_id))
 
 
 @corporations_bp.get("/corporations/<int:corporation_id>/market_orders/enriched")
@@ -44,7 +44,7 @@ def corporations_get_market_orders_enriched(corporation_id: int):
     refresh_raw = (request.args.get("refresh") or "0").strip().lower()
     refresh = refresh_raw in {"1", "true", "yes", "y", "on"}
 
-    return ok(data=svc.get_market_orders_enriched(refresh=refresh, corporation_id=corporation_id))
+    return ok_batch(data=svc.get_market_orders_enriched(refresh=refresh, corporation_id=corporation_id))
 
 
 @corporations_bp.get("/corporations/realized_profit")

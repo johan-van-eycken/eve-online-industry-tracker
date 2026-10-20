@@ -5,6 +5,7 @@ from typing import Any
 import streamlit as st
 
 from streamlit_ui.api.client import api_get_or_error
+from streamlit_ui.components.batch_errors import batch_errors
 
 
 def _get(path: str, timeout_seconds: int, what: str) -> dict[str, Any]:
@@ -26,8 +27,10 @@ def fetch_market_orders() -> dict[str, Any]:
     return _get("/characters/market_orders?refresh=0", 60, "Market orders")
 
 
-def refresh_market_orders() -> None:
-    _get("/characters/market_orders?refresh=1", 120, "Failed to refresh market orders")
+def refresh_market_orders() -> dict[str, str]:
+    """Refresh every character's orders; {character name: error} of each
+    whose refresh failed (the others were refreshed)."""
+    return batch_errors(_get("/characters/market_orders?refresh=1", 120, "Failed to refresh market orders"))
 
 
 def clear_market_orders_cache() -> None:
@@ -47,9 +50,11 @@ def fetch_corp_market_orders_enriched(corporation_id: int) -> list[Any]:
     return data if isinstance(data, list) else []
 
 
-def refresh_corp_market_orders(corporation_id: int) -> None:
-    _get(f"/corporations/{corporation_id}/market_orders?refresh=1", 120,
-         "Failed to refresh corporation market orders")
+def refresh_corp_market_orders(corporation_id: int) -> dict[str, str]:
+    """{corporation name: error} of a partial refresh (none for one corporation:
+    its failure raises)."""
+    return batch_errors(_get(f"/corporations/{corporation_id}/market_orders?refresh=1", 120,
+                             "Failed to refresh corporation market orders"))
 
 
 def clear_corp_market_orders_cache() -> None:

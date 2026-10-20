@@ -5,6 +5,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
+from eve_online_industry_tracker.application.batch import PartialResult, batch_errors
 from eve_online_industry_tracker.application.characters.realized_profit import (
     CharacterRealizedProfitLedgerService,
     ledger_rebuild_lock,
@@ -175,4 +176,5 @@ class CharactersService:
 
         # Compute repricing priority score for sell orders
         add_reprice_priority_scores(enriched_orders)
-        return enriched_orders
+        # The owners whose orders could not be read are named, not left out silently.
+        return PartialResult(enriched_orders, batch_errors(refreshed_data))

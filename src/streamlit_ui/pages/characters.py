@@ -14,6 +14,7 @@ from streamlit_ui.components.assets_ui import (
 )
 from streamlit_ui.api.characters import build_character_options, fetch_characters
 from streamlit_ui.api.client import api_get, api_post
+from streamlit_ui.components.batch_errors import show_batch_errors
 from streamlit_ui.components.aggrid_formatters import js_category_text_style, js_icon_cell_renderer
 from streamlit_ui.components.formatters import format_isk, format_date, format_date_into_age, type_icon_url
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
@@ -184,6 +185,7 @@ def _fetch_current_character_assets(character_id: int) -> list[dict]:
     response = api_get(f"/characters/assets?character_id={int(character_id)}", timeout_seconds=180) or {}
     if response.get("status") != "success":
         raise RuntimeError(response.get("message") or "Failed to refresh character assets")
+    show_batch_errors(response, "Character")
 
     data = response.get("data") or []
     if not isinstance(data, list):
@@ -501,6 +503,8 @@ def render():
                     wallet_balance = wallet_data.get("wallet_balance")
                     if character_name and wallet_balance:
                         df.loc[df["character_name"] == character_name, "wallet_balance"] = wallet_balance
+                with col_status:
+                    show_batch_errors(response, "Character")   # the others were refreshed
             except Exception as e:
                 with col_status:
                     st.error(f"Failed to refresh wallet balances: {e}")

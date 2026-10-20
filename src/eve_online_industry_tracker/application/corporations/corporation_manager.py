@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from eve_online_industry_tracker.config.config_manager import ConfigManager
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
+from eve_online_industry_tracker.application.batch import PartialResult
 from eve_online_industry_tracker.application.characters.character_manager import CharacterManager
 from eve_online_industry_tracker.application.corporations.corporation import Corporation
 
@@ -164,45 +165,56 @@ class CorporationManager:
 
     def _read_each(
         self,
-        corps: List[Corporation],
         getter: str,
-        refresh_method: Optional[str] = None,
-    ) -> List[List[Any]]:
-        """[corp.<getter>()] per corporation, after its `refresh_method`.
-        Every corporation is tried; then CorporationRefreshError names each
-        one that failed (a refresh or a read)."""
-        results: List[Any] = []
+        refresh_method: Optional[str],
+        corporation_name: Optional[str] = None,
+        corporation_id: Optional[int] = None,
+    ) -> PartialResult:
+        """corp.<getter>() of each selected corporation (one with a
+        corporation_id or name, else all), after one batch `refresh_method`
+        (None: no refresh). A corporation whose refresh or read fails is
+        logged as an ERROR and named in the result's `errors`; the others'
+        data is returned. When every selected corporation fails (so always
+        for a single selected one), CorporationRefreshError names each. An
+        unknown corporation_id or name raises UnknownCorporationError."""
+        corps = self._select_corporations(getter, corporation_name, corporation_id)
         errors: Dict[str, str] = {}
-        for corp in corps:
+        if refresh_method:
             try:
-                if refresh_method:
-                    self._refresh_batch(refresh_method, corporation_id=corp.corporation_id)
+                self._refresh_batch(refresh_method, corporation_name, corporation_id)
+            except UnknownCorporationError:
+                raise
+            except CorporationRefreshError as exc:   # each failure is logged there; the others are read
+                errors.update(exc.errors)
+
+        results: List[Any] = []
+        for corp in corps:
+            if _corp_label(corp) in errors:
+                continue   # its refresh failed: no stale read in its place
+            try:
                 results.append(getattr(corp, getter)())
-            except CorporationRefreshError as e:
-                errors.update(e.errors)
-            except Exception as e:   # the batch boundary: one corporation must not stop the others
+            except Exception as e:   # the batch boundary: one corporation must not hide the others' data
                 logging.error("Error during %s for %s: %s", getter, _corp_label(corp), e,
                               exc_info=not isinstance(e, ESI_REQUEST_ERRORS))
                 errors[_corp_label(corp)] = f"{type(e).__name__}: {e}"
-        if errors:
+        if errors and not results:
             raise CorporationRefreshError(getter, errors)
-        return results
+        return PartialResult(results, errors)
 
     def get_assets(
         self,
         corporation_name: Optional[str] = None,
         corporation_id: Optional[int] = None,
-    ) -> List[Dict[str, object]]:
-        corps = self._select_corporations("get_assets", corporation_name, corporation_id)
-        return self._read_each(corps, "get_assets", "refresh_assets")
+    ) -> PartialResult:
+        return self._read_each("get_assets", "refresh_assets", corporation_name, corporation_id)
 
-    def get_members(self) -> List[Dict[str, object]]:
-        return [member for members in self._read_each(self._corporations, "get_members", "refresh_members")
-                for member in members]
+    def get_members(self) -> PartialResult:
+        result = self._read_each("get_members", "refresh_members")
+        return PartialResult((member for members in result for member in members), result.errors)
 
-    def get_structures(self) -> List[Dict[str, object]]:
-        return [structure for structures in self._read_each(self._corporations, "get_structures", "refresh_structures")
-                for structure in structures]
+    def get_structures(self) -> PartialResult:
+        result = self._read_each("get_structures", "refresh_structures")
+        return PartialResult((structure for structures in result for structure in structures), result.errors)
 
     def _refresh_batch(self, method_name: str, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
         """Run `method_name` on each selected corporation (in parallel when
@@ -269,13 +281,11 @@ class CorporationManager:
         corporation_id: Optional[int] = None,
         *,
         refresh: bool = False,
-    ) -> List[Dict]:
-        """Market orders for one or all corporations; with `refresh`, the
-        selected corporations are refreshed first (once)."""
-        corps = self._select_corporations("get_market_orders", corporation_name, corporation_id)
-        if refresh:
-            self._refresh_batch("refresh_market_orders", corporation_name, corporation_id)
-        return self._read_each(corps, "get_market_orders")
+    ) -> PartialResult:
+        """Market orders for one or all corporations (see _read_each); with
+        `refresh`, the selected corporations are refreshed first (once)."""
+        return self._read_each("get_market_orders", "refresh_market_orders" if refresh else None,
+                               corporation_name, corporation_id)
 
     def refresh_market_orders(self, corporation_name: Optional[str] = None, corporation_id: Optional[int] = None) -> None:
         self._refresh_batch("refresh_market_orders", corporation_name, corporation_id)

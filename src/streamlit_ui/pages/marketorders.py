@@ -13,6 +13,7 @@ from streamlit_ui.api.market_orders import (
     fetch_corp_market_orders_enriched,
 )
 from streamlit_ui.api.client import api_get
+from streamlit_ui.components.batch_errors import show_batch_errors, show_errors
 from streamlit_ui.components.webpage_ui import AgGridRuntime, aggrid_height, require_aggrid
 
 
@@ -737,7 +738,13 @@ def _render_pricing_analysis(selected_order: dict) -> None:
 
 # ── Corp order row builders ───────────────────────────────────────────────────
 
+#: {owner kind: {name: error}} of the last refresh, shown after the rerun it triggers.
+_REFRESH_ERRORS_KEY = "market_orders_refresh_errors"
+
+
 def _render_market_orders(runtime: object, img_renderer: object) -> None:
+    for owner_kind, errors in (st.session_state.pop(_REFRESH_ERRORS_KEY, None) or {}).items():
+        show_errors(errors, f"Refresh: {owner_kind}")
     all_orders = []
     try:
         response = fetch_market_orders()
@@ -745,6 +752,7 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
     except Exception as e:
         st.error(f"Error fetching market orders: {str(e)}")
         return
+    show_batch_errors(response, "Character")
 
     # Merge corp orders from the ESI corporation endpoint (adds orders placed by other characters).
     # Read once per run: the refresh below reuses it (one warning when it fails).
@@ -789,15 +797,18 @@ def _render_market_orders(runtime: object, img_renderer: object) -> None:
             st.write("<br>", unsafe_allow_html=True)
             if st.button("Refresh Market Orders"):
                 with st.spinner("Refreshing market orders..."):
+                    refresh_errors: dict[str, dict[str, str]] = {"Character": {}, "Corporation": {}}
                     try:
-                        refresh_market_orders()
+                        refresh_errors["Character"].update(refresh_market_orders() or {})
                     except Exception as e:
                         st.error(f"Refresh failed: {str(e)}")
                     for corp_id in director_corp_ids:
                         try:
-                            refresh_corp_market_orders(corp_id)
+                            refresh_errors["Corporation"].update(refresh_corp_market_orders(corp_id) or {})
                         except Exception as e:
                             st.error(f"Corp refresh failed: {str(e)}")
+                    # Partial failures: named after the rerun below.
+                    st.session_state[_REFRESH_ERRORS_KEY] = {k: v for k, v in refresh_errors.items() if v}
                 clear_market_orders_cache()
                 clear_corp_market_orders_cache()
                 _rerun()

@@ -119,7 +119,7 @@ def test_the_realized_profit_inputs_refresh_every_kind_and_name_each_failure():
     assert set(info.value.errors) == {"Acme (refresh_wallet_journal)", "Bolt (refresh_assets)"}
 
 
-@pytest.mark.parametrize("method,failing", [
+_GETTER_FAILURES = [
     ("get_assets", "get_assets"),
     ("get_assets", "refresh_assets"),
     ("get_members", "get_members"),
@@ -127,14 +127,36 @@ def test_the_realized_profit_inputs_refresh_every_kind_and_name_each_failure():
     ("get_structures", "get_structures"),
     ("get_structures", "refresh_structures"),
     ("get_market_orders", "get_market_orders"),
-])
-def test_a_getter_tries_every_corporation_and_names_each_failure(method, failing):
+]
+
+
+@pytest.mark.parametrize("method,failing", _GETTER_FAILURES)
+def test_a_getter_keeps_the_others_data_and_names_each_failure(method, failing):
+    # Round J1.8: the corporations that worked are returned; result.errors names each that failed.
     a, b, c = _Corp(1, "Acme", fail={failing}), _Corp(2, "Bolt"), _Corp(3, "Crux", fail={failing})
+    result = getattr(_manager(a, b, c), method)()
+    assert set(result.errors) == {"Acme", "Crux"}
+    assert all(f"{failing} down" in message for message in result.errors.values())
+    assert b.calls[method] == 1
+    if method in ("get_assets", "get_market_orders"):
+        assert [r["corporation_id"] for r in result] == [2]
+    else:   # members and structures are flattened: Bolt's entries only
+        assert list(result) == list({"corporation_id": 2, "kind": method})
+
+
+@pytest.mark.parametrize("method,failing", _GETTER_FAILURES)
+def test_a_getter_whose_every_corporation_fails_raises_naming_each(method, failing):
+    a, b = _Corp(1, "Acme", fail={failing}), _Corp(2, "Bolt", fail={failing})
     with pytest.raises(CorporationRefreshError) as info:
-        getattr(_manager(a, b, c), method)()
-    assert set(info.value.errors) == {"Acme", "Crux"}
-    assert f"{failing} down" in str(info.value)
-    assert b.calls[method] == 1   # Bolt was read too
+        getattr(_manager(a, b), method)()
+    assert set(info.value.errors) == {"Acme", "Bolt"}
+
+
+def test_a_failed_refresh_skips_that_corporations_read():
+    a, b = _Corp(1, "Acme", fail={"refresh_assets"}), _Corp(2, "Bolt")
+    result = _manager(a, b).get_assets()
+    assert a.calls == {"refresh_assets": 1} and b.calls == {"refresh_assets": 1, "get_assets": 1}
+    assert [r["corporation_id"] for r in result] == [2] and set(result.errors) == {"Acme"}
 
 
 def test_a_selected_corporation_is_refreshed_and_read_once():

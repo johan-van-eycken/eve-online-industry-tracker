@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from eve_online_industry_tracker.application.batch import PartialResult, batch_errors
 from eve_online_industry_tracker.application.characters.realized_profit import (
     CorporationRealizedProfitLedgerService,
     ledger_rebuild_lock,
@@ -174,7 +175,8 @@ class CorporationsService:
                 ))
 
         add_reprice_priority_scores(enriched_orders)
-        return enriched_orders
+        # The corporations whose orders could not be read are named, not left out silently.
+        return PartialResult(enriched_orders, batch_errors(raw_corp_data))
 
     def get_realized_profit_ledger(
         self,

@@ -5,6 +5,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
+from eve_online_industry_tracker.application.batch import PartialResult
 from eve_online_industry_tracker.application.characters.character import Character
 from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS
 from eve_online_industry_tracker.infrastructure.models import OAuthCharacter
@@ -201,25 +202,36 @@ class CharacterManager:
         character_id: Optional[int],
         *,
         refresh: bool = True,
-    ) -> List[Any]:
-        """`getter` of each character, after `refresh_method`. With a
-        character_id or name: that character only, refreshed once
-        (UnknownCharacterError when it does not exist, CharacterRefreshError
-        naming it when its refresh fails). Without one, every character, each
-        refreshed once (one batch) before the reads."""
+    ) -> PartialResult:
+        """`getter` of each selected character (one with a character_id or
+        name, else all), after one batch `refresh_method`. A character whose
+        refresh or read fails is logged as an ERROR and named in the
+        result's `errors`; the others' data is returned. When every selected
+        character fails (so always for a single selected one),
+        CharacterRefreshError names each. An unknown character_id or name
+        raises UnknownCharacterError."""
         chars = self._select_characters(refresh_method, character_name, character_id)
+        errors: Dict[str, str] = {}
         if refresh:
-            self._refresh_batch(refresh_method, character_name, character_id)
+            try:
+                self._refresh_batch(refresh_method, character_name, character_id)
+            except UnknownCharacterError:
+                raise
+            except CharacterRefreshError as exc:   # each failure is logged there; the others are read
+                errors.update(exc.errors)
 
         results = []
         for char in chars:
+            if char.character_name in errors:
+                continue   # its refresh failed: no stale read in its place
             try:
                 results.append(getattr(char, getter)())
-            except Exception as e:
-                error_message = f"Error retrieving {what} for {char.character_name}: {str(e)}"
-                logging.error(error_message)
-                raise Exception(error_message)
-        return results
+            except Exception as e:   # the batch boundary: one character must not hide the others' data
+                logging.error("Error retrieving %s for %s: %s", what, char.character_name, e, exc_info=True)
+                errors[char.character_name] = f"{type(e).__name__}: {e}"
+        if errors and not results:
+            raise CharacterRefreshError(getter, errors)
+        return PartialResult(results, errors)
 
     def _select_characters(self, method_name: str, character_name: Optional[str] = None,
                            character_id: Optional[int] = None) -> List[Character]:
