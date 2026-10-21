@@ -28,6 +28,7 @@ from eve_online_industry_tracker.application.daily_planner.chain_planner import 
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder  # noqa: E402
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 
 class _Adm:
@@ -109,7 +110,7 @@ def _probe_a(component_te, *, widget_bpos=1, widget_decision="build"):
         },
         "blueprint_data": R.BLUEPRINT_DATA, "market_depth_cache": R.MARKET, "variant_rows_by_type_id": {},
     })
-    actions = CharacterAssigner().assign(plan, [], R._Chars(R._pilot(("Laboratory Operation", 3406, 5))), R._Admin())
+    actions = CharacterAssigner().assign(plan, [], R._Chars(R._pilot(("Laboratory Operation", 3406, 5))), R._Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)
     return plan, parent, actions
 
 
@@ -193,7 +194,7 @@ def _run(decisions, bpos, bpcs, chars=None, blueprints=BP_B):
         "bpo_assets_by_type_id": bpos, "bpc_assets_by_type_id": bpcs,
         "blueprint_data": blueprints, "market_depth_cache": A.PRICES, "variant_rows_by_type_id": {},
     })
-    actions = CharacterAssigner().assign(plan, [], A._Chars(chars or _chars()), A._Admin(), price_map=A.PRICES)
+    actions = CharacterAssigner().assign(plan, [], A._Chars(chars or _chars()), A._Admin(), price_map=A.PRICES, blueprint_data=NO_SKILL_REQUIREMENTS)
     return plan, actions
 
 
@@ -330,7 +331,7 @@ def test_probe_g_two_hand_built_rows_do_not_both_copy_the_one_bpo():
     plan = ChainPlan(decisions=[A._decision(first, stage="copying", score=2.0),
                                 A._decision(second, stage="copying", type_id=12346, score=1.0)])
     chars = [A._best_inventor(), A._second_inventor(), A._copier(), {**A._copier(), "character_id": 9, "character_name": "C2"}]
-    actions = CharacterAssigner().assign(plan, [], A._Chars(chars), A._Admin(), price_map=A.PRICES)
+    actions = CharacterAssigner().assign(plan, [], A._Chars(chars), A._Admin(), price_map=A.PRICES, blueprint_data=NO_SKILL_REQUIREMENTS)
     copies = [a for a in actions if a.action_type == "copy"]
     assert [c.type_id for c in copies] == [998] and copies[0].notes.startswith("Copy T1 BPO")
     assert [a for a in actions if a.type_id == 12346] == []
@@ -405,7 +406,7 @@ def test_probe_d_the_composed_plan_is_unchanged():
         {"character_id": 3, "character_name": "Second", "skills": {"skills": A._second_inventor()["skills"]["skills"]}},
         {"character_id": 4, "character_name": "Copier", "skills": {"skills": [A._skill("Laboratory Operation", 1, 3406)]}},
     ]
-    actions = CharacterAssigner().assign(plan, [], A._Chars(chars), A._Admin(), price_map=prices)
+    actions = CharacterAssigner().assign(plan, [], A._Chars(chars), A._Admin(), price_map=prices, blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [(a.action_type, a.type_id, a.character_id, a.runs, a.quantity, a.estimated_job_fee_isk) for a in actions] == [
         ("me_research", 999, 1, None, None, 0.0),
         ("te_research", 999, 1, None, None, 0.0),
@@ -455,7 +456,7 @@ def test_probe_d_the_composed_plan_is_unchanged():
 def test_a_copying_or_invention_row_says_no_manufacture_today(stage):
     row = A._row(t1_bpo=stage == "copying")
     decision = A._decision(row, stage=stage)
-    CharacterAssigner().assign(ChainPlan(decisions=[decision]), [], A._Chars(_chars()), A._Admin(), price_map=A.PRICES)
+    CharacterAssigner().assign(ChainPlan(decisions=[decision]), [], A._Chars(_chars()), A._Admin(), price_map=A.PRICES, blueprint_data=NO_SKILL_REQUIREMENTS)
     assert decision.decision_reason.count("; no manufacture today: ") == 1
 
 
@@ -489,7 +490,7 @@ def test_a_sub_build_of_several_jobs_on_one_bpo_queues_the_rest():
     pilot = {"character_id": 1, "character_name": "Pilot", "skills": {"skills": [
         {"skill_id": 3387, "skill_name": "Mass Production", "trained_skill_level": 1},
     ]}}
-    actions = CharacterAssigner().assign(plan, [], R._Chars(pilot), R._Admin())
+    actions = CharacterAssigner().assign(plan, [], R._Chars(pilot), R._Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)
     subs = [a for a in actions if a.action_type == "sub_manufacture"]
     assert [a.runs for a in subs] == [40, 40, 20]
     assert {a.character_id for a in subs} == {1}
@@ -541,7 +542,7 @@ def _thing_and_widget_ii(*, research_busy=False, mfg_busy=False):
     if mfg_busy:  # and their only manufacturing slot too
         jobs += [{"character_id": cid, "activity_id": 1, "status": "active"} for cid in (A.BEST_ID, A.COPIER_ID)]
     chars = [A._best_inventor(), {**A._copier(), "skills": {"skills": []}}]
-    actions = CharacterAssigner().assign(plan, jobs, A._Chars(chars), A._Admin(), price_map=prices)
+    actions = CharacterAssigner().assign(plan, jobs, A._Chars(chars), A._Admin(), price_map=prices, blueprint_data=NO_SKILL_REQUIREMENTS)
     return thing, widget, actions
 
 
@@ -686,7 +687,7 @@ def test_m8_no_component_reason_when_the_stock_covers_it():
         "blueprint_data": R.BLUEPRINT_DATA, "market_depth_cache": R.MARKET, "variant_rows_by_type_id": {},
         "corp_material_stock": {54321: 1000},
     })
-    CharacterAssigner().assign(plan, [], R._Chars(R._pilot()), R._Admin())
+    CharacterAssigner().assign(plan, [], R._Chars(R._pilot()), R._Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert parent.decision_reason == "test"
 
 
@@ -699,7 +700,7 @@ def test_m8_no_component_reason_when_the_parent_gets_no_manufacture():
     })
     no_slots = {"character_id": 1, "character_name": "Pilot", "skills": {"skills": []}}
     busy = [{"character_id": 1, "activity_id": 1, "status": "active"}]
-    CharacterAssigner().assign(plan, busy, R._Chars(no_slots), R._Admin())
+    CharacterAssigner().assign(plan, busy, R._Chars(no_slots), R._Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert "component Widget bought" not in parent.decision_reason
 
 
@@ -825,7 +826,7 @@ def test_m8_the_component_reason_checks_stock_pooled_across_parents():
         "blueprint_data": R.BLUEPRINT_DATA, "market_depth_cache": R.MARKET, "variant_rows_by_type_id": {},
         "corp_material_stock": {54321: 1000},
     })
-    CharacterAssigner().assign(plan, [], R._Chars(R._pilot()), R._Admin())
+    CharacterAssigner().assign(plan, [], R._Chars(R._pilot()), R._Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert all("component Widget bought: its BPO is used by manufacture of Widget (54321) today" in d.decision_reason
                for d in rows)
 
@@ -857,7 +858,7 @@ def _p4(bpos):
         "bpo_assets_by_type_id": {999: bpos}, "bpc_assets_by_type_id": {999: [_bpc(80, 999, 10)]},
         "blueprint_data": bp, "market_depth_cache": prices, "variant_rows_by_type_id": {12345: [variant]},
     })
-    actions = CharacterAssigner().assign(plan, [], A._Chars(_chars()), A._Admin(), price_map=prices)
+    actions = CharacterAssigner().assign(plan, [], A._Chars(_chars()), A._Admin(), price_map=prices, blueprint_data=NO_SKILL_REQUIREMENTS)
     return thing, widget, actions
 
 
@@ -895,7 +896,7 @@ def test_m8_a_kept_row_component_reason_survives_when_the_fallback_buys_it():
         "corp_material_stock": {54321: 500},
     })
     busy = [{"character_id": 1, "activity_id": 3, "status": "active"}] * 10
-    actions = CharacterAssigner().assign(plan, busy, R._Chars(R._pilot()), R._Admin())
+    actions = CharacterAssigner().assign(plan, busy, R._Chars(R._pilot()), R._Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)
     (build,) = [a for a in actions if a.action_type == "manufacture" and a.type_id == 12345]
     assert build.materials[54321] == 1000
     assert "component Widget bought: its BPO is used by manufacture of Widget (54321) today" in thing.decision_reason

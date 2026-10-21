@@ -19,6 +19,7 @@ import pytest
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner, _sizing_bonus_wording
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 BLUEPRINT_DATA = {
     # Parent 999: 1 run of 12345 needs 100 x the component 54321.
@@ -121,7 +122,7 @@ def _plan(row, *, te=0, me=10, variants=None, bpo_count=1, bpos=None):
 
 def _assign(plan, pilot=None, *, busy_research_slots=0):
     jobs = [{"character_id": 1, "activity_id": 3, "status": "active"}] * busy_research_slots
-    actions = CharacterAssigner().assign(plan, jobs, _Chars(pilot or _pilot()), _Admin())
+    actions = CharacterAssigner().assign(plan, jobs, _Chars(pilot or _pilot()), _Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)
     return {a.action_type: a for a in actions}
 
 
@@ -230,13 +231,19 @@ def test_the_pilots_research_skills_shorten_the_duration():
     assert abs((te.estimated_completion - before) - expected) < timedelta(seconds=5)
 
 
-def test_unknown_pilot_skills_keep_the_producer_figure_and_say_so():
+def test_a_pilot_whose_skills_are_unknown_gets_no_research_and_says_so():
+    """Never plan what cannot be executed: a pilot whose skills are not
+    loaded does not qualify for a job (it used to research at the producer
+    character's figure)."""
     row = _row(**BPO_ROW)
     _with_unskilled(row, 0.5)
     pilot = _pilot(loaded=False)
     pilot["skills"] = None
-    te = _assign(_plan(row), pilot=pilot)["te_research"]
-    assert "(at the producer character's skills: the pilot's are unknown)" in te.notes
+    plan = _plan(row)
+    actions = _assign(plan, pilot=pilot)
+    assert "te_research" not in actions and "me_research" not in actions
+    (top,) = [d for d in plan.decisions if not d.is_sub_component]
+    assert "no TE research today: no pilot qualifies: skills not loaded for Pilot" in top.decision_reason
 
 
 def _with_base(row, implants=None):

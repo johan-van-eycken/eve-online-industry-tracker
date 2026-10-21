@@ -15,8 +15,9 @@ in either:
     "assume a slow, unknown-quality signal", not "assume it sells out instantly" (which
     `1.0 / small_number` would imply if the guard were absent).
   * `days_of_supply_current` is exposed on PipelineState and consumed by
-    ProfitabilityScorer.pipeline_saturation (profitability_scorer.py:59-63:
-    `max(0.0, 1.0 - (days_supply - 3.0) / 11.0)`). There, 0.0 means "nothing already in
+    ProfitabilityScorer.pipeline_saturation (profitability_scorer.py, "Pipeline
+    saturation": `max(floor, 1.0 - (days_supply - 3.0) / (full_days - 3.0))`, both
+    admin settings). There, 0.0 means "nothing already in
     the pipeline" and *raises* the multiplier above 1.0 -- encouraging more production on
     a total unknown, the opposite of conservative. This module instead reports the
     formula's own neutral point (3.0, where pipeline_saturation == 1.0 -- no adjustment)
@@ -41,7 +42,8 @@ logger = logging.getLogger(__name__)
 
 # Neutral fallback for PipelineState.days_of_supply_current when the producer could not
 # compute a days_of_supply for this item (see module docstring). Matches
-# ProfitabilityScorer.pipeline_saturation's own neutral point (profitability_scorer.py:61).
+# ProfitabilityScorer.pipeline_saturation's own neutral point (profitability_scorer.py, "Pipeline
+# saturation": 1.0 at 3 days of supply, whatever the floor and full-days settings).
 _NEUTRAL_DAYS_OF_SUPPLY = 3.0
 
 

@@ -15,6 +15,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 from eve_online_industry_tracker.application.industry.shopping_list import LATER_BATCH_PLAN_VERSION
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 # Public SDE ids: High Energy Physics, Caldari Starship Engineering, Caldari Encryption Methods.
 _HARNESS_INVENTION_SKILLS = (
@@ -2472,7 +2473,7 @@ def test_the_daily_plan_schedules_the_lanes_the_producers_elapsed_assumes(monkey
     )])
     chars = SimpleNamespace(list_characters=lambda: characters)
     admin = SimpleNamespace(get=lambda section, key, default=None: default)
-    invents = [a for a in CharacterAssigner().assign(plan, [], chars, admin, price_map={}) if a.action_type == "invent"]
+    invents = [a for a in CharacterAssigner().assign(plan, [], chars, admin, price_map={}, blueprint_data=NO_SKILL_REQUIREMENTS) if a.action_type == "invent"]
     assert [a.character_id for a in invents] == [1, 2]
     assert len(invents) == parallel["lanes_used"]
     assert max(a.runs for a in invents) == parallel["rounds"]

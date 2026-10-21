@@ -544,9 +544,11 @@ adjusted_score = isk_per_hour
                             #   e.g. momentum_signal = -6 → momentum_adj = max(0.8, 0.80) = 0.80
                             #   No upward bonus for positive momentum_signal (cap remains 1.0)
                             # source: price_trend_7d_pct and price_trend_30d_pct from IndustryService rows
-  × pipeline_saturation     # > 1.0 if days_of_supply < 3d (urgency boost); 1.0 at 3d; linear decay to 0.0 at 14d+
-                            # formula: max(0, 1 - (days_of_supply - 3) / 11)
-                            # e.g. 0 days → 1.27 (urgent), 3 days → 1.0, 14 days → 0.0
+  × pipeline_saturation     # > 1.0 if days_of_supply < 3d (urgency boost); 1.0 at 3d; linear decay to a floor
+                            # formula: max(floor, 1 - (days_of_supply - 3) / (full_days - 3)),
+                            # admin settings planner_saturation_floor (0.25) and planner_saturation_full_days (30)
+                            # e.g. 0 days → 1.11, 3 days → 1.0, 14 days → 0.59, 23.25 days and more → 0.25
+                            # (ruling 2026-10-21; was max(0, 1 - (days_of_supply - 3) / 11): 0.0 from 14 days)
   × competition_factor      # new: penalises items with high competitor supply on market
                             # competition_index < 1.0  → 1.00 (thin market, no penalty)
                             # competition_index 1.0–2.0 → 0.90
@@ -565,7 +567,7 @@ adjusted_score = isk_per_hour
 
 | Decision | Condition |
 |---|---|
-| `build` | `adjusted_score` > `planner_min_isk_per_hour` threshold (default 5M ISK/hr) AND `absolute_profit_per_batch` > `planner_min_profit_per_batch` (default 20M ISK) AND `total_pipeline_days` < 3 AND `competition_index` < 4.0 |
+| `build` | `adjusted_score` > `planner_min_isk_per_hour` threshold (default 2M ISK/hr) AND `absolute_profit_per_batch` > `planner_min_profit_per_batch` (default 10M ISK) AND `total_pipeline_days` < 3 AND `competition_index` < 4.0 |
 | `watch` | Profitable but `total_pipeline_days` ≥ 3 days of supply (already saturated) OR `competition_index` ≥ 4.0 (market flooded) |
 | `pause` | There are active in-flight manufacturing jobs for this item AND (`price_trend_7d_pct` < -8% OR `momentum_signal` < -6) — finish in-flight jobs, do not start new ones. An item with no active jobs and a declining trend goes to `skip`, not `pause`. |
 | `skip` | `adjusted_score` ≤ minimum threshold, `absolute_profit_per_batch` ≤ minimum batch profit, high anomaly risk, or insufficient liquidity |
@@ -1064,12 +1066,12 @@ Items flagged as "mineral-squeeze sensitive" (Pearson correlation < −0.6) show
 | velocity_multiplier | 1.08 | ×1.08 |
 | cost_multiplier | 0.97 | ×0.97 |
 | market_timing_factor | 0.91 (trend −7.2%, momentum −2.1) | ×0.91 |
-| pipeline_saturation | 1.12 (1.4d supply) | ×1.12 |
+| pipeline_saturation | 1.06 (1.4d supply; max(0.25, 1 − (1.4 − 3)/27)) | ×1.06 |
 | competition_factor | 0.90 (index 1.6) | ×0.90 |
 | mineral_squeeze_penalty | 1.00 (not sensitive) | ×1.00 |
 | confidence_tier_bonus | 1.05 (medium, 8 samples) | ×1.05 |
-| **Adjusted score** | **17.2M ISK/hour** | |
-| **Decision** | **build** (above 5M threshold, pipeline < 3d, index < 4.0) | |
+| **Adjusted score** | **16.5M ISK/hour** | |
+| **Decision** | **build** (above 2M threshold, pipeline < 3d, index < 4.0) | |
 
 This panel also shows the `decision_reason` text and the active force-override toggle for this item. The user can see exactly which factor is suppressing an item and make an informed override decision rather than guessing.
 
@@ -1125,7 +1127,7 @@ New blueprint: `flask_app/routes/daily_planner.py`
 - IndustryService overview freshness threshold = 12 hours (configurable via admin settings)
 - BPO break-even thresholds (Strong Buy: 30d, Consider: 90d) configurable via admin settings
 - Slow-mover timeout = 60 days (global default, configurable via admin settings). Applies uniformly across all item categories. **Known limitation:** 60 days may be too short for capitals or rare T2 items that legitimately take months to sell — these will accumulate slow_mover outcomes and have their velocity scores penalised unfairly. Mitigation: monitor confidence tier and velocity_multiplier for high-value items in Tab 4; a future version may add per-meta-group timeout overrides.
-- Minimum ISK/hour threshold for `build` decision = 5M ISK/hr (configurable via admin settings)
+- Minimum ISK/hour threshold for `build` decision = 2M ISK/hr (configurable via admin settings; 5M until 2026-10-21)
 - `freshness_score` warning level = 0.9 (configurable via admin settings)
 - Tab 4 accuracy window N = 20 batches (configurable via admin settings)
 - Tab 4 Plan History depth = 90 days rolling window (configurable via admin settings as `plan_history_days`); older archived `build_plan` records are retained in the DB but excluded from the UI history view
@@ -1559,7 +1561,7 @@ All new configurable knobs appended to `ADMIN_SETTINGS_SCHEMA` in `config/admin_
 | Key | Default | Description |
 |---|---|---|
 | `planner_ema_alpha` | `0.2` | EMA smoothing factor for learning weights |
-| `planner_min_isk_per_hour` | `5_000_000` | Minimum ISK/hr for `build` decision |
+| `planner_min_isk_per_hour` | `2_000_000` | Minimum ISK/hr for `build` decision (5M until 2026-10-21) |
 | `planner_price_drift_threshold_pct` | `5.0` | % price change that counts as drifted for staleness |
 | `planner_freshness_warning_level` | `0.9` | `freshness_score` below this triggers UI warning |
 | `planner_industry_data_max_age_hours` | `12` | Max age of IndustryService data before warning |
@@ -1580,7 +1582,9 @@ All new configurable knobs appended to `ADMIN_SETTINGS_SCHEMA` in `config/admin_
 | `planner_mineral_correlation_min_days` | `30` | Minimum data points required before margin–mineral correlation is computed |
 | `planner_market_refresh_interval_hours` | `3` | How often `MarketIntelligenceJob` refreshes market depth and VWAP |
 | `planner_max_plan_age_hours` | `36` | Plan age threshold above which the plan switches to expired mode; Tab 1 action list is hidden |
-| `planner_min_profit_per_batch` | `20_000_000` | Minimum absolute ISK profit per batch for `build` decision (prevents near-zero-margin fast jobs) |
+| `planner_min_profit_per_batch` | `10_000_000` | Minimum absolute ISK profit per batch for `build` decision (prevents near-zero-margin fast jobs; 20M until 2026-10-21) |
+| `planner_saturation_floor` | `0.25` | Lowest pipeline saturation multiplier on the score (range 0–1) |
+| `planner_saturation_full_days` | `30` | Days of supply at which the saturation formula reaches 0 before the floor (range 4–365) |
 | `planner_price_outlier_sigma` | `3.0` | Standard deviations from avg_30d beyond which a sell order is excluded as an outlier |
 | `planner_optimal_te_threshold_pct` | `1.0` | Minimum % time saving per TE level to continue researching; below this threshold `compute_optimal_te()` stops. e.g. 1.0 = stop when one more TE level saves < 1% of job duration. |
 

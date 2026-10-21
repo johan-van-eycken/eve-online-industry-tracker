@@ -55,6 +55,7 @@ from eve_online_industry_tracker.application.daily_planner.shopping_list_builder
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.config.admin_settings import AdminSettingsManager
 from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "overview_rows_real.json")
 
@@ -250,7 +251,7 @@ def _run_phases(overview_rows, input_rows, meta, admin, *, own_bpos=True):
         chain_plan=chain, industry_jobs=[],
         characters_service=SimpleNamespace(list_characters=lambda: [dict(_SKILLED_PILOT)]),
         admin_settings=admin,
-    )
+     blueprint_data=NO_SKILL_REQUIREMENTS)
 
     return SimpleNamespace(
         states=states, decisions=decisions, promoted=promoted, chain=chain,

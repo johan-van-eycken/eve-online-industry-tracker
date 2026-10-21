@@ -120,6 +120,9 @@ from eve_online_industry_tracker.application.industry.invention_model import (
     source_copy_lanes,
 )
 from eve_online_industry_tracker.application.industry.character_slots import (
+    activity_skill_requirements,
+    meets_skill_levels,
+    required_skill_levels,
     research_slot_capacity,
     skill_levels_by_name as _character_skill_levels_by_name,
 )
@@ -10984,8 +10987,16 @@ class IndustryService:
         blueprint_type_ids: list[int],
     ) -> dict[int, dict[int, bool]]:
         """
-        For each blueprint_type_id, return whether each configured character
-        meets the manufacturing skill requirements.
+        For each blueprint_type_id, whether each configured character meets
+        the SDE skills of its manufacturing activity (a reaction formula's
+        reaction): the shared job skill check (character_slots), the one the
+        daily planner assigns jobs by.
+
+        Never plan what cannot be executed: a blueprint not in the SDE, or
+        without a manufacturing / reaction activity, qualifies nobody, and a
+        character whose skills cannot be read does not qualify (both logged
+        at WARNING). The SDE keys activities by name; this used to read
+        activities["1"], found nothing, and let every character qualify.
 
         Returns: {blueprint_type_id: {character_id: bool}}
         """
@@ -10995,8 +11006,8 @@ class IndustryService:
         characters = self._state.char_manager.get_characters()
         character_ids: list[int] = [int(c["character_id"]) for c in characters if c.get("character_id")]
 
-        # Fetch trained skill levels for each character
-        char_skill_levels: dict[int, dict[int, int]] = {}
+        # Trained skill levels per character; None: they cannot be read.
+        char_skill_levels: dict[int, dict[int, int] | None] = {}
         for character_id in character_ids:
             try:
                 char_skill_levels[character_id] = self._get_character_trained_skill_levels(
@@ -11004,45 +11015,46 @@ class IndustryService:
                 )
             except ServiceError as exc:
                 logger.warning("Blueprint skill qualification: the skills of character %s cannot be read (%s); it "
-                               "counts as having none", character_id, exc)
-                char_skill_levels[character_id] = {}
+                               "qualifies for no blueprint", character_id, exc)
+                char_skill_levels[character_id] = None
 
-        # Query blueprints from SDE
+        # The SDE's raw activities, shaped as get_blueprint_manufacturing_data's
+        # activity_skills for the shared helper.
         sde_session: Any = self._sessions.sde_session()
-        blueprint_rows = (
-            sde_session.query(Blueprints)
-            .filter(Blueprints.blueprintTypeID.in_(blueprint_type_ids))
-            .all()
-        )
-        blueprint_skills_by_type_id: dict[int, list[dict[str, int]]] = {}
+        try:
+            blueprint_rows = (
+                sde_session.query(Blueprints)
+                .filter(Blueprints.blueprintTypeID.in_(blueprint_type_ids))
+                .all()
+            )
+        finally:
+            close = getattr(sde_session, "close", None)
+            if callable(close):
+                close()
+        blueprint_data: dict[int, dict[str, Any]] = {}
         for bp in blueprint_rows:
-            activities = bp.activities or {}
-            if not isinstance(activities, dict):
-                activities = {}
-            mfg_skills = activities.get("1", {}).get("skills", [])
-            if not isinstance(mfg_skills, list):
-                mfg_skills = []
-            blueprint_skills_by_type_id[int(bp.blueprintTypeID)] = [
-                s for s in mfg_skills if isinstance(s, dict)
-            ]
+            activities = bp.activities if isinstance(bp.activities, dict) else {}
+            blueprint_data[int(bp.blueprintTypeID)] = {"activity_skills": {
+                name: [
+                    {"type_id": skill.get("typeID"), "level": skill.get("level")}
+                    for skill in (activity.get("skills") or []) if isinstance(skill, dict)
+                ]
+                for name, activity in activities.items() if isinstance(activity, dict)
+            }}
 
         result: dict[int, dict[int, bool]] = {}
         for bp_type_id in blueprint_type_ids:
-            required_skills = blueprint_skills_by_type_id.get(bp_type_id)
-            if required_skills is None:
-                # Blueprint not found in SDE — no requirements, all qualify
-                result[bp_type_id] = {cid: True for cid in character_ids}
+            entries, unknown = activity_skill_requirements(blueprint_data, bp_type_id, "manufacturing")
+            if entries is None:
+                logger.warning("Blueprint skill qualification: %s; no character qualifies", unknown)
+                result[bp_type_id] = {cid: False for cid in character_ids}
                 continue
-
-            char_qual: dict[int, bool] = {}
-            for character_id in character_ids:
-                trained = char_skill_levels.get(character_id) or {}
-                qualifies = all(
-                    trained.get(int(req.get("typeID") or 0), 0) >= int(req.get("level") or 0)
-                    for req in required_skills
-                )
-                char_qual[character_id] = qualifies
-            result[bp_type_id] = char_qual
+            required_levels = required_skill_levels(entries)
+            result[bp_type_id] = {
+                cid: char_skill_levels.get(cid) is not None
+                and meets_skill_levels(required_levels, char_skill_levels[cid] or {})
+                for cid in character_ids
+            }
 
         return result
 

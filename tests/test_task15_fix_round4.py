@@ -10,6 +10,7 @@ import test_daily_planner_assigned_inventor as a4
 from eve_online_industry_tracker.application.daily_planner import chain_planner as cp
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 
 # --- 1. a merged component fee: any requester unknown -> unknown, in any order ------
@@ -127,7 +128,7 @@ def test_bpcs_of_a_row_without_a_qualifying_pilot_go_to_the_next_row_of_the_sour
     actions = CharacterAssigner().assign(
         ChainPlan(decisions=[high, low]), [], a4._Chars([_other_pilot(lab_slots=1)]), a4._Admin(),
         price_map=a4.PRICES,
-    )
+     blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [(a.action_type, a.type_id, a.character_id, a.blueprint_item_id) for a in actions] == [
         ("invent", 12346, 1, 701),
     ]
@@ -144,7 +145,7 @@ def test_a_row_that_invents_keeps_its_bpcs():
     actions = CharacterAssigner().assign(
         ChainPlan(decisions=[high, low]), [], a4._Chars([_other_pilot(lab_slots=1)]), a4._Admin(),
         price_map=a4.PRICES,
-    )
+     blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [(a.action_type, a.type_id, a.blueprint_item_id) for a in actions] == [
         ("invent", 12345, 701), ("copy", 998, None),
     ]
@@ -156,7 +157,7 @@ def _assign_rows(*decisions, lab_slots=1):
     return CharacterAssigner().assign(
         ChainPlan(decisions=list(decisions)), [], a4._Chars([_other_pilot(lab_slots=lab_slots)]), a4._Admin(),
         price_map=a4.PRICES,
-    )
+     blueprint_data=NO_SKILL_REQUIREMENTS)
 
 
 def test_released_bpcs_name_the_row_that_takes_them():

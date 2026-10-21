@@ -99,7 +99,7 @@ class TestProfitabilityScorer:
 
         # At 0% trend: base_factor = max(0.5, min(1.0, 1.0 + (0+5)*0.05)) = min(1.0, 1.25) = 1.0
         # momentum_signal=0, not < -3 → market_timing_factor = 1.0
-        # days_supply=3: pipeline_saturation = max(0, 1-(3-3)/11) = 1.0
+        # days_supply=3: pipeline_saturation = max(0.25, 1-(3-3)/27) = 1.0
         # competition_index=None → competition_factor=1.0
         # confidence_tier=low → bonus=1.0
         # Expected: 10M * 1 * 1 * 1 * 1.0 * 1.0 * 1.0 * 1.0 * 1.0 = 10M
@@ -160,21 +160,22 @@ class TestProfitabilityScorer:
         assert abs(scored.market_timing_factor - 0.76) < 0.01, f"Got {scored.market_timing_factor}"
 
     def test_pipeline_saturation_at_0_days(self):
-        """0 days supply → pipeline_saturation = 1 - (0-3)/11 = 1 + 3/11 ≈ 1.27."""
+        """0 days supply → pipeline_saturation = 1 - (0-3)/(30-3) = 1 + 3/27 ≈ 1.11
+        (defaults: floor 0.25, full at 30 days; tests/test_daily_planner_thresholds.py)."""
         pipeline = _make_pipeline(price_trend_7d=0.0, days_of_supply=0.0)
         row = _input_row(isk_per_hour=10_000_000)
         weights = _make_weights()
         scored = self.scorer.score(pipeline, row, weights, None, None)
-        expected = max(0.0, 1.0 - (0.0 - 3.0) / 11.0)
+        expected = max(0.25, 1.0 - (0.0 - 3.0) / 27.0)
         assert abs(scored.pipeline_saturation - expected) < 0.01, f"Got {scored.pipeline_saturation}"
 
     def test_pipeline_saturation_at_14_days(self):
-        """14 days supply → pipeline_saturation = max(0, 1-(14-3)/11) = 0.0."""
+        """14 days supply → pipeline_saturation = max(0.25, 1-(14-3)/27) ≈ 0.59 (was 0.0)."""
         pipeline = _make_pipeline(price_trend_7d=0.0, days_of_supply=14.0)
         row = _input_row(isk_per_hour=10_000_000)
         weights = _make_weights()
         scored = self.scorer.score(pipeline, row, weights, None, None)
-        assert abs(scored.pipeline_saturation - 0.0) < 0.01, f"Got {scored.pipeline_saturation}"
+        assert abs(scored.pipeline_saturation - (1.0 - 11.0 / 27.0)) < 0.01, f"Got {scored.pipeline_saturation}"
 
     def test_competition_factor_none_is_1(self):
         """competition_index=None (Phase A) → competition_factor=1.0."""

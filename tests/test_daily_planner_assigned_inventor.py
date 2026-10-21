@@ -23,6 +23,7 @@ import pytest
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
 from eve_online_industry_tracker.application.daily_planner.shopping_list_builder import ShoppingListBuilder
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 SCIENCE_A, SCIENCE_B, ENCRYPTION = 11433, 11454, 21790
 DATACORE_A, DATACORE_B, DECRYPTOR = 20416, 20417, 34201
@@ -186,7 +187,7 @@ def _plan(row, *, stage="invention"):
 def _assign(row, chars, jobs=(), admin=None, *, stage="invention"):
     return CharacterAssigner().assign(
         _plan(row, stage=stage), list(jobs), _Chars(chars), admin or _Admin(), price_map=PRICES,
-    )
+     blueprint_data=NO_SKILL_REQUIREMENTS)
 
 
 def _invent(row, chars, jobs=(), admin=None):
@@ -341,25 +342,13 @@ def test_an_unpriced_input_line_falls_back_to_the_hub_price():
 # --- unknown skills (I2, minor 1, minor 7) -----------------------------------------
 
 
-def test_unloaded_pilot_skills_buy_at_the_sde_base_chance_with_a_warning(caplog):
-    """I2: never the best inventor's chance (that under-buys); the SDE base
-    chance x the decryptor is a lower bound."""
+def test_a_pilot_whose_skills_are_not_loaded_does_not_invent():
+    """Never plan what cannot be executed: a pilot whose skills are not
+    loaded is no inventor (it used to invent at the SDE base chance). The
+    only qualified inventor is busy, so nobody invents."""
     no_skills = {"character_id": WEAK_ID, "character_name": "Weaker"}
-    with caplog.at_level(logging.WARNING):
-        invent = _invent(_row(), [_best_inventor(), no_skills], jobs=[_busy(BEST_ID)])
-
-    assert invent.character_id == WEAK_ID
-    # 0.30 x 1.2 = 0.36 -> ceil(2 / 0.36) = 6.
-    assert invent.invention_probability == pytest.approx(0.36)
-    assert invent.invention_best_probability == pytest.approx(0.525)
-    assert invent.runs == 6
-    assert invent.invention_chance_reason == "the assigned pilot's skills are not loaded"
-    assert "chance 36% (SDE base: the assigned pilot's skills are not loaded), best inventor 52.5%" in invent.notes
-    assert any(
-        r.levelno == logging.WARNING and "12345" in r.getMessage() and "not loaded" in r.getMessage()
-        for r in caplog.records
-    )
-    assert _buy(invent) == {DATACORE_A: 12, DATACORE_B: 12, DECRYPTOR: 6}
+    actions = _assign(_row(), [_best_inventor(), no_skills], jobs=[_busy(BEST_ID)])
+    assert [a for a in actions if a.action_type == "invent"] == []
 
 
 @pytest.mark.parametrize("skills", [
@@ -373,7 +362,7 @@ def test_loaded_skills_without_the_items_skills_cannot_invent(skills, caplog):
     plan = _plan(_row())
     actions = CharacterAssigner().assign(
         plan, [_busy(BEST_ID)], _Chars([_best_inventor(), _weaker_pilot(skills=skills)]), _Admin(), price_map=PRICES,
-    )
+     blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a for a in actions if a.action_type == "invent"] == []
     assert "no invention today: no free pilot with the invention skills" in plan.decisions[0].decision_reason
 
@@ -756,7 +745,7 @@ def test_two_rows_share_the_t1_bpc_runs_on_hand_once():
     plan = ChainPlan(decisions=[_decision(first, stage="copying", score=2.0),
                                 _decision(second, stage="copying", type_id=12346, score=1.0)])
     chars = [_best_inventor(), _second_inventor(), _copier(), {**_copier(), "character_id": 9, "character_name": "C2"}]
-    actions = CharacterAssigner().assign(plan, [], _Chars(chars), _Admin(), price_map=PRICES)
+    actions = CharacterAssigner().assign(plan, [], _Chars(chars), _Admin(), price_map=PRICES, blueprint_data=NO_SKILL_REQUIREMENTS)
     invents_first = [a for a in actions if a.action_type == "invent" and a.type_id == 12345]
     invents_second = [a for a in actions if a.action_type == "invent" and a.type_id == 12346]
     assert sum(a.runs for a in invents_first) == 4

@@ -398,7 +398,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             },
             "planner_min_isk_per_hour": {
                 "type": "int",
-                "default": 5_000_000,
+                "default": 2_000_000,
                 "min": 100_000,
                 "max": 100_000_000,
                 "label": "Minimum ISK/hour for build decision",
@@ -521,6 +521,27 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
                 "label": "Mineral squeeze score multiplier",
                 "help": "Score multiplier applied to mineral-squeeze-sensitive items when Tritanium 7d trend > +5%.",
             },
+            "planner_saturation_floor": {
+                "type": "float",
+                "default": 0.25,
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.05,
+                "format": "%.2f",
+                "label": "Pipeline saturation floor",
+                "help": "The lowest pipeline saturation multiplier on the score, however many days of supply "
+                        "the hub holds. Saturation is max(floor, 1 - (days of supply - 3) / (full days - 3)): "
+                        "1.0 at 3 days, falling toward the floor as supply grows.",
+            },
+            "planner_saturation_full_days": {
+                "type": "int",
+                "default": 30,
+                "min": 4,
+                "max": 365,
+                "label": "Pipeline saturation full at (days of supply)",
+                "help": "Days of supply (hub sell liquidity / regional daily volume) at which the saturation "
+                        "formula reaches 0, before the floor: the larger, the softer the curve.",
+            },
             "planner_momentum_pause_threshold": {
                 "type": "float",
                 "default": -6.0,
@@ -558,7 +579,7 @@ ADMIN_SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             },
             "planner_min_profit_per_batch": {
                 "type": "int",
-                "default": 20_000_000,
+                "default": 10_000_000,
                 "min": 1_000_000,
                 "max": 500_000_000,
                 "label": "Minimum profit per batch (ISK)",

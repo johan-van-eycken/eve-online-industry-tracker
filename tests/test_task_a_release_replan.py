@@ -24,6 +24,7 @@ import test_daily_planner_assigned_inventor as A  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan  # noqa: E402
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 OTHER_ENCRYPTION = 99_001
 
@@ -47,9 +48,10 @@ def _t2_row(type_id, encryption, bpcs):
     return row
 
 
-def _assign(decisions, chars, jobs=()):
+def _assign(decisions, chars, jobs=(), skill_data=NO_SKILL_REQUIREMENTS):
     plan = decisions if isinstance(decisions, ChainPlan) else ChainPlan(decisions=list(decisions))
-    return CharacterAssigner().assign(plan, list(jobs), A._Chars(chars), A._Admin(), price_map=A.PRICES)
+    return CharacterAssigner().assign(plan, list(jobs), A._Chars(chars), A._Admin(), price_map=A.PRICES,
+                                      blueprint_data=skill_data)
 
 
 # --- item 3: fewer lanes than claimed BPCs -----------------------------------------
@@ -89,12 +91,12 @@ def _planned_t2(type_id, name, score, encryption):
     return L._dec(row, type_id, name, score, 2, "invention")
 
 
-def _plan_and_assign(decisions, bpos, bpcs, chars, jobs=(), blueprints=None):
+def _plan_and_assign(decisions, bpos, bpcs, chars, jobs=(), blueprints=None, skill_data=NO_SKILL_REQUIREMENTS):
     plan = L._planner(0).plan_chain(decisions, {
         "bpo_assets_by_type_id": bpos, "bpc_assets_by_type_id": bpcs,
         "blueprint_data": blueprints or L.BP_B, "market_depth_cache": A.PRICES, "variant_rows_by_type_id": {},
     })
-    return plan, _assign(plan, chars, jobs)
+    return plan, _assign(plan, chars, jobs, skill_data)
 
 
 def test_a_row_not_built_for_released_bpcs_is_re_planned_and_invents():
@@ -233,3 +235,49 @@ def test_a_re_plan_that_still_gets_no_slot_keeps_the_not_built_reason():
         "but no free pilot with the invention skills"
     )
     assert "its T1 BPC(s) 701 stay unused today" in high.decision_reason
+
+
+# --- an undone re-plan keeps the assigner's skill reason ----------------------------
+
+def _skill_data(**required):
+    """The SDE skills of the T1 (998) and T2 (1999) blueprints: none, but
+    the given activities of 998 (fake levels)."""
+    from planner_skill_fakes import blueprint, skill
+
+    activities = ("manufacturing", "copying", "invention", "research_material", "research_time")
+    return {
+        998: blueprint(**{a: [skill(*required[a])] if a in required else [] for a in activities}),
+        1999: blueprint(**{a: [] for a in activities}),
+    }
+
+
+def test_a_re_planned_manufacture_no_pilot_has_the_skills_for_says_so():
+    """The T1 row gets the released BPO 77 (as above), but no pilot has its
+    manufacturing skills: the re-plan is undone with that reason, not "no
+    free manufacturing slot"."""
+    t2 = L._dec(L._t2_row(), 12345, "Widget II", 2.0, 2, "invention")
+    t1 = L._dec(L._t1_row(20), 12344, "Widget I", 1.0, 1)
+    _plan, actions = _plan_and_assign([t2, t1], {998: [L._bpo(77, 998)]}, {},
+                                      [A._best_inventor()], jobs=[_busy(A.BEST_ID, 8)],
+                                      skill_data=_skill_data(manufacturing=(3380, "Industry", 5)))
+    assert actions == []
+    assert t1.pipeline_stage == "blocked"
+    assert "no free manufacturing slot" not in t1.decision_reason
+    assert ("BPO free (its holder does not use it today), but no pilot has the skills: "
+            "Industry 5 (best: Best at 0)") in t1.decision_reason
+
+
+def test_a_re_planned_copy_no_pilot_has_the_copying_skills_for_says_so():
+    """The T2 row gets the released BPO 77 to copy (as above), but no pilot
+    has the copying skills: the re-plan is undone with that reason."""
+    t1 = L._dec(L._t1_row(20), 12344, "Widget I", 2.0, 1)
+    t2 = L._dec(L._t2_row(), 12345, "Widget II", 1.0, 2, "invention")
+    _plan, actions = _plan_and_assign([t1, t2], {998: [L._bpo(77, 998)]}, {},
+                                      [A._best_inventor(), A._copier()],
+                                      jobs=[_busy(A.BEST_ID, 1), _busy(A.COPIER_ID, 1)],
+                                      skill_data=_skill_data(copying=(3402, "Science", 5)))
+    assert actions == []
+    assert t2.pipeline_stage == "blocked"
+    assert "no free research slot for the copy" not in t2.decision_reason
+    assert ("T1 BPO (998) free (its holder does not use it today), but no copy of its T1 BPO (998) today: "
+            "no pilot has the skills: Science 5 (best: Best at 0)") in t2.decision_reason
