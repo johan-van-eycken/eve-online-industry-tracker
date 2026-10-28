@@ -438,9 +438,15 @@ def reduced_batch_quantity(base_qty_per_run: int, runs: int, material_reduction:
     if base <= 0 or runs <= 0:
         return 0
     raw = float(base * runs) * max(0.0, 1.0 - float(material_reduction))
-    if raw <= 0:
+    return round_material_quantity(raw, minimum_quantity=runs)
+
+
+def round_material_quantity(raw_quantity: float, *, minimum_quantity: int) -> int:
+    """The one material rounding rule: ceil, never below minimum_quantity, 0 when not positive."""
+    if raw_quantity <= 0:
         return 0
-    return max(runs, int(math.ceil(raw)))
+    # 1e-9 absorbs float noise: 7500 * (1 - 0.0984) is 6762.000000000001, not 6763 units.
+    return max(int(minimum_quantity), int(math.ceil(raw_quantity - 1e-9)))
 
 
 def me_adjusted_quantity(base_qty: int, me: int) -> int:

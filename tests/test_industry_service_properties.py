@@ -147,7 +147,19 @@ class TestRoundMaterialQuantity:
     def test_rounds_up_with_minimum(self, raw: float, minimum: int):
         result = IndustryService._round_material_quantity(raw, minimum_quantity=minimum)
         assert result >= minimum
-        assert result >= int(math.ceil(raw))
+        assert result >= int(math.ceil(raw - 1e-9))
+
+    def test_float_noise_does_not_add_a_unit(self):
+        """ME 8 + 2% structure, 250/run x 30 runs is exactly 6762, float math gives 6762.000000000001."""
+        from eve_online_industry_tracker.application.characters import asset_provenance
+        from eve_online_industry_tracker.infrastructure.sde import blueprints
+
+        reduction = IndustryService._combine_reductions([0.08, 0.02])
+        raw = 250 * 30 * (1.0 - reduction)
+        assert raw > 6762  # the float noise this test is about
+        assert IndustryService._round_material_quantity(raw, minimum_quantity=30) == 6762
+        assert asset_provenance._round_material_quantity(raw, minimum_quantity=30) == 6762
+        assert blueprints.reduced_batch_quantity(250, 30, reduction) == 6762
 
     @given(st.floats(min_value=-1e6, max_value=0.0, allow_nan=False, allow_infinity=False))
     def test_non_positive_returns_zero(self, raw: float):

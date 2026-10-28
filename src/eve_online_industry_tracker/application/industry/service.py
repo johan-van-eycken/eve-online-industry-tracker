@@ -128,6 +128,7 @@ from eve_online_industry_tracker.domain import rig_groups as _rig_groups
 from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.domain import industry_facility as _industry_facility
 from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
+from eve_online_industry_tracker.infrastructure.sde.blueprints import round_material_quantity
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 from eve_online_industry_tracker.application.characters.asset_provenance import (
     RealizedInventionInputs,
@@ -3660,11 +3661,7 @@ class IndustryService:
             return 0
         return max(1, int(math.ceil(raw_seconds)))
 
-    @staticmethod
-    def _round_material_quantity(raw_quantity: float, *, minimum_quantity: int) -> int:
-        if raw_quantity <= 0:
-            return 0
-        return max(int(minimum_quantity), int(math.ceil(raw_quantity)))
+    _round_material_quantity = staticmethod(round_material_quantity)
 
     @staticmethod
     def _skill_levels_by_name(character_modifier_payload: dict[str, Any] | None) -> dict[str, int]:
@@ -5064,6 +5061,7 @@ class IndustryService:
             layout = _BatchRunLayout((), int(blueprint_material_efficiency), int(blueprint_time_efficiency), blueprint_source_kind)
         job_segments = layout.segments(0, runs)
         activity_by_efficiency: dict[tuple[int, int], dict[str, Any]] = {}
+        segment_costs: list[dict[str, Any]] = []
         for job_segment in job_segments:
             efficiency = (int(job_segment["blueprint_material_efficiency"]), int(job_segment["blueprint_time_efficiency"]))
             if efficiency not in activity_by_efficiency:
@@ -5076,42 +5074,19 @@ class IndustryService:
                     blueprint_material_efficiency=efficiency[0], blueprint_time_efficiency=efficiency[1],
                     surcharge_rates=None,
                 )
-            job_activity = activity_by_efficiency[efficiency]
-            job_segment["material_reduction"] = float(job_activity.get("material_reduction", 0.0))
-            job_segment["time_reduction"] = float(job_activity["time_reduction"])
-            job_segment["duration_seconds"] = self._round_duration_seconds(
-                int(job.get("time_seconds") or 0) * int(job_segment["runs"]) * max(0.0, 1.0 - job_segment["time_reduction"])
-            )
-            job_segment["materials"] = {}
-        cost_reduction = next(iter(activity_by_efficiency.values()))["cost_reduction"]
+            segment_costs.append(activity_by_efficiency[efficiency])
+        cost_reduction = segment_costs[0]["cost_reduction"]
+        sized = self._fill_job_segments(
+            job_segments, segment_costs,
+            base_time_seconds=int(job.get("time_seconds") or 0),
+            materials=[dict(entry) for entry in (job.get("materials") or []) if isinstance(entry, dict)],
+        )
         # Runs-weighted over the jobs when they differ; job_segments has each job's own.
-        material_reduction, material_differs = self._runs_weighted_reduction(job_segments, "material_reduction")
-        _time_reduction, time_differs = self._runs_weighted_reduction(job_segments, "time_reduction")
+        material_reduction = sized["material_reduction"]
         # Labels the runs-weighted material_reduction (see the top-level row).
-        reduction_basis = "runs_weighted_job_segments" if material_differs or time_differs else None
-
-        adjusted_material_entries: list[dict[str, Any]] = []
-        base_material_entries: list[dict[str, Any]] = []
-        for raw_material in [dict(entry) for entry in (job.get("materials") or []) if isinstance(entry, dict)]:
-            material = dict(raw_material)
-            quantity_per_run = int(material.get("quantity") or 0)
-            base_total_quantity = quantity_per_run * runs
-            adjusted_total_quantity = 0
-            for job_segment in job_segments:
-                job_runs = int(job_segment["runs"])
-                job_quantity = self._round_material_quantity(
-                    float(quantity_per_run * job_runs) * max(0.0, 1.0 - job_segment["material_reduction"]),
-                    minimum_quantity=(job_runs if quantity_per_run > 0 else 0),
-                )
-                if job_quantity > 0:
-                    job_segment["materials"][str(int(material.get("type_id") or 0))] = job_quantity
-                adjusted_total_quantity += job_quantity
-            material["quantity_per_run"] = quantity_per_run
-            material["base_quantity"] = base_total_quantity
-            material["quantity"] = adjusted_total_quantity
-            material["material_reduction"] = material_reduction
-            adjusted_material_entries.append(material)
-            base_material_entries.append({**material, "quantity": base_total_quantity})
+        reduction_basis = "runs_weighted_job_segments" if sized["reductions_differ"] else None
+        adjusted_material_entries: list[dict[str, Any]] = sized["adjusted_material_entries"]
+        base_material_entries: list[dict[str, Any]] = sized["base_material_entries"]
 
         eiv_unknown_reasons: list[str] = []
         process_value, priced_material_count, eiv_material_count = self._sum_estimated_item_value_counted(
@@ -7452,11 +7427,32 @@ class IndustryService:
             )
             for segment in job_segments
         ]
+        sized = self._fill_job_segments(
+            job_segments, segment_costs, base_time_seconds=base_time,
+            materials=[
+                self._compact_material_entry(dict(e))
+                for e in (manufacturing_job.get("materials") or []) if isinstance(e, dict)
+            ],
+        )
+        return {**sized, "costs": segment_costs[0]}
+
+    def _fill_job_segments(
+        self,
+        job_segments: list[dict[str, Any]],
+        segment_costs: list[dict[str, Any]],
+        *,
+        base_time_seconds: int,
+        materials: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """The one sizing rule for a batch's jobs (top-level rows and nested
+        sub-builds): each job at its own reductions, one ceiling per job and
+        material, never per run (EVE). Fills each segment's reductions,
+        duration_seconds and materials in place."""
         for segment, segment_cost in zip(job_segments, segment_costs):
             segment["material_reduction"] = float(segment_cost.get("material_reduction", 0.0))
             segment["time_reduction"] = float(segment_cost["time_reduction"])
             segment["duration_seconds"] = self._round_duration_seconds(
-                base_time * int(segment["runs"]) * max(0.0, 1.0 - segment["time_reduction"])
+                base_time_seconds * int(segment["runs"]) * max(0.0, 1.0 - segment["time_reduction"])
             )
             segment["materials"] = {}
         material_reduction, material_differs = self._runs_weighted_reduction(job_segments, "material_reduction")
@@ -7464,8 +7460,7 @@ class IndustryService:
         total_runs = sum(int(segment["runs"]) for segment in job_segments)
         adjusted: list[dict[str, Any]] = []
         base: list[dict[str, Any]] = []
-        for raw_mat in [dict(e) for e in (manufacturing_job.get("materials") or []) if isinstance(e, dict)]:
-            mat = self._compact_material_entry(raw_mat)
+        for mat in materials:
             qty_per_run = int(mat.get("quantity") or 0)
             adjusted_total = 0
             for segment in job_segments:
@@ -7486,7 +7481,6 @@ class IndustryService:
         return {
             "adjusted_material_entries": adjusted,
             "base_material_entries": base,
-            "costs": segment_costs[0],
             "material_reduction": material_reduction,
             "time_reduction": time_reduction,
             "reductions_differ": material_differs or time_differs,
