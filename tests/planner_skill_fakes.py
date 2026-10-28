@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from eve_online_industry_tracker.application.industry.character_slots import SDE_ACTIVITIES
+from eve_online_industry_tracker.infrastructure.sde.blueprints import SDE_ACTIVITIES
 
 
 class _NoSkillRequirements:

@@ -113,10 +113,6 @@ def research_slot_capacity(levels_by_name: Mapping[str, int]) -> int:
 # (invention_model.can_run_invention) and the producer's
 # get_blueprint_skill_qualification all compare through meets_skill_levels.
 
-#: The SDE blueprint activities (get_blueprint_manufacturing_data's
-#: activity_skills keys).
-SDE_ACTIVITIES = ("manufacturing", "reaction", "invention", "copying", "research_material", "research_time")
-
 _ACTIVITY_LABELS = {
     "manufacturing": "manufacturing", "reaction": "reaction", "invention": "invention",
     "copying": "copying", "research_material": "ME research", "research_time": "TE research",
