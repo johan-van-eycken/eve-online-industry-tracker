@@ -895,12 +895,8 @@ def _render_overview_columns_about() -> None:
             "Higher = more expensive system. A 5% cost index is roughly neutral; above 8% starts eroding margins significantly."
         )
 
-    if hasattr(st, "popover"):
-        with st.popover("?", help="About the data columns"):
-            _content()
-    else:
-        with st.expander("?", expanded=False):
-            _content()
+    with st.popover("?", help="About the data columns"):
+        _content()
 
 
 def _render_page_about() -> None:
@@ -935,12 +931,8 @@ def _render_page_about() -> None:
             "The 7d Avg smooths the latest daily volume over 7 reported days."
         )
 
-    if hasattr(st, "popover"):
-        with st.popover("?", help="About this page"):
-            _content()
-    else:
-        with st.expander("?", expanded=False):
-            _content()
+    with st.popover("?", help="About this page"):
+        _content()
 
 
 def render() -> None:
