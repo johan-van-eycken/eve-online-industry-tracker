@@ -42,7 +42,15 @@ class LocationsService:
     def _resolve_location(self, location_id: int) -> dict | None:
         """Try every resolution strategy in order, cache on success."""
 
-        # 1. Main ESI service (stations, systems, etc. + structures if accessible)
+        # 1. A structure resolved before (or found by the public scan) costs no ESI call; an
+        # ESI 403 per pilot on every page load spends the shared error budget.
+        # shortcut: a stored name never refreshes, so a renamed structure keeps its old name; add an updated_at check if that matters.
+        if _is_structure_id(location_id):
+            info = self._lookup_structure_cache(location_id) or self._lookup_public_structures(location_id)
+            if info:
+                return info
+
+        # 2. Main ESI service (stations, systems, etc. + structures if accessible)
         info = self._state.esi_service.get_location_info(
             location_id,
             suppress_forbidden_log=True,
@@ -56,20 +64,10 @@ class LocationsService:
         if not _is_structure_id(location_id):
             return None
 
-        # 2. Multi-character fallback for structures
+        # 3. Multi-character fallback for structures
         info = self._resolve_structure_via_characters(location_id)
         if info:
             self._cache_structure(location_id, info)
-            return info
-
-        # 3. Persistent DB cache (structure was resolved in a previous session)
-        info = self._lookup_structure_cache(location_id)
-        if info:
-            return info
-
-        # 4. Public structures table
-        info = self._lookup_public_structures(location_id)
-        if info:
             return info
 
         logging.debug("Structure %s could not be resolved from any source", location_id)
