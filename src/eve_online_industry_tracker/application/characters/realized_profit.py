@@ -1435,8 +1435,8 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         2. Group those sells by (type_id, unit_price).
         3. Within each group, take the first cluster of consecutive sells separated by
            at most _CORP_BROKER_CLUSTER_GAP_SECONDS (longer gaps indicate a new order).
-        4. If fee_amount / (cluster_size × unit_price) falls in a plausible broker-rate
-           range (0.3%–25%), assign fee_amount / cluster_size to each sell in the cluster.
+        4. If fee_amount / (cluster units × unit_price) falls in a plausible broker-rate
+           range (0.3%–25%), split fee_amount over the cluster by each sell's share of its value.
         5. Try groups in order of earliest first sell (the order that started filling
            soonest after the fee was paid is the most likely match).
         """
@@ -1447,17 +1447,20 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         _MAX_RATE = 0.25
 
         # Index sell transactions
-        sell_data: list[tuple[datetime, int, int, float]] = []
+        sell_data: list[tuple[datetime, int, int, float, int]] = []
         for tx in sell_transactions:
             if getattr(tx, "is_buy", None):
                 continue
             tx_id = _safe_int(getattr(tx, "transaction_id", None))
             type_id = _safe_int(getattr(tx, "type_id", None))
             unit_price = _safe_float(getattr(tx, "unit_price", None))
+            quantity = _safe_int(getattr(tx, "quantity", None))
             date = _parse_date(getattr(tx, "date", None))
             if tx_id is None or type_id is None or not unit_price or unit_price <= 0 or date is None:
                 continue
-            sell_data.append((date, int(tx_id), int(type_id), float(unit_price)))
+            if not quantity or quantity <= 0:
+                continue
+            sell_data.append((date, int(tx_id), int(type_id), float(unit_price), int(quantity)))
         sell_data.sort(key=lambda s: s[0])
 
         matched_tx_ids: set[int] = set()
@@ -1480,7 +1483,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             fee_date_naive = fee_date.replace(tzinfo=None)
 
             # Unmatched sells that occurred after this fee within the attribution window
-            candidates: list[tuple[datetime, int, int, float]] = [
+            candidates: list[tuple[datetime, int, int, float, int]] = [
                 s for s in sell_data
                 if s[1] not in matched_tx_ids
                 and 0 < (s[0].replace(tzinfo=None) - fee_date_naive).total_seconds()
@@ -1490,7 +1493,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 continue
 
             # Group by (type_id, rounded unit_price) — round to nearest 10 ISK for float safety
-            groups: dict[tuple[int, int], list[tuple[datetime, int, int, float]]] = defaultdict(list)
+            groups: dict[tuple[int, int], list[tuple[datetime, int, int, float, int]]] = defaultdict(list)
             for s in candidates:
                 key = (s[2], int(round(s[3] / 10) * 10))
                 groups[key].append(s)
@@ -1501,8 +1504,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 key=lambda kv: min(s[0] for s in kv[1]),
             )
 
-            best_cluster: list[tuple] | None = None
-            best_per_unit: float | None = None
+            best_fee_by_tx_id: dict[int, float] | None = None
 
             for (_type_id, _rounded_price), group in group_items:
                 sorted_group = sorted(group, key=lambda s: s[0])
@@ -1518,20 +1520,17 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     else:
                         break
 
-                n = len(cluster)
-                price = cluster[0][3]
-                if price <= 0:
+                cluster_value = sum(s[3] * s[4] for s in cluster)
+                if cluster_value <= 0:
                     continue
-                implied_rate = fee_amount / (n * price)
+                implied_rate = fee_amount / cluster_value
                 if _MIN_RATE <= implied_rate <= _MAX_RATE:
-                    best_cluster = cluster
-                    best_per_unit = fee_amount / n
+                    best_fee_by_tx_id = {s[1]: fee_amount * s[3] * s[4] / cluster_value for s in cluster}
                     break  # Take first valid group (earliest sells after the fee)
 
-            if best_cluster is not None and best_per_unit is not None:
-                for s in best_cluster:
-                    per_unit_broker_fee[s[1]] = best_per_unit
-                    matched_tx_ids.add(s[1])
+            if best_fee_by_tx_id is not None:
+                per_unit_broker_fee.update(best_fee_by_tx_id)
+                matched_tx_ids.update(best_fee_by_tx_id)
                 if journal_id is not None:
                     consumed_journal_ids.add(int(journal_id))
 
