@@ -5,7 +5,8 @@ import statistics
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_
+from sqlalchemy import and_, func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.application.market_pricing.order_values import readable_int, readable_number
 from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
@@ -79,28 +80,23 @@ class MarketHistoryService:
                 items = []
 
             skipped = 0
+            rows = []
             for item in items:
                 values = _history_row_values(item)
                 if values is None:
                     skipped += 1
                     continue
-                date_str = values["date"]
+                rows.append({"type_id": int(type_id), "region_id": int(region_id), **values})
 
-                existing = app_session.query(MarketHistoryModel).filter(
-                    and_(
-                        MarketHistoryModel.type_id == type_id,
-                        MarketHistoryModel.region_id == region_id,
-                        MarketHistoryModel.date == date_str,
-                    )
-                ).first()
-
-                if existing:
-                    for field, value in values.items():
-                        if field != "date":
-                            setattr(existing, field, value)
-                else:
-                    app_session.add(MarketHistoryModel(type_id=type_id, region_id=region_id, **values))
-
+            if rows:
+                # One upsert: no SELECT per day, and a day another writer stored meanwhile is updated.
+                stmt = sqlite_insert(MarketHistoryModel)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["type_id", "region_id", "date"],
+                    set_={**{c: stmt.excluded[c] for c in ("close", "high", "low", "volume", "order_count")},
+                          "updated_at": func.now()},
+                )
+                app_session.execute(stmt, rows)
             app_session.commit()
             if skipped:
                 logging.warning(
