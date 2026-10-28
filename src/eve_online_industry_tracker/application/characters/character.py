@@ -833,20 +833,15 @@ class Character:
             self.ensure_esi()
             transactions = self._esi_client.esi_get(ESI_CHAR_WALLET_TRANSACTIONS.format(character_id=self.character_id))
 
-            new_transaction_entries = []
-            for entry in transactions:
-                entry_transaction_id = entry.get("transaction_id")
-                if entry_transaction_id is None:
-                    continue  # Skip entries without an ID
-
-                existing_entry = (
-                    self._db_app.session.query(CharacterWalletTransactionsModel)
-                    .filter_by(character_id=self.character_id, transaction_id=entry_transaction_id)
-                    .first()
-                )
-                if existing_entry:
-                    continue  # Skip if already exists
-                new_transaction_entries.append(entry)
+            known_ids = {
+                row[0]
+                for row in self._db_app.session.query(CharacterWalletTransactionsModel.transaction_id)
+                .filter_by(character_id=self.character_id)
+            }
+            new_transaction_entries = [
+                entry for entry in transactions
+                if entry.get("transaction_id") is not None and entry.get("transaction_id") not in known_ids
+            ]
 
             # Step 1: Collect unique client IDs
             client_ids = set()

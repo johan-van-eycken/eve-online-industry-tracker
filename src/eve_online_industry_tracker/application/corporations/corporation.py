@@ -684,6 +684,10 @@ class Corporation:
                 return
 
             new_entries: List[Dict[str, Any]] = []
+            # transaction_id is unique across corporations, so the check is too.
+            known_ids = {
+                row[0] for row in self._db_app.session.query(CorporationWalletTransactionsModel.transaction_id)
+            }
             for wallet in corp_wallets:
                 if not isinstance(wallet, dict):
                     continue
@@ -703,14 +707,7 @@ class Corporation:
                     if not isinstance(entry, dict):
                         continue
                     tx_id = entry.get("transaction_id")
-                    if tx_id is None:
-                        continue
-                    exists = (
-                        self._db_app.session.query(CorporationWalletTransactionsModel)
-                        .filter_by(transaction_id=tx_id)
-                        .first()
-                    )
-                    if exists:
+                    if tx_id is None or tx_id in known_ids:
                         continue
                     entry["division"] = division
                     new_entries.append(entry)
