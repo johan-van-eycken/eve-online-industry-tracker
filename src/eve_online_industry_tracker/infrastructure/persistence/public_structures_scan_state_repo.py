@@ -36,5 +36,3 @@ def mark_completed(session) -> None:
     session.commit()
 
 
-def get_last_completed_at(session) -> datetime | None:
-    return get_state(session).last_completed_at
