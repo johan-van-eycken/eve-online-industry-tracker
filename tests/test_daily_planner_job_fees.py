@@ -21,6 +21,7 @@ from eve_online_industry_tracker.application.daily_planner.chain_planner import 
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 PILOT = 1
 
@@ -57,7 +58,7 @@ def _decision(row, **overrides):
 
 def _actions(row, **overrides):
     plan = ChainPlan(decisions=[_decision(row, **overrides)])
-    return {a.action_type: a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin())}
+    return {a.action_type: a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)}
 
 
 def _invent_row(*, per_attempt=4.4, per_copy_run=0.0099, whole_attempts=4, bpc_runs_on_hand=2):
@@ -176,7 +177,7 @@ def test_a_sub_manufacture_action_carries_its_jobs_fee():
         ],
     }
     plan = ChainPlan(decisions=[_decision(row, is_sub_component=True, meta_group_id=1)])
-    subs = [a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin()) if a.action_type == "sub_manufacture"]
+    subs = [a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin(), blueprint_data=NO_SKILL_REQUIREMENTS) if a.action_type == "sub_manufacture"]
     assert [a.estimated_job_fee_isk for a in subs] == [60.0, None]
 
 
@@ -242,5 +243,5 @@ def test_a_sub_manufacture_action_carries_its_jobs_fee_reason():
         ],
     }
     plan = ChainPlan(decisions=[_decision(row, is_sub_component=True, meta_group_id=1)])
-    (sub,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin()) if a.action_type == "sub_manufacture"]
+    (sub,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin(), blueprint_data=NO_SKILL_REQUIREMENTS) if a.action_type == "sub_manufacture"]
     assert sub.estimated_job_fee_unknown_reason == "no index"

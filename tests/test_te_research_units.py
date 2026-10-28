@@ -26,6 +26,7 @@ import pytest
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 BLUEPRINT_DATA = {
     999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
@@ -116,7 +117,7 @@ def _plan(te: int, *, me: int = 10, admin=None, row=None) -> dict:
 
 def _actions(row) -> dict:
     plan = ChainPlan(decisions=[_decision(row)])
-    return {a.action_type: a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin())}
+    return {a.action_type: a for a in CharacterAssigner().assign(plan, [], _Chars(), _Admin(), blueprint_data=NO_SKILL_REQUIREMENTS)}
 
 
 # --- the TE target: always the max ---------------------------------------------

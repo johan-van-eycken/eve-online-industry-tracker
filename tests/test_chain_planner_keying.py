@@ -25,6 +25,7 @@ from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     me_adjusted_quantity,
     optimal_me_for_quantities,
 )
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 BLUEPRINT_DATA = {
     999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
@@ -393,7 +394,7 @@ def test_owned_t1_bpo_and_assigner_produce_a_copy_of_the_t1_blueprint():
         "character_id": 1, "character_name": "Pilot",
         "skills": {"skills": [{"skill_name": "Laboratory Operation", "trained_skill_level": 5}]},
     }])
-    actions = CharacterAssigner().assign(plan, [], chars, _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], chars, _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
 
     copies = [a for a in actions if a.action_type == "copy"]
     assert [a.type_id for a in copies] == [999]
@@ -905,7 +906,7 @@ def _assign(decisions, pilots):
     from eve_online_industry_tracker.application.daily_planner.character_assigner import (
         CharacterAssigner,
     )
-    return CharacterAssigner().assign(ChainPlan(decisions=decisions), [], pilots, _AdminStub())
+    return CharacterAssigner().assign(ChainPlan(decisions=decisions), [], pilots, _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
 
 
 def test_a_split_sub_build_takes_one_manufacturing_slot_per_job():
@@ -1047,7 +1048,7 @@ def test_a_sub_manufacture_action_carries_the_planned_runs_and_batch_materials()
         CharacterAssigner,
     )
     (action,) = CharacterAssigner().assign(
-        ChainPlan(decisions=[_sub_decision()]), [], _one_slot_pilot(), _AdminStub())
+        ChainPlan(decisions=[_sub_decision()]), [], _one_slot_pilot(), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert (action.action_type, action.quantity, action.runs, action.materials) == (
         "sub_manufacture", 100, 10, {34: 18})
 
@@ -1063,7 +1064,7 @@ def test_sub_components_are_assigned_only_after_every_top_level_item():
     sub = _sub_decision()
     sub.adjusted_score = 100.0
     actions = CharacterAssigner().assign(
-        ChainPlan(decisions=[parent, sub]), [], _one_slot_pilot(), _AdminStub())
+        ChainPlan(decisions=[parent, sub]), [], _one_slot_pilot(), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a.action_type for a in actions] == ["manufacture"]
 
 
@@ -1380,7 +1381,7 @@ def test_research_without_a_blueprint_id_is_skipped_not_aimed_at_the_product(cap
     }])
     with caplog.at_level("WARNING"):
         actions = CharacterAssigner().assign(
-            ChainPlan(decisions=[_decision(row)]), [], chars, _AdminStub())
+            ChainPlan(decisions=[_decision(row)]), [], chars, _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a.action_type for a in actions] == ["manufacture"]
     assert sum("research" in r.getMessage() and "blueprint type id" in r.getMessage()
                for r in caplog.records) == 2
@@ -1565,7 +1566,7 @@ def _t2_actions(plan):
         "character_id": 1, "character_name": "Pilot",
         "skills": {"skills": [{"skill_name": "Laboratory Operation", "trained_skill_level": 5}]},
     }])
-    return CharacterAssigner().assign(plan, [], chars, _AdminStub())
+    return CharacterAssigner().assign(plan, [], chars, _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
 
 
 def test_a_busy_t1_bpo_gets_no_copy_and_is_not_suggested_for_purchase():
@@ -1817,7 +1818,7 @@ def test_a_copying_stage_parent_sub_builds_no_component():
     (parent,) = [d for d in plan.decisions if not d.is_sub_component]
     assert parent.pipeline_stage == "copying"
     assert [d for d in plan.decisions if d.is_sub_component] == []
-    actions = CharacterAssigner().assign(plan, [], _pilot_chars(), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _pilot_chars(), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a.action_type for a in actions] == ["copy"]
 
 

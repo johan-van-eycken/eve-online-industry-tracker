@@ -19,8 +19,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from eve_online_industry_tracker.application.daily_planner.values import attr as _get_attr, utc_now as _now
 from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
-from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
-from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
+from eve_online_industry_tracker.application.daily_planner.chain_planner import NOT_BUILT_STAGE, ChainPlanner
+from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+    CharacterAssigner,
+    manufacture_skill_block,
+    pilot_skill_levels,
+    sole_blueprint_owners,
+)
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
 from eve_online_industry_tracker.application.daily_planner.input_row import (
     PlannerInputError,
@@ -418,6 +423,18 @@ class DailyPlannerService:
         """daily_planner/planner_mineral_squeeze_factor, read per compute."""
         return float(_adm(self._admin, "planner_mineral_squeeze_factor"))
 
+    def _saturation_settings(self) -> dict[str, Any]:
+        """daily_planner/planner_saturation_floor and planner_saturation_full_days,
+        read per compute, as ProfitabilityScorer.score's keywords."""
+        return {
+            "saturation_floor": float(
+                _adm(self._admin, "planner_saturation_floor")
+            ),
+            "saturation_full_days": int(
+                _adm(self._admin, "planner_saturation_full_days")
+            ),
+        }
+
     def get_analytics(self) -> dict[str, Any]:
         """Fetch self-learning accuracy stats for all tracked type_ids."""
         plan = self._repo.get_active_plan()
@@ -603,6 +620,8 @@ class DailyPlannerService:
                 scored_items = self._phase_3_score(pipeline_states, phase1_data)
             with _ComputeStep(self, "deciding items (phase 4)"):
                 top_level_decisions = self._phase_4_decide(scored_items, pipeline_states, phase1_data)
+            with _ComputeStep(self, "checking pilot skills (phase 4)"):
+                self._phase_4_skill_gate(top_level_decisions, phase1_data)
             with _ComputeStep(self, "planning chains (phase 5)"):
                 chain_plan = self._phase_5_chain(top_level_decisions, phase1_data)
             with _ComputeStep(self, "assigning characters (phase 6)"):
@@ -839,6 +858,7 @@ class DailyPlannerService:
         input_by_type = {r.type_id: r for r in phase1["input_rows"]}
         trit_trend_7d: float | None = phase1.get("trit_trend_7d")
         squeeze_factor = self._mineral_squeeze_factor()
+        saturation = self._saturation_settings()
         scored = []
         for ps in pipeline_states:
             row = input_by_type.get(ps.type_id)
@@ -861,6 +881,7 @@ class DailyPlannerService:
                     margin_correlation=margin_corr,
                     trit_trend_7d=trit_trend_7d,
                     mineral_squeeze_factor=squeeze_factor,
+                    **saturation,
                 )
                 scored.append(scored_item)
             except (TypeError, ValueError):
@@ -913,6 +934,33 @@ class DailyPlannerService:
                 logger.exception("DailyPlannerService: Phase 4 error for type_id=%s", scored.type_id)
         return decisions
 
+    def _phase_4_skill_gate(self, decisions: list[Any], phase1: dict[str, Any]) -> None:
+        """Never plan what cannot be executed: a build row whose blueprint no
+        industry pilot has the manufacturing (or reaction) skills for, per the
+        SDE, is a skip, its reason naming the missing skills with the best
+        pilot's level ("not built: no pilot has the skills: ..."). Free slots
+        play no part here. So it does not count as a build, and chain
+        planning neither sub-builds, researches, invents nor buys for it.
+        When the only free blueprints of its type are pilots' own (owner-bound
+        in the ledger, Task A) only those owners count: "not built: owner X
+        lacks the skills: ...". CharacterAssigner applies the same rule
+        (manufacture_skill_block's helpers) to every job it assigns."""
+        pilots = pilot_skill_levels(self._character_assigner._get_characters(self._characters))
+        blueprint_data = phase1["blueprint_data"]
+        bpos, bpcs = phase1["bpo_assets_by_type_id"], phase1["bpc_assets_by_type_id"]
+        busy = {int(i) for i in phase1.get("busy_blueprint_item_ids") or ()}
+        for decision in decisions:
+            if decision.decision != "build":
+                continue
+            owners = sole_blueprint_owners(orow.get_blueprint_type_id(decision.overview_row), bpos, bpcs, busy)
+            blocked = manufacture_skill_block(decision.overview_row, blueprint_data, pilots, owners)
+            if blocked is None:
+                continue
+            logger.info("DailyPlannerService: type_id=%s not built: %s", decision.type_id, blocked)
+            decision.decision = "skip"
+            decision.pipeline_stage = NOT_BUILT_STAGE
+            decision.decision_reason = f"{decision.decision_reason}; not built: {blocked}"
+
     def _phase_5_chain(
         self,
         top_level_decisions: list[Any],
@@ -937,6 +985,9 @@ class DailyPlannerService:
             admin_settings=self._admin,
             # The invent action prices a weaker pilot's extra inputs with it (A4).
             price_map=phase1.get("price_map", phase1["market_depth_cache"]),
+            # The SDE skills each job's activity requires: a job goes only to
+            # a pilot who has them.
+            blueprint_data=phase1["blueprint_data"],
         )
 
     def _phase_7_shopping(

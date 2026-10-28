@@ -853,7 +853,7 @@ def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufactur
         )
     )
 
-    # Character industry job (Duke X1): 4 units completed after the corp job.
+    # Character industry job (a pilot's own): 4 units completed after the corp job.
     app_session.add(
         CharacterIndustryJobsModel(
             character_id=1,

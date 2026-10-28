@@ -13,6 +13,7 @@ from eve_online_industry_tracker.application.daily_planner.character_assigner im
 from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
 from eve_online_industry_tracker.infrastructure.models import CharacterIndustryJobsModel
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 
 def _now():
@@ -136,7 +137,7 @@ def test_me_and_te_research_take_two_separate_slots():
         overview_row={"type_id": 12345, "needs_me_research": True,
                       "needs_te_research": True, "blueprint_type_id": 999},
     )])
-    actions = CharacterAssigner().assign(plan, [], _Chars(chars), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars(chars), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     kinds = sorted(a.action_type for a in actions if a.action_type.endswith("_research"))
     assert kinds == ["me_research", "te_research"]
 
@@ -152,7 +153,7 @@ def test_a_single_research_slot_yields_only_one_running_research_job():
         _decision(type_id=22222, overview_row={"type_id": 22222, "needs_me_research": True,
                                                "blueprint_type_id": 888}),
     ])
-    actions = CharacterAssigner().assign(plan, [], _Chars(chars), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars(chars), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     research = [a for a in actions if a.action_type.endswith("_research")]
     assert [(a.action_type, a.type_id) for a in research] == [("me_research", 999), ("te_research", 999)]
     assert "no research slot taken in this plan" in research[1].notes
@@ -164,7 +165,7 @@ def test_invention_prefers_the_higher_science_skilled_pilot():
     plan = ChainPlan(decisions=[_decision(
         overview_row={"type_id": 12345, "needs_invention": True},
     )])
-    actions = CharacterAssigner().assign(plan, [], _Chars([low, high]), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars([low, high]), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     invent = [a for a in actions if a.action_type == "invent"]
     assert len(invent) == 1
     assert invent[0].character_id == 2
@@ -224,7 +225,7 @@ def test_a_copy_action_is_created_when_an_owned_t1_bpo_feeds_invention():
                       # The T2 blueprint being invented: NOT what gets copied.
                       "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999}}},
     )])
-    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     copies = [a for a in actions if a.action_type == "copy"]
     assert len(copies) == 1
     assert copies[0].type_id == 999
@@ -234,7 +235,7 @@ def test_no_copy_action_without_an_owned_t1_bpo():
     plan = ChainPlan(decisions=[_decision(
         overview_row={"type_id": 12345, "needs_invention": True, "needs_t1_bpo": True},
     )])
-    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a for a in actions if a.action_type == "copy"] == []
 
 
@@ -244,7 +245,7 @@ def test_no_copy_action_when_the_t1_blueprint_is_unknown(caplog):
         overview_row={"type_id": 12345, "needs_invention": True, "has_t1_bpo": True},
     )])
     with caplog.at_level("WARNING"):
-        actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+        actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a for a in actions if a.action_type == "copy"] == []
     assert any("t1_blueprint_type_id" in r.message for r in caplog.records)
 
@@ -256,7 +257,7 @@ def test_research_actions_carry_the_nested_blueprint_type_id():
         overview_row={"type_id": 12345, "needs_me_research": True, "needs_te_research": True,
                       "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 999}}},
     )])
-    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     research = [a for a in actions if a.action_type.endswith("_research")]
     assert sorted(a.type_id for a in research) == [999, 999]
 
@@ -274,7 +275,7 @@ def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
         "type_id": 12345, "needs_invention": True,
         "manufacturing_job": {"invention_chance": chance},
     })])
-    actions = CharacterAssigner().assign(plan, [], _Chars([generalist, specialist]), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars([generalist, specialist]), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
 
 
@@ -333,7 +334,7 @@ def test_invention_skips_a_pilot_excluded_from_industry():
         "type_id": 12345, "needs_invention": True,
         "manufacturing_job": {"invention_chance": chance},
     })])
-    actions = CharacterAssigner().assign(plan, [], _Chars([excluded, weaker]), _AdminStub())
+    actions = CharacterAssigner().assign(plan, [], _Chars([excluded, weaker]), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a.character_id for a in actions if a.action_type == "invent"] == [2]
 
 
@@ -341,7 +342,7 @@ def test_the_generic_inventor_ranking_is_logged_at_info(caplog):
     plan = ChainPlan(decisions=[_decision(overview_row={"type_id": 12345, "needs_invention": True})])
     pilot = _char(1, "Pilot", [_skill("Laboratory Operation", 5), _skill("Science", 5, 3402)])
     with caplog.at_level(logging.INFO, logger="eve_online_industry_tracker.application.daily_planner.character_assigner"):
-        actions = CharacterAssigner().assign(plan, [], _Chars([pilot]), _AdminStub())
+        actions = CharacterAssigner().assign(plan, [], _Chars([pilot]), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a.character_id for a in actions if a.action_type == "invent"] == [1]
     assert any(r.levelno == logging.INFO and "generic" in r.getMessage() and "12345" in r.getMessage()
                for r in caplog.records)
@@ -378,7 +379,7 @@ def test_an_excluded_pilot_gets_no_job_of_any_type():
     """Ruling: industry_enabled=False pilots are out of every assignment."""
     enabled = {**_char(2, "Enabled", [_skill("Mass Production", 1), _skill("Laboratory Operation", 5)]),
                "industry_enabled": True}
-    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot(), enabled]), _AdminStub())
+    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot(), enabled]), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
 
     assert {a.action_type for a in actions} == {
         "manufacture", "sub_manufacture", "copy", "me_research", "te_research", "invent",
@@ -387,7 +388,7 @@ def test_an_excluded_pilot_gets_no_job_of_any_type():
 
 
 def test_work_stays_unassigned_when_every_pilot_is_excluded():
-    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot()]), _AdminStub())
+    actions = CharacterAssigner().assign(_every_assignment_plan(), [], _Chars([_excluded_strong_pilot()]), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
     assert actions == []
 
 
@@ -396,7 +397,7 @@ def test_the_invent_action_names_the_producers_decryptor():
         "type_id": 12345, "needs_invention": True,
         "manufacturing_job": {"invention_decryptor": {"type_id": 34201, "type_name": "Accelerant Decryptor"}},
     })])
-    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
                  if a.action_type == "invent"]
     assert (invent.decryptor_type_id, invent.decryptor_type_name) == (34201, "Accelerant Decryptor")
     assert "Accelerant Decryptor" in invent.notes
@@ -407,7 +408,7 @@ def test_an_invent_action_without_a_decryptor_names_none():
         "type_id": 12345, "needs_invention": True,
         "manufacturing_job": {"invention_decryptor": {"type_id": None, "type_name": "No decryptor"}},
     })])
-    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub())
+    (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
                  if a.action_type == "invent"]
     assert invent.decryptor_type_id is None and invent.decryptor_type_name is None
     # The row carries no sized invention plan, so the note says so (A4); no decryptor is named.
@@ -421,5 +422,5 @@ def test_on_equal_free_slots_the_pilot_with_fewer_active_jobs_wins():
         2: {"character_id": 2, "character_name": "Idle", "free_mfg": 3, "free_research": 3, "total_active_jobs": 2},
     }
     assigner = CharacterAssigner()
-    assert assigner._best_mfg_char(slots, []) == (2, "Idle")
-    assert assigner._best_research_char(slots, []) == (2, "Idle")
+    assert assigner._best_mfg_char(slots, [], qualified=frozenset({1, 2})) == (2, "Idle")
+    assert assigner._best_research_char(slots, [], qualified=frozenset({1, 2})) == (2, "Idle")

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from eve_online_industry_tracker.application.daily_planner import character_assigner as ca
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 PARENT, FALLEN = 990001, 990002
 
@@ -43,7 +44,7 @@ def test_a_parent_with_no_manufacture_is_dropped_even_when_no_sub_decision_names
     monkeypatch.setattr(assigner, "_assign_decision", _assign)
     monkeypatch.setattr(ca, "_reword_unused_research_claims", lambda *a: None)
     monkeypatch.setattr(ca, "_reword_released_bpcs", lambda *a: None)
-    assigner.assign(plan, [], None, None)
+    assigner.assign(plan, [], None, None, blueprint_data=NO_SKILL_REQUIREMENTS)
     assert calls == [({FALLEN}, {PARENT})]
 
 

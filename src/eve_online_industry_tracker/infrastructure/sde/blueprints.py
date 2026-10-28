@@ -46,6 +46,13 @@ def get_blueprint_manufacturing_data(
     """Return manufacturing materials/products/skills and research times for blueprints.
 
     If `blueprint_type_ids` is provided, only those blueprint typeIDs are loaded.
+
+    `activity_skills` holds, for every activity the SDE gives the blueprint
+    (manufacturing, reaction, invention, copying, research_material,
+    research_time), the skills it requires as enriched {type_id, type_name,
+    level} entries ([] when it requires none). An activity the blueprint
+    lacks is absent, so "no skills needed" and "cannot run" stay apart: the
+    daily planner assigns a job only to a pilot with these skills.
     """
 
     q = (
@@ -71,6 +78,12 @@ def get_blueprint_manufacturing_data(
     for bp in blueprints:
         blueprint_type_id_set.add(bp.blueprintTypeID)
         activities = bp.activities if isinstance(bp.activities, dict) else {}
+        for activity in _SKILL_ACTIVITIES:
+            for skill in _activity_skill_list(activities, activity):
+                try:
+                    skill_type_ids.add(int(skill["typeID"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
         manufacturing = activities.get("manufacturing", {})
         reaction = activities.get("reaction", {})
 
@@ -315,9 +328,29 @@ def get_blueprint_manufacturing_data(
                 "time": activities.get("research_material", {}).get("time", 0),
             },
             "copying": activities.get("copying", {}).get("time", 0),
+            "activity_skills": {
+                activity: [
+                    enriched for enriched in (
+                        _enrich_type_entry(type_data_map, skill.get("typeID"), level=skill.get("level"))
+                        for skill in _activity_skill_list(activities, activity)
+                    ) if enriched is not None
+                ]
+                for activity in _SKILL_ACTIVITIES if isinstance(activities.get(activity), dict)
+            },
         }
 
     return result
+
+
+#: The blueprint activities whose required skills activity_skills carries.
+_SKILL_ACTIVITIES = ("manufacturing", "reaction", "invention", "copying", "research_material", "research_time")
+
+
+def _activity_skill_list(activities: dict[str, Any], activity: str) -> list[dict[str, Any]]:
+    """The SDE's raw {typeID, level} skill entries of one activity ([] when none)."""
+    entry = activities.get(activity)
+    skills = entry.get("skills") if isinstance(entry, dict) else None
+    return [s for s in skills if isinstance(s, dict)] if isinstance(skills, list) else []
 
 
 def get_invention_source_blueprint_ids(

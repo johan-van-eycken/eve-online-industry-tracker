@@ -15,9 +15,13 @@ from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCH
 logger = logging.getLogger(__name__)
 
 
+_PLANNER_SETTINGS = ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]
 #: The schema default of daily_planner/planner_mineral_squeeze_factor, for a caller without settings.
-DEFAULT_MINERAL_SQUEEZE_FACTOR: float = float(
-    ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"]["planner_mineral_squeeze_factor"]["default"])
+DEFAULT_MINERAL_SQUEEZE_FACTOR: float = float(_PLANNER_SETTINGS["planner_mineral_squeeze_factor"]["default"])
+#: The schema defaults of daily_planner/planner_saturation_floor and
+#: planner_saturation_full_days, for a caller without settings.
+DEFAULT_SATURATION_FLOOR: float = float(_PLANNER_SETTINGS["planner_saturation_floor"]["default"])
+DEFAULT_SATURATION_FULL_DAYS: int = int(_PLANNER_SETTINGS["planner_saturation_full_days"]["default"])
 
 
 class ProfitabilityScorer:
@@ -32,8 +36,11 @@ class ProfitabilityScorer:
         margin_correlation: Any | None, # MarginCorrelationCacheModel | None
         trit_trend_7d: float | None = None,  # Tritanium 7d price trend %
         mineral_squeeze_factor: float = DEFAULT_MINERAL_SQUEEZE_FACTOR,  # daily_planner/planner_mineral_squeeze_factor
+        saturation_floor: float = DEFAULT_SATURATION_FLOOR,  # daily_planner/planner_saturation_floor
+        saturation_full_days: int = DEFAULT_SATURATION_FULL_DAYS,  # daily_planner/planner_saturation_full_days
     ) -> ScoredItem:
-        """Apply Phase 3 multipliers and return a ScoredItem."""
+        """Apply Phase 3 multipliers and return a ScoredItem. The caller reads
+        the mineral squeeze factor and the two saturation settings per compute."""
         type_id = pipeline.type_id
 
         # ── Base values ───────────────────────────────────────────────────────
@@ -82,10 +89,17 @@ class ProfitabilityScorer:
             market_timing_factor = base_factor
 
         # ── Pipeline saturation ───────────────────────────────────────────────
-        # max(0, 1 - (days_of_supply - 3) / 11)
-        # At 0 days: 1.27; at 3 days: 1.0; at 14 days: 0.0
+        # max(floor, 1 - (days_of_supply - 3) / (full_days - 3)), the floor and
+        # full_days admin settings (defaults 0.25 and 30; the user's ruling of
+        # 2026-10-21 softened max(0, 1 - (days_of_supply - 3) / 11), which hit 0
+        # at 14 days). days_of_supply is the hub's sell liquidity / the whole
+        # region's daily volume (PipelineAnalyzer), so it is the market's
+        # supply, not only ours. Defaults: 1.11 at 0 days, 1.0 at 3, 0.59 at
+        # 14, the floor from 23.25 days on.
         days_supply = pipeline.days_of_supply_current
-        pipeline_saturation = max(0.0, 1.0 - (days_supply - 3.0) / 11.0)
+        pipeline_saturation = max(
+            float(saturation_floor), 1.0 - (days_supply - 3.0) / (float(saturation_full_days) - 3.0),
+        )
 
         # ── Competition factor ────────────────────────────────────────────────
         ci = pipeline.competition_index

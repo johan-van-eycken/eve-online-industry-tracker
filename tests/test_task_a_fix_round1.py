@@ -25,6 +25,7 @@ import test_task_a_release_replan as T  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.service import merge_blueprint_indexes  # noqa: E402
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 
 # --- I1 ------------------------------------------------------------------------------
@@ -74,7 +75,7 @@ def test_no_sub_build_for_a_parent_whose_owner_is_busy():
     parent, plan = _thing_plan({999: [C._owned_bpo(1, 999)], 888: [L._bpo(2, 888)]}, {}, L.R._row(**L.R.BPO_ROW))
     assert [d.type_id for d in plan.decisions if d.is_sub_component] == [54321]
     actions = CharacterAssigner().assign(plan, [C._busy(C.OWNER_ID, 1)], A._Chars([C._other(), C._owner()]),
-                                         A._Admin(), price_map=L.R.MARKET)
+                                         A._Admin(), price_map=L.R.MARKET, blueprint_data=NO_SKILL_REQUIREMENTS)
     assert actions == []
     assert [d.type_id for d in plan.decisions if d.is_sub_component] == []
     assert "no manufacture today: owner Owner has no free slot" in parent.decision_reason
@@ -91,7 +92,7 @@ def test_no_sub_build_for_a_parent_whose_blueprints_have_several_owners():
                                {999: [C._owned_bpc(78, 999, 5), C._owned_bpc(79, 999, 5, owner=C.OTHER_ID)]}, row)
     assert [d.type_id for d in plan.decisions if d.is_sub_component] == [54321]
     actions = CharacterAssigner().assign(plan, [], A._Chars([C._other(), C._owner()]), A._Admin(),
-                                         price_map=L.R.MARKET)
+                                         price_map=L.R.MARKET, blueprint_data=NO_SKILL_REQUIREMENTS)
     assert actions == []
     assert [d.type_id for d in plan.decisions if d.is_sub_component] == []
     assert "its blueprints belong to several pilots (Owner, Other)" in parent.decision_reason
@@ -100,7 +101,7 @@ def test_no_sub_build_for_a_parent_whose_blueprints_have_several_owners():
 def test_a_parent_that_builds_keeps_its_sub_build():
     parent, plan = _thing_plan({999: [C._owned_bpo(1, 999)], 888: [L._bpo(2, 888)]}, {}, L.R._row(**L.R.BPO_ROW))
     actions = CharacterAssigner().assign(plan, [], A._Chars([C._other(), C._owner()]), A._Admin(),
-                                         price_map=L.R.MARKET)
+                                         price_map=L.R.MARKET, blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [(a.action_type, a.type_id, a.character_id, a.runs) for a in actions] == [
         ("manufacture", 12345, C.OWNER_ID, 10), ("sub_manufacture", 54321, C.OTHER_ID, 100),
     ]
@@ -166,13 +167,12 @@ def test_release_history_is_kept_across_passes():
 
 # --- M1 ------------------------------------------------------------------------------
 
-def test_an_owner_without_loaded_skills_still_invents_at_the_base_chance():
-    """As for a corp BPC: the owner whose skills are not loaded invents
-    (the shopping list buys at the SDE base chance, with a reason)."""
+def test_an_owner_without_loaded_skills_does_not_invent():
+    """Never plan what cannot be executed: the owner whose skills are not
+    loaded is no inventor (it used to invent at the SDE base chance), and
+    only the owner may invent from its own BPC."""
     t2 = L._dec(L._t2_row(), 12345, "Widget II", 2.0, 2, "invention")
     owner = C._owner()
     owner["skills"] = None
     _plan, actions = C._run([t2], {}, {998: [C._owned_bpc(701, 998, 10)]}, [owner, C._other()])
-    assert [(a.action_type, a.character_id, a.blueprint_item_id) for a in actions] == [
-        ("invent", C.OWNER_ID, 701),
-    ]
+    assert [a for a in actions if a.action_type == "invent"] == []

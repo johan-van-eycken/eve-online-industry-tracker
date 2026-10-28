@@ -232,6 +232,7 @@ from eve_online_industry_tracker.application.daily_planner.models import (  # no
     ItemDecision,
 )
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService  # noqa: E402
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 
 def _sde_error():
@@ -333,7 +334,7 @@ def _mfg_pilot():
 
 def _assign(row):
     plan = ChainPlan(decisions=[_decision(row, meta_group_id=2)])
-    return [a for a in CharacterAssigner().assign(plan, [], _mfg_pilot(), _AdminKeyError())
+    return [a for a in CharacterAssigner().assign(plan, [], _mfg_pilot(), _AdminKeyError(), blueprint_data=NO_SKILL_REQUIREMENTS)
             if a.action_type == "manufacture"]
 
 

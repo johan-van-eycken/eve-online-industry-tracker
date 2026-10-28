@@ -22,6 +22,7 @@ import test_task_a_release_replan as T  # noqa: E402
 
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner  # noqa: E402
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 OWNER_ID, OTHER_ID = 5, 6
 
@@ -61,7 +62,7 @@ def _run(decisions, bpos, bpcs, chars, jobs=()):
         "bpo_assets_by_type_id": bpos, "bpc_assets_by_type_id": bpcs,
         "blueprint_data": L.BP_B, "market_depth_cache": A.PRICES, "variant_rows_by_type_id": {},
     })
-    actions = CharacterAssigner().assign(plan, list(jobs), A._Chars(chars), A._Admin(), price_map=A.PRICES)
+    actions = CharacterAssigner().assign(plan, list(jobs), A._Chars(chars), A._Admin(), price_map=A.PRICES, blueprint_data=NO_SKILL_REQUIREMENTS)
     return plan, actions
 
 

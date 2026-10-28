@@ -1,6 +1,12 @@
 """CharacterAssigner — Phase 6: assign planned jobs to characters.
 
-Priority rules:
+Every job goes only to a pilot whose loaded skills meet the SDE skills of
+its activity (manufacturing or reaction, copying, ME / TE research; invention
+checks its own required levels): _SkillGate. A pilot whose skills are not
+loaded never qualifies. No pilot qualifying: no job, and the row's reason
+names the missing skills with the best pilot's level.
+
+Priority rules, among the qualifying pilots:
   1. Manufacturing / sub-manufacture → character with most free manufacturing slots
   2. Invention → free research slot + highest invention skill factor for the
      item's own skills (the producer's invention_chance, D2); a row without
@@ -23,6 +29,8 @@ from eve_online_industry_tracker.application.daily_planner.assigned_invention im
     assigned_invention_lanes,
     invention_probability_floor,
 )
+from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger
+from eve_online_industry_tracker.application.daily_planner.chain_planner import NOT_BUILT_STAGE
 from eve_online_industry_tracker.application.daily_planner.input_row import require_batch_runs
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ItemDecision
 from eve_online_industry_tracker.application.industry import overview_row as orow
@@ -31,7 +39,11 @@ from eve_online_industry_tracker.application.industry.research_time import resea
 # invention lanes (Task 12), so both count the same slots.
 from eve_online_industry_tracker.application.industry.character_slots import (
     MFG_SLOT_SKILLS,
+    activity_skill_requirements,
+    meets_skill_levels,
+    required_skill_levels,
     research_slot_capacity,
+    skill_shortfall,
     skill_levels_by_id,
     skill_levels_by_name,
     skills_loaded as _skills_loaded,
@@ -78,11 +90,16 @@ class CharacterAssigner:
         characters_service: Any,             # CharactersService
         admin_settings: Any,
         price_map: dict[int, Any] | None = None,
+        *,
+        blueprint_data: Any,
     ) -> list[AssignedAction]:
         """Return list of AssignedAction for all planned jobs.
 
         price_map: phase 1's merged price map, the market price of the extra
-        invention inputs a weaker assigned inventor needs (A4)."""
+        invention inputs a weaker assigned inventor needs (A4).
+        blueprint_data: phase 1's SDE blueprint map
+        (get_blueprint_manufacturing_data): the skills each job's activity
+        requires (_SkillGate). Required: no caller may skip the check."""
         now = _now()
 
         # Build character capability map
@@ -92,6 +109,7 @@ class CharacterAssigner:
             return []
 
         char_slots = self._compute_available_slots(characters, industry_jobs, now)
+        skill_gate = _SkillGate(blueprint_data, char_slots)
         # The producer's floor, so an assigned pilot's chance is floored the same way.
         probability_floor = invention_probability_floor(admin_settings)
         assigned_actions: list[AssignedAction] = []
@@ -131,6 +149,7 @@ class CharacterAssigner:
                 fell_back=fell_back,
                 can_resize=callable(resize),
                 bpc_pool=bpc_pool,
+                skill_gate=skill_gate,
             )
 
         for pass_decisions in (top_level, None):
@@ -235,6 +254,7 @@ class CharacterAssigner:
         fell_back: set[int] | None = None,
         can_resize: bool = False,
         bpc_pool: dict[str, Any] | None = None,
+        skill_gate: _SkillGate,
     ) -> list[AssignedAction]:
         """Return AssignedAction(s) for a single ItemDecision. A research-first
         parent that builds from its kept BPO row is added to `fell_back`;
@@ -242,6 +262,8 @@ class CharacterAssigner:
         actions: list[AssignedAction] = []
         type_id = decision.type_id
         type_name = decision.type_name
+        # Why this attempt got no job for lack of skills (_replan_cause).
+        decision.overview_row.pop(SKILL_BLOCK_KEY, None)
 
         # DELIVER actions: in-flight jobs completing soon (end_date < now)
         # These are built separately in ActionPlanBuilder from industry_jobs directly.
@@ -261,15 +283,25 @@ class CharacterAssigner:
             owner_by_item = dict(bpc_pool["owners"])
         research_owners = _claim_owners(decision, owner_by_item, "research")
 
-        # ME/TE research
+        # ME/TE research, by a pilot with the activity's skills. Why a
+        # planned research got no job, when it is the skills (research first
+        # then builds from the BPO, saying so).
         me_scheduled, lab_free_at = False, now
         me_pilot: tuple[int | None, str | None] = (None, None)
+        research_blocked: str | None = None
         if row.get("needs_me_research"):
             bp_type_id = self._research_blueprint_type_id(row, type_id, "ME")
-            char_id, char_name = (
-                (None, None) if bp_type_id is None
-                else self._best_research_char(char_slots, characters, only=research_owners)
+            qualified, blocked = (
+                (frozenset(), None) if bp_type_id is None
+                else skill_gate.for_owners(bp_type_id, "research_material", research_owners)
             )
+            char_id, char_name = (
+                (None, None) if bp_type_id is None or blocked is not None
+                else self._best_research_char(char_slots, characters, only=research_owners, qualified=qualified)
+            )
+            if blocked is not None:
+                research_blocked = blocked
+                _append_reason(decision, f"no ME research today: {blocked}")
             if char_id is not None:
                 me_timing = _research_timing(
                     row, "research_material", "me_current", "me_research_target", now,
@@ -302,16 +334,27 @@ class CharacterAssigner:
 
         if row.get("needs_te_research"):
             bp_type_id = self._research_blueprint_type_id(row, type_id, "TE")
+            qualified, blocked = (
+                (frozenset(), None) if bp_type_id is None
+                else skill_gate.for_owners(bp_type_id, "research_time", research_owners)
+            )
             if me_scheduled:
                 # Queued behind the ME job on the same BPO (one job per
                 # blueprint): it cannot start in this plan, so it goes to the
-                # ME pilot and takes no research slot now.
+                # ME pilot and takes no research slot now -- if that pilot
+                # has the TE research skills.
                 char_id, char_name = me_pilot
+                if blocked is None and char_id not in qualified:
+                    blocked = skill_gate.pilot_lacks(bp_type_id, "research_time", char_id, prefix="ME pilot")
             else:
                 char_id, char_name = (
-                    (None, None) if bp_type_id is None
-                    else self._best_research_char(char_slots, characters, only=research_owners)
+                    (None, None) if bp_type_id is None or blocked is not None
+                    else self._best_research_char(char_slots, characters, only=research_owners, qualified=qualified)
                 )
+            if blocked is not None:
+                char_id, char_name = None, None
+                research_blocked = research_blocked or blocked
+                _append_reason(decision, f"no TE research today: {blocked}")
             if char_id is not None:
                 actions.append(AssignedAction(
                     type_id=bp_type_id,
@@ -363,7 +406,21 @@ class CharacterAssigner:
             )
             wants_copy = False
         stage_reason: str | None = None
-        if row.get("needs_invention"):
+        # The SDE invention skills (on the T1 source blueprint) bound every
+        # inventor; nobody with them: no invention, and no copy for one.
+        inv_qualified, inv_blocked = (
+            skill_gate.check(t1_blueprint_type_id or None, "invention") if row.get("needs_invention")
+            else (frozenset(), None)
+        )
+        if row.get("needs_invention") and inv_blocked is not None:
+            text = f"no invention today: {inv_blocked}"
+            logger.info("CharacterAssigner: type_id=%s: %s", type_id, text)
+            _note_skill_block(decision, text)
+            if decision.pipeline_stage in ("copying", "invention"):
+                stage_reason = text  # worded as its no-manufacture reason
+            else:
+                _append_reason(decision, text)
+        elif row.get("needs_invention"):
             pools = bpc_pool if bpc_pool is not None else {}
             used_bpcs: set[Any] = pools.setdefault("bpcs", set())
             used_bpos: set[Any] = pools.setdefault("bpos", set())
@@ -390,22 +447,35 @@ class CharacterAssigner:
                     )
                     logger.info("CharacterAssigner: type_id=%s: %s", type_id, stage_reason)
                 # 1. The copy's slots first, steered away from the inventors
-                #    (non-inventors, then the weakest inventor first).
-                reserved, reserved_bpos, blocked_owners = self._reserve_owned_copy_pilots(
-                    char_slots, row, copy_bpos, owner_by_item,
+                #    (non-inventors, then the weakest inventor first), among
+                #    the pilots with the copying skills.
+                copy_qualified, copy_blocked = skill_gate.check(t1_blueprint_type_id, "copying")
+                reserved, reserved_bpos, blocked_owners, unskilled_owners = self._reserve_owned_copy_pilots(
+                    char_slots, row, copy_bpos, owner_by_item, copy_qualified,
                 )
                 if not reserved and blocked_owners:
                     stage_reason = (
                         f"owner {_pilot_names(characters, blocked_owners)} has no free slot: "
                         f"no copy of its T1 BPO ({t1_blueprint_type_id}) today"
                     )
+                if not reserved and copy_bpos and (copy_blocked is not None or unskilled_owners):
+                    why = copy_blocked or "; ".join(
+                        skill_gate.pilot_lacks(t1_blueprint_type_id, "copying", owner, prefix="owner")
+                        for owner in unskilled_owners
+                    )
+                    stage_reason = f"no copy of its T1 BPO ({t1_blueprint_type_id}) today: {why}"
+                    logger.info("CharacterAssigner: type_id=%s: %s", type_id, stage_reason)
+                    _note_skill_block(decision, stage_reason)
+                    if decision.pipeline_stage != "copying":
+                        # The copying stage words it as its no-manufacture reason.
+                        _append_reason(decision, stage_reason)
                 # 2. Sized for the invent lanes actually free after the copy
                 #    took its slots (fix round 3); none free: the weakest
                 #    qualifying pilot alone (the most attempts).
                 max_runs_per_copy = _max_runs_per_copy(row, type_id) if copy_bpos else None
                 jobs, needed, lane_sizes = self._copy_jobs_for(
                     char_slots, characters, row, on_hand, len(reserved), max_runs_per_copy,
-                    probability_floor=probability_floor, price_map=price_map,
+                    probability_floor=probability_floor, price_map=price_map, qualified=inv_qualified,
                 )
                 # 3. Give back the slots no copy job needs; a returned slot can
                 #    free an invent lane, so the lanes AND the copies are re-sized
@@ -417,7 +487,7 @@ class CharacterAssigner:
                     reserved_bpos = reserved_bpos[:len(jobs)]
                     jobs, needed, lane_sizes = self._copy_jobs_for(
                         char_slots, characters, row, on_hand, len(reserved), max_runs_per_copy,
-                        probability_floor=probability_floor, price_map=price_map,
+                        probability_floor=probability_floor, price_map=price_map, qualified=inv_qualified,
                     )
                 if copy_bpos and not reserved and (jobs is None or jobs):
                     logger.info("CharacterAssigner: type_id=%s: no free research slot for its copy", type_id)
@@ -446,6 +516,7 @@ class CharacterAssigner:
                 results, free_lanes = self._invention_results(
                     char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
                     max_lanes=len(bpcs) if bpcs is not None else None, bpc_owners=bpc_owners,
+                    qualified=inv_qualified,
                 )
                 lanes: list[tuple[int, Any, tuple[Any, int | None, int] | None]] = (
                     [(cid, inv, None) for cid, inv in results] if bpcs is None
@@ -498,10 +569,15 @@ class CharacterAssigner:
                         # Every BPC is a pilot's own: only its owner may invent.
                         owners = sorted(set(bpc_owners))
                         free = any(int((char_slots.get(o) or {}).get("free_research", 0)) > 0 for o in owners)
-                        why = (
-                            f"owner {_pilot_names(characters, owners)} "
-                            f"{'lacks the invention skills' if free else 'has no free slot'}"
-                        )
+                        _q, owner_blocked = skill_gate.for_owners(t1_blueprint_type_id, "invention", owners)
+                        if owner_blocked is not None:
+                            why = owner_blocked
+                            _note_skill_block(decision, f"no invention today: {owner_blocked}")
+                        else:
+                            why = (
+                                f"owner {_pilot_names(characters, owners)} "
+                                f"{'lacks the invention skills' if free else 'has no free slot'}"
+                            )
                     logger.info("CharacterAssigner: type_id=%s: no invention today: %s", type_id, why)
                     if bpcs:
                         # Task 15 fix round 4: the BPCs ChainPlanner claimed
@@ -536,6 +612,15 @@ class CharacterAssigner:
         # parents' purchase: those units are bought instead.
         if decision.is_sub_component:
             jobs = _sub_jobs(type_id, row)
+            # Only a pilot with the component blueprint's skills; none: no
+            # job, the units are bought (as without a free slot).
+            qualified, blocked = skill_gate.check(orow.get_blueprint_type_id(row), "manufacturing")
+            if blocked is not None:
+                logger.info("CharacterAssigner: sub-manufacture of type_id=%s not built: %s", type_id, blocked)
+                decision.pipeline_stage = NOT_BUILT_STAGE
+                _append_reason(decision, f"not built: {blocked}; its units are bought")
+                _note_skill_block(decision, blocked)
+                return actions
             pilots: list[tuple[int | None, str | None]] = []
             for index, job in enumerate(jobs):
                 after = job.get("after_job")
@@ -543,7 +628,9 @@ class CharacterAssigner:
                 # Minor 4: a job beyond the free BPOs waits for an earlier job
                 # on the same BPO; it goes to that job's pilot and takes no
                 # slot of its own (the earlier job's slot frees first).
-                char_id, char_name = pilots[after - 1] if queued else self._best_mfg_char(char_slots, characters)
+                char_id, char_name = (
+                    pilots[after - 1] if queued else self._best_mfg_char(char_slots, characters, qualified=qualified)
+                )
                 if char_id is None:
                     logger.info(
                         "CharacterAssigner: no free mfg slot for %d of %d sub-manufacture "
@@ -586,7 +673,11 @@ class CharacterAssigner:
         if first is not None:
             research = [a for a in actions if a.action_type in ("me_research", "te_research")]
             if not research and first["mode"] != "other_bpo" and not first.get("unconditional"):
-                build_note = "BPO research planned but no free research slot: built from the BPO"
+                build_note = (
+                    f"BPO research planned but no research today ({research_blocked}): built from the BPO"
+                    if research_blocked is not None
+                    else "BPO research planned but no free research slot: built from the BPO"
+                )
                 sized = (
                     "its components re-sized for the BPO's batch" if can_resize
                     else first.get("sized_note")
@@ -640,7 +731,31 @@ class CharacterAssigner:
                 "no one pilot can install the batch"
             ))
             return actions
-        char_id, char_name = self._best_mfg_char(char_slots, characters, only=mfg_owners)
+        # Only a pilot with the blueprint's manufacturing (or reaction)
+        # skills. None at all: not built, so nothing is bought for it and its
+        # sub-builds are dropped (assign's no_build). The decision gate
+        # (DailyPlannerService phase 4) already turns such a top-level row
+        # into a skip; this holds for any row that reaches here.
+        bp_type_id = orow.get_blueprint_type_id(row)
+        mfg_qualified, blocked = skill_gate.check(bp_type_id, "manufacturing")
+        if blocked is not None:
+            logger.info("CharacterAssigner: type_id=%s not built: %s", type_id, blocked)
+            _mark_not_built(decision, blocked)
+            _note_skill_block(decision, blocked)
+            return actions
+        if mfg_owners and not set(mfg_owners) & mfg_qualified:
+            lacks = "; ".join(
+                skill_gate.pilot_lacks(bp_type_id, "manufacturing", owner, prefix="owner") for owner in mfg_owners
+            )
+            # Not built (stage blocked), like a row no pilot can build: the
+            # decision gate passed it on a corp blueprint, but the ledger booked
+            # the owner's (the batch is priced on it), and only the owner may
+            # install that one.
+            logger.info("CharacterAssigner: type_id=%s not built: %s", type_id, lacks)
+            _mark_not_built(decision, lacks)
+            _note_skill_block(decision, lacks)
+            return actions
+        char_id, char_name = self._best_mfg_char(char_slots, characters, only=mfg_owners, qualified=mfg_qualified)
         if char_id is None and mfg_owners:
             logger.info("CharacterAssigner: type_id=%s: its blueprint's owner has no free mfg slot", type_id)
             _no_manufacture_today(decision, f"owner {_pilot_names(characters, mfg_owners)} has no free slot")
@@ -863,11 +978,14 @@ class CharacterAssigner:
 
     def _best_mfg_char(
         self, char_slots: dict[int, dict], characters: list[dict], only: list[int] | None = None,
+        *, qualified: frozenset[int],
     ) -> tuple[int | None, str | None]:
-        """Character with most free manufacturing slots; tie-break by fewest
+        """Among the pilots with the job's skills (`qualified`, _SkillGate),
+        the one with most free manufacturing slots; tie-break by fewest
         total active jobs. `only`: the blueprint owner(s) allowed (Task A)."""
         candidates = [(s["free_mfg"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_mfg"] > 0
+                      and s["character_id"] in qualified
                       and (not only or s["character_id"] in only)]
         if not candidates:
             return None, None
@@ -894,11 +1012,14 @@ class CharacterAssigner:
 
     def _best_research_char(
         self, char_slots: dict[int, dict], characters: list[dict], only: list[int] | None = None,
+        *, qualified: frozenset[int],
     ) -> tuple[int | None, str | None]:
-        """Character with most free research slots; tie-break by fewest
-        active jobs. `only`: the blueprint owner(s) allowed (Task A)."""
+        """Among the pilots with the research's skills (`qualified`), the one
+        with most free research slots; tie-break by fewest active jobs.
+        `only`: the blueprint owner(s) allowed (Task A)."""
         candidates = [(s["free_research"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_research"] > 0
+                      and s["character_id"] in qualified
                       and (not only or s["character_id"] in only)]
         if not candidates:
             return None, None
@@ -909,7 +1030,7 @@ class CharacterAssigner:
     def _invention_results(
         self, char_slots: dict[int, dict], characters: list[dict], row: dict[str, Any], *,
         probability_floor: float, price_map: dict[int, Any], max_lanes: int | None = None,
-        bpc_owners: list[int | None] | None = None,
+        bpc_owners: list[int | None] | None = None, qualified: frozenset[int],
     ) -> tuple[list[tuple[int, Any]], int]:
         """(the invent actions' (pilot, figures), the free lanes today): over
         the free qualifying lanes when there is more than one, else the single
@@ -920,7 +1041,8 @@ class CharacterAssigner:
         slot is taken here."""
         if max_lanes is not None and max_lanes <= 0:
             return [], 0
-        lanes = self._invention_lanes(char_slots, row)
+        # Only pilots with the SDE invention skills (`qualified`, _SkillGate).
+        lanes = [cid for cid in self._invention_lanes(char_slots, row) if cid in qualified]
         owners = [o for o in bpc_owners or [] if o is not None]
         only = sorted(set(owners)) if bpc_owners and len(owners) == len(bpc_owners) else None
         if only is not None:
@@ -932,11 +1054,10 @@ class CharacterAssigner:
                 row, lanes=[(cid, char_slots[cid].get("skills_by_id")) for cid in lanes],
                 probability_floor=probability_floor, price_map=price_map,
             ), len(lanes)
-        # One lane or none: the single best free pilot (A4), among the owners
-        # when every BPC is a pilot's own (Task A fix round 1, M1: an owner
-        # whose skills are not loaded invents at the base chance, as for a
-        # corp BPC).
-        char_id, _name = self._best_invention_char(char_slots, characters, row, only=only)
+        # One lane or none: the single best free pilot (A4) with the SDE
+        # invention skills, among the owners when every BPC is a pilot's own.
+        # A pilot whose skills are not loaded never qualifies.
+        char_id, _name = self._best_invention_char(char_slots, characters, row, only=only, qualified=qualified)
         if char_id is None:
             return [], 0
         return [(char_id, assigned_invention(
@@ -975,6 +1096,7 @@ class CharacterAssigner:
     def _copy_jobs_for(
         self, char_slots: dict[int, dict], characters: list[dict], row: dict[str, Any], on_hand: int,
         job_count: int, max_runs_per_copy: int | None, *, probability_floor: float, price_map: dict[int, Any],
+        qualified: frozenset[int],
     ) -> tuple[list[dict[str, int]] | None, int | None, list[int] | None]:
         """(copy jobs, the attempts needed, the lane sizes the copies match)
         for the invent lanes free now: the T1 BPC runs the invention needs
@@ -983,8 +1105,11 @@ class CharacterAssigner:
         when the attempts are unknown."""
         results, _free = self._invention_results(
             char_slots, characters, row, probability_floor=probability_floor, price_map=price_map,
+            qualified=qualified,
         )
-        needed = self._copy_need(results, char_slots, row, probability_floor=probability_floor, price_map=price_map)
+        needed = self._copy_need(
+            results, char_slots, row, probability_floor=probability_floor, price_map=price_map, qualified=qualified,
+        )
         if needed is None:
             return None, None, None
         copy_runs = max(0, needed - on_hand)
@@ -1006,36 +1131,44 @@ class CharacterAssigner:
 
     def _reserve_owned_copy_pilots(
         self, char_slots: dict[int, dict], row: dict[str, Any], copy_bpos: list[Any], owner_by_item: dict[int, int],
-    ) -> tuple[list[tuple[int, str | None]], list[Any], list[int]]:
-        """(pilots, the BPO each copies, owners with no free slot): a pilot's
-        own T1 BPO is copied by that pilot only (Task A item 1), first; the
-        corp BPOs then go to the pilots _reserve_copy_pilots steers to."""
+        qualified: frozenset[int],
+    ) -> tuple[list[tuple[int, str | None]], list[Any], list[int], list[int]]:
+        """(pilots, the BPO each copies, owners with no free slot, owners
+        without the copying skills): a pilot's own T1 BPO is copied by that
+        pilot only (Task A item 1), first; the corp BPOs then go to the
+        pilots with the copying skills (`qualified`) _reserve_copy_pilots
+        steers to."""
         reserved: list[tuple[int, str | None]] = []
         reserved_bpos: list[Any] = []
         blocked: list[int] = []
+        unskilled: list[int] = []
         corp: list[Any] = []
         for bpo in copy_bpos:
             owner = owner_by_item.get(bpo) if isinstance(bpo, int) else None
             if owner is None:
                 corp.append(bpo)
+            elif owner not in qualified:
+                if owner not in unskilled:
+                    unskilled.append(owner)
             elif int((char_slots.get(owner) or {}).get("free_research", 0)) > 0:
                 reserved.append((owner, char_slots[owner].get("character_name")))
                 reserved_bpos.append(bpo)
                 self._take_slot(char_slots, owner, "copy")
             elif owner not in blocked:
                 blocked.append(owner)
-        for pilot, bpo in zip(self._reserve_copy_pilots(char_slots, row, len(corp)), corp):
+        for pilot, bpo in zip(self._reserve_copy_pilots(char_slots, row, len(corp), qualified), corp):
             reserved.append(pilot)
             reserved_bpos.append(bpo)
-        return reserved, reserved_bpos, blocked
+        return reserved, reserved_bpos, blocked, unskilled
 
     def _reserve_copy_pilots(
-        self, char_slots: dict[int, dict], row: dict[str, Any], count: int,
+        self, char_slots: dict[int, dict], row: dict[str, Any], count: int, qualified: frozenset[int],
     ) -> list[tuple[int, str | None]]:
-        """Take up to `count` research slots for copy jobs, steered away from
-        the inventors (fix round 3): pilots who cannot run this invention
-        first (most free slots first), then the inventors weakest first, so
-        the best inventor copies only when nobody else can."""
+        """Take up to `count` research slots for copy jobs on pilots with the
+        copying skills (`qualified`), steered away from the inventors (fix
+        round 3): pilots who cannot run this invention first (most free
+        slots first), then the inventors weakest first, so the best inventor
+        copies only when nobody else can."""
         skills = orow.get_invention_skill_set(row)
         skill_set = InventionSkillSet(skills[0], skills[1]) if skills is not None else None
         required = self._required_levels(row)
@@ -1043,7 +1176,7 @@ class CharacterAssigner:
         for _ in range(max(0, int(count))):
             candidates = []
             for cid, slot in char_slots.items():
-                if int(slot.get("free_research", 0)) <= 0:
+                if int(slot.get("free_research", 0)) <= 0 or cid not in qualified:
                     continue
                 levels = slot.get("skills_by_id")
                 inventor = (
@@ -1064,7 +1197,7 @@ class CharacterAssigner:
 
     def _copy_need(
         self, results: list[tuple[int, Any]], char_slots: dict[int, dict], row: dict[str, Any], *,
-        probability_floor: float, price_map: dict[int, Any],
+        probability_floor: float, price_map: dict[int, Any], qualified: frozenset[int],
     ) -> int | None:
         """The T1 BPC runs the invention needs (one per attempt): today's
         free invent lanes' total; with none free, the weakest qualifying
@@ -1076,7 +1209,7 @@ class CharacterAssigner:
         required = self._required_levels(row)
         qualifying = [
             cid for cid, slot in sorted(char_slots.items())
-            if required is not None and slot.get("skills_by_id") is not None
+            if required is not None and slot.get("skills_by_id") is not None and cid in qualified
             and can_run_invention(required, slot["skills_by_id"])
         ]
         if qualifying:
@@ -1228,7 +1361,7 @@ class CharacterAssigner:
 
     def _best_invention_char(
         self, char_slots: dict[int, dict], characters: list[dict], row: dict[str, Any] | None = None,
-        only: list[int] | None = None,
+        only: list[int] | None = None, *, qualified: frozenset[int] | None = None,
     ) -> tuple[int | None, str | None]:
         """The free pilot with the highest invention skill factor for this
         item: the producer's invention_chance skills (D2, the same rule as the
@@ -1240,9 +1373,9 @@ class CharacterAssigner:
         Only a pilot who can run the invention (every required skill level,
         _required_levels) is ranked (Task 15 fix round 1, I1): an unqualified
         pilot's chance would size another pilot's attempts (an under-buy). A
-        pilot whose skills are not loaded stays a candidate: A4 then buys at
-        the SDE base chance with a reason (an over-buy). None: nobody free
-        qualifies."""
+        pilot whose skills are not loaded never qualifies, nor one outside
+        `qualified` (the SDE invention skills, _SkillGate; None only for a
+        direct ranking call). None: nobody free qualifies."""
         skills = orow.get_invention_skill_set(row or {})
         skill_set = InventionSkillSet(skills[0], skills[1]) if skills is not None else None
         required = self._required_levels(row or {}) if skill_set is not None else None
@@ -1259,7 +1392,9 @@ class CharacterAssigner:
             if only is not None and slot["character_id"] not in only:
                 continue  # Task A: a pilot's own BPC is that pilot's job
             loaded = slot.get("skills_by_id")
-            if required is not None and loaded is not None and not can_run_invention(required, loaded):
+            if loaded is None or (qualified is not None and slot["character_id"] not in qualified):
+                continue
+            if required is not None and not can_run_invention(required, loaded):
                 continue
             if skill_set is not None:
                 score = invention_skill_factor(skill_set, slot.get("skills_by_id") or {})
@@ -1274,6 +1409,161 @@ class CharacterAssigner:
             return None, None
         candidates.sort()
         return candidates[0][2], candidates[0][3]
+
+
+class _SkillGate:
+    """Which industry pilots can run one SDE activity of one blueprint: those
+    whose loaded skills meet every level of its activities.<activity>.skills
+    (the shared character_slots helpers). A pilot whose skills are not loaded
+    never qualifies; requirements the SDE data does not give qualify nobody.
+    Slots play no part: the callers pick among the qualified."""
+
+    def __init__(self, blueprint_data: Any, char_slots: dict[int, dict[str, Any]]) -> None:
+        self._data = blueprint_data
+        self._slots = char_slots
+        self._cache: dict[tuple[int | None, str], tuple[frozenset[int], str | None]] = {}
+
+    def check(self, blueprint_type_id: int | None, activity: str) -> tuple[frozenset[int], str | None]:
+        """(the qualifying pilot ids, None), or (empty, why nobody qualifies)."""
+        key = (blueprint_type_id, activity)
+        if key not in self._cache:
+            entries, unknown = activity_skill_requirements(self._data, blueprint_type_id, activity)
+            if entries is None:
+                self._cache[key] = (frozenset(), unknown)
+            else:
+                required = required_skill_levels(entries)
+                qualified = frozenset(
+                    cid for cid, slot in self._slots.items()
+                    if slot.get("skills_by_id") is not None and meets_skill_levels(required, slot["skills_by_id"])
+                )
+                self._cache[key] = (qualified, None if qualified else skill_shortfall(
+                    entries, [(str(s.get("character_name") or cid), s.get("skills_by_id")) for cid, s in self._slots.items()],
+                ))
+        return self._cache[key]
+
+    def for_owners(
+        self, blueprint_type_id: int, activity: str, owners: list[int],
+    ) -> tuple[frozenset[int], str | None]:
+        """check(), and when the job is bound to its blueprint's owner(s)
+        (Task A) and none of them qualifies, what they lack."""
+        qualified, blocked = self.check(blueprint_type_id, activity)
+        if blocked is None and owners and not set(owners) & qualified:
+            blocked = "; ".join(self.pilot_lacks(blueprint_type_id, activity, o, prefix="owner") for o in owners)
+        return qualified, blocked
+
+    def pilot_lacks(self, blueprint_type_id: int | None, activity: str, char_id: int | None, *, prefix: str) -> str:
+        """What one pilot lacks for the activity, e.g. "owner Pilot Alpha lacks
+        the skills: Energy Weapon Rigging 4 (at 2)"."""
+        slot = self._slots.get(char_id) if char_id is not None else None
+        entries, unknown = activity_skill_requirements(self._data, blueprint_type_id, activity)
+        if entries is None:
+            return str(unknown)
+        pilot = None if slot is None else (str(slot.get("character_name") or char_id), slot.get("skills_by_id"))
+        return _pilot_lacks(entries, char_id, pilot, prefix=prefix)
+
+
+def _pilot_lacks(
+    entries: list[dict[str, Any]], char_id: int | None, pilot: tuple[str, dict[int, int] | None] | None, *, prefix: str,
+) -> str:
+    """What one pilot lacks of these SDE skill entries. `pilot`: (name,
+    levels by type_id or None when not loaded), None when not in industry."""
+    if pilot is None:
+        return f"{prefix} character {char_id} is not an industry pilot"
+    name, levels = pilot
+    if levels is None:
+        return f"{prefix} {name}'s skills are not loaded"
+    names = {int(e.get("type_id") or 0): str(e.get("type_name") or f"skill {e.get('type_id')}") for e in entries}
+    missing = [
+        f"{names.get(tid, f'skill {tid}')} {level} (at {int(levels.get(tid, 0) or 0)})"
+        for tid, level in required_skill_levels(entries).items() if int(levels.get(tid, 0) or 0) < level
+    ]
+    return f"{prefix} {name} lacks the skills: {', '.join(missing)}"
+
+
+def pilot_skill_levels(characters: list[dict[str, Any]]) -> dict[int, tuple[str, dict[int, int] | None]]:
+    """{character_id: (name, skill levels by type_id; None when not loaded)}
+    of every pilot in industry (industry_enabled, as
+    _compute_available_slots), for the decision gate's manufacture_skill_block."""
+    return {
+        int(c.get("character_id") or c.get("id") or 0): (
+            str(c.get("character_name") or c.get("name") or c.get("character_id") or ""),
+            skill_levels_by_id(c) if _skills_loaded(c) else None,
+        )
+        for c in characters
+        if int(c.get("character_id") or c.get("id") or 0) > 0 and c.get("industry_enabled", True)
+    }
+
+
+def sole_blueprint_owners(
+    blueprint_type_id: int | None, bpo_assets_by_type_id: dict[int, list], bpc_assets_by_type_id: dict[int, list],
+    busy_item_ids: set[int],
+) -> list[int] | None:
+    """The pilots whose own blueprints are the only ones of this type to build
+    from (sorted), or None when a corp blueprint is free (any pilot may
+    install it) or none is owned at all (the producer priced it without one:
+    no owner binding). The same index and owner binding as ChainPlanner's
+    BlueprintLedger (Task A item 1: only its owner installs a pilot's
+    blueprint); a blueprint in an active job does not count."""
+    if not blueprint_type_id:
+        return None
+    ledger = BlueprintLedger(
+        {blueprint_type_id: list(bpo_assets_by_type_id.get(blueprint_type_id) or [])},
+        {blueprint_type_id: list(bpc_assets_by_type_id.get(blueprint_type_id) or [])},
+    )
+    keys = [k for k, _asset in ledger.free_bpos(blueprint_type_id)] + [
+        k for k, _item, _runs in ledger.free_bpcs(blueprint_type_id)
+    ]
+    keys = [k for k in keys if k not in busy_item_ids]
+    if not keys:
+        return None
+    owners = {ledger.owner_of(k) for k in keys}
+    if None in owners:
+        return None
+    return sorted(o for o in owners if o is not None)
+
+
+def manufacture_skill_block(
+    row: dict[str, Any], blueprint_data: Any, pilots: dict[int, tuple[str, dict[int, int] | None]],
+    owners: list[int] | None = None,
+) -> str | None:
+    """Why no pilot can manufacture (or react) this row's blueprint, else
+    None: the decision gate's check, the same rule _SkillGate applies to the
+    manufacture job (free slots aside). `owners` (sole_blueprint_owners): the
+    row builds only from these pilots' own blueprints, so only they count;
+    none qualifying: what each owner lacks."""
+    entries, unknown = activity_skill_requirements(blueprint_data, orow.get_blueprint_type_id(row), "manufacturing")
+    if entries is None:
+        return unknown
+    required = required_skill_levels(entries)
+    candidates = list(pilots) if owners is None else [o for o in owners if o in pilots]
+    if any(pilots[c][1] is not None and meets_skill_levels(required, pilots[c][1]) for c in candidates):
+        return None
+    if owners is not None:
+        return "; ".join(_pilot_lacks(entries, o, pilots.get(o), prefix="owner") for o in owners)
+    return skill_shortfall(entries, pilots.values())
+
+
+#: On a row's overview_row: why its last assignment attempt got no job for
+#: lack of skills, for _replan_cause (an undone re-plan restores the reason).
+SKILL_BLOCK_KEY = "skill_block_reason"
+
+
+def _note_skill_block(decision: ItemDecision, reason: str) -> None:
+    decision.overview_row[SKILL_BLOCK_KEY] = reason
+
+
+def _append_reason(decision: ItemDecision, text: str) -> None:
+    """Add one clause to the persisted decision_reason, once."""
+    if text not in (decision.decision_reason or ""):
+        decision.decision_reason = f"{decision.decision_reason}; {text}" if decision.decision_reason else text
+
+
+def _mark_not_built(decision: ItemDecision, reason: str) -> None:
+    """No pilot can run the row's manufacture: not built (ChainPlanner's
+    stage), saying why, unless a "not built:" already says it."""
+    decision.pipeline_stage = NOT_BUILT_STAGE
+    if "not built:" not in (decision.decision_reason or ""):
+        _append_reason(decision, f"not built: {reason}")
 
 
 _LANE_WORDING = re.compile(r"lane \d+ of \d+")
@@ -1336,7 +1626,11 @@ _OWNER_NO_SLOT = re.compile(r"owner [^;]+? has no free slot")
 
 def _replan_cause(decision: ItemDecision, char_slots: dict[int, dict[str, Any]]) -> str:
     """Why a re-planned row still got no action (fix round 1, I3), for its
-    reason once the re-plan is undone."""
+    reason once the re-plan is undone: the skill reason the assigner wrote
+    when that was it (manufacture, copy, invention), else the slots."""
+    skill_block = decision.overview_row.get(SKILL_BLOCK_KEY)
+    if isinstance(skill_block, str) and skill_block:
+        return skill_block
     match = _OWNER_NO_SLOT.search(decision.decision_reason or "")
     if match:
         return match.group(0)

@@ -20,6 +20,7 @@ from eve_online_industry_tracker.application.industry.portfolio_service import (
     IndustryPortfolioService,
 )
 from eve_online_industry_tracker.application.industry.service import IndustryService
+from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
 _F2 = 1 + 6 / 30 + 3 / 40  # pilot "Qual" 3/3/3: 0.30 x 1.275 = 0.3825
 _UPPER = "profit is an upper bound: job fees unknown for: invention (x)"
@@ -57,7 +58,7 @@ def test_probe_g_qualifying_pilot_busy_means_no_invent_and_a_reason():
     row = a4._row(inventor=2, best_factor=_F2, decryptor=False, multiplier=1.0)
     plan = a4._plan(row)
     actions = a4.CharacterAssigner().assign(plan, [a4._busy(2)], a4._Chars([_NO_ENC, _QUAL]), a4._Admin(),
-                                            price_map=a4.PRICES)
+                                            price_map=a4.PRICES, blueprint_data=NO_SKILL_REQUIREMENTS)
     assert [a for a in actions if a.action_type == "invent"] == []
     assert "no invention today: no free pilot with the invention skills" in plan.decisions[0].decision_reason
 
@@ -351,7 +352,7 @@ def test_first_warning_is_thread_safe():
 
 def _actions_with_jobs(row, chars, jobs):
     plan = a4._plan(row)
-    actions = a4.CharacterAssigner().assign(plan, list(jobs), a4._Chars(chars), a4._Admin(), price_map=a4.PRICES)
+    actions = a4.CharacterAssigner().assign(plan, list(jobs), a4._Chars(chars), a4._Admin(), price_map=a4.PRICES, blueprint_data=NO_SKILL_REQUIREMENTS)
     return plan.decisions[0], actions
 
 
@@ -392,7 +393,7 @@ def test_c_the_shopping_list_buys_the_whole_component_on_the_parent():
     materials = ck._batch_materials(fee=None, **{"54321": 200})
     materials["54321"]["component_job_fee_per_run_unknown_reason"] = "no index"
     plan = ck._planner().plan_chain([ck._decision(ck._row(materials=materials))], ck._limited_sub_phase1(7))
-    actions = [a for a in ca.CharacterAssigner().assign(plan, [], fl._mfg_pilot(), fl._AdminKeyError())
+    actions = [a for a in ca.CharacterAssigner().assign(plan, [], fl._mfg_pilot(), fl._AdminKeyError(), blueprint_data=NO_SKILL_REQUIREMENTS)
                if a.action_type in ("manufacture", "sub_manufacture")]
     assert [a.action_type for a in actions] == ["manufacture"]
     assert "component Widget bought: its install fee is unknown for Thing's structure (no index)" in actions[0].notes

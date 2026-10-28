@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
+from eve_online_industry_tracker.application.industry.character_slots import meets_skill_levels
+
 logger = logging.getLogger(__name__)
 
 INVENTED_BASE_ME = 2
@@ -490,11 +492,9 @@ def required_invention_skill_levels(
 
 
 def can_run_invention(required_levels: Mapping[int, int], levels_by_skill_type_id: Mapping[int, int]) -> bool:
-    """Whether one character has every required invention skill trained."""
-    return all(
-        int(levels_by_skill_type_id.get(int(type_id), 0) or 0) >= int(level)
-        for type_id, level in required_levels.items()
-    )
+    """Whether one character has every required invention skill trained
+    (the shared job skill check, character_slots.meets_skill_levels)."""
+    return meets_skill_levels(required_levels, levels_by_skill_type_id)
 
 
 def pilot_invention_probability(
