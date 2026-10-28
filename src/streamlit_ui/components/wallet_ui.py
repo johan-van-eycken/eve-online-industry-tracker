@@ -17,7 +17,7 @@ from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid
 RANGE_OPTIONS = ["Past Week", "Past Month", "Past 3 Months", "Year to Date", "Past Year", "All Time"]
 
 
-def _parse_iso_date(value: Any) -> datetime | None:
+def parse_iso_date(value: Any) -> datetime | None:
     raw_value = str(value or "").strip()
     if not raw_value:
         return None
@@ -30,7 +30,7 @@ def _parse_iso_date(value: Any) -> datetime | None:
 
 
 def format_wallet_datetime(value: Any) -> str:
-    parsed = _parse_iso_date(value)
+    parsed = parse_iso_date(value)
     if parsed is None:
         return str(value or "")
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
@@ -138,12 +138,15 @@ def apply_wallet_location_names(
     return out
 
 
-def _resolve_range_preset(
+def resolve_range_preset(
     preset: str,
     *,
     min_date: date | None,
     max_date: date | None,
+    fallback_days: int = 30,
 ) -> tuple[date | None, date | None]:
+    """(start, end) of a range preset over data from min_date to max_date;
+    an unknown preset spans fallback_days."""
     if max_date is None:
         return None, None
     if preset == "All Time":
@@ -160,7 +163,7 @@ def _resolve_range_preset(
         "Past 3 Months": 90,
         "Past Year": 365,
     }
-    day_span = days_by_preset.get(preset, 30)
+    day_span = days_by_preset.get(preset, fallback_days)
     resolved_start = max_date - timedelta(days=day_span)
     if min_date is not None:
         resolved_start = max(min_date, resolved_start)
@@ -202,13 +205,13 @@ def filter_dataframe_by_range(df: pd.DataFrame, *, date_column: str, preset: str
         return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
     filtered = df.copy()
-    parsed_dates = filtered[date_column].apply(_parse_iso_date)
+    parsed_dates = filtered[date_column].apply(parse_iso_date)
     date_values = parsed_dates.apply(lambda value: value.date() if value is not None else None)
     available_dates = [value for value in date_values.tolist() if value is not None]
     if not available_dates:
         return filtered
 
-    start_date, end_date = _resolve_range_preset(
+    start_date, end_date = resolve_range_preset(
         str(preset),
         min_date=min(available_dates),
         max_date=max(available_dates),
