@@ -7,12 +7,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
-
-
-def _schema_default(key: str) -> Any:
-    """A daily_planner setting's schema default (the fallback without a settings store)."""
-    return ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"][key]["default"]
+from eve_online_industry_tracker.application.daily_planner.admin_setting import schema_default
+from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 
 TRITANIUM_TYPE_ID = 34
 
@@ -22,29 +18,24 @@ class MarginCorrelator:
         self._state = state
         self._admin = admin_settings
 
-    def _get_min_days(self) -> int:
+    def _setting(self, key: str, cast: type) -> Any:
+        """A daily_planner setting; its schema default without a settings store or for a
+        value that is not a number (with a WARNING). An unknown key propagates."""
         if self._admin:
             try:
-                return int(self._admin.get("daily_planner", "planner_mineral_correlation_min_days"))
+                return cast(self._admin.get("daily_planner", key))
             except AdminSettingInvalid:
                 raise  # a stored invalid value fails loudly, naming it
             except (TypeError, ValueError) as exc:
-                logging.warning("MarginCorrelator: daily_planner/planner_mineral_correlation_min_days is not "
-                                "a number (%s); using its schema default %s", exc,
-                                _schema_default("planner_mineral_correlation_min_days"))
-        return int(_schema_default("planner_mineral_correlation_min_days"))
+                logging.warning("MarginCorrelator: daily_planner/%s is not a number (%s); using its schema default %s",
+                                key, exc, schema_default("daily_planner", key))
+        return cast(schema_default("daily_planner", key))
+
+    def _get_min_days(self) -> int:
+        return self._setting("planner_mineral_correlation_min_days", int)
 
     def _get_threshold(self) -> float:
-        if self._admin:
-            try:
-                return float(self._admin.get("daily_planner", "planner_mineral_correlation_threshold"))
-            except AdminSettingInvalid:
-                raise  # a stored invalid value fails loudly, naming it
-            except (TypeError, ValueError) as exc:
-                logging.warning("MarginCorrelator: daily_planner/planner_mineral_correlation_threshold is not "
-                                "a number (%s); using its schema default %s", exc,
-                                _schema_default("planner_mineral_correlation_threshold"))
-        return float(_schema_default("planner_mineral_correlation_threshold"))
+        return self._setting("planner_mineral_correlation_threshold", float)
 
     def _is_due(self) -> bool:
         """Returns True if last computation was > 24h ago (or never ran)."""
