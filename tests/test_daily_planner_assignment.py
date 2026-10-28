@@ -196,7 +196,6 @@ def test_a_character_installed_job_deducts_a_manufacturing_slot(session_provider
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),
         admin_settings=SimpleNamespace(get=lambda *a, **k: None),
         session_provider=session_provider,
