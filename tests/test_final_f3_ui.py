@@ -286,7 +286,7 @@ def test_portfolio_track_record_is_reused_when_the_ids_were_already_fetched():
 def test_realized_profit_stops_with_an_error_when_wallet_owners_fail(monkeypatch, st_messages):
     from streamlit_ui.pages import realized_profit as page
 
-    def boom():
+    def boom(**_):
         raise RuntimeError("Failed to load characters")
 
     monkeypatch.setattr(page, "fetch_characters", boom)
@@ -307,7 +307,7 @@ def test_realized_profit_render_stops_without_the_wallet_owners(monkeypatch, st_
 
     fetched = []
     monkeypatch.setattr(page, "require_aggrid", lambda: SimpleNamespace(js_code=lambda s: s))
-    monkeypatch.setattr(page, "fetch_characters", lambda: [])
+    monkeypatch.setattr(page, "fetch_characters", lambda **_: [])
     monkeypatch.setattr(corps, "fetch_director_corporations", boom)
     monkeypatch.setattr(page, "fetch_realized_profit", lambda **k: fetched.append(k) or {"status": "success"})
     page.render()

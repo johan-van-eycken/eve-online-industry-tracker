@@ -196,7 +196,7 @@ def render() -> None:
     st.caption("Active industry jobs across all characters. Shows occupied manufacturing, research, invention, and reaction slots.")
 
     try:
-        characters = fetch_characters()
+        characters = fetch_characters(summary=True)
     except Exception as exc:
         st.error(f"Failed to load characters: {exc}")
         return

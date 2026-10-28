@@ -11,12 +11,18 @@ from eve_online_industry_tracker.application.characters.service import Character
 
 characters_bp = Blueprint("characters", __name__)
 
+_HISTORY_FIELDS = ("wallet_journal", "wallet_transactions", "market_orders", "assets")
+
 
 @characters_bp.get("/characters")
 def characters():
     require_ready(get_state())
     svc = CharactersService(state=get_state())
-    return ok(data=svc.list_characters())
+    characters = svc.list_characters()
+    if request.args.get("summary") == "1":
+        # Selectors need ids and names, not each character's full history.
+        characters = [{k: v for k, v in c.items() if k not in _HISTORY_FIELDS} for c in characters]
+    return ok(data=characters)
 
 
 @characters_bp.get("/characters/oauth")

@@ -290,7 +290,7 @@ def load_character_context() -> tuple[
     dict[str, str],
     str,
 ]:
-    characters = filter_industry_characters(fetch_characters())
+    characters = filter_industry_characters(fetch_characters(summary=True))
     if not characters:
         raise RuntimeError("No character data found. Run main.py first.")
 

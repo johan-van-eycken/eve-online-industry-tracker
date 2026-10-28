@@ -122,16 +122,17 @@ def build_scope_refreshed_at_map(characters: list[dict[str, Any]]) -> dict[str, 
     return result
 
 
-def fetch_characters() -> list[dict]:
+def fetch_characters(*, summary: bool = False) -> list[dict]:
     """Fetch character list from the Flask API.
 
-    Returns the raw list of dicts from `GET /characters`.
+    Returns the raw list of dicts from `GET /characters`; `summary` leaves
+    out the wallet journal, wallet transactions, market orders and assets.
 
     Raises:
         RuntimeError: when the API returns a non-success response.
     """
 
-    resp = cached_api_get("/characters") or {}
+    resp = cached_api_get("/characters?summary=1" if summary else "/characters") or {}
     if resp.get("status") != "success":
         raise RuntimeError(resp.get("message") or "Failed to load characters")
 

@@ -105,7 +105,7 @@ def _lower_bound_cost_warning(rows: list[dict[str, Any]]) -> str | None:
 
 def _character_name_map() -> dict[int, str]:
     try:
-        characters = filter_industry_characters(fetch_characters())
+        characters = filter_industry_characters(fetch_characters(summary=True))
     except RuntimeError as exc:
         _warn_load_failure("characters", exc)
         return {}
