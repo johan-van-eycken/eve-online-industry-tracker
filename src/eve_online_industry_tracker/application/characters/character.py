@@ -1412,72 +1412,25 @@ class Character:
             self.ensure_esi()
             order_list = self._esi_client.esi_get(ESI_CHAR_ORDERS.format(character_id=self.character_id))
 
-            # Cache location/region lookups for this refresh to avoid repeated ESI calls.
-            # { location_id: (location_name, region_id, region_name) }
-            location_region_cache: Dict[int, tuple[Optional[str], int, Optional[str]]] = {}
+            # Cache name lookups for this refresh to avoid repeated ESI calls.
+            location_name_cache: Dict[int, Optional[str]] = {}
             region_name_cache: Dict[int, Optional[str]] = {}
 
-            def resolve_region_name(region_id: int) -> Optional[str]:
-                if not region_id or not isinstance(region_id, int):
-                    return None
-
-                cached = region_name_cache.get(region_id)
-                if cached is not None:
-                    return cached
-
-                try:
-                    region_info = self._esi_service.get_location_info(region_id)
-                    if isinstance(region_info, dict):
-                        name = region_info.get("name")
-                        if isinstance(name, str) and name:
-                            region_name_cache[region_id] = name
-                            return name
-                except ESI_REQUEST_ERRORS as exc:
-                    logging.warning("Market orders: region %s name unavailable: %s", region_id, exc)
-
-                region_name_cache[region_id] = None
-                return None
-
-            def resolve_location_region(location_id: Optional[int]) -> tuple[Optional[str], int, Optional[str]]:
+            def resolve_name(location_id: Optional[int], cache: Dict[int, Optional[str]], kind: str) -> Optional[str]:
                 if not location_id or not isinstance(location_id, int):
-                    return None, 0, None
-
-                cached = location_region_cache.get(location_id)
-                if cached is not None:
-                    return cached
-
-                location_name: Optional[str] = None
-                region_id: int = 0
-                region_name: Optional[str] = None
-
+                    return None
+                if location_id in cache:
+                    return cache[location_id]
+                name: Optional[str] = None
                 try:
-                    location_info = self._esi_service.get_location_info(location_id)
-                    if isinstance(location_info, dict):
-                        location_name = location_info.get("name")
-
-                        # Stations have system_id; structures have solar_system_id.
-                        system_id = location_info.get("system_id") or location_info.get("solar_system_id")
-                        if system_id and isinstance(system_id, int):
-                            system_info = self._esi_service.get_location_info(system_id)
-                            if isinstance(system_info, dict):
-                                # /universe/systems/{id} does not contain region_id; it contains constellation_id.
-                                constellation_id = system_info.get("constellation_id")
-                                if isinstance(constellation_id, int) and constellation_id:
-                                    constellation_info = self._esi_service.get_location_info(constellation_id)
-                                    if isinstance(constellation_info, dict):
-                                        region_id_val = constellation_info.get("region_id")
-                                        if isinstance(region_id_val, int) and region_id_val:
-                                            region_id = region_id_val
-
-                    if region_id:
-                        region_name = resolve_region_name(region_id)
+                    info = self._esi_service.get_location_info(location_id)
+                    if isinstance(info, dict) and isinstance(info.get("name"), str) and info.get("name"):
+                        name = info["name"]
                 except ESI_REQUEST_ERRORS as exc:
                     # Do not fail refresh_market_orders if enrichment fails.
-                    logging.warning("Market orders: location %s name/region unavailable: %s", location_id, exc)
-
-                resolved = (location_name, region_id, region_name)
-                location_region_cache[location_id] = resolved
-                return resolved
+                    logging.warning("Market orders: %s %s name unavailable: %s", kind, location_id, exc)
+                cache[location_id] = name
+                return name
 
             orders = []
             type_ids = set(order.get("type_id") for order in order_list)
@@ -1493,12 +1446,7 @@ class Character:
                 category_data = category_data_map.get(group_data.categoryID) if group_data else None
 
                 location_id = order.get("location_id", None)
-                resolved_location_name, resolved_region_id, resolved_region_name = resolve_location_region(location_id)
-
-                # Prefer the region_id coming from the order payload when present,
-                # but always resolve a human-readable region_name from region_id.
-                final_region_id = order.get("region_id", None) or resolved_region_id
-                final_region_name = resolve_region_name(final_region_id) or resolved_region_name
+                region_id = order.get("region_id", None)  # ESI orders always carry their region
 
                 new_order = {
                     "character_id": self.character_id,
@@ -1510,9 +1458,9 @@ class Character:
                     "type_category_id": group_data.categoryID if group_data else None,
                     "type_category_name": category_data.name[self._db_sde.language] if category_data else None,
                     "location_id": location_id,
-                    "location_name": resolved_location_name,
-                    "region_id": final_region_id,
-                    "region_name": final_region_name,
+                    "location_name": resolve_name(location_id, location_name_cache, "location"),
+                    "region_id": region_id,
+                    "region_name": resolve_name(region_id, region_name_cache, "region"),
                     "owner": self.corporation_name if order.get("is_corporation", False) else self.character_name,
                     "is_corporation": order.get("is_corporation", False),
                     "price": order.get("price", 0.0),

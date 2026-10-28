@@ -1177,61 +1177,24 @@ class Corporation:
             if not isinstance(order_list, list):
                 return
 
-            # Cache location/region lookups to avoid repeated ESI calls.
-            location_region_cache: Dict[int, tuple] = {}
+            # Cache name lookups to avoid repeated ESI calls.
+            location_name_cache: Dict[int, Optional[str]] = {}
             region_name_cache: Dict[int, Optional[str]] = {}
 
-            def resolve_region_name(region_id: int) -> Optional[str]:
-                if not region_id or not isinstance(region_id, int):
-                    return None
-                cached = region_name_cache.get(region_id)
-                if cached is not None:
-                    return cached
-                try:
-                    region_info = self._default_esi_character.esi_service.get_location_info(region_id)
-                    if isinstance(region_info, dict):
-                        name = region_info.get("name")
-                        if isinstance(name, str) and name:
-                            region_name_cache[region_id] = name
-                            return name
-                except ESI_REQUEST_ERRORS as exc:
-                    logging.warning("Corporation market orders: region %s name unavailable: %s", region_id, exc)
-                region_name_cache[region_id] = None
-                return None
-
-            def resolve_location_region(location_id: Optional[int]) -> tuple:
+            def resolve_name(location_id: Optional[int], cache: Dict[int, Optional[str]], kind: str) -> Optional[str]:
                 if not location_id or not isinstance(location_id, int):
-                    return None, 0, None
-                cached = location_region_cache.get(location_id)
-                if cached is not None:
-                    return cached
-                location_name: Optional[str] = None
-                region_id: int = 0
-                region_name: Optional[str] = None
+                    return None
+                if location_id in cache:
+                    return cache[location_id]
+                name: Optional[str] = None
                 try:
-                    location_info = self._default_esi_character.esi_service.get_location_info(location_id)
-                    if isinstance(location_info, dict):
-                        location_name = location_info.get("name")
-                        system_id = location_info.get("system_id") or location_info.get("solar_system_id")
-                        if system_id and isinstance(system_id, int):
-                            system_info = self._default_esi_character.esi_service.get_location_info(system_id)
-                            if isinstance(system_info, dict):
-                                constellation_id = system_info.get("constellation_id")
-                                if isinstance(constellation_id, int) and constellation_id:
-                                    constellation_info = self._default_esi_character.esi_service.get_location_info(constellation_id)
-                                    if isinstance(constellation_info, dict):
-                                        region_id_val = constellation_info.get("region_id")
-                                        if isinstance(region_id_val, int) and region_id_val:
-                                            region_id = region_id_val
-                    if region_id:
-                        region_name = resolve_region_name(region_id)
+                    info = self._default_esi_character.esi_service.get_location_info(location_id)
+                    if isinstance(info, dict) and isinstance(info.get("name"), str) and info.get("name"):
+                        name = info["name"]
                 except ESI_REQUEST_ERRORS as exc:
-                    logging.warning(
-                        "Corporation market orders: location %s name/region unavailable: %s", location_id, exc
-                    )
-                resolved = (location_name, region_id, region_name)
-                location_region_cache[location_id] = resolved
-                return resolved
+                    logging.warning("Corporation market orders: %s %s name unavailable: %s", kind, location_id, exc)
+                cache[location_id] = name
+                return name
 
             # Bulk-load SDE type/group/category data for all orders in one pass.
             type_ids = {o.get("type_id") for o in order_list if o.get("type_id")}
@@ -1249,10 +1212,7 @@ class Corporation:
                 category_data = category_data_map.get(group_data.categoryID) if group_data else None
 
                 location_id = order.get("location_id")
-                resolved_location_name, resolved_region_id, resolved_region_name = resolve_location_region(location_id)
-
-                final_region_id = order.get("region_id") or resolved_region_id
-                final_region_name = resolve_region_name(final_region_id) or resolved_region_name
+                region_id = order.get("region_id")  # ESI orders always carry their region
 
                 orders.append({
                     "corporation_id": self.corporation_id,
@@ -1264,9 +1224,9 @@ class Corporation:
                     "type_category_id": group_data.categoryID if group_data else None,
                     "type_category_name": category_data.name[self._db_sde.language] if category_data else None,
                     "location_id": location_id,
-                    "location_name": resolved_location_name,
-                    "region_id": final_region_id,
-                    "region_name": final_region_name,
+                    "location_name": resolve_name(location_id, location_name_cache, "location"),
+                    "region_id": region_id,
+                    "region_name": resolve_name(region_id, region_name_cache, "region"),
                     "price": order.get("price", 0.0),
                     "is_buy_order": order.get("is_buy_order", False),
                     "escrow": order.get("escrow", 0.0),
