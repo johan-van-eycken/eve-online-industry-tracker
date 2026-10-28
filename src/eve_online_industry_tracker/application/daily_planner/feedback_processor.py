@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from eve_online_industry_tracker.application.daily_planner.values import utc_now as _now
 from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
 from eve_online_industry_tracker.infrastructure.models import (
     PlanItemOutcomeModel,
@@ -99,10 +100,6 @@ def _industry_build_unit_cost(allocation_details: Any) -> tuple[float | None, st
     if build_lots == 0:
         return None, f"no industry-built lots in this sale (sources: {sorted(sources)})"
     return None, "industry-built lots have no positive cost and quantity"
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
 def _confidence_tier(sample_count: int) -> str:

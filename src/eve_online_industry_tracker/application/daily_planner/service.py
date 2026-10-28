@@ -11,14 +11,14 @@ import logging
 import math
 import threading
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
+from eve_online_industry_tracker.application.daily_planner.values import attr as _get_attr, utc_now as _now
+from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
 from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
-from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
@@ -46,10 +46,6 @@ from eve_online_industry_tracker.infrastructure.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
 #: The effect of a failed modifier read on the score, in its reason text.
@@ -225,21 +221,6 @@ def compute_freshness_score(
         plan_items, market_depth, drift_threshold_pct
     )
     return score
-
-
-def _schema_default(key: str) -> Any:
-    """A daily_planner setting's schema default (the fallback without a settings store)."""
-    return ADMIN_SETTINGS_SCHEMA["daily_planner"]["settings"][key]["default"]
-
-
-def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
-    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
-
-    AttributeError covers stub/None admin objects; KeyError is what
-    AdminSettingsManager.get raises for an unknown key (every key read here is
-    pinned to the schema by tests/test_daily_planner_fail_loud.py).
-    """
-    return admin_setting(admin_settings, "daily_planner", key, fallback)
 
 
 #: Job statuses ESI reports for a *finished* job -- excluded from "active" job
@@ -435,7 +416,7 @@ class DailyPlannerService:
 
     def _mineral_squeeze_factor(self) -> float:
         """daily_planner/planner_mineral_squeeze_factor, read per compute."""
-        return float(_adm(self._admin, "planner_mineral_squeeze_factor", _schema_default("planner_mineral_squeeze_factor")))
+        return float(_adm(self._admin, "planner_mineral_squeeze_factor"))
 
     def get_analytics(self) -> dict[str, Any]:
         """Fetch self-learning accuracy stats for all tracked type_ids."""
@@ -445,7 +426,7 @@ class DailyPlannerService:
 
         items = self._repo.get_plan_items(int(plan.id))
         type_ids = [int(i.type_id) for i in items]
-        batch_window = int(_adm(self._admin, "planner_analytics_batch_window", _schema_default("planner_analytics_batch_window")))
+        batch_window = int(_adm(self._admin, "planner_analytics_batch_window"))
         weights = self._repo.get_weights(type_ids)
         invention_rates = self._repo.get_invention_success_rates(type_ids)
 
@@ -756,7 +737,7 @@ class DailyPlannerService:
         busy_item_ids = busy_blueprint_item_ids(industry_jobs)
         if busy_item_ids:
             owned = {
-                int(_asset_attr(a, "item_id") or 0)
+                int(_get_attr(a, "item_id") or 0)
                 for assets in (*bpo_assets_by_type_id.values(), *bpc_assets_by_type_id.values())
                 for a in assets
             }
@@ -1594,21 +1575,9 @@ def _model_to_dict(model: Any) -> dict[str, Any]:
     return result
 
 
-def _asset_attr(asset: Any, attr: str) -> Any:
-    if isinstance(asset, dict):
-        return asset.get(attr)
-    return getattr(asset, attr, None)
-
-
 def _asset_attr_bool(asset: Any, attr: str) -> bool:
-    v = _asset_attr(asset, attr)
+    v = _get_attr(asset, attr)
     return bool(v) if v is not None else False
-
-
-def _get_attr(obj: Any, attr: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(attr)
-    return getattr(obj, attr, None)
 
 
 def busy_blueprint_item_ids(industry_jobs: list[Any]) -> set[int]:
@@ -1643,7 +1612,7 @@ def merge_blueprint_indexes(
     pilot can install it: the conservative reading), and a WARNING names
     the items. Without the dedupe the ledger would book it twice."""
     character_items = {
-        int(_asset_attr(a, "item_id") or 0)
+        int(_get_attr(a, "item_id") or 0)
         for index in character_index for assets in (index or {}).values() for a in assets
     }
     character_items.discard(0)
@@ -1654,7 +1623,7 @@ def merge_blueprint_indexes(
         for target, source in ((bpos, index_bpos), (bpcs, index_bpcs)):
             for type_id, assets in (source or {}).items():
                 for asset in assets:
-                    item = int(_asset_attr(asset, "item_id") or 0)
+                    item = int(_get_attr(asset, "item_id") or 0)
                     if is_corp and item in character_items:
                         dropped.add(item)
                         continue
@@ -1687,11 +1656,11 @@ def index_blueprint_assets(
     # per distinct type_id -- hundreds of sessions for a live corp_assets table of thousands of rows in
     # this app's own database. prefetch() is idempotent (skips ids already cached or
     # already marked missing), so this is safe even if a caller already warmed it.
-    type_ids = {int(_asset_attr(a, "type_id") or 0) for a in corp_assets}
+    type_ids = {int(_get_attr(a, "type_id") or 0) for a in corp_assets}
     meta_resolver.prefetch({t for t in type_ids if t > 0})
 
     for asset in corp_assets:
-        type_id = int(_asset_attr(asset, "type_id") or 0)
+        type_id = int(_get_attr(asset, "type_id") or 0)
         if type_id <= 0 or not meta_resolver.is_blueprint(type_id):
             continue
         target = bpcs if _asset_attr_bool(asset, "is_blueprint_copy") else bpos

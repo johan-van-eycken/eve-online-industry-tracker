@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.values import attr as _get_attr, utc_now as _now
 from eve_online_industry_tracker.application.daily_planner import research_first
-from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting, planner_setting as _adm
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import (
     BlueprintLedger,
     owner_character_id,
@@ -39,21 +40,6 @@ META_GROUP_T1 = 1
 #: The pipeline stage of an item this plan does not build: a blueprint it
 #: needs is in an active job, or it has no blueprint source to build from.
 NOT_BUILT_STAGE = "blocked"
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
-
-
-def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
-    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
-
-    AttributeError covers stub/None admin objects; KeyError is what
-    AdminSettingsManager.get raises for an unknown key. Every key the planner
-    reads is pinned to the schema by tests/test_daily_planner_fail_loud.py, so
-    with the real manager the KeyError branch cannot hide a typo.
-    """
-    return admin_setting(admin_settings, "daily_planner", key, fallback)
 
 
 def _lowest_blueprint_by_activity_product(
@@ -2623,12 +2609,6 @@ def _blueprint_efficiency(asset: Any, kind: str) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
-
-
-def _get_attr(obj: Any, attr: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(attr)
-    return getattr(obj, attr, None)
 
 
 def _unknown_fee_buy_reasons(request: dict[str, Any], own_row_reason: str | None) -> dict[int, str]:

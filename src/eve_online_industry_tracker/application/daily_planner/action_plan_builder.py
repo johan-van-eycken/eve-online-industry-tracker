@@ -9,9 +9,10 @@ NOT rendered in Tab 1. They use character_id=None, character_name=None.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.values import utc_now as _now
 from eve_online_industry_tracker.application.daily_planner.models import AssignedAction, ShoppingItem
 from eve_online_industry_tracker.domain import industry_activities as _activities
 from eve_online_industry_tracker.infrastructure.models import DailyActionLogModel
@@ -36,10 +37,6 @@ _ACTION_ORDER = {
 #: ChainPlanner._analyze_bpo_investment recommendations that mean "buy the BPO".
 #: The third value, "hold", is analysis only and gets no action.
 _BUY_RECOMMENDATIONS = frozenset({"strong_buy", "consider"})
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
 class ActionPlanBuilder:
