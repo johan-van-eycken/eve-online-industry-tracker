@@ -144,18 +144,23 @@ def resolve_range_preset(
     min_date: date | None,
     max_date: date | None,
     fallback_days: int = 30,
+    today: date | None = None,
 ) -> tuple[date | None, date | None]:
-    """(start, end) of a range preset over data from min_date to max_date;
-    an unknown preset spans fallback_days."""
+    """(start, end) of a range preset over data from min_date to max_date,
+    counted back from today ("Past Week" is the last 7 days, not the week
+    before the newest row); an unknown preset spans fallback_days."""
     if max_date is None:
         return None, None
+    anchor = today or date.today()
+    # A row dated after the local today (ESI dates are UTC) stays in range.
+    end_date = max(anchor, max_date)
     if preset == "All Time":
-        return min_date, max_date
+        return min_date, end_date
     if preset == "Year to Date":
-        resolved_start = date(max_date.year, 1, 1)
+        resolved_start = date(anchor.year, 1, 1)
         if min_date is not None:
             resolved_start = max(min_date, resolved_start)
-        return resolved_start, max_date
+        return resolved_start, end_date
 
     days_by_preset = {
         "Past Week": 7,
@@ -164,10 +169,10 @@ def resolve_range_preset(
         "Past Year": 365,
     }
     day_span = days_by_preset.get(preset, fallback_days)
-    resolved_start = max_date - timedelta(days=day_span)
+    resolved_start = anchor - timedelta(days=day_span)
     if min_date is not None:
         resolved_start = max(min_date, resolved_start)
-    return resolved_start, max_date
+    return resolved_start, end_date
 
 
 def load_range_preset(*, namespace: str, preference_key: str, state_key: str) -> str:
