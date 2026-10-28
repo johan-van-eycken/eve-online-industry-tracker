@@ -716,23 +716,47 @@ class IndustryService:
             "min_region_daily_volume": int(min_region_daily_volume or 0),
         }
 
-    def _find_matching_job(self, *, store: Any, params: dict[str, Any]) -> dict[str, Any] | None:
+    # Finished jobs kept per store: the latest results (a portfolio job is also the
+    # candidate snapshot a plan is built from), not every refresh of the session.
+    _FINISHED_JOBS_KEPT = 5
+
+    def _claim_job(
+        self, store: Any, params: dict[str, Any], *, step_count: int,
+    ) -> tuple[dict[str, Any], bool]:
+        """(job, created): the active job with these params, else a new queued
+        one. Check, prune and insert under one lock, so racing identical starts
+        run one recompute."""
         with store.lock:
             for job in store.jobs.values():
-                if not isinstance(job, dict):
-                    continue
-                if not self._job_is_active(job):
-                    continue
-                if dict(job.get("request_params") or {}) != params:
-                    continue
-                return dict(job)
-        return None
-
-    def _find_matching_overview_refresh_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
-        return self._find_matching_job(store=self._get_industry_overview_refresh_store(), params=params)
-
-    def _find_matching_portfolio_candidates_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
-        return self._find_matching_job(store=self._get_industry_portfolio_candidates_store(), params=params)
+                if isinstance(job, dict) and self._job_is_active(job) and dict(job.get("request_params") or {}) == params:
+                    return dict(job), False
+            finished = sorted(
+                (job_id for job_id, job in store.jobs.items() if not self._job_is_active(job)),
+                key=lambda job_id: str(store.jobs[job_id].get("created_at") or ""),
+            )
+            for job_id in finished[:-self._FINISHED_JOBS_KEPT]:
+                del store.jobs[job_id]
+            job_id = str(uuid.uuid4())
+            created_at = datetime.now(timezone.utc).isoformat()
+            store.jobs[job_id] = {
+                "job_id": job_id,
+                "request_params": dict(params),
+                "status": "queued",
+                "progress_fraction": 0.0,
+                "progress_label": "Queued",
+                "progress_meta": {
+                    "stage": "queued",
+                    "step": 0,
+                    "step_count": step_count,
+                },
+                "created_at": created_at,
+                "updated_at": created_at,
+                "result": None,
+                "result_meta": {},
+                "result_count": 0,
+                "error_message": None,
+            }
+            return dict(store.jobs[job_id]), True
 
     def _update_job(
         self,
@@ -806,8 +830,8 @@ class IndustryService:
             owned_blueprints_scope=owned_blueprints_scope,
             character_id=character_id,
         )
-        existing_job = self._find_matching_overview_refresh_job(params=params)
-        if existing_job is not None:
+        existing_job, created = self._claim_job(self._get_industry_overview_refresh_store(), params, step_count=9)
+        if not created:
             return {
                 "job_id": str(existing_job.get("job_id") or ""),
                 "created_at": existing_job.get("created_at"),
@@ -815,29 +839,8 @@ class IndustryService:
                 "progress_label": str(existing_job.get("progress_label") or "Queued"),
                 "progress_meta": dict(existing_job.get("progress_meta") or {}),
             }
-
-        job_id = str(uuid.uuid4())
-        store = self._get_industry_overview_refresh_store()
-        created_at = datetime.now(timezone.utc).isoformat()
-        with store.lock:
-            store.jobs[job_id] = {
-                "job_id": job_id,
-                "request_params": dict(params),
-                "status": "queued",
-                "progress_fraction": 0.0,
-                "progress_label": "Queued",
-                "progress_meta": {
-                    "stage": "queued",
-                    "step": 0,
-                    "step_count": 9,
-                },
-                "created_at": created_at,
-                "updated_at": created_at,
-                "result": None,
-                "result_meta": {},
-                "result_count": 0,
-                "error_message": None,
-            }
+        job_id = str(existing_job["job_id"])
+        created_at = existing_job["created_at"]
 
         thread = threading.Thread(
             target=self._run_overview_refresh_job,
@@ -961,8 +964,8 @@ class IndustryService:
             min_isk_per_hour=min_isk_per_hour,
             min_region_daily_volume=min_region_daily_volume,
         )
-        existing_job = self._find_matching_portfolio_candidates_job(params=params)
-        if existing_job is not None:
+        existing_job, created = self._claim_job(self._get_industry_portfolio_candidates_store(), params, step_count=11)
+        if not created:
             return {
                 "job_id": str(existing_job.get("job_id") or ""),
                 "created_at": existing_job.get("created_at"),
@@ -970,29 +973,8 @@ class IndustryService:
                 "progress_label": str(existing_job.get("progress_label") or "Queued"),
                 "progress_meta": dict(existing_job.get("progress_meta") or {}),
             }
-
-        job_id = str(uuid.uuid4())
-        store = self._get_industry_portfolio_candidates_store()
-        created_at = datetime.now(timezone.utc).isoformat()
-        with store.lock:
-            store.jobs[job_id] = {
-                "job_id": job_id,
-                "request_params": dict(params),
-                "status": "queued",
-                "progress_fraction": 0.0,
-                "progress_label": "Queued",
-                "progress_meta": {
-                    "stage": "queued",
-                    "step": 0,
-                    "step_count": 11,
-                },
-                "created_at": created_at,
-                "updated_at": created_at,
-                "result": None,
-                "result_meta": {},
-                "result_count": 0,
-                "error_message": None,
-            }
+        job_id = str(existing_job["job_id"])
+        created_at = existing_job["created_at"]
 
         thread = threading.Thread(
             target=self._run_portfolio_candidates_refresh_job,
