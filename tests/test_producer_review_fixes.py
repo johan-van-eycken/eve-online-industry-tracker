@@ -16,7 +16,7 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
-import test_industry_service_calculations as h
+import industry_service_fakes as h
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA
 from eve_online_industry_tracker.application.daily_planner.assigned_invention import assigned_invention
 from eve_online_industry_tracker.application.industry import invention_model as im
