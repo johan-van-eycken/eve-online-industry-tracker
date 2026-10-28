@@ -1217,16 +1217,21 @@ class DailyPlannerService:
             session.close()
 
     def _get_character_blueprint_assets(self) -> list[Any]:
-        """Every pilot's blueprint assets: the producer's owned-blueprint
-        source for its default scope (blueprints_repo.get_character_blueprints).
+        """The known pilots' blueprint assets: the producer's owned-blueprint
+        source for its default scope (IndustryService._resolve_scope_owner_ids,
+        "all_characters"). A removed pilot's leftover rows are not planned.
 
         No error handler (like _get_corp_assets): an empty list would plan a
         row the producer priced from a pilot's blueprint as not built, or
         tell the user to buy a blueprint a pilot owns."""
+        character_ids = [
+            int(c["character_id"]) for c in self._character_assigner._get_characters(self._characters)
+            if c.get("character_id")
+        ]
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
-            return list(blueprints_repo.get_character_blueprints(session))
+            return list(blueprints_repo.get_character_blueprint_assets_for_ids(session, character_ids))
         finally:
             session.close()
 

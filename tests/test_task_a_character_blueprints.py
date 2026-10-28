@@ -210,8 +210,34 @@ def test_phase_1_reads_the_character_blueprints_from_the_producers_source():
     session = SimpleNamespace(query=lambda _m: _Query(rows), close=lambda: closed.append(True))
     svc = DailyPlannerService.__new__(DailyPlannerService)
     svc._session_provider = SimpleNamespace(app_session=lambda: session)
+    svc._character_assigner = CharacterAssigner()
+    svc._characters = SimpleNamespace(list_characters=lambda: [{"character_id": OWNER_ID}])
     assert svc._get_character_blueprint_assets() == rows
     assert closed == [True]
+
+
+def test_phase_1_skips_the_blueprints_of_a_pilot_the_app_no_longer_knows(session_provider):
+    """The producer's rule (IndustryService._resolve_scope_owner_ids): only the
+    known pilots' blueprints count. A removed pilot's asset rows stay in the
+    table, but the planner must not plan from them."""
+    from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+    from eve_online_industry_tracker.db_models import CharacterAssetsModel
+
+    session = session_provider.app_session()
+    session.add_all([
+        CharacterAssetsModel(character_id=character_id, item_id=item_id, type_id=998, quantity=1,
+                             location_id=6001, type_category_name="Blueprint", is_blueprint_copy=False,
+                             is_singleton=True, is_container=False, is_asset_safety_wrap=False,
+                             is_ship=False, is_office_folder=False)
+        for character_id, item_id in ((OWNER_ID, 77), (OWNER_ID + 1, 78))
+    ])
+    session.commit()
+    session.close()
+    svc = DailyPlannerService.__new__(DailyPlannerService)
+    svc._session_provider = session_provider
+    svc._character_assigner = CharacterAssigner()
+    svc._characters = SimpleNamespace(list_characters=lambda: [{"character_id": OWNER_ID}])
+    assert [row.item_id for row in svc._get_character_blueprint_assets()] == [77]
 
 
 def test_character_blueprints_merge_into_the_corp_index():
