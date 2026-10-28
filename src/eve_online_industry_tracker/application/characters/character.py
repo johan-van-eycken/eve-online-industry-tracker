@@ -754,20 +754,15 @@ class Character:
                 ESI_CHAR_WALLET_JOURNAL.format(character_id=self.character_id), paginate=True
             )
 
-            new_journal_entries = []
-            for entry in journal_entries:
-                entry_wallet_journal_id = entry.get("id")
-                if entry_wallet_journal_id is None:
-                    continue  # Skip entries without an ID
-
-                existing_entry = (
-                    self._db_app.session.query(CharacterWalletJournalModel)
-                    .filter_by(character_id=self.character_id, wallet_journal_id=entry_wallet_journal_id)
-                    .first()
-                )
-                if existing_entry:
-                    continue  # Skip if already exists
-                new_journal_entries.append(entry)
+            known_ids = {
+                row[0]
+                for row in self._db_app.session.query(CharacterWalletJournalModel.wallet_journal_id)
+                .filter_by(character_id=self.character_id)
+            }
+            new_journal_entries = [
+                entry for entry in journal_entries
+                if entry.get("id") is not None and entry.get("id") not in known_ids
+            ]
 
             # Step 1: Collect unique party IDs
             party_ids = set()

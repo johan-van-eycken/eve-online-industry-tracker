@@ -555,6 +555,11 @@ class Corporation:
             if not corp_wallets or not isinstance(corp_wallets, list):
                 return
 
+            known_ids = {
+                row[0]
+                for row in self._db_app.session.query(CorporationWalletJournalModel.wallet_journal_id)
+                .filter_by(corporation_id=self.corporation_id)
+            }
             new_entries: List[Dict[str, Any]] = []
             for wallet in corp_wallets:
                 if not isinstance(wallet, dict):
@@ -576,14 +581,7 @@ class Corporation:
                     if not isinstance(entry, dict):
                         continue
                     journal_id = entry.get("id")
-                    if journal_id is None:
-                        continue
-                    exists = (
-                        self._db_app.session.query(CorporationWalletJournalModel)
-                        .filter_by(corporation_id=self.corporation_id, wallet_journal_id=journal_id)
-                        .first()
-                    )
-                    if exists:
+                    if journal_id is None or journal_id in known_ids:
                         continue
                     entry["division"] = division
                     new_entries.append(entry)
