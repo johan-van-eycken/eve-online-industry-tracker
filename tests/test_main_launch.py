@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-import main
+from eve_online_industry_tracker import cli as main
 
 
 class _FakeFlask:
@@ -51,7 +51,7 @@ def test_flask_is_stopped_when_streamlit_fails_to_start(monkeypatch):
 
     monkeypatch.setattr(main, "run_streamlit", boom)
     with pytest.raises(SystemExit) as exc:
-        main.main()
+        main.main([])
     assert exc.value.code == 1
     assert fake.terminated
 
@@ -61,7 +61,7 @@ def test_flask_is_killed_when_terminate_does_not_stop_it(monkeypatch):
     _patch_flask(monkeypatch, fake)
     monkeypatch.setattr(main, "run_streamlit", lambda: (_ for _ in ()).throw(FileNotFoundError("streamlit")))
     with pytest.raises(SystemExit) as exc:
-        main.main()
+        main.main([])
     assert exc.value.code == 1
     assert fake.terminated and fake.killed
 
@@ -78,7 +78,7 @@ def test_streamlit_relaunch_is_limited_and_flask_is_reaped(monkeypatch):
     launches = []
     monkeypatch.setattr(main, "run_streamlit", lambda: launches.append(1) or _DeadStreamlit())
     with pytest.raises(SystemExit) as exc:
-        main.main()
+        main.main([])
     assert exc.value.code == 1
     # The first launch plus one relaunch per failure short of the limit.
     assert len(launches) == main.STREAMLIT_MAX_CONSECUTIVE_FAILURES
@@ -102,7 +102,7 @@ def test_slow_streamlit_exits_do_not_count_as_failures(monkeypatch):
     monkeypatch.setattr(main, "run_streamlit", launch)
     # The KeyboardInterrupt path POSTs /shutdown to Flask's real port; never touch it.
     monkeypatch.setattr(main.requests, "post", lambda *a, **kw: None)
-    main.main()
+    main.main([])
     assert len(launches) > main.STREAMLIT_MAX_CONSECUTIVE_FAILURES
 
 
@@ -134,7 +134,7 @@ def test_giving_up_on_flask_exits_non_zero_after_cleanup(monkeypatch):
     streamlit = _LiveStreamlit()
     monkeypatch.setattr(main, "run_streamlit", lambda: streamlit)
     with pytest.raises(SystemExit) as exc:
-        main.main()
+        main.main([])
     assert exc.value.code == 1
     assert streamlit.terminated
 
@@ -144,5 +144,5 @@ def test_ctrl_c_shutdown_still_exits_normally(monkeypatch):
     _patch_flask(monkeypatch, fake)
     monkeypatch.setattr(main, "run_streamlit", lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
     monkeypatch.setattr(main.requests, "post", lambda *a, **kw: None)
-    main.main()  # returns: exit status 0
+    main.main([])  # returns: exit status 0
     assert fake.terminated
