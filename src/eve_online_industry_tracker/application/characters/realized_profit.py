@@ -705,18 +705,15 @@ class _BaseRealizedProfitLedgerService:
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
-        # Always load char-job and char-buy lots regardless of whether an asset history lot
-        # exists for the same type_id. FIFO attribution only charges costs to actually-sold
-        # units; extra lots that aren't consumed simply remain unused in the queue, so there
-        # is no double-counting risk. This allows char-built items sold before the corp job
-        # was captured in asset history to be correctly attributed as Manufacturing instead
-        # of falling through to opening_inventory (Trade).
+        # Char-job and char-buy lots cover char-built items sold before the transfer was
+        # captured in asset history (Manufacturing instead of opening_inventory). A lot the
+        # asset history already stamped from the same job or buy is skipped: unconsumed
+        # leftovers stay in the queue and a later sale would take them as a second copy.
         supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id))
-
-        # Merge supplemental lots into asset_history_lots (may overlap on type_id when both
-        # a corp asset history row and char-job lots exist for the same product type)
         for supp_type_id, supp_lots in supplemental_lots.items():
-            asset_history_lots.setdefault(int(supp_type_id), []).extend(supp_lots)
+            type_lots = asset_history_lots.setdefault(int(supp_type_id), [])
+            stamped = {(lot.reference_type, lot.reference_id) for lot in type_lots if lot.reference_id is not None}
+            type_lots.extend(lot for lot in supp_lots if (lot.reference_type, lot.reference_id) not in stamped)
 
         # A lot that points at an industry job is priced from the job's
         # current unit_build_cost, not the cost stamped when the lot was
@@ -1173,8 +1170,8 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         """Return FifoLots from character industry jobs and character market buys.
 
         These represent items manufactured or purchased by characters, then transferred to the
-        corporation. All lots are loaded unconditionally; FIFO only charges costs to actually-sold
-        units, so surplus lots simply remain unused in the queue with no double-counting risk.
+        corporation. Buys paid from the corp wallet are left out: the corp's own transactions
+        already hold them. _rebuild_owner skips a lot the corp asset history already stamped.
         """
         lots_by_type: dict[int, list[FifoLot]] = {}
         completed_statuses = {"delivered", "ready", "completed"}
@@ -1214,6 +1211,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             self._app_session.query(CharacterWalletTransactionsModel)
             .filter(
                 CharacterWalletTransactionsModel.is_buy.is_(True),
+                CharacterWalletTransactionsModel.is_personal.is_not(False),
                 CharacterWalletTransactionsModel.unit_price.isnot(None),
             )
             .all()
