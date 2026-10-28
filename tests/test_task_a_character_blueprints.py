@@ -240,6 +240,29 @@ def test_phase_1_skips_the_blueprints_of_a_pilot_the_app_no_longer_knows(session
     assert [row.item_id for row in svc._get_character_blueprint_assets()] == [77]
 
 
+def test_phase_1_reads_only_the_corp_assets_of_the_known_pilots_corporations(session_provider):
+    """The producer's rule for the "all" scopes: the known pilots'
+    corporations. A corporation no known pilot is in any more keeps its asset
+    rows, but the planner must not count its blueprints or stock."""
+    from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+    from eve_online_industry_tracker.db_models import CorporationAssetsModel
+
+    session = session_provider.app_session()
+    session.add_all([
+        CorporationAssetsModel(corporation_id=corporation_id, item_id=item_id, type_id=34, quantity=100,
+                               location_id=6001, type_category_name="Material", is_blueprint_copy=False,
+                               is_singleton=False)
+        for corporation_id, item_id in ((5001, 87), (5002, 88))
+    ])
+    session.commit()
+    session.close()
+    svc = DailyPlannerService.__new__(DailyPlannerService)
+    svc._session_provider = session_provider
+    svc._character_assigner = CharacterAssigner()
+    svc._characters = SimpleNamespace(list_characters=lambda: [{"character_id": OWNER_ID, "corporation_id": 5001}])
+    assert [row.item_id for row in svc._get_corp_assets()] == [87]
+
+
 def test_character_blueprints_merge_into_the_corp_index():
     from eve_online_industry_tracker.application.daily_planner.service import merge_blueprint_indexes
 

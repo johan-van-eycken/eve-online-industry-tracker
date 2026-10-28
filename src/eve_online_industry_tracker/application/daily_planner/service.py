@@ -1205,16 +1205,24 @@ class DailyPlannerService:
             session.close()
 
     def _get_corp_assets(self) -> list[Any]:
-        """Get corp assets.
+        """The assets of the known pilots' corporations: the producer's rule
+        for its "all" scopes (IndustryService._resolve_scope_owner_ids). A
+        corporation no known pilot is in any more is not planned from.
 
         No error handler: an empty list would mean "the corp owns no BPOs and
         no stock", and the plan would tell the user to buy both. A failed
         query must fail the compute (see _get_industry_jobs).
         """
+        corporation_ids = sorted({
+            int(c["corporation_id"]) for c in self._character_assigner._get_characters(self._characters)
+            if c.get("corporation_id")
+        })
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.models import CorporationAssetsModel
-            return session.query(CorporationAssetsModel).all()
+            return session.query(CorporationAssetsModel).filter(
+                CorporationAssetsModel.corporation_id.in_(corporation_ids)
+            ).all()
         finally:
             session.close()
 
