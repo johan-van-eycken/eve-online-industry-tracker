@@ -63,7 +63,7 @@ def _bpc(item_id, type_id, runs):
 
 def _planner(me=10):
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_Adm())
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: me
+    planner._compute_optimal_me = lambda bp_data, runs=1: me
     return planner
 
 

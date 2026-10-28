@@ -355,45 +355,6 @@ def get_invention_source_blueprint_ids(
     return result
 
 
-def compute_optimal_me(blueprint_type_id: int, session, runs: int = 1) -> int:
-    """Return the ME level where no material quantity further decreases.
-
-    For each material in the blueprint's manufacturing activity, find the last
-    ME level (1–10) that still reduces the required quantity. The optimal ME
-    is the maximum of these per-material values. If no material ever benefits
-    from ME research (e.g. qty=1 for all materials), returns 0.
-
-    Algorithm:
-        For ME in 1..10, compute me_adjusted_batch_quantity(qty, runs, ME) =
-        max(runs, ceil(qty * runs * (1 - 0.01 * ME))) -- one ceiling over the
-        whole batch, never fewer than one unit per run -- and compare it to the
-        previous level. The last ME that yields a reduction is the material's
-        optimal ME. optimal_ME = max across all materials.
-
-    `runs` is the planned batch size (default 1, a single run).
-    """
-    blueprint = session.query(Blueprints).filter(
-        Blueprints.blueprintTypeID == int(blueprint_type_id)
-    ).first()
-    if blueprint is None:
-        return 0
-
-    activities = blueprint.activities if isinstance(blueprint.activities, dict) else {}
-    manufacturing = activities.get("manufacturing", {}) if isinstance(activities.get("manufacturing"), dict) else {}
-    materials = manufacturing.get("materials", []) or []
-
-    if not materials:
-        return 0
-
-    quantities: list[int] = []
-    for mat in materials:
-        try:
-            quantities.append(int(mat.get("quantity", 0)))
-        except (TypeError, ValueError):
-            continue
-    return optimal_me_for_quantities(quantities, runs=runs)
-
-
 def _me_reduction(me: int) -> float:
     """ME level as the producer's combined material-reduction fraction.
 
