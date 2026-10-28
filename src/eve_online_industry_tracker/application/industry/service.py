@@ -6618,6 +6618,35 @@ class IndustryService:
             )
         return owner_id
 
+    @classmethod
+    def _resolve_scope_owner_ids(
+        cls, owned_blueprints_scope: str, character_ids: list[int], corporation_ids: list[int],
+    ) -> tuple[list[int], list[int]]:
+        """(character IDs, corporation IDs) an owned_blueprints_scope selects:
+        the one rule for owned blueprints and owned inventory. The "all" scopes
+        take the known pilots and their corporations; an unknown scope is a 400."""
+        normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
+        kind, _, rest = normalized_scope.partition(":")
+        if kind == "character":
+            return [cls._scope_owner_id(owned_blueprints_scope, rest, "character")], []
+        if kind == "corporation":
+            return [], [cls._scope_owner_id(owned_blueprints_scope, rest, "corporation")]
+        if kind == "character_and_corporation":
+            parts = normalized_scope.split(":")
+            return (
+                [cls._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")],
+                [cls._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")],
+            )
+        by_scope = {
+            "all_characters": (character_ids, []),
+            "character_and_corporations": (character_ids, corporation_ids),
+            "all_corporations": ([], corporation_ids),
+            "all": (character_ids, corporation_ids),
+        }
+        if normalized_scope not in by_scope:
+            raise ServiceError(f"owned_blueprints_scope {owned_blueprints_scope!r} is not a known scope", status_code=400)
+        return list(by_scope[normalized_scope][0]), list(by_scope[normalized_scope][1])
+
     def _get_owned_blueprint_assets(
         self,
         *,
@@ -6714,166 +6743,27 @@ class IndustryService:
                         out[int(top_location_id)] = name
                 return out
 
-            normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
-            if normalized_scope.startswith("character:"):
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
-                character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
-                historical_character_assets, _ = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[selected_character_id],
-                    corporation_ids=[],
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
-                )
-                character_assets.extend(historical_character_assets)
-                top_location_name_by_id = resolve_top_location_name_map(character_assets)
-                return (
-                    character_assets,
-                    [],
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope.startswith("character_and_corporation:"):
-                parts = normalized_scope.split(":")
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
-                character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
-                corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
-                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[selected_character_id],
-                    corporation_ids=[selected_corporation_id],
-                    current_item_ids={
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
-                    },
-                )
-                character_assets.extend(historical_character_assets)
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
-                return (
-                    character_assets,
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope.startswith("corporation:"):
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
-                corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
-                _, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[],
-                    corporation_ids=[selected_corporation_id],
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets},
-                )
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map(corporation_assets)
-                return (
-                    [],
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "all_characters":
-                character_assets = blueprints_repo.get_character_blueprints(session)
-                historical_character_assets, _ = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=character_ids,
-                    corporation_ids=[],
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
-                )
-                character_assets.extend(historical_character_assets)
-                top_location_name_by_id = resolve_top_location_name_map(character_assets)
-                return (
-                    character_assets,
-                    [],
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "character_and_corporations":
-                character_assets = blueprints_repo.get_character_blueprints(session)
-                corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, corporation_ids)
-                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=character_ids,
-                    corporation_ids=corporation_ids,
-                    current_item_ids={
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
-                    },
-                )
-                character_assets.extend(historical_character_assets)
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
-                return (
-                    character_assets,
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "all_corporations":
-                corporation_assets = blueprints_repo.get_corporation_blueprints(session)
-                _, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[],
-                    corporation_ids=corporation_ids,
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets},
-                )
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map(corporation_assets)
-                return (
-                    [],
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "all":
-                character_assets = blueprints_repo.get_character_blueprints(session)
-                corporation_assets = blueprints_repo.get_corporation_blueprints(session)
-                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=character_ids,
-                    corporation_ids=corporation_ids,
-                    current_item_ids={
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
-                    },
-                )
-                character_assets.extend(historical_character_assets)
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
-                return (
-                    character_assets,
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            character_assets = blueprints_repo.get_character_blueprints(session)
-            historical_character_assets, _ = self._load_historical_blueprint_assets(
+            scoped_character_ids, scoped_corporation_ids = self._resolve_scope_owner_ids(
+                owned_blueprints_scope, character_ids, corporation_ids,
+            )
+            character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, scoped_character_ids)
+            corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, scoped_corporation_ids)
+            historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
                 app_session=session,
                 sde_session=sde_session,
-                character_ids=character_ids,
-                corporation_ids=[],
-                current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
+                character_ids=scoped_character_ids,
+                corporation_ids=scoped_corporation_ids,
+                current_item_ids={
+                    *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
+                    *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
+                },
             )
             character_assets.extend(historical_character_assets)
-            top_location_name_by_id = resolve_top_location_name_map(character_assets)
+            corporation_assets.extend(historical_corporation_assets)
+            top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
             return (
                 character_assets,
-                [],
+                corporation_assets,
                 character_name_by_id,
                 corporation_name_by_id,
                 top_location_name_by_id,
@@ -6917,8 +6807,6 @@ class IndustryService:
                 if corporation_id > 0:
                     corporation_ids.append(corporation_id)
 
-            normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
-
             def query_character_assets(ids: list[int]) -> list[CharacterAssetsModel]:
                 normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
                 if not normalized_ids:
@@ -6945,32 +6833,11 @@ class IndustryService:
                     q = q.filter(CorporationAssetsModel.location_flag.in_(_hangar_flags))
                 return q.all()
 
-            character_assets: list[CharacterAssetsModel] = []
-            corporation_assets: list[CorporationAssetsModel] = []
-            if normalized_scope.startswith("character:"):
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
-                character_assets = query_character_assets([selected_character_id])
-            elif normalized_scope.startswith("character_and_corporation:"):
-                parts = normalized_scope.split(":")
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
-                character_assets = query_character_assets([selected_character_id])
-                corporation_assets = query_corporation_assets([selected_corporation_id])
-            elif normalized_scope.startswith("corporation:"):
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
-                corporation_assets = query_corporation_assets([selected_corporation_id])
-            elif normalized_scope == "all_characters":
-                character_assets = query_character_assets(character_ids)
-            elif normalized_scope == "character_and_corporations":
-                character_assets = query_character_assets(character_ids)
-                corporation_assets = query_corporation_assets(corporation_ids)
-            elif normalized_scope == "all_corporations":
-                corporation_assets = query_corporation_assets(corporation_ids)
-            elif normalized_scope == "all":
-                character_assets = query_character_assets(character_ids)
-                corporation_assets = query_corporation_assets(corporation_ids)
-            else:
-                character_assets = query_character_assets(character_ids)
+            scoped_character_ids, scoped_corporation_ids = self._resolve_scope_owner_ids(
+                owned_blueprints_scope, character_ids, corporation_ids,
+            )
+            character_assets = query_character_assets(scoped_character_ids)
+            corporation_assets = query_corporation_assets(scoped_corporation_ids)
 
             # Build on-hand quantity map (excluding blueprints)
             quantity_by_type_id: dict[int, int] = {}

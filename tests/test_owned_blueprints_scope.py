@@ -67,3 +67,45 @@ def test_a_programming_error_in_the_corporation_list_propagates():
     service._state.corp_manager = _Buggy()
     with pytest.raises(AttributeError):
         service._get_owned_blueprint_assets(owned_blueprints_scope="all")
+
+
+@pytest.mark.parametrize("method", ["_get_owned_blueprint_assets", "_get_owned_item_inventory"])
+def test_an_unknown_scope_is_a_400_not_all_characters(method):
+    with pytest.raises(ServiceError) as exc_info:
+        getattr(_service(), method)(owned_blueprints_scope="every_pilot")
+    assert exc_info.value.status_code == 400
+    assert "every_pilot" in exc_info.value.message
+
+
+@pytest.mark.parametrize("scope, expected", [
+    ("", ([1, 2], [])),
+    ("all_characters", ([1, 2], [])),
+    ("character_and_corporations", ([1, 2], [10])),
+    ("all_corporations", ([], [10])),
+    ("all", ([1, 2], [10])),
+    ("Character:2", ([2], [])),
+    ("corporation:10", ([], [10])),
+    ("character_and_corporation:1:10", ([1], [10])),
+])
+def test_one_scope_resolution_for_blueprints_and_inventory(scope, expected):
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+    assert IndustryService._resolve_scope_owner_ids(scope, [1, 2], [10]) == expected
+
+
+def test_all_characters_counts_only_known_pilots_blueprints(monkeypatch):
+    """A pilot the app no longer knows (asset rows left in the table) must not
+    count for blueprints when its materials do not count for inventory."""
+    from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
+
+    seen: dict[str, list[int]] = {}
+    real = blueprints_repo.get_character_blueprint_assets_for_ids
+
+    def spy(session, ids):
+        seen["ids"] = sorted(ids)
+        return real(session, ids)
+
+    monkeypatch.setattr(blueprints_repo, "get_character_blueprint_assets_for_ids", spy)
+    monkeypatch.setattr(blueprints_repo, "get_character_blueprints",
+                        lambda session: pytest.fail("all_characters must not read every pilot's rows"))
+    _service()._get_owned_blueprint_assets(owned_blueprints_scope="all_characters")
+    assert seen["ids"] == [1]
