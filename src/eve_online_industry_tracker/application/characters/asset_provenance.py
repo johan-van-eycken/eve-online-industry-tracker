@@ -247,6 +247,7 @@ def _estimate_industry_job_materials_cost_total(
     total_adjusted_quantity = 0
     historical_adjusted_quantity = 0
     input_cost_details: dict[str, Any] = {}
+    unpriced_type_ids: list[int] = []
     for m in materials:
         if not isinstance(m, dict):
             continue
@@ -289,6 +290,7 @@ def _estimate_industry_job_materials_cost_total(
         if unit_price is None:
             average_historical_unit_cost = _safe_float(cost_payload.get("unit_cost"))
             if average_historical_unit_cost is None or average_historical_unit_cost <= 0:
+                unpriced_type_ids.append(int(mat_type_id))
                 continue
             unit_price = float(average_historical_unit_cost)
         material_cost_total += float(remaining_quantity) * float(unit_price)
@@ -312,6 +314,10 @@ def _estimate_industry_job_materials_cost_total(
         "historical_material_coverage_fraction": float(coverage_fraction),
         "historical_input_costs": input_cost_details,
         "material_cost_source": material_cost_source,
+        "materials_cost_lower_bound_reason": (
+            f"materials cost is a lower bound: no price for material type(s) {', '.join(map(str, unpriced_type_ids))}"
+            if unpriced_type_ids else None
+        ),
     }
 
 
@@ -669,8 +675,8 @@ def resnapshot_jobs_without_decryptor_choice(
             row.historical_material_cost_source = snapshot.get("historical_material_cost_source")
             row.historical_material_coverage_fraction = snapshot.get("historical_material_coverage_fraction")
             row.historical_input_costs = snapshot.get("historical_input_costs")
-            # The materials cost is replaced: a backfill's lower bound no longer applies.
-            row.materials_cost_lower_bound_reason = None
+            # The materials cost is replaced: the new estimate's own lower bound, not a backfill's.
+            row.materials_cost_lower_bound_reason = snapshot.get("materials_cost_lower_bound_reason")
             row.invention_cost = snapshot.get("invention_cost")
             row.invention_cost_unknown_reason = snapshot.get("invention_cost_unknown_reason")
             row.total_build_cost = snapshot.get("total_cost")
@@ -1652,6 +1658,7 @@ def resolve_industry_job_cost_snapshot(
                 "historical_material_cost_source": estimated.get("material_cost_source"),
                 "historical_material_coverage_fraction": _safe_float(estimated.get("historical_material_coverage_fraction")),
                 "historical_input_costs": estimated.get("historical_input_costs") or None,
+                "materials_cost_lower_bound_reason": estimated.get("materials_cost_lower_bound_reason"),
                 "copy_cost": copy_cost,
                 "invention_cost": invention_cost,
                 "invention_cost_unknown_reason": invention_cost_unknown_reason,

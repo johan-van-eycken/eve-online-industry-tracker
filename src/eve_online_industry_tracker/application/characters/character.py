@@ -1179,6 +1179,7 @@ class Character:
                         "historical_material_cost_source": snapshot.get("historical_material_cost_source"),
                         "historical_material_coverage_fraction": snapshot.get("historical_material_coverage_fraction"),
                         "historical_input_costs": snapshot.get("historical_input_costs"),
+                        "materials_cost_lower_bound_reason": snapshot.get("materials_cost_lower_bound_reason"),
                         "copy_cost": snapshot.get("copy_cost"),
                         "invention_cost": snapshot.get("invention_cost"),
                         "invention_cost_unknown_reason": snapshot.get("invention_cost_unknown_reason"),
