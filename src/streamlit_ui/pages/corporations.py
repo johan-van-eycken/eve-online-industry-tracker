@@ -11,119 +11,22 @@ from streamlit_ui.components.assets_ui import (
     ASSET_ISK_COLUMNS,
     apply_location_names,
     build_asset_display_frame,
+    render_asset_dataframe,
+    render_asset_summary,
     render_ship_cards,
     summarize_asset_items,
 )
 from streamlit_ui.api.client import api_get
 from streamlit_ui.components.batch_errors import show_batch_errors
-from streamlit_ui.components.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age, type_icon_url
+from streamlit_ui.components.formatters import format_datetime, format_date_countdown, format_isk, format_date_into_age
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
 from streamlit_ui.api.streamlit_client import cached_api_get
 from streamlit_ui.components.aggrid_formatters import js_category_text_style, js_icon_cell_renderer
-from streamlit_ui.components.wallet_ui import RANGE_OPTIONS, apply_wallet_location_names, camel_case_header, filter_dataframe_by_range, format_wallet_datetime, load_range_preset, reorder_columns, render_income_expense_tile, save_range_preset
+from streamlit_ui.components.wallet_ui import build_tooltip, camel_case_header, range_preset_control, render_income_expense_tile, wallet_journal_view, wallet_transactions_view
 from streamlit_ui.components.webpage_ui import render_aggrid_table, require_aggrid
 
 
 _PREFERENCES_NAMESPACE = "corporations_details"
-
-
-def _build_tooltip(breakdown, category, formatter=format_isk, join_labels=True):
-    if category not in breakdown.index.get_level_values(0):
-        return ""
-
-    items = breakdown.loc[category].abs().sort_values(ascending=False)
-    tooltip_lines = []
-    if isinstance(items.index, pd.MultiIndex):
-        for idx, val in items.items():
-            label = " / ".join(str(x) for x in idx) if join_labels else str(idx[-1])
-            tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
-    else:
-        for label, val in items.items():
-            tooltip_lines.append(f"<div><span>{label}</span><span>{formatter(val)}</span></div>")
-
-    return "".join(tooltip_lines)
-
-
-def _range_preset_control(*, label: str, preference_key: str, state_key: str) -> str:
-    persisted_range_preset = load_range_preset(
-        namespace=_PREFERENCES_NAMESPACE,
-        preference_key=preference_key,
-        state_key=state_key,
-    )
-    range_preset = st.segmented_control(
-        label,
-        options=RANGE_OPTIONS,
-        key=state_key,
-        label_visibility="collapsed",
-    )
-    range_preset = str(range_preset or persisted_range_preset or "Past Month")
-    if range_preset != persisted_range_preset:
-        save_range_preset(
-            namespace=_PREFERENCES_NAMESPACE,
-            preference_key=preference_key,
-            preset=range_preset,
-        )
-    return range_preset
-
-
-def _wallet_journal_view(journal_data: list[dict[str, Any]], *, range_preset: str) -> pd.DataFrame:
-    journal_df = pd.DataFrame(journal_data)
-    journal_df["category"] = journal_df["amount"].apply(lambda value: "Income" if float(value or 0.0) > 0 else "Expenses")
-    journal_df = filter_dataframe_by_range(journal_df, date_column="date", preset=range_preset)
-    source_location_column = "location_id" if "location_id" in journal_df.columns else "context_id"
-    journal_df = apply_wallet_location_names(journal_df, source_column=source_location_column)
-    if "date" in journal_df.columns:
-        journal_df["date"] = journal_df["date"].apply(format_wallet_datetime)
-    journal_df = reorder_columns(
-        journal_df,
-        [
-            "date",
-            "category",
-            "location_name",
-            "description",
-            "amount",
-            "balance",
-            "first_party_name",
-            "second_party_name",
-            "reason",
-            "tax_receiver_name",
-            "tax",
-        ],
-    )
-    if "date" in journal_df.columns:
-        journal_df = journal_df.sort_values(by=["date"], ascending=False)
-    return journal_df
-
-
-def _wallet_transactions_view(transactions_data: list[dict[str, Any]], *, range_preset: str) -> pd.DataFrame:
-    transactions_df = pd.DataFrame(transactions_data)
-    transactions_df["category"] = transactions_df.apply(
-        lambda row: "Expenses" if bool(row.get("is_buy")) else "Income", axis=1
-    )
-    transactions_df["Icon"] = transactions_df["type_id"].apply(lambda value: type_icon_url(value, size=32))
-    transactions_df = filter_dataframe_by_range(transactions_df, date_column="date", preset=range_preset)
-    transactions_df = apply_wallet_location_names(transactions_df, source_column="location_id")
-    if "date" in transactions_df.columns:
-        transactions_df["date"] = transactions_df["date"].apply(format_wallet_datetime)
-    transactions_df = reorder_columns(
-        transactions_df,
-        [
-            "date",
-            "category",
-            "Icon",
-            "type_name",
-            "quantity",
-            "total_price",
-            "unit_price",
-            "client_name",
-            "location_name",
-            "type_category_name",
-            "location_id",
-        ],
-    )
-    if "date" in transactions_df.columns:
-        transactions_df = transactions_df.sort_values(by=["date"], ascending=False)
-    return transactions_df
 
 
 NO_WALLETS_REPORTED = "No wallets reported"
@@ -188,42 +91,6 @@ def _render_asset_table(
         number_cols_2=[column for column in ASSET_FLOAT_COLUMNS if column in df_display.columns],
         isk_cols=[column for column in ASSET_ISK_COLUMNS if column in df_display.columns],
         height=height,
-    )
-
-
-def _render_asset_summary(df: pd.DataFrame) -> None:
-    unique_items, total_volume, total_value = summarize_asset_items(df)
-    st.markdown(
-        f"Items: {unique_items} - Total Volume: {total_volume:,.2f} m³ - Total Value: {total_value:,.2f} ISK"
-    )
-
-
-def _render_asset_dataframe(df: pd.DataFrame, *, height: int, prefer_container_names: bool = False, prefer_ship_names: bool = False) -> None:
-    """Render assets via st.dataframe — works reliably inside st.expander."""
-    df_display = build_asset_display_frame(df, prefer_container_names=prefer_container_names, prefer_ship_names=prefer_ship_names)
-    if df_display.empty:
-        st.info("No items.")
-        return
-
-    column_config: dict[str, Any] = {}
-    if "image_url" in df_display.columns:
-        column_config["image_url"] = st.column_config.ImageColumn("", width=40)
-    for col in ASSET_ISK_COLUMNS:
-        if col in df_display.columns:
-            column_config[col] = st.column_config.NumberColumn(format="%.2f ISK")
-    for col in ASSET_INT_COLUMNS:
-        if col in df_display.columns:
-            column_config[col] = st.column_config.NumberColumn(format="%d")
-    for col in ASSET_FLOAT_COLUMNS:
-        if col in df_display.columns:
-            column_config[col] = st.column_config.NumberColumn(format="%.2f")
-
-    st.dataframe(
-        df_display,
-        column_config=column_config,
-        height=height,
-        width="stretch",
-        hide_index=True,
     )
 
 
@@ -354,7 +221,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
 
         st.markdown(division_label)
         if not direct_items.empty:
-            _render_asset_summary(direct_items)
+            render_asset_summary(direct_items)
             _render_asset_table(
                 render_table,
                 direct_items,
@@ -381,7 +248,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
                 else:
                     st.info("No capacity information available for this container.")
 
-                _render_asset_dataframe(
+                render_asset_dataframe(
                     items_in_container,
                     height=320,
                 )
@@ -397,7 +264,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
         with st.expander("No corporation deliveries found at this location."):
             st.info("No corporation deliveries found at this location.")
     else:
-        _render_asset_summary(deliveries_items)
+        render_asset_summary(deliveries_items)
         _render_asset_table(
             render_table,
             deliveries_items,
@@ -411,7 +278,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
         if items.empty:
             continue
         st.markdown(f"**{title}**")
-        _render_asset_summary(items)
+        render_asset_summary(items)
         _render_asset_table(
             render_table,
             items,
@@ -436,7 +303,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
                     if items_in_wrap.empty:
                         st.info("No items in this container.")
                     else:
-                        _render_asset_dataframe(
+                        render_asset_dataframe(
                             items_in_wrap,
                             height=420,
                             prefer_container_names=True,
@@ -451,7 +318,7 @@ def _render_corporation_assets_tab(render_table, corp_row: dict) -> None:
         with st.expander("No ships found at this location."):
             st.info("No ships found at this location.")
     else:
-        _render_asset_summary(ships)
+        render_asset_summary(ships)
         render_ship_cards(ships)
 
 def render():
@@ -691,13 +558,15 @@ def render():
     wallet_range_preset = None
     with header_right:
         if selected_detail_section == "Wallet Journal":
-            wallet_range_preset = _range_preset_control(
+            wallet_range_preset = range_preset_control(
+                namespace=_PREFERENCES_NAMESPACE,
                 label="Wallet Journal range",
                 preference_key="wallet_journal_range_preset",
                 state_key="corporation_wallet_journal_range_preset",
             )
         elif selected_detail_section == "Wallet Transactions":
-            wallet_range_preset = _range_preset_control(
+            wallet_range_preset = range_preset_control(
+                namespace=_PREFERENCES_NAMESPACE,
                 label="Wallet Transactions range",
                 preference_key="wallet_transactions_range_preset",
                 state_key="corporation_wallet_transactions_range_preset",
@@ -834,11 +703,11 @@ def render():
             st.stop()
         try:
             range_preset = str(wallet_range_preset or "Past Month")
-            journal_df = _wallet_journal_view(journal_data, range_preset=range_preset)
+            journal_df = wallet_journal_view(journal_data, range_preset=range_preset)
             aggregated_journal = journal_df.groupby("category")["amount"].sum()
             journal_breakdown = journal_df.groupby(["category", "ref_type"])["amount"].sum()
-            journal_income_tooltip = _build_tooltip(journal_breakdown, "Income")
-            journal_expense_tooltip = _build_tooltip(journal_breakdown, "Expenses")
+            journal_income_tooltip = build_tooltip(journal_breakdown, "Income")
+            journal_expense_tooltip = build_tooltip(journal_breakdown, "Expenses")
 
             render_income_expense_tile(
                 income_label="Total Income",
@@ -886,11 +755,11 @@ def render():
             st.stop()
         try:
             range_preset = str(wallet_range_preset or "Past Month")
-            transactions_df = _wallet_transactions_view(transactions_data, range_preset=range_preset)
+            transactions_df = wallet_transactions_view(transactions_data, range_preset=range_preset)
             aggregated_transactions = transactions_df.groupby("category")["total_price"].sum()
             tx_breakdown = transactions_df.groupby(["category", "type_category_name"])["total_price"].sum()
-            tx_income_tooltip = _build_tooltip(tx_breakdown, "Income", join_labels=False)
-            tx_expense_tooltip = _build_tooltip(tx_breakdown, "Expenses", join_labels=False)
+            tx_income_tooltip = build_tooltip(tx_breakdown, "Income", join_labels=False)
+            tx_expense_tooltip = build_tooltip(tx_breakdown, "Expenses", join_labels=False)
 
             render_income_expense_tile(
                 income_label="Total Income",
