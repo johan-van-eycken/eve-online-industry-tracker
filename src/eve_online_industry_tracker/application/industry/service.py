@@ -881,18 +881,7 @@ class IndustryService:
                 )
 
             payload = self.industry_manufacturing_product_overview_payload(
-                force_refresh=bool(params.get("force_refresh", False)),
-                maximize_bp_runs=bool(params.get("maximize_bp_runs", False)),
-                group_identical_bpcs=bool(params.get("group_identical_bpcs", True)),
-                build_from_bpc=bool(params.get("build_from_bpc", True)),
-                have_blueprint_source_only=bool(params.get("have_blueprint_source_only", True)),
-                include_reactions=bool(params.get("include_reactions", False)),
-                market_hub=str(params.get("market_hub") or "jita"),
-                material_price_side=str(params.get("material_price_side") or "sell"),
-                product_price_side=str(params.get("product_price_side") or "sell"),
-                industry_profile_id=params.get("industry_profile_id"),
-                owned_blueprints_scope=str(params.get("owned_blueprints_scope") or "all_characters"),
-                character_id=params.get("character_id"),
+                **params,
                 progress_callback=report_progress,
             )
             self._update_overview_refresh_job(
@@ -1015,25 +1004,7 @@ class IndustryService:
                 )
 
             payload = self.industry_manufacturing_portfolio_candidates_payload(
-                force_refresh=bool(params.get("force_refresh", False)),
-                maximize_bp_runs=bool(params.get("maximize_bp_runs", False)),
-                group_identical_bpcs=bool(params.get("group_identical_bpcs", True)),
-                build_from_bpc=bool(params.get("build_from_bpc", True)),
-                have_blueprint_source_only=bool(params.get("have_blueprint_source_only", True)),
-                include_reactions=bool(params.get("include_reactions", False)),
-                market_hub=str(params.get("market_hub") or "jita"),
-                material_price_side=str(params.get("material_price_side") or "sell"),
-                product_price_side=str(params.get("product_price_side") or "sell"),
-                industry_profile_id=params.get("industry_profile_id"),
-                owned_blueprints_scope=str(params.get("owned_blueprints_scope") or "all_characters"),
-                character_id=params.get("character_id"),
-                planning_horizon_hours=float(params.get("planning_horizon_hours") or 24.0),
-                enabled_meta_groups=params.get("enabled_meta_groups"),
-                have_skills_only=bool(params.get("have_skills_only", False)),
-                positive_profit_only=bool(params.get("positive_profit_only", False)),
-                min_margin_pct=float(params.get("min_margin_pct") or 0.0),
-                min_isk_per_hour=float(params.get("min_isk_per_hour") or 0.0),
-                min_region_daily_volume=int(params.get("min_region_daily_volume") or 0),
+                **params,
                 progress_callback=report_progress,
             )
             self._update_portfolio_candidates_job(

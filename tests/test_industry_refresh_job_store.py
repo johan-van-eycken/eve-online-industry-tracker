@@ -72,3 +72,18 @@ def test_finished_jobs_are_pruned_to_the_newest_few(service):
     finished = sorted(k for k, j in store.jobs.items() if j["status"] == "completed")
     assert finished == [f"done-{i}" for i in range(5, 10)]   # the newest five
     assert "running" in store.jobs and new_id in store.jobs  # active jobs are never pruned
+
+
+def test_the_runner_passes_the_normalized_params_through(service):
+    params = IndustryService._normalize_portfolio_candidates_params(include_reactions=True, planning_horizon_hours=6)
+    job, _ = service._claim_job(service._state.jobs.industry_portfolio_candidates, params, step_count=11)
+    seen: dict = {}
+
+    def payload(**kw):
+        seen.update(kw)
+        return {"candidates": [{"id": 1}]}
+
+    service.industry_manufacturing_portfolio_candidates_payload = payload
+    service._run_portfolio_candidates_refresh_job(job["job_id"], params)
+    assert {k: v for k, v in seen.items() if k != "progress_callback"} == params
+    assert service.industry_manufacturing_portfolio_candidates_refresh_status(job_id=job["job_id"])["status"] == "completed"
