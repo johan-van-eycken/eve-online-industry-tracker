@@ -1,4 +1,5 @@
 pandas==2.2.2
+numpy==2.4.6
 requests==2.32.4
 truststore==0.10.4
 SQLAlchemy==2.0.19
@@ -6,16 +7,11 @@ streamlit==1.52.2
 streamlit-aggrid==1.2.1.post2
 pyyaml==6.0.2
 flask==3.1.1
-matplotlib==3.9.4
-scipy==1.15.3
 pulp==3.3.0
 tqdm==4.66.1
 
 # EVE SSO JWT validation
 PyJWT[crypto]==2.10.1
-
-# ESI response validation (Daily Planner DTOs)
-pydantic>=2.0
 
 # pip install --upgrade pip setuptools wheel
 # pip install -r requirements.txt
