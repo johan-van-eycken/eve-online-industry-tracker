@@ -315,6 +315,71 @@ def _estimate_industry_job_materials_cost_total(
     }
 
 
+def _input_lot_key(lot: dict[str, Any]) -> tuple[Any, Any]:
+    # The acquisition, not the history row: backfill rows are rebuilt with new ids each refresh.
+    return (lot.get("reference_type"), lot.get("reference_id") or lot.get("history_id"))
+
+
+def consumed_input_lots(historical_input_costs: Any) -> dict[tuple[Any, Any], int]:
+    """Quantity a job took per acquisition lot, from its historical_input_costs."""
+    out: dict[tuple[Any, Any], int] = {}
+    if not isinstance(historical_input_costs, dict):
+        return out
+    for detail in historical_input_costs.values():
+        if not isinstance(detail, dict):
+            continue
+        for lot in detail.get("lots") or []:
+            if isinstance(lot, dict) and (quantity := _safe_int(lot.get("quantity"))):
+                key = _input_lot_key(lot)
+                out[key] = out.get(key, 0) + int(quantity)
+    return out
+
+
+def add_consumed_input_lots(total: dict[tuple[Any, Any], int], historical_input_costs: Any) -> None:
+    for key, quantity in consumed_input_lots(historical_input_costs).items():
+        total[key] = total.get(key, 0) + quantity
+
+
+def subtract_consumed_input_lots(
+    lookup: dict[int, dict[str, Any]], consumed: dict[tuple[Any, Any], int],
+) -> dict[int, dict[str, Any]]:
+    """The lookup minus what earlier jobs already took, oldest lots first (FIFO)."""
+    if not consumed:
+        return lookup
+    remaining = dict(consumed)
+    out: dict[int, dict[str, Any]] = {}
+    for type_id, payload in lookup.items():
+        lots = []
+        for lot in payload.get("lots") or []:
+            key = _input_lot_key(lot)
+            taken = min(remaining.get(key, 0), _safe_int(lot.get("quantity")) or 0)
+            if taken:
+                remaining[key] -= taken
+            if (_safe_int(lot.get("quantity")) or 0) - taken > 0:
+                lots.append({**lot, "quantity": int(lot["quantity"]) - taken})
+        out[type_id] = {**payload, "lots": lots}
+    return out
+
+
+def earlier_jobs_consumed_input_lots(
+    app_session: Any, *, job_model: Any, owner_field: str, owner_id: int, start_date: Any, job_id: int,
+) -> dict[tuple[Any, Any], int]:
+    """What the owner's stored jobs that started before (start_date, job_id) took."""
+    total: dict[tuple[Any, Any], int] = {}
+    if not start_date:
+        return total
+    rows = (
+        app_session.query(job_model)
+        .filter(getattr(job_model, owner_field) == int(owner_id))
+        .filter(job_model.start_date <= str(start_date))
+        .all()
+    )
+    for row in rows:
+        if (str(row.start_date), int(row.job_id)) < (str(start_date), int(job_id)):
+            add_consumed_input_lots(total, row.historical_input_costs)
+    return total
+
+
 def industry_job_material_type_ids(
     *,
     sde_session: Any,
@@ -571,12 +636,16 @@ def resnapshot_jobs_without_decryptor_choice(
                 continue
             owner_id = int(getattr(row, owner_field))
             completed_at = row.completed_date or row.end_date
-            owned_costs = build_historical_input_cost_lookup(
-                app_session=app_session, owner_kind=owner_kind, owner_id=owner_id, as_of=completed_at,
+            owned_costs = subtract_consumed_input_lots(build_historical_input_cost_lookup(
+                app_session=app_session, owner_kind=owner_kind, owner_id=owner_id,
+                as_of=row.start_date or completed_at,
                 type_ids=industry_job_material_type_ids(
                     sde_session=sde_session, blueprint_type_id=int(row.blueprint_type_id or 0),
                 ),
-            )
+            ), earlier_jobs_consumed_input_lots(
+                app_session, job_model=model, owner_field=owner_field, owner_id=owner_id,
+                start_date=row.start_date, job_id=int(row.job_id),
+            ))
             snapshot = resolve_industry_job_cost_snapshot(
                 job=type("IndustryJobPayload", (), dict(raw))(),
                 sde_session=sde_session,
