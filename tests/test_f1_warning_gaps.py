@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from eve_online_industry_tracker.application.industry import service as service_module
+from eve_online_industry_tracker.application.industry import facilities
 from eve_online_industry_tracker.application.industry.service import IndustryService
 
 SYSTEM = 30000001
@@ -37,9 +37,9 @@ def _service(state, sessions):
 
 def test_public_structure_owner_names_that_cannot_be_resolved_are_logged(monkeypatch, caplog):
     structures = [{"structure_id": 1035000000001, "type_id": 35825, "owner_id": CORP, "name": "Fake Raitaru"}]
-    monkeypatch.setattr(service_module, "public_structures_cache_ttl_seconds", lambda: 3600)
-    monkeypatch.setattr(service_module, "get_cached_public_structures", lambda **kw: (structures, True))
-    monkeypatch.setattr(service_module, "get_type_data", lambda session, language, ids: {})
+    monkeypatch.setattr(facilities, "public_structures_cache_ttl_seconds", lambda: 3600)
+    monkeypatch.setattr(facilities, "get_cached_public_structures", lambda **kw: (structures, True))
+    monkeypatch.setattr(facilities, "get_type_data", lambda session, language, ids: {})
     svc = _service(SimpleNamespace(esi_service=_esi_names_failing(), db_sde=None),
                    SimpleNamespace(sde_session=lambda: None))
     with caplog.at_level(logging.WARNING):
@@ -53,10 +53,10 @@ def test_a_programming_error_in_the_public_owner_lookup_propagates(monkeypatch):
     def _bug(ids):
         raise KeyError("fake bug")
 
-    monkeypatch.setattr(service_module, "public_structures_cache_ttl_seconds", lambda: 3600)
-    monkeypatch.setattr(service_module, "get_cached_public_structures",
+    monkeypatch.setattr(facilities, "public_structures_cache_ttl_seconds", lambda: 3600)
+    monkeypatch.setattr(facilities, "get_cached_public_structures",
                         lambda **kw: ([{"type_id": 35825, "owner_id": CORP}], True))
-    monkeypatch.setattr(service_module, "get_type_data", lambda session, language, ids: {})
+    monkeypatch.setattr(facilities, "get_type_data", lambda session, language, ids: {})
     svc = _service(SimpleNamespace(esi_service=SimpleNamespace(get_universe_names=_bug), db_sde=None),
                    SimpleNamespace(sde_session=lambda: None))
     with pytest.raises(KeyError):
@@ -67,7 +67,7 @@ def test_a_programming_error_in_the_public_owner_lookup_propagates(monkeypatch):
 
 def test_corporation_structure_owner_names_that_cannot_be_resolved_are_logged(monkeypatch, caplog):
     rows = [SimpleNamespace(to_dict=lambda: {"structure_id": 1035000000002, "corporation_id": CORP})]
-    monkeypatch.setattr(service_module, "corporation_structures_list_by_corporation_id", lambda session, cid: rows)
+    monkeypatch.setattr(facilities, "corporation_structures_list_by_corporation_id", lambda session, cid: rows)
     character = SimpleNamespace(corporation_id=CORP)
     state = SimpleNamespace(char_manager=SimpleNamespace(get_character_by_id=lambda cid: character),
                             esi_service=_esi_names_failing(), db_sde=None)
