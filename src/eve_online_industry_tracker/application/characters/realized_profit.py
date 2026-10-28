@@ -1248,18 +1248,29 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         by scripts/backfill_corp_transfer_costs.py with acquisition_source values such as
         'industry_build_transferred', 'industry_build_transferred_avg', and
         'character_market_buy_transferred'.
+
+        Only transfer rows: the corp's own jobs and buys are already events. Every asset
+        refresh copies a stack again, so one item is one lot, from its earliest costed row.
         """
         rows = (
             self._app_session.query(CorporationAssetHistoryModel)
             .filter(
                 CorporationAssetHistoryModel.corporation_id == int(owner_id),
                 CorporationAssetHistoryModel.acquisition_unit_cost.isnot(None),
+                CorporationAssetHistoryModel.acquisition_source.like("%transferred%"),
             )
+            .order_by(CorporationAssetHistoryModel.observed_at, CorporationAssetHistoryModel.id)
             .all()
         )
         lots_by_type: dict[int, list[FifoLot]] = {}
         blended_reason_by_type_id: dict[int, str] | None = None
+        seen_item_ids: set[int] = set()
         for row in rows:
+            item_id = _safe_int(getattr(row, "item_id", None))
+            if item_id is not None:
+                if item_id in seen_item_ids:
+                    continue
+                seen_item_ids.add(item_id)
             type_id = _safe_int(getattr(row, "type_id", None))
             unit_cost = _safe_float(getattr(row, "acquisition_unit_cost", None))
             quantity = _safe_int(getattr(row, "quantity", None))
