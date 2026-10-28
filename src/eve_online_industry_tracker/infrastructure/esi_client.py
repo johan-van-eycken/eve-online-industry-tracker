@@ -6,7 +6,7 @@ import random
 import json as jsonlib
 import threading
 import re
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from typing import Callable, Optional, Any, Dict, Tuple, Union
 
 try:
@@ -501,7 +501,7 @@ class ESIClient:
         logging.debug(f"Opening URL for EVE Online login: {auth_url}")
         webbrowser.open(auth_url)
 
-        with OAuthServer(("localhost", 8080), OAuthHandler, return_to_url=streamlit_url) as httpd:
+        with OAuthServer(("localhost", urlparse(self.redirect_uri).port or 80),OAuthHandler, return_to_url=streamlit_url) as httpd:
             httpd.timeout = timeout_seconds
             logging.debug("Waiting for authorization code...")
             start_time = time.time()

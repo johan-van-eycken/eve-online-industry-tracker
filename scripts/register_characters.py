@@ -9,7 +9,7 @@ import logging
 import time
 import webbrowser
 import re
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -87,12 +87,13 @@ def register_character(cfg, db_path, char_cfg):
     print(f"  Log in with the correct EVE account for this character.")
     print(f"{'='*60}")
     print(f"\n  If the browser does not open, copy this URL:\n  {auth_url}\n")
-    print(f"  Waiting up to {TIMEOUT_SECONDS}s for SSO callback on port 8080...")
+    callback_port = urlparse(cfg.get("app")["redirect_uri"]).port or 80
+    print(f"  Waiting up to {TIMEOUT_SECONDS}s for SSO callback on port {callback_port}...")
 
     webbrowser.open(auth_url)
 
     streamlit_url = (cfg.get("app") or {}).get("streamlit_url", "http://localhost:8501")
-    with OAuthServer(("localhost", 8080), OAuthHandler, return_to_url=streamlit_url) as httpd:
+    with OAuthServer(("localhost", callback_port),OAuthHandler, return_to_url=streamlit_url) as httpd:
         httpd.timeout = TIMEOUT_SECONDS
         start_time = time.time()
         while httpd.code is None:
