@@ -1,6 +1,5 @@
 import streamlit as st # pyright: ignore[reportMissingImports]
 import pandas as pd # pyright: ignore[reportMissingModuleSource, reportMissingImports]
-import json
 from typing import Any, cast
 
 from streamlit_ui.components.assets_ui import (
@@ -14,6 +13,7 @@ from streamlit_ui.components.assets_ui import (
 )
 from streamlit_ui.api.characters import build_character_options, fetch_characters
 from streamlit_ui.api.client import api_get, api_post
+from streamlit_ui.api.streamlit_client import cached_api_get
 from streamlit_ui.components.batch_errors import show_batch_errors
 from streamlit_ui.components.aggrid_formatters import js_category_text_style, js_icon_cell_renderer
 from streamlit_ui.components.formatters import format_isk, format_date, format_date_into_age, type_icon_url
@@ -477,6 +477,21 @@ def render():
 
     st.subheader("Characters")
 
+    # Button to refresh wallet balances; before the fetch, so the tiles show the new balances
+    col_btn, col_status = st.columns([1, 6])
+    with col_btn:
+        if st.button("Refresh Wallets Balances"):
+            try:
+                response = api_get("/characters/wallet_balances") or {}
+                if response.get("status") != "success":
+                    raise Exception(f"{response.get('message', 'Unknown error')}")
+                cached_api_get.clear("/characters")  # the refreshed balances are stored by the backend
+                with col_status:
+                    show_batch_errors(response, "Character")   # the others were refreshed
+            except Exception as e:
+                with col_status:
+                    st.error(f"Failed to refresh wallet balances: {e}")
+
     # Fetch all characters data from backend
     try:
         characters_list = fetch_characters()
@@ -486,28 +501,6 @@ def render():
 
     # Convert to DataFrame for tabular display, but keep list of dicts for details
     df = pd.DataFrame(characters_list)
-
-    # Button to refresh wallet balances
-    col_btn, col_status = st.columns([1, 6])
-    with col_btn:
-        if st.button("Refresh Wallets Balances"):
-            try:
-                response = api_get("/characters/wallet_balances") or {}
-                if response.get("status") != "success":
-                    raise Exception(f"{response.get('message', 'Unknown error')}")
-                response_data = response.get("data", [])
-                for wallet_data in response_data:
-                    if isinstance(wallet_data, str):
-                        wallet_data = json.loads(wallet_data)
-                    character_name = wallet_data.get("character_name")
-                    wallet_balance = wallet_data.get("wallet_balance")
-                    if character_name and wallet_balance:
-                        df.loc[df["character_name"] == character_name, "wallet_balance"] = wallet_balance
-                with col_status:
-                    show_batch_errors(response, "Character")   # the others were refreshed
-            except Exception as e:
-                with col_status:
-                    st.error(f"Failed to refresh wallet balances: {e}")
 
     # Character tiles
     cards_per_row = 5
