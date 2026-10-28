@@ -561,8 +561,11 @@ def _normalize_untracked_payload(payload: dict[str, Any]) -> dict[str, Any]:
     priced_quantity = int(normalized.get("priced_quantity") or 0)
     unpriced_quantity = int(normalized.get("unpriced_quantity") or 0)
     allocated_cost = float(normalized.get("allocated_cost") or 0.0)
-    net_revenue = _safe_float(normalized.get("net_revenue"))
 
+    if unpriced_quantity > 0:
+        # No cost basis for every unit, no profit (rows built before this rule carry net revenue - 0).
+        normalized["realized_profit"] = None
+        normalized["realized_margin_fraction"] = None
     if source_mix or priced_quantity > 0 or unpriced_quantity <= 0:
         return normalized
 
@@ -586,11 +589,6 @@ def _normalize_untracked_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "reference_type": "untracked_inventory",
             }
         ]
-
-    if normalized.get("realized_profit") is None and net_revenue is not None:
-        normalized["realized_profit"] = float(net_revenue) - float(allocated_cost)
-        if float(net_revenue) > 0:
-            normalized["realized_margin_fraction"] = float(normalized["realized_profit"]) / float(net_revenue)
 
     return normalized
 
@@ -913,7 +911,7 @@ class _BaseRealizedProfitLedgerService:
                     notes.append(f"{allocation['unpriced_quantity']} unit(s) could not be matched to a historical cost basis.")
                 realized_profit = None
                 realized_margin_fraction = None
-                if allocation["unpriced_quantity"] == 0 or int(allocation["priced_quantity"]) == 0:
+                if allocation["unpriced_quantity"] == 0:
                     realized_profit = float(net_revenue) - float(allocation["total_cost"])
                     if net_revenue > 0:
                         realized_margin_fraction = float(realized_profit) / float(net_revenue)

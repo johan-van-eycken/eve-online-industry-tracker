@@ -29,6 +29,7 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
 from eve_online_industry_tracker.application.characters.realized_profit import (  # noqa: E402
     CharacterRealizedProfitLedgerService,
     CorporationRealizedProfitLedgerService,
+    _normalize_untracked_payload,
 )
 
 
@@ -337,10 +338,25 @@ def test_realized_profit_ledger_marks_unpriced_sales_low_confidence() -> None:
     assert row["confidence"] == "Low"
     # No stored market fees: the highest (untrained) fees are assumed, 7.5% + 3% of 250.
     assert row["fee_capture_mode"] == "assumed_market_fees"
-    assert row["realized_profit"] == pytest.approx(250.0 - 18.75 - 7.5)
-    assert row["realized_margin_fraction"] == 1.0
+    # No cost basis, no profit: the same rule as a partly untracked sale.
+    assert row["realized_profit"] is None
+    assert row["realized_margin_fraction"] is None
+    assert row["net_revenue"] == pytest.approx(250.0 - 18.75 - 7.5)
     assert row["source_mix"]["untracked_inventory"]["quantity"] == 5
     assert any("could not be matched" in note.lower() for note in row["notes"])
+    assert service.list_rows(character_id=1)[0]["realized_profit"] is None
+
+
+def test_a_stored_untracked_row_is_read_back_without_a_profit() -> None:
+    """Rows built before the rule change carry a profit of net revenue - 0."""
+    legacy = {"priced_quantity": 0, "unpriced_quantity": 5, "allocated_cost": 0.0, "net_revenue": 223.75,
+              "realized_profit": 223.75, "realized_margin_fraction": 1.0,
+              "source_mix": {"untracked_inventory": {"quantity": 5, "cost": 0.0}}}
+
+    row = _normalize_untracked_payload(legacy)
+
+    assert row["realized_profit"] is None
+    assert row["realized_margin_fraction"] is None
 
 
 def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_cost() -> None:
@@ -537,7 +553,7 @@ def test_character_realized_profit_estimates_market_fees_without_journal() -> No
     assert row["sales_tax_amount"] == pytest.approx(6.75)
     assert row["other_fees_amount"] == pytest.approx(2.0)
     assert row["net_revenue"] == pytest.approx(191.25)
-    assert row["realized_profit"] == pytest.approx(191.25)
+    assert row["realized_profit"] is None  # untracked units: no cost basis, no profit
     assert row["fee_capture_mode"] == "estimated_market_fees"
 
 
