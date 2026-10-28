@@ -3596,18 +3596,6 @@ class IndustryService:
             multiplier *= max(0.0, 1.0 - reduction)
         return max(0.0, min(1.0 - multiplier, 0.99))
 
-    _reduction_memo: dict[tuple, float] = {}
-
-    @classmethod
-    def _combine_reductions_memo(cls, reductions: list[Any]) -> float:
-        key = tuple(reductions)
-        cached = cls._reduction_memo.get(key)
-        if cached is not None:
-            return cached
-        result = cls._combine_reductions(reductions)
-        cls._reduction_memo[key] = result
-        return result
-
     @staticmethod
     def _round_duration_seconds(raw_seconds: float) -> int:
         if raw_seconds <= 0:
