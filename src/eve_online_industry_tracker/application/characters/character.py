@@ -750,7 +750,9 @@ class Character:
         """Fetch and update the character's wallet journal from ESI. Enrich with SDE and ESI data."""
         try:
             self.ensure_esi()
-            journal_entries = self._esi_client.esi_get(ESI_CHAR_WALLET_JOURNAL.format(character_id=self.character_id))
+            journal_entries = self._esi_client.esi_get(
+                ESI_CHAR_WALLET_JOURNAL.format(character_id=self.character_id), paginate=True
+            )
 
             new_journal_entries = []
             for entry in journal_entries:

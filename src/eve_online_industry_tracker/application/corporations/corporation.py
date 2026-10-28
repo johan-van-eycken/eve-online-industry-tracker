@@ -452,7 +452,9 @@ class Corporation:
     def refresh_structures(self) -> None:
         """Refresh the structures of the corporation from ESI."""
         try:
-            structures_data = self._default_esi_character._esi_client.esi_get(ESI_CORP_STRUCTURES.format(corporation_id=self.corporation_id))
+            structures_data = self._default_esi_character._esi_client.esi_get(
+                ESI_CORP_STRUCTURES.format(corporation_id=self.corporation_id), paginate=True
+            )
             self.structures = []
             for structure in structures_data:
                 system_data = self._default_esi_character._esi_client.esi_get(ESI_UNIVERSE_SYSTEMS.format(system_id=structure.get('system_id')))
@@ -562,7 +564,8 @@ class Corporation:
                     continue
 
                 journal_entries = self._default_esi_character._esi_client.esi_get(
-                    ESI_CORP_WALLETS_JOURNAL.format(corporation_id=self.corporation_id, division=division)
+                    ESI_CORP_WALLETS_JOURNAL.format(corporation_id=self.corporation_id, division=division),
+                    paginate=True,
                 )
                 if isinstance(journal_entries, str):
                     journal_entries = json.loads(journal_entries)
