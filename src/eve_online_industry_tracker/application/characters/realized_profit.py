@@ -561,8 +561,11 @@ def _normalize_untracked_payload(payload: dict[str, Any]) -> dict[str, Any]:
     priced_quantity = int(normalized.get("priced_quantity") or 0)
     unpriced_quantity = int(normalized.get("unpriced_quantity") or 0)
     allocated_cost = float(normalized.get("allocated_cost") or 0.0)
-    net_revenue = _safe_float(normalized.get("net_revenue"))
 
+    if unpriced_quantity > 0:
+        # No cost basis for every unit, no profit (rows built before this rule carry net revenue - 0).
+        normalized["realized_profit"] = None
+        normalized["realized_margin_fraction"] = None
     if source_mix or priced_quantity > 0 or unpriced_quantity <= 0:
         return normalized
 
@@ -586,11 +589,6 @@ def _normalize_untracked_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "reference_type": "untracked_inventory",
             }
         ]
-
-    if normalized.get("realized_profit") is None and net_revenue is not None:
-        normalized["realized_profit"] = float(net_revenue) - float(allocated_cost)
-        if float(net_revenue) > 0:
-            normalized["realized_margin_fraction"] = float(normalized["realized_profit"]) / float(net_revenue)
 
     return normalized
 
@@ -705,18 +703,15 @@ class _BaseRealizedProfitLedgerService:
         industry_jobs = self._load_industry_jobs(owner_id=int(owner_id))
         asset_history_lots = self._load_asset_history_lots(owner_id=int(owner_id))
 
-        # Always load char-job and char-buy lots regardless of whether an asset history lot
-        # exists for the same type_id. FIFO attribution only charges costs to actually-sold
-        # units; extra lots that aren't consumed simply remain unused in the queue, so there
-        # is no double-counting risk. This allows char-built items sold before the corp job
-        # was captured in asset history to be correctly attributed as Manufacturing instead
-        # of falling through to opening_inventory (Trade).
+        # Char-job and char-buy lots cover char-built items sold before the transfer was
+        # captured in asset history (Manufacturing instead of opening_inventory). A lot the
+        # asset history already stamped from the same job or buy is skipped: unconsumed
+        # leftovers stay in the queue and a later sale would take them as a second copy.
         supplemental_lots = self._load_supplemental_lots(owner_id=int(owner_id))
-
-        # Merge supplemental lots into asset_history_lots (may overlap on type_id when both
-        # a corp asset history row and char-job lots exist for the same product type)
         for supp_type_id, supp_lots in supplemental_lots.items():
-            asset_history_lots.setdefault(int(supp_type_id), []).extend(supp_lots)
+            type_lots = asset_history_lots.setdefault(int(supp_type_id), [])
+            stamped = {(lot.reference_type, lot.reference_id) for lot in type_lots if lot.reference_id is not None}
+            type_lots.extend(lot for lot in supp_lots if (lot.reference_type, lot.reference_id) not in stamped)
 
         # A lot that points at an industry job is priced from the job's
         # current unit_build_cost, not the cost stamped when the lot was
@@ -916,7 +911,7 @@ class _BaseRealizedProfitLedgerService:
                     notes.append(f"{allocation['unpriced_quantity']} unit(s) could not be matched to a historical cost basis.")
                 realized_profit = None
                 realized_margin_fraction = None
-                if allocation["unpriced_quantity"] == 0 or int(allocation["priced_quantity"]) == 0:
+                if allocation["unpriced_quantity"] == 0:
                     realized_profit = float(net_revenue) - float(allocation["total_cost"])
                     if net_revenue > 0:
                         realized_margin_fraction = float(realized_profit) / float(net_revenue)
@@ -1173,8 +1168,8 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         """Return FifoLots from character industry jobs and character market buys.
 
         These represent items manufactured or purchased by characters, then transferred to the
-        corporation. All lots are loaded unconditionally; FIFO only charges costs to actually-sold
-        units, so surplus lots simply remain unused in the queue with no double-counting risk.
+        corporation. Buys paid from the corp wallet are left out: the corp's own transactions
+        already hold them. _rebuild_owner skips a lot the corp asset history already stamped.
         """
         lots_by_type: dict[int, list[FifoLot]] = {}
         completed_statuses = {"delivered", "ready", "completed"}
@@ -1214,6 +1209,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             self._app_session.query(CharacterWalletTransactionsModel)
             .filter(
                 CharacterWalletTransactionsModel.is_buy.is_(True),
+                CharacterWalletTransactionsModel.is_personal.is_not(False),
                 CharacterWalletTransactionsModel.unit_price.isnot(None),
             )
             .all()
@@ -1437,8 +1433,8 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         2. Group those sells by (type_id, unit_price).
         3. Within each group, take the first cluster of consecutive sells separated by
            at most _CORP_BROKER_CLUSTER_GAP_SECONDS (longer gaps indicate a new order).
-        4. If fee_amount / (cluster_size × unit_price) falls in a plausible broker-rate
-           range (0.3%–25%), assign fee_amount / cluster_size to each sell in the cluster.
+        4. If fee_amount / (cluster units × unit_price) falls in a plausible broker-rate
+           range (0.3%–25%), split fee_amount over the cluster by each sell's share of its value.
         5. Try groups in order of earliest first sell (the order that started filling
            soonest after the fee was paid is the most likely match).
         """
@@ -1449,17 +1445,20 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         _MAX_RATE = 0.25
 
         # Index sell transactions
-        sell_data: list[tuple[datetime, int, int, float]] = []
+        sell_data: list[tuple[datetime, int, int, float, int]] = []
         for tx in sell_transactions:
             if getattr(tx, "is_buy", None):
                 continue
             tx_id = _safe_int(getattr(tx, "transaction_id", None))
             type_id = _safe_int(getattr(tx, "type_id", None))
             unit_price = _safe_float(getattr(tx, "unit_price", None))
+            quantity = _safe_int(getattr(tx, "quantity", None))
             date = _parse_date(getattr(tx, "date", None))
             if tx_id is None or type_id is None or not unit_price or unit_price <= 0 or date is None:
                 continue
-            sell_data.append((date, int(tx_id), int(type_id), float(unit_price)))
+            if not quantity or quantity <= 0:
+                continue
+            sell_data.append((date, int(tx_id), int(type_id), float(unit_price), int(quantity)))
         sell_data.sort(key=lambda s: s[0])
 
         matched_tx_ids: set[int] = set()
@@ -1482,7 +1481,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
             fee_date_naive = fee_date.replace(tzinfo=None)
 
             # Unmatched sells that occurred after this fee within the attribution window
-            candidates: list[tuple[datetime, int, int, float]] = [
+            candidates: list[tuple[datetime, int, int, float, int]] = [
                 s for s in sell_data
                 if s[1] not in matched_tx_ids
                 and 0 < (s[0].replace(tzinfo=None) - fee_date_naive).total_seconds()
@@ -1492,7 +1491,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 continue
 
             # Group by (type_id, rounded unit_price) — round to nearest 10 ISK for float safety
-            groups: dict[tuple[int, int], list[tuple[datetime, int, int, float]]] = defaultdict(list)
+            groups: dict[tuple[int, int], list[tuple[datetime, int, int, float, int]]] = defaultdict(list)
             for s in candidates:
                 key = (s[2], int(round(s[3] / 10) * 10))
                 groups[key].append(s)
@@ -1503,8 +1502,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                 key=lambda kv: min(s[0] for s in kv[1]),
             )
 
-            best_cluster: list[tuple] | None = None
-            best_per_unit: float | None = None
+            best_fee_by_tx_id: dict[int, float] | None = None
 
             for (_type_id, _rounded_price), group in group_items:
                 sorted_group = sorted(group, key=lambda s: s[0])
@@ -1520,20 +1518,17 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
                     else:
                         break
 
-                n = len(cluster)
-                price = cluster[0][3]
-                if price <= 0:
+                cluster_value = sum(s[3] * s[4] for s in cluster)
+                if cluster_value <= 0:
                     continue
-                implied_rate = fee_amount / (n * price)
+                implied_rate = fee_amount / cluster_value
                 if _MIN_RATE <= implied_rate <= _MAX_RATE:
-                    best_cluster = cluster
-                    best_per_unit = fee_amount / n
+                    best_fee_by_tx_id = {s[1]: fee_amount * s[3] * s[4] / cluster_value for s in cluster}
                     break  # Take first valid group (earliest sells after the fee)
 
-            if best_cluster is not None and best_per_unit is not None:
-                for s in best_cluster:
-                    per_unit_broker_fee[s[1]] = best_per_unit
-                    matched_tx_ids.add(s[1])
+            if best_fee_by_tx_id is not None:
+                per_unit_broker_fee.update(best_fee_by_tx_id)
+                matched_tx_ids.update(best_fee_by_tx_id)
                 if journal_id is not None:
                     consumed_journal_ids.add(int(journal_id))
 

@@ -23,8 +23,7 @@ exact bug this branch exists to fix:
     session_provider fixture) for the TypeMetadataResolver Phase 1 builds.
 
 Only industry_service, corporations_service, characters_service,
-sales_history_service, market_pricing_service and
-realized_profit_service are stubs -- none of them are exercised by
+sales_history_service and market_pricing_service are stubs -- none of them are exercised by
 _run_compute's core phase sequence for this scenario (no characters means
 CharacterAssigner assigns nothing, which is fine: the assertions below check
 Phase 9's persisted plan, not the shopping/action lists).
@@ -70,7 +69,6 @@ def test_run_compute_completes_end_to_end_and_persists_a_plan_with_items(
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
         admin_settings=admin,
         session_provider=session_provider,
@@ -117,7 +115,6 @@ def test_a_malformed_wallet_balance_persists_as_unknown_not_a_real_zero(
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
         admin_settings=admin,
         session_provider=session_provider,
@@ -150,7 +147,6 @@ def test_two_variants_of_one_product_yield_exactly_one_plan_item(
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
         admin_settings=admin,
         session_provider=session_provider,
@@ -176,7 +172,6 @@ def test_a_compute_logs_no_pricing_suggestion_or_relist_warning(
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
         admin_settings=admin,
         session_provider=session_provider,
@@ -225,7 +220,6 @@ def _invention_planner(session_provider, planner_repo, tmp_path, *, prices):
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
-        realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
         admin_settings=admin,
         session_provider=session_provider,
@@ -302,7 +296,6 @@ def _material_planner(session_provider, planner_repo, tmp_path, *, prices):
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
-        realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
         admin_settings=admin,
         session_provider=session_provider,
@@ -407,7 +400,6 @@ def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(get_type_price_map=get_type_price_map),
-        realized_profit_service=SimpleNamespace(),
         repo=planner_repo,
         admin_settings=admin,
         session_provider=session_provider,

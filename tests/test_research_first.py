@@ -106,7 +106,7 @@ def _decision(row) -> ItemDecision:
 
 def _plan(row, *, te=0, me=10, variants=None, bpo_count=1, bpos=None):
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
+    planner._compute_optimal_me = lambda bp_data, runs=1: 10
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
                           blueprint_material_efficiency=me, blueprint_time_efficiency=te)
     component_bpo = SimpleNamespace(type_id=888, is_blueprint_copy=False,
@@ -475,7 +475,7 @@ def _bpc_then_bpo_row(profile=None, *, with_profile=True):
 
 def _plan5(row, *, bpos, blueprint_data=PARENT_SDE, variants=None, busy=None):
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
+    planner._compute_optimal_me = lambda bp_data, runs=1: 10
     component_bpo = SimpleNamespace(type_id=888, item_id=88, is_blueprint_copy=False,
                                     blueprint_material_efficiency=10, blueprint_time_efficiency=20)
     data = {

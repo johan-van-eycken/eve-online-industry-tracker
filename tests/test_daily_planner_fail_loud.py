@@ -238,14 +238,6 @@ def _sde_error():
     return OperationalError("SELECT 1", {}, Exception("database is locked"))
 
 
-class _BrokenSdeProvider:
-    def __init__(self, exc):
-        self._exc = exc
-
-    def sde_session(self):
-        raise self._exc
-
-
 class _AdminKeyError:
     def get(self, section, key):
         raise KeyError(key)
@@ -265,21 +257,29 @@ def _decision(row, **overrides):
 
 # --- ChainPlanner: optimal ME/TE no longer swallow to 0 --------------------------
 
-def test_an_sde_failure_makes_optimal_me_unknown_not_zero(caplog):
-    # TE has no SDE lookup: it is always researched to the max TE setting
-    # (Task 8c fix round 1).
-    planner = ChainPlanner(None, _BrokenSdeProvider(_sde_error()), _AdminKeyError())
+def test_optimal_me_comes_from_the_blueprint_base_materials():
+    planner = ChainPlanner(None, None, _AdminKeyError())
+    bp_data = {"manufacturing": {"materials": [{"type_id": 34, "quantity": 5}]}}
+    assert planner._compute_optimal_me(bp_data) == 0
+    assert planner._compute_optimal_me(bp_data, runs=10) == 10
+
+
+def test_a_blueprint_missing_from_the_sde_makes_optimal_me_unknown_not_zero(caplog):
+    """An outdated SDE import has no materials for the blueprint: the planner
+    must not read that as ME 0, which would mark the BPO fully researched."""
+    row = {"type_id": 12345, "type_name": "Thing", "quantity": 1,
+           "manufacturing_job": {"runs": 1, "blueprint_sde": {"blueprint_type_id": 999}}}
+    bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
+                          blueprint_material_efficiency=0, blueprint_time_efficiency=0)
+    planner = ChainPlanner(None, None, _AdminKeyError())
+
+    assert planner._compute_optimal_me({}) is None
     with caplog.at_level(logging.WARNING):
-        assert planner._compute_optimal_me(999) is None
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert all("999" in r.getMessage() for r in warnings)
+        planner.plan_chain([_decision(row)], {"bpo_assets_by_type_id": {999: [bpo]}})
 
-
-def test_a_non_database_error_in_optimal_me_propagates():
-    planner = ChainPlanner(None, _BrokenSdeProvider(RuntimeError("bug")), _AdminKeyError())
-    with pytest.raises(RuntimeError):
-        planner._compute_optimal_me(999)
+    assert "needs_me_research" not in row
+    assert any("optimal ME unknown" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
 
 
 def test_an_unknown_optimal_me_schedules_no_me_research_and_says_why(caplog):
@@ -288,7 +288,7 @@ def test_an_unknown_optimal_me_schedules_no_me_research_and_says_why(caplog):
     bpo = SimpleNamespace(type_id=999, is_blueprint_copy=False,
                           blueprint_material_efficiency=0, blueprint_time_efficiency=0)
     planner = ChainPlanner(None, None, _AdminKeyError())
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: None
+    planner._compute_optimal_me = lambda bp_data, runs=1: None
 
     with caplog.at_level(logging.WARNING):
         planner.plan_chain([_decision(row)], {"bpo_assets_by_type_id": {999: [bpo]}})
@@ -410,7 +410,6 @@ def _bare_service():
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),
         admin_settings=SimpleNamespace(),
         session_provider=SimpleNamespace(),

@@ -44,7 +44,7 @@ def _planner(*, optimal_me=10, own_parent_blueprints=True):
     BPO or BPC of gets a fully researched BPO (Task 14 I3: a row with no
     owned blueprint is not built, so these sub-build tests need one)."""
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: optimal_me
+    planner._compute_optimal_me = lambda bp_data, runs=1: optimal_me
     if own_parent_blueprints:
         plan_chain = planner.plan_chain
 
@@ -542,7 +542,7 @@ def test_an_owned_bpo_without_a_batch_run_count_schedules_no_me_research(caplog)
     guessed from quantity; ME research is not scheduled and a WARNING says why."""
     asked = []
     planner = _planner()
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: asked.append(runs) or 10
+    planner._compute_optimal_me = lambda bp_data, runs=1: asked.append(runs) or 10
     row = _row()
     row["quantity"] = 50
     del row["manufacturing_job"]["runs"]
@@ -615,7 +615,7 @@ def test_optimal_me_research_target_is_computed_at_the_batch_run_count():
     """The owned-BPO branch must ask for the optimum at the row's run count."""
     seen = {}
     planner = _planner()
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: seen.setdefault("runs", runs) and 10
+    planner._compute_optimal_me = lambda bp_data, runs=1: seen.setdefault("runs", runs) and 10
     row = _row(runs=20)
     phase1 = {"bpo_assets_by_type_id": {999: [_bpo(999, me=0, te=0)]}, "blueprint_data": BLUEPRINT_DATA}
     planner.plan_chain([_decision(row)], phase1)
@@ -783,7 +783,6 @@ def test_a_sub_component_has_no_own_sell_velocity_and_persists_it_as_null(
     service = DailyPlannerService(
         industry_service=None, corporations_service=None, characters_service=None,
         sales_history_service=None, market_pricing_service=None,
-        realized_profit_service=None,
         repo=DailyPlannerRepository(session_provider=session_provider),
         admin_settings=None, session_provider=session_provider,
     )

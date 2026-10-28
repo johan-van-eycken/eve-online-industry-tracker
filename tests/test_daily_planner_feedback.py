@@ -174,11 +174,11 @@ class TestFeedbackProcessor:
         result = self.processor.process_pending_feedback()
         assert result == 1
 
-        # Verify upsert_weights was called
-        assert self.repo.upsert_weights.called
+        # Verify record_feedback was called
+        assert self.repo.record_feedback.called
 
-        # Extract the PlanLearningWeightsModel passed to upsert_weights
-        weights_arg = self.repo.upsert_weights.call_args[0][0]
+        # Extract the PlanLearningWeightsModel passed to record_feedback
+        weights_arg = self.repo.record_feedback.call_args[0][2]
 
         # accuracy_ema = 0.8 * 1.0 + 0.2 * (8M / 10M) = 0.8 + 0.2*0.8 = 0.8 + 0.16 = 0.96
         expected_accuracy = 0.8 * 1.0 + 0.2 * (8_000_000.0 / 10_000_000.0)
@@ -197,7 +197,7 @@ class TestFeedbackProcessor:
             "isk_per_hour": 8_000_000.0, "sell_days": 5.0,
         }
         self.processor.process_pending_feedback()
-        weights = self.repo.upsert_weights.call_args[0][0]
+        weights = self.repo.record_feedback.call_args[0][2]
         assert abs(weights.accuracy_ema - (0.8 * 4.0 + 0.2 * 0.8)) < 1e-9
 
     def _run_cost_case(self, *, build_cost, action_qty, allocations, old_cost=1.0):
@@ -209,8 +209,8 @@ class TestFeedbackProcessor:
             "isk_per_hour": 8_000_000.0, "allocation_details": allocations, "sell_days": 5.0,
         }
         self.processor.process_pending_feedback()
-        return (self.repo.upsert_weights.call_args[0][0],
-                self.repo.insert_outcome.call_args[0][0])
+        return (self.repo.record_feedback.call_args[0][2],
+                self.repo.record_feedback.call_args[0][1])
 
     def test_cost_update_compares_full_build_cost_per_unit(self):
         """Both sides are materials + job fees per unit: 55M / 100 = 550k
@@ -331,7 +331,7 @@ class TestFeedbackProcessor:
             "isk_per_hour": 1_000_000_000.0, "sell_days": 0.1,
         }
         self.processor.process_pending_feedback()
-        weights = self.repo.upsert_weights.call_args[0][0]
+        weights = self.repo.record_feedback.call_args[0][2]
         assert weights.velocity_multiplier == LEARNING_WEIGHT_MAX
         assert weights.accuracy_ema == LEARNING_WEIGHT_MAX
 
@@ -367,8 +367,8 @@ class TestFeedbackProcessor:
         with caplog.at_level(logging.INFO):
             assert self.processor.process_pending_feedback() == 1
 
-        weights = self.repo.upsert_weights.call_args[0][0]
-        outcome = self.repo.insert_outcome.call_args[0][0]
+        weights = self.repo.record_feedback.call_args[0][2]
+        outcome = self.repo.record_feedback.call_args[0][1]
         assert weights.accuracy_ema == 1.3
         assert outcome.accuracy_ratio is None
         assert abs(weights.cost_multiplier - (0.8 + 0.2 * (550_000.0 / 600_000.0))) < 1e-9
@@ -392,8 +392,8 @@ class TestFeedbackProcessor:
         with caplog.at_level(logging.INFO):
             assert self.processor.process_pending_feedback() == 1
 
-        weights = self.repo.upsert_weights.call_args[0][0]
-        outcome = self.repo.insert_outcome.call_args[0][0]
+        weights = self.repo.record_feedback.call_args[0][2]
+        outcome = self.repo.record_feedback.call_args[0][1]
         ratio = realized_isk / 10_000_000.0
         assert weights.accuracy_ema == clamp_weight(0.8 * 1.0 + 0.2 * ratio)
         assert outcome.accuracy_ratio == ratio
@@ -407,7 +407,7 @@ class TestFeedbackProcessor:
         self.repo.get_plan_items.return_value = []
         self.processor._find_realized_sale.return_value = {"isk_per_hour": 5.0, "sell_days": 2.0}
         self.processor.process_pending_feedback()
-        outcome = self.repo.insert_outcome.call_args[0][0]
+        outcome = self.repo.record_feedback.call_args[0][1]
         assert outcome.predicted_isk_per_hour is None
         assert outcome.actual_isk_per_hour == 5.0
         assert outcome.accuracy_ratio is None
@@ -431,7 +431,7 @@ class TestFeedbackProcessor:
 
         self.processor.process_pending_feedback()
 
-        weights_arg = self.repo.upsert_weights.call_args[0][0]
+        weights_arg = self.repo.record_feedback.call_args[0][2]
         expected_velocity = 0.8 * old_velocity + 0.2 * (5.0 / actual_days)
         assert abs(weights_arg.velocity_multiplier - expected_velocity) < 1e-9
 
@@ -463,8 +463,8 @@ class TestFeedbackProcessor:
         with caplog.at_level(logging.INFO):
             assert self.processor.process_pending_feedback() == 1
 
-        weights = self.repo.upsert_weights.call_args[0][0]
-        outcome = self.repo.insert_outcome.call_args[0][0]
+        weights = self.repo.record_feedback.call_args[0][2]
+        outcome = self.repo.record_feedback.call_args[0][1]
         assert weights.velocity_multiplier == 1.3
         assert outcome.predicted_sell_days is None
         assert outcome.actual_sell_days == 5.0
@@ -497,8 +497,8 @@ class TestFeedbackProcessor:
         with caplog.at_level(logging.INFO):
             assert self.processor.process_pending_feedback() == 1
 
-        weights = self.repo.upsert_weights.call_args[0][0]
-        outcome = self.repo.insert_outcome.call_args[0][0]
+        weights = self.repo.record_feedback.call_args[0][2]
+        outcome = self.repo.record_feedback.call_args[0][1]
         assert (weights.accuracy_ema, weights.cost_multiplier, weights.velocity_multiplier) == (
             0.95, 1.05, 1.2,
         )
@@ -532,7 +532,7 @@ class TestFeedbackProcessor:
 
         self.processor.process_pending_feedback()
 
-        weights_arg = self.repo.upsert_weights.call_args[0][0]
+        weights_arg = self.repo.record_feedback.call_args[0][2]
 
         # accuracy_ema NOT updated → should equal old_accuracy
         assert abs(weights_arg.accuracy_ema - old_accuracy) < 0.001, (
@@ -561,7 +561,8 @@ class TestFeedbackProcessor:
 
         self.processor.process_pending_feedback()
 
-        self.repo.mark_action_feedback_processed.assert_called_once_with(action.id)
+        assert self.repo.record_feedback.call_args[0][0] == action.id
+        self.repo.mark_action_feedback_processed.assert_not_called()
 
     def test_non_manufacture_actions_marked_processed_but_not_counted(self):
         """deliver actions are marked processed but not counted in return value."""
@@ -579,8 +580,9 @@ class TestFeedbackProcessor:
 
         # Only manufacture actions counted
         assert result == 1
-        # Both should be marked processed
-        assert self.repo.mark_action_feedback_processed.call_count == 2
+        # Both should be marked processed: deliver on its own, manufacture with its feedback
+        self.repo.mark_action_feedback_processed.assert_called_once_with(deliver.id)
+        assert self.repo.record_feedback.call_args[0][0] == manufacture.id
 
     def test_legacy_relist_order_row_is_marked_processed_and_does_not_crash(self):
         """The RELIST phase is gone, but plans persisted before its removal may still
@@ -610,8 +612,8 @@ class TestFeedbackProcessor:
 
         # Should return 0 (not processed as slow_mover yet)
         assert result == 0
-        # upsert_weights should NOT have been called (no update)
-        self.repo.upsert_weights.assert_not_called()
+        # record_feedback should NOT have been called (no update)
+        self.repo.record_feedback.assert_not_called()
         # mark_action_feedback_processed should NOT have been called (action deferred)
         self.repo.mark_action_feedback_processed.assert_not_called()
 
@@ -629,7 +631,7 @@ class TestFeedbackProcessor:
 
         self.processor.process_pending_feedback()
 
-        weights_arg = self.repo.upsert_weights.call_args[0][0]
+        weights_arg = self.repo.record_feedback.call_args[0][2]
         assert weights_arg.sample_count == old_count + 1
 
     def test_confidence_tier_upgrades_at_5_samples(self):
@@ -645,7 +647,7 @@ class TestFeedbackProcessor:
 
         self.processor.process_pending_feedback()
 
-        weights_arg = self.repo.upsert_weights.call_args[0][0]
+        weights_arg = self.repo.record_feedback.call_args[0][2]
         assert weights_arg.confidence_tier == "medium", f"Got {weights_arg.confidence_tier}"
 
     def test_confidence_tier_high_at_20_samples(self):
@@ -661,7 +663,7 @@ class TestFeedbackProcessor:
 
         self.processor.process_pending_feedback()
 
-        weights_arg = self.repo.upsert_weights.call_args[0][0]
+        weights_arg = self.repo.record_feedback.call_args[0][2]
         assert weights_arg.confidence_tier == "high", f"Got {weights_arg.confidence_tier}"
 
 
@@ -859,3 +861,34 @@ class TestFindRealizedSaleAttribution:
     def test_without_an_action_date_no_sale_is_credited(self, planner_repo, app_session):
         processor = _processor(app_session, planner_repo)
         assert processor._find_realized_sale(12345, action=None) is None
+
+
+def test_a_locked_database_on_marking_processed_does_not_count_the_action_twice(
+    planner_repo, app_session, monkeypatch,
+):
+    """The outcome, the weights and the processed flag commit together: if
+    marking processed fails, nothing is written and the retry counts once."""
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Query
+
+    from eve_online_industry_tracker.infrastructure.models import BuildPlanModel, DailyActionLogModel
+
+    now = _utcnow()
+    plan_id = planner_repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    planner_repo.insert_actions([DailyActionLogModel(
+        plan_id=plan_id, generated_at=now - timedelta(days=90), action_type="manufacture",
+        type_id=590, type_name="Rifter", quantity=5, status="done", processed_for_feedback=False,
+    )])
+    processor = _processor(app_session, planner_repo)  # no sale + 90 days old -> slow mover
+
+    def _locked(*_args, **_kwargs):
+        raise OperationalError("UPDATE", {}, Exception("database is locked"))
+
+    with monkeypatch.context() as m:
+        m.setattr(Query, "update", _locked)
+        assert processor.process_pending_feedback() == 0
+    assert planner_repo.get_outcomes(590) == []
+
+    assert processor.process_pending_feedback() == 1
+    assert len(planner_repo.get_outcomes(590)) == 1
+    assert planner_repo.get_weights([590])[590].sample_count == 1

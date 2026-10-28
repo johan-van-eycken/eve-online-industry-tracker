@@ -108,7 +108,6 @@ def _service(session_provider, repo=None):
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=repo if repo is not None else SimpleNamespace(),
         admin_settings=_no_settings(),
         session_provider=session_provider,

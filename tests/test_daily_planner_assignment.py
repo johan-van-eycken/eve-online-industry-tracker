@@ -196,7 +196,6 @@ def test_a_character_installed_job_deducts_a_manufacturing_slot(session_provider
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),
         admin_settings=SimpleNamespace(get=lambda *a, **k: None),
         session_provider=session_provider,
@@ -414,3 +413,13 @@ def test_an_invent_action_without_a_decryptor_names_none():
     # The row carries no sized invention plan, so the note says so (A4); no decryptor is named.
     assert invent.notes.startswith("Invention: BPC stock below pipeline threshold; datacore need unknown")
     assert "use " not in invent.notes
+
+
+def test_on_equal_free_slots_the_pilot_with_fewer_active_jobs_wins():
+    slots = {
+        1: {"character_id": 1, "character_name": "Busy", "free_mfg": 3, "free_research": 3, "total_active_jobs": 5},
+        2: {"character_id": 2, "character_name": "Idle", "free_mfg": 3, "free_research": 3, "total_active_jobs": 2},
+    }
+    assigner = CharacterAssigner()
+    assert assigner._best_mfg_char(slots, []) == (2, "Idle")
+    assert assigner._best_research_char(slots, []) == (2, "Idle")

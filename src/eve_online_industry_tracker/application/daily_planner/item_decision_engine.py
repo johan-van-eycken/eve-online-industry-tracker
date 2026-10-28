@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import planner_setting as _adm
 from eve_online_industry_tracker.application.industry import overview_row as orow
 from eve_online_industry_tracker.application.daily_planner.models import (
     ItemDecision,
@@ -210,11 +210,3 @@ class ItemDecisionEngine:
         )
 
 
-def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
-    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
-
-    AttributeError covers stub/None admin objects; KeyError is what
-    AdminSettingsManager.get raises for an unknown key (every key read here is
-    pinned to the schema by tests/test_daily_planner_fail_loud.py).
-    """
-    return admin_setting(admin_settings, "daily_planner", key, fallback)

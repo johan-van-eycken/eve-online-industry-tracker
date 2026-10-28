@@ -124,7 +124,7 @@ def _wallet_service(list_corporations):
         industry_service=SimpleNamespace(),
         corporations_service=SimpleNamespace(list_corporations=list_corporations),
         characters_service=SimpleNamespace(), sales_history_service=SimpleNamespace(),
-        market_pricing_service=SimpleNamespace(), realized_profit_service=SimpleNamespace(),
+        market_pricing_service=SimpleNamespace(),
         repo=SimpleNamespace(), admin_settings=SimpleNamespace(),
         session_provider=SimpleNamespace(),
     )

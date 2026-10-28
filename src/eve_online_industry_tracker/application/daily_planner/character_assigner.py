@@ -14,9 +14,10 @@ import dataclasses
 import logging
 import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.values import attr as _job_attr, utc_now as _now
 from eve_online_industry_tracker.application.daily_planner.assigned_invention import (
     assigned_invention,
     assigned_invention_lanes,
@@ -62,10 +63,6 @@ from eve_online_industry_tracker.domain.industry_activities import (  # noqa: E4
 
 # Fallback inventor ranking for a row without the producer's invention skills.
 SCIENCE_SKILLS = ("Science", "Advanced Industry", "Metallurgy", "Research")
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
 class CharacterAssigner:
@@ -869,7 +866,7 @@ class CharacterAssigner:
     ) -> tuple[int | None, str | None]:
         """Character with most free manufacturing slots; tie-break by fewest
         total active jobs. `only`: the blueprint owner(s) allowed (Task A)."""
-        candidates = [(s["free_mfg"], -s["total_active_jobs"], s["character_id"], s["character_name"])
+        candidates = [(s["free_mfg"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_mfg"] > 0
                       and (not only or s["character_id"] in only)]
         if not candidates:
@@ -900,7 +897,7 @@ class CharacterAssigner:
     ) -> tuple[int | None, str | None]:
         """Character with most free research slots; tie-break by fewest
         active jobs. `only`: the blueprint owner(s) allowed (Task A)."""
-        candidates = [(s["free_research"], -s["total_active_jobs"], s["character_id"], s["character_name"])
+        candidates = [(s["free_research"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_research"] > 0
                       and (not only or s["character_id"] in only)]
         if not candidates:
@@ -1868,12 +1865,6 @@ def _research_fee(row: dict[str, Any], activity: str, current_key: str, target_k
     if not (0 <= current <= target <= 10):
         return None, f"the research levels {current} -> {target} are outside 0..10"
     return None, orow.get_research_fee_unknown_reason(row, activity)
-
-
-def _job_attr(job: Any, attr: str) -> Any:
-    if isinstance(job, dict):
-        return job.get(attr)
-    return getattr(job, attr, None)
 
 
 def _batch_runs(type_id: int, row: dict[str, Any]) -> int:

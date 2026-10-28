@@ -1,6 +1,6 @@
 """The daily planner's one admin-settings reader.
 
-Every `_adm` helper in this package delegates here, and settings outside the
+Every `_adm` in this package is planner_setting below, and settings outside the
 daily_planner section (industry.invention_probability_floor) are read with it
 directly. Literal section/key reads are pinned to the schema by
 tests/test_daily_planner_fail_loud.py.
@@ -30,3 +30,9 @@ def admin_setting(admin_settings: Any, section: str, key: str, fallback: Any = S
         return admin_settings.get(section, key)
     except (AttributeError, KeyError):
         return schema_default(section, key) if fallback is SCHEMA_DEFAULT else fallback
+
+
+def planner_setting(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
+    """A daily_planner setting; see admin_setting. Modules import it as `_adm`,
+    the name tests/test_daily_planner_fail_loud.py scans for."""
+    return admin_setting(admin_settings, "daily_planner", key, fallback)

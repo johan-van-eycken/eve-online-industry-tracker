@@ -95,7 +95,7 @@ def _render_restart_flask_page() -> None:
 
     if st.button("Confirm Restart", type="primary"):
         try:
-            api_get("/shutdown")
+            api_post("/shutdown", None)
             st.success("Flask app is restarting. Please wait a few seconds.")
             st.info("The page will automatically reconnect when Flask is back online.")
         except (requests.exceptions.ConnectionError, requests.exceptions.RequestException):

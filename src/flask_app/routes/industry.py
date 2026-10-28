@@ -86,6 +86,34 @@ def _industry_profile_id_param(params) -> int | None:
     return profile_id
 
 
+def _flag(params, key: str, default: bool) -> bool:
+    """A boolean from a query string or a JSON body: a real bool as is, a
+    string by its meaning ("false" is False, not bool("false")), absent or
+    blank the default."""
+    raw = params.get(key)
+    if isinstance(raw, str):
+        raw = raw.strip().lower()
+        return default if raw == "" else raw in {"1", "true", "yes", "y", "on"}
+    return default if raw is None else bool(raw)
+
+
+def _overview_params(params, character_id: int) -> dict[str, object]:
+    """The request values the overview and portfolio routes share, GET or POST."""
+    return {
+        "maximize_bp_runs": _flag(params, "maximize_bp_runs", False),
+        "group_identical_bpcs": _flag(params, "group_identical_bpcs", True),
+        "build_from_bpc": _flag(params, "build_from_bpc", True),
+        "have_blueprint_source_only": _flag(params, "have_blueprint_source_only", True),
+        "include_reactions": _flag(params, "include_reactions", False),
+        "market_hub": str(params.get("market_hub") or "jita").strip().lower() or "jita",
+        "material_price_side": str(params.get("material_price_side") or "sell").strip().lower() or "sell",
+        "product_price_side": str(params.get("product_price_side") or "sell").strip().lower() or "sell",
+        "industry_profile_id": _industry_profile_id_param(params),
+        "owned_blueprints_scope": str(params.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters",
+        "character_id": int(character_id),
+    }
+
+
 def _type_ids_param(key: str) -> list[int]:
     """A comma-separated id list query value: [] when absent or blank. A
     malformed entry (not a whole number, or an empty entry between commas)
@@ -236,37 +264,10 @@ def industry_profiles(character_id: int):
 def industry_products(character_id: int):
     require_ready(get_state())
     require_sde_ready(get_state())
-    refresh_raw = (request.args.get("refresh") or "0").strip().lower()
-    refresh = refresh_raw in {"1", "true", "yes", "y", "on"}
-    maximize_bp_runs_raw = (request.args.get("maximize_bp_runs") or "0").strip().lower()
-    maximize_bp_runs = maximize_bp_runs_raw in {"1", "true", "yes", "y", "on"}
-    group_identical_bpcs_raw = (request.args.get("group_identical_bpcs") or "1").strip().lower()
-    group_identical_bpcs = group_identical_bpcs_raw in {"1", "true", "yes", "y", "on"}
-    build_from_bpc_raw = (request.args.get("build_from_bpc") or "1").strip().lower()
-    build_from_bpc = build_from_bpc_raw in {"1", "true", "yes", "y", "on"}
-    have_blueprint_source_only_raw = (request.args.get("have_blueprint_source_only") or "1").strip().lower()
-    have_blueprint_source_only = have_blueprint_source_only_raw in {"1", "true", "yes", "y", "on"}
-    include_reactions_raw = (request.args.get("include_reactions") or "0").strip().lower()
-    include_reactions = include_reactions_raw in {"1", "true", "yes", "y", "on"}
-    market_hub = str(request.args.get("market_hub") or "jita").strip().lower() or "jita"
-    material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
-    product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
-    industry_profile_id = _industry_profile_id_param(request.args)
-    owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
     payload = svc.industry_manufacturing_product_overview_payload(
-        force_refresh=refresh,
-        maximize_bp_runs=maximize_bp_runs,
-        group_identical_bpcs=group_identical_bpcs,
-        build_from_bpc=build_from_bpc,
-        have_blueprint_source_only=have_blueprint_source_only,
-        include_reactions=include_reactions,
-        market_hub=market_hub,
-        material_price_side=material_price_side,
-        product_price_side=product_price_side,
-        industry_profile_id=industry_profile_id,
-        owned_blueprints_scope=owned_blueprints_scope,
-        character_id=int(character_id),
+        force_refresh=_flag(request.args, "refresh", False),
+        **_overview_params(request.args, character_id),
     )
     return ok(
         data=payload.get("rows") or [],
@@ -279,32 +280,11 @@ def industry_products_refresh(character_id: int):
     require_ready(get_state())
     require_sde_ready(get_state())
     payload = request.get_json(silent=True) or {}
-    maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
-    group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
-    build_from_bpc = bool(payload.get("build_from_bpc", True))
-    have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
-    include_reactions = bool(payload.get("include_reactions", False))
-    market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
-    material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
-    product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
-    force_refresh = bool(payload.get("force_refresh", True))
-    industry_profile_id = _industry_profile_id_param(payload)
-    owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
     return ok(
         data=svc.start_industry_manufacturing_product_overview_refresh(
-            force_refresh=force_refresh,
-            maximize_bp_runs=maximize_bp_runs,
-            group_identical_bpcs=group_identical_bpcs,
-            build_from_bpc=build_from_bpc,
-            have_blueprint_source_only=have_blueprint_source_only,
-            include_reactions=include_reactions,
-            market_hub=market_hub,
-            material_price_side=material_price_side,
-            product_price_side=product_price_side,
-            industry_profile_id=industry_profile_id,
-            owned_blueprints_scope=owned_blueprints_scope,
-            character_id=int(character_id),
+            force_refresh=_flag(payload, "force_refresh", True),
+            **_overview_params(payload, character_id),
         ),
         status_code=202,
     )
@@ -324,34 +304,13 @@ def industry_portfolio_candidates_start(character_id: int):
     require_ready(get_state())
     require_sde_ready(get_state())
     payload = request.get_json(silent=True) or {}
-    maximize_bp_runs = bool(payload.get("maximize_bp_runs", False))
-    group_identical_bpcs = bool(payload.get("group_identical_bpcs", True))
-    build_from_bpc = bool(payload.get("build_from_bpc", True))
-    have_blueprint_source_only = bool(payload.get("have_blueprint_source_only", True))
-    include_reactions = bool(payload.get("include_reactions", False))
-    market_hub = str(payload.get("market_hub") or "jita").strip().lower() or "jita"
-    material_price_side = str(payload.get("material_price_side") or "sell").strip().lower() or "sell"
-    product_price_side = str(payload.get("product_price_side") or "sell").strip().lower() or "sell"
-    owned_blueprints_scope = str(payload.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
-    industry_profile_id = _industry_profile_id_param(payload)
+    params = _overview_params(payload, character_id)
     planning_horizon_hours = _planning_horizon_param(payload)
-    have_skills_only = bool(payload.get("have_skills_only", True))
-
     svc = IndustryService(state=get_state())
     refresh_job = svc.start_industry_manufacturing_portfolio_candidates_refresh(
-        maximize_bp_runs=maximize_bp_runs,
-        group_identical_bpcs=group_identical_bpcs,
-        build_from_bpc=build_from_bpc,
-        have_blueprint_source_only=have_blueprint_source_only,
-        include_reactions=include_reactions,
-        market_hub=market_hub,
-        material_price_side=material_price_side,
-        product_price_side=product_price_side,
-        industry_profile_id=industry_profile_id,
-        owned_blueprints_scope=owned_blueprints_scope,
-        character_id=int(character_id),
+        **params,
         planning_horizon_hours=planning_horizon_hours,
-        have_skills_only=have_skills_only,
+        have_skills_only=_flag(payload, "have_skills_only", True),
     )
     return ok(data=refresh_job, status_code=202)
 
@@ -369,35 +328,11 @@ def industry_portfolio_candidates_status(job_id: str):
 def industry_portfolio_candidates(character_id: int):
     require_ready(get_state())
     require_sde_ready(get_state())
-    maximize_bp_runs_raw = (request.args.get("maximize_bp_runs") or "0").strip().lower()
-    maximize_bp_runs = maximize_bp_runs_raw in {"1", "true", "yes", "y", "on"}
-    group_identical_bpcs_raw = (request.args.get("group_identical_bpcs") or "1").strip().lower()
-    group_identical_bpcs = group_identical_bpcs_raw in {"1", "true", "yes", "y", "on"}
-    build_from_bpc_raw = (request.args.get("build_from_bpc") or "1").strip().lower()
-    build_from_bpc = build_from_bpc_raw in {"1", "true", "yes", "y", "on"}
-    have_blueprint_source_only_raw = (request.args.get("have_blueprint_source_only") or "1").strip().lower()
-    have_blueprint_source_only = have_blueprint_source_only_raw in {"1", "true", "yes", "y", "on"}
-    include_reactions_raw = (request.args.get("include_reactions") or "0").strip().lower()
-    include_reactions = include_reactions_raw in {"1", "true", "yes", "y", "on"}
-    market_hub = str(request.args.get("market_hub") or "jita").strip().lower() or "jita"
-    material_price_side = str(request.args.get("material_price_side") or "sell").strip().lower() or "sell"
-    product_price_side = str(request.args.get("product_price_side") or "sell").strip().lower() or "sell"
+    params = _overview_params(request.args, character_id)
     planning_horizon_hours = _planning_horizon_param(request.args)
-    industry_profile_id = _industry_profile_id_param(request.args)
-    owned_blueprints_scope = (request.args.get("owned_blueprints_scope") or "all_characters").strip() or "all_characters"
     svc = IndustryService(state=get_state())
     payload = svc.industry_manufacturing_portfolio_candidates_payload(
-        maximize_bp_runs=maximize_bp_runs,
-        group_identical_bpcs=group_identical_bpcs,
-        build_from_bpc=build_from_bpc,
-        have_blueprint_source_only=have_blueprint_source_only,
-        include_reactions=include_reactions,
-        market_hub=market_hub,
-        material_price_side=material_price_side,
-        product_price_side=product_price_side,
-        industry_profile_id=industry_profile_id,
-        owned_blueprints_scope=owned_blueprints_scope,
-        character_id=int(character_id),
+        **params,
         planning_horizon_hours=planning_horizon_hours,
     )
     return ok(

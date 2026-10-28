@@ -70,6 +70,18 @@ def test_a_200_with_an_html_body_is_a_runtime_error_after_the_retries(client, me
     assert issubclass(esi_client_module.EsiRequestError, esi_client_module.ESI_REQUEST_ERRORS)
 
 
+# --- a client error (4xx) ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("method, paginate", [("esi_get", False), ("esi_get", True),
+                                              ("esi_post", False), ("esi_post", True)])
+@pytest.mark.parametrize("status", [400, 401, 422])
+def test_a_client_error_is_raised_at_once_without_retries(client, method, paginate, status):
+    client._http_session = _Session(lambda: _html_response(status))
+    with pytest.raises(esi_client_module.EsiRequestError, match=f"ESI (GET|POST) {status}"):
+        getattr(client, method)("/x/", use_cache=False, paginate=paginate)
+    assert client._http_session.calls == 1
+
+
 # --- the SSO token refresh -------------------------------------------------------------------------
 
 class _TokenResponse:

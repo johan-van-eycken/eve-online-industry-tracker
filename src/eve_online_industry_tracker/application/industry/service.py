@@ -128,6 +128,7 @@ from eve_online_industry_tracker.domain import rig_groups as _rig_groups
 from eve_online_industry_tracker.domain import security_band as _security_band
 from eve_online_industry_tracker.domain import industry_facility as _industry_facility
 from eve_online_industry_tracker.infrastructure.sde import industry as _sde_industry
+from eve_online_industry_tracker.infrastructure.sde.blueprints import round_material_quantity
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 from eve_online_industry_tracker.application.characters.asset_provenance import (
     RealizedInventionInputs,
@@ -715,23 +716,47 @@ class IndustryService:
             "min_region_daily_volume": int(min_region_daily_volume or 0),
         }
 
-    def _find_matching_job(self, *, store: Any, params: dict[str, Any]) -> dict[str, Any] | None:
+    # Finished jobs kept per store: the latest results (a portfolio job is also the
+    # candidate snapshot a plan is built from), not every refresh of the session.
+    _FINISHED_JOBS_KEPT = 5
+
+    def _claim_job(
+        self, store: Any, params: dict[str, Any], *, step_count: int,
+    ) -> tuple[dict[str, Any], bool]:
+        """(job, created): the active job with these params, else a new queued
+        one. Check, prune and insert under one lock, so racing identical starts
+        run one recompute."""
         with store.lock:
             for job in store.jobs.values():
-                if not isinstance(job, dict):
-                    continue
-                if not self._job_is_active(job):
-                    continue
-                if dict(job.get("request_params") or {}) != params:
-                    continue
-                return dict(job)
-        return None
-
-    def _find_matching_overview_refresh_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
-        return self._find_matching_job(store=self._get_industry_overview_refresh_store(), params=params)
-
-    def _find_matching_portfolio_candidates_job(self, *, params: dict[str, Any]) -> dict[str, Any] | None:
-        return self._find_matching_job(store=self._get_industry_portfolio_candidates_store(), params=params)
+                if isinstance(job, dict) and self._job_is_active(job) and dict(job.get("request_params") or {}) == params:
+                    return dict(job), False
+            finished = sorted(
+                (job_id for job_id, job in store.jobs.items() if not self._job_is_active(job)),
+                key=lambda job_id: str(store.jobs[job_id].get("created_at") or ""),
+            )
+            for job_id in finished[:-self._FINISHED_JOBS_KEPT]:
+                del store.jobs[job_id]
+            job_id = str(uuid.uuid4())
+            created_at = datetime.now(timezone.utc).isoformat()
+            store.jobs[job_id] = {
+                "job_id": job_id,
+                "request_params": dict(params),
+                "status": "queued",
+                "progress_fraction": 0.0,
+                "progress_label": "Queued",
+                "progress_meta": {
+                    "stage": "queued",
+                    "step": 0,
+                    "step_count": step_count,
+                },
+                "created_at": created_at,
+                "updated_at": created_at,
+                "result": None,
+                "result_meta": {},
+                "result_count": 0,
+                "error_message": None,
+            }
+            return dict(store.jobs[job_id]), True
 
     def _update_job(
         self,
@@ -805,8 +830,8 @@ class IndustryService:
             owned_blueprints_scope=owned_blueprints_scope,
             character_id=character_id,
         )
-        existing_job = self._find_matching_overview_refresh_job(params=params)
-        if existing_job is not None:
+        existing_job, created = self._claim_job(self._get_industry_overview_refresh_store(), params, step_count=9)
+        if not created:
             return {
                 "job_id": str(existing_job.get("job_id") or ""),
                 "created_at": existing_job.get("created_at"),
@@ -814,29 +839,8 @@ class IndustryService:
                 "progress_label": str(existing_job.get("progress_label") or "Queued"),
                 "progress_meta": dict(existing_job.get("progress_meta") or {}),
             }
-
-        job_id = str(uuid.uuid4())
-        store = self._get_industry_overview_refresh_store()
-        created_at = datetime.now(timezone.utc).isoformat()
-        with store.lock:
-            store.jobs[job_id] = {
-                "job_id": job_id,
-                "request_params": dict(params),
-                "status": "queued",
-                "progress_fraction": 0.0,
-                "progress_label": "Queued",
-                "progress_meta": {
-                    "stage": "queued",
-                    "step": 0,
-                    "step_count": 9,
-                },
-                "created_at": created_at,
-                "updated_at": created_at,
-                "result": None,
-                "result_meta": {},
-                "result_count": 0,
-                "error_message": None,
-            }
+        job_id = str(existing_job["job_id"])
+        created_at = existing_job["created_at"]
 
         thread = threading.Thread(
             target=self._run_overview_refresh_job,
@@ -877,18 +881,7 @@ class IndustryService:
                 )
 
             payload = self.industry_manufacturing_product_overview_payload(
-                force_refresh=bool(params.get("force_refresh", False)),
-                maximize_bp_runs=bool(params.get("maximize_bp_runs", False)),
-                group_identical_bpcs=bool(params.get("group_identical_bpcs", True)),
-                build_from_bpc=bool(params.get("build_from_bpc", True)),
-                have_blueprint_source_only=bool(params.get("have_blueprint_source_only", True)),
-                include_reactions=bool(params.get("include_reactions", False)),
-                market_hub=str(params.get("market_hub") or "jita"),
-                material_price_side=str(params.get("material_price_side") or "sell"),
-                product_price_side=str(params.get("product_price_side") or "sell"),
-                industry_profile_id=params.get("industry_profile_id"),
-                owned_blueprints_scope=str(params.get("owned_blueprints_scope") or "all_characters"),
-                character_id=params.get("character_id"),
+                **params,
                 progress_callback=report_progress,
             )
             self._update_overview_refresh_job(
@@ -960,8 +953,8 @@ class IndustryService:
             min_isk_per_hour=min_isk_per_hour,
             min_region_daily_volume=min_region_daily_volume,
         )
-        existing_job = self._find_matching_portfolio_candidates_job(params=params)
-        if existing_job is not None:
+        existing_job, created = self._claim_job(self._get_industry_portfolio_candidates_store(), params, step_count=11)
+        if not created:
             return {
                 "job_id": str(existing_job.get("job_id") or ""),
                 "created_at": existing_job.get("created_at"),
@@ -969,29 +962,8 @@ class IndustryService:
                 "progress_label": str(existing_job.get("progress_label") or "Queued"),
                 "progress_meta": dict(existing_job.get("progress_meta") or {}),
             }
-
-        job_id = str(uuid.uuid4())
-        store = self._get_industry_portfolio_candidates_store()
-        created_at = datetime.now(timezone.utc).isoformat()
-        with store.lock:
-            store.jobs[job_id] = {
-                "job_id": job_id,
-                "request_params": dict(params),
-                "status": "queued",
-                "progress_fraction": 0.0,
-                "progress_label": "Queued",
-                "progress_meta": {
-                    "stage": "queued",
-                    "step": 0,
-                    "step_count": 11,
-                },
-                "created_at": created_at,
-                "updated_at": created_at,
-                "result": None,
-                "result_meta": {},
-                "result_count": 0,
-                "error_message": None,
-            }
+        job_id = str(existing_job["job_id"])
+        created_at = existing_job["created_at"]
 
         thread = threading.Thread(
             target=self._run_portfolio_candidates_refresh_job,
@@ -1032,25 +1004,7 @@ class IndustryService:
                 )
 
             payload = self.industry_manufacturing_portfolio_candidates_payload(
-                force_refresh=bool(params.get("force_refresh", False)),
-                maximize_bp_runs=bool(params.get("maximize_bp_runs", False)),
-                group_identical_bpcs=bool(params.get("group_identical_bpcs", True)),
-                build_from_bpc=bool(params.get("build_from_bpc", True)),
-                have_blueprint_source_only=bool(params.get("have_blueprint_source_only", True)),
-                include_reactions=bool(params.get("include_reactions", False)),
-                market_hub=str(params.get("market_hub") or "jita"),
-                material_price_side=str(params.get("material_price_side") or "sell"),
-                product_price_side=str(params.get("product_price_side") or "sell"),
-                industry_profile_id=params.get("industry_profile_id"),
-                owned_blueprints_scope=str(params.get("owned_blueprints_scope") or "all_characters"),
-                character_id=params.get("character_id"),
-                planning_horizon_hours=float(params.get("planning_horizon_hours") or 24.0),
-                enabled_meta_groups=params.get("enabled_meta_groups"),
-                have_skills_only=bool(params.get("have_skills_only", False)),
-                positive_profit_only=bool(params.get("positive_profit_only", False)),
-                min_margin_pct=float(params.get("min_margin_pct") or 0.0),
-                min_isk_per_hour=float(params.get("min_isk_per_hour") or 0.0),
-                min_region_daily_volume=int(params.get("min_region_daily_volume") or 0),
+                **params,
                 progress_callback=report_progress,
             )
             self._update_portfolio_candidates_job(
@@ -3642,29 +3596,13 @@ class IndustryService:
             multiplier *= max(0.0, 1.0 - reduction)
         return max(0.0, min(1.0 - multiplier, 0.99))
 
-    _reduction_memo: dict[tuple, float] = {}
-
-    @classmethod
-    def _combine_reductions_memo(cls, reductions: list[Any]) -> float:
-        key = tuple(reductions)
-        cached = cls._reduction_memo.get(key)
-        if cached is not None:
-            return cached
-        result = cls._combine_reductions(reductions)
-        cls._reduction_memo[key] = result
-        return result
-
     @staticmethod
     def _round_duration_seconds(raw_seconds: float) -> int:
         if raw_seconds <= 0:
             return 0
         return max(1, int(math.ceil(raw_seconds)))
 
-    @staticmethod
-    def _round_material_quantity(raw_quantity: float, *, minimum_quantity: int) -> int:
-        if raw_quantity <= 0:
-            return 0
-        return max(int(minimum_quantity), int(math.ceil(raw_quantity)))
+    _round_material_quantity = staticmethod(round_material_quantity)
 
     @staticmethod
     def _skill_levels_by_name(character_modifier_payload: dict[str, Any] | None) -> dict[str, int]:
@@ -5064,6 +5002,7 @@ class IndustryService:
             layout = _BatchRunLayout((), int(blueprint_material_efficiency), int(blueprint_time_efficiency), blueprint_source_kind)
         job_segments = layout.segments(0, runs)
         activity_by_efficiency: dict[tuple[int, int], dict[str, Any]] = {}
+        segment_costs: list[dict[str, Any]] = []
         for job_segment in job_segments:
             efficiency = (int(job_segment["blueprint_material_efficiency"]), int(job_segment["blueprint_time_efficiency"]))
             if efficiency not in activity_by_efficiency:
@@ -5076,42 +5015,19 @@ class IndustryService:
                     blueprint_material_efficiency=efficiency[0], blueprint_time_efficiency=efficiency[1],
                     surcharge_rates=None,
                 )
-            job_activity = activity_by_efficiency[efficiency]
-            job_segment["material_reduction"] = float(job_activity.get("material_reduction", 0.0))
-            job_segment["time_reduction"] = float(job_activity["time_reduction"])
-            job_segment["duration_seconds"] = self._round_duration_seconds(
-                int(job.get("time_seconds") or 0) * int(job_segment["runs"]) * max(0.0, 1.0 - job_segment["time_reduction"])
-            )
-            job_segment["materials"] = {}
-        cost_reduction = next(iter(activity_by_efficiency.values()))["cost_reduction"]
+            segment_costs.append(activity_by_efficiency[efficiency])
+        cost_reduction = segment_costs[0]["cost_reduction"]
+        sized = self._fill_job_segments(
+            job_segments, segment_costs,
+            base_time_seconds=int(job.get("time_seconds") or 0),
+            materials=[dict(entry) for entry in (job.get("materials") or []) if isinstance(entry, dict)],
+        )
         # Runs-weighted over the jobs when they differ; job_segments has each job's own.
-        material_reduction, material_differs = self._runs_weighted_reduction(job_segments, "material_reduction")
-        _time_reduction, time_differs = self._runs_weighted_reduction(job_segments, "time_reduction")
+        material_reduction = sized["material_reduction"]
         # Labels the runs-weighted material_reduction (see the top-level row).
-        reduction_basis = "runs_weighted_job_segments" if material_differs or time_differs else None
-
-        adjusted_material_entries: list[dict[str, Any]] = []
-        base_material_entries: list[dict[str, Any]] = []
-        for raw_material in [dict(entry) for entry in (job.get("materials") or []) if isinstance(entry, dict)]:
-            material = dict(raw_material)
-            quantity_per_run = int(material.get("quantity") or 0)
-            base_total_quantity = quantity_per_run * runs
-            adjusted_total_quantity = 0
-            for job_segment in job_segments:
-                job_runs = int(job_segment["runs"])
-                job_quantity = self._round_material_quantity(
-                    float(quantity_per_run * job_runs) * max(0.0, 1.0 - job_segment["material_reduction"]),
-                    minimum_quantity=(job_runs if quantity_per_run > 0 else 0),
-                )
-                if job_quantity > 0:
-                    job_segment["materials"][str(int(material.get("type_id") or 0))] = job_quantity
-                adjusted_total_quantity += job_quantity
-            material["quantity_per_run"] = quantity_per_run
-            material["base_quantity"] = base_total_quantity
-            material["quantity"] = adjusted_total_quantity
-            material["material_reduction"] = material_reduction
-            adjusted_material_entries.append(material)
-            base_material_entries.append({**material, "quantity": base_total_quantity})
+        reduction_basis = "runs_weighted_job_segments" if sized["reductions_differ"] else None
+        adjusted_material_entries: list[dict[str, Any]] = sized["adjusted_material_entries"]
+        base_material_entries: list[dict[str, Any]] = sized["base_material_entries"]
 
         eiv_unknown_reasons: list[str] = []
         process_value, priced_material_count, eiv_material_count = self._sum_estimated_item_value_counted(
@@ -6643,6 +6559,35 @@ class IndustryService:
             )
         return owner_id
 
+    @classmethod
+    def _resolve_scope_owner_ids(
+        cls, owned_blueprints_scope: str, character_ids: list[int], corporation_ids: list[int],
+    ) -> tuple[list[int], list[int]]:
+        """(character IDs, corporation IDs) an owned_blueprints_scope selects:
+        the one rule for owned blueprints and owned inventory. The "all" scopes
+        take the known pilots and their corporations; an unknown scope is a 400."""
+        normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
+        kind, _, rest = normalized_scope.partition(":")
+        if kind == "character":
+            return [cls._scope_owner_id(owned_blueprints_scope, rest, "character")], []
+        if kind == "corporation":
+            return [], [cls._scope_owner_id(owned_blueprints_scope, rest, "corporation")]
+        if kind == "character_and_corporation":
+            parts = normalized_scope.split(":")
+            return (
+                [cls._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")],
+                [cls._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")],
+            )
+        by_scope = {
+            "all_characters": (character_ids, []),
+            "character_and_corporations": (character_ids, corporation_ids),
+            "all_corporations": ([], corporation_ids),
+            "all": (character_ids, corporation_ids),
+        }
+        if normalized_scope not in by_scope:
+            raise ServiceError(f"owned_blueprints_scope {owned_blueprints_scope!r} is not a known scope", status_code=400)
+        return list(by_scope[normalized_scope][0]), list(by_scope[normalized_scope][1])
+
     def _get_owned_blueprint_assets(
         self,
         *,
@@ -6739,166 +6684,27 @@ class IndustryService:
                         out[int(top_location_id)] = name
                 return out
 
-            normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
-            if normalized_scope.startswith("character:"):
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
-                character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
-                historical_character_assets, _ = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[selected_character_id],
-                    corporation_ids=[],
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
-                )
-                character_assets.extend(historical_character_assets)
-                top_location_name_by_id = resolve_top_location_name_map(character_assets)
-                return (
-                    character_assets,
-                    [],
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope.startswith("character_and_corporation:"):
-                parts = normalized_scope.split(":")
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
-                character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, [selected_character_id])
-                corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
-                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[selected_character_id],
-                    corporation_ids=[selected_corporation_id],
-                    current_item_ids={
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
-                    },
-                )
-                character_assets.extend(historical_character_assets)
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
-                return (
-                    character_assets,
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope.startswith("corporation:"):
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
-                corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, [selected_corporation_id])
-                _, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[],
-                    corporation_ids=[selected_corporation_id],
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets},
-                )
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map(corporation_assets)
-                return (
-                    [],
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "all_characters":
-                character_assets = blueprints_repo.get_character_blueprints(session)
-                historical_character_assets, _ = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=character_ids,
-                    corporation_ids=[],
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
-                )
-                character_assets.extend(historical_character_assets)
-                top_location_name_by_id = resolve_top_location_name_map(character_assets)
-                return (
-                    character_assets,
-                    [],
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "character_and_corporations":
-                character_assets = blueprints_repo.get_character_blueprints(session)
-                corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, corporation_ids)
-                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=character_ids,
-                    corporation_ids=corporation_ids,
-                    current_item_ids={
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
-                    },
-                )
-                character_assets.extend(historical_character_assets)
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
-                return (
-                    character_assets,
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "all_corporations":
-                corporation_assets = blueprints_repo.get_corporation_blueprints(session)
-                _, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=[],
-                    corporation_ids=corporation_ids,
-                    current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets},
-                )
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map(corporation_assets)
-                return (
-                    [],
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            if normalized_scope == "all":
-                character_assets = blueprints_repo.get_character_blueprints(session)
-                corporation_assets = blueprints_repo.get_corporation_blueprints(session)
-                historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
-                    app_session=session,
-                    sde_session=sde_session,
-                    character_ids=character_ids,
-                    corporation_ids=corporation_ids,
-                    current_item_ids={
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
-                        *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
-                    },
-                )
-                character_assets.extend(historical_character_assets)
-                corporation_assets.extend(historical_corporation_assets)
-                top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
-                return (
-                    character_assets,
-                    corporation_assets,
-                    character_name_by_id,
-                    corporation_name_by_id,
-                    top_location_name_by_id,
-                )
-            character_assets = blueprints_repo.get_character_blueprints(session)
-            historical_character_assets, _ = self._load_historical_blueprint_assets(
+            scoped_character_ids, scoped_corporation_ids = self._resolve_scope_owner_ids(
+                owned_blueprints_scope, character_ids, corporation_ids,
+            )
+            character_assets = blueprints_repo.get_character_blueprint_assets_for_ids(session, scoped_character_ids)
+            corporation_assets = blueprints_repo.get_corporation_blueprint_assets_for_ids(session, scoped_corporation_ids)
+            historical_character_assets, historical_corporation_assets = self._load_historical_blueprint_assets(
                 app_session=session,
                 sde_session=sde_session,
-                character_ids=character_ids,
-                corporation_ids=[],
-                current_item_ids={int(getattr(asset, "item_id", 0) or 0) for asset in character_assets},
+                character_ids=scoped_character_ids,
+                corporation_ids=scoped_corporation_ids,
+                current_item_ids={
+                    *[int(getattr(asset, "item_id", 0) or 0) for asset in character_assets],
+                    *[int(getattr(asset, "item_id", 0) or 0) for asset in corporation_assets],
+                },
             )
             character_assets.extend(historical_character_assets)
-            top_location_name_by_id = resolve_top_location_name_map(character_assets)
+            corporation_assets.extend(historical_corporation_assets)
+            top_location_name_by_id = resolve_top_location_name_map([*character_assets, *corporation_assets])
             return (
                 character_assets,
-                [],
+                corporation_assets,
                 character_name_by_id,
                 corporation_name_by_id,
                 top_location_name_by_id,
@@ -6942,8 +6748,6 @@ class IndustryService:
                 if corporation_id > 0:
                     corporation_ids.append(corporation_id)
 
-            normalized_scope = (owned_blueprints_scope or "all_characters").strip().lower()
-
             def query_character_assets(ids: list[int]) -> list[CharacterAssetsModel]:
                 normalized_ids = sorted({int(asset_id) for asset_id in ids if int(asset_id) > 0})
                 if not normalized_ids:
@@ -6970,32 +6774,11 @@ class IndustryService:
                     q = q.filter(CorporationAssetsModel.location_flag.in_(_hangar_flags))
                 return q.all()
 
-            character_assets: list[CharacterAssetsModel] = []
-            corporation_assets: list[CorporationAssetsModel] = []
-            if normalized_scope.startswith("character:"):
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "character")
-                character_assets = query_character_assets([selected_character_id])
-            elif normalized_scope.startswith("character_and_corporation:"):
-                parts = normalized_scope.split(":")
-                selected_character_id = self._scope_owner_id(owned_blueprints_scope, parts[1] if len(parts) > 1 else None, "character")
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, parts[2] if len(parts) > 2 else None, "corporation")
-                character_assets = query_character_assets([selected_character_id])
-                corporation_assets = query_corporation_assets([selected_corporation_id])
-            elif normalized_scope.startswith("corporation:"):
-                selected_corporation_id = self._scope_owner_id(owned_blueprints_scope, normalized_scope.split(":", 1)[1], "corporation")
-                corporation_assets = query_corporation_assets([selected_corporation_id])
-            elif normalized_scope == "all_characters":
-                character_assets = query_character_assets(character_ids)
-            elif normalized_scope == "character_and_corporations":
-                character_assets = query_character_assets(character_ids)
-                corporation_assets = query_corporation_assets(corporation_ids)
-            elif normalized_scope == "all_corporations":
-                corporation_assets = query_corporation_assets(corporation_ids)
-            elif normalized_scope == "all":
-                character_assets = query_character_assets(character_ids)
-                corporation_assets = query_corporation_assets(corporation_ids)
-            else:
-                character_assets = query_character_assets(character_ids)
+            scoped_character_ids, scoped_corporation_ids = self._resolve_scope_owner_ids(
+                owned_blueprints_scope, character_ids, corporation_ids,
+            )
+            character_assets = query_character_assets(scoped_character_ids)
+            corporation_assets = query_corporation_assets(scoped_corporation_ids)
 
             # Build on-hand quantity map (excluding blueprints)
             quantity_by_type_id: dict[int, int] = {}
@@ -7452,11 +7235,32 @@ class IndustryService:
             )
             for segment in job_segments
         ]
+        sized = self._fill_job_segments(
+            job_segments, segment_costs, base_time_seconds=base_time,
+            materials=[
+                self._compact_material_entry(dict(e))
+                for e in (manufacturing_job.get("materials") or []) if isinstance(e, dict)
+            ],
+        )
+        return {**sized, "costs": segment_costs[0]}
+
+    def _fill_job_segments(
+        self,
+        job_segments: list[dict[str, Any]],
+        segment_costs: list[dict[str, Any]],
+        *,
+        base_time_seconds: int,
+        materials: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """The one sizing rule for a batch's jobs (top-level rows and nested
+        sub-builds): each job at its own reductions, one ceiling per job and
+        material, never per run (EVE). Fills each segment's reductions,
+        duration_seconds and materials in place."""
         for segment, segment_cost in zip(job_segments, segment_costs):
             segment["material_reduction"] = float(segment_cost.get("material_reduction", 0.0))
             segment["time_reduction"] = float(segment_cost["time_reduction"])
             segment["duration_seconds"] = self._round_duration_seconds(
-                base_time * int(segment["runs"]) * max(0.0, 1.0 - segment["time_reduction"])
+                base_time_seconds * int(segment["runs"]) * max(0.0, 1.0 - segment["time_reduction"])
             )
             segment["materials"] = {}
         material_reduction, material_differs = self._runs_weighted_reduction(job_segments, "material_reduction")
@@ -7464,8 +7268,7 @@ class IndustryService:
         total_runs = sum(int(segment["runs"]) for segment in job_segments)
         adjusted: list[dict[str, Any]] = []
         base: list[dict[str, Any]] = []
-        for raw_mat in [dict(e) for e in (manufacturing_job.get("materials") or []) if isinstance(e, dict)]:
-            mat = self._compact_material_entry(raw_mat)
+        for mat in materials:
             qty_per_run = int(mat.get("quantity") or 0)
             adjusted_total = 0
             for segment in job_segments:
@@ -7486,7 +7289,6 @@ class IndustryService:
         return {
             "adjusted_material_entries": adjusted,
             "base_material_entries": base,
-            "costs": segment_costs[0],
             "material_reduction": material_reduction,
             "time_reduction": time_reduction,
             "reductions_differ": material_differs or time_differs,

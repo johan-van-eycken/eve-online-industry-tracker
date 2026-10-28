@@ -78,7 +78,7 @@ class MarginCorrelator:
             logging.warning("MarginCorrelator failed: %s", e)
 
     def _run(self) -> None:
-        from scipy.stats import pearsonr
+        import numpy as np
         from eve_online_industry_tracker.infrastructure.session_provider import StateSessionProvider
         from eve_online_industry_tracker.infrastructure.models import MarketHistoryModel
         from eve_online_industry_tracker.application.characters.realized_profit import CorporationRealizedProfitLedgerService
@@ -184,7 +184,8 @@ class MarginCorrelator:
                         for d in common_dates
                     ]
 
-                    pearson_r, _ = pearsonr(trit_series, margin_series)
+                    # NaN for a constant series, as scipy's pearsonr gave; min_days (>= 5) guards the length.
+                    pearson_r = float(np.corrcoef(trit_series, margin_series)[0, 1])
                     is_squeeze = bool(pearson_r < threshold)
 
                     write_session.execute(text(

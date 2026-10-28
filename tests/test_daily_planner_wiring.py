@@ -57,7 +57,6 @@ def _service(session_provider, overview_rows):
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),
         # Every setting at its schema default (the store of an untouched install).
         admin_settings=SimpleNamespace(get=lambda section, key: ADMIN_SETTINGS_SCHEMA[section]["settings"][key]["default"]),

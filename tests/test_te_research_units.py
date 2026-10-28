@@ -71,7 +71,7 @@ class _Chars:
 def _planner(admin=None) -> ChainPlanner:
     """ME is held at its optimum so only TE varies; TE needs no SDE lookup."""
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=admin or _AdminStub())
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
+    planner._compute_optimal_me = lambda bp_data, runs=1: 10
     return planner
 
 

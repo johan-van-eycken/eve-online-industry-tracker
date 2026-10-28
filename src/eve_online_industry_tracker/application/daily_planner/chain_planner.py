@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy.exc import SQLAlchemyError
-
+from eve_online_industry_tracker.application.daily_planner.values import attr as _get_attr, utc_now as _now
 from eve_online_industry_tracker.application.daily_planner import research_first
-from eve_online_industry_tracker.application.daily_planner.admin_setting import SCHEMA_DEFAULT, admin_setting
+from eve_online_industry_tracker.application.daily_planner.admin_setting import admin_setting, planner_setting as _adm
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import (
     BlueprintLedger,
     owner_character_id,
@@ -41,21 +40,6 @@ META_GROUP_T1 = 1
 #: The pipeline stage of an item this plan does not build: a blueprint it
 #: needs is in an active job, or it has no blueprint source to build from.
 NOT_BUILT_STAGE = "blocked"
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
-
-
-def _adm(admin_settings: Any, key: str, fallback: Any = SCHEMA_DEFAULT) -> Any:
-    """A daily_planner setting, or `fallback` (the schema default) when there is no settings store.
-
-    AttributeError covers stub/None admin objects; KeyError is what
-    AdminSettingsManager.get raises for an unknown key. Every key the planner
-    reads is pinned to the schema by tests/test_daily_planner_fail_loud.py, so
-    with the real manager the KeyError branch cannot hide a typo.
-    """
-    return admin_setting(admin_settings, "daily_planner", key, fallback)
 
 
 def _lowest_blueprint_by_activity_product(
@@ -981,8 +965,8 @@ class ChainPlanner:
         bpo_owned = bp_type_id in bpo_assets_by_type_id and bool(bpo_assets_by_type_id[bp_type_id])
 
         if bpo_owned:
-            # Compute optimal ME/TE via SDE lookup. The optimal ME depends on the
-            # batch run count; with no validated manufacturing_job.runs it is
+            # Optimal ME from the SDE base materials. It depends on the batch
+            # run count; with no validated manufacturing_job.runs it is
             # unknown (never guessed from quantity) and no ME research is scheduled.
             batch_runs, runs_reason = _batch_runs(
                 orow.get_manufacturing_job(decision.overview_row)
@@ -995,7 +979,7 @@ class ChainPlanner:
                 )
                 optimal_me = None
             else:
-                optimal_me = self._compute_optimal_me(bp_type_id, runs=batch_runs)
+                optimal_me = self._compute_optimal_me(bp_data, runs=batch_runs)
             optimal_te = te_research_target
 
             # The producer's BPO order, so the choice is deterministic. The
@@ -1042,8 +1026,8 @@ class ChainPlanner:
             # treating the optimum as 0, which silently reads as "already
             # optimal". The TE target is the setting and always known. When
             # the missing batch runs caused it, that WARNING was logged above
-            # and this one is skipped; an SDE lookup failure (runs fine)
-            # still gets this WARNING on top of _compute_optimal_me's own.
+            # and this one is skipped; missing SDE base materials (runs fine)
+            # get this WARNING.
             if optimal_me is None and runs_reason is None:
                 logger.warning(
                     "ChainPlanner: optimal ME unknown for owned BPO %s; "
@@ -2234,19 +2218,7 @@ class ChainPlanner:
             optimal_me_for_quantities,
         )
 
-        manufacturing = bp_data.get("manufacturing") if isinstance(bp_data, dict) else None
-        base_materials = (manufacturing or {}).get("materials") if isinstance(manufacturing, dict) else None
-        base: list[tuple[int, int]] = []
-        for mat in base_materials or []:
-            if not isinstance(mat, dict):
-                continue
-            try:
-                mat_type_id = int(mat.get("type_id") or 0)
-                base_qty = int(mat.get("quantity") or 0)
-            except (TypeError, ValueError):
-                continue
-            if mat_type_id > 0 and base_qty > 0:
-                base.append((mat_type_id, base_qty))
+        base = _base_materials(bp_data)
         if not base:
             return None, "no SDE base material quantities for the blueprint"
 
@@ -2305,25 +2277,34 @@ class ChainPlanner:
             "ChainPlanner: BPO analysis skipped for type_id=%s: %s", decision.type_id, reason
         )
 
-    def _compute_optimal_me(self, blueprint_type_id: int, runs: int = 1) -> int | None:
-        """Optimal ME at a `runs`-run batch from the SDE, or None when the SDE query fails.
+    def _compute_optimal_me(self, bp_data: dict[str, Any], runs: int = 1) -> int | None:
+        """Optimal ME at a `runs`-run batch from the blueprint's SDE base
+        materials, or None without them. None must never be read as 0 -- that
+        would make the owned BPO look fully researched."""
+        from eve_online_industry_tracker.infrastructure.sde.blueprints import optimal_me_for_quantities
 
-        Only a database error degrades (logged at WARNING); None must never be
-        read as 0 -- that would make every owned BPO look fully researched.
-        """
-        from eve_online_industry_tracker.infrastructure.sde.blueprints import compute_optimal_me
-        try:
-            sde_session = self._session_provider.sde_session()
-            try:
-                return compute_optimal_me(blueprint_type_id, sde_session, runs=runs)
-            finally:
-                sde_session.close()
-        except SQLAlchemyError:
-            logger.warning(
-                "ChainPlanner: SDE lookup of optimal ME failed for bp_type_id=%s",
-                blueprint_type_id, exc_info=True,
-            )
+        base = _base_materials(bp_data)
+        if not base:
             return None
+        return optimal_me_for_quantities((q for _, q in base), runs=runs)
+
+
+def _base_materials(bp_data: dict[str, Any] | None) -> list[tuple[int, int]]:
+    """(type_id, base quantity) of the blueprint's SDE manufacturing materials."""
+    manufacturing = bp_data.get("manufacturing") if isinstance(bp_data, dict) else None
+    base_materials = (manufacturing or {}).get("materials") if isinstance(manufacturing, dict) else None
+    base: list[tuple[int, int]] = []
+    for mat in base_materials or []:
+        if not isinstance(mat, dict):
+            continue
+        try:
+            mat_type_id = int(mat.get("type_id") or 0)
+            base_qty = int(mat.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if mat_type_id > 0 and base_qty > 0:
+            base.append((mat_type_id, base_qty))
+    return base
 
 
 class _NoMetaGroups:
@@ -2628,12 +2609,6 @@ def _blueprint_efficiency(asset: Any, kind: str) -> int | None:
         except (TypeError, ValueError):
             return None
     return None
-
-
-def _get_attr(obj: Any, attr: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(attr)
-    return getattr(obj, attr, None)
 
 
 def _unknown_fee_buy_reasons(request: dict[str, Any], own_row_reason: str | None) -> dict[int, str]:

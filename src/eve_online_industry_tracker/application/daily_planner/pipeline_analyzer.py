@@ -26,9 +26,10 @@ in either:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Protocol
 
+from eve_online_industry_tracker.application.daily_planner.values import attr as _get_attr, utc_now as _now
 from eve_online_industry_tracker.application.daily_planner.character_assigner import (
     ACTIVITY_MANUFACTURING,
 )
@@ -42,10 +43,6 @@ logger = logging.getLogger(__name__)
 # compute a days_of_supply for this item (see module docstring). Matches
 # ProfitabilityScorer.pipeline_saturation's own neutral point (profitability_scorer.py:61).
 _NEUTRAL_DAYS_OF_SUPPLY = 3.0
-
-
-def _now() -> datetime:
-    return datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
 
 class BlueprintCategorySource(Protocol):
@@ -263,7 +260,3 @@ def _asset_attr_bool(asset: Any, attr: str) -> bool:
     return bool(v)
 
 
-def _get_attr(obj: Any, attr: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(attr)
-    return getattr(obj, attr, None)

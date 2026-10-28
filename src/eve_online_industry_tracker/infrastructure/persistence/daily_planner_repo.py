@@ -261,30 +261,31 @@ class DailyPlannerRepository:
     def upsert_weights(self, weights: PlanLearningWeightsModel) -> None:
         session = self._session_provider.app_session()
         try:
-            stmt = (
-                sqlite_insert(PlanLearningWeightsModel)
-                .values(
-                    type_id=weights.type_id,
-                    accuracy_ema=weights.accuracy_ema,
-                    velocity_multiplier=weights.velocity_multiplier,
-                    cost_multiplier=weights.cost_multiplier,
-                    sample_count=weights.sample_count,
-                    last_updated=weights.last_updated,
-                    confidence_tier=weights.confidence_tier,
-                )
-                .on_conflict_do_update(
-                    index_elements=["type_id"],
-                    set_={
-                        "accuracy_ema": weights.accuracy_ema,
-                        "velocity_multiplier": weights.velocity_multiplier,
-                        "cost_multiplier": weights.cost_multiplier,
-                        "sample_count": weights.sample_count,
-                        "last_updated": weights.last_updated,
-                        "confidence_tier": weights.confidence_tier,
-                    },
-                )
-            )
-            session.execute(stmt)
+            session.execute(_weights_upsert(weights))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def record_feedback(
+        self,
+        action_id: int,
+        outcome: PlanItemOutcomeModel | None,
+        weights: PlanLearningWeightsModel | None,
+    ) -> None:
+        """Write an action's outcome and weights and mark it processed in one
+        commit, so a failed step never leaves it half counted."""
+        session = self._session_provider.app_session()
+        try:
+            if outcome is not None:
+                session.add(outcome)
+            if weights is not None:
+                session.execute(_weights_upsert(weights))
+            session.query(DailyActionLogModel).filter(
+                DailyActionLogModel.id == action_id
+            ).update({"processed_for_feedback": True}, synchronize_session="fetch")
             session.commit()
         except Exception:
             session.rollback()
@@ -439,3 +440,19 @@ class DailyPlannerRepository:
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc).replace(tzinfo=None)
+
+
+def _weights_upsert(weights: PlanLearningWeightsModel) -> Any:
+    fields = {
+        "accuracy_ema": weights.accuracy_ema,
+        "velocity_multiplier": weights.velocity_multiplier,
+        "cost_multiplier": weights.cost_multiplier,
+        "sample_count": weights.sample_count,
+        "last_updated": weights.last_updated,
+        "confidence_tier": weights.confidence_tier,
+    }
+    return (
+        sqlite_insert(PlanLearningWeightsModel)
+        .values(type_id=weights.type_id, **fields)
+        .on_conflict_do_update(index_elements=["type_id"], set_=fields)
+    )

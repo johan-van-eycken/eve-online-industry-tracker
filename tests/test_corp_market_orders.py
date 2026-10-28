@@ -115,3 +115,41 @@ def test_order_id_is_unique() -> None:
     session.add(CorporationMarketOrdersModel(**_make_order(order_id=400001)))
     with pytest.raises(IntegrityError):
         session.commit()
+
+
+def test_refresh_names_location_and_region_from_the_order_with_one_lookup_each() -> None:
+    """ESI orders carry region_id: no system/constellation walk, one name lookup per id."""
+    from types import SimpleNamespace
+
+    from eve_online_industry_tracker.application.corporations.corporation import Corporation
+    from eve_online_industry_tracker.infrastructure.models import BaseSde
+
+    app_session = _make_session()
+    sde_engine = create_engine("sqlite:///:memory:")
+    BaseSde.metadata.create_all(bind=sde_engine)
+    names = {60003760: "Jita IV - Moon 4", 10000002: "The Forge"}
+    looked_up: list[int] = []
+
+    def _info(location_id):
+        looked_up.append(location_id)
+        return {"name": names[location_id]}
+
+    esi_order = {"order_id": 1, "type_id": 34, "location_id": 60003760, "region_id": 10000002, "price": 5.0}
+    corp = object.__new__(Corporation)
+    corp.corporation_id = 98765
+    corp.corporation_name = "Corp"
+    corp._db_app = SimpleNamespace(session=app_session)
+    corp._db_sde = SimpleNamespace(session=sessionmaker(bind=sde_engine)(), language="en")
+    corp._default_esi_character = SimpleNamespace(
+        ensure_esi=lambda: None,
+        _esi_client=SimpleNamespace(esi_get=lambda *a, **kw: [dict(esi_order), dict(esi_order, order_id=2)]),
+        esi_service=SimpleNamespace(get_location_info=_info),
+    )
+
+    corp.refresh_market_orders()
+
+    rows = app_session.query(CorporationMarketOrdersModel).order_by(CorporationMarketOrdersModel.order_id).all()
+    assert [(r.location_name, r.region_id, r.region_name) for r in rows] == [
+        ("Jita IV - Moon 4", 10000002, "The Forge")
+    ] * 2
+    assert sorted(looked_up) == [10000002, 60003760]

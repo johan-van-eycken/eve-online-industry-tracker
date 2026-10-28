@@ -32,7 +32,7 @@ esi-corporations.read_structures.v1
 esi-universe.read_structures.v1
 ```
 
-Set the callback URL to: `http://localhost:8765/callback`
+Set the callback URL to: `http://localhost:8080/callback`
 
 ---
 

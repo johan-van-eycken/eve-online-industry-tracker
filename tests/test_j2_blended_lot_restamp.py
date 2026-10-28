@@ -129,11 +129,12 @@ def test_recosted_types_are_the_jobs_whose_unit_cost_changed(app_session):
 
 
 def _ledger_with_sale(s):
-    """A sale of all 13 units: the 5 of the character job lots, then the corp rows."""
+    """A sale of all 11 units: job 5002's 3, then the 8 of the corp rows (job
+    5001's lot is already in row 1 and the row 2 blend, so it is not queued twice)."""
     s.add(CorporationModel(corporation_id=CORP, corporation_name="Fake"))
     s.add(CorporationWalletTransactionsModel(
-        corporation_id=CORP, transaction_id=6001, date="2026-06-06T00:00:00Z", is_buy=False, quantity=13,
-        type_id=PRODUCT, unit_price=200.0, total_price=2600.0))
+        corporation_id=CORP, transaction_id=6001, date="2026-06-06T00:00:00Z", is_buy=False, quantity=11,
+        type_id=PRODUCT, unit_price=200.0, total_price=2200.0))
     s.commit()
     return CorporationRealizedProfitLedgerService(app_session=s, sde_session=None, market_prices=[])
 

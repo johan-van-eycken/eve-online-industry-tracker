@@ -25,7 +25,6 @@ def _bare_service():
         characters_service=SimpleNamespace(list_characters=lambda: []),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
-        realized_profit_service=SimpleNamespace(),
         repo=SimpleNamespace(),
         admin_settings=SimpleNamespace(),
         session_provider=SimpleNamespace(),

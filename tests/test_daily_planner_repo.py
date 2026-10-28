@@ -5,6 +5,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -19,6 +20,7 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
     DailyActionLogModel,
     MarketDepthCacheModel,
     InventionOutcomeLogModel,
+    PlanItemOutcomeModel,
     PlanLearningWeightsModel,
 )
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService  # noqa: E402
@@ -40,7 +42,6 @@ def _service(session_provider, admin_settings=None) -> DailyPlannerService:
         characters_service=None,
         sales_history_service=None,
         market_pricing_service=None,
-        realized_profit_service=None,
         repo=repo,
         admin_settings=admin_settings,
         session_provider=session_provider,
@@ -503,6 +504,51 @@ def test_upsert_weights_and_get() -> None:
     result2 = repo.get_weights([590])
     assert result2[590].accuracy_ema == 0.90
     assert result2[590].sample_count == 12
+
+
+def _feedback_rows(now):
+    outcome = PlanItemOutcomeModel(
+        plan_item_id=0, type_id=590, completed_at=now, predicted_isk_per_hour=1.0,
+        actual_isk_per_hour=1.0, accuracy_ratio=1.0, predicted_sell_days=7.0,
+        actual_sell_days=7.0, slow_mover=False,
+    )
+    weights = PlanLearningWeightsModel(
+        type_id=590, accuracy_ema=1.0, velocity_multiplier=1.0, cost_multiplier=1.0,
+        sample_count=1, last_updated=now, confidence_tier="low",
+    )
+    return outcome, weights
+
+
+def test_record_feedback_commits_nothing_when_marking_processed_fails(monkeypatch) -> None:
+    """A locked database on the last step must not leave the outcome and
+    weights behind, or the next compute counts the action a second time."""
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Query
+
+    repo, _ = _make_repo()
+    now = _now()
+    plan_id = repo.insert_plan(BuildPlanModel(created_at=now, updated_at=now, status="active"))
+    repo.insert_actions([DailyActionLogModel(
+        plan_id=plan_id, generated_at=now, action_type="manufacture", type_id=590,
+        type_name="Rifter", quantity=5, status="done", processed_for_feedback=False,
+    )])
+    action_id = repo.get_actions(plan_id)[0].id
+
+    def _locked(*_args, **_kwargs):
+        raise OperationalError("UPDATE", {}, Exception("database is locked"))
+
+    with monkeypatch.context() as m:
+        m.setattr(Query, "update", _locked)
+        with pytest.raises(OperationalError):
+            repo.record_feedback(action_id, *_feedback_rows(now))
+
+    assert repo.get_outcomes(590) == []
+    assert repo.get_weights([590]) == {}
+    assert [a.id for a in repo.get_unprocessed_done_actions()] == [action_id]
+
+    repo.record_feedback(action_id, *_feedback_rows(now))
+    assert len(repo.get_outcomes(590)) == 1
+    assert repo.get_unprocessed_done_actions() == []
 
 
 # ---------------------------------------------------------------------------

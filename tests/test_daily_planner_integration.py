@@ -236,7 +236,7 @@ def _run_phases(overview_rows, input_rows, meta, admin, *, own_bpos=True):
     planner = ChainPlanner(
         industry_service=SimpleNamespace(), session_provider=None, admin_settings=admin,
     )
-    planner._compute_optimal_me = lambda bp_type_id, runs=1: 10
+    planner._compute_optimal_me = lambda bp_data, runs=1: 10
     chain = planner.plan_chain(
         top_level_decisions=promoted,
         phase1_data={

@@ -750,22 +750,19 @@ class Character:
         """Fetch and update the character's wallet journal from ESI. Enrich with SDE and ESI data."""
         try:
             self.ensure_esi()
-            journal_entries = self._esi_client.esi_get(ESI_CHAR_WALLET_JOURNAL.format(character_id=self.character_id))
+            journal_entries = self._esi_client.esi_get(
+                ESI_CHAR_WALLET_JOURNAL.format(character_id=self.character_id), paginate=True
+            )
 
-            new_journal_entries = []
-            for entry in journal_entries:
-                entry_wallet_journal_id = entry.get("id")
-                if entry_wallet_journal_id is None:
-                    continue  # Skip entries without an ID
-
-                existing_entry = (
-                    self._db_app.session.query(CharacterWalletJournalModel)
-                    .filter_by(character_id=self.character_id, wallet_journal_id=entry_wallet_journal_id)
-                    .first()
-                )
-                if existing_entry:
-                    continue  # Skip if already exists
-                new_journal_entries.append(entry)
+            known_ids = {
+                row[0]
+                for row in self._db_app.session.query(CharacterWalletJournalModel.wallet_journal_id)
+                .filter_by(character_id=self.character_id)
+            }
+            new_journal_entries = [
+                entry for entry in journal_entries
+                if entry.get("id") is not None and entry.get("id") not in known_ids
+            ]
 
             # Step 1: Collect unique party IDs
             party_ids = set()
@@ -1415,72 +1412,25 @@ class Character:
             self.ensure_esi()
             order_list = self._esi_client.esi_get(ESI_CHAR_ORDERS.format(character_id=self.character_id))
 
-            # Cache location/region lookups for this refresh to avoid repeated ESI calls.
-            # { location_id: (location_name, region_id, region_name) }
-            location_region_cache: Dict[int, tuple[Optional[str], int, Optional[str]]] = {}
+            # Cache name lookups for this refresh to avoid repeated ESI calls.
+            location_name_cache: Dict[int, Optional[str]] = {}
             region_name_cache: Dict[int, Optional[str]] = {}
 
-            def resolve_region_name(region_id: int) -> Optional[str]:
-                if not region_id or not isinstance(region_id, int):
-                    return None
-
-                cached = region_name_cache.get(region_id)
-                if cached is not None:
-                    return cached
-
-                try:
-                    region_info = self._esi_service.get_location_info(region_id)
-                    if isinstance(region_info, dict):
-                        name = region_info.get("name")
-                        if isinstance(name, str) and name:
-                            region_name_cache[region_id] = name
-                            return name
-                except ESI_REQUEST_ERRORS as exc:
-                    logging.warning("Market orders: region %s name unavailable: %s", region_id, exc)
-
-                region_name_cache[region_id] = None
-                return None
-
-            def resolve_location_region(location_id: Optional[int]) -> tuple[Optional[str], int, Optional[str]]:
+            def resolve_name(location_id: Optional[int], cache: Dict[int, Optional[str]], kind: str) -> Optional[str]:
                 if not location_id or not isinstance(location_id, int):
-                    return None, 0, None
-
-                cached = location_region_cache.get(location_id)
-                if cached is not None:
-                    return cached
-
-                location_name: Optional[str] = None
-                region_id: int = 0
-                region_name: Optional[str] = None
-
+                    return None
+                if location_id in cache:
+                    return cache[location_id]
+                name: Optional[str] = None
                 try:
-                    location_info = self._esi_service.get_location_info(location_id)
-                    if isinstance(location_info, dict):
-                        location_name = location_info.get("name")
-
-                        # Stations have system_id; structures have solar_system_id.
-                        system_id = location_info.get("system_id") or location_info.get("solar_system_id")
-                        if system_id and isinstance(system_id, int):
-                            system_info = self._esi_service.get_location_info(system_id)
-                            if isinstance(system_info, dict):
-                                # /universe/systems/{id} does not contain region_id; it contains constellation_id.
-                                constellation_id = system_info.get("constellation_id")
-                                if isinstance(constellation_id, int) and constellation_id:
-                                    constellation_info = self._esi_service.get_location_info(constellation_id)
-                                    if isinstance(constellation_info, dict):
-                                        region_id_val = constellation_info.get("region_id")
-                                        if isinstance(region_id_val, int) and region_id_val:
-                                            region_id = region_id_val
-
-                    if region_id:
-                        region_name = resolve_region_name(region_id)
+                    info = self._esi_service.get_location_info(location_id)
+                    if isinstance(info, dict) and isinstance(info.get("name"), str) and info.get("name"):
+                        name = info["name"]
                 except ESI_REQUEST_ERRORS as exc:
                     # Do not fail refresh_market_orders if enrichment fails.
-                    logging.warning("Market orders: location %s name/region unavailable: %s", location_id, exc)
-
-                resolved = (location_name, region_id, region_name)
-                location_region_cache[location_id] = resolved
-                return resolved
+                    logging.warning("Market orders: %s %s name unavailable: %s", kind, location_id, exc)
+                cache[location_id] = name
+                return name
 
             orders = []
             type_ids = set(order.get("type_id") for order in order_list)
@@ -1496,12 +1446,7 @@ class Character:
                 category_data = category_data_map.get(group_data.categoryID) if group_data else None
 
                 location_id = order.get("location_id", None)
-                resolved_location_name, resolved_region_id, resolved_region_name = resolve_location_region(location_id)
-
-                # Prefer the region_id coming from the order payload when present,
-                # but always resolve a human-readable region_name from region_id.
-                final_region_id = order.get("region_id", None) or resolved_region_id
-                final_region_name = resolve_region_name(final_region_id) or resolved_region_name
+                region_id = order.get("region_id", None)  # ESI orders always carry their region
 
                 new_order = {
                     "character_id": self.character_id,
@@ -1513,9 +1458,9 @@ class Character:
                     "type_category_id": group_data.categoryID if group_data else None,
                     "type_category_name": category_data.name[self._db_sde.language] if category_data else None,
                     "location_id": location_id,
-                    "location_name": resolved_location_name,
-                    "region_id": final_region_id,
-                    "region_name": final_region_name,
+                    "location_name": resolve_name(location_id, location_name_cache, "location"),
+                    "region_id": region_id,
+                    "region_name": resolve_name(region_id, region_name_cache, "region"),
                     "owner": self.corporation_name if order.get("is_corporation", False) else self.character_name,
                     "is_corporation": order.get("is_corporation", False),
                     "price": order.get("price", 0.0),
@@ -1556,7 +1501,6 @@ class Character:
             self.ensure_esi()
             assets = self._esi_client.esi_get(ESI_CHAR_ASSETS.format(character_id=self.character_id), paginate=True)
             logging.debug(f"ESI assets fetched for {self.character_name}: {len(assets) if assets else 0} items")
-            print(f"[DEBUG] ESI assets for {self.character_name}: {len(assets) if assets else 0} items")
 
             blueprints = self._esi_client.esi_get(ESI_CHAR_BLUEPRINTS.format(character_id=self.character_id), paginate=True)
             market_prices = self._esi_client.esi_get(ESI_MARKETS_PRICES)
@@ -1745,13 +1689,6 @@ class Character:
             for asset in asset_list:
                 asset["top_location_id"] = resolve_top_location_id(asset)
 
-            # Check for Draugur before saving
-            draugur_before_save = [a for a in asset_list if a.get("type_id") == 52254]
-            if draugur_before_save:
-                logging.debug(f"Draugur in asset_list before save_assets(): {len(draugur_before_save)} item(s)")
-            else:
-                logging.debug(f"Draugur NOT in asset_list before save_assets()")
-
             self.save_assets(asset_list)
 
             # Assign loaded entries to self.assets for runtime access
@@ -1760,13 +1697,6 @@ class Character:
                 {col: getattr(entry, col) for col in CharacterAssetsModel.__table__.columns.keys()}
                 for entry in character_assets
             ]
-
-            # Check for Draugur after save
-            draugur_after_save = [a for a in self.assets if a.get("type_id") == 52254]
-            if draugur_after_save:
-                logging.debug(f"Draugur in database after save_assets(): {len(draugur_after_save)} item(s)")
-            else:
-                logging.debug(f"Draugur NOT in database after save_assets()")
 
             logging.debug(f"Assets successfully updated for {self.character_name}. Total assets: {len(asset_list)}")
         except Exception as e:

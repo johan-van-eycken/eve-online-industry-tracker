@@ -4,7 +4,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
-import math
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from sqlalchemy import desc, func, or_
@@ -35,6 +34,7 @@ from eve_online_industry_tracker.infrastructure.models import (
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     get_blueprint_manufacturing_data,
     get_invention_source_blueprint_ids,
+    round_material_quantity as _round_material_quantity,
 )
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
@@ -118,12 +118,6 @@ def _coalesce_int(payload: dict[str, Any], *keys: str) -> Optional[int]:
         if value is not None:
             return value
     return None
-
-
-def _round_material_quantity(raw_quantity: float, *, minimum_quantity: int) -> int:
-    if raw_quantity <= 0:
-        return 0
-    return max(int(minimum_quantity), int(math.ceil(raw_quantity)))
 
 
 def build_market_price_map(rows: Iterable[dict[str, Any]] | None) -> dict[int, float]:

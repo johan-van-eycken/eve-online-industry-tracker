@@ -11,6 +11,7 @@ import logging
 import math
 from typing import Any
 
+from eve_online_industry_tracker.application.daily_planner.values import attr as _get_attr
 from eve_online_industry_tracker.application.daily_planner.chain_planner import (
     build_invention_source_index,
     build_product_to_blueprint_index,
@@ -458,12 +459,6 @@ def _positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return n if n > 0 else None
-
-
-def _get_attr(obj: Any, attr: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(attr)
-    return getattr(obj, attr, None)
 
 
 def _asset_attr(asset: Any, attr: str) -> Any:
