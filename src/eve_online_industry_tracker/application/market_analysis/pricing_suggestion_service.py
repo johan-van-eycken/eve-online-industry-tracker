@@ -380,17 +380,16 @@ class PricingSuggestionService:
 
     def _get_orderbook_levels(self, *, type_id: int, region_id: int = 10000002) -> list[list[float]]:
         try:
-            from eve_online_industry_tracker.infrastructure.persistence.market_orderbook_cache_repo import get_cached_orderbook_levels
+            from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo
             app_session = self._sessions.app_session()
             try:
-                result = get_cached_orderbook_levels(
+                views = market_orderbook_view_cache_repo.get_views(
                     app_session,
                     hub="jita", region_id=region_id, station_id=60003760,
-                    side="sell", type_id=type_id, at_hub=True, ttl_seconds=3600,
+                    side="sell", at_hub=True, type_ids=[type_id], ttl_seconds=3600,
                 )
-                if result is not None:
-                    levels, _ = result
-                    return sorted(levels, key=lambda lv: lv[0])
+                if int(type_id) in views:
+                    return sorted(views[int(type_id)]["levels"], key=lambda lv: lv[0])
             finally:
                 app_session.close()
         except SQLAlchemyError as exc:   # the cached order book table; a bug propagates
