@@ -158,11 +158,8 @@ class FeedbackProcessor:
         processed_count = 0
 
         for action in manufacture_actions:
-            did_process = False
             try:
-                did_process = self._process_single_action(action, alpha=alpha, slow_mover_timeout=slow_mover_timeout)
-                if did_process:
-                    processed_count += 1
+                feedback = self._process_single_action(action, alpha=alpha, slow_mover_timeout=slow_mover_timeout)
             except (SQLAlchemyError, TypeError, ValueError):
                 # Repo/ledger queries and the float()/int() work on stored
                 # values. Anything else is a bug and must abort the compute.
@@ -171,15 +168,26 @@ class FeedbackProcessor:
                     action.id,
                     action.type_id,
                 )
-                did_process = True  # mark processed on error to avoid infinite retry loops
-
-            if did_process:
+                # mark processed on error to avoid infinite retry loops
                 try:
                     self._repo.mark_action_feedback_processed(action.id)
                 except SQLAlchemyError:
                     logger.exception(
                         "FeedbackProcessor: failed to mark action_id=%s as processed", action.id
                     )
+                continue
+
+            if feedback is None:
+                continue
+            outcome, weights = feedback
+            try:
+                self._repo.record_feedback(action.id, outcome, weights)
+                processed_count += 1
+            except SQLAlchemyError:
+                # One commit, so nothing was written: the next compute retries it.
+                logger.exception(
+                    "FeedbackProcessor: failed to record feedback for action_id=%s", action.id
+                )
 
         # Mark non-manufacture done actions as processed too (deliver, etc.)
         non_mfg = [a for a in done_actions if a.action_type != "manufacture"]
@@ -199,8 +207,9 @@ class FeedbackProcessor:
         *,
         alpha: float,
         slow_mover_timeout: float,
-    ) -> bool:
-        """Process one done manufacture action. Returns True if processed, False if deferred."""
+    ) -> tuple[PlanItemOutcomeModel, PlanLearningWeightsModel] | None:
+        """Process one done manufacture action. Returns the outcome and weights
+        to record, or None if deferred. Writes nothing itself."""
         type_id = int(action.type_id)
 
         # Try to find matching realized sale via the session provider (temporal FIFO)
@@ -375,7 +384,7 @@ class FeedbackProcessor:
             action_age_days = _action_age_days(action)
             if action_age_days < slow_mover_timeout:
                 # Not yet timed out — skip for now, will be retried next compute
-                return False
+                return None
 
             # Slow-mover outcome — write timeout record, only update velocity
             predicted_days = _estimate_predicted_sell_days(matching_item)
@@ -407,9 +416,6 @@ class FeedbackProcessor:
                 actual_material_cost=None,
             )
 
-        self._repo.insert_outcome(outcome)
-
-        # Upsert learning weights
         updated_weights = PlanLearningWeightsModel(
             type_id=type_id,
             accuracy_ema=new_accuracy_ema,
@@ -419,8 +425,7 @@ class FeedbackProcessor:
             last_updated=_now(),
             confidence_tier=confidence_tier,
         )
-        self._repo.upsert_weights(updated_weights)
-        return True
+        return outcome, updated_weights
 
     def _find_realized_sale(self, type_id: int, *, action: Any = None) -> dict[str, Any] | None:
         """Earliest realized sale of `type_id` at or after `action`'s timestamp.

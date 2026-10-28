@@ -445,7 +445,7 @@ def test_a_feedback_skips_the_accuracy_update_on_an_upper_bound_isk_per_hour(cap
     repo.get_plan_items.return_value = [item]
     with caplog.at_level("INFO"):
         assert processor.process_pending_feedback() == 1
-    assert repo.upsert_weights.call_args[0][0].accuracy_ema == 1.3
-    assert repo.insert_outcome.call_args[0][0].accuracy_ratio is None
+    assert repo.record_feedback.call_args[0][2].accuracy_ema == 1.3
+    assert repo.record_feedback.call_args[0][1].accuracy_ratio is None
     assert any("accuracy update skipped" in r.getMessage() and "upper bound" in r.getMessage()
                for r in caplog.records)
