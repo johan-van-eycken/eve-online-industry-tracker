@@ -536,6 +536,16 @@ class ESIClient:
     # ----------------------------
     # Token Refresh
     # ----------------------------
+    # One lock for all clients (tests build clients with __new__): refreshes are rare, and
+    # parallel refresh threads of one pilot must not each rotate the refresh token.
+    _token_refresh_lock = threading.Lock()
+
+    def _ensure_fresh_token(self) -> None:
+        """Refresh the access token when it is missing or expired, once across threads."""
+        with self._token_refresh_lock:
+            if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
+                self.refresh_access_token()
+
     def refresh_access_token(self) -> None:
         """Refresh access token using stored refresh token."""
         if not self.refresh_token:
@@ -1016,8 +1026,7 @@ class ESIClient:
         timeout_seconds None: esi_resilience/esi_request_timeout_seconds; the
         attempts are 1 + esi_resilience/esi_max_retries (per page).
         """
-        if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
-            self.refresh_access_token()
+        self._ensure_fresh_token()
         if timeout_seconds is None:
             timeout_seconds = esi_request_timeout_seconds()
 
@@ -1086,8 +1095,7 @@ class ESIClient:
         timeout None: esi_resilience/esi_request_timeout_seconds; the attempts
         are 1 + esi_resilience/esi_max_retries (per page).
         """
-        if not self.access_token or (self.token_expiry and time.time() > self.token_expiry):
-            self.refresh_access_token()
+        self._ensure_fresh_token()
         if timeout is None:
             timeout = esi_request_timeout_seconds()
         if headers is None:
