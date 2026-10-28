@@ -15,6 +15,8 @@ from eve_online_industry_tracker.infrastructure.esi_client import (
     ESI_REQUEST_ERRORS,
     ESIClient,
     EsiRequestError,
+    _ESI_ERROR_LIMITER,
+    _esi_gate,
     call_esi_monitor,
     esi_total_pages,
 )
@@ -226,6 +228,8 @@ class ESIService:
                 except (TypeError, ValueError):
                     page = None
             while True:
+                # The error budget is per IP, so public calls wait on and feed the same limiter.
+                _esi_gate(f"GET {endpoint}")
                 request_started_at = time.time()
                 try:
                     response = self._http_session.get(
@@ -234,6 +238,7 @@ class ESIService:
                         timeout=float(timeout_seconds),
                         headers=headers,
                     )
+                    _ESI_ERROR_LIMITER.update_from_headers(getattr(response, "headers", None))
                     _monitor(
                         "record_http_attempt",
                         lambda: dict(

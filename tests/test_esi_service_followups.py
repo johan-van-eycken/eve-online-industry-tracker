@@ -208,3 +208,20 @@ def test_an_odd_status_code_does_not_fail_an_esi_get(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         assert c.esi_get("/x/", use_cache=False, suppress_not_found_log=True) is None   # the 404 path
     assert any("ESI monitor record_http_attempt failed" in r.getMessage() for r in caplog.records)
+
+
+# --- public ESI calls share the error-budget limiter ----------------------------------------------
+
+def test_a_public_esi_get_waits_on_and_feeds_the_shared_error_limiter(monkeypatch):
+    gates, seen = [], []
+    monkeypatch.setattr("eve_online_industry_tracker.infrastructure.esi_service._esi_gate", gates.append)
+    monkeypatch.setattr(esi_client_module._ESI_ERROR_LIMITER, "update_from_headers", seen.append)
+    monkeypatch.setattr(esi_client_module, "get_esi_monitor", None)
+    headers = {"X-Esi-Error-Limit-Remain": "7", "X-Esi-Error-Limit-Reset": "30"}
+    response = SimpleNamespace(status_code=200, headers=headers, url="u", json=lambda: [1],
+                               raise_for_status=lambda: None)
+    svc = _svc(SimpleNamespace(esi_base_uri="https://esi.example"))
+    svc._http_session = SimpleNamespace(get=lambda url, **kw: response)
+
+    assert svc._public_esi_get("/markets/10000002/history/") == [1]
+    assert gates == ["GET /markets/10000002/history/"] and seen == [headers]
