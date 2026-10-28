@@ -162,6 +162,37 @@ def _output_quantity_per_run_for_job(*, sde_session: Any, blueprint_type_id: int
     return quantity if quantity and quantity > 0 else None
 
 
+COMPLETED_JOB_STATUSES = {"delivered", "ready", "completed"}
+
+
+def completed_job_output_lot(
+    job: Any, *, sde_session: Any, market_price_map: dict[int, float],
+) -> Optional[tuple[int, float]]:
+    """(quantity, unit cost) of a finished job's output as a cost lot, or None."""
+    status = str(getattr(job, "status", "") or "").strip().lower()
+    if status and status not in COMPLETED_JOB_STATUSES:
+        return None
+    if not (getattr(job, "completed_date", None) or getattr(job, "end_date", None)):
+        return None
+    product_type_id = _safe_int(getattr(job, "product_type_id", None))
+    blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
+    if not product_type_id or not blueprint_type_id:
+        return None
+    snapshot = resolve_industry_job_cost_snapshot(job=job, sde_session=sde_session, market_price_map=market_price_map)
+    unit_cost = _safe_float(snapshot.get("unit_cost"))
+    if unit_cost is None or unit_cost <= 0:
+        return None
+    quantity = _safe_int(snapshot.get("output_quantity")) or 0
+    if quantity <= 0:
+        per_run = _output_quantity_per_run_for_job(
+            sde_session=sde_session, blueprint_type_id=blueprint_type_id, product_type_id=product_type_id,
+        )
+        if not per_run:
+            return None
+        quantity = int(per_run) * _industry_job_runs(job)
+    return int(quantity), float(unit_cost)
+
+
 def _estimate_industry_job_materials_cost_total(
     *,
     sde_session: Any,
@@ -1763,78 +1794,15 @@ def build_fifo_remaining_lots_by_type(
     # Add industry-job outputs as FIFO "buy" lots (best-effort).
     # This allows FIFO valuation for items you manufactured, not only bought.
     if industry_jobs is not None and sde_session is not None and market_price_map:
-        completed_statuses = {"delivered", "ready", "completed"}
-        qty_per_run_cache: dict[tuple[int, int], Optional[int]] = {}
-
-        def _output_qty_per_run(blueprint_type_id: int, product_type_id: int) -> Optional[int]:
-            key = (int(blueprint_type_id), int(product_type_id))
-            if key in qty_per_run_cache:
-                return qty_per_run_cache[key]
-            bp = (
-                sde_session.query(Blueprints)
-                .filter_by(blueprintTypeID=int(blueprint_type_id))
-                .first()
-            )
-            if bp is None:
-                qty_per_run_cache[key] = None
-                return None
-            mfg = _get_mfg_activity(getattr(bp, "activities", None))
-            if not mfg:
-                qty_per_run_cache[key] = None
-                return None
-            products = mfg.get("products")
-            if not isinstance(products, list) or not products:
-                qty_per_run_cache[key] = None
-                return None
-            out_q: Optional[int] = None
-            for p in products:
-                if not isinstance(p, dict):
-                    continue
-                if _safe_int(p.get("typeID")) == int(product_type_id):
-                    out_q = _safe_int(p.get("quantity"))
-                    break
-            if out_q is None and products:
-                out_q = _safe_int(products[0].get("quantity")) if isinstance(products[0], dict) else None
-            if not out_q or out_q <= 0:
-                qty_per_run_cache[key] = None
-                return None
-            qty_per_run_cache[key] = int(out_q)
-            return int(out_q)
-
         for job in industry_jobs or []:
-            status = str(getattr(job, "status", "") or "").lower()
-            completed_date = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
-            if status and status not in completed_statuses:
+            lot = completed_job_output_lot(job, sde_session=sde_session, market_price_map=market_price_map)
+            if lot is None:
                 continue
-            if completed_date is None:
-                continue
-
-            product_type_id = _safe_int(getattr(job, "product_type_id", None))
-            blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
-            if not product_type_id or not blueprint_type_id:
-                continue
-
-            snapshot = resolve_industry_job_cost_snapshot(
-                job=job,
-                sde_session=sde_session,
-                market_price_map=market_price_map,
-            )
-            lot_qty = _safe_int(snapshot.get("output_quantity")) or 0
-            unit_cost = _safe_float(snapshot.get("unit_cost"))
-            if unit_cost is None or unit_cost <= 0:
-                continue
-            if lot_qty <= 0:
-                qpr = _output_qty_per_run(int(blueprint_type_id), int(product_type_id))
-                if qpr is None:
-                    continue
-                lot_qty = int(qpr) * int(_industry_job_runs(job))
-                if lot_qty <= 0:
-                    continue
-
-            date_s = completed_date
+            lot_qty, unit_cost = lot
+            date_s = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
             dt = _parse_date(date_s)
             job_id = _safe_int(getattr(job, "job_id", None))
-            tx_by_type[int(product_type_id)].append(
+            tx_by_type[int(getattr(job, "product_type_id"))].append(
                 {
                     "kind": "buy",
                     "quantity": int(lot_qty),
@@ -2227,7 +2195,7 @@ def build_cost_map_for_assets(
 
     # Pull completed jobs (most recent per product type).
     # ESI job statuses vary; we treat delivered/ready/completed as "completed".
-    completed_statuses = {"delivered", "ready", "completed"}
+    completed_statuses = COMPLETED_JOB_STATUSES
     job_rows = (
         app_session.query(industry_job_model)
         .filter(industry_job_model.product_type_id.in_(type_ids))

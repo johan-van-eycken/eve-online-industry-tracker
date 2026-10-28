@@ -13,11 +13,13 @@ from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.application.characters.asset_provenance import (
     ASSET_SOURCE_INDUSTRY_BUILD,
     ASSET_SOURCE_MARKET_BUY,
+    COMPLETED_JOB_STATUSES,
     FifoLot,
-    resolve_industry_job_cost_snapshot,
+    _safe_float,
+    _safe_int,
+    completed_job_output_lot,
 )
 from eve_online_industry_tracker.db_models import (
-    Blueprints,
     CharacterIndustryJobsModel,
     CharacterModel,
     CharacterRealizedSalesLedgerModel,
@@ -60,24 +62,6 @@ def cost_lower_bound_reason(allocation_details: Any) -> str | None:
 ASSET_SOURCE_OPENING_INVENTORY = "opening_inventory"
 
 
-def _safe_float(value: Any) -> float | None:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_int(value: Any) -> int | None:
-    try:
-        if value is None:
-            return None
-        return int(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-
-
 def _parse_date(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
@@ -90,36 +74,6 @@ def _parse_date(value: Any) -> datetime | None:
         return datetime.fromisoformat(raw_value)
     except ValueError:
         return None
-
-
-def _get_mfg_activity(activities: Any) -> dict[str, Any] | None:
-    if not isinstance(activities, dict):
-        return None
-    manufacturing = activities.get("manufacturing")
-    return manufacturing if isinstance(manufacturing, dict) else None
-
-
-def _output_quantity_per_run(*, sde_session: Any, blueprint_type_id: int, product_type_id: int) -> int | None:
-    blueprint = sde_session.query(Blueprints).filter_by(blueprintTypeID=int(blueprint_type_id)).first()
-    if blueprint is None:
-        return None
-    manufacturing = _get_mfg_activity(getattr(blueprint, "activities", None))
-    if not manufacturing:
-        return None
-    products = manufacturing.get("products") or []
-    if not isinstance(products, list) or not products:
-        return None
-    for product in products:
-        if not isinstance(product, dict):
-            continue
-        if _safe_int(product.get("typeID")) == int(product_type_id):
-            quantity = _safe_int(product.get("quantity"))
-            return quantity if quantity and quantity > 0 else None
-    first = products[0]
-    if not isinstance(first, dict):
-        return None
-    quantity = _safe_int(first.get("quantity"))
-    return quantity if quantity and quantity > 0 else None
 
 
 def _append_lot(lots_by_type: dict[int, list[FifoLot]], *, type_id: int, lot: FifoLot) -> None:
@@ -747,7 +701,6 @@ class _BaseRealizedProfitLedgerService:
                 }
             )
 
-        completed_statuses = {"delivered", "ready", "completed"}
         market_price_map = {
             int(row.get("type_id")): float(row.get("average_price") or row.get("adjusted_price"))
             for row in self._market_prices
@@ -756,35 +709,12 @@ class _BaseRealizedProfitLedgerService:
             and _safe_float(row.get("average_price") or row.get("adjusted_price")) is not None
         }
         for job in industry_jobs:
-            status = str(getattr(job, "status", "") or "").strip().lower()
-            if status and status not in completed_statuses:
+            lot = completed_job_output_lot(job, sde_session=self._sde_session, market_price_map=market_price_map)
+            if lot is None:
                 continue
-            product_type_id = _safe_int(getattr(job, "product_type_id", None))
-            blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
-            if not product_type_id or not blueprint_type_id:
-                continue
+            quantity, unit_cost = lot
+            product_type_id = int(getattr(job, "product_type_id"))
             completed_date = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
-            if not completed_date:
-                continue
-            snapshot = resolve_industry_job_cost_snapshot(
-                job=job,
-                sde_session=self._sde_session,
-                market_price_map=market_price_map,
-            )
-            quantity = _safe_int(snapshot.get("output_quantity")) or 0
-            unit_cost = _safe_float(snapshot.get("unit_cost"))
-            if unit_cost is None or unit_cost <= 0:
-                continue
-            if quantity <= 0:
-                runs = _safe_int(getattr(job, "successful_runs", None)) or _safe_int(getattr(job, "runs", None)) or 1
-                quantity_per_run = _output_quantity_per_run(
-                    sde_session=self._sde_session,
-                    blueprint_type_id=int(blueprint_type_id),
-                    product_type_id=int(product_type_id),
-                )
-                if not quantity_per_run or quantity_per_run <= 0:
-                    continue
-                quantity = int(quantity_per_run) * int(runs)
             events_by_type.setdefault(int(product_type_id), []).append(
                 {
                     "kind": "job",
@@ -1172,7 +1102,7 @@ class CorporationRealizedProfitLedgerService(_BaseRealizedProfitLedgerService):
         already hold them. _rebuild_owner skips a lot the corp asset history already stamped.
         """
         lots_by_type: dict[int, list[FifoLot]] = {}
-        completed_statuses = {"delivered", "ready", "completed"}
+        completed_statuses = COMPLETED_JOB_STATUSES
 
         char_jobs = (
             self._app_session.query(CharacterIndustryJobsModel)
