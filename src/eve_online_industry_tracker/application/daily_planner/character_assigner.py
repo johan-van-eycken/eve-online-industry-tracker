@@ -1480,20 +1480,6 @@ def _pilot_lacks(
     return f"{prefix} {name} lacks the skills: {', '.join(missing)}"
 
 
-def pilot_skill_levels(characters: list[dict[str, Any]]) -> dict[int, tuple[str, dict[int, int] | None]]:
-    """{character_id: (name, skill levels by type_id; None when not loaded)}
-    of every pilot in industry (industry_enabled, as
-    _compute_available_slots), for the decision gate's manufacture_skill_block."""
-    return {
-        int(c.get("character_id") or c.get("id") or 0): (
-            str(c.get("character_name") or c.get("name") or c.get("character_id") or ""),
-            skill_levels_by_id(c) if _skills_loaded(c) else None,
-        )
-        for c in characters
-        if int(c.get("character_id") or c.get("id") or 0) > 0 and c.get("industry_enabled", True)
-    }
-
-
 def sole_blueprint_owners(
     blueprint_type_id: int | None, bpo_assets_by_type_id: dict[int, list], bpc_assets_by_type_id: dict[int, list],
     busy_item_ids: set[int],
@@ -1520,27 +1506,6 @@ def sole_blueprint_owners(
     if None in owners:
         return None
     return sorted(o for o in owners if o is not None)
-
-
-def manufacture_skill_block(
-    row: dict[str, Any], blueprint_data: Any, pilots: dict[int, tuple[str, dict[int, int] | None]],
-    owners: list[int] | None = None,
-) -> str | None:
-    """Why no pilot can manufacture (or react) this row's blueprint, else
-    None: the decision gate's check, the same rule _SkillGate applies to the
-    manufacture job (free slots aside). `owners` (sole_blueprint_owners): the
-    row builds only from these pilots' own blueprints, so only they count;
-    none qualifying: what each owner lacks."""
-    entries, unknown = activity_skill_requirements(blueprint_data, orow.get_blueprint_type_id(row), "manufacturing")
-    if entries is None:
-        return unknown
-    required = required_skill_levels(entries)
-    candidates = list(pilots) if owners is None else [o for o in owners if o in pilots]
-    if any(pilots[c][1] is not None and meets_skill_levels(required, pilots[c][1]) for c in candidates):
-        return None
-    if owners is not None:
-        return "; ".join(_pilot_lacks(entries, o, pilots.get(o), prefix="owner") for o in owners)
-    return skill_shortfall(entries, pilots.values())
 
 
 #: On a row's overview_row: why its last assignment attempt got no job for
