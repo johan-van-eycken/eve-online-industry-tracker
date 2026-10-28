@@ -783,36 +783,20 @@ def render() -> None:
     with controls_about:
         st.write("")
         st.write("")
-        if hasattr(st, "popover"):
-            with st.popover("?", help="About this page"):
-                st.caption(
-                    "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
-                    "Corporation scope uses wallet journal-backed fee capture via context_id matching."
-                )
-                st.caption(
-                    "Profit Type groups sales into Manufacturing or Trade for readability. "
-                    "Trade includes untracked inventory, older stock outside tracked history, transfers, loot, donations, and similar cases where no historical source lot was matched."
-                )
-                st.caption(
-                    "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
-                )
-                st.caption("Coverage excludes rows with missing historical cost basis.")
-        else:
-            with st.expander("?", expanded=False):
-                st.caption(
-                    "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
-                    "Character scope supports wallet journal-backed fee capture when linked."
-                )
-                st.caption(
-                    "Profit Type groups sales into Manufacturing or Trade for readability. "
-                    "Trade includes untracked inventory, older stock outside tracked history, transfers, loot, donations, and similar cases where no historical source lot was matched."
-                )
-                st.caption(
-                    "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
-                )
-                st.caption("Coverage excludes rows with missing historical cost basis.")
+        with st.popover("?", help="About this page"):
+            st.caption(
+                "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
+                "Fees come from the wallet journal where a journal entry can be linked to the sale."
+            )
+            st.caption(
+                "Profit Type groups sales into Manufacturing or Trade for readability. "
+                "Sales with any unit without a historical cost (untracked inventory, older stock outside tracked "
+                "history, transfers, loot, donations) are not counted in profit; they are listed in Coverage."
+            )
+            st.caption(
+                "Confidence indicates how complete the pricing evidence is for a sale. "
+                "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
+            )
 
     # A failed ledger read (either scope of "All") stops the page with the
     # reason: it is not "no realized sales".
