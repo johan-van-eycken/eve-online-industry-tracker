@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from eve_online_industry_tracker.config.settings import public_structures_cache_ttl_seconds as _public_structures_cache_ttl_seconds
+from eve_online_industry_tracker.config.settings import public_structures_cache_ttl_seconds
 from eve_online_industry_tracker.infrastructure import public_structures_cache_service
 from eve_online_industry_tracker.infrastructure.persistence import corporation_structures_repo
 from eve_online_industry_tracker.infrastructure.persistence import industry_profiles_repo
@@ -25,10 +25,6 @@ def trigger_refresh_public_structures_for_system(*, state: Any, system_id: int) 
         state=state,
         system_id=int(system_id),
     )
-
-
-def public_structures_cache_ttl_seconds() -> int:
-    return int(_public_structures_cache_ttl_seconds())
 
 
 def corporation_structures_list_by_corporation_id(db_app_session: Any, corporation_id: int) -> list[Any]:
