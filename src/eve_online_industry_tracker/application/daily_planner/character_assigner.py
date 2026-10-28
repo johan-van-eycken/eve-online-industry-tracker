@@ -869,7 +869,7 @@ class CharacterAssigner:
     ) -> tuple[int | None, str | None]:
         """Character with most free manufacturing slots; tie-break by fewest
         total active jobs. `only`: the blueprint owner(s) allowed (Task A)."""
-        candidates = [(s["free_mfg"], -s["total_active_jobs"], s["character_id"], s["character_name"])
+        candidates = [(s["free_mfg"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_mfg"] > 0
                       and (not only or s["character_id"] in only)]
         if not candidates:
@@ -900,7 +900,7 @@ class CharacterAssigner:
     ) -> tuple[int | None, str | None]:
         """Character with most free research slots; tie-break by fewest
         active jobs. `only`: the blueprint owner(s) allowed (Task A)."""
-        candidates = [(s["free_research"], -s["total_active_jobs"], s["character_id"], s["character_name"])
+        candidates = [(s["free_research"], s["total_active_jobs"], s["character_id"], s["character_name"])
                       for s in char_slots.values() if s["free_research"] > 0
                       and (not only or s["character_id"] in only)]
         if not candidates:
