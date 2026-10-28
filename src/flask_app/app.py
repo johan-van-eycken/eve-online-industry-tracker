@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from flask import Flask
+from flask import Flask, request
 
 from werkzeug.exceptions import HTTPException
 
@@ -34,6 +34,13 @@ def create_app() -> Flask:
 
     # Ensure DB sessions created during a request are always closed.
     app.teardown_appcontext(close_request_sessions)
+
+    @app.before_request
+    def _reject_cross_site_writes():
+        # Browsers add Origin to cross-site writes; the Streamlit client (requests) never
+        # does, so this stops any web page from POSTing to /shutdown or /admin_settings/reset.
+        if request.method != "GET" and request.headers.get("Origin"):
+            return error(message="Cross-origin requests are not allowed", status_code=403)
 
     @app.errorhandler(HTTPException)
     def _handle_http_exception(e: HTTPException):

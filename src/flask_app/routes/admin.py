@@ -66,7 +66,7 @@ def health_check():
     return jsonify(payload), status
 
 
-@admin_bp.route("/shutdown", methods=["GET", "POST"])
+@admin_bp.route("/shutdown", methods=["POST"])
 def shutdown():
     """Shutdown the Flask server."""
     try:
