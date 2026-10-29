@@ -162,6 +162,22 @@ def test_a_failed_facility_bonus_read_is_not_kept_in_the_cache(monkeypatch):
         page.cached_api_get.clear()
 
 
+def test_cached_api_get_keeps_no_failed_response(monkeypatch):
+    import streamlit_ui.api.streamlit_client as streamlit_client
+
+    responses = [None, {"status": "error", "message": "HTTP 503"},
+                 {"status": "success", "data": [1]}, {"status": "success", "data": [2]}]
+    monkeypatch.setattr(streamlit_client, "api_get", lambda path, timeout_seconds=None: responses.pop(0))
+    streamlit_client.cached_api_get.clear()
+    try:
+        assert streamlit_client.cached_api_get("/characters") is None  # Flask down
+        assert streamlit_client.cached_api_get("/characters")["message"] == "HTTP 503"
+        assert streamlit_client.cached_api_get("/characters")["data"] == [1]
+        assert streamlit_client.cached_api_get("/characters")["data"] == [1]  # the success is cached
+    finally:
+        streamlit_client.cached_api_get.clear()
+
+
 def test_rig_options_exclude_a_malformed_rig_and_warn(monkeypatch, st_messages, caplog):
     from streamlit_ui.pages import industry_profiles as page
 
@@ -270,7 +286,7 @@ def test_portfolio_track_record_is_reused_when_the_ids_were_already_fetched():
 def test_realized_profit_stops_with_an_error_when_wallet_owners_fail(monkeypatch, st_messages):
     from streamlit_ui.pages import realized_profit as page
 
-    def boom():
+    def boom(**_):
         raise RuntimeError("Failed to load characters")
 
     monkeypatch.setattr(page, "fetch_characters", boom)
@@ -291,7 +307,7 @@ def test_realized_profit_render_stops_without_the_wallet_owners(monkeypatch, st_
 
     fetched = []
     monkeypatch.setattr(page, "require_aggrid", lambda: SimpleNamespace(js_code=lambda s: s))
-    monkeypatch.setattr(page, "fetch_characters", lambda: [])
+    monkeypatch.setattr(page, "fetch_characters", lambda **_: [])
     monkeypatch.setattr(corps, "fetch_director_corporations", boom)
     monkeypatch.setattr(page, "fetch_realized_profit", lambda **k: fetched.append(k) or {"status": "success"})
     page.render()

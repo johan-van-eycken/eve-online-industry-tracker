@@ -41,12 +41,11 @@ def _request(method, path, *, payload=None, timeout_seconds=None):
         return None
 
 
-def api_get_or_error(path, timeout_seconds=None):
-    """(body, None) on success; (None, the API's error message) on failure,
-    so a page can show why instead of an empty result."""
+def _request_or_error(method, path, *, payload=None, timeout_seconds=None):
+    """(body, None) on success; (None, the API's error message) on failure."""
     timeout = api_request_timeout_seconds() if timeout_seconds is None else timeout_seconds
     try:
-        response = requests.get(f"{api_base()}{path}", timeout=timeout)
+        response = requests.request(method, f"{api_base()}{path}", json=payload, timeout=timeout)
     except requests_exceptions.RequestException as exc:
         logging.error("%s request failed: %s", path, exc)
         return None, f"request failed: {exc}"
@@ -63,12 +62,14 @@ def api_get_or_error(path, timeout_seconds=None):
     return body, None
 
 
+def api_get_or_error(path, timeout_seconds=None):
+    """(body, None) on success; (None, the API's error message) on failure,
+    so a page can show why instead of an empty result."""
+    return _request_or_error("GET", path, timeout_seconds=timeout_seconds)
+
+
 def api_post(path, payload):
     return _request("POST", path, payload=payload)
-
-
-def cached_api_get(path, timeout_seconds=None):
-    return api_get(path, timeout_seconds=timeout_seconds)
 
 
 def api_get(path, timeout_seconds=None):
@@ -82,23 +83,7 @@ def api_put(path, payload):
 def api_put_or_error(path, payload, timeout_seconds=None):
     """(body, None) on success; (None, the API's error message) on failure,
     e.g. the settings route's 400 naming a refused setting and its range."""
-    timeout = api_request_timeout_seconds() if timeout_seconds is None else timeout_seconds
-    try:
-        response = requests.put(f"{api_base()}{path}", json=payload, timeout=timeout)
-    except requests_exceptions.RequestException as exc:
-        logging.error("%s request failed: %s", path, exc)
-        return None, f"request failed: {exc}"
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
-    if not (200 <= response.status_code < 300):
-        _handle_failure(path, response)
-        message = (body or {}).get("message") if isinstance(body, dict) else None
-        return None, message or f"HTTP {response.status_code}"
-    if body is None:
-        return None, "invalid JSON"
-    return body, None
+    return _request_or_error("PUT", path, payload=payload, timeout_seconds=timeout_seconds)
 
 
 def api_delete(path):

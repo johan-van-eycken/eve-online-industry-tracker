@@ -163,7 +163,7 @@ def test_portfolio_planner_optional_fetch_lets_programming_errors_through():
 def test_realized_profit_warns_when_wallet_owners_fail(monkeypatch, st_messages):
     from streamlit_ui.pages import realized_profit as page
 
-    def boom():
+    def boom(**_):
         raise RuntimeError("Failed to load characters")
 
     monkeypatch.setattr(page, "fetch_characters", boom)

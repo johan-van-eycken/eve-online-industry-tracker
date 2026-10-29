@@ -356,8 +356,7 @@ def render() -> None:
             st.info("No ESI warnings/errors recorded yet.")
 
     # Prefer fragments for real-time updates (no full app rerun).
-    fragment = getattr(st, "fragment", None)
-    if auto_refresh and callable(fragment):
+    if auto_refresh:
         @st.fragment(run_every=f"{int(refresh_interval_s)}s")
         def _live_fragment() -> None:
             snap = _fetch_snapshot()
@@ -369,9 +368,7 @@ def render() -> None:
         _render_details(st.session_state.get("esi_monitor_snapshot") or {})
         return
 
-    # Manual refresh (and fallback for older Streamlit versions)
-    if auto_refresh and not callable(fragment):
-        st.info("Auto-refresh without full reruns requires Streamlit fragments. Upgrade Streamlit or use 'Refresh now'.")
+    # Manual refresh
 
     snap = _fetch_snapshot()
     st.session_state["esi_monitor_snapshot"] = snap

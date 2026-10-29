@@ -935,12 +935,8 @@ def _render_page_about() -> None:
             "and unprofitable products) are excluded from scoring entirely and listed in the Excluded section."
         )
 
-    if hasattr(st, "popover"):
-        with st.popover("?", help="About the Portfolio Planner"):
-            _content()
-    else:
-        with st.expander("?", expanded=False):
-            _content()
+    with st.popover("?", help="About the Portfolio Planner"):
+        _content()
 
 
 # ---------------------------------------------------------------------------

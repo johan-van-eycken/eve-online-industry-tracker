@@ -116,13 +116,6 @@ def _profile_save_block_reason(
     return None
 
 
-def _forget_cached_get(path: str) -> None:
-    """Drop a failed response from cached_api_get, so the next run asks again."""
-    clear = getattr(cached_api_get, "clear", None)
-    if callable(clear):
-        clear(path)
-
-
 def _fetch_facility_bonuses(type_id: int) -> tuple[dict, str | None]:
     """The SDE facility bonuses (fractions) of a structure type, and the
     reason when they could not be loaded ({} then)."""
@@ -131,8 +124,6 @@ def _fetch_facility_bonuses(type_id: int) -> tuple[dict, str | None]:
     if not bonus_resp or bonus_resp.get("status") != "success":
         reason = (bonus_resp or {}).get("message") or "the structure type bonuses request failed (see the logs)"
         logger.warning("Industry profiles: facility bonuses for type %s did not load: %s", type_id, reason)
-        # A blocked save says "reload": the failure must not stay cached.
-        _forget_cached_get(path)
         return {}, str(reason)
     bonuses = (bonus_resp.get("data") or {}).get("bonuses") or {}
     try:
@@ -646,7 +637,6 @@ def _load_profile_context(selected_character_id: int, profiles: list[dict]) -> d
         else:
             reason = (context_resp or {}).get("message") or "the request failed (see the logs)"
             logger.warning("Industry profiles: the context of profile %s did not load: %s", profile_id, reason)
-            _forget_cached_get(f"/industry_profile_context/{int(profile_id)}")
             warnings =[f"The profile's cost indices, facility and bonuses could not be checked ({reason})."]
         context["profile_warnings_by_id"][int(profile_id)] = warnings
 

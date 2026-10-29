@@ -21,7 +21,7 @@ def select_character_id(
     """
 
     try:
-        characters = fetch_characters()
+        characters = fetch_characters(summary=True)
     except Exception as e:
         st.error(f"Failed to get characters: {e}")
         return None

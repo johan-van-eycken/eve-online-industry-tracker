@@ -123,3 +123,39 @@ def render_ship_cards(ships: pd.DataFrame, *, cards_per_row: int = 4) -> None:
                     """,
                     unsafe_allow_html=True,
                 )
+
+
+def render_asset_dataframe(df: pd.DataFrame, *, height: int, prefer_container_names: bool = False, prefer_ship_names: bool = False) -> None:
+    """Render assets via st.dataframe — works reliably inside st.expander."""
+    df_display = build_asset_display_frame(df, prefer_container_names=prefer_container_names, prefer_ship_names=prefer_ship_names)
+    if df_display.empty:
+        st.info("No items.")
+        return
+
+    column_config: dict[str, Any] = {}
+    if "image_url" in df_display.columns:
+        column_config["image_url"] = st.column_config.ImageColumn("", width=40)
+    for col in ASSET_ISK_COLUMNS:
+        if col in df_display.columns:
+            column_config[col] = st.column_config.NumberColumn(format="%.2f ISK")
+    for col in ASSET_INT_COLUMNS:
+        if col in df_display.columns:
+            column_config[col] = st.column_config.NumberColumn(format="%d")
+    for col in ASSET_FLOAT_COLUMNS:
+        if col in df_display.columns:
+            column_config[col] = st.column_config.NumberColumn(format="%.2f")
+
+    st.dataframe(
+        df_display,
+        column_config=column_config,
+        height=height,
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def render_asset_summary(df: pd.DataFrame) -> None:
+    unique_items, total_volume, total_value = summarize_asset_items(df)
+    st.markdown(
+        f"Items: {unique_items} - Total Volume: {total_volume:,.2f} m³ - Total Value: {total_value:,.2f} ISK"
+    )

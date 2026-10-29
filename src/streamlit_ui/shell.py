@@ -149,8 +149,7 @@ def _render_public_structures_scan_page() -> None:
         except Exception as exc:
             st.error(f"Error starting public structures scan: {exc}")
 
-    fragment = getattr(st, "fragment", None)
-    if auto_refresh and callable(fragment):
+    if auto_refresh:
         @st.fragment(run_every=f"{int(refresh_interval_s)}s")
         def _status_fragment() -> None:
             _render_public_structures_scan_status()
@@ -158,9 +157,6 @@ def _render_public_structures_scan_page() -> None:
         _status_fragment()
         st.caption("Live updates: fragment refresh (no full-page rerun).")
         return
-
-    if auto_refresh and not callable(fragment):
-        st.info("Auto-refresh without full reruns requires Streamlit fragments. Upgrade Streamlit or use 'Refresh now'.")
 
     _render_public_structures_scan_status()
 

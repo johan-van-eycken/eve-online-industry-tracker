@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import altair as alt
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from eve_online_industry_tracker.application.characters.realized_profit import ASSUMED_FEE_CAPTURE_MODES
+from eve_online_industry_tracker.application.characters.realized_profit import (
+    ASSUMED_FEE_CAPTURE_MODES,
+    summarize_realized_profit_rows,
+)
 from streamlit_ui.components.aggrid_formatters import js_flag_text_style, js_icon_cell_renderer
 from streamlit_ui.api.characters import build_character_options, fetch_characters, filter_industry_characters
 from streamlit_ui.components.formatters import format_isk_eu, format_isk_short, format_pct_eu, type_icon_url
@@ -19,6 +22,7 @@ from streamlit_ui.api.realized_profit import (
     refresh_realized_profit,
 )
 from streamlit_ui.state.session_state import ensure_state_defaults, ensure_valid_state_value
+from streamlit_ui.components.wallet_ui import parse_iso_date, resolve_range_preset
 from streamlit_ui.components.webpage_ui import render_aggrid_table, require_aggrid
 from streamlit_ui.api.client import api_get
 
@@ -28,20 +32,8 @@ _RANGE_OPTIONS = ["Past Week", "Past Month", "Past 3 Months", "Year to Date", "P
 _RANGE_STATE_KEY = "realized_profit_range_preset"
 
 
-def _parse_iso_date(value: Any) -> datetime | None:
-    raw_value = str(value or "").strip()
-    if not raw_value:
-        return None
-    if raw_value.endswith("Z"):
-        raw_value = raw_value[:-1] + "+00:00"
-    try:
-        return datetime.fromisoformat(raw_value)
-    except ValueError:
-        return None
-
-
 def _format_table_datetime(value: Any) -> str:
-    dt = _parse_iso_date(value)
+    dt = parse_iso_date(value)
     if dt is None:
         return str(value or "")
     return dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -105,7 +97,7 @@ def _lower_bound_cost_warning(rows: list[dict[str, Any]]) -> str | None:
 
 def _character_name_map() -> dict[int, str]:
     try:
-        characters = filter_industry_characters(fetch_characters())
+        characters = filter_industry_characters(fetch_characters(summary=True))
     except RuntimeError as exc:
         _warn_load_failure("characters", exc)
         return {}
@@ -205,53 +197,13 @@ def _save_range_preset(preset: str) -> None:
     )
 
 
-def _default_date_range(rows: list[dict[str, Any]]) -> tuple[date | None, date | None]:
-    dates = sorted(
-        [dt.date() for dt in (_parse_iso_date(row.get("date")) for row in rows) if dt is not None]
-    )
-    if not dates:
-        return None, None
-    end_date = dates[-1]
-    start_date = max(dates[0], end_date - timedelta(days=30))
-    return start_date, end_date
-
-
 def _available_date_span(rows: list[dict[str, Any]]) -> tuple[date | None, date | None]:
     dates = sorted(
-        [dt.date() for dt in (_parse_iso_date(row.get("date")) for row in rows) if dt is not None]
+        [dt.date() for dt in (parse_iso_date(row.get("date")) for row in rows) if dt is not None]
     )
     if not dates:
         return None, None
     return dates[0], dates[-1]
-
-
-def _resolve_range_preset(
-    preset: str,
-    *,
-    min_date: date | None,
-    max_date: date | None,
-) -> tuple[date | None, date | None]:
-    if max_date is None:
-        return None, None
-    if preset == "All Time":
-        return min_date, max_date
-    if preset == "Year to Date":
-        resolved_start = date(max_date.year, 1, 1)
-        if min_date is not None:
-            resolved_start = max(min_date, resolved_start)
-        return resolved_start, max_date
-
-    days_by_preset = {
-        "Past Week": 7,
-        "Past Month": 30,
-        "Past 3 Months": 90,
-        "Past Year": 365,
-    }
-    day_span = days_by_preset.get(preset, 31)
-    resolved_start = max_date - timedelta(days=day_span)
-    if min_date is not None:
-        resolved_start = max(min_date, resolved_start)
-    return resolved_start, max_date
 
 
 def _filter_rows(
@@ -265,7 +217,7 @@ def _filter_rows(
     for row in rows:
         if selected_character_id is not None and int(row.get("character_id") or 0) != int(selected_character_id):
             continue
-        row_dt = _parse_iso_date(row.get("date"))
+        row_dt = parse_iso_date(row.get("date"))
         row_date = row_dt.date() if row_dt is not None else None
         if start_date is not None and row_date is not None and row_date < start_date:
             continue
@@ -273,22 +225,6 @@ def _filter_rows(
             continue
         filtered.append(row)
     return filtered
-
-
-def _summary(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    realized_rows = [row for row in filtered_rows if row.get("realized_profit") is not None]
-    total_profit = sum(float(row.get("realized_profit") or 0.0) for row in realized_rows)
-    total_net = sum(float(row.get("net_revenue") or 0.0) for row in filtered_rows)
-    total_fees = sum(float(row.get("total_fees_amount") or 0.0) for row in filtered_rows)
-    fully_priced_count = sum(1 for row in filtered_rows if int(row.get("unpriced_quantity") or 0) == 0)
-    return {
-        "total_profit": float(total_profit),
-        "total_net": float(total_net),
-        "total_fees": float(total_fees),
-        "row_count": len(filtered_rows),
-        "fully_priced_count": fully_priced_count,
-        "coverage_fraction": (float(fully_priced_count) / float(len(filtered_rows))) if filtered_rows else 0.0,
-    }
 
 
 _MANUFACTURING_SOURCES = frozenset({
@@ -342,7 +278,7 @@ def _filtered_character_wallet_transactions(
         for tx in character.get("wallet_transactions") or []:
             if not isinstance(tx, dict):
                 continue
-            tx_dt = _parse_iso_date(tx.get("date"))
+            tx_dt = parse_iso_date(tx.get("date"))
             tx_date = tx_dt.date() if tx_dt is not None else None
             if start_date is not None and tx_date is not None and tx_date < start_date:
                 continue
@@ -369,7 +305,7 @@ def _filtered_corp_wallet_transactions(
         for tx in corp.get("wallet_transactions") or []:
             if not isinstance(tx, dict):
                 continue
-            tx_dt = _parse_iso_date(tx.get("date"))
+            tx_dt = parse_iso_date(tx.get("date"))
             tx_date = tx_dt.date() if tx_dt is not None else None
             if start_date is not None and tx_date is not None and tx_date < start_date:
                 continue
@@ -572,7 +508,7 @@ def _overview_payload(filtered_rows: list[dict[str, Any]]) -> dict[str, Any]:
         realized_profit = _safe_float(row.get("realized_profit"))
         if realized_profit is None:
             continue
-        dt = _parse_iso_date(row.get("date"))
+        dt = parse_iso_date(row.get("date"))
         classified_rows.append(
             {
                 "bucket": _primary_profit_bucket(row.get("source_mix")),
@@ -847,36 +783,20 @@ def render() -> None:
     with controls_about:
         st.write("")
         st.write("")
-        if hasattr(st, "popover"):
-            with st.popover("?", help="About this page"):
-                st.caption(
-                    "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
-                    "Corporation scope uses wallet journal-backed fee capture via context_id matching."
-                )
-                st.caption(
-                    "Profit Type groups sales into Manufacturing or Trade for readability. "
-                    "Trade includes untracked inventory, older stock outside tracked history, transfers, loot, donations, and similar cases where no historical source lot was matched."
-                )
-                st.caption(
-                    "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
-                )
-                st.caption("Coverage excludes rows with missing historical cost basis.")
-        else:
-            with st.expander("?", expanded=False):
-                st.caption(
-                    "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
-                    "Character scope supports wallet journal-backed fee capture when linked."
-                )
-                st.caption(
-                    "Profit Type groups sales into Manufacturing or Trade for readability. "
-                    "Trade includes untracked inventory, older stock outside tracked history, transfers, loot, donations, and similar cases where no historical source lot was matched."
-                )
-                st.caption(
-                    "Confidence indicates how complete the pricing evidence is for a sale. "
-                    "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
-                )
-                st.caption("Coverage excludes rows with missing historical cost basis.")
+        with st.popover("?", help="About this page"):
+            st.caption(
+                "Realized sales are matched against FIFO cost lots from prior market buys and completed industry jobs. "
+                "Fees come from the wallet journal where a journal entry can be linked to the sale."
+            )
+            st.caption(
+                "Profit Type groups sales into Manufacturing or Trade for readability. "
+                "Sales with any unit without a historical cost (untracked inventory, older stock outside tracked "
+                "history, transfers, loot, donations) are not counted in profit; they are listed in Coverage."
+            )
+            st.caption(
+                "Confidence indicates how complete the pricing evidence is for a sale. "
+                "High means the sale is fully priced with strong source matching, Medium means the core pricing is present but some parts rely on inferred or estimated inputs, and Low means the row still has notable gaps or weaker historical support, or its fees are assumed (the character's skills unknown)."
+            )
 
     # A failed ledger read (either scope of "All") stops the page with the
     # reason: it is not "no realized sales".
@@ -903,10 +823,11 @@ def render() -> None:
         st.warning(fee_warning)
 
     min_available_date, max_available_date = _available_date_span(rows)
-    start_date, end_date = _resolve_range_preset(
+    start_date, end_date = resolve_range_preset(
         str(range_preset),
         min_date=min_available_date,
         max_date=max_available_date,
+        fallback_days=31,
     )
 
     filtered_rows = _filter_rows(
@@ -916,7 +837,7 @@ def render() -> None:
         end_date=end_date,
     )
 
-    summary = _summary(filtered_rows)
+    summary = summarize_realized_profit_rows(filtered_rows)
     if not filtered_rows:
         st.warning("No sales match the current filters.")
         return
@@ -939,7 +860,7 @@ def render() -> None:
     with groups_left:
         _render_stat_card_grid(
             [
-                (f"{period_label} Net Profit", format_isk_short(summary["total_profit"])),
+                (f"{period_label} Net Profit", format_isk_short(summary["total_realized_profit"])),
                 ("Trade", format_isk_short(square_metrics["trade_profit"])),
                 ("Manufacturing", format_isk_short(square_metrics["manufacturing_profit"])),
             ],
