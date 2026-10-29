@@ -218,7 +218,7 @@ class TestPipelineAnalyzer:
         states = self._run(rows, sell_velocities=velocities, weights=weights)
         assert states[0].effective_velocity >= 0.01
 
-    # ── Task 7: real pipeline numbers (findings 4, 6, cluster B) ───────────────
+    # ── Real pipeline numbers ───────────────────────────────────────────────────
 
     def test_pipeline_days_comes_from_the_producer_not_a_reimplementation(self):
         row = _input_row(pipeline_days_supply=12.5, pipeline_units_in_jobs=40,

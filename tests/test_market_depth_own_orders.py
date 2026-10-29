@@ -1,4 +1,4 @@
-"""F1 items 1-2: the market depth collector counts as own volume every sell
+"""The market depth collector counts as own volume every sell
 order of every tracked corporation AND character (the "primary corp" lookup
 is gone), and when the own orders cannot be read it keeps the previous
 market_depth_cache row, marks it stale (stale_reason) and logs a WARNING
@@ -169,7 +169,7 @@ def test_the_velocity_fallback_reads_the_sales_history_of_every_tracked_corporat
 
 # --- own sell volume: hub region only, a pilot's corp order counted once -----------------------
 #
-# H1.2: own sell volume counts only the hub region's orders, and a pilot's
+# Own sell volume counts only the hub region's orders, and a pilot's
 # order for a tracked corporation once (it is in both the character and the
 # corporation order endpoints); the velocity fallback leaves out a pilot's
 # non-personal (corporation) transactions. Fake ids.

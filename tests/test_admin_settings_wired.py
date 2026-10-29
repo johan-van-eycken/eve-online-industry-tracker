@@ -379,7 +379,7 @@ def test_the_industry_profiles_npc_tax_fallback_is_the_schema_default():
 
 # --- the removed market default region and station ---------------------------------------------
 #
-# Round H2.7: market_defaults/default_region_id and default_station_id had
+# market_defaults/default_region_id and default_station_id had
 # no effect (every market hub carries its own region and station, and the
 # ESI service's defaults took precedence over them anyway), so they are
 # removed with their strictness. A value still stored in the file is ignored

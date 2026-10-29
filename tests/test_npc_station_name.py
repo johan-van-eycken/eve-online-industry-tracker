@@ -127,7 +127,7 @@ def test_the_station_name_route_answers_with_the_name_or_the_reason(station_sde)
 def test_the_settings_page_shows_the_resolved_station_name(monkeypatch):
     from streamlit_ui.pages import admin_settings as page
 
-    # Round H3: the name is cached per station; each response here is a fresh read.
+    # The name is cached per station; each response here is a fresh read.
     page._station_name_data.clear()
     monkeypatch.setattr(page, "api_get_or_error", lambda path: (
         {"data": {"station_id": 60003760, "name": "Jita IV - Moon 4 - Caldari Navy Assembly Plant",

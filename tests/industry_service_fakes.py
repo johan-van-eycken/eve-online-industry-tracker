@@ -71,8 +71,8 @@ def _build_service(
         lambda self: (NO_DECRYPTOR,), service,
     )
     # Invention chance: one loaded, untrained pilot and identifiable invention
-    # skills, like real SDE rows. The pilot cannot run the invention (Task 15
-    # I3), so every chance is the SDE base chance and no number moves; the
+    # skills, like real SDE rows. The pilot cannot run the invention,
+    # so every chance is the SDE base chance and no number moves; the
     # skilled branches have their own tests, which override these.
     for row in blueprint_rows:
         invention_job = row.get("invention_job") if isinstance(row, dict) else None
@@ -222,7 +222,7 @@ def _invented_t2_blueprint_rows() -> list[dict]:
 
 _INVENTION_FAKE_PRICES = {34: 5.0, 204: 100.0}
 
-# Task 15 fix round 1 (minor 1): a sub-build whose job fees are unknown is
+# A sub-build whose job fees are unknown is
 # bought, so the harness's default profile prices every fee (a test passes
 # profile=None for "no profile"). Every index 1e-9, no facility tax: each fee
 # is the SCC surcharge on the job value.
@@ -303,7 +303,7 @@ _INVENTION_ONLY_PROFILE = {
 
 
 # _INVENTION_ONLY_PROFILE for a row with a sub-build: the sub-build's other
-# fees must be priced too, or it is bought (Task 15 fix round 1, minor 1).
+# fees must be priced too, or it is bought.
 # The other indices are 1e-9, so each other fee is ~ the 4 % SCC on its value.
 _NESTED_FEES_PROFILE = {
     **_INVENTION_ONLY_PROFILE,
@@ -351,7 +351,7 @@ def _nested_invention_blueprint_rows(*, probability_pct: float = 50.0) -> list[d
 _NESTED_FAKE_PRICES = {34: 5.0, 204: 100.0, 5002: 10_000.0}
 
 
-# --- fix round 1: whole-attempt invention buy list ------------------------------
+# --- Whole-attempt invention buy list -------------------------------------------
 
 
 def _shopping_line(row: dict, type_id: int) -> dict | None:
@@ -372,7 +372,7 @@ def _invented_parent_rows() -> list[dict]:
     return [*rows, source]
 
 
-# --- round 3 final wave I1: datacores for the batches past owned T2 BPCs ------
+# --- Datacores for the batches past owned T2 BPCs -----------------------------
 
 
 def _owned_t2_bpc(*, runs: int, item_id: int = 81) -> SimpleNamespace:
@@ -384,7 +384,7 @@ def _owned_t2_bpc(*, runs: int, item_id: int = 81) -> SimpleNamespace:
     )
 
 
-# --- round 5 Task 1: invented BPC baseline ME 2 / TE 4, decryptor data -------
+# --- Invented BPC baseline ME 2 / TE 4, decryptor data -----------------------
 
 _ACCELERANT_LIKE = DecryptorOption(
     type_id=34201, type_name="Accelerant Decryptor", probability_multiplier=1.2,
@@ -421,7 +421,7 @@ def _decryptor_overview(monkeypatch, options, *, prices=None, maximize_bp_runs=T
     return {row["type_id"]: row for row in rows}
 
 
-# --- round 5 Task 5: batches 2..N from their own plans (C1) --------------------
+# --- Batches 2..N from their own plans -----------------------------------------
 # A later batch has no owned BPC run batch 1 spent, so it is planned again:
 # the row's own job at the next blueprint source (invented ME/TE with the
 # decryptor), every sub-build afresh, and one ME rounding per job. Invented

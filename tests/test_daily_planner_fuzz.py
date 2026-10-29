@@ -1,5 +1,4 @@
-"""Task A fix round 2: a bounded property test over random small plans
-(the review's fuzz probe p11), and seed 380 pinned.
+"""A bounded property test over random small plans, and seed 380 pinned.
 
 Seed 380: a row took the higher rows' leftover T1 BPCs, then invented
 nothing and released them to the shared pool a second time, so a lower row

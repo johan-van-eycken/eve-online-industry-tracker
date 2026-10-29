@@ -59,9 +59,9 @@ def _corrupt_warnings(caplog) -> list[str]:
 
 
 def test_a_corrupt_row_warns_once_per_compute_naming_every_corrupt_field(caplog):
-    """FU-04: the scorer, the pipeline analyzer and the feedback processor each
+    """The scorer, the pipeline analyzer and the feedback processor each
     read the same row; inside one compute the row warns once, naming each
-    corrupt field (fix round 1: per row, not per field)."""
+    corrupt field (per row, not per field)."""
     w = SimpleNamespace(type_id=7, cost_multiplier=float("nan"), accuracy_ema="abc", velocity_multiplier=1.5)
     with caplog.at_level(logging.WARNING):
         with weight_warnings_once_per_compute():

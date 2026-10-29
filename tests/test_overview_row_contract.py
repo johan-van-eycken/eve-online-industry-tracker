@@ -1,7 +1,7 @@
 # tests/test_overview_row_contract.py
 """Guards the contract against the real producer output.
 
-Skips until the sanitised fixture has been captured (see Task 3 of
+Skips until the sanitised fixture has been captured (see
 docs/superpowers/plans/2026-09-17-daily-planner-remediation.md).
 """
 from __future__ import annotations

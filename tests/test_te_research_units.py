@@ -1,12 +1,12 @@
 # tests/test_te_research_units.py
-"""Task 8c: TE research in EVE's units, end to end.
+"""TE research in EVE's units, end to end.
 
 EVE's TE is a percentage, 2% per research level: level L gives TE 2L%, so
 TE runs 0..20 and research levels 0..10. The planner stores and compares TE
 as the percentage (the asset's blueprint_time_efficiency) and converts to a
 level only where a level is needed: the research fee and duration tables.
 
-Fix round 1 (the user's decisions):
+The user's decisions:
 - TE is always researched to the max (industry.max_blueprint_time_efficiency,
   default 20); the TE threshold setting is gone.
 - Research first: a BPO with a research action in the plan is not used for

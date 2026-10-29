@@ -34,7 +34,7 @@ _PILOT = 7001
 _PRODUCT = 990003
 _TARGET_BP = 990002
 _REASON = "invention cost unknown: no corp character has its skills loaded"
-#: Every character id is one the character manager has (J2.4 checks it).
+#: Every character id is one the character manager has (an unknown one is refused).
 _KNOWN_CHARACTERS = SimpleNamespace(get_character_by_id=lambda character_id: object())
 
 

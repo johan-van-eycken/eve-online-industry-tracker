@@ -232,7 +232,7 @@ def _mfg(job_id, *, blueprint_id=77, runs=12, start_date="2026-10-02T00:00:00Z")
 
 
 def test_the_overview_choice_no_longer_settles_a_tie(sde):
-    """H1.3 (the user's ruling: evidence, else skip): the overview's
+    """Evidence, else skip: the overview's
     published choice is no evidence of what an earlier job used."""
     for choice in (_PLUS_2B, NO_DECRYPTOR):
         source = _sources(sde, [_job()], options=_OPTIONS_WITH_TWIN, overview_choices={_TARGET_BP: choice})[_TARGET_BP]
@@ -333,7 +333,7 @@ def test_without_sde_decryptor_data_no_decryptor_is_assumed(sde):
 
 @pytest.mark.parametrize("cost", [None, "n/a"])
 def test_a_job_without_a_readable_install_cost_is_skipped_with_a_reason(sde, cost):
-    """H1: never a free install (that under-costs every attempt)."""
+    """Never a free install (that under-costs every attempt)."""
     source = _sources(sde, [_job(cost=cost)])[_TARGET_BP]
     assert source.get("unit_cost_per_run") is None
     assert "job 1: the job has no readable install cost" in source["unknown_reason"]
@@ -428,7 +428,7 @@ def test_read_takes_the_provider_once(monkeypatch):
 
 
 def test_the_jobs_left_out_of_a_known_cost_are_counted_with_their_reasons(sde):
-    """J3.2: a cost from some of a blueprint's jobs names the ones it left out
+    """A cost from some of a blueprint's jobs names the ones it left out
     (a count and each reason), not only an INFO log."""
     source = _sources(sde, [_job(1), _job(2, probability=0.123), _job(3, cost=None)])[_TARGET_BP]
     assert source["unit_cost_per_run"] == pytest.approx(90.0)

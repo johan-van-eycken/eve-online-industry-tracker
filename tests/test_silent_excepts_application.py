@@ -1,4 +1,4 @@
-"""Task C2: the formerly silent `except Exception` handlers in application/characters,
+"""The formerly silent `except Exception` handlers in application/characters,
 application/corporations and the rest of application (outside industry, daily_planner
 and market_intelligence). Expected failures log a WARNING and, where a price is
 missing, give the reason in the payload; programming errors propagate. Fake values."""
@@ -199,7 +199,7 @@ def test_a_bug_in_the_structure_lookup_via_characters_propagates():
 
 # --- narrow excepts: DB and ESI errors only ----------------------------------------------------
 #
-# Round H2.4: the remaining except-Exception-with-a-warning sites catch
+# The remaining except-Exception-with-a-warning sites catch
 # SQLAlchemyError plus ESI_REQUEST_ERRORS only; a bug propagates as itself.
 #
 # pricing_suggestion_service (hub sell/buy price, cached order book levels),
@@ -358,7 +358,7 @@ def test_a_failed_prune_is_a_warning_and_a_bug_propagates(monkeypatch, caplog):
 
 # --- warnings that had no test of their own ----------------------------------------------------
 #
-# F1 item 10: the warnings that had no test of their own. The public and
+# The warnings that had no test of their own. The public and
 # corporation structure owner-name lookups (cosmetic: the structures keep
 # their IDs), the market depth collector's plan-velocity read failing on its
 # own (the sales-history fallback still answers) and the excluded blueprint

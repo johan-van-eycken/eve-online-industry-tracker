@@ -1,4 +1,4 @@
-"""Rig values, security multipliers and the facility gate, from the SDE (Task 11b).
+"""Rig values, security multipliers and the facility gate, from the SDE.
 
 - Each rig effect's value is the rig attribute its SDE effect actually
   modifies with (modifierInfo.modifyingAttributeID): 2714/2713 for reactor

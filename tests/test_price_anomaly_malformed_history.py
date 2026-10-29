@@ -1,4 +1,4 @@
-"""F1 item 9: a malformed market history row (None, or a None/non-numeric
+"""A malformed market history row (None, or a None/non-numeric
 price field) on the price-anomaly fetch_and_store_history path is skipped
 explicitly, with one WARNING counting the skipped rows; the good rows are
 stored and the enrichment does not crash. Fake values throughout."""

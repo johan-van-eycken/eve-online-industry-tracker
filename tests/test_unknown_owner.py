@@ -1,4 +1,7 @@
-"""Round J1.7: the corporation side mirrors the character side.
+"""An unknown character or corporation is an error that names it (a 404 on
+the routes), never an empty result or a refresh of nothing.
+
+The corporation side mirrors the character side:
 
 - get_corporation and _refresh_batch raise UnknownCorporationError (a
   CorporationRefreshError naming the unknown id or name) instead of
@@ -139,7 +142,7 @@ _GETTER_FAILURES = [
 
 @pytest.mark.parametrize("method,failing", _GETTER_FAILURES)
 def test_a_getter_keeps_the_others_data_and_names_each_failure(method, failing):
-    # Round J1.8: the corporations that worked are returned; result.errors names each that failed.
+    # The corporations that worked are returned; result.errors names each that failed.
     a, b, c = _Corp(1, "Acme", fail={failing}), _Corp(2, "Bolt"), _Corp(3, "Crux", fail={failing})
     result = getattr(_manager(a, b, c), method)()
     assert set(result.errors) == {"Acme", "Crux"}
@@ -229,7 +232,7 @@ def test_the_bootstrap_names_each_failed_corporation_refresh(monkeypatch, tmp_pa
 
 # --- an unknown character ----------------------------------------------------------------------
 #
-# Round J1.2: a refresh for a character_id or name the CharacterManager does
+# A refresh for a character_id or name the CharacterManager does
 # not have raises UnknownCharacterError (a CharacterRefreshError naming the
 # unknown selector) instead of refreshing nothing; the routes answer 404.
 # Fake values only.
@@ -315,7 +318,7 @@ def test_the_assets_route_answers_404_for_an_unknown_character(monkeypatch):
 
 # --- the realized profit read of an unknown owner ----------------------------------------------
 #
-# J2.4: the realized profit read of an unknown corporation_id or
+# The realized profit read of an unknown corporation_id or
 # character_id is a 404 (UnknownCorporationError / UnknownCharacterError,
 # codes unknown_corporation / unknown_character), not empty rows. Fake ids.
 

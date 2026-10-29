@@ -12,7 +12,7 @@ from industry_service_fakes import (
 )
 
 
-# --- round 5 Task 8: fees per attempt, per copy run and per research level (D4, A2) ---
+# --- Fees per attempt, per copy run and per research level ----------------------------
 
 
 # Fake rates: facility tax 6% + SCC 4% = 10% on manufacturing, copy and
@@ -84,7 +84,7 @@ def test_an_owned_bpo_row_publishes_its_cumulative_research_fee_per_level() -> N
 
 
 def test_the_research_fee_uses_the_level_multiplier_not_the_rank_scaled_seconds() -> None:
-    """Fix round 1: the old formula multiplied by the rank-scaled duration in
+    """The old formula multiplied by the rank-scaled duration in
     SECONDS, so a rank-20 blueprint's ME 0 -> 10 fee was 20 x 105 = 2100x
     the real one. Real ESI jobs (same facility and activity, a week apart)
     cost the same per ISK of EIV at rank 20 and rank 40: the fee does not
@@ -97,7 +97,7 @@ def test_the_research_fee_uses_the_level_multiplier_not_the_rank_scaled_seconds(
 
 
 def test_an_owned_bpo_row_publishes_its_cumulative_research_duration_per_level() -> None:
-    """Task 8c fix round 1: the research-time model the fee uses (rank x the
+    """The research-time model the fee uses (rank x the
     rank-1 level table, then the skill / structure time reductions), per
     level, so the planner can show a research action's duration for its
     exact level span. Fake rank 20, no skills, no structure time bonus."""
@@ -111,7 +111,7 @@ def test_an_owned_bpo_row_publishes_its_cumulative_research_duration_per_level()
 
 
 def test_the_unskilled_research_duration_leaves_the_research_skills_out() -> None:
-    """Fix round 2: the planner applies the ASSIGNED pilot's skills to the
+    """The planner applies the ASSIGNED pilot's skills to the
     unskilled table. The producer character here has Research 5 (-25% TE
     research time); the unskilled table leaves that out. Fake rank 20."""
     mj = _owned_bpo_manufacturing_job(level_one_seconds=20 * 105, modifier_skills=[
@@ -128,7 +128,7 @@ def test_the_unskilled_research_duration_leaves_the_research_skills_out() -> Non
 
 
 def test_the_base_research_duration_leaves_skills_and_implants_out() -> None:
-    """Task 12 fix round 1: the planner times research with the assigned
+    """The planner times research with the assigned
     pilot's own skills and implants, on a table that has neither. A fake
     implant cuts the producer character's TE research time 10 %."""
     implant = {"modifiers": [{"activity": "research_te", "metric": "time", "value": 0.1}]}
@@ -197,7 +197,7 @@ def test_a_bpc_variant_of_an_owned_bpo_publishes_the_research_fee_table_too() ->
 
 def test_an_owned_t2_bpc_covering_batch_one_still_publishes_the_invention_fees(monkeypatch) -> None:
     """Batch 1 invents nothing, but the planner's invent / copy actions for
-    the later batches still need the fee rates (D4)."""
+    the later batches still need the fee rates."""
     from eve_online_industry_tracker.application.industry import overview_row as orow
 
     row = _invention_overview(
@@ -210,7 +210,7 @@ def test_an_owned_t2_bpc_covering_batch_one_still_publishes_the_invention_fees(m
     assert orow.get_source_copy_fee_per_run(row) == pytest.approx(0.039)
 
 
-# --- round 5 Task 8 fix round 1: a component's per-run job fee on its parent ---
+# --- A component's per-run job fee on its parent -------------------------------
 
 
 def _parent_of_component_row() -> dict:
@@ -251,7 +251,7 @@ def test_a_parent_publishes_its_components_job_fee_per_run() -> None:
     assert "component_job_fee_per_run" not in rows[5001]["manufacturing_job"]["materials"]["34"]
 
 
-# --- Task 8b fix round 1: an unknown fee input is unknown with its reason ---
+# --- An unknown fee input is unknown with its reason ------------------------
 
 
 def test_a_profile_without_a_facility_tax_leaves_every_fee_unknown_with_the_reason(monkeypatch, caplog) -> None:

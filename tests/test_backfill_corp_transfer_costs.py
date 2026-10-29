@@ -710,7 +710,7 @@ def test_backfill_uses_character_buy_transactions_for_unmatched_items(db_session
 
 # --- corp sales of pilot-built transfer lots ---------------------------------------------------
 #
-# H1.1: a corp sale of a pilot-built lot keeps its lower-bound flag until the
+# A corp sale of a pilot-built lot keeps its lower-bound flag until the
 # job's cost is resolved, then takes the job's current cost; a blended
 # (average or multi-lot) transfer lot is flagged while any job of its type has
 # a partly unknown cost. Fake ids.
@@ -787,7 +787,7 @@ def test_multi_lot_fifo_blend_without_job_reference_is_flagged(app_session):
 
 # --- a re-costed job re-stamps the blended transfer lots ---------------------------------------
 #
-# J2.1: a re-costed character job re-stamps the blended corp transfer lots
+# A re-costed character job re-stamps the blended corp transfer lots
 # of its product type (scripts/backfill_corp_transfer_costs.py's matching, now
 # importable from application/characters/corp_transfer_costs.py), bounded to
 # the affected types and idempotent; the ledger rebuilds through its stale
@@ -994,7 +994,7 @@ def test_a_character_job_refresh_restamps_the_types_it_recosts(app_session, monk
     assert rows[4].acquisition_unit_cost == 10.0
 
 
-# --- J3.1: the one-time re-stamp of every blended type ---------------------------------
+# --- The one-time re-stamp of every blended type ---------------------------------------
 
 
 def _stale_seed(s):

@@ -1,4 +1,4 @@
-"""F5: the status bar shows the LIVE freshness, not the stored one.
+"""The status bar shows the LIVE freshness, not the stored one.
 
 The stored plan.freshness_score is written in Phase 9 against the same market
 cache the plan was just computed from, so it is always 1.0; the live value is

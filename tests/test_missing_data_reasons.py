@@ -1,5 +1,4 @@
-"""J3: the final review's minors. Missing data gives a reason, a WARNING or a
-visible error: an unknown region volume is an unknown liquidity score (None),
+"""Missing data gives a reason, a WARNING or a visible error: an unknown region volume is an unknown liquidity score (None),
 a non-list order-book reply is an unavailable book with a reason, the unknown
 corporation check names its caller, /industry_active_jobs of an unknown
 character is a 404, a partial market-orders reply is cached for a minute
@@ -18,7 +17,7 @@ from eve_online_industry_tracker.application.industry.service import IndustrySer
 
 from eve_online_industry_tracker.infrastructure.models import CharacterIndustryJobsModel, CorporationIndustryJobsModel
 
-# --- J3.3: an unknown region volume is an unknown liquidity score ------------------------------
+# --- An unknown region volume is an unknown liquidity score ------------------------------------
 
 
 def _industry_cls():
@@ -54,7 +53,7 @@ def test_the_liquidity_metrics_of_an_unknown_region_volume_are_unknown():
     assert row["liquidity_indicator"] == "Unknown"
 
 
-# --- J3.4: a non-list order-book reply is an unavailable book with a reason --------------------
+# --- A non-list order-book reply is an unavailable book with a reason --------------------------
 
 
 def _esi_svc(reply):
@@ -84,7 +83,7 @@ def test_a_non_list_order_book_reply_is_unavailable_with_a_reason(monkeypatch, c
     assert any("35" in r.getMessage() and "not a list" in r.getMessage() for r in caplog.records)
 
 
-# --- J3.5: the unknown corporation check names its caller --------------------------------------
+# --- The unknown corporation check names its caller --------------------------------------------
 
 
 def test_the_unknown_corporation_error_names_the_calling_method():
@@ -112,7 +111,7 @@ def test_a_known_corporation_and_no_id_pass():
     require_known_corporation(SimpleNamespace(), None, "get_realized_profit_ledger")
 
 
-# --- J3.6: /industry_active_jobs of an unknown character is a 404 ------------------------------
+# --- /industry_active_jobs of an unknown character is a 404 ------------------------------------
 
 
 def _jobs_svc(session_provider, known=(7001,)):
@@ -154,7 +153,7 @@ def test_the_active_jobs_route_answers_404_unknown_character(monkeypatch, sessio
     assert response.get_json()["error"]["code"] == "unknown_character"
 
 
-# --- J3.7: a partial market-orders reply is cached for a minute only ---------------------------
+# --- A partial market-orders reply is cached for a minute only ---------------------------------
 
 
 @pytest.fixture()
@@ -208,7 +207,7 @@ def test_a_failed_fetch_raises_and_is_not_cached(orders_api, monkeypatch):
     assert api.fetch_market_orders()["data"] == []
 
 
-# --- J3.1: the one-time blended-lot re-stamp at startup ----------------------------------------
+# --- The one-time blended-lot re-stamp at startup ----------------------------------------------
 
 
 def _init(monkeypatch, restamp):
@@ -258,7 +257,7 @@ def test_a_failed_one_time_restamp_is_a_warning_and_a_bug_propagates(monkeypatch
 
 # --- the active jobs' build cost ---------------------------------------------------------------
 #
-# H1 addition: /industry_active_jobs carries each stored job's build cost and
+# /industry_active_jobs carries each stored job's build cost and
 # why it is partly unknown (character and corporation jobs), None when absent.
 # Fake ids.
 

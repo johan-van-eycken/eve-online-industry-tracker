@@ -30,8 +30,8 @@ PILOT = 1
 class _Chars:
     def list_characters(self):
         # Laboratory Operation 5 / Mass Production 5: enough slots for every action.
-        # Level 1 of the row's invention skills: the pilot can run it (Task 15
-        # fix round 1, I1); as the row's inventor it keeps the producer's figures.
+        # Level 1 of the row's invention skills: the pilot can run it; as the
+        # row's inventor it keeps the producer's figures.
         return [{"character_id": PILOT, "character_name": "Pilot", "skills": {"skills": [
             {"skill_id": 3406, "skill_name": "Laboratory Operation", "trained_skill_level": 5},
             {"skill_id": 3387, "skill_name": "Mass Production", "trained_skill_level": 5},
@@ -59,9 +59,8 @@ def _actions(row, **overrides):
 
 def _invent_row(*, per_attempt=4.4, per_copy_run=0.0099, whole_attempts=4, bpc_runs_on_hand=2):
     """A T2 row whose batch 1 invents: 20 runs, 10 runs per BPC, chance 0.5
-    for the best inventor (the only pilot), so 4 whole attempts. Task 12 fix
-    round 2: the T1 BPC runs on hand cap today's attempts; the copy covers
-    the rest (2 + 2 by default)."""
+    for the best inventor (the only pilot), so 4 whole attempts. The T1 BPC runs on hand cap today's attempts; the
+    copy covers the rest (2 + 2 by default)."""
     return {
         "type_id": 12345, "quantity": 20, "needs_invention": True, "has_t1_bpo": True,
         "t1_blueprint_type_id": 999, "t1_bpc_runs_on_hand": bpc_runs_on_hand,
@@ -194,7 +193,7 @@ def test_invention_fee_accessors_fall_back_to_the_later_batch_plan():
     assert orow.get_invention_fee_per_attempt({"manufacturing_job": {}}) is None
 
 
-# --- Task 8b fix round 1: an unknown fee carries its cause to Capital Reserved ---
+# --- An unknown fee carries its cause to Capital Reserved ------------------------
 
 
 def test_a_priced_fee_records_no_unknown_reason():

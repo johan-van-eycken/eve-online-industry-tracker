@@ -1,5 +1,5 @@
 """Tests for optimal_me_for_quantities() in blueprints.py. (TE has no optimum: it is
-always researched to the max TE setting, Task 8c fix round 1.)"""
+always researched to the max TE setting.)"""
 from __future__ import annotations
 
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (

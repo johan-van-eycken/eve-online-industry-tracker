@@ -212,7 +212,7 @@ def test_optimize_manufacturing_portfolio_honors_operator_directives() -> None:
 
 # --- the Portfolio page's capped-rows hint -----------------------------------------------------
 #
-# Task A item 4: the Streamlit Portfolio page shows the "N rows capped: job
+# The Streamlit Portfolio page shows the "N rows capped: job
 # fees unknown" hint the API result carries (portfolio_service), where its
 # result is empty or filtered. Fake rows only.
 
@@ -230,7 +230,7 @@ def test_the_hint_wording_is_shared_with_the_api():
 
 
 def test_the_page_counts_only_capped_rows_it_does_not_show():
-    """Fix round 1 (M2): a capped row still in the result needs no hint."""
+    """A capped row still in the result needs no hint."""
     from streamlit_ui.pages import portfolio_planner as page
 
     rows = [_row(1, "Medium", True), _row(2, "Medium", True), _row(3, "Medium", False), _row(4, "High", False)]

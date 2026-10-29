@@ -39,7 +39,7 @@ def test_the_tab_renders_exactly_the_character_action_types():
 
 
 def test_the_sections_follow_the_given_action_types_order():
-    """FU-32: _ACTION_ORDER is derived from CHARACTER_ACTION_TYPES, so the
+    """_ACTION_ORDER is derived from CHARACTER_ACTION_TYPES, so the
     order and the set live in one place; only the labels are local."""
     assert tab_actions._action_sections(("manufacture", "deliver")) == [
         ("manufacture", "MANUFACTURE", "🟢"),
@@ -69,7 +69,7 @@ def test_a_missing_action_type_is_logged_as_missing_not_as_an_empty_string(monke
 
 
 def test_a_te_queued_after_me_is_not_todays_work():
-    """Task 8c fix round 4: a TE research queued behind its BPO's ME job
+    """A TE research queued behind its BPO's ME job
     cannot start today: it neither counts as pending nor blocks day complete."""
     actions = [{"action_type": "me_research", "status": "done"},
                {"action_type": "te_research", "status": "pending", "queued_after_me": True}]
@@ -78,7 +78,7 @@ def test_a_te_queued_after_me_is_not_todays_work():
     assert tab_actions._is_queued(actions[1]) and not tab_actions._is_queued(actions[0])
 
 
-# --- Task 8c fix round 5: "Mark started" on a queued TE once the ME ends -------------
+# --- "Mark started" on a queued TE once the ME ends ----------------------------------
 
 def _queued_pair(me_completion, me_status="pending"):
     me = {"action_type": "me_research", "status": me_status, "type_id": 7, "character_id": 1,
@@ -134,7 +134,7 @@ def test_a_queued_te_waits_while_its_me_research_was_never_started():
     assert pending_character_action_count([me, te], now) == 1   # the ME itself
 
 
-# --- Task 10 fix round 1, minor 2: the ME job's real end, from the industry jobs ---
+# --- The ME job's real end, from the industry jobs ---------------------------------
 
 def _me_job(end_date, type_id=7):
     return {"activity_id": 4, "blueprint_type_id": type_id, "character_id": 1, "end_date": end_date}
@@ -150,7 +150,7 @@ def test_a_queued_te_follows_the_active_me_jobs_end_date_over_the_estimate():
     me, te = _queued_pair("2026-01-01T12:00:00Z", me_status="done")
     startable, note = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-03T00:00:00Z")])
     assert startable is False and "from the industry jobs" in note
-    # Fix round 2, item 3: an ME job of the type that ends before the estimate
+    # An ME job of the type that ends before the estimate
     # may be a sibling BPO's: the TE waits for the later of the two.
     me, te = _queued_pair("2026-01-05T00:00:00Z", me_status="done")
     startable, note = queued_te_status(te, [me, te], now, jobs=[_me_job("2026-01-01T06:00:00Z")])

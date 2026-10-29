@@ -228,7 +228,7 @@ def test_a_public_esi_get_waits_on_and_feeds_the_shared_error_limiter(monkeypatc
 
 # --- the admin ESI settings apply before the startup refresh -----------------------------------
 #
-# Round H2.2: the admin ESI settings apply before the startup refresh.
+# The admin ESI settings apply before the startup refresh.
 #
 # - bootstrap wires the ESI error limiter (and an existing state.esi_service)
 # to the admin settings right after loading them, before refresh_all.

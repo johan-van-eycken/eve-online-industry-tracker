@@ -1,4 +1,4 @@
-"""Task 15 fix round 1: the planner side of unknown job fees and qualifying
+"""The planner side of unknown job fees and qualifying
 inventors, plus the review's minors. Fake pilots, prices and rows only."""
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _pilot(cid, name, a, b, e):
 _NO_ENC, _QUAL = _pilot(1, "NoEnc", 5, 5, 0), _pilot(2, "Qual", 3, 3, 3)
 
 
-# --- I1: only a pilot who can run the invention invents ------------------------------
+# --- Only a pilot who can run the invention invents ----------------------------------
 
 def test_probe_g_the_invent_goes_to_the_qualifying_pilot():
     row = a4._row(inventor=2, best_factor=_F2, decryptor=False, multiplier=1.0)
@@ -66,7 +66,7 @@ def test_g_case_a_bpc_plan_the_assigner_picks_the_qualifying_pilot():
     assert invent.runs == 6
 
 
-# --- I2: a lower-bound cost is an upper-bound profit, everywhere ---------------------
+# --- A lower-bound cost is an upper-bound profit, everywhere -------------------------
 
 def test_the_producer_flags_the_profit_as_an_upper_bound(monkeypatch):
     _service, row = r0._probe_f_row(monkeypatch)
@@ -139,7 +139,7 @@ def test_the_inventory_priority_rank_says_it_ranks_an_upper_bound(monkeypatch):
     assert rows[1]["inventory_priority_uses_upper_bound"] is False
 
 
-# --- Minor 1: a sub-build with unknown fees is bought, with the reason ----------------
+# --- A sub-build with unknown fees is bought, with the reason -------------------------
 
 def test_a_sub_build_with_unknown_fees_is_bought_with_the_reason(monkeypatch):
     rows = h._nested_invention_blueprint_rows(probability_pct=30.0)
@@ -171,7 +171,7 @@ def test_estimated_total_cost_is_unknown_with_unknown_fees():
     assert IndustryService._build_cost_unknown_reason({"estimated_total_cost": 5.0}) is None
 
 
-# --- Minor 2: unknown invention cost caps the shown confidence ------------------------
+# --- Unknown invention cost caps the shown confidence ---------------------------------
 
 def _good_market(row):
     row.update({
@@ -198,7 +198,7 @@ def test_net_proceeds_unknown_is_a_confidence_reason(monkeypatch):
     assert f"Net proceeds unknown: {IndustryService._BROKER_FEE_UNKNOWN_REASON}." in row["pricing_confidence_reasons"]
 
 
-# --- Minor 3: Portfolio says when the confidence cap emptied it -----------------------
+# --- Portfolio says when the confidence cap emptied it --------------------------------
 
 def _candidate(row_id, confidence, capped):
     return {"overview_row_id": row_id, "type_id": 1, "type_name": "Fake", "pricing_confidence": confidence,
@@ -227,7 +227,7 @@ def test_no_portfolio_hint_without_capped_rows():
     assert out["confidence_capped_hint"] is None
 
 
-# --- Minor 4: the grid's Total Cost shows the lower bound ----------------------------
+# --- The grid's Total Cost shows the lower bound -------------------------------------
 
 def test_the_grid_total_cost_formatter_prefixes_a_lower_bound():
     from streamlit_ui.components.aggrid_formatters import js_eu_isk_formatter
@@ -244,7 +244,7 @@ def test_the_grid_total_cost_formatter_prefixes_a_lower_bound():
     assert flat["Total Cost"] == 10.0 and flat["_total_cost_lower_bound"] is True
 
 
-# --- Minor 5: the aggregate rig reason per metric ------------------------------------
+# --- The aggregate rig reason per metric ---------------------------------------------
 
 @pytest.mark.parametrize("fields, text", [
     ({"structure_rig_time_bonus": 0.2}, "time"),
@@ -267,7 +267,7 @@ def test_a_time_only_aggregate_does_not_claim_material_overstated(monkeypatch):
     assert "material" not in reason.split(" — ")[1]
 
 
-# --- Minor 7: has_work False, research labels, fees="none" end to end ---------------
+# --- has_work False, research labels, fees="none" end to end ------------------------
 
 def test_an_unknown_fee_on_a_job_with_no_work_is_not_flagged():
     unknown = {"total_job_cost": None, "fee_unknown_reason": "x", "base_duration_seconds": 0}
@@ -319,7 +319,7 @@ def test_differing_fee_gaps_compare_without_fees(monkeypatch):
     assert choice["reason"].endswith("; job fees unknown for some candidates (x)")
 
 
-# --- Minor 6: the once-only check-then-add is locked ---------------------------------
+# --- The once-only check-then-add is locked ------------------------------------------
 
 def test_first_warning_is_thread_safe():
     import threading
@@ -342,7 +342,6 @@ def test_first_warning_is_thread_safe():
 
 
 
-# --- Fix round 2 ---------------------------------------------------------------------
 
 def _actions_with_jobs(row, chars, jobs):
     plan = a4._plan(row)
@@ -365,7 +364,7 @@ def test_b_no_free_skilled_inventor_and_no_free_slot_are_told_apart():
 
 
 def test_c_a_sub_component_with_an_unknown_fee_is_bought_with_the_reason():
-    """Fix round 3: the planner buys it, as the producer does
+    """The planner buys it, as the producer does
     (_build_cost_unknown_reason), and the parent names why."""
     import test_chain_planner_keying as ck
 

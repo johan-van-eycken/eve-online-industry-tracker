@@ -82,7 +82,7 @@ def test_the_default_invention_context_plans_without_a_decryptor():
     assert im.InventionContext().decryptor_for_blueprint(9002) is im.NO_DECRYPTOR
 
 
-# --- Task 2: chance from the best inventor -------------------------------------
+# --- Chance from the best inventor ---------------------------------------------
 
 _HEP, _CSE, _CALDARI_ENC, _CAP_CONSTRUCTION = 11433, 11454, 21790, 22242
 _ENCRYPTION_IDS = frozenset({3408, 21790, 21791, 23087, 23121, 52308, 55025})
@@ -240,7 +240,7 @@ def test_the_chance_payload_names_skills_and_the_floored_chance():
     assert payload["note"] is None
 
 
-# --- Task 3: the decryptor selection criterion (amendment A1) ------------------
+# --- The decryptor selection criterion ------------------------------------------
 # Highest profit per invention cycle; lowest cost per unit when the sell price
 # is unknown. Fake numbers: the service-test fixture at a 500 ISK sell price
 # (no decryptor 4,110 / Accelerant 4,553.33 / Attainment 4,971.67 per cycle).
@@ -357,11 +357,10 @@ def test_the_decryptor_switch_is_an_admin_bool_defaulting_on():
     assert spec["type"] == "bool" and spec["default"] is True
 
 
-# --- Task 3 fix round 1 -------------------------------------------------------
 
 
 def test_decryptors_within_the_tolerance_of_the_best_go_to_the_lower_type_id():
-    # M7: 34201 earns 0.004 ISK more than 34200; within the tolerance that is a
+    # 34201 earns 0.004 ISK more than 34200; within the tolerance that is a
     # tie, so the lower type id wins (in both criteria).
     twin = im.DecryptorOption(34200, "Twin", 1.2, 2, 10, 1)
     tol = im.DECRYPTOR_TIE_TOLERANCE_ISK
@@ -401,7 +400,7 @@ def test_unknown_market_fees_fall_back_with_a_reason_that_names_them():
 
 
 def test_the_no_decryptor_check_uses_the_best_metric_not_the_tied_lower_id():
-    # Fix round 2 (M7): 34201 beats no decryptor by 0.015 (outside the
+    # 34201 beats no decryptor by 0.015 (outside the
     # tolerance); 34200 is within the tolerance of 34201, so it is the pick.
     # The no-decryptor check must use the best value (500.015), not 34200's
     # own 500.006, which alone would be a tie with no decryptor.

@@ -409,7 +409,7 @@ def _gate(chars, phase1):
 
 def test_a_row_only_a_pilot_owned_blueprint_builds_is_blocked_when_its_owner_lacks_the_skills():
     """Its only blueprint is Pilot Alpha's own BPC, which the ledger binds to
-    Pilot Alpha (Task A): Skilled could build the item but cannot install Pilot Alpha's
+    Pilot Alpha: Skilled could build the item but cannot install Pilot Alpha's
     blueprint, so the row is not a build."""
     skilled = _pilot(3, "Skilled", _skill("Energy Weapon Rigging", 4, EWR))
     decision = _gate([_alpha(), skilled], _phase1(bpcs={ALGID_BP: [_owned_bpc(1)]}))

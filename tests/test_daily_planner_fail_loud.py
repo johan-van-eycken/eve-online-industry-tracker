@@ -348,7 +348,7 @@ def test_a_manufacture_action_carries_the_batch_runs_and_material_cost():
 
 
 def test_a_manufacture_action_carries_the_batch_unit_total():
-    """FeedbackProcessor compares PER-UNIT costs (F1): estimated_cost_isk is a
+    """FeedbackProcessor compares PER-UNIT costs: estimated_cost_isk is a
     whole-batch total, so the action must also carry the batch's units
     (top-level `quantity` = units per run x runs) to divide it by."""
     row = {"type_id": 12345, "quantity": 200,
@@ -376,7 +376,7 @@ def test_a_manufacture_action_without_a_total_cost_has_an_unknown_build_cost():
 
 
 def test_a_manufacture_action_carries_the_producers_batch_materials():
-    """F4: the shopping list buys these as-is (already scaled by runs and
+    """The shopping list buys these as-is (already scaled by runs and
     ME/structure) and subtracts what sub-manufacture builds."""
     row = {"type_id": 12345, "quantity": 200,
            "manufacturing_job": {"runs": 20, "materials": {
@@ -422,7 +422,7 @@ def test_an_industry_jobs_query_failure_fails_the_compute_not_frees_every_slot()
         svc._get_industry_jobs()
 
 
-# --- Fix round 1: a failed input query fails the compute, it is not "empty" ---
+# --- A failed input query fails the compute, it is not "empty" ----------------
 # An empty corp-assets list plans BPO and material purchases for things the
 # corp already owns; empty blueprint data drops every chain; empty orders skew
 # days-of-supply. Each must reach _run_compute and the status banner instead.

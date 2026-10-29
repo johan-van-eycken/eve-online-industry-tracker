@@ -1,4 +1,4 @@
-"""Round H2.9: the character and corporation market-order enrichment share
+"""The character and corporation market-order enrichment share
 one helper (application/market_analysis/market_order_enrichment), behaviour
 unchanged (checked against a before/after snapshot of both services on the
 same fake orders). Plus the ESIService retry cleanup. Fake values only.

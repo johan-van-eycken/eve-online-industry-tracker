@@ -165,10 +165,9 @@ def test_the_page_shows_a_stored_invalid_bool_as_its_own_choice():
     assert "maybe" in problem and "fail with an error" in problem
 
 
-# --- review round 1 ------------------------------------------------------------------------
 
 def test_an_empty_string_is_not_a_boolean(tmp_path):
-    # M2: "" used to read as False.
+    # "" used to read as False.
     with pytest.raises(ValueError, match="not a boolean"):
         _manager(tmp_path).set(*BOOL, "")
     mgr = _manager(tmp_path, {"industry": {"invention_decryptor_selection_enabled": ""}})
@@ -178,7 +177,7 @@ def test_an_empty_string_is_not_a_boolean(tmp_path):
 
 @pytest.mark.parametrize("raw", ["Jita", "JITA", " jita "])
 def test_a_case_variant_of_an_option_is_refused_with_a_hint(tmp_path, raw):
-    # M5: still refused (the planner queries by the exact hub), but the error names the option.
+    # Still refused (the planner queries by the exact hub), but the error names the option.
     with pytest.raises(ValueError, match="did you mean 'jita'"):
         _manager(tmp_path).set(*HUB, raw)
     mgr = _manager(tmp_path, {"daily_planner": {"planner_market_hub": raw}})
@@ -193,7 +192,7 @@ def test_a_value_unlike_every_option_has_no_hint(tmp_path):
 
 @pytest.mark.parametrize("stored", [1.0, 0.0, 1, "maybe"])
 def test_a_stored_invalid_bool_is_fixed_by_picking_on_or_off(stored):
-    # M1: picking On over a stored 1.0 was "no change" (True == 1.0), so it could never be fixed.
+    # Picking On over a stored 1.0 was "no change" (True == 1.0), so it could never be fixed.
     from streamlit_ui.pages.admin_settings import NO_CHANGE, _choice_to_save
 
     assert _choice_to_save(True, stored, problem="invalid") is True

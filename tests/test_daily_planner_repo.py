@@ -531,7 +531,7 @@ def test_record_feedback_commits_nothing_when_marking_processed_fails(monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# DailyPlannerService.get_analytics() -- plan_history (finding 13)
+# DailyPlannerService.get_analytics() -- plan_history
 # ---------------------------------------------------------------------------
 
 def test_plan_history_returns_recent_plans(app_session, session_provider):
@@ -564,7 +564,7 @@ def test_plan_history_returns_recent_plans(app_session, session_provider):
 
     # Only the "now" plan is inside the configured 30-day window. Asserting
     # the exact boundary (not merely "non-empty") is what actually catches
-    # finding 13: the old code's hardcoded 90-day cutoff would let the
+    # The old code's hardcoded 90-day cutoff would let the
     # 45-day-old plan back in, producing 2 rows instead of 1.
     assert len(history) == 1
     assert history[0]["status"] == "active"
@@ -596,7 +596,7 @@ def test_plan_history_returns_recent_plans(app_session, session_provider):
 
 
 def test_plan_history_keeps_an_unknown_freshness_unknown(app_session, session_provider):
-    """F5: `freshness_score or 1.0` showed a NULL score as 100% fresh and a
+    """`freshness_score or 1.0` showed a NULL score as 100% fresh and a
     real 0.0 (everything drifted) as 100% too."""
     from datetime import datetime
 
@@ -617,7 +617,7 @@ def test_plan_history_keeps_an_unknown_freshness_unknown(app_session, session_pr
 
 
 # ---------------------------------------------------------------------------
-# DailyPlannerService._persist_plan_items() -- meta_group_id persistence (D6)
+# DailyPlannerService._persist_plan_items() -- meta_group_id persistence
 # ---------------------------------------------------------------------------
 
 def test_plan_items_persist_the_resolved_meta_group_id(app_session, session_provider):
@@ -632,7 +632,7 @@ def test_plan_items_persist_the_resolved_meta_group_id(app_session, session_prov
 
 # ---------------------------------------------------------------------------
 # DailyPlannerService._build_plan_items() / _persist_plan_items() --
-# snapshot_sell_price write (finding 15 fix round 1)
+# snapshot_sell_price write
 #
 # This pins the one line that *is* the finding-15 fix:
 # `snapshot_sell_price=_spot_sell_price(market_depth_cache.get(d.type_id))`.
@@ -837,8 +837,8 @@ _INVENT_COLUMNS = (
 
 
 def test_an_invent_actions_chance_and_decryptor_survive_a_reload_on_a_legacy_table() -> None:
-    """A4 fix round 1, minor 5: the assigned chance, the best inventor's, the
-    expected attempts and Task 3's decryptor are persisted. ensure_app_schema
+    """The assigned chance, the best inventor's, the
+    expected attempts and the decryptor are persisted. ensure_app_schema
     adds the columns to a pre-existing daily_action_log (idempotent: run twice)."""
     from sqlalchemy import text
 
@@ -886,7 +886,7 @@ def test_an_invent_actions_chance_and_decryptor_survive_a_reload_on_a_legacy_tab
 
 
 def test_a_job_actions_install_fee_survives_a_reload_on_a_legacy_table() -> None:
-    """D4 (Task 8): estimated_job_fee_isk is persisted; ensure_app_schema adds
+    """estimated_job_fee_isk is persisted; ensure_app_schema adds
     the column to a pre-existing daily_action_log (idempotent: run twice).
     A legacy row reads back NULL (unknown), never 0."""
     from sqlalchemy import text
@@ -936,7 +936,7 @@ def test_a_job_actions_install_fee_survives_a_reload_on_a_legacy_table() -> None
 
 
 def test_a_job_actions_unknown_fee_reason_survives_a_reload() -> None:
-    """Task 8b fix round 1: the cause of an unknown fee is persisted, so
+    """The cause of an unknown fee is persisted, so
     Capital Reserved can name it (and show the refresh hint only without one)."""
     from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
     from eve_online_industry_tracker.application.daily_planner.models import AssignedAction
@@ -955,7 +955,7 @@ def test_a_job_actions_unknown_fee_reason_survives_a_reload() -> None:
 
 
 def test_get_analytics_reads_out_of_band_weights_through_the_band(app_session, session_provider):
-    """FU-03: get_analytics reads plan_learning_weights through read_weight,
+    """get_analytics reads plan_learning_weights through read_weight,
     so a pre-clamp or hand-edited row is shown clamped, not raw."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     plan = BuildPlanModel(created_at=now, updated_at=now, status="active", freshness_score=1.0)
@@ -975,7 +975,7 @@ def test_get_analytics_reads_out_of_band_weights_through_the_band(app_session, s
 
 
 def test_a_compute_warns_once_for_a_corrupt_weight_row(session_provider, caplog):
-    """FU-04: _run_compute is one compute for the learned-weight warnings, so
+    """_run_compute is one compute for the learned-weight warnings, so
     two readers of the same corrupt row produce one WARNING."""
     import logging
     from types import SimpleNamespace
@@ -997,7 +997,7 @@ def test_a_compute_warns_once_for_a_corrupt_weight_row(session_provider, caplog)
 
 
 def test_the_copy_flag_of_busy_blueprints_comes_from_the_asset_history(app_session, session_provider):
-    """Fix round 1, minor 3: many live job rows have a NULL
+    """Many live job rows have a NULL
     blueprint_is_blueprint_copy; the asset history says what the item is."""
     from eve_online_industry_tracker.infrastructure.models import (
         CharacterAssetHistoryModel,
@@ -1019,7 +1019,7 @@ def test_the_copy_flag_of_busy_blueprints_comes_from_the_asset_history(app_sessi
 
 
 def test_a_job_with_a_null_status_holds_its_slot_and_blueprint(session_provider):
-    """Fix round 3, item 3: NOT IN drops NULL rows; a NULL status is active."""
+    """NOT IN drops NULL rows; a NULL status is active."""
     from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
 
     session = session_provider.app_session()

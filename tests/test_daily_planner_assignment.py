@@ -145,7 +145,7 @@ def test_me_and_te_research_take_two_separate_slots():
 
 def test_a_single_research_slot_yields_only_one_running_research_job():
     """One research slot: the ME job takes it. The TE job on the same BPO is
-    queued behind the ME job (one job per blueprint, Task 8c fix round 3),
+    queued behind the ME job (one job per blueprint),
     so it takes no slot in this plan; a second item's research gets none."""
     chars = [_char(1, "Pilot", [])]  # 1 + 0 = 1 research slot only
     plan = ChainPlan(decisions=[
@@ -264,7 +264,7 @@ def test_research_actions_carry_the_nested_blueprint_type_id():
 
 
 def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
-    """D2: rank by the item's own science + encryption skills (the producer's
+    """Rank by the item's own science + encryption skills (the producer's
     invention_chance), not by a generic Science sum."""
     chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}
     generalist = _char(1, "Generalist", [_skill("Laboratory Operation", 5), _skill("Science", 5, 3402)])
@@ -281,7 +281,7 @@ def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
 
 
 def test_invention_ranking_without_an_encryption_skill_uses_the_science_skills():
-    """A3: an item whose SDE entry has no encryption skill still ranks by its
+    """An item whose SDE entry has no encryption skill still ranks by its
     two science skills. Both pilots train both science skills, so both can run it."""
     chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": None}
     encryptor = _char(1, "Encryptor", [_skill("Laboratory Operation", 5), _skill("Caldari Encryption Methods", 5, 21790),
@@ -358,7 +358,7 @@ def _every_assignment_plan():
             "t1_bpc_runs_on_hand": 1,
             "needs_me_research": True, "needs_te_research": True,
             # Built from an owned BPC, so the BPO's research does not block
-            # the manufacture (research first, Task 8c fix round 1).
+            # the manufacture (research first).
             "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999},
                                   "blueprint_source_kind": "owned_blueprint_copy"},
         }),
@@ -412,7 +412,7 @@ def test_an_invent_action_without_a_decryptor_names_none():
     (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
                  if a.action_type == "invent"]
     assert invent.decryptor_type_id is None and invent.decryptor_type_name is None
-    # The row carries no sized invention plan, so the note says so (A4); no decryptor is named.
+    # The row carries no sized invention plan, so the note says so; no decryptor is named.
     assert invent.notes.startswith("Invention: BPC stock below pipeline threshold; datacore need unknown")
     assert "use " not in invent.notes
 
@@ -429,7 +429,7 @@ def test_on_equal_free_slots_the_pilot_with_fewer_active_jobs_wins():
 
 # --- copies per copy job -----------------------------------------------------------------------
 #
-# Task A item 5: how many copies one copy job may make.
+# How many copies one copy job may make.
 #
 # The verified EVE rule (see character_assigner.max_copies_per_job): runs per
 # copy at most the blueprint's maxProductionLimit (CCP support, "Copying"),

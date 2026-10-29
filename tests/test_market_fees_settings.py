@@ -232,7 +232,7 @@ def test_the_public_structure_scan_has_its_concurrency_names():
     assert sorted(r["station_id"] for r in rows) == [1021, 1022]
 
 
-# --- M1: the VWAP days, read once per cycle --------------------------------------------------
+# --- The VWAP days, read once per cycle ------------------------------------------------------
 
 def test_an_invalid_vwap_days_fails_the_cycle_once_not_per_type(tmp_path):
     from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import MarketDepthCollector
@@ -254,7 +254,7 @@ def test_the_vwap_takes_its_days_from_the_caller():
     assert "days" in inspect.signature(MarketDepthCollector._compute_vwap_5d).parameters
 
 
-# --- M2: the retry budget is per page ----------------------------------------------------------
+# --- The retry budget is per page --------------------------------------------------------------
 
 class _Response:
     def __init__(self, pages):
@@ -295,7 +295,7 @@ def test_the_retry_budget_applies_per_page(monkeypatch, tmp_path):
     assert len(c._http_session.calls) == 6
 
 
-# --- M3: one settings read per planner page render ---------------------------------------------
+# --- One settings read per planner page render -------------------------------------------------
 
 def test_the_actions_tab_takes_the_planner_settings_from_the_page():
     from streamlit_ui.components.daily_planner import status_bar, tab_actions

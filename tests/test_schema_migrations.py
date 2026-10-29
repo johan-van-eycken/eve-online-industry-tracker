@@ -1,4 +1,4 @@
-"""Round H2.6: a failed ADD COLUMN or ensure_table fails startup with a clear
+"""A failed ADD COLUMN or ensure_table fails startup with a clear
 message (SchemaMigrationError), instead of a WARNING after which the ORM
 fails obscurely ("no such column") wherever the model is read.
 
@@ -80,7 +80,7 @@ def test_a_full_migration_on_a_fresh_db_still_succeeds_twice():
 
 # --- _ensure_index -----------------------------------------------------------------------------
 #
-# Round J1.3: schema_migrations._ensure_index logs a DB error as a WARNING
+# schema_migrations._ensure_index logs a DB error as a WARNING
 # and lets a programming error propagate. Fake values only.
 
 class _IndexDb:

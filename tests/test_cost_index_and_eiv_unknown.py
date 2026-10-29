@@ -1,4 +1,4 @@
-"""F1 items 3-4: a non-numeric EIV quantity, a non-numeric system cost index
+"""A non-numeric EIV quantity, a non-numeric system cost index
 and a system without the activity's cost index make the job fee unknown,
 with the reason (the job_fee_unknown_reasons path), never 0. The industry
 profile payloads carry cost_index_unknown_reason. Fake values throughout."""
@@ -21,7 +21,7 @@ def _profile(*entries, **extra):
     return {"system_id": SYSTEM, "system_cost_indices": list(entries), **extra}
 
 
-# --- item 3: the EIV quantity -----------------------------------------------------------------
+# --- The EIV quantity -------------------------------------------------------------------------
 
 def test_a_non_numeric_eiv_quantity_makes_the_eiv_unknown_with_the_reason(caplog):
     entries = [{"type_id": 34, "quantity": "many"}, {"type_id": 35, "quantity": 10}]
@@ -57,7 +57,7 @@ def test_the_default_eiv_reason_is_unchanged():
     assert fee["fee_unknown_reason"] == "no priced EIV for the manufacturing job (a material has no adjusted price)"
 
 
-# --- items 3-4: the system cost index --------------------------------------------------------------
+# --- The system cost index -------------------------------------------------------------------------
 
 def test_a_non_numeric_cost_index_is_unknown_with_the_reason(caplog):
     profile = _profile({"activity": "manufacturing", "cost_index": "n/a"})
@@ -148,7 +148,7 @@ def test_a_missing_index_reads_unknown_in_the_activity_cost_indices(monkeypatch)
     assert indices["invention"] is None and indices["copying"] is None             # unknown, not 0.00%
 
 
-# --- item 4: the profile payloads ---------------------------------------------------------------------
+# --- The profile payloads -----------------------------------------------------------------------------
 
 def _esi(systems):
     return SimpleNamespace(get_industry_systems=lambda: systems)

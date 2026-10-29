@@ -1,4 +1,4 @@
-"""Round H2.5: the ESI cache.
+"""The ESI cache.
 
 - No If-None-Match when the cached data cannot be decoded (a 304 would then
   give None as the data), nor for a paginated request (its pages are never

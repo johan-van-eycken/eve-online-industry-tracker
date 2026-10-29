@@ -399,7 +399,7 @@ class TestResolveEivPricing:
         assert source == "esi_adjusted_price"
 
     def test_no_average_price_fallback(self):
-        """H1: the EIV is the adjusted price only; an average price is no
+        """The EIV is the adjusted price only; an average price is no
         stand-in (the fee would be priced on another basis), so it is unknown
         with a reason."""
         reasons: list[str] = []
@@ -558,7 +558,7 @@ class TestProfileJobSurchargeRates:
 
     @given(st.floats(min_value=-5.0, max_value=5.0, allow_nan=False, allow_infinity=False))
     def test_the_facility_tax_is_never_guessed(self, value: float):
-        """Fix round 1: a negative tax or a legacy modifier below SCC is not
+        """A negative tax or a legacy modifier below SCC is not
         clamped to 0 %: the tax (so every fee) is unknown, with a reason."""
         service = _service()
         for profile in ({"installation_cost_modifier": value}, {"facility_tax": value}):
@@ -612,7 +612,7 @@ class TestSystemCostIndex:
                 {"activity": "copying", "cost_index": 0.01},
             ],
         }
-        # F1 item 4: unknown (the fee is unknown, with the reason), never 0%
+        # Unknown (the fee is unknown, with the reason), never 0%
         assert IndustryService._system_cost_index(
             profile_payload=profile, activity="manufacturing",
         ) is None
@@ -842,7 +842,7 @@ class TestProfileRigReduction:
         assert result_no_match == 0.0
 
     def test_no_fallback_to_aggregate_keys(self):
-        """Task 15 M1: with no rig effects array the aggregate bonus keys name
+        """With no rig effects array the aggregate bonus keys name
         no rig, so no rig bonus applies (never an under-buy)."""
         profile = {"structure_rig_material_bonus": 0.044}
         result = IndustryService._profile_rig_reduction(
@@ -914,7 +914,7 @@ class TestReductionPipelineIntegration:
 
 
 # ---------------------------------------------------------------------------
-# _sum_estimated_item_value (fix round 1: never a partial EIV)
+# _sum_estimated_item_value (never a partial EIV)
 # ---------------------------------------------------------------------------
 
 class TestSumEstimatedItemValueNeverPartial:

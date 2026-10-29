@@ -154,7 +154,7 @@ def test_none_meta_group_is_not_logged_as_a_problem(caplog):
 
 
 # ---------------------------------------------------------------------------
-# Fix round 1 -- finding 1 (is_blueprint must be language-independent)
+# is_blueprint must be language-independent
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +196,7 @@ def test_is_blueprint_false_for_non_blueprint_category():
 
 
 # ---------------------------------------------------------------------------
-# Fix round 1 -- finding 2 (a loader exception must not poison _missing)
+# A loader exception must not poison _missing
 # ---------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ def test_loader_exception_during_prefetch_does_not_poison_other_ids():
 
 
 # ---------------------------------------------------------------------------
-# Fix round 1 (task 11b) — the shared sde_engine fixture must support the
+# The shared sde_engine fixture must support the
 # real get_type_data loader, not just _FakeLoader.
 # ---------------------------------------------------------------------------
 
@@ -256,8 +256,7 @@ def test_resolver_against_the_real_sde_schema_and_default_loader(session_provide
     got created because conftest.py's sde_engine fixture now creates it
     explicitly. Before that fix, inserting a Types row with a non-null
     metaGroupID (exactly what this test does) made the reflection line raise
-    NoSuchTableError, uncaught (Task 5 removed prefetch's swallowing
-    try/except). This also locks in the float-to-int cast documented on
+    NoSuchTableError, uncaught (prefetch has no swallowing try/except). This also locks in the float-to-int cast documented on
     meta_group_id(): metaGroupID is a REAL column in the real SDE.
     """
     from eve_online_industry_tracker.db_models import Types

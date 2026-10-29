@@ -34,7 +34,7 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
 
 
 
-#: Every character id is one the character manager has (J2.4 checks it).
+#: Every character id is one the character manager has (an unknown one is refused).
 _KNOWN_CHARACTERS = SimpleNamespace(get_character_by_id=lambda character_id: object())
 
 def _sessions():
@@ -172,7 +172,7 @@ def test_the_page_names_the_assumed_fees_per_character():
     assert _assumed_fee_warnings(rows[2:], {}) == []
 
 
-# --- review round 1: M4 (assumed fees are Low confidence) and I2 (stale persisted fees) ----------
+# --- Assumed fees are Low confidence; stale persisted fees -----------------------------------------
 
 def test_assumed_fees_are_low_confidence():
     from eve_online_industry_tracker.application.characters.realized_profit import _confidence

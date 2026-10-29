@@ -146,8 +146,6 @@ def test_a_character_job_gives_its_facility_location_as_station_id():
     assert industry_job_location_id({"job_id": 1}) is None
 
 
-# --- Task D review minors -------------------------------------------------------------------------
-
 @pytest.fixture()
 def fresh_compat_warning(monkeypatch):
     monkeypatch.setattr(esi_client_module, "_COMPATIBILITY_DATE_WARNED", set())

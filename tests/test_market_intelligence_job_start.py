@@ -1,4 +1,4 @@
-"""F1 item 8 (and the item 10 ImportError gap): MarketIntelligenceJob.start
+"""MarketIntelligenceJob.start
 sets _running only once the thread is registered, so a failed registration
 leaves the job startable again instead of "running" with no thread; without
 the Flask package (ImportError) the thread still starts. Fake state."""

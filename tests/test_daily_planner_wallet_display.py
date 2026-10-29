@@ -58,7 +58,7 @@ def test_a_non_finite_wallet_snapshot_is_unknown_not_a_number():
 
 
 def test_the_shopping_total_names_its_unpriced_lines():
-    """Task 8 fix round 1: unpriced lines are bought; the total says it
+    """Unpriced lines are bought; the total says it
     excludes them instead of passing as exact."""
     from streamlit_ui.components.daily_planner import tab_shopping
 
@@ -75,7 +75,7 @@ def test_the_shopping_total_names_its_unpriced_lines():
     assert tab_shopping.unpriced_total_caption(rows[:1]) is None
 
 
-# --- Task 8b fix round 1: an unpriced line makes the remainder unknown ---
+# --- An unpriced line makes the remainder unknown ------------------------
 
 from streamlit_ui.components.daily_planner.tab_shopping import budget_metric  # noqa: E402
 

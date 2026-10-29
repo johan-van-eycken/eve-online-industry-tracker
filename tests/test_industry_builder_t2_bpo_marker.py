@@ -70,7 +70,7 @@ def test_an_unknown_invention_node_is_labelled_unknown():
     assert ui.tree_node_activity_label({"activity": "invention", "recommendation_action": "unknown", "runs": 0}) == "unknown"
 
 
-# --- round 5 Task 10 carry 10: a partial EIV is named, not blank ---------------
+# --- A partial EIV is named, not blank -----------------------------------------
 
 
 def test_a_known_eiv_is_shown_as_a_number():

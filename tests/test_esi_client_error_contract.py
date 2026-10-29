@@ -216,7 +216,7 @@ def test_parallel_calls_with_an_expired_token_refresh_it_once(client, monkeypatc
 
 # --- EsiRequestError ---------------------------------------------------------------------------
 #
-# Round H2.3: a dedicated EsiRequestError(RuntimeError).
+# A dedicated EsiRequestError(RuntimeError).
 #
 # ESI_REQUEST_ERRORS is (EsiRequestError, requests.RequestException): a plain
 # ValueError or RuntimeError of our own code is no longer read as an ESI

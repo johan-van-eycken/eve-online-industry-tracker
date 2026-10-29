@@ -1,4 +1,4 @@
-"""Unit tests for industry hangar scoping (Task 1).
+"""Unit tests for industry hangar scoping.
 
 Verifies:
 1. AdminSettingsManager correctly stores/coerces the ``industry_hangar_flag``

@@ -1,4 +1,4 @@
-"""Engineering-rig coverage by SDE category/group (Task 11, FU-14; SDE update).
+"""Engineering-rig coverage by SDE category/group.
 
 EVE applies a manufacturing rig by the product's category and group (CCP's
 industry target filters, read from the SDE's industryTargetFilters and
@@ -287,7 +287,7 @@ def test_two_rigs_covering_the_product_both_apply(catalog):
 
 
 def test_the_aggregate_is_never_applied(catalog):
-    """Task 15 M1 (supersedes Task 11 I1 / 11b M2): the aggregate names no
+    """The aggregate names no
     rig, so a profile with no per-effect rigs gets no rig bonus, in any band."""
     S = _producer()
     groups = S._manufacturing_rig_groups(_entry(508, "Missile Launcher Heavy", 7, "Module"))

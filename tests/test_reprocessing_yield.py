@@ -595,7 +595,7 @@ def test_other_float_settings_are_refused_too_not_clamped(tmp_path):
 
 # --- a non-numeric adjusted price --------------------------------------------------------------
 #
-# H1.6: a non-numeric ESI adjusted_price is left out with a WARNING (not a
+# A non-numeric ESI adjusted_price is left out with a WARNING (not a
 # crash of the whole optimizer), so the reprocessing fee is unknown with its
 # reason. Fake values.
 

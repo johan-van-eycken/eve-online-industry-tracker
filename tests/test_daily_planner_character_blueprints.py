@@ -1,4 +1,4 @@
-"""Task A item 1: blueprints in a pilot's own hangar.
+"""Blueprints in a pilot's own hangar.
 
 The producer prices rows from character blueprints too (owned_blueprints_
 scope, default "all_characters"). The planner now reads them from the same

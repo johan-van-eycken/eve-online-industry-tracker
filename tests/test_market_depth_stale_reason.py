@@ -1,4 +1,4 @@
-"""G1 item 1: market_depth_cache.stale_reason is a model column and a schema
+"""market_depth_cache.stale_reason is a model column and a schema
 migration (no longer an ALTER inside the collector), and a stale row carries
 its reason wherever market depth is read: the daily planner's decision reason
 and plan-level unavailable inputs, and the Analytics tab. Fake values."""

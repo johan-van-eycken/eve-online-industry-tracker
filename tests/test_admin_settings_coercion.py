@@ -1,5 +1,5 @@
 # tests/test_admin_settings_coercion.py
-"""Task 8c fix round 1: stored admin settings are checked against the schema
+"""Stored admin settings are checked against the schema
 on load. An out-of-range or mistyped stored value used to pass straight
 through: it changed behaviour silently and crashed st.number_input on the
 settings page. Since the strict-settings follow-up a stored invalid number is
@@ -96,7 +96,7 @@ def test_the_settings_page_number_input_args_keep_a_valid_value_and_the_spec():
     assert args["format"] == "%.1f" and args["step"] == 0.1
 
 
-# --- fix round 2: step and bool strings ----------------------------------------------
+# --- Step and bool strings -----------------------------------------------------------
 
 def test_an_odd_stored_te_is_kept_with_an_error_not_snapped(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
@@ -138,7 +138,7 @@ def test_an_unparseable_bool_string_is_kept_with_an_error_not_the_default(tmp_pa
 
 # --- a corrupt or non-object admin_settings.json -----------------------------------------------
 #
-# Round H2.1: a corrupt or non-object admin_settings.json, or a non-object
+# A corrupt or non-object admin_settings.json, or a non-object
 # category, does not silently mean "all defaults".
 #
 # - The load problem is logged as an ERROR and listed (prefixed ERROR) by

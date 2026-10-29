@@ -5,7 +5,7 @@ Each assertion here checks a value that was structurally zero or dead before
 the remediation: material cost, pipeline days, BPO analysis on the nested
 blueprint id, slot counts, manufacture runs and shopping quantities.
 
-The fixture is captured by hand (plan Task 3) and this module skips until it
+The fixture is captured by hand and this module skips until it
 exists. tests/test_daily_planner_end_to_end.py already drives _run_compute
 over one synthetic row, so this module does not repeat that. It wires the
 phase components the way DailyPlannerService's _phase_2 .. _phase_7 do, so
@@ -219,7 +219,7 @@ def _run_phases(overview_rows, input_rows, meta, admin, *, own_bpos=True):
     promoted = [dataclasses.replace(d, decision="build") for d in decisions]
 
     # The corp owns a fully researched BPO of every T1 row's blueprint: a
-    # row with no owned blueprint is not built (Task 14 I3), and Phase 5
+    # row with no owned blueprint is not built, and Phase 5
     # onwards is what this test is about.
     owned_bpos = {
         bp: [SimpleNamespace(item_id=900_000 + i, type_id=bp, is_blueprint_copy=False,
@@ -410,7 +410,7 @@ def test_every_real_row_gets_a_reasoned_decision(run, planner_rows):
 
 
 def test_the_planner_makes_one_decision_per_distinct_product(run, overview_rows):
-    """F2: the producer emits one row per blueprint variant. One decision per
+    """The producer emits one row per blueprint variant. One decision per
     ROW mixed one variant's pipeline state with another's profitability.
     A count, so it holds against the scrambled fixture."""
     assert len(run.decisions) == len({int(r["type_id"]) for r in overview_rows})
@@ -464,7 +464,7 @@ def test_a_skilled_pilot_is_assigned_more_than_one_job(run):
 def test_manufacture_actions_carry_real_runs_and_cost(run, planner_rows):
     manufactures = [a for a in run.actions if a.action_type == "manufacture"]
     assert all(a.runs is not None and a.runs > 0 for a in manufactures)
-    # One kept row per product (F2), so the runs must be that row's own.
+    # One kept row per product, so the runs must be that row's own.
     runs_by_type = {r.type_id: r.runs for r in planner_rows}
     wrong_runs = [
         (a.type_id, a.runs) for a in manufactures if a.runs != runs_by_type.get(a.type_id)
@@ -483,7 +483,7 @@ def test_manufacture_actions_carry_real_runs_and_cost(run, planner_rows):
 def test_shopping_quantities_are_the_producers_batch_quantities(run, meta, admin):
     """A manufacture action buys each material at the quantity the producer
     wrote under manufacturing_job.materials: already per-run x runs after
-    ME/structure reduction (F4). The old path, SDE per-run x runs, ignored ME,
+    ME/structure reduction. The old path, SDE per-run x runs, ignored ME,
     and before that bought for a single run of a 20-run job. Each line is
     checked against one field of the real row, so it holds on the scrambled
     fixture."""

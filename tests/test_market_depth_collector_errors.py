@@ -1,4 +1,4 @@
-"""G1 items 2 and 3c: the market depth collector catches only data, ESI and DB
+"""The market depth collector catches only data, ESI and DB
 errors per type (a WARNING naming the type id, the previous row kept and
 marked stale) and lets a programming error propagate; and a type whose order
 book fetch failed is not an empty book: nothing is written, the previous row
@@ -86,7 +86,7 @@ def _db_error(*a, **k):
     raise OperationalError("SELECT fake", {}, Exception("fake db down"))
 
 
-# --- item 2: the per-type except ----------------------------------------------------------------
+# --- The per-type except ------------------------------------------------------------------------
 
 def test_a_programming_error_in_one_type_propagates(app_engine, monkeypatch):
     c = _collector(monkeypatch, _state(app_engine, _Esi()))
@@ -217,7 +217,7 @@ def test_a_programming_error_in_the_history_refresh_propagates(app_engine, monke
 
 # --- a malformed ESI value skips one item ------------------------------------------------------
 #
-# H1 after H2's EsiRequestError: ValueError is no longer an ESI error, so
+# ValueError is not an ESI error, so
 # the per-item loops name it explicitly (a TypeError stays a bug and
 # propagates): a malformed value skips that one item, with its reason, and the
 # others are still processed.

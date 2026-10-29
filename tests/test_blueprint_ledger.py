@@ -1,5 +1,5 @@
 # tests/test_blueprint_ledger.py
-"""Round 5 Task 14: one plan-wide blueprint reservation.
+"""One plan-wide blueprint reservation.
 
 EVE runs one job per blueprint. ChainPlanner keeps a single ledger of the
 free BPOs (by item) and BPCs (by item, with their runs) and claims them in
@@ -7,8 +7,8 @@ plan order: research first, then top-level manufacture and copies (score
 order), then invention on the BPCs left, then sub-builds on the component
 BPOs left. A row that loses a claim is not built, or buys, with a reason.
 
-One regression test per review probe (a, b, c, e, f, g) and the composed
-probe d pinned. Fake ids and numbers throughout.
+One regression test per sharing case below and the composed scenario
+pinned. Fake ids and numbers throughout.
 """
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def _kinds(actions):
     return sorted((a.action_type, a.type_id) for a in actions)
 
 
-# --- probe a: a component that is also its own top-level row ---------------------
+# --- A component that is also its own top-level row ------------------------------
 
 def _widget_row():
     return {
@@ -154,7 +154,7 @@ def test_a_component_whose_top_level_row_is_not_built_is_merged_into_one_sub_bui
     assert sub.quantity == 1000
 
 
-# --- probe b: a T1 BPO shared by a T1 row and a T2 row's copy --------------------
+# --- A T1 BPO shared by a T1 row and a T2 row's copy -----------------------------
 
 BP_B = copy.deepcopy(A.BLUEPRINTS)
 BP_B[998]["manufacturing"]["materials"] = [{"type_id": 34, "quantity": 5}]
@@ -218,7 +218,7 @@ def test_probe_b_research_comes_first_so_no_copy_of_a_bpo_in_research():
     assert "buy a T1 BPO" not in t2.decision_reason
 
 
-# --- probe c: a T1 BPC used by the T1 row is not invented from too ----------------
+# --- A T1 BPC used by the T1 row is not invented from too -------------------------
 
 def test_probe_c_a_bpc_the_t1_row_builds_on_is_not_used_by_invention():
     t1_row = _t1_row(20)
@@ -242,10 +242,10 @@ def test_probe_c_a_bpc_the_t1_row_builds_on_is_not_used_by_invention():
     assert "make 2 copies × 3 runs" in copy_action.notes
 
 
-# --- I2: lanes from per-BPC runs --------------------------------------------------
+# --- Lanes from per-BPC runs ------------------------------------------------------
 
 def test_one_bpc_gives_one_invent_lane_of_at_most_its_runs():
-    """The pinned Task 12 case, corrected: one 4-run BPC, two free inventors,
+    """One 4-run BPC, two free inventors,
     two corp BPOs. One invention job per BPC, so ONE lane of 4 (the best
     inventor's whole attempts), not 3 + 1 from the same BPC; no copy."""
     row = A._row(t1_bpo=True)
@@ -258,7 +258,7 @@ def test_one_bpc_gives_one_invent_lane_of_at_most_its_runs():
 
 def test_two_bpcs_give_at_most_two_lanes_each_within_its_bpc_and_named():
     """BPCs of 1 and 3 runs, three free inventors: two lanes (one per BPC),
-    the two best pilots, split 3 + 1. Best fit (M7): the 3-attempt lane
+    the two best pilots, split 3 + 1. Best fit: the 3-attempt lane
     takes the 3-run BPC, the 1-attempt lane the 1-run BPC."""
     row = A._row(t1_bpo=True)
     row["t1_bpo_count"] = 1
@@ -274,7 +274,7 @@ def test_two_bpcs_give_at_most_two_lanes_each_within_its_bpc_and_named():
 
 
 def test_the_smallest_bpc_with_enough_runs_is_used():
-    """M7: one lane of 4 attempts and BPCs of 10 and 4 runs: the 4-run BPC
+    """One lane of 4 attempts and BPCs of 10 and 4 runs: the 4-run BPC
     fits, so the 10-run one stays for later."""
     row = A._row(t1_bpo=True)
     row["t1_bpo_count"] = 1
@@ -289,7 +289,7 @@ def test_the_chain_planner_claims_the_best_fitting_bpc():
     assert t2.overview_row["t1_bpc_runs_by_item"] == [[79, 4]]
 
 
-# --- probe e: T1 BPCs without a T1 BPO are invented from ---------------------------
+# --- T1 BPCs without a T1 BPO are invented from ------------------------------------
 
 def test_probe_e_t1_bpcs_on_hand_without_a_bpo_are_invented_from():
     t2 = _dec(_t2_row(), 12345, "Widget II", 2.0, 2, "invention")
@@ -308,7 +308,7 @@ def test_without_bpcs_and_without_a_bpo_the_reason_still_says_buy_a_t1_bpo():
     assert "buy a T1 BPO (Widget I Blueprint, 998) first" in t2.decision_reason
 
 
-# --- probe f: a T1 row with no owned blueprint is not built ------------------------
+# --- A T1 row with no owned blueprint is not built ---------------------------------
 
 def test_probe_f_a_t1_row_without_an_owned_bpo_or_bpc_is_not_built():
     row = _t1_row(20)
@@ -322,7 +322,7 @@ def test_probe_f_a_t1_row_without_an_owned_bpo_or_bpc_is_not_built():
     assert _shop(actions, A.PRICES, BP_B) == {}
 
 
-# --- probe g: two T2 rows, one T1 BPO -----------------------------------------------
+# --- Two T2 rows, one T1 BPO --------------------------------------------------------
 
 def test_probe_g_two_hand_built_rows_do_not_both_copy_the_one_bpo():
     first, second = A._row(t1_bpo=True), A._row(t1_bpo=True)
@@ -364,7 +364,7 @@ def test_the_copy_states_copies_times_runs_and_is_capped_at_the_max_runs_per_cop
     assert "make 2 copies × 3 runs" in copy_action.notes
 
 
-# --- probe d: the composed scenario stays correct, pinned --------------------------
+# --- The composed scenario stays correct, pinned -----------------------------------
 
 def test_probe_d_the_composed_plan_is_unchanged():
     from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
@@ -415,7 +415,7 @@ def test_probe_d_the_composed_plan_is_unchanged():
         ("copy", 998, 4, 2, 1, 1.0),
         ("invent", 22345, 1, 2, None, 8.0),
         # The parent row publishes the component's fee (0 per run, the
-        # research-first fixture): an unknown fee would buy it (Task 15 fix round 3).
+        # research-first fixture): an unknown fee would buy it.
         ("sub_manufacture", 54321, 1, 69, 690, 0.0),
     ]
     (invent,) = [a for a in actions if a.action_type == "invent"]
@@ -446,12 +446,12 @@ def test_probe_d_the_composed_plan_is_unchanged():
         bpo_opportunities=[], character_name_map={}, meta_resolver=_Meta(),
     )
     value, caption = capital_reserved_display(compute_capital_reserved([_model_to_dict(r) for r in rows]))
-    # Task 15 fix round 4: the cause is the unpriced Datacore B purchase
+    # The cause is the unpriced Datacore B purchase
     # (estimated_total None above), and only that: every job fee is known.
     assert (value, caption) == ("unknown", "1 purchase(s) have no price")
 
 
-# --- minor 2: rows not manufactured today say why -----------------------------------
+# --- Rows not manufactured today say why --------------------------------------------
 
 @pytest.mark.parametrize("stage", ["copying", "invention"])
 def test_a_copying_or_invention_row_says_no_manufacture_today(stage):
@@ -475,7 +475,7 @@ def test_a_bpo_in_research_with_no_other_source_says_no_manufacture_today():
     assert "; no manufacture today: BPO in research" in top.decision_reason
 
 
-# --- minor 4: a sub-build split over jobs runs in parallel only on free BPOs --------
+# --- A sub-build split over jobs runs in parallel only on free BPOs -----------------
 
 def test_a_sub_build_of_several_jobs_on_one_bpo_queues_the_rest():
     """One component BPO, jobs of 40, 40 and 20 runs. The pilot has two
@@ -502,7 +502,7 @@ def test_a_sub_build_of_several_jobs_on_one_bpo_queues_the_rest():
     ]
 
 
-# --- minor 5: the owned-BPC part's units add up -------------------------------------
+# --- The owned-BPC part's units add up ----------------------------------------------
 
 def test_the_owned_bpc_part_rounds_up_and_the_rest_adds_up_to_the_total():
     from eve_online_industry_tracker.application.daily_planner import research_first
@@ -516,7 +516,6 @@ def test_the_owned_bpc_part_rounds_up_and_the_rest_adds_up_to_the_total():
     assert "rest_quantity" not in part
 
 
-# --- fix round 1 -------------------------------------------------------------------
 
 def _thing_and_widget_ii(*, research_busy=False, mfg_busy=False):
     """s4: Thing (T1, score 1) is priced on BPC 78 (4 runs) + BPO 11 (TE 0,
@@ -548,7 +547,7 @@ def _thing_and_widget_ii(*, research_busy=False, mfg_busy=False):
 
 
 def test_s4_the_kept_rows_bpc_is_claimed_too_so_invention_cannot_double_book_it():
-    """Fix round 1, I1: research first plans the variant (BPC 80), but without
+    """Research first plans the variant (BPC 80), but without
     a research slot Thing builds from its kept row (BPC 78 + BPO 11). The
     union is claimed, so Widget II has no BPC and no BPO left today."""
     thing, widget, actions = _thing_and_widget_ii(research_busy=True)
@@ -573,7 +572,7 @@ def test_m10_a_research_that_gets_its_slot_keeps_the_research_reason():
 
 
 def test_s1_bpc_runs_on_hand_that_cover_the_attempts_claim_no_copy_bpo():
-    """Fix round 1, I2: a 4-run T1 BPC covers the 4 attempts, so the T2 row
+    """A 4-run T1 BPC covers the 4 attempts, so the T2 row
     (score 2) claims no copy BPO and the T1 row (score 1) builds from it."""
     t2 = _dec(_t2_row(), 12345, "Widget II", 2.0, 2, "invention")
     t1 = _dec(_t1_row(20), 12344, "Widget I", 1.0, 1)
@@ -615,7 +614,7 @@ def test_without_a_lane_count_one_copy_bpo_is_claimed():
 
 
 def test_s3_a_bpo_in_an_active_job_is_owned_not_a_purchase():
-    """Fix round 1, I3: the one BPO is installed in a job and the snapshot
+    """The one BPO is installed in a job and the snapshot
     dropped it. It is owned and busy: no BPO analysis, no buy advice."""
     job = {"blueprint_item_id": 77, "blueprint_type_id": 998, "activity_id": 1, "blueprint_is_blueprint_copy": False}
     t1 = _dec(_t1_row(20), 12344, "Widget I", 1.0, 1)
@@ -734,7 +733,6 @@ def test_an_unknown_lane_is_capped_by_its_bpc():
     assert "at most 3 attempt(s): the 3 run(s) of T1 BPC item 81" in capped.note
 
 
-# --- fix round 2 -------------------------------------------------------------------
 
 def _two_t2_rows():
     a = _dec(_t2_row(12345), 12345, "Widget II", 2.0, 2, "invention")
@@ -805,7 +803,7 @@ def test_p3_no_manufacture_emitted_keeps_the_research_wording_with_no_slot():
     _thing, widget, actions = _thing_and_widget_ii(research_busy=True, mfg_busy=True)
     assert [a.action_type for a in actions] == []
     assert "manufacture of Thing" not in widget.decision_reason
-    # Task A fix round 1 (I3): Thing's idle claims are released and Widget II
+    # Thing's idle claims are released and Widget II
     # is re-planned, but no research slot is free either: undone, and the
     # reason says the blueprint is free and why nothing runs.
     assert ("not built: T1 BPO (999) free (its holder does not use it today), "
@@ -841,7 +839,6 @@ def test_a_row_whose_t1_bpcs_another_row_invents_from_is_not_told_to_buy_a_bpo()
     )
 
 
-# --- fix round 3 -------------------------------------------------------------------
 
 def _p4(bpos):
     """Thing (T1) has a BPC-80 variant but no research; Widget II invents from
@@ -922,7 +919,7 @@ def test_m10_a_multi_holder_reason_is_reworded_per_holder():
 
 # --- one blueprint item booked once ------------------------------------------------------------
 #
-# Task A fix round 1: the review's probes, pinned. Fake ids and numbers.
+# The review's probes, pinned. Fake ids and numbers.
 #
 # I1 one blueprint item in both the corp and a pilot's assets is booked once,
 # as the pilot's (owner-bound), with a WARNING.
@@ -963,7 +960,6 @@ def test_a_stale_duplicate_bpc_gives_one_invent_job_by_its_owner():
     assert [(a.action_type, a.character_id, a.blueprint_item_id) for a in actions] == [("invent", A.BEST_ID, 701)]
 
 
-# --- I2 ------------------------------------------------------------------------------
 
 def _thing_plan(bpos, bpcs, parent_row):
     parent = _dec(parent_row, 12345, "Thing", 2.0, 1)
@@ -1010,7 +1006,7 @@ def test_a_parent_that_builds_keeps_its_sub_build():
     ]
 
 
-# --- I3, M3, M4: the cascade probe --------------------------------------------------
+# --- The cascade probe --------------------------------------------------------------
 
 def _cascade(lab):
     """Widget I holds T1 BPO 77 (no manufacturing slot), Widget II holds
@@ -1068,7 +1064,6 @@ def test_release_history_is_kept_across_passes():
     assert "its BPO 77 goes to manufacture of Widget I (12344)" in x.decision_reason
 
 
-# --- M1 ------------------------------------------------------------------------------
 
 def test_an_owner_without_loaded_skills_does_not_invent():
     """Never plan what cannot be executed: the owner whose skills are not

@@ -93,7 +93,7 @@ def test_phase_5_sub_manufacture_lets_a_contract_violation_through():
                                  blueprint_material_efficiency=10, blueprint_time_efficiency=20)
     planner._compute_optimal_me = lambda bp_data, runs=1: 10
     phase1 = {
-        # The parent is built from an owned BPO (Task 14 I3).
+        # The parent is built from an owned BPO.
         "bpo_assets_by_type_id": {888: [bpo], 999: [parent_bpo]},
         "blueprint_data": {888: {"manufacturing": {
             "products": [{"type_id": 54321, "quantity": 10}],

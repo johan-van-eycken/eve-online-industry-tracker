@@ -1,4 +1,4 @@
-"""Round J1.8: a read over several characters or corporations keeps the data
+"""A read over several characters or corporations keeps the data
 of every one that worked and names each that failed (PartialResult.errors,
 the reply's `errors`, one st.warning per failed owner on the pages). Only
 when every one fails is it an error. The corporation getters are covered in

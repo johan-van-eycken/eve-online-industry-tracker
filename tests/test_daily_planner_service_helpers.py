@@ -50,7 +50,7 @@ def test_non_blueprint_assets_are_excluded():
 
 
 def test_index_blueprint_assets_batches_the_sde_lookup_into_one_call():
-    """Regression for a fix-round-1 finding: is_blueprint() inside the per-asset loop
+    """Regression: is_blueprint() inside the per-asset loop
     self-heals a resolver cache miss with a single-id prefetch, so calling it without a
     prior batched prefetch would open one SDE session per distinct asset type_id (hundreds
     of sessions for the live corp_assets table's hundreds of distinct types). index_blueprint_assets

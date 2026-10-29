@@ -1,4 +1,4 @@
-"""RM-35 (round 5 Task 13): a scoring or analytics read that fails is visibly
+"""A scoring or analytics read that fails is visibly
 "unavailable", never a silent empty result.
 
 Each reader in scope (margin correlation, the Tritanium 7-day trend, and the
@@ -352,14 +352,13 @@ def test_analytics_caption_is_absent_without_a_status(analytics):
     assert tab_analytics.analytics_unavailable_caption(analytics) is None
 
 
-# --- fix round 1 ---------------------------------------------------------------
 
 _SECTION_KEYS = ("market_depth", "margin_correlation", "invention_details")
 
 
 @pytest.mark.parametrize("key", _SECTION_KEYS)
 def test_an_empty_section_shows_the_failed_read_not_a_false_cause(key):
-    """I1: a failed read must not show "no data yet, run X first" as its cause."""
+    """A failed read must not show "no data yet, run X first" as its cause."""
     reason = f"{key} unavailable (DB error: X): data not shown"
     message, unavailable = tab_analytics.section_empty_message(
         {"unavailable": {key: reason}}, key, "No data yet.",
@@ -374,13 +373,13 @@ def test_an_empty_section_without_a_failed_read_shows_the_default(key, analytics
 
 
 def test_the_status_bar_caption_says_it_is_a_compute_time_snapshot():
-    """M2: the status is the plan's, recorded when it was computed."""
+    """The status is the plan's, recorded when it was computed."""
     caption = status_bar.unavailable_inputs_caption({"unavailable_inputs": {"margin_correlation": MARGIN_NOTE}})
     assert caption == f"When this plan was computed, some scoring inputs could not be read: {MARGIN_NOTE}"
 
 
 def test_an_empty_decision_reason_gets_no_leading_separator(session_provider, monkeypatch):
-    """M3: the notes are joined without an empty first part."""
+    """The notes are joined without an empty first part."""
     svc = _service(session_provider)
     real_decide = svc._decision_engine.decide
 

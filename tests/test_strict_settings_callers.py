@@ -1,17 +1,17 @@
-"""Fix round 1 on the strict settings, the rig migration and the station name.
+"""The strict settings' callers, the rig migration and the station name.
 
-- I1: an invalid strict setting read under a broad except (the market order
+- An invalid strict setting read under a broad except (the market order
   books, the price suggestion, the market history) is re-raised, so the
   market-order pages show it instead of an empty order book.
-- M1: a startup-critical setting read as its default logs a WARNING once per
+- A startup-critical setting read as its default logs a WARNING once per
   process naming it and the default; the market refresh loop reads its
   interval visibly.
-- M2: a float's step is input granularity, not validity (type, finiteness
+- A float's step is input granularity, not validity (type, finiteness
   and min/max only); "6.0" reads as 6 for an int.
-- M4: the rig migration shows on /health and the settings page; an invalid
+- The rig migration shows on /health and the settings page; an invalid
   legacy rig does not fail an Athanor.
-- M5: the NPC station name comes from ESI /universe/stations/{id} first.
-- M6: a rig's ore class needs a LocationGroupModifier on the reprocessing
+- The NPC station name comes from ESI /universe/stations/{id} first.
+- A rig's ore class needs a LocationGroupModifier on the reprocessing
   service group 1322.
 
 Fake values throughout.
@@ -41,7 +41,7 @@ def _invalid_workers() -> AdminSettingInvalid:
     return AdminSettingInvalid("performance", "market_order_max_workers", 99, "99 is outside 1 to 20")
 
 
-# --- I1: the market-order pages ----------------------------------------------------------------
+# --- The market-order pages --------------------------------------------------------------------
 
 class _RaisingEsi:
     def __init__(self, *, buy=False, sell=False, history=False):
@@ -136,7 +136,7 @@ def test_the_market_orders_page_api_raises_with_the_backends_message(monkeypatch
     assert api._fetch_market_orders_reply.__wrapped__()["response"]["data"] == [{"order_id": 1}]
 
 
-# --- M1: the startup-critical settings ---------------------------------------------------------
+# --- The startup-critical settings -------------------------------------------------------------
 
 @pytest.fixture()
 def fresh_default_warnings(monkeypatch):
@@ -179,7 +179,7 @@ def test_the_market_refresh_interval_reader_flags_an_invalid_setting(tmp_path, c
     assert job._refresh_interval_hours() == float(spec["default"])
 
 
-# --- M2: float steps and integral strings -------------------------------------------------------
+# --- Float steps and integral strings -----------------------------------------------------------
 
 def test_a_float_off_its_step_is_accepted_as_entered(tmp_path):
     """A float's step is the settings page's input granularity, not validity."""
@@ -209,7 +209,7 @@ def test_an_integral_string_for_an_int_reads_like_the_float(tmp_path):
         mgr.set("industry", "portfolio_order_count_threshold", "6.5")
 
 
-# --- M4: the rig migration -------------------------------------------------------------------
+# --- The rig migration -----------------------------------------------------------------------
 
 def _legacy(tmp_path, reprocessing):
     return _manager(tmp_path, {"reprocessing": reprocessing})
@@ -240,7 +240,7 @@ def test_an_invalid_legacy_rig_does_not_fail_an_athanor(tmp_path):
         facility_repo.configured_facility(tatara, None, fakes.fake_ore_data())
 
 
-# --- M5: the station name from ESI -----------------------------------------------------------
+# --- The station name from ESI ---------------------------------------------------------------
 
 def _npc(station_name):
     return facility_repo.facility_from_choice(
@@ -303,7 +303,7 @@ def test_the_esi_station_name_is_cached():
         svc.get_station_name(60000001)
 
 
-# --- M6: the rig's ore classes need the right modifier ------------------------------------------
+# --- The rig's ore classes need the right modifier ----------------------------------------------
 
 def test_a_rig_class_needs_a_location_group_modifier_on_the_service_group():
     effects = copy.deepcopy(fakes.DOGMA_EFFECTS)
@@ -315,7 +315,7 @@ def test_a_rig_class_needs_a_location_group_modifier_on_the_service_group():
     assert data.rig_ore_classes[46635] == frozenset()
 
 
-# --- M3: the ore page shows why the fee is unknown -----------------------------------------------
+# --- The ore page shows why the fee is unknown ---------------------------------------------------
 
 def test_the_ore_page_warns_when_the_fee_is_unknown():
     from streamlit_ui.pages.ore_calculator import _fee_unknown_warning

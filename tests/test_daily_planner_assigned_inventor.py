@@ -72,7 +72,7 @@ def _best_inventor():
 
 
 def _weaker_pilot(skills=None, *, copy_slot=False):
-    # Encryption 1: the pilot can run the invention (Task 15 fix round 1, I1).
+    # Encryption 1: the pilot can run the invention.
     # One research slot, so one invent lane (the single-pilot A4 path);
     # copy_slot: Laboratory Operation 1, a second slot for the copy action.
     entries = [
@@ -100,7 +100,7 @@ def _row(*, multiplier=1.2, base=0.30, decryptor=True, skills_unknown_reason=Non
     expected = 2 / best_p
     mj = {
         "runs": 20,
-        # The install fees (D4): a priced row warns about no unknown fee.
+        # The install fees: a priced row warns about no unknown fee.
         "manufacturing_job_cost": 2_000.0,
         "invention_chance": {
             "base_probability": base, "skill_factor": best_factor, "decryptor_multiplier": multiplier,
@@ -202,7 +202,7 @@ def _cost(expected):
     )
 
 
-# --- the weaker pilot (A4) ---------------------------------------------------------
+# --- the weaker pilot --------------------------------------------------------------
 
 
 def test_a_weaker_assigned_pilot_gets_its_own_lower_chance_and_buys_more():
@@ -223,7 +223,7 @@ def test_a_weaker_assigned_pilot_gets_its_own_lower_chance_and_buys_more():
 
 
 def test_the_extra_expected_units_are_priced_at_the_market_not_the_fifo_cost():
-    """Minor 2: the best inventor's inputs keep their line totals (Datacore A
+    """The best inventor's inputs keep their line totals (Datacore A
     at FIFO 50); the weaker pilot's extra 0.9866 expected attempts buy at the
     market (900 ISK per attempt), the fee scales with the attempts."""
     invent = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
@@ -268,7 +268,7 @@ def test_without_a_decryptor_only_the_datacores_scale():
 
 
 def test_the_copy_action_makes_one_t1_bpc_run_per_invention_attempt():
-    """Minor 6, Task 12 fix rounds 2-3: the copy covers the attempts the T1
+    """The copy covers the attempts the T1
     BPC runs on hand do not, for the pilot free to invent today (the best
     inventor is busy: the weaker pilot's 5); with none on hand it is the only
     action, and with them on hand today's attempts are capped by them."""
@@ -319,12 +319,12 @@ def test_the_best_inventor_recomputed_without_its_id_gives_the_same_numbers():
 
 
 def test_an_unpriced_input_line_falls_back_to_the_hub_price():
-    """Minor 3: Datacore B has no producer price; the planner's price map (100) prices it."""
+    """Datacore B has no producer price; the planner's price map (100) prices it."""
     invent = _invent(_row(unpriced_b=True), [_best_inventor()])
     assert invent.estimated_cost_isk == pytest.approx(1000.0 + 800.0 * E_BEST)
 
 
-# --- unknown skills (I2, minor 1, minor 7) -----------------------------------------
+# --- unknown skills ----------------------------------------------------------------
 
 
 def test_a_pilot_whose_skills_are_not_loaded_does_not_invent():
@@ -341,7 +341,7 @@ def test_a_pilot_whose_skills_are_not_loaded_does_not_invent():
     [_skill("Mass Production", 5, 3387)],  # loaded, none of the item's skills
 ])
 def test_loaded_skills_without_the_items_skills_cannot_invent(skills, caplog):
-    """Minor 7 / I2, then Task 15 fix round 1 (I1): a loaded list without the
+    """A loaded list without the
     item's skills is level 0, so the pilot cannot run the invention at all:
     no invent action (never another pilot's chance), and the reason."""
     plan = _plan(_row())
@@ -353,7 +353,7 @@ def test_loaded_skills_without_the_items_skills_cannot_invent(skills, caplog):
 
 
 def test_the_pilots_chance_is_computed_when_the_producer_had_no_skills_loaded():
-    """Minor 1: the producer used the base chance (no corp character with
+    """The producer used the base chance (no corp character with
     skills), but the item's skill set is known and the planner has this
     pilot's skills: compute them."""
     row = _row(skills_unknown_reason="no corp character has its skills loaded", inventor=None, best_factor=None)
@@ -381,7 +381,7 @@ def test_an_unknown_item_skill_set_buys_at_the_sde_base_chance_with_a_warning(ca
                for r in caplog.records)
 
 
-# --- unsized plans (I1) ------------------------------------------------------------
+# --- unsized plans -----------------------------------------------------------------
 
 
 def test_an_owned_bpc_covering_batch_one_sizes_from_the_later_batch_plan():
@@ -397,7 +397,7 @@ def test_an_owned_bpc_covering_batch_one_sizes_from_the_later_batch_plan():
 
 
 def test_the_later_batch_plans_unknown_cost_has_a_reason_a_warning_and_an_over_buy_flag(caplog):
-    """Fix round 2, item 1: no top-level invention fee, so the cost is
+    """No top-level invention fee, so the cost is
     unknown, not guessed, and the action says so; one full batch is sized
     although an owned BPC (the planner may not see) can cover part of it."""
     with caplog.at_level(logging.WARNING):
@@ -436,7 +436,7 @@ def test_a_row_without_any_invention_figures_is_datacore_need_unknown():
 
 
 def test_an_sde_base_chance_of_zero_keeps_the_producers_floored_chance(caplog):
-    """Fix round 2, item 2: base 0 x any skill factor is 0, so every pilot
+    """Base 0 x any skill factor is 0, so every pilot
     invents at the admin floor: the producer's chance is exact."""
     row = _row()
     mj = row["manufacturing_job"]
@@ -454,7 +454,7 @@ def test_an_sde_base_chance_of_zero_keeps_the_producers_floored_chance(caplog):
 
 
 def test_an_input_line_without_a_quantity_makes_the_cost_unknown_with_a_reason(caplog):
-    """Fix round 2, item 3: never a silently dropped line."""
+    """Never a silently dropped line."""
     row = _row()
     row["manufacturing_job"]["expected_invention_materials"][str(DATACORE_B)]["quantity"] = None
     with caplog.at_level(logging.WARNING):
@@ -474,7 +474,7 @@ def test_invention_attempts_never_divides_by_zero():
 
 
 def test_the_invent_fee_is_paid_per_attempt_the_assigned_pilot_launches():
-    """D4: a weaker pilot launches 5 whole attempts (best inventor: 4), so
+    """A weaker pilot launches 5 whole attempts (best inventor: 4), so
     the invent action's install fee is 5 x 4.0, not the best inventor's 4 x 4.0."""
     best = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(WEAK_ID)])
     weak = _invent(_row(), [_best_inventor(), _weaker_pilot()], jobs=[_busy(BEST_ID)])
@@ -482,7 +482,7 @@ def test_the_invent_fee_is_paid_per_attempt_the_assigned_pilot_launches():
     assert (weak.runs, weak.estimated_job_fee_isk) == (5, pytest.approx(20.0))
 
 
-# --- Task 12 fix round 1: invention split over the free qualifying inventors -----
+# --- Invention split over the free qualifying inventors --------------------------
 # A second qualifying inventor at 3/3/3: 0.30 x (1 + 6/30 + 3/40) x 1.2 = 0.459.
 # 2 BPCs over the lanes (0.525, 0.459), sum 0.984: ceil(2 / 0.984) = 3 rounds.
 # The best lane runs 3 (1.575 expected BPCs), the second ceil(0.425 / 0.459) = 1.
@@ -519,7 +519,7 @@ def test_two_free_inventors_get_one_invent_action_each_at_their_own_chance():
     # Each lane's share of the 2 expected BPCs over its own chance.
     assert best.invention_expected_attempts == pytest.approx(2 * 3 / COVERED)
     assert second.invention_expected_attempts == pytest.approx(2 * 1 / COVERED)
-    # Fix round 2: the lanes' 2 x 4 / COVERED expected attempts are priced
+    # The lanes' 2 x 4 / COVERED expected attempts are priced
     # once (Datacore A's FIFO discount counts once); each lane takes its share.
     total = 2 * 4 / COVERED
     assert best.estimated_cost_isk == pytest.approx(_cost(total) * 3 / 4)
@@ -552,7 +552,7 @@ def test_copies_go_one_per_free_corp_bpo_with_the_runs_spread():
     actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
     copies = [a for a in actions if a.action_type == "copy"]
     assert [a for a in actions if a.action_type == "invent"] == []  # no T1 BPC on hand yet
-    # Task 14: one copy per invent lane (3 + 1 attempts), one copy job per BPO:
+    # One copy per invent lane (3 + 1 attempts), one copy job per BPO:
     # each lane later gets its own BPC of enough runs.
     assert [(c.quantity, c.runs) for c in copies] == [(1, 3), (1, 1)]
     assert copies[0].character_id == COPIER_ID  # the most free research slots
@@ -564,7 +564,7 @@ def test_copies_go_one_per_free_corp_bpo_with_the_runs_spread():
 def test_one_corp_bpo_keeps_one_copy_action():
     actions = _assign(_row(t1_bpo=True), [_best_inventor(), _second_inventor(), _copier()])
     (copy,) = [a for a in actions if a.action_type == "copy"]
-    # Task 14: lanes of 3 + 1 on one BPO: one job of 2 copies x 3 runs (one
+    # Lanes of 3 + 1 on one BPO: one job of 2 copies x 3 runs (one
     # job's copies share their runs, so sized at the larger lane).
     assert (copy.quantity, copy.runs) == (2, 6)
 
@@ -578,7 +578,7 @@ def _alt(character_id):
 
 
 def test_the_lanes_costs_add_up_to_one_pricing_of_their_expected_attempts():
-    """Fix round 2 (review probe): five lanes priced one by one applied the
+    """Five lanes priced one by one used to apply the
     held stock's discount five times (summing to 3019 ISK where 4543 is
     right, and a lane could go negative). Now the lanes' total expected
     attempts are priced once and split by share."""
@@ -591,7 +591,7 @@ def test_the_lanes_costs_add_up_to_one_pricing_of_their_expected_attempts():
         assert a.estimated_cost_isk == pytest.approx(_cost(total_expected) * a.invention_expected_attempts / total_expected)
 
 
-# --- fix round 2: copy first in the copying stage --------------------------------
+# --- Copy first in the copying stage ---------------------------------------------
 
 
 def test_a_small_corp_of_inventors_copies_first_and_does_not_livelock():
@@ -636,7 +636,6 @@ def test_fewer_free_lanes_than_the_build_time_assumes_are_said_on_the_invent_act
     assert all("lanes free today" not in a.notes for a in full)
 
 
-# --- fix round 3 ------------------------------------------------------------------
 
 NO_MANUFACTURE_NOTE = "no manufacture until a T2 BPC exists"
 
@@ -706,7 +705,7 @@ def test_a_dropped_lane_renumbers_the_lane_wording():
     actions = _assign(row, [_best_inventor(), _second_inventor(), _copier()])
     (invent,) = [a for a in actions if a.action_type == "invent"]
     assert invent.runs == 1
-    # Task 14: one BPC, so one lane from the start: no lane wording left over.
+    # One BPC, so one lane from the start: no lane wording left over.
     assert "of 2" not in invent.notes
 
 
@@ -738,7 +737,6 @@ def test_two_rows_share_the_t1_bpc_runs_on_hand_once():
     assert [a for a in actions if a.action_type == "copy" and a.type_id == 998]
 
 
-# --- fix round 4 ------------------------------------------------------------------
 
 
 def test_the_copy_is_re_sized_after_a_released_slot():
@@ -748,7 +746,7 @@ def test_the_copy_is_re_sized_after_a_released_slot():
     Re-sized with that lane free, the best inventor's 4 attempts are covered
     by the 4 runs on hand: no copy is needed and the other slot returns too.
 
-    Corrected in Task 14 (I2): the 4 runs are ONE BPC, and an invention job
+    The 4 runs are ONE BPC, and an invention job
     uses one BPC, so one lane invents: the best inventor's 4 attempts, not
     3 + 1 from the same BPC."""
     row = _row(t1_bpo=True)

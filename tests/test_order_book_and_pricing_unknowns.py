@@ -321,7 +321,7 @@ def test_pricing_suggestion_data_failures_are_warnings(monkeypatch, caplog):
 
 # --- an unknown hub, order side or smoothing value is refused ----------------------------------
 #
-# H1.5: an unknown market hub or order side is refused (a 400 ServiceError
+# An unknown market hub or order side is refused (a 400 ServiceError
 # naming it), not silently read as Jita / sell; an invalid orderbook_smoothing
 # config value is refused, a missing one is the config schema's default; an
 # out-of-range min_target_margin_pct is clamped with a WARNING naming it.
@@ -398,7 +398,7 @@ def test_an_in_range_min_target_margin_logs_nothing(caplog):
 
 # --- a failed order-book fetch: unknown price and hub liquidity --------------------------------
 #
-# H1.4: a type whose order-book fetch failed (ESIService leaves it out of the
+# A type whose order-book fetch failed (ESIService leaves it out of the
 # book and keeps the reason) has an unknown price and hub liquidity, None with
 # `price_unavailable_reason` / `liquidity_unavailable_reason`, never an empty
 # book read as 0 units; it is not cached. The industry service carries the

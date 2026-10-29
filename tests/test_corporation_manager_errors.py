@@ -1,4 +1,4 @@
-"""Round J1.1: a corporation whose CharacterManager or Corporation cannot be
+"""A corporation whose CharacterManager or Corporation cannot be
 built is logged as an ERROR, named in CorporationManager.init_errors (the
 bootstrap puts each in init_warnings) and skipped; the other corporations go
 on. Before, the unbound name raised UnboundLocalError, or a later failure

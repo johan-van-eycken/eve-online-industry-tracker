@@ -1,4 +1,4 @@
-"""Task 12 (FU-56): invention and source-copy elapsed time over parallel lanes.
+"""Invention and source-copy elapsed time over parallel lanes.
 
 Fake characters, fake skill ids and fake durations throughout.
 """
@@ -100,7 +100,7 @@ def test_three_inventors_with_two_slots_each_run_twelve_attempts_in_two_rounds()
 
 
 def test_weaker_lanes_count_at_their_own_chance():
-    """Fix round 1: the best pilot 5/5/5 with 1 slot plus four 1/1/1 alts
+    """The best pilot 5/5/5 with 1 slot plus four 1/1/1 alts
     with 5 slots each, 300 runs / 10 per BPC = 30 BPCs, base 34 %.
     p_best = 0.34 x (1 + 10/30 + 5/40) = 0.495833, p_alt = 0.34 x
     (1 + 2/30 + 1/40) = 0.371167; 21 lanes, sum 7.919167, so
@@ -120,7 +120,7 @@ def test_weaker_lanes_count_at_their_own_chance():
     assert (parallel["lanes"], parallel["lanes_used"], parallel["pilots_used"]) == (21, 20, 5)
     assert parallel["rounds"] == 4
     assert costs["elapsed_duration_seconds"] == 4 * 100
-    # Fix round 2: the row's attempts ARE the lanes' (cost, procurement, budget).
+    # The row's attempts ARE the lanes' (cost, procurement, budget).
     # The best inventor alone: 61 whole, 30 / 0.495833 = 60.50 expected.
     p_best, p_alt = 0.34 * (1 + 10 / 30 + 5 / 40), 0.34 * (1 + 2 / 30 + 1 / 40)
     assert costs["best_inventor_whole_attempts"] == 61
@@ -214,7 +214,7 @@ def test_a_dc_ii_style_example_with_a_known_whole_attempt_count():
     assert costs["whole_attempts"] == 7
     assert costs["elapsed_parallel"]["lanes"] == 5
     # Every lane at the same chance: the lane expected attempts equal the
-    # best inventor's, 3 / 0.4647 = 6.456 (fix round 2: unchanged).
+    # best inventor's, 3 / 0.4647 = 6.456 (unchanged).
     assert costs["runs"] == pytest.approx(costs["best_inventor_expected_attempts"])
     assert costs["runs"] == pytest.approx(3 / (0.34 * (1 + 8 / 30 + 4 / 40)))
     assert costs["elapsed_parallel"]["lane_duration_seconds"] == 910
@@ -235,7 +235,7 @@ def test_the_selected_character_is_timed_with_the_producers_own_calculator():
 
 
 def test_another_pilot_is_timed_with_its_own_implants():
-    """Fix round 1: one convention for another pilot, its own payload."""
+    """One convention for another pilot, its own payload."""
     costs = _invention(levels={2: _TRAINED}, slots={2: _capacity(2, implant=0.1)})
     assert costs["elapsed_parallel"]["lane_duration_seconds"] == 90
     no_payload = _invention(levels={2: _TRAINED}, slots={2: _capacity(2, implant=0.1, payload=False)})
@@ -314,7 +314,7 @@ def test_source_copies_stay_sequential_without_a_second_lane_or_slot_data(contex
 
 
 def test_the_whole_run_budget_and_the_copies_use_the_lanes_attempts():
-    """Fix round 2: whole_attempts is the lanes' total (7 here), and both the
+    """whole_attempts is the lanes' total (7 here), and both the
     whole-run budget of owned source runs and the copy elapsed time spend it."""
     context = InventionContext(
         slot_capacity_by_character_id={1: _capacity(2)},
@@ -367,7 +367,7 @@ def test_producer_and_planner_count_the_same_research_slots():
 
 
 def test_later_batches_per_bpc_attempts_never_under_buy_the_lanes():
-    """Fix round 2: one BPC over lanes (0.9, 0.1, 0.1, 0.1) takes 2 attempts
+    """One BPC over lanes (0.9, 0.1, 0.1, 0.1) takes 2 attempts
     (split_invention_attempts), but 10 BPCs take 28, more than 10 x 2: the
     per-BPC figure the shopping list multiplies is ceil(28 / 10) = 3."""
     lanes = [0.9, 0.1, 0.1, 0.1]

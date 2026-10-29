@@ -1,5 +1,6 @@
-"""Final round F3, Flask side: strict numeric request values, the request
-session teardown, and the industry profile context route."""
+"""Strict numeric request values (the admin and character/corporation id
+query values included), the request session teardown, and the industry
+profile context route."""
 from __future__ import annotations
 
 import math
@@ -258,7 +259,7 @@ def test_teardown_logs_a_failing_sqlalchemy_close(caplog):
 
 # --- non-numeric admin query values ------------------------------------------------------------
 #
-# Round J1.9: a non-numeric admin query value is a 400 naming the parameter
+# A non-numeric admin query value is a 400 naming the parameter
 # and the value, not a 500 from int()/float(). Covers every numeric argument
 # of the admin routes (the public structures status, refresh and scan start,
 # and the ESI metrics). Fake values only.
@@ -332,7 +333,7 @@ def test_a_fractional_int_is_a_400():
 
 # --- non-integer character_id / corporation_id -------------------------------------------------
 #
-# Round J1.5: a character_id or corporation_id query value that is not a
+# A character_id or corporation_id query value that is not a
 # whole number is a 400 naming the field and the value, not a silent "all
 # characters" / "all corporations". Absent or blank still means all. Fake
 # values only.

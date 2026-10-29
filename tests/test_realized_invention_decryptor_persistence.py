@@ -329,7 +329,7 @@ def test_the_first_publish_re_snapshots_the_jobs_stored_without_a_choice(session
 
 
 def test_a_later_publish_with_a_newly_planned_blueprint_re_snapshots_again(session_provider, sde_engine):
-    """H1: the re-snapshot is not once per process: a later overview that
+    """The re-snapshot is not once per process: a later overview that
     publishes a choice for a blueprint the earlier ones did not plan
     re-snapshots its stored jobs too."""
     _seed_sde(sde_engine)
@@ -630,7 +630,7 @@ def test_the_migration_adds_the_reason_column_and_the_choices_table():
 
 # --- the ME/TE of owned T2 BPCs as decryptor evidence ------------------------------------------
 #
-# J2.2: the ME/TE of the owner's T2 BPCs as decryptor evidence.
+# The ME/TE of the owner's T2 BPCs as decryptor evidence.
 #
 # An invented BPC has ME 2 / TE 4 plus its decryptor's modifiers, and a copy
 # cannot be researched, so a BPC of the invented blueprint first seen after an

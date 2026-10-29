@@ -1,4 +1,4 @@
-"""F1 items 5-6: a malformed owned_blueprints_scope is a 400 naming the bad
+"""A malformed owned_blueprints_scope is a 400 naming the bad
 id (not a scope that silently selects no assets), and the corporation name
 lookup in _get_owned_blueprint_assets is cosmetic: a failed read logs a
 WARNING and leaves the names empty, so the overview refresh never fails on

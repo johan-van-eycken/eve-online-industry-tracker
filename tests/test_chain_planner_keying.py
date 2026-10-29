@@ -40,7 +40,7 @@ BLUEPRINT_DATA = {
 
 def _planner(*, optimal_me=10, own_parent_blueprints=True):
     """`own_parent_blueprints`: a parent whose blueprint the fixture owns no
-    BPO or BPC of gets a fully researched BPO (Task 14 I3: a row with no
+    BPO or BPC of gets a fully researched BPO (a row with no
     owned blueprint is not built, so these sub-build tests need one)."""
     planner = ChainPlanner(industry_service=None, session_provider=None, admin_settings=_AdminStub())
     planner._compute_optimal_me = lambda bp_data, runs=1: optimal_me
@@ -184,7 +184,7 @@ def _batch_materials(fee=0.0, **qty_by_type_id):
 
     `fee`: the component's install fee per run the producer published
     (component_job_fee_per_run). Known by default: a component whose fee is
-    unknown is bought (Task 15 fix round 3); fee=None leaves it out."""
+    unknown is bought; fee=None leaves it out."""
     return {
         str(t): {"type_id": int(t), "quantity": q, "type_name": "Widget",
                  **({"component_job_fee_per_run": fee} if fee is not None else {})}
@@ -235,7 +235,7 @@ _SUB_PHASE1 = {
 
 
 def test_sub_manufacture_quantity_is_the_parents_batch_quantity_not_one_sde_run():
-    """F4: the SDE says 100 per run. A 20-run parent at ME10 needs 1800, which
+    """The SDE says 100 per run. A 20-run parent at ME10 needs 1800, which
     is what the producer wrote under manufacturing_job.materials."""
     row = _row(runs=20, materials=_batch_materials(**{"54321": 1800}))
 
@@ -250,7 +250,7 @@ def test_sub_manufacture_quantity_is_the_parents_batch_quantity_not_one_sde_run(
 
 def test_sub_manufacture_requests_for_one_material_are_merged_across_parents():
     a = _row(type_id=12345, materials=_batch_materials(**{"54321": 300}))
-    # Its own blueprint: two rows on one BPO would book it twice (Task 14).
+    # Its own blueprint: two rows on one BPO would book it twice.
     b = _row(type_id=22222, blueprint_type_id=1000, materials=_batch_materials(**{"54321": 200}))
 
     plan = _planner().plan_chain([_decision(a), _decision(b)], _SUB_PHASE1)
@@ -345,7 +345,7 @@ def test_owned_t1_bpo_marks_the_t2_item_for_copy_and_invention():
 
 
 def test_the_t1_bpc_runs_on_hand_and_the_bpo_count_reach_the_assigner():
-    """Task 12 fix round 2: CharacterAssigner copies first and caps today's
+    """CharacterAssigner copies first and caps today's
     invent attempts by the free T1 BPC runs on hand."""
     from types import SimpleNamespace
 
@@ -358,7 +358,7 @@ def test_the_t1_bpc_runs_on_hand_and_the_bpo_count_reach_the_assigner():
               "bpc_assets_by_type_id": {999: bpcs},
               "blueprint_data": INVENTION_BLUEPRINT_DATA}
     _planner().plan_chain([_decision(row, meta_group_id=2)], phase1)
-    # Task 14 fix round 1: extra copy BPOs only up to the producer's invention
+    # Extra copy BPOs only up to the producer's invention
     # lanes; this row names none, so one BPO copies.
     assert (row["t1_bpo_count"], row["t1_bpc_runs_on_hand"]) == (1, 5)
 
@@ -373,7 +373,7 @@ def test_unowned_t1_bpo_means_one_must_be_acquired():
     assert row.get("has_t1_bpo") is not True
     assert row["needs_t1_bpo"] is True
     assert row["t1_blueprint_type_id"] == 999
-    # Not built until a T1 BPO is acquired (fix round 1, I2).
+    # Not built until a T1 BPO is acquired.
     assert decision.pipeline_stage == "blocked"
 
 
@@ -793,7 +793,7 @@ def test_a_sub_component_has_no_own_sell_velocity_and_persists_it_as_null(
 
 def _limited_sub_phase1(limit, *, component_bpos=3):
     """Three BPOs of the component by default, so a split build's jobs run in
-    parallel (Task 14 minor 4: one job per free BPO at a time)."""
+    parallel (one job per free BPO at a time)."""
     blueprint_data = {**SUB_BLUEPRINT_DATA, 888: {**SUB_BLUEPRINT_DATA[888],
                                                    "max_production_limit": limit}}
     phase1 = _sub_phase1(blueprint_data=blueprint_data)
@@ -852,7 +852,7 @@ def test_a_sub_batch_over_the_max_runs_records_each_job():
     13 + 13 + 11 = 37 Tritanium, priced at 1 ISK each."""
     (sub,) = _subs_for(200, _limited_sub_phase1(7))
     # No overview row of the component; the parent's published fee per run is
-    # 0 (_batch_materials' default: an unknown fee buys, Task 15 fix round 3).
+    # 0 (_batch_materials' default: an unknown fee buys).
     free_fee = {"fee": 0.0, "fee_unknown_reason": None, "after_job": None}
     assert sub.overview_row["sub_job_batches"] == [
         {"runs": 7, "output": 70, "quantity": 70, "materials": {34: 13}, "cost": 13.0, **free_fee},
@@ -862,7 +862,7 @@ def test_a_sub_batch_over_the_max_runs_records_each_job():
 
 
 def test_each_sub_job_carries_the_components_fee_per_run_times_its_runs():
-    """D4: the component's own overview row prices one run at 4 / 4 = 1
+    """The component's own overview row prices one run at 4 / 4 = 1
     ISK, so the 7, 7 and 6-run jobs pay 7, 7 and 6."""
     phase1 = {**_limited_sub_phase1(7), "overview_rows": [
         {"type_id": 54321, "manufacturing_job": {"runs": 4, "manufacturing_job_cost": 4.0}},
@@ -1099,7 +1099,7 @@ def _structure_subs(profile, *, entry=_COMPONENT_ENTRY, parents=1):
         p = profile[i] if isinstance(profile, list) else profile
         rows.append(_row(type_id=12345 + i, blueprint_type_id=999 + i, runs=10, industry_profile=p,
                          materials={"54321": {**dict(entry), "component_job_fee_per_run": 0.0}}))
-    # A published fee: a component whose fee is unknown is bought (Task 15 fix round 3).
+    # A published fee: a component whose fee is unknown is bought.
     plan = _planner().plan_chain([_decision(r) for r in rows], _sub_phase1())
     return [d for d in plan.decisions if d.is_sub_component]
 
@@ -1217,10 +1217,9 @@ def test_an_all_group_rig_still_applies_when_the_component_group_is_unknown():
     assert sub.overview_row["rig_applicability"] == "unknown"
 
 
-# --- fix round 1 ---------------------------------------------------------------
 
 # SDE group 1136 "Fuel Block" (category 4 "Material"): EVE's Structures rig
-# target filter names it (Task 11); before, the producer filed it under "Modules".
+# target filter names it; before, the producer filed it under "Modules".
 _FUEL_BLOCK_ENTRY = {"type_id": 54321, "type_name": "Widget", "quantity": 1000,
                      "group_id": 1136, "group_name": "Fuel Block",
                      "category_id": 4, "category_name": "Material"}
@@ -1294,7 +1293,6 @@ def test_the_adapter_matches_the_producer_statics():
         S._manufacturing_rig_groups(_COMPONENT_ENTRY))
 
 
-# --- fix round 2 ---------------------------------------------------------------
 
 def _entry(group_id, group_name, category_id, category_name):
     return {"type_id": 54321, "type_name": "Widget", "quantity": 1000, "group_id": group_id,
@@ -1386,7 +1384,7 @@ def test_research_without_a_blueprint_id_is_skipped_not_aimed_at_the_product(cap
 
 
 def test_a_two_job_batch_saves_only_on_the_runs_a_researched_bpo_would_build():
-    """D3: 4 runs on an owned ME 0 BPC (a BPO can't change those) plus 6
+    """4 runs on an owned ME 0 BPC (a BPO can't change those) plus 6
     invented runs at ME 2, which a BPO at the optimal ME 10 would build:
       * 5 x 6 = 30 units x 1000 ISK: ceil(29.4) = 30 -> 27, saves 3000 ISK
       * 1000 x 6 = 6000 units x 5 ISK: 5880 -> 5400, saves 2400 ISK
@@ -1407,7 +1405,7 @@ def test_a_two_job_batch_saves_only_on_the_runs_a_researched_bpo_would_build():
 
 
 def test_consecutive_invented_jobs_are_one_researched_bpo_job():
-    """Task 5: a batch split over invented BPCs is several jobs, but a
+    """A batch split over invented BPCs is several jobs, but a
     researched BPO would build their runs as one job. 4 owned runs plus 3 + 3
     invented at ME 2: current ceil(14.7) x 2 = 30 -> one 6-run job at ME 10
     = 27 (3000 ISK); 2940 x 2 = 5880 -> 5400 (2400 ISK). Valuing each 3-run
@@ -1428,7 +1426,7 @@ def test_consecutive_invented_jobs_are_one_researched_bpo_job():
     assert _planner()._me_saving_isk_per_batch(row=row, bp_data=bp_data) == (5_400.0, None)
 
 
-# --- round 5 Task 8 fix round 1: the parent's published component fee --------
+# --- The parent's published component fee ------------------------------------
 
 
 def _subs_with_parent_fee(qty, fee_per_run, phase1):
@@ -1461,11 +1459,11 @@ def test_build_vs_buy_counts_the_install_fee():
     assert sub.overview_row["sub_install_fee"] == 20.0
 
 
-# --- Task 8b fix round 1: a build decision on an unknown fee warns and records why ---
+# --- A build decision on an unknown fee warns and records why ------------------------
 
 
 def test_an_unknown_fee_buys_the_component_warns_and_records_the_cause(caplog):
-    """Task 15 fix round 3: a build cost without its fee is a lower bound, so
+    """A build cost without its fee is a lower bound, so
     the component is bought (the producer's rule), with the cause."""
     materials = _batch_materials(fee=None, **{"54321": 200})
     materials["54321"]["component_job_fee_per_run_unknown_reason"] = "the industry profile has no manufacturing cost index"
@@ -1497,7 +1495,7 @@ def test_the_components_own_row_reason_wins_over_the_parents():
     )
 
 
-# --- round 5 Task 9: one lowest-id builder, one warning ---------------------------
+# --- One lowest-id builder, one warning -------------------------------------------
 
 def test_two_blueprints_for_one_product_resolve_to_the_lowest_id():
     data = {
@@ -1538,7 +1536,7 @@ def test_a_zero_or_negative_bpo_spot_price_is_no_price(spot):
     assert decision.bpo_analysis_skip_reason == "no BPO market price for bp_type_id=999"
 
 
-# --- round 5 Task 10 carries 12, 13: busy blueprints in the invention chain ------
+# --- Busy blueprints in the invention chain --------------------------------------
 # A blueprint installed in an active job cannot copy or build. The asset
 # snapshot can still list it, or can already have dropped it.
 
@@ -1674,7 +1672,7 @@ def test_a_row_whose_bpc_jobs_are_all_busy_is_not_built_and_plans_no_invention(b
 
 
 def test_the_free_bpc_jobs_build_when_another_bpc_of_the_batch_is_busy():
-    # Fix round 1, I1: with grouped BPCs one variant holds every BPC of the
+    # With grouped BPCs one variant holds every BPC of the
     # type. BPC 55 is in a job; the batch's 3 runs on the free BPC 56 build.
     row = _row_on_owned_bpcs(
         {"item_id": None, "item_ids": [56, 55]},
@@ -1710,7 +1708,7 @@ def test_a_row_on_free_bpcs_is_built_as_usual():
     assert [a.action_type for a in _t2_actions(plan)] == ["manufacture"]
 
 
-# --- Task 10 fix round 1, I2: a T2 item with no way to build it ----------------
+# --- A T2 item with no way to build it -----------------------------------------
 
 def _t2_bpo(item_id):
     return SimpleNamespace(type_id=1999, item_id=item_id, is_blueprint_copy=False,
@@ -1753,7 +1751,7 @@ def test_a_busy_owned_t2_bpo_does_not_count_as_a_source():
     assert [a.action_type for a in _t2_actions(plan)] == []
 
 
-# --- Task 10 fix round 2, item 2: a T1 row that is not built stays "blocked" -----
+# --- A T1 row that is not built stays "blocked" ----------------------------------
 
 def _t1_bpc(item_id):
     return SimpleNamespace(type_id=999, item_id=item_id, is_blueprint_copy=True,
@@ -1790,7 +1788,7 @@ def test_a_t1_row_building_its_free_bpc_jobs_is_manufacturing():
     assert decision.pipeline_stage == "manufacturing"
 
 
-# --- Task 12 fix round 4: a parent that is not built ----------------------------
+# --- A parent that is not built -------------------------------------------------
 
 
 def _pilot_chars():
@@ -1841,7 +1839,7 @@ def test_a_busy_t1_bpo_row_says_why_in_its_persisted_reason():
 
 # --- no sub-builds under a dropped parent ------------------------------------------------------
 #
-# H1.6 minors (planner): a parent with no manufacture today gets no
+# A parent with no manufacture today gets no
 # sub-builds on a later re-size, also when none of the current sub-component
 # decisions names it (no_build covers every parent with sub-manufacture
 # requests); and the unknown-fee component buy reasons of one sizing do not

@@ -730,7 +730,7 @@ def test_owned_blueprint_copy_cost_falls_back_to_adjusted_price() -> None:
     assert allocated_cost == 20_000.0
 
 
-# --- Task H: the shopping list spends owned stock once over all batches -------
+# --- The shopping list spends owned stock once over all batches ---------------
 
 
 def test_partly_owned_manufacturing_material_reports_take_and_buy(monkeypatch) -> None:
@@ -753,7 +753,7 @@ def test_shopping_list_spends_owned_material_once_over_batches(monkeypatch) -> N
 
 
 def test_shopping_list_spends_owned_datacores_once_over_batches(monkeypatch) -> None:
-    # 1-run batches share 10-run BPCs (fix round 1, I2): 15 batches = 15 runs
+    # 1-run batches share 10-run BPCs: 15 batches = 15 runs
     # = 2 BPCs x 2 attempts x 2 datacores = 8 (was 4 per batch, 60). 3 owned,
     # netted once: 8 - 3 = 5.
     row = _invention_overview(monkeypatch, owned_item_inventory=({204: 3}, {204: 60.0}))[5002]
@@ -773,7 +773,7 @@ def test_two_products_sharing_owned_material_subtract_it_once(monkeypatch) -> No
     assert (line["need"], line["buy"]) == (13, 10)
 
 
-# --- round 5 Task 4: a partly owned BPC batch is two jobs (D3) ----------------
+# --- A partly owned BPC batch is two jobs -------------------------------------
 
 
 def _owned_t2_bpo(*, me: int, te: int, item_id: int = 95) -> SimpleNamespace:
@@ -862,12 +862,11 @@ def test_a_nested_partly_owned_bpc_with_unknown_odds_keeps_building_the_owned_ru
     assert mj["procurement_materials"]["5002"]["quantity"] == 6
     assert mj["procurement_materials"]["34"]["quantity"] == 40
     # Later batches have no owned runs: the sub-build would be invented with
-    # unknown odds, so all 10 components are bought (FU-60), nothing flagged.
+    # unknown odds, so all 10 components are bought, nothing flagged.
     assert _later_plan(mj, 2)["procurement_materials"]["5002"]["quantity"] == 10
     assert "invention_cost_unknown_reason" not in mj
 
 
-# --- round 5 Task 4 fix round 1 ------------------------------------------------
 
 
 def test_unknown_odds_past_an_owned_bpc_warn_once_and_name_the_bought_runs(monkeypatch, caplog) -> None:
@@ -1006,8 +1005,8 @@ def test_later_batches_rebuild_a_nested_component_without_the_owned_bpc(monkeypa
 
 
 def test_later_batches_of_a_partly_owned_nested_bpc_invent_every_run(monkeypatch) -> None:
-    # Replaces the round-4 "invents the built runs" test. Batch 1: 4 runs on
-    # the owned BPC + 6 invented (Task 4): 40 + 59 = 99. Later batches: all 10
+    # Batch 1: 4 runs on
+    # the owned BPC + 6 invented: 40 + 59 = 99. Later batches: all 10
     # invented, one job: ceil(100 x 0.98) = 98 (was 99, the rounding gap);
     # 1 BPC, 2 attempts, 4 datacores.
     row = _invention_overview(
@@ -1121,7 +1120,6 @@ def test_row_reductions_of_a_two_job_batch_are_runs_weighted_and_labelled(monkey
     assert "reduction_basis" not in single
 
 
-# --- round 5 Task 5 fix round 1 ------------------------------------------------
 
 
 def test_every_build_from_bpc_row_is_stamped_with_the_later_batch_plan_version(monkeypatch) -> None:
@@ -1220,7 +1218,7 @@ def test_reduction_labels_on_nested_and_activity_breakdowns(monkeypatch) -> None
     assert row["manufacturing_job"]["activity_breakdown"]["manufacturing"]["reduction_basis"] == "runs_weighted_job_segments"
 
 
-# --- round 5 Task 5 fix round 2: the version stamp is a validity check ---------
+# --- The version stamp is a validity check -------------------------------------
 
 
 def test_an_overview_cached_before_the_later_batch_plans_is_rebuilt(monkeypatch) -> None:
@@ -1249,7 +1247,7 @@ def test_an_overview_cached_before_the_later_batch_plans_is_rebuilt(monkeypatch)
     assert service.get_cached_overview_rows() is not None
 
 
-# --- round 5 Task 6: nested-plan hygiene (C5, C6, C7) ---------------------------
+# --- Nested-plan hygiene --------------------------------------------------------
 
 
 def _parent_with_cheap_component_rows() -> list[dict]:
@@ -1283,7 +1281,7 @@ def _parent_with_cheap_component_rows() -> list[dict]:
 
 def test_a_rejected_sub_build_spends_no_stock(monkeypatch) -> None:
     # 10 Tritanium owned. Evaluating the component build took all 10, then the
-    # component was bought anyway and the parent's own 5 were bought too (FU-61).
+    # component was bought anyway and the parent's own 5 were bought too.
     row = _invention_overview(
         monkeypatch, blueprint_rows=_parent_with_cheap_component_rows(),
         prices={34: 5.0, 6200: 1.0}, owned_item_inventory=({34: 10}, {34: 1.0}),
@@ -1298,7 +1296,7 @@ def test_owned_datacores_are_valued_once_across_a_rows_inventions(monkeypatch) -
     # Parent 9100 (invented) and its component 5002 (invented) each need 4
     # amortized datacores over 10 runs; 5 are owned at 60, the market is 100.
     # The top level takes 4 at 60 (240); the component gets 1 at 60 + 3 at 100
-    # (360). Was 4 x 60 twice (480): the owned datacores were counted twice (FU-63).
+    # (360). Was 4 x 60 twice (480): the owned datacores were counted twice.
     row = _invention_overview(
         monkeypatch, maximize_bp_runs=True, blueprint_rows=_invented_parent_rows(),
         prices=_NESTED_FAKE_PRICES, owned_item_inventory=({204: 5}, {204: 60.0}),
@@ -1330,7 +1328,7 @@ def test_fractional_source_copy_runs_carry_to_the_next_invention() -> None:
     assert runs[1001] == pytest.approx(0.4)
 
 
-# --- round 5 Task 6 fix round 1: whole-run budget, fractional write-back -------
+# --- Whole-run budget, fractional write-back -----------------------------------
 
 
 def _source_copy_elapsed_seconds(service, runs: dict, attempts: float, whole_attempts: int) -> int:
@@ -1388,7 +1386,7 @@ def test_a_sub_build_keeps_the_fractional_bpc_run_remainder(monkeypatch) -> None
     assert runs[1001] == pytest.approx(0.7)
 
 
-# --- round 5 Task 7: rows publish the stock they were planned against ----------
+# --- Rows publish the stock they were planned against --------------------------
 
 
 def test_a_row_publishes_the_stock_of_its_buy_line_types(monkeypatch) -> None:
@@ -1412,7 +1410,7 @@ def test_every_row_of_one_overview_publishes_the_same_stock(monkeypatch) -> None
 
 
 def test_owned_datacores_net_against_later_batches_when_an_owned_bpc_covers_batch_one(monkeypatch) -> None:
-    # FU-75 / C8: 3 datacores in the hangar, a 10-run owned BPC covers batch 1
+    # 3 datacores in the hangar, a 10-run owned BPC covers batch 1
     # (and batches 2..10). 25 one-run batches: runs 11..25 = 15 runs = 2
     # invented BPCs x 2 whole attempts x 2 datacores = 8 needed. No row took
     # the 3 owned (no batch-1 invention list), so the take bound bought 8.
@@ -1428,7 +1426,7 @@ def test_owned_datacores_net_against_later_batches_when_an_owned_bpc_covers_batc
 
 
 def test_two_products_sharing_a_material_net_the_real_stock_once_over_batches(monkeypatch) -> None:
-    # C9: 12 Tritanium and 3 datacores owned. 5002 (10 Tritanium a run) at 15
+    # 12 Tritanium and 3 datacores owned. 5002 (10 Tritanium a run) at 15
     # one-run batches: batch 1 takes 10, batches 2..15 need 10 each. 6001 (3 a
     # run) at 4 batches: batch 1 takes 3. Need 150 + 12 = 162; the 12 owned
     # count once: buy 150 (the take bound said 10 owned, buy 152). Datacores:
@@ -1452,7 +1450,7 @@ def test_every_row_of_one_overview_publishes_one_stock_pool_id(monkeypatch) -> N
     assert other[5002]["manufacturing_job"]["owned_stock_pool_id"] not in pool_ids
 
 
-# --- round 5 Task 9: visibility --------------------------------------------------
+# --- Visibility ------------------------------------------------------------------
 
 
 def test_an_invention_node_with_unknown_odds_says_unknown_not_take(monkeypatch) -> None:

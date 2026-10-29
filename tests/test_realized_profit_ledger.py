@@ -979,7 +979,7 @@ def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells(se
 
 # --- a cost-only change makes the ledger stale -------------------------------------------------
 #
-# J2.3: a cost-only change makes the realized profit ledger stale.
+# A cost-only change makes the realized profit ledger stale.
 #
 # Each allocation of a job-referenced lot keeps the job's unit_build_cost it
 # was built from (`cost_basis`), and a blended corp transfer lot its asset

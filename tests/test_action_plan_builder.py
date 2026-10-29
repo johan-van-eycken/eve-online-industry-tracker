@@ -168,8 +168,8 @@ def test_no_character_name_map_or_resolver_still_uses_honest_fallbacks():
     assert deliver_rows[0].type_name == "type_999"
 
 
-# --- buy_bpo rows (Task 18, ruling R4) -----------------------------------------
-# Before Task 16 every BPO opportunity was a zero-saving "hold", so emitting a
+# --- buy_bpo rows --------------------------------------------------------------
+# When every BPO opportunity was a zero-saving "hold", emitting a
 # buy_bpo row for every one of them, keyed by the *product* type_id, was
 # invisible. With real savings it would tell the user to buy the product for
 # every analysed item.

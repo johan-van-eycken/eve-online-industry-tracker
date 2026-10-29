@@ -1,4 +1,4 @@
-"""F1 item 7: CharacterManager.get_characters() raises CharacterDataError
+"""CharacterManager.get_characters() raises CharacterDataError
 (not a bare Exception) when a character cannot be serialized; the slot
 capacities propagate it, and the active jobs' cosmetic name map logs a
 WARNING and keeps the job's ID. Fake values throughout."""
@@ -85,7 +85,7 @@ def test_the_active_jobs_name_map_survives_an_unreadable_character_list(session_
 
 # --- one failing character does not abort the batch --------------------------------------------
 #
-# Round H2.8: one failing character no longer aborts the refresh of the
+# One failing character no longer aborts the refresh of the
 # others. The batch refreshes every character, then raises one
 # CharacterRefreshError naming each failed character; the bootstrap puts one
 # init_warnings line per failed character, and a character that could not be
@@ -211,7 +211,7 @@ def test_the_bootstrap_names_each_failed_character_in_init_warnings(monkeypatch,
 
 # --- the getters with a character read that character only -------------------------------------
 #
-# Round J1.6: CharacterManager.get_assets / get_wallet_balances /
+# CharacterManager.get_assets / get_wallet_balances /
 # get_market_orders with a character_id (or name) refresh that character once
 # and return only its data. Before, they looped over every character,
 # refreshed the selected one once per character and returned everyone's

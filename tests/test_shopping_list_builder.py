@@ -170,7 +170,7 @@ SUB_MFG_BLUEPRINTS_ZERO_OUTPUT = {
 def test_material_with_no_market_price_is_bought_with_an_unknown_price_not_zero():
     """A material absent from market_depth_cache (no vwap_5d, no spot price)
     is never priced at 0.0, which would make it look free; nor dropped, which
-    under-buys it (Task 8 fix round 1): its price is None."""
+    under-buys it: its price is None."""
     items = ShoppingListBuilder().build(
         assigned_actions=[_action(runs=20)], corp_assets=[], market_depth_cache={},
         admin_settings=_Admin(), blueprint_data=BLUEPRINTS,
@@ -305,7 +305,7 @@ def test_invent_action_whose_source_has_no_invention_materials_is_skipped_with_a
 
 
 def test_invention_input_without_a_price_is_still_bought_at_an_unknown_cost(caplog):
-    """Fix round 1: dropping the line under-bought the input and made
+    """Dropping the line under-bought the input and made
     Capital Reserved look exact. The line stays, with its quantity."""
     with caplog.at_level(logging.WARNING):
         items = _build_invention([_invent_action()], depth={})
@@ -319,7 +319,7 @@ def test_invention_input_without_a_price_is_still_bought_at_an_unknown_cost(capl
     )
 
 
-# --- F4: producer batch materials and sub-manufactured components ------------
+# --- Producer batch materials and sub-manufactured components ----------------
 
 def test_a_manufacture_action_buys_the_producers_batch_quantities():
     """The producer already scaled by runs and ME/structure (1800, not the SDE's
@@ -329,7 +329,7 @@ def test_a_manufacture_action_buys_the_producers_batch_quantities():
 
 
 def test_a_sub_manufactured_component_is_not_also_bought_for_the_parent():
-    """F4: the parent bought the full component AND a sub_manufacture action
+    """The parent bought the full component AND a sub_manufacture action
     built it. The parent now buys only what sub-manufacture does not cover."""
     blueprints = {
         999: {"manufacturing": {"materials": [], "products": [{"type_id": 12345, "quantity": 1}]}},

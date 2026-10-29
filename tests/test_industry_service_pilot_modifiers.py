@@ -19,7 +19,7 @@ from industry_service_fakes import (
 )
 
 
-# --- round 5 Task 2: invention chance from the corp's best inventor -----------
+# --- Invention chance from the corp's best inventor ---------------------------
 # Fake skill levels only.
 
 _INVENTION_SKILLS = [
@@ -60,7 +60,7 @@ def test_the_best_inventors_skills_raise_the_chance(monkeypatch) -> None:
 
 
 def test_an_untrained_corp_cannot_run_the_invention_so_the_base_chance_is_used(monkeypatch) -> None:
-    """Task 15 I3: a pilot with none of the invention skills cannot run it, so
+    """A pilot with none of the invention skills cannot run it, so
     it is never the inventor: the SDE base chance, with the reason."""
     mj = _skilled_overview(monkeypatch, levels={1: {}})[5002]["manufacturing_job"]
 
@@ -83,7 +83,7 @@ def test_unloaded_skills_fall_back_to_the_base_chance_with_a_reason(monkeypatch,
 
 
 def test_a_blueprint_without_an_encryption_skill_uses_the_science_term_with_a_row_note(monkeypatch) -> None:
-    """A3: the formula with the science term only, not the base chance."""
+    """The formula with the science term only, not the base chance."""
     levels = {1: {11433: 4, 11454: 4, 21790: 5}}
     mj = _skilled_overview(
         monkeypatch, levels=levels, skill_entries=_INVENTION_SKILLS[:2], real_confidence=True,
@@ -221,7 +221,7 @@ def test_an_empty_inventor_list_names_why(monkeypatch, caplog, characters, reaso
     assert sum(reason in r.getMessage() for r in caplog.records if r.levelname == "WARNING") == 1
 
 
-# --- round 5 Task 12: invention elapsed time over parallel inventors ----------
+# --- Invention elapsed time over parallel inventors ---------------------------
 # Every pilot at 1/1/1: p = 0.5 x (1 + 2/30 + 1/40) = 0.546, so 1 BPC needs
 # ceil(1 / 0.546) = 2 whole attempts of 40 s (no profile, no time skills).
 
@@ -247,14 +247,14 @@ def test_two_parallel_inventors_halve_the_invention_elapsed_time(monkeypatch) ->
     assert copying["elapsed_duration_seconds"] == 40
     assert copying["elapsed_parallel"]["sequential_reason"] == ONE_SOURCE_BPO_REASON
     assert mj["elapsed_time_seconds"] == 96 + 40 + 40
-    # Fix round 1: a row note, shown with the confidence reasons and the Build time.
+    # A row note, shown with the confidence reasons and the Build time.
     note = "invention assumes 2 research slots over 2 inventors (capacity, not today's free slots)"
     assert mj["elapsed_lane_notes"] == [note]
     assert f"Build time: {note}." in mj["pricing_confidence_reasons"]
 
 
 def test_the_daily_plan_schedules_the_lanes_the_producers_elapsed_assumes(monkeypatch) -> None:
-    """Task 12 fix round 1: with every qualifying slot free, the planner's
+    """With every qualifying slot free, the planner's
     invent actions are the producer's lanes: same pilots, same attempts per
     lane, so the longest lane is the producer's rounds."""
     from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
@@ -297,7 +297,7 @@ def _lane_skills(level: int, lab_operation: int = 0) -> dict:
 
 
 def test_the_portfolio_list_buys_the_lanes_whole_attempts(monkeypatch) -> None:
-    """Fix round 2: base 10 %, 1 BPC. The 5/5/5 pilot alone (p 0.1458)
+    """Base 10 %, 1 BPC. The 5/5/5 pilot alone (p 0.1458)
     needs ceil(1 / 0.1458) = 7 attempts; its 1 slot plus a 1/1/1 alt's 5
     (p 0.1092) run ceil(1 / 0.6917) = 2 rounds: 2 + 2 + 2 + 2 + 1 = 9
     attempts. The Portfolio buys the 9, and the cost prices the lanes'

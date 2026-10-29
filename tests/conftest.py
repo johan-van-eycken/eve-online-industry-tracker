@@ -85,8 +85,8 @@ def sde_engine():
     TypeMetadataResolver.prefetch() runs real ORM queries (session.query(Types),
     a Table("metaGroups", ..., autoload_with=bind) reflection, etc.) against
     whatever session sde_session() hands back. Reusing app_engine would make
-    those queries raise "no such table" -- since Task 5 removed the swallowing
-    try/except in prefetch(), that propagates and breaks any test that calls
+    those queries raise "no such table" -- prefetch() has no swallowing
+    try/except, so that propagates and breaks any test that calls
     _build_input_rows(). Creating the real (if empty) SDE schema instead lets
     prefetch's queries succeed and simply find nothing, which the contract
     already treats as legitimate optional data (meta_group_id/category_id ->

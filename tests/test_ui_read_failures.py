@@ -1,4 +1,4 @@
-"""Round H3, the Streamlit pages and the Flask routes: a failed or partial
+"""The Streamlit pages and the Flask routes: a failed or partial
 read is named (a reason, a warning, an error or "unknown"), never a silent
 0, default or overwrite. Fake values throughout."""
 from __future__ import annotations
@@ -355,7 +355,7 @@ def test_the_market_orders_grid_shows_unknown_for_price_and_total():
 
 
 # =============================================================================================
-# H1 interface: liquidity_unavailable_reason / price_unavailable_reason in the Industry Builder
+# liquidity_unavailable_reason / price_unavailable_reason in the Industry Builder
 # =============================================================================================
 
 LIQ_REASON = "order book for 10000002 unavailable: fake 503"
@@ -861,7 +861,7 @@ def test_a_save_of_another_setting_leaves_the_invalid_values_alone(monkeypatch):
 
 # --- the admin settings notice -----------------------------------------------------------------
 #
-# Round J1.4: an admin settings notice that starts with "ERROR:" (an
+# An admin settings notice that starts with "ERROR:" (an
 # unreadable admin_settings.json) renders as st.error, the others as
 # st.warning. Fake values only.
 

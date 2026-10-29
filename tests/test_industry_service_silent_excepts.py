@@ -1,4 +1,4 @@
-"""Task C1: IndustryService no longer swallows every exception. A failed read
+"""IndustryService no longer swallows every exception. A failed read
 or an unparsable value that feeds a cost, fee, bonus, skill or price logs a
 WARNING with the reason (and names it in the payload where the data
 matters); a programming error (AttributeError, KeyError, an unexpected
@@ -146,7 +146,7 @@ def test_slot_capacities_propagate_a_character_read_failure():
     from eve_online_industry_tracker.application.characters.character_manager import CharacterDataError
 
     def _boom():
-        raise CharacterDataError("Error retrieving characters: fake")   # what get_characters raises (F1 item 7)
+        raise CharacterDataError("Error retrieving characters: fake")   # what get_characters raises
 
     with pytest.raises(CharacterDataError):
         _service(char_manager=SimpleNamespace(get_characters=_boom))._character_slot_capacities()
