@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_LOCAL_SDE = os.path.join(_ROOT, "database", "eve_sde.db")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
 
 
 def _importer():
@@ -118,8 +118,7 @@ def test_the_importer_stores_packaged_volume_as_the_sde_has_it(tmp_path):
 # --- the local SDE ------------------------------------------------------------------
 
 def _local_sde_with_packaged_volume():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     conn = sqlite3.connect(f"file:{_LOCAL_SDE}?mode=ro", uri=True)
     if "packagedVolume" not in {r[1] for r in conn.execute("PRAGMA table_info(types)")}:
         conn.close()

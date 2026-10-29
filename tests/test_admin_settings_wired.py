@@ -12,6 +12,7 @@ import json
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import logging
 
 import pytest
 import requests
@@ -19,6 +20,7 @@ import requests
 from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingsManager
 from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
 from eve_online_industry_tracker.infrastructure import esi_service as esi_service_module
+from eve_online_industry_tracker.application.market_pricing.service import MarketPricingService
 
 
 def _manager(tmp_path, values: dict | None = None) -> AdminSettingsManager:
@@ -259,8 +261,7 @@ def test_the_relist_broker_fee_assumption_is_the_setting(tmp_path):
     from eve_online_industry_tracker.application.industry.service import IndustryService
 
     mgr = _manager(tmp_path)
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(admin_settings=mgr)
+    svc = IndustryService(state=SimpleNamespace(admin_settings=mgr))
     def row(broker):
         return {"manufacturing_job": {"market_fee_context": {"broker_fee_applies": True,
                                                              "rates": {"broker_fee_fraction": broker}}}}
@@ -368,20 +369,47 @@ def test_the_planner_page_names_an_unreadable_or_invalid_threshold(monkeypatch):
     assert values["planner_max_plan_age_hours"] == 36.0 and "HTTP 503" in problems[0]
 
 
-def test_the_status_bar_and_actions_tab_use_the_settings():
-    import inspect
-
-    from streamlit_ui.components.daily_planner import status_bar, tab_actions
-
-    assert not hasattr(status_bar, "PLANNER_MAX_PLAN_AGE_HOURS")
-    assert not hasattr(status_bar, "PLANNER_MARKET_REFRESH_INTERVAL_HOURS")
-    assert "0.90" not in inspect.getsource(status_bar)
-    assert "planner_max_plan_age_hours" in inspect.getsource(tab_actions)
-
-
 def test_the_industry_profiles_npc_tax_fallback_is_the_schema_default():
     from streamlit_ui.pages import industry_profiles as page
 
     spec = ADMIN_SETTINGS_SCHEMA["industry"]["settings"]["npc_station_facility_tax"]
     assert page._NPC_STATION_FACILITY_TAX == spec["default"]
     assert page._npc_admin_defaults({"npc_station_facility_tax": 0.005})[0] == 0.005
+
+
+# --- the removed market default region and station ---------------------------------------------
+#
+# market_defaults/default_region_id and default_station_id had
+# no effect (every market hub carries its own region and station, and the
+# ESI service's defaults took precedence over them anyway), so they are
+# removed with their strictness. A value still stored in the file is ignored
+# with an INFO, not reported as invalid. Fake values only.
+
+def test_the_settings_are_gone_from_the_schema():
+    settings = ADMIN_SETTINGS_SCHEMA["market_defaults"]["settings"]
+    assert "default_region_id" not in settings
+    assert "default_station_id" not in settings
+
+
+def test_a_stored_value_is_ignored_not_invalid(tmp_path, caplog):
+    path = tmp_path / "admin_settings.json"
+    path.write_text(json.dumps({"market_defaults": {"default_region_id": "not a region", "default_station_id": 1}}),
+                    encoding="utf-8")
+    with caplog.at_level(logging.INFO):
+        mgr = AdminSettingsManager(path)
+    assert mgr.invalid() == {}
+    assert mgr.problems() == []
+    assert "default_region_id" in caplog.text
+
+
+@pytest.mark.parametrize("hub", sorted(MarketPricingService._MARKET_HUBS))
+def test_each_hub_is_priced_in_its_own_region_and_station(hub):
+    class _Admin:
+        def get(self, category, key):
+            raise AssertionError(f"read {category}/{key}")
+
+    svc = MarketPricingService(state=SimpleNamespace(admin_settings=_Admin(),
+                                                     esi_service=SimpleNamespace(_region_id=1, _station_id=2)))
+    context = svc._market_hub_context(hub)
+    configured = MarketPricingService._MARKET_HUBS[hub]
+    assert (context["region_id"], context["station_id"]) == (configured["region_id"], configured["station_id"])

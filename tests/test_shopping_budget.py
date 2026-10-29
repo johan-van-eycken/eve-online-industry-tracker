@@ -1,4 +1,4 @@
-"""Task 14 minor 1: the Shopping tab's budget agrees with Capital Reserved.
+"""The Shopping tab's budget agrees with Capital Reserved.
 
 It counts the PENDING purchase lines only (a done or skipped line is no
 longer to be paid) and adds the pending jobs' install fees as their own
@@ -34,7 +34,6 @@ def test_an_unknown_fee_or_price_makes_the_total_a_lower_bound():
     assert (budget.unpriced_lines, budget.unknown_fee_jobs, budget.unknown_lines) == (1, 1, 2)
 
 
-# --- fix round 1, M5 ---------------------------------------------------------------
 
 def _bpo_buy(cost, status="pending"):
     return {"action_type": "buy_bpo", "estimated_cost_isk": cost, "status": status}

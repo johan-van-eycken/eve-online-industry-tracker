@@ -20,18 +20,8 @@ from types import SimpleNamespace
 import pytest
 
 from eve_online_industry_tracker.application.errors import ServiceError
-from eve_online_industry_tracker.config.admin_settings import (
-    ADMIN_SETTINGS_SCHEMA,
-    AdminSettingInvalid,
-    AdminSettingsManager,
-)
-
-
-def _manager(tmp_path, payload=None) -> AdminSettingsManager:
-    path = tmp_path / "admin_settings.json"
-    if payload is not None:
-        path.write_text(json.dumps(payload), encoding="utf-8")
-    return AdminSettingsManager(path)
+from eve_online_industry_tracker.config.admin_settings import ADMIN_SETTINGS_SCHEMA, AdminSettingInvalid
+from fakes import _manager
 
 
 def _numeric_settings():

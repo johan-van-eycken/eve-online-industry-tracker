@@ -1,4 +1,4 @@
-"""Task C3: the broad, silent excepts in src/flask_app and src/streamlit_ui.
+"""The broad, silent excepts in src/flask_app and src/streamlit_ui.
 
 A failure that hides missing data now logs and gives a reason (in the API
 response or as an st.warning on the page); an unexpected exception now

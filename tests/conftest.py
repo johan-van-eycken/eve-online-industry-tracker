@@ -14,6 +14,22 @@ from eve_online_industry_tracker.infrastructure.models import BaseApp, BaseSde  
 from eve_online_industry_tracker.infrastructure.persistence.daily_planner_repo import (  # noqa: E402
     DailyPlannerRepository,
 )
+from sde_industry_fakes import (  # noqa: E402
+    LOCAL_SDE, LOCAL_SDE_MISSING, OVERVIEW_FIXTURE, OVERVIEW_FIXTURE_MISSING,
+)
+
+# The git-ignored local data some tests read: marker -> (path, skip reason).
+_LOCAL_DATA = {
+    "needs_local_sde": (LOCAL_SDE, LOCAL_SDE_MISSING),
+    "needs_overview_fixture": (OVERVIEW_FIXTURE, OVERVIEW_FIXTURE_MISSING),
+}
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    for marker, (path, reason) in _LOCAL_DATA.items():
+        if item.get_closest_marker(marker) and not os.path.exists(path):
+            pytest.skip(reason)
 
 
 @pytest.fixture(autouse=True)
@@ -69,8 +85,8 @@ def sde_engine():
     TypeMetadataResolver.prefetch() runs real ORM queries (session.query(Types),
     a Table("metaGroups", ..., autoload_with=bind) reflection, etc.) against
     whatever session sde_session() hands back. Reusing app_engine would make
-    those queries raise "no such table" -- since Task 5 removed the swallowing
-    try/except in prefetch(), that propagates and breaks any test that calls
+    those queries raise "no such table" -- prefetch() has no swallowing
+    try/except, so that propagates and breaks any test that calls
     _build_input_rows(). Creating the real (if empty) SDE schema instead lets
     prefetch's queries succeed and simply find nothing, which the contract
     already treats as legitimate optional data (meta_group_id/category_id ->
@@ -120,19 +136,31 @@ class _EngineSessionProvider:
     def __init__(self, engine, sde_engine=None) -> None:
         self._factory = sessionmaker(bind=engine, future=True)
         self._sde_factory = sessionmaker(bind=sde_engine, future=True) if sde_engine is not None else None
+        self._opened: list[Session] = []
 
     def app_session(self) -> Session:
-        return self._factory()
+        return self._track(self._factory())
 
     def sde_session(self) -> Session:
         if self._sde_factory is None:
             raise RuntimeError("session_provider has no sde_engine configured")
-        return self._sde_factory()
+        return self._track(self._sde_factory())
+
+    def _track(self, session: Session) -> Session:
+        self._opened.append(session)
+        return session
+
+    def close_all(self) -> None:
+        """Close what a test left open, before its engines are disposed."""
+        for session in self._opened:
+            session.close()
 
 
 @pytest.fixture()
-def session_provider(app_engine, sde_engine) -> _EngineSessionProvider:
-    return _EngineSessionProvider(app_engine, sde_engine)
+def session_provider(app_engine, sde_engine):
+    provider = _EngineSessionProvider(app_engine, sde_engine)
+    yield provider
+    provider.close_all()
 
 
 @pytest.fixture()

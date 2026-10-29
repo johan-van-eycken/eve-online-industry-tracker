@@ -220,7 +220,7 @@ def test_phase_7_passes_the_resolver(session_provider):
 def test_get_industry_jobs_excludes_only_terminal_statuses(session_provider):
     """_get_industry_jobs must run its status filter for real, not just build a
     query object -- a delivered job wrongly counting as active is what made the
-    pause decision unreachable (finding 2). paused is pinned deliberately: it is
+    pause decision unreachable. paused is pinned deliberately: it is
     the case the deny-list (vs. the producer's active/ready allow-list) exists
     for -- a paused job still holds a manufacturing slot and must stay active."""
     session = session_provider.app_session()
@@ -270,7 +270,7 @@ def test_get_industry_jobs_includes_character_jobs_not_only_corp_jobs(session_pr
     assert job_ids == {101, 201}
 
 
-# --- F2: one overview row per product -----------------------------------------
+# --- One overview row per product ---------------------------------------------
 
 def _variant(overview_row_id, isk_per_hour, **extra):
     return dict(GOOD_ROW, overview_row_id=overview_row_id, isk_per_hour=isk_per_hour, **extra)

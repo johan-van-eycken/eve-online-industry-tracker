@@ -1,4 +1,4 @@
-"""The facility gate and the reaction gate, from CCP's data (Task 11b fix round 1).
+"""The facility gate and the reaction gate, from CCP's data.
 
 Which hulls need a shipyard comes from CCP's assembly lines (the SDE's
 industryAssemblyLines / industryInstallationTypes, read into a
@@ -17,7 +17,6 @@ tables are absent.
 from __future__ import annotations
 
 import logging
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -27,14 +26,8 @@ from eve_online_industry_tracker.domain import industry_facility as fac
 from eve_online_industry_tracker.domain import security_band as sb
 from eve_online_industry_tracker.infrastructure.sde import industry
 
-_LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
-_needs_sde = pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
-
-
-def _producer():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    return IndustryService
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, _producer
+_needs_sde = pytest.mark.needs_local_sde
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +95,7 @@ def _can(hull, profile, category=(6, "Ship")):
     return bool(S._filter_overview_rows_for_portfolio_candidates([row], industry_profile_payload=profile))
 
 
-# --- I1: the hull groups come from CCP's assembly lines ------------------------------
+# --- The hull groups come from CCP's assembly lines ----------------------------------
 
 _CAPITAL_HULLS = {485, 547, 883, 1538, 4594, 5120}
 _GROUP_CATEGORIES = {gid: cat for gid, (cat, _) in fakes.GROUPS.items()}
@@ -153,7 +146,7 @@ def test_the_lines_follow_the_sde_not_a_constant():
 
 
 def test_a_category_on_the_basic_line_builds_every_hull_in_it():
-    """M4: detailsPerCategory counts. A made-up SDE whose basic line lists
+    """detailsPerCategory counts. A made-up SDE whose basic line lists
     category 6 (Ship) builds every hull there: no shipyard is required."""
     assembly_lines = {**fakes.ASSEMBLY_LINES}
     assembly_lines[175] = {**assembly_lines[175], "detailsPerCategory": [{"categoryID": 6}]}
@@ -171,7 +164,7 @@ def test_a_category_on_a_shipyard_line_adds_its_groups():
 
 
 def test_a_type_list_on_a_service_line_is_an_error():
-    """M4: detailsPerTypeList names types, which the hull-group gate cannot
+    """detailsPerTypeList names types, which the hull-group gate cannot
     read: the data is unreadable, not silently ignored."""
     assembly_lines = {**fakes.ASSEMBLY_LINES}
     assembly_lines[176] = {**assembly_lines[176], "detailsPerTypeList": [{"typeListID": 583}]}
@@ -336,7 +329,7 @@ def test_with_a_profile_the_response_says_the_gate_was_applied_and_what_it_hid()
     assert summary["facility_gate_hidden_count"] == 1
 
 
-# --- M1: supercapitals: NPC nullsec refused, the sovereignty upgrade is assumed -------
+# --- Supercapitals: NPC nullsec refused, the sovereignty upgrade is assumed -----------
 
 @pytest.mark.parametrize("hull", [_TITAN, _SUPERCARRIER])
 def test_supercapitals_are_built_only_in_a_sovereign_nullsec_sotiyo(hull, caplog):
@@ -372,7 +365,7 @@ def test_the_assumed_sovereignty_warning_is_logged_once(caplog):
     assert len([r for r in caplog.records if "sovereignty" in r.getMessage()]) == 1
 
 
-# --- M4: the gate's reason reaches the response -------------------------------------
+# --- The gate's reason reaches the response -----------------------------------------
 
 def test_the_candidate_filter_reports_each_hidden_row_and_its_reason():
     S = _producer()
@@ -391,7 +384,7 @@ def test_the_candidate_filter_reports_each_hidden_row_and_its_reason():
     assert "Supercapital Shipyard" in hidden[1]["reason"]
 
 
-# --- I2: the reaction gate -----------------------------------------------------------
+# --- The reaction gate ---------------------------------------------------------------
 
 @pytest.mark.parametrize("structure", ["Athanor", "Tatara"])
 @pytest.mark.parametrize("band", ["low", "null", "wormhole"])
@@ -441,11 +434,11 @@ def test_the_separate_security_reader_is_gone():
     assert not hasattr(_producer(), "_profile_system_security_status")
 
 
-# --- M2 (superseded by Task 15 M1): the aggregate rig bonus is never applied ---------
+# --- The aggregate rig bonus is never applied -----------------------------------------
 
 @pytest.mark.parametrize("band", ["high", "low", "null", "wormhole", None])
 def test_an_aggregate_only_profile_gets_no_rig_bonus_and_warns(band, caplog):
-    """Task 15 M1: the aggregate names no rig, so neither its groups nor its
+    """The aggregate names no rig, so neither its groups nor its
     security multiplier is known: no rig bonus in any band, with a WARNING."""
     S = _producer()
     profile = {"structure_rig_material_bonus": 0.037}
@@ -484,7 +477,7 @@ def test_the_ui_rig_totals_are_scaled_for_the_band():
 
 def test_the_ui_saves_the_raw_aggregate_and_the_producer_scales_it_once():
     """The saved structure_rig_*_bonus is unscaled; only the displayed totals
-    are band-scaled. The producer never applies the aggregate (Task 15 M1)."""
+    are band-scaled. The producer never applies the aggregate."""
     from streamlit_ui.pages import industry_profiles as page
 
     rig_bonus_map = {45544: {"type_id": 45544, "material_reduction": 0.037, "time_reduction": 0.0,
@@ -535,7 +528,7 @@ def test_the_ui_effects_table_lists_reactor_rigs_under_reactions():
     assert table.loc[table["Manufacturing Group"] == "Hybrid Reactions", "ME"].item() == "2%"
 
 
-# --- M3 / M6: security_band edge cases ------------------------------------------------
+# --- security_band edge cases ---------------------------------------------------------
 
 def test_a_scaled_effect_without_multipliers_gives_no_bonus_and_says_why(caplog):
     S = _producer()
@@ -561,8 +554,7 @@ def test_a_none_top_level_status_falls_back_to_the_industry_system():
 
 @pytest.fixture(scope="module")
 def sde_session():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    fakes.skip_without_local_sde()
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
@@ -582,7 +574,7 @@ def test_the_service_module_fits_are_the_sdes(sde_session):
         assert get_type_group_id(sde_session, type_id) == group_id
 
 
-# --- M5: the profile context end to end -------------------------------------------------
+# --- The profile context end to end -----------------------------------------------------
 
 _LOWSEC_SYSTEM = 30002537     # a public lowsec system (security 0.4), not a user's
 _NPC_NULL_SYSTEM = 30003268   # a public NPC nullsec system (Syndicate)

@@ -1,4 +1,4 @@
-"""Unit tests for industry hangar scoping (Task 1).
+"""Unit tests for industry hangar scoping.
 
 Verifies:
 1. AdminSettingsManager correctly stores/coerces the ``industry_hangar_flag``
@@ -9,16 +9,11 @@ Verifies:
 """
 from __future__ import annotations
 
-import os
-import sys
 import tempfile
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.config.admin_settings import (  # noqa: E402
     ADMIN_SETTINGS_SCHEMA,

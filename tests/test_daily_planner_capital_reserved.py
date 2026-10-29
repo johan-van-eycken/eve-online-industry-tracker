@@ -1,10 +1,5 @@
-"""Capital Reserved: pending purchases plus estimated job install fees (D4, A2)."""
+"""Capital Reserved: pending purchases plus estimated job install fees."""
 from __future__ import annotations
-
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from streamlit_ui.components.daily_planner import status_bar  # noqa: E402
 
@@ -89,7 +84,7 @@ def test_capital_reserved_help_states_scope():
 
 
 def test_an_unknown_fee_caption_says_how_to_fix_an_old_cache_or_plan():
-    """Fix round 1: a plan or overview from before the fee estimates has no
+    """A plan or overview from before the fee estimates has no
     fees at all; the caption names the fix."""
     assert "recompute the plan" in status_bar.STALE_FEE_HINT
     assert "refresh the product overview" in status_bar.STALE_FEE_HINT
@@ -101,7 +96,7 @@ def test_an_unknown_fee_caption_says_how_to_fix_an_old_cache_or_plan():
     )
 
 
-# --- Task 8b fix round 1: name the cause; the refresh hint only for stale fees ---
+# --- Name the cause; the refresh hint only for stale fees ------------------------
 
 def _r(action_type, fee=None, reason=None):
     return {**_a(action_type, None, fee=fee), "estimated_job_fee_unknown_reason": reason}
@@ -133,7 +128,7 @@ def test_the_refresh_hint_shows_only_for_the_unknowns_without_a_reason():
     assert caption.endswith(status_bar.STALE_FEE_HINT)
 
 
-# --- Task 8c fix round 5: the queued TE's fee is shown apart ------------------------
+# --- The queued TE's fee is shown apart ---------------------------------------------
 
 def test_a_queued_te_fee_stays_in_the_total_and_is_named_in_the_caption():
     actions = [

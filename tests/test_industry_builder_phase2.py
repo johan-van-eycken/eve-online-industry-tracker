@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.infrastructure.persistence import market_orderbook_view_cache_repo as repo

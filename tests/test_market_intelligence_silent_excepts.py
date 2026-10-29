@@ -1,4 +1,4 @@
-"""Task C1: the market intelligence collector and correlator no longer
+"""The market intelligence collector and correlator no longer
 swallow every exception. A failed read logs a WARNING with the reason (and
 keeps its fallback, or fails the cycle where nothing can be collected); a
 programming error (KeyError for an unknown setting, a TypeError) propagates.
@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from eve_online_industry_tracker.application.market_intelligence import market_depth_collector as mdc
 from eve_online_industry_tracker.application.market_intelligence.margin_correlator import MarginCorrelator
 from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import MarketDepthCollector
 
@@ -67,7 +66,7 @@ def test_correlator_setting_reader_propagates_an_unknown_setting(reader):
         getattr(corr, reader)()
 
 
-@pytest.mark.parametrize("reader,default", [("_get_min_days", 30), ("_get_threshold", -0.6)])  # the schema defaults (H1: -0.7 had drifted)
+@pytest.mark.parametrize("reader,default", [("_get_min_days", 30), ("_get_threshold", -0.6)])  # the schema defaults (-0.7 had drifted)
 def test_correlator_setting_reader_warns_on_an_unparsable_value(reader, default, caplog):
     corr = MarginCorrelator(state=SimpleNamespace(), admin_settings=_Admin(ValueError("not a number")))
     with caplog.at_level(logging.WARNING):
@@ -150,7 +149,7 @@ def test_effective_velocity_propagates_a_programming_error_in_the_sales_history(
 
 
 def test_own_volume_read_failure_raises_for_the_caller_to_mark_the_row_stale():
-    # F1 item 2: no silent 0 (competitor_units would include our own orders); run() keeps the old row
+    # No silent 0 (competitor_units would include our own orders); run() keeps the old row
     with pytest.raises(OperationalError):
         _collector()._query_own_sell_volume(34, {98000001}, set(), region_id=10000002)
 

@@ -1,4 +1,4 @@
-"""Task C1: IndustryService no longer swallows every exception. A failed read
+"""IndustryService no longer swallows every exception. A failed read
 or an unparsable value that feeds a cost, fee, bonus, skill or price logs a
 WARNING with the reason (and names it in the payload where the data
 matters); a programming error (AttributeError, KeyError, an unexpected
@@ -14,11 +14,11 @@ from sqlalchemy.exc import OperationalError
 
 from eve_online_industry_tracker.application.errors import ServiceError
 from eve_online_industry_tracker.application.industry.service import IndustryService
+from industry_service_fakes import _profile_service
 
 
 def _service(**state):
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(**state)
+    svc = IndustryService(state=SimpleNamespace(**state))
     return svc
 
 
@@ -68,19 +68,6 @@ def test_a_non_numeric_preferred_value_quantity_is_logged(caplog):
 
 
 # --- the profile context ---------------------------------------------------------------------------
-
-def _profile_service(app_session, **profile):
-    from eve_online_industry_tracker.infrastructure.models import IndustryProfilesModel
-
-    row = IndustryProfilesModel(character_id=90000001, profile_name="Fake profile", is_default=True, **profile)
-    app_session.add(row)
-    app_session.commit()
-    sessions = SimpleNamespace(app_session=lambda: app_session, sde_session=lambda: None)
-    svc = IndustryService(state=SimpleNamespace(esi_service=None, admin_settings=None, db_sde=None),
-                          sessions=sessions)
-    svc.solar_systems = lambda: []
-    return svc, row.id
-
 
 def test_an_unavailable_cost_index_is_logged_and_named_in_the_profile(app_session, caplog):
     svc, profile_id = _profile_service(app_session, system_id=30000001)
@@ -159,7 +146,7 @@ def test_slot_capacities_propagate_a_character_read_failure():
     from eve_online_industry_tracker.application.characters.character_manager import CharacterDataError
 
     def _boom():
-        raise CharacterDataError("Error retrieving characters: fake")   # what get_characters raises (F1 item 7)
+        raise CharacterDataError("Error retrieving characters: fake")   # what get_characters raises
 
     with pytest.raises(CharacterDataError):
         _service(char_manager=SimpleNamespace(get_characters=_boom))._character_slot_capacities()

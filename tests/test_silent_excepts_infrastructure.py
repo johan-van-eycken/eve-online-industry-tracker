@@ -1,4 +1,4 @@
-"""Task C2: the formerly silent `except Exception` handlers in infrastructure and
+"""The formerly silent `except Exception` handlers in infrastructure and
 utils. Expected (remote/data) failures now log a WARNING and keep the per-item
 skip; programming errors propagate. Fake values only."""
 from __future__ import annotations
@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 from eve_online_industry_tracker.infrastructure import esi_client as esi_client_module
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
+from fakes import _raiser
 
 
 def _svc(esi_client) -> ESIService:
@@ -21,12 +22,6 @@ def _svc(esi_client) -> ESIService:
     svc._esi_client = esi_client
     svc._public_structures_cache, svc._public_structures_cache_ttl_seconds = {}, 600
     return svc
-
-
-def _raiser(exc):
-    def _f(*a, **k):
-        raise exc
-    return _f
 
 
 # --- /universe/names/ -----------------------------------------------------------------------
@@ -140,7 +135,7 @@ def test_a_failed_background_structure_refresh_is_logged_and_kept_in_state(caplo
 # --- schema migrations -----------------------------------------------------------------------
 
 def test_unreadable_table_columns_are_an_error_that_fails_the_migration(caplog):
-    # Round H2.6: no longer a WARNING and an empty set (then a failing ADD COLUMN).
+    # No longer a WARNING and an empty set (then a failing ADD COLUMN).
     from eve_online_industry_tracker.infrastructure.schema_migrations import SchemaMigrationError, _table_columns
 
     db = SimpleNamespace(query=_raiser(OperationalError("PRAGMA", {}, Exception("database is locked"))))

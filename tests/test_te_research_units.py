@@ -1,12 +1,12 @@
 # tests/test_te_research_units.py
-"""Task 8c: TE research in EVE's units, end to end.
+"""TE research in EVE's units, end to end.
 
 EVE's TE is a percentage, 2% per research level: level L gives TE 2L%, so
 TE runs 0..20 and research levels 0..10. The planner stores and compares TE
 as the percentage (the asset's blueprint_time_efficiency) and converts to a
 level only where a level is needed: the research fee and duration tables.
 
-Fix round 1 (the user's decisions):
+The user's decisions:
 - TE is always researched to the max (industry.max_blueprint_time_efficiency,
   default 20); the TE threshold setting is gone.
 - Research first: a BPO with a research action in the plan is not used for
@@ -25,8 +25,9 @@ import pytest
 
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
-from eve_online_industry_tracker.application.daily_planner.models import ChainPlan, ItemDecision
+from eve_online_industry_tracker.application.daily_planner.models import ChainPlan
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
+from fakes import _Admin, _AdminStub, _decision
 
 BLUEPRINT_DATA = {
     999: {"manufacturing": {"products": [{"type_id": 12345, "quantity": 1}],
@@ -39,13 +40,6 @@ FEE_TO_LEVEL = [0.0, 1.0, 3.0, 7.0, 15.0, 31.0, 63.0, 127.0, 255.0, 511.0, 1023.
 SECONDS_TO_LEVEL = [0, 60, 180, 420, 900, 1860, 3780, 7620, 15300, 30660, 61380]
 
 
-class _AdminStub:
-    """No settings store: ChainPlanner's own fallbacks (TE max 20)."""
-
-    def get(self, section, key, default=None):
-        raise KeyError(key)
-
-
 class _AdminMaxTe:
     def __init__(self, max_te):
         self.max_te = max_te
@@ -54,11 +48,6 @@ class _AdminMaxTe:
         if (section, key) == ("industry", "max_blueprint_time_efficiency"):
             return self.max_te
         raise KeyError(key)
-
-
-class _Admin:
-    def get(self, section, key, default=None):
-        return default
 
 
 class _Chars:
@@ -94,15 +83,6 @@ def _row(**job) -> dict:
     }
     manufacturing_job.update(job)
     return {"type_id": 12345, "type_name": "Thing", "quantity": 10, "manufacturing_job": manufacturing_job}
-
-
-def _decision(row) -> ItemDecision:
-    return ItemDecision(
-        type_id=12345, type_name="Thing", decision="build", decision_reason="test",
-        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
-        days_of_supply_current=1.0, effective_velocity=1.0, meta_group_id=1,
-        pipeline_stage="manufacturing", overview_row=row,
-    )
 
 
 def _plan(te: int, *, me: int = 10, admin=None, row=None) -> dict:

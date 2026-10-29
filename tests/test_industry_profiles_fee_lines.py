@@ -1,10 +1,5 @@
-"""The industry profile page's job-fee lines (round 5 Task 10, carries 9, 11)."""
+"""The industry profile page's job-fee lines."""
 from __future__ import annotations
-
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from streamlit_ui.pages import industry_profiles as page  # noqa: E402
 
@@ -29,7 +24,7 @@ def test_fee_lines_use_the_rates_fetched_once_per_render(monkeypatch):
 
 
 def test_one_admin_settings_read_gives_every_rate(monkeypatch):
-    """Fix round 1, minor 6: the page reads /admin_settings once per render
+    """The page reads /admin_settings once per render
     and derives the NPC defaults and the SCC rates from that one read."""
     calls: list[str] = []
     payload = {"status": "success", "data": {"values": {"industry": {
@@ -46,7 +41,7 @@ def test_one_admin_settings_read_gives_every_rate(monkeypatch):
 def test_the_rates_fall_back_to_the_defaults_without_admin_settings(monkeypatch):
     monkeypatch.setattr(page, "api_get", lambda path, *a, **k: None)
     values, failed_caption = page._admin_industry_values()
-    # Task 14 minor 3: one SCC default (the producer's), and the page says
+    # One SCC default (the producer's), and the page says
     # the rates shown are the defaults because the read failed.
     assert page._npc_admin_defaults(values) == (page._NPC_STATION_FACILITY_TAX, page.DEFAULT_SCC_SURCHARGE)
     assert page._job_scc_rates(values) == (page.DEFAULT_SCC_SURCHARGE, page.DEFAULT_RESEARCH_SCC_SURCHARGE)
@@ -60,7 +55,7 @@ def test_a_failed_admin_settings_reply_is_named_too(monkeypatch):
     assert values == {} and failed_caption is not None
 
 
-# --- round 5 Task 13 carry 1: the stored rig bonuses are labelled unscaled -------
+# --- The stored rig bonuses are labelled unscaled --------------------------------
 
 def test_the_stored_rig_bonuses_are_labelled_unscaled_before_the_security_band():
     """The stored structure_rig_*_bonus are the rigs' raw values

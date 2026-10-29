@@ -1,4 +1,4 @@
-"""Engineering-rig coverage by SDE category/group (Task 11, FU-14; SDE update).
+"""Engineering-rig coverage by SDE category/group.
 
 EVE applies a manufacturing rig by the product's category and group (CCP's
 industry target filters, read from the SDE's industryTargetFilters and
@@ -12,7 +12,6 @@ absent). Public SDE ids only.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 
 import pytest
@@ -21,8 +20,8 @@ import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import rig_groups as rg
 from eve_online_industry_tracker.infrastructure.sde import industry
 
-_LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
-_needs_sde = pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, _producer
+_needs_sde = pytest.mark.needs_local_sde
 
 
 @pytest.fixture(params=["fake_sde", "local_sde"])
@@ -45,12 +44,6 @@ def _primary(entry):
 def _entry(group_id, group_name, category_id, category_name, **extra):
     return {"type_id": 1, "group_id": group_id, "group_name": group_name,
             "category_id": category_id, "category_name": category_name, **extra}
-
-
-def _producer():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    return IndustryService
 
 
 def _profile(group, value=0.02, structure=0.01):
@@ -294,7 +287,7 @@ def test_two_rigs_covering_the_product_both_apply(catalog):
 
 
 def test_the_aggregate_is_never_applied(catalog):
-    """Task 15 M1 (supersedes Task 11 I1 / 11b M2): the aggregate names no
+    """The aggregate names no
     rig, so a profile with no per-effect rigs gets no rig bonus, in any band."""
     S = _producer()
     groups = S._manufacturing_rig_groups(_entry(508, "Missile Launcher Heavy", 7, "Module"))

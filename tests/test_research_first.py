@@ -1,5 +1,5 @@
 # tests/test_research_first.py
-"""Task 8c fix round 2: research first, end to end.
+"""Research first, end to end.
 
 EVE runs one job per blueprint, so a BPO in ME/TE research neither builds
 nor is copied. ChainPlanner decides once, before sizing the sub-components,
@@ -18,8 +18,8 @@ import pytest
 
 from eve_online_industry_tracker.application.daily_planner.chain_planner import ChainPlanner, _sizing_bonus_wording
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner
-from eve_online_industry_tracker.application.daily_planner.models import ItemDecision
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
+from fakes import _Admin, _AdminStub, _decision
 
 BLUEPRINT_DATA = {
     # Parent 999: 1 run of 12345 needs 100 x the component 54321.
@@ -32,16 +32,6 @@ BLUEPRINT_DATA = {
 }
 MARKET = {34: {"vwap_5d": 1.0}, 54321: {"vwap_5d": 1.0}, 12345: {"vwap_5d": 100.0}}
 SECONDS_TO_LEVEL = [0, 60, 180, 420, 900, 1860, 3780, 7620, 15300, 30660, 61380]
-
-
-class _AdminStub:
-    def get(self, section, key, default=None):
-        raise KeyError(key)
-
-
-class _Admin:
-    def get(self, section, key, default=None):
-        return default
 
 
 def _pilot(*skills, loaded=True):
@@ -75,7 +65,7 @@ def _row(*, segments, kind="owned_blueprint_original", material_cost=1000.0, pro
         "manufacturing_job": {
             "runs": 10, "manufacturing_job_cost": 50.0, "material_cost": material_cost,
             "total_cost": material_cost + 50.0,
-            # A published install fee: an unknown one buys the component (Task 15 fix round 3).
+            # A published install fee: an unknown one buys the component.
             "materials": {"54321": {"type_id": 54321, "quantity": widgets, "type_name": "Widget",
                                     "component_job_fee_per_run": 0.0}},
             "blueprint_sde": {"blueprint_type_id": 999},
@@ -94,15 +84,6 @@ BPO_ROW = dict(segments=[_segment(10, "owned_blueprint_original", 1000)])
 MIXED_ROW = dict(segments=[_segment(4, "owned_blueprint_copy", 400),
                            _segment(6, "copied_from_owned_blueprint_original", 600)],
                  kind="owned_blueprint_copy")
-
-
-def _decision(row) -> ItemDecision:
-    return ItemDecision(
-        type_id=12345, type_name="Thing", decision="build", decision_reason="test",
-        adjusted_score=1.0, absolute_profit_per_batch=1.0, isk_per_hour=1.0, margin_pct=1.0,
-        days_of_supply_current=1.0, effective_velocity=1.0, meta_group_id=1,
-        pipeline_stage="manufacturing", overview_row=row,
-    )
 
 
 def _plan(row, *, te=0, me=10, variants=None, bpo_count=1, bpos=None):
@@ -247,7 +228,7 @@ def test_a_pilot_whose_skills_are_unknown_gets_no_research_and_says_so():
 
 
 def _with_base(row, implants=None):
-    """Task 12 fix round 1: the skill- and implant-free table, and the
+    """The skill- and implant-free table, and the
     pilots' own implant multipliers."""
     row["manufacturing_job"]["research_duration_seconds_by_level_base"] = {
         "research_material": list(SECONDS_TO_LEVEL), "research_time": list(SECONDS_TO_LEVEL),
@@ -302,7 +283,7 @@ def test_the_service_hands_chain_planning_the_dropped_variants():
     assert _dropped_variants([kept, bpc, other_kept, orphan, "junk"], [kept, other_kept]) == {1: [bpc]}
 
 
-# --- fix round 3: research first only when the research is actually assigned -------
+# --- Research first only when the research is actually assigned --------------------
 
 ALL_SIX_SLOTS = 6  # Laboratory Operation 5: 1 + 5 research slots
 
@@ -317,7 +298,7 @@ def test_a_te_0_bpo_without_a_free_research_slot_is_built_from_in_full(caplog):
     assert any("no free research slot" in r.getMessage() and r.levelno == logging.WARNING
                for r in caplog.records)
     # The plan sized no components for the research-first batch (none):
-    # they are re-sized to the full BPO batch (fix round 5).
+    # they are re-sized to the full BPO batch.
     assert "components re-sized for the BPO's batch" in build.notes
     assert actions["sub_manufacture"].quantity == 1000
 
@@ -376,7 +357,7 @@ def test_the_duration_note_names_the_producers_structure_and_implants():
     assert "(structure and implants: the producer's)" in te.notes
 
 
-# --- fix round 4: several BPOs at different levels ----------------------------------
+# --- Several BPOs at different levels -----------------------------------------------
 
 def _bpo(item_id, me, te):
     return SimpleNamespace(type_id=999, item_id=item_id, is_blueprint_copy=False,
@@ -460,7 +441,7 @@ def test_the_queued_flag_is_persisted_on_the_action_log_row():
     assert "queued_after_me" in DailyActionLogModel.__table__.columns
 
 
-# --- fix round 5: another BPO without its own producer row (default settings) -----
+# --- Another BPO without its own producer row (default settings) ------------------
 #
 # With build_from_bpc on and owned BPCs, the producer emits only the BPC
 # variant: no row per BPO. While BPO 1 researches, BPO 2 builds the BPO runs;
@@ -548,7 +529,7 @@ def test_another_bpo_that_cannot_be_sized_keeps_the_safe_fallback_with_a_reason(
     assert expected_reason in build.notes
 
 
-# --- fix round 5: no research slot re-sizes the components to the kept row ---------
+# --- No research slot re-sizes the components to the kept row ----------------------
 
 def test_no_slot_fallback_resizes_the_components_to_the_kept_bpo_row():
     """The variant planned BPO 2 (950); without a research slot BPO 1 builds
@@ -563,7 +544,7 @@ def test_no_slot_fallback_resizes_the_components_to_the_kept_bpo_row():
     assert "buys any difference" not in actions["manufacture"].notes
 
 
-# --- fix round 5: blueprints installed in an active job ------------------------------
+# --- Blueprints installed in an active job -------------------------------------------
 
 def test_a_bpo_in_an_active_job_is_neither_researched_nor_built_from():
     plan = _plan5(_priced_row(), bpos=[A_PRICED], busy={1})
@@ -572,12 +553,12 @@ def test_a_bpo_in_an_active_job_is_neither_researched_nor_built_from():
     assert actions == {}
     (top,) = [d for d in plan.decisions if not d.is_sub_component]
     assert "in an active industry job" in top.overview_row["research_first"]["note"]
-    # Not shown as "manufacturing": nothing is built from it (fix round 1, minor 5).
+    # Not shown as "manufacturing": nothing is built from it.
     assert top.pipeline_stage == "blocked"
 
 
 def test_a_blocked_busy_bpo_row_says_not_built_in_its_decision_reason():
-    """Task 13 carry 2: the research-first "none" branch with a busy priced
+    """The research-first "none" branch with a busy priced
     BPO sets the stage to "blocked", so its persisted decision_reason must
     carry the same "; not built: <reason>" text every other blocked row has."""
     plan = _plan5(_priced_row(), bpos=[A_PRICED], busy={1})
@@ -633,7 +614,7 @@ def test_the_service_collects_the_blueprints_of_active_jobs():
     assert busy_blueprint_item_ids(jobs) == {11, 12}
 
 
-# --- round 5 Task 10 carry 15: the sizing note names only the bonuses applied ------
+# --- The sizing note names only the bonuses applied --------------------------------
 
 @pytest.mark.parametrize("profile, wording", [
     ({}, "with no structure or rig bonus"),
@@ -655,7 +636,7 @@ def test_the_sizing_bonus_wording(structure, rig, wording):
     assert _sizing_bonus_wording(structure, rig) == wording
 
 
-# --- round 5 Task 10 carries 12, 16: busy blueprints in research first ------------
+# --- Busy blueprints in research first --------------------------------------------
 
 def test_a_research_first_variant_on_a_busy_bpc_is_not_used():
     variant = _bpc_variant()
@@ -691,7 +672,7 @@ def test_a_free_bpo_with_unknown_levels_still_warns(caplog):
     assert len(_unknown_levels_warnings(caplog)) == 1
 
 
-# --- Task 10 fix round 1, minor 3: jobs whose copy flag is NULL ------------------
+# --- Jobs whose copy flag is NULL ------------------------------------------------
 
 def _job(item_id, activity_id, is_copy=None, bp_type_id=999):
     return {"blueprint_item_id": item_id, "blueprint_type_id": bp_type_id,

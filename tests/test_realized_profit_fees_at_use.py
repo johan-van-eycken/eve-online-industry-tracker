@@ -11,15 +11,11 @@ capture mode, and the realized-profit page shows it. Fake values throughout.
 from __future__ import annotations
 
 import json
-import os
-import sys
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.characters.realized_profit import (  # noqa: E402
     CharacterRealizedProfitLedgerService,
@@ -38,7 +34,7 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
 
 
 
-#: Every character id is one the character manager has (J2.4 checks it).
+#: Every character id is one the character manager has (an unknown one is refused).
 _KNOWN_CHARACTERS = SimpleNamespace(get_character_by_id=lambda character_id: object())
 
 def _sessions():
@@ -176,7 +172,7 @@ def test_the_page_names_the_assumed_fees_per_character():
     assert _assumed_fee_warnings(rows[2:], {}) == []
 
 
-# --- review round 1: M4 (assumed fees are Low confidence) and I2 (stale persisted fees) ----------
+# --- Assumed fees are Low confidence; stale persisted fees -----------------------------------------
 
 def test_assumed_fees_are_low_confidence():
     from eve_online_industry_tracker.application.characters.realized_profit import _confidence
@@ -252,12 +248,17 @@ def test_reading_the_ledger_rebuilds_a_stale_character(tmp_path):
 
 
 def test_the_fee_inputs_column_is_migrated():
-    import inspect
+    import sqlite3
 
-    from eve_online_industry_tracker.infrastructure import schema_migrations
+    from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
+    from fakes import _FakeDb
 
-    source = inspect.getsource(schema_migrations.ensure_app_schema)
-    assert 'table="character_realized_sales_ledger", column="fee_inputs"' in source
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE character_realized_sales_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, quantity INTEGER)")
+    conn.commit()
+    db = _FakeDb(conn)
+    ensure_app_schema(db)
+    assert "fee_inputs" in {row[1] for row in db.query("PRAGMA table_info(character_realized_sales_ledger)")}
 
 
 def test_concurrent_reads_rebuild_a_stale_character_once(monkeypatch):

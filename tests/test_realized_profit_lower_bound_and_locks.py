@@ -28,12 +28,13 @@ from eve_online_industry_tracker.infrastructure.models import (
     CharacterModel,
     CharacterWalletTransactionsModel,
 )
+from fakes import _ledger
 
 _PILOT = 7001
 _PRODUCT = 990003
 _TARGET_BP = 990002
 _REASON = "invention cost unknown: no corp character has its skills loaded"
-#: Every character id is one the character manager has (J2.4 checks it).
+#: Every character id is one the character manager has (an unknown one is refused).
 _KNOWN_CHARACTERS = SimpleNamespace(get_character_by_id=lambda character_id: object())
 
 
@@ -51,10 +52,6 @@ def _seed(session, *, reason=_REASON):
         is_personal=True, quantity=2, type_id=_PRODUCT, unit_price=200.0, total_price=400.0,
     ))
     session.commit()
-
-
-def _ledger(session):
-    return CharacterRealizedProfitLedgerService(app_session=session, sde_session=None, market_prices=[])
 
 
 def test_a_lower_bound_sale_names_its_reason_and_feedback_skips_it(app_session):

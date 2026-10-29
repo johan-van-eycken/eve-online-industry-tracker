@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 import os
 
+from fakes import _AdminKeyError, _bare_service
+
 PACKAGE = os.path.join(
     os.path.dirname(__file__), "..", "src", "eve_online_industry_tracker",
     "application", "daily_planner",
@@ -239,11 +241,6 @@ def _sde_error():
     return OperationalError("SELECT 1", {}, Exception("database is locked"))
 
 
-class _AdminKeyError:
-    def get(self, section, key):
-        raise KeyError(key)
-
-
 def _decision(row, **overrides):
     base = dict(
         type_id=int(row["type_id"]), type_name="Thing", decision="build",
@@ -351,7 +348,7 @@ def test_a_manufacture_action_carries_the_batch_runs_and_material_cost():
 
 
 def test_a_manufacture_action_carries_the_batch_unit_total():
-    """FeedbackProcessor compares PER-UNIT costs (F1): estimated_cost_isk is a
+    """FeedbackProcessor compares PER-UNIT costs: estimated_cost_isk is a
     whole-batch total, so the action must also carry the batch's units
     (top-level `quantity` = units per run x runs) to divide it by."""
     row = {"type_id": 12345, "quantity": 200,
@@ -379,7 +376,7 @@ def test_a_manufacture_action_without_a_total_cost_has_an_unknown_build_cost():
 
 
 def test_a_manufacture_action_carries_the_producers_batch_materials():
-    """F4: the shopping list buys these as-is (already scaled by runs and
+    """The shopping list buys these as-is (already scaled by runs and
     ME/structure) and subtracts what sub-manufacture builds."""
     row = {"type_id": 12345, "quantity": 200,
            "manufacturing_job": {"runs": 20, "materials": {
@@ -404,19 +401,6 @@ def test_a_manufacture_decision_without_runs_is_a_contract_violation():
 
 # --- DailyPlannerService: collaborator reads that used to swallow ---------------
 
-def _bare_service():
-    return DailyPlannerService(
-        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: []),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
-        characters_service=SimpleNamespace(list_characters=lambda: []),
-        sales_history_service=SimpleNamespace(),
-        market_pricing_service=SimpleNamespace(),
-        repo=SimpleNamespace(),
-        admin_settings=SimpleNamespace(),
-        session_provider=SimpleNamespace(),
-    )
-
-
 def test_corp_id_is_read_from_an_object_shaped_corporation_too():
     svc = _bare_service()
     svc._corporations = SimpleNamespace(
@@ -438,7 +422,7 @@ def test_an_industry_jobs_query_failure_fails_the_compute_not_frees_every_slot()
         svc._get_industry_jobs()
 
 
-# --- Fix round 1: a failed input query fails the compute, it is not "empty" ---
+# --- A failed input query fails the compute, it is not "empty" ----------------
 # An empty corp-assets list plans BPO and material purchases for things the
 # corp already owns; empty blueprint data drops every chain; empty orders skew
 # days-of-supply. Each must reach _run_compute and the status banner instead.

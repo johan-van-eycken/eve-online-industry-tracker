@@ -6,29 +6,12 @@ page reload hid it, leaving the user looking at the previous plan.
 """
 from __future__ import annotations
 
-import os
-import sys
 from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputError  # noqa: E402
-from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService  # noqa: E402
-
-
-def _bare_service():
-    return DailyPlannerService(
-        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: []),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
-        characters_service=SimpleNamespace(list_characters=lambda: []),
-        sales_history_service=SimpleNamespace(),
-        market_pricing_service=SimpleNamespace(),
-        repo=SimpleNamespace(),
-        admin_settings=SimpleNamespace(),
-        session_provider=SimpleNamespace(),
-    )
+from fakes import _bare_service
 
 
 def _fail_with(svc, exc):

@@ -1,4 +1,4 @@
-"""G1 item 3b: MarketHistoryService.fetch_and_store_history returns why a type
+"""MarketHistoryService.fetch_and_store_history returns why a type
 has no fresh history (the ESI fetch failed, no ESI service), None on success,
 and its callers show it: the price anomaly names it on the row instead of
 silently skipping the historical check, and refresh_market_history returns

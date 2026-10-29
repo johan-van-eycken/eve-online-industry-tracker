@@ -19,24 +19,11 @@ from eve_online_industry_tracker.application.daily_planner.action_plan_builder i
     ActionPlanBuilder,
 )
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
+from fakes import _RecordingLoader
 
 
 def _past(hours: int = 1) -> datetime:
     return (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).replace(tzinfo=None)
-
-
-class _RecordingLoader:
-    """Mirrors tests/test_type_metadata.py's _FakeLoader: records every batch
-    of type_ids it was asked to load, so a test can assert it was invoked
-    exactly once (batched), not once per deliver row."""
-
-    def __init__(self, data):
-        self._data = data
-        self.calls: list[list[int]] = []
-
-    def __call__(self, session, language, type_ids):
-        self.calls.append(sorted(type_ids))
-        return {tid: self._data[tid] for tid in type_ids if tid in self._data}
 
 
 def _job(**kwargs):
@@ -181,8 +168,8 @@ def test_no_character_name_map_or_resolver_still_uses_honest_fallbacks():
     assert deliver_rows[0].type_name == "type_999"
 
 
-# --- buy_bpo rows (Task 18, ruling R4) -----------------------------------------
-# Before Task 16 every BPO opportunity was a zero-saving "hold", so emitting a
+# --- buy_bpo rows --------------------------------------------------------------
+# When every BPO opportunity was a zero-saving "hold", emitting a
 # buy_bpo row for every one of them, keyed by the *product* type_id, was
 # invisible. With real savings it would tell the user to buy the product for
 # every analysed item.

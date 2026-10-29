@@ -120,7 +120,7 @@ def test_get_meta_group_name_passes_through_unrecognized_names():
     assert orow.get_meta_group_name({}) == ""
 
 
-# --- batch materials (F4) -------------------------------------------------------
+# --- batch materials ------------------------------------------------------------
 
 def test_batch_materials_read_the_producers_scaled_quantities():
     """manufacturing_job.materials is keyed by str(type_id) and its `quantity`

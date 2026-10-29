@@ -1,4 +1,4 @@
-"""Task A items 2, 3 and 6: blueprints a row claimed but does not use today
+"""Blueprints a row claimed but does not use today
 go to the rows that wanted them, within the same compute.
 
 3. A row with fewer invent lanes than claimed T1 BPCs releases the rest to
@@ -13,10 +13,6 @@ Fake ids, pilots and numbers throughout.
 from __future__ import annotations
 
 import copy
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402
@@ -54,7 +50,7 @@ def _assign(decisions, chars, jobs=(), skill_data=NO_SKILL_REQUIREMENTS):
                                       blueprint_data=skill_data)
 
 
-# --- item 3: fewer lanes than claimed BPCs -----------------------------------------
+# --- Fewer lanes than claimed BPCs -------------------------------------------------
 
 def test_bpcs_beyond_a_rows_lanes_go_to_a_lower_row_of_the_same_source():
     """The higher row has two 10-run BPCs but one lane (only Hi has its
@@ -83,7 +79,7 @@ def test_a_row_that_uses_every_bpc_releases_nothing():
     assert "fewer invent lanes" not in high.decision_reason
 
 
-# --- item 2: a row not built for BPCs a higher row released is re-planned ---------
+# --- A row not built for BPCs a higher row released is re-planned -----------------
 
 def _planned_t2(type_id, name, score, encryption):
     row = L._t2_row(type_id)
@@ -135,7 +131,7 @@ def test_only_one_re_planned_row_gets_a_released_bpc():
 
 def test_a_hand_built_plan_without_the_planner_is_not_re_planned():
     """Control: a ChainPlan with no re-plan callback keeps the planner's
-    not-built rows as they are (the Task 15 wording)."""
+    not-built rows and their wording as they are."""
     high = A._decision(_t2_row(12345, A.ENCRYPTION, [[701, 10]]), type_id=12345, score=2.0)
     low = A._decision(A._row(), type_id=12346, score=1.0, stage="invention")
     low.overview_row = {"type_id": 12346, "manufacturing_job": {"runs": 20}}
@@ -145,7 +141,7 @@ def test_a_hand_built_plan_without_the_planner_is_not_re_planned():
     assert "(which ended up not inventing)" in low.decision_reason
 
 
-# --- item 6: a BPO claimed for a job without a slot goes to the row that wanted it --
+# --- A BPO claimed for a job without a slot goes to the row that wanted it --------
 
 def _busy(character_id, activity_id):
     from datetime import datetime, timedelta, timezone
@@ -171,7 +167,7 @@ def test_a_t1_bpo_whose_manufacture_gets_no_slot_is_copied_by_the_t2_row():
 
 
 def test_a_t1_bpo_whose_copy_gets_no_slot_builds_the_t1_row():
-    """Probe b reversed: the T2 row (higher) claims BPO 77 to copy, the T1
+    """The shared T1 BPO reversed: the T2 row (higher) claims BPO 77 to copy, the T1
     row is not built. No research slot is free, so the copy is not made:
     the BPO is released and the T1 row builds from it, buying its inputs."""
     t2 = L._dec(L._t2_row(), 12345, "Widget II", 2.0, 2, "invention")
@@ -189,7 +185,7 @@ def test_a_t1_bpo_whose_copy_gets_no_slot_builds_the_t1_row():
 
 
 def test_a_used_bpo_is_not_released():
-    """Control (probe b): the copy gets a slot, so the T1 row stays not built."""
+    """Control: the copy gets a slot, so the T1 row stays not built."""
     t2 = L._dec(L._t2_row(), 12345, "Widget II", 2.0, 2, "invention")
     t1 = L._dec(L._t1_row(20), 12344, "Widget I", 1.0, 1)
     _plan, actions = _plan_and_assign([t2, t1], {998: [L._bpo(77, 998)]}, {}, L._chars())
@@ -229,7 +225,7 @@ def test_a_re_plan_that_still_gets_no_slot_keeps_the_not_built_reason():
     assert actions == []
     assert low.pipeline_stage == "blocked"
     assert "re-planned" not in low.decision_reason
-    # Fix round 1 (I3): worded from the final ledger, with the assigner's cause.
+    # Worded from the final ledger, with the assigner's cause.
     assert low.decision_reason == (
         "test; not built: T1 BPCs (998) free (its holder does not use it today), "
         "but no free pilot with the invention skills"

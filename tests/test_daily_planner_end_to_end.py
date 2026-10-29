@@ -1,9 +1,9 @@
 """End-to-end smoke test for DailyPlannerService._run_compute().
 
-Fix round 1 (task 11b), finding 1: the wiring tests in
+The wiring tests in
 test_daily_planner_wiring.py prove the phase call sites pass the kwargs the
 sub-components now require, but none of them actually runs the nine-phase
-pipeline. Task 19's integration test is fixture-gated on a real-data capture
+pipeline. test_daily_planner_integration.py is fixture-gated on a real-data capture
 that has not been performed and stays skipped, so before this test nothing
 committed proved plan computation completes -- a later change could break the
 chain end to end and the suite would stay green.
@@ -134,7 +134,7 @@ def test_a_malformed_wallet_balance_persists_as_unknown_not_a_real_zero(
 def test_two_variants_of_one_product_yield_exactly_one_plan_item(
     session_provider, planner_repo, tmp_path
 ):
-    """F2: one overview row per blueprint variant used to produce one
+    """One overview row per blueprint variant used to produce one
     decision per ROW, each mixing that row's pipeline state with the last
     row's profitability. Phase 1 now keeps one row per type_id."""
     admin = AdminSettingsManager(file_path=str(tmp_path / "admin.json"))
@@ -190,7 +190,7 @@ def test_a_compute_logs_no_pricing_suggestion_or_relist_warning(
     assert offending == []
 
 
-# --- round 5 Task 3 fix round 1, I3: invention inputs are priced in phase 1 ---
+# --- Invention inputs are priced in phase 1 -----------------------------------
 # FAKE prices. The market-depth table only holds the plan's product types, so
 # datacores and decryptors need their own price lookup or the shopping list
 # skips them as unpriced.
@@ -258,14 +258,14 @@ def test_an_unpriced_invention_input_still_warns(session_provider, planner_repo,
     with caplog.at_level(logging.WARNING):
         items = {i.type_id: i for i in svc._phase_7_shopping([invent], phase1)}
 
-    # Task 8 fix round 1: still bought, at an unknown cost.
+    # Still bought, at an unknown cost.
     assert 204 in items and items[34201].estimated_total is None and items[34201].quantity > 0
     assert any(
         "type_id=34201" in r.getMessage() and "unknown cost" in r.getMessage() for r in caplog.records
     )
 
 
-# --- round 5 Task 3 fix round 2: every buyable material is priced in phase 1 --
+# --- Every buyable material is priced in phase 1 ------------------------------
 # FAKE prices. A mineral (Tritanium) from the producer's batch materials and a
 # component (Intact Armor Plates 25624) from an owned BPO's SDE materials are
 # both outside the market-depth table; a depth row without any price must not
@@ -349,12 +349,12 @@ def test_a_material_with_no_hub_price_still_warns(session_provider, planner_repo
     with caplog.at_level(logging.WARNING):
         items = {i.type_id: i for i in svc._phase_7_shopping(actions, phase1)}
 
-    # Task 8 fix round 1: still bought, at an unknown cost.
+    # Still bought, at an unknown cost.
     assert 34 in items and items[25624].estimated_total is None and items[25624].quantity > 0
     assert any("type_id=25624" in r.getMessage() and "unknown cost" in r.getMessage() for r in caplog.records)
 
 
-# --- round 5 Task 3 fix round 3: one merged price map for phases 5 and 7 -----
+# --- One merged price map for phases 5 and 7 ---------------------------------
 # FAKE prices. A T1 parent (12345) needs 10 x component 7778 per batch; the
 # corp owns BPO 7777 (ME 10) for it, 100 Tritanium per run. Depth holds only
 # the parent, so the component and the mineral are priced in phase 1. Build:
@@ -384,7 +384,7 @@ def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_
         "manufacturing_job": {
             **GOOD_ROW["manufacturing_job"],
             "blueprint_sde": {"blueprint_type_id": 999},
-            # A published install fee: an unknown one buys the component (Task 15 fix round 3).
+            # A published install fee: an unknown one buys the component.
             "materials": {"7778": {"type_id": 7778, "type_name": "Component", "quantity": 10,
                                    "component_job_fee_per_run": 0.0}},
         },
@@ -414,7 +414,7 @@ def _sub_manufacture_planner(session_provider, planner_repo, tmp_path, *, depth_
                                  "products": [{"type_id": 7778, "quantity": 1}]}},
     }
     svc._index_blueprint_assets = lambda assets: (
-        # The parent's own BPO too: a row with no owned blueprint is not built (Task 14 I3).
+        # The parent's own BPO too: a row with no owned blueprint is not built.
         {7777: [SimpleNamespace(type_id=7777, blueprint_material_efficiency=10, blueprint_time_efficiency=20)],
          999: [SimpleNamespace(type_id=999, blueprint_material_efficiency=10, blueprint_time_efficiency=20)]}, {},
     )

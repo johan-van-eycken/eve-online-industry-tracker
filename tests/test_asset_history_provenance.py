@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import os
-import sys
-from types import SimpleNamespace
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from sqlalchemy.orm import Session
 
 from eve_online_industry_tracker.application.characters.asset_history import (  # noqa: E402
     backfill_wallet_buy_acquisitions,
@@ -20,9 +14,7 @@ from eve_online_industry_tracker.application.characters.asset_history import (  
 import eve_online_industry_tracker.application.characters.character as character_module  # noqa: E402
 from eve_online_industry_tracker.application.characters.character import Character  # noqa: E402
 from eve_online_industry_tracker.application.characters.asset_provenance import resolve_industry_job_cost_snapshot  # noqa: E402
-from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
-    BaseApp,
-    BaseSde,
+from eve_online_industry_tracker.infrastructure.models import (
     Blueprints,
     CharacterAssetEventModel,
     CharacterAssetHistoryModel,
@@ -30,14 +22,6 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
     CharacterIndustryJobsModel,
     CharacterWalletTransactionsModel,
 )
-
-
-def _make_sessions() -> tuple[Session, Session]:
-    app_engine = create_engine("sqlite:///:memory:")
-    sde_engine = create_engine("sqlite:///:memory:")
-    BaseApp.metadata.create_all(bind=app_engine)
-    BaseSde.metadata.create_all(bind=sde_engine)
-    return sessionmaker(bind=app_engine)(), sessionmaker(bind=sde_engine)()
 
 
 class _FakeDbManager:
@@ -102,8 +86,8 @@ def _stub_refresh_dependencies(monkeypatch, *, snapshot_by_job_id: dict[int, dic
     monkeypatch.setattr(character_module, "resolve_industry_job_cost_snapshot", _resolve_snapshot)
 
 
-def test_sync_asset_history_records_asset_lifecycle_events() -> None:
-    app_session, _ = _make_sessions()
+def test_sync_asset_history_records_asset_lifecycle_events(session_provider) -> None:
+    app_session = session_provider.app_session()
 
     app_session.add_all(
         [
@@ -162,8 +146,8 @@ def test_sync_asset_history_records_asset_lifecycle_events() -> None:
     assert [row.item_id for row in history_rows] == [1001, 1003]
 
 
-def test_lookup_historical_blueprint_provenance_resolves_exact_vanished_bpc() -> None:
-    app_session, _ = _make_sessions()
+def test_lookup_historical_blueprint_provenance_resolves_exact_vanished_bpc(session_provider) -> None:
+    app_session = session_provider.app_session()
 
     app_session.add(
         CharacterAssetHistoryModel(
@@ -199,8 +183,8 @@ def test_lookup_historical_blueprint_provenance_resolves_exact_vanished_bpc() ->
     assert provenance["source"] == "historical_blueprint_exact_item"
 
 
-def test_lookup_historical_blueprint_provenance_forward_fills_consistent_future_state() -> None:
-    app_session, _ = _make_sessions()
+def test_lookup_historical_blueprint_provenance_forward_fills_consistent_future_state(session_provider) -> None:
+    app_session = session_provider.app_session()
 
     app_session.add_all(
         [
@@ -258,8 +242,8 @@ def test_lookup_historical_blueprint_provenance_forward_fills_consistent_future_
     assert provenance["source"] == "historical_blueprint_type_forward_fill"
 
 
-def test_lookup_historical_blueprint_provenance_does_not_forward_fill_mixed_future_state() -> None:
-    app_session, _ = _make_sessions()
+def test_lookup_historical_blueprint_provenance_does_not_forward_fill_mixed_future_state(session_provider) -> None:
+    app_session = session_provider.app_session()
 
     app_session.add_all(
         [
@@ -303,8 +287,8 @@ def test_lookup_historical_blueprint_provenance_does_not_forward_fill_mixed_futu
     assert provenance is None
 
 
-def test_build_historical_input_cost_lookup_returns_historical_lots_before_job() -> None:
-    app_session, _ = _make_sessions()
+def test_build_historical_input_cost_lookup_returns_historical_lots_before_job(session_provider) -> None:
+    app_session = session_provider.app_session()
 
     app_session.add_all(
         [
@@ -360,8 +344,8 @@ def test_build_historical_input_cost_lookup_returns_historical_lots_before_job()
     assert [lot["unit_cost"] for lot in lookup[34]["lots"]] == [5.0, 7.5]
 
 
-def test_backfill_wallet_buy_acquisitions_populates_historical_lookup() -> None:
-    app_session, _ = _make_sessions()
+def test_backfill_wallet_buy_acquisitions_populates_historical_lookup(session_provider) -> None:
+    app_session = session_provider.app_session()
 
     app_session.add(
         CharacterWalletTransactionsModel(
@@ -401,8 +385,8 @@ def test_backfill_wallet_buy_acquisitions_populates_historical_lookup() -> None:
     assert lookup[34]["reference_id"] == 501
 
 
-def test_record_historical_industry_output_populates_later_input_lookup() -> None:
-    app_session, _ = _make_sessions()
+def test_record_historical_industry_output_populates_later_input_lookup(session_provider) -> None:
+    app_session = session_provider.app_session()
 
     record_historical_acquisition(
         app_session=app_session,
@@ -450,8 +434,8 @@ def test_record_historical_industry_output_populates_later_input_lookup() -> Non
     assert 34 not in cleared_lookup
 
 
-def test_resolve_industry_job_cost_snapshot_prefers_historical_owned_inputs() -> None:
-    _, sde_session = _make_sessions()
+def test_resolve_industry_job_cost_snapshot_prefers_historical_owned_inputs(session_provider) -> None:
+    sde_session = session_provider.sde_session()
 
     sde_session.add(
         Blueprints(
@@ -532,8 +516,8 @@ def test_resolve_industry_job_cost_snapshot_prefers_historical_owned_inputs() ->
     assert snapshot["blueprint_provenance_ref_id"] == 44
 
 
-def test_resolve_industry_job_cost_snapshot_consumes_historical_lots_fifo() -> None:
-    _, sde_session = _make_sessions()
+def test_resolve_industry_job_cost_snapshot_consumes_historical_lots_fifo(session_provider) -> None:
+    sde_session = session_provider.sde_session()
 
     sde_session.add(
         Blueprints(
@@ -628,8 +612,8 @@ def test_resolve_industry_job_cost_snapshot_consumes_historical_lots_fifo() -> N
     assert snapshot["unit_cost"] == 89.0
 
 
-def test_refresh_industry_jobs_preserves_existing_jobs_for_backfill(monkeypatch) -> None:
-    app_session, sde_session = _make_sessions()
+def test_refresh_industry_jobs_preserves_existing_jobs_for_backfill(session_provider, monkeypatch) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
     app_session.add(
         CharacterIndustryJobsModel(
             character_id=1,
@@ -685,8 +669,8 @@ def test_refresh_industry_jobs_preserves_existing_jobs_for_backfill(monkeypatch)
     assert [row.acquisition_reference_id for row in history_rows] == [9001, 9002]
 
 
-def test_refresh_industry_jobs_skips_active_job_output_backfill(monkeypatch) -> None:
-    app_session, sde_session = _make_sessions()
+def test_refresh_industry_jobs_skips_active_job_output_backfill(session_provider, monkeypatch) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
     fetched_jobs = [
         {
             "job_id": 9010,
@@ -717,8 +701,8 @@ def test_refresh_industry_jobs_skips_active_job_output_backfill(monkeypatch) -> 
     assert history_rows == []
 
 
-def test_an_unpriced_material_makes_the_materials_cost_a_lower_bound() -> None:
-    _, sde_session = _make_sessions()
+def test_an_unpriced_material_makes_the_materials_cost_a_lower_bound(session_provider) -> None:
+    sde_session = session_provider.sde_session()
     sde_session.add(Blueprints(blueprintTypeID=5004, maxProductionLimit=1, activities={"manufacturing": {
         "materials": [{"typeID": 34, "quantity": 10}, {"typeID": 35, "quantity": 5}],
         "products": [{"typeID": 104, "quantity": 1}]}}))

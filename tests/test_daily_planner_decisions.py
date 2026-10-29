@@ -1,11 +1,7 @@
 """Tests for ItemDecisionEngine (Phase 4)."""
 from __future__ import annotations
 
-import os
-import sys
 from unittest.mock import MagicMock
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState, ScoredItem

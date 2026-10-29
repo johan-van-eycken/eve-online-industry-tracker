@@ -1,12 +1,11 @@
-"""Final round F3, Streamlit side: the contract keys the backend groups add
+"""The Streamlit side of the contract keys the backend groups add
 (cost_lower_bound_reason, pricing_error, price_unknown_reason, lookup_error,
 cost_index_unknown_reason) are rendered when present and tolerated when
 absent; the user's rulings on the profile save and the failed active jobs;
-and the small C3 points."""
+and smaller points."""
 from __future__ import annotations
 
 import logging
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -537,7 +536,7 @@ def test_the_market_intel_failure_is_worded_once(monkeypatch, market_intel_api):
 
 
 # =============================================================================================
-# 6. Small C3 points
+# 6. Smaller points
 # =============================================================================================
 
 

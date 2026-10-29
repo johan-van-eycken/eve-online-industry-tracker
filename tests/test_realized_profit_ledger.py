@@ -1,18 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
-    BaseApp,
-    BaseSde,
+from eve_online_industry_tracker.infrastructure.models import (
     Blueprints,
     CharacterModel,
     CharacterIndustryJobsModel,
@@ -31,6 +23,7 @@ from eve_online_industry_tracker.application.characters.realized_profit import (
     CorporationRealizedProfitLedgerService,
     _normalize_untracked_payload,
 )
+from eve_online_industry_tracker.infrastructure.models import CorporationAssetHistoryModel
 
 
 # The fee estimates come from the stored skills and standings with the admin settings
@@ -42,16 +35,8 @@ _MARKET_FEES = json.dumps({"jita_4_4": {
     "rates": {"sales_tax_fraction": 0.5, "broker_fee_fraction": 0.5}}})
 
 
-def _make_sessions() -> tuple[Session, Session]:
-    app_engine = create_engine("sqlite:///:memory:")
-    sde_engine = create_engine("sqlite:///:memory:")
-    BaseApp.metadata.create_all(bind=app_engine)
-    BaseSde.metadata.create_all(bind=sde_engine)
-    return sessionmaker(bind=app_engine)(), sessionmaker(bind=sde_engine)()
-
-
-def test_realized_profit_ledger_builds_from_completed_industry_jobs() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_builds_from_completed_industry_jobs(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -146,8 +131,8 @@ def test_realized_profit_ledger_builds_from_completed_industry_jobs() -> None:
     assert len(persisted) == 1
 
 
-def test_realized_profit_ledger_prefers_persisted_job_cost_snapshot() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_prefers_persisted_job_cost_snapshot(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -250,8 +235,8 @@ def test_build_market_price_map_prefers_lower_available_price() -> None:
     assert price_map[36] == 8.0
 
 
-def test_resolve_industry_job_cost_snapshot_applies_blueprint_material_efficiency() -> None:
-    _, sde_session = _make_sessions()
+def test_resolve_industry_job_cost_snapshot_applies_blueprint_material_efficiency(session_provider) -> None:
+    sde_session = session_provider.sde_session()
 
     sde_session.add(
         Blueprints(
@@ -293,8 +278,8 @@ def test_resolve_industry_job_cost_snapshot_applies_blueprint_material_efficienc
     assert snapshot["source"] == "market_snapshot_estimate"
 
 
-def test_realized_profit_ledger_marks_unpriced_sales_low_confidence() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_marks_unpriced_sales_low_confidence(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -359,8 +344,8 @@ def test_a_stored_untracked_row_is_read_back_without_a_profit() -> None:
     assert row["realized_margin_fraction"] is None
 
 
-def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_cost() -> None:
-    app_session, sde_session = _make_sessions()
+def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_cost(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -464,11 +449,11 @@ def test_realized_profit_ledger_seeds_opening_inventory_from_first_known_build_c
     assert second_row["source_mix"]["industry_build"]["quantity"] == 5
 
 
-def test_character_realized_profit_excludes_non_personal_sales() -> None:
+def test_character_realized_profit_excludes_non_personal_sales(session_provider) -> None:
     # Corp sell orders (is_personal=False) appear in CharacterWalletTransactionsModel
     # but belong to the corporation ledger, not the character ledger. They must be
     # excluded to prevent double-counting and Trade misclassification.
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -510,8 +495,8 @@ def test_character_realized_profit_excludes_non_personal_sales() -> None:
     assert len(persisted) == 0
 
 
-def test_character_realized_profit_estimates_market_fees_without_journal() -> None:
-    app_session, sde_session = _make_sessions()
+def test_character_realized_profit_estimates_market_fees_without_journal(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(
         CharacterModel(
@@ -557,8 +542,8 @@ def test_character_realized_profit_estimates_market_fees_without_journal() -> No
     assert row["fee_capture_mode"] == "estimated_market_fees"
 
 
-def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture() -> None:
-    app_session, sde_session = _make_sessions()
+def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture(session_provider) -> None:
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     sde_session.add(
         Blueprints(
@@ -631,9 +616,9 @@ def test_corporation_realized_profit_ledger_uses_gross_only_fee_capture() -> Non
     assert len(persisted) == 1
 
 
-def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
+def test_corporation_realized_profit_journal_matched_fee_capture(session_provider) -> None:
     """Corp ledger row uses journal_matched mode when brokers_fee and transaction_tax entries exist within the time window."""
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=20, corporation_name="Test Corp"))
     app_session.add(
@@ -698,9 +683,9 @@ def test_corporation_realized_profit_journal_matched_fee_capture() -> None:
     assert row["sales_tax_amount"] == 20.0
 
 
-def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match() -> None:
+def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match(session_provider) -> None:
     """Corp ledger row falls back to gross_only when no journal entries match."""
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=21, corporation_name="No Journal Corp"))
     app_session.add(
@@ -738,7 +723,7 @@ def test_corporation_realized_profit_falls_back_gracefully_when_no_journal_match
     assert row["total_fees_amount"] == 0.0
 
 
-def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_corp_also_bought_same_type() -> None:
+def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_corp_also_bought_same_type(session_provider) -> None:
     """Corp sell order for a type that a character manufactured should show as Manufacturing
     even when the corporation also has market buy transactions for that same type.
 
@@ -746,7 +731,7 @@ def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_c
     dropped the supplemental character industry-job lots. The sell then matched only
     the corp market-buy lot and was classified as Trade.
     """
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=30, corporation_name="Mixed Source Corp"))
 
@@ -824,7 +809,7 @@ def test_corporation_realized_profit_classifies_char_job_as_manufacturing_when_c
     assert row["source_mix"]["industry_build_transferred"]["quantity"] == 5
 
 
-def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufacturing() -> None:
+def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufacturing(session_provider) -> None:
     """When a corp industry job AND a character industry job both produce the same type,
     and all units are sold via a single corp sell order, every unit must be classified
     as Manufacturing — none should fall through to untracked/Trade.
@@ -832,7 +817,7 @@ def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufactur
     Previously _covered_from_corp_jobs blocked the char job lots whenever the corp had
     its own manufacturing job for the same type_id, leaving the char-built units untracked.
     """
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
 
     app_session.add(CorporationModel(corporation_id=40, corporation_name="Mixed Mfg Corp"))
 
@@ -909,7 +894,7 @@ def test_corporation_realized_profit_char_and_corp_job_same_type_both_manufactur
     assert abs(row["allocated_cost"] - 308.0) < 0.01
 
 
-def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells() -> None:
+def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells(session_provider) -> None:
     """A corp market order's lump-sum broker_fee is split equally across all units that sell.
 
     Before this fix three bugs caused the -7.5M Deluge profit to be wrong:
@@ -921,7 +906,7 @@ def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells() 
     transaction_tax = 30 ISK per unit (NULL context_id, date-proximity fallback).
     Expected per-unit net_revenue = 1000 − 30 (broker) − 30 (tax) = 940 ISK each.
     """
-    app_session, sde_session = _make_sessions()
+    app_session, sde_session = session_provider.app_session(), session_provider.sde_session()
     app_session.add(CorporationModel(corporation_id=50, corporation_name="Multi-Unit Corp"))
 
     # Three individual sell transactions for the same type at the same price,
@@ -990,3 +975,140 @@ def test_corporation_realized_profit_splits_multiunit_broker_fee_across_sells() 
         # Net revenue: 1000 − 30 − 30 = 940 ISK
         assert abs(row["net_revenue"] - 940.0) < 0.01, f"Expected 940.0, got {row['net_revenue']}"
         assert row["fee_capture_mode"] == "journal_matched"
+
+
+# --- a cost-only change makes the ledger stale -------------------------------------------------
+#
+# A cost-only change makes the realized profit ledger stale.
+#
+# Each allocation of a job-referenced lot keeps the job's unit_build_cost it
+# was built from (`cost_basis`), and a blended corp transfer lot its asset
+# history row and stamped acquisition_unit_cost. The stale check compares them
+# with the current values for the rows' own lots only (bounded), so a
+# re-costed job or a re-stamped blended lot rebuilds the ledger on read even
+# when no lower-bound reason changed. A ledger built before the basis was
+# recorded is stale once. Fake ids only.
+
+PILOT, CORP, PRODUCT = 7001, 98000001, 990003
+
+
+def _job(s, *, character_id=PILOT, job_id=5001, unit=70.0, completed="2026-10-01T00:00:00Z"):
+    s.add(CharacterIndustryJobsModel(
+        character_id=character_id, job_id=job_id, status="delivered", activity_id=1, runs=2,
+        blueprint_type_id=990002, product_type_id=PRODUCT, cost=40.0, completed_date=completed,
+        output_quantity=2, total_build_cost=unit * 2, unit_build_cost=unit))
+
+
+def _set_job_cost(s, unit, job_id=5001):
+    job = s.query(CharacterIndustryJobsModel).filter_by(job_id=job_id).one()
+    job.unit_build_cost = unit
+    job.total_build_cost = unit * 2
+    s.commit()
+
+
+# --- characters ------------------------------------------------------------------
+
+
+def _character(s):
+    s.add(CharacterModel(character_name="Fake Pilot", character_id=PILOT))
+    _job(s)
+    s.add(CharacterWalletTransactionsModel(
+        character_id=PILOT, transaction_id=6001, date="2026-10-02T00:00:00Z", is_buy=False, is_personal=True,
+        quantity=2, type_id=PRODUCT, unit_price=200.0, total_price=400.0))
+    s.commit()
+    return CharacterRealizedProfitLedgerService(app_session=s, sde_session=None, market_prices=[])
+
+
+def test_a_re_costed_job_makes_the_character_ledger_stale(app_session):
+    ledger = _character(app_session)
+    ledger.rebuild(character_id=PILOT)
+    assert ledger.stale_resolved_cost_owner_ids(ledger.list_rows(character_id=PILOT)) == set()
+
+    _set_job_cost(app_session, 90.0)
+    assert ledger.stale_resolved_cost_owner_ids(ledger.list_rows(character_id=PILOT)) == {PILOT}
+    [row] = ledger.rebuild(character_id=PILOT)
+    assert row["allocated_cost"] == 180.0
+    assert ledger.stale_resolved_cost_owner_ids(ledger.list_rows(character_id=PILOT)) == set()
+
+
+def test_a_character_ledger_built_without_a_cost_basis_is_stale_once(app_session):
+    ledger = _character(app_session)
+    ledger.rebuild(character_id=PILOT)
+    row = app_session.query(CharacterRealizedSalesLedgerModel).one()
+    row.allocation_details = [{k: v for k, v in a.items() if k != "cost_basis"} for a in row.allocation_details]
+    app_session.commit()
+    assert ledger.stale_resolved_cost_owner_ids(ledger.list_rows(character_id=PILOT)) == {PILOT}
+    ledger.rebuild(character_id=PILOT)
+    assert ledger.stale_resolved_cost_owner_ids(ledger.list_rows(character_id=PILOT)) == set()
+
+
+# --- corporations ----------------------------------------------------------------
+
+
+def _corporation(s, *, source, referenced):
+    s.add(CorporationModel(corporation_id=CORP, corporation_name="Fake"))
+    # The pilot's job also feeds the corp a lot of its own, completed after
+    # the sale: the sale consumes only the history row.
+    _job(s, job_id=5001, completed="2026-10-03T00:00:00Z")
+    s.add(CorporationAssetHistoryModel(
+        id=1, corporation_id=CORP, item_id=1, observed_at="2026-10-01T01:00:00Z", type_id=PRODUCT, quantity=2,
+        acquisition_source=source, acquisition_unit_cost=70.0, acquisition_total_cost=140.0,
+        acquisition_reference_type="industry_job" if referenced else None,
+        acquisition_reference_id=5001 if referenced else None, acquisition_date="2026-10-01T00:00:00Z"))
+    s.add(CorporationWalletTransactionsModel(
+        corporation_id=CORP, transaction_id=6001, date="2026-10-02T00:00:00Z", is_buy=False, quantity=2,
+        type_id=PRODUCT, unit_price=200.0, total_price=400.0))
+    s.commit()
+    return CorporationRealizedProfitLedgerService(app_session=s, sde_session=None, market_prices=[])
+
+
+def _corp_stale(ledger):
+    return ledger.stale_resolved_cost_owner_ids(ledger.list_rows(corporation_id=CORP))
+
+
+def test_a_re_costed_job_makes_the_corporation_ledger_stale(app_session):
+    ledger = _corporation(app_session, source="industry_build_transferred", referenced=True)
+    ledger.rebuild(corporation_id=CORP)
+    assert _corp_stale(ledger) == set()
+
+    _set_job_cost(app_session, 90.0)
+    assert _corp_stale(ledger) == {CORP}
+    ledger.rebuild(corporation_id=CORP)
+    assert _corp_stale(ledger) == set()
+
+
+def test_a_re_stamped_blended_lot_makes_the_corporation_ledger_stale(app_session):
+    ledger = _corporation(app_session, source="industry_build_transferred_avg", referenced=False)
+    [row] = ledger.rebuild(corporation_id=CORP)
+    blended = [a for a in row["allocation_details"] if a.get("asset_history_id") == 1]
+    assert blended and blended[0]["cost_basis"] == 70.0
+    assert _corp_stale(ledger) == set()
+
+    history = app_session.query(CorporationAssetHistoryModel).filter_by(id=1).one()
+    history.acquisition_unit_cost = 85.0
+    history.acquisition_total_cost = 170.0
+    app_session.commit()
+    assert _corp_stale(ledger) == {CORP}
+    rows = ledger.rebuild(corporation_id=CORP)
+    assert 85.0 in {a["unit_cost"] for a in rows[0]["allocation_details"]}
+    assert _corp_stale(ledger) == set()
+
+
+def test_a_corporation_blended_lot_built_without_its_history_row_is_stale_once(app_session):
+    ledger = _corporation(app_session, source="industry_build_transferred_avg", referenced=False)
+    ledger.rebuild(corporation_id=CORP)
+    row = app_session.query(CorporationRealizedSalesLedgerModel).one()
+    row.allocation_details = [
+        {k: v for k, v in a.items() if k not in ("cost_basis", "asset_history_id")} for a in row.allocation_details
+    ]
+    app_session.commit()
+    assert _corp_stale(ledger) == {CORP}
+    ledger.rebuild(corporation_id=CORP)
+    assert _corp_stale(ledger) == set()
+
+
+def test_an_unchanged_cost_is_not_stale(app_session):
+    ledger = _corporation(app_session, source="industry_build_transferred", referenced=True)
+    ledger.rebuild(corporation_id=CORP)
+    _set_job_cost(app_session, 70.0)
+    assert _corp_stale(ledger) == set()

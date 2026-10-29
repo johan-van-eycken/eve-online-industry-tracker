@@ -1,4 +1,4 @@
-"""The importer records the build it imported, not the one online (SDE update fix round 1).
+"""The importer records the build it imported, not the one online.
 
 The extracted SDE says its own build in _sde.yaml (sde: buildNumber,
 releaseDate). The importer records that build; the online latest version is

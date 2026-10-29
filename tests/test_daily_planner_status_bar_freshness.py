@@ -1,4 +1,4 @@
-"""F5: the status bar shows the LIVE freshness, not the stored one.
+"""The status bar shows the LIVE freshness, not the stored one.
 
 The stored plan.freshness_score is written in Phase 9 against the same market
 cache the plan was just computed from, so it is always 1.0; the live value is
@@ -7,11 +7,7 @@ the top-level `freshness_score` that get_active_plan recomputes on every GET.
 """
 from __future__ import annotations
 
-import os
-import sys
 from contextlib import contextmanager
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from streamlit_ui.components.daily_planner import status_bar  # noqa: E402
 from streamlit_ui.state.daily_planner_page import DailyPlannerPageState  # noqa: E402

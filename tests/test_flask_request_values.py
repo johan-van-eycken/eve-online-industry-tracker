@@ -1,12 +1,20 @@
-"""Final round F3, Flask side: strict numeric request values, the request
-session teardown, and the industry profile context route."""
+"""Strict numeric request values (the admin and character/corporation id
+query values included), the request session teardown, and the industry
+profile context route."""
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
 from eve_online_industry_tracker.application.errors import ServiceError
+import flask_app.routes.admin as admin
+from flask_app.app import create_app
+import flask_app.routes.characters as character_routes
+import flask_app.routes.corporations as corporation_routes
+import flask_app.routes.industry as industry_routes
+from fakes import industry_client
 
 
 # --- _number_param edge cases ----------------------------------------------------------------
@@ -100,16 +108,6 @@ def test_portfolio_plan_request_keeps_the_default_horizon_when_absent():
 
     assert _portfolio_plan_request_from_payload({}).planning_horizon_hours == 24.0
     assert _portfolio_plan_request_from_payload({"planning_horizon_hours": 48}).planning_horizon_hours == 48.0
-
-
-@pytest.fixture
-def industry_client(monkeypatch):
-    from flask_app.app import create_app
-    import flask_app.routes.industry as routes
-
-    monkeypatch.setattr(routes, "require_ready", lambda s: None)
-    monkeypatch.setattr(routes, "require_sde_ready", lambda s: None)
-    return create_app().test_client()
 
 
 def test_portfolio_candidates_route_returns_400_for_a_zero_planning_horizon(industry_client):
@@ -257,3 +255,130 @@ def test_teardown_logs_a_failing_sqlalchemy_close(caplog):
         close_request_sessions()
         assert getattr(g, "_db_oauth_session", None) is None
     assert any("session" in r.getMessage().lower() for r in caplog.records)
+
+
+# --- non-numeric admin query values ------------------------------------------------------------
+#
+# A non-numeric admin query value is a 400 naming the parameter
+# and the value, not a 500 from int()/float(). Covers every numeric argument
+# of the admin routes (the public structures status, refresh and scan start,
+# and the ESI metrics). Fake values only.
+
+@pytest.fixture
+def client(monkeypatch):
+    class _NoService:
+        def __init__(self, *a, **k):
+            pass
+
+        def __getattr__(self, name):
+            raise AssertionError(f"{name}: the service must not be reached with an invalid argument")
+
+    monkeypatch.setattr(admin, "require_ready", lambda state: None)
+    monkeypatch.setattr(admin, "get_state", lambda: SimpleNamespace())
+    monkeypatch.setattr(admin, "AdminService", _NoService)
+    monkeypatch.setattr(admin, "get_esi_monitor", lambda: _NoService())
+    return create_app().test_client()
+
+
+_CASES = [
+    ("get", "/public_structures_status", "system_id", {}),
+    ("post", "/refresh_public_structures", "system_id", {}),
+    ("post", "/refresh_public_structures", "scan", {"system_id": "30000142"}),
+    ("post", "/refresh_public_structures", "workers", {"system_id": "30000142"}),
+    ("post", "/refresh_public_structures", "max_results", {"system_id": "30000142"}),
+    ("post", "/refresh_public_structures", "time_budget", {"system_id": "30000142"}),
+    ("post", "/public_structures_scan/start", "scan", {}),
+    ("post", "/public_structures_scan/start", "workers", {}),
+    ("post", "/public_structures_scan/start", "batch_size", {}),
+    ("post", "/public_structures_scan/start", "time_budget", {}),
+    ("post", "/public_structures_scan/start", "pause", {}),
+    ("post", "/public_structures_scan/start", "request_timeout_seconds", {}),
+    ("get", "/esi_metrics", "window", {}),
+    ("get", "/esi_metrics", "bucket", {}),
+    ("get", "/esi_metrics", "top", {}),
+]
+
+
+@pytest.mark.parametrize("method,path,param,extra", _CASES)
+@pytest.mark.parametrize("value", ["abc", "1e", "nan"])
+def test_a_non_numeric_value_is_a_400_naming_the_parameter(client, method, path, param, extra, value):
+    response = getattr(client, method)(path, query_string={**extra, param: value})
+    assert response.status_code == 400, response.get_json()
+    message = response.get_json()["message"]
+    assert param in message and repr(value) in message
+
+
+@pytest.mark.parametrize("raw,default,expected", [(None, 5, 5), ("", 5, 5), (" 7 ", 5, 7)])
+def test_the_int_arg(raw, default, expected):
+    query = {} if raw is None else {"scan": raw}
+    with create_app().test_request_context("/", query_string=query):
+        assert admin._int_arg("scan", default) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [(None, 8.0), ("2.5", 2.5), ("3", 3.0)])
+def test_the_float_arg(raw, expected):
+    query = {} if raw is None else {"time_budget": raw}
+    with create_app().test_request_context("/", query_string=query):
+        assert admin._float_arg("time_budget", 8.0) == expected
+
+
+def test_a_fractional_int_is_a_400():
+    from eve_online_industry_tracker.application.errors import ServiceError
+
+    with create_app().test_request_context("/", query_string={"scan": "2.5"}):
+        with pytest.raises(ServiceError) as info:
+            admin._int_arg("scan", 5)
+    assert info.value.status_code == 400 and "scan" in info.value.message
+
+
+# --- non-integer character_id / corporation_id -------------------------------------------------
+#
+# A character_id or corporation_id query value that is not a
+# whole number is a 400 naming the field and the value, not a silent "all
+# characters" / "all corporations". Absent or blank still means all. Fake
+# values only.
+
+_ROUTES = [
+    ("/characters/assets", "character_id"),
+    ("/characters/realized_profit", "character_id"),
+    ("/corporations/assets", "corporation_id"),
+    ("/corporations/realized_profit", "corporation_id"),
+    ("/industry_active_jobs", "character_id"),
+]
+
+
+@pytest.fixture
+def id_client(monkeypatch):
+    class _no_service:
+        def __init__(self, *a, **k):
+            pass
+
+        def __getattr__(self, name):
+            raise AssertionError(f"{name}: the service must not be reached with an invalid id")
+
+    for module in (character_routes, corporation_routes, industry_routes):
+        monkeypatch.setattr(module, "require_ready", lambda state: None)
+        monkeypatch.setattr(module, "get_state", lambda: SimpleNamespace())
+    monkeypatch.setattr(character_routes, "CharactersService", _no_service)
+    monkeypatch.setattr(corporation_routes, "CorporationsService", _no_service)
+    monkeypatch.setattr(industry_routes, "IndustryService", _no_service)
+    return create_app().test_client()
+
+
+@pytest.mark.parametrize("path,field", _ROUTES)
+@pytest.mark.parametrize("value", ["abc", "12x", "-5", "1.5"])
+def test_an_invalid_id_is_a_400_naming_it(id_client, path, field, value):
+    response = id_client.get(path, query_string={field: value})
+    assert response.status_code == 400
+    message = response.get_json()["message"]
+    assert field in message and repr(value) in message
+
+
+@pytest.mark.parametrize("raw,expected", [(None, None), ("", None), ("  ", None), (" 90000001 ", 90000001)])
+def test_the_optional_id_param(raw, expected):
+    from flask_app.http import optional_id_param
+
+    app = create_app()
+    query = {} if raw is None else {"character_id": raw}
+    with app.test_request_context("/", query_string=query):
+        assert optional_id_param("character_id") == expected

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
+import copy
 
 import pytest
 
@@ -14,6 +15,14 @@ from eve_online_industry_tracker.application.daily_planner.models import ChainPl
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
 from eve_online_industry_tracker.infrastructure.models import CharacterIndustryJobsModel
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
+import test_daily_planner_assigned_inventor as A
+import test_blueprint_ledger as L
+from eve_online_industry_tracker.application.daily_planner.character_assigner import (
+    MAX_JOB_SECONDS,
+    _shape_copy_jobs,
+    max_copies_per_job,
+)
+from fakes import _Chars
 
 
 def _now():
@@ -38,14 +47,6 @@ def _skill(skill_name, level, skill_id=0):
     """
     return {"skill_id": skill_id, "skill_name": skill_name,
             "group_name": "Production", "trained_skill_level": level}
-
-
-class _Chars:
-    def __init__(self, chars):
-        self._chars = chars
-
-    def list_characters(self):
-        return self._chars
 
 
 def _decision(**overrides):
@@ -144,7 +145,7 @@ def test_me_and_te_research_take_two_separate_slots():
 
 def test_a_single_research_slot_yields_only_one_running_research_job():
     """One research slot: the ME job takes it. The TE job on the same BPO is
-    queued behind the ME job (one job per blueprint, Task 8c fix round 3),
+    queued behind the ME job (one job per blueprint),
     so it takes no slot in this plan; a second item's research gets none."""
     chars = [_char(1, "Pilot", [])]  # 1 + 0 = 1 research slot only
     plan = ChainPlan(decisions=[
@@ -263,7 +264,7 @@ def test_research_actions_carry_the_nested_blueprint_type_id():
 
 
 def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
-    """D2: rank by the item's own science + encryption skills (the producer's
+    """Rank by the item's own science + encryption skills (the producer's
     invention_chance), not by a generic Science sum."""
     chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": 21790}
     generalist = _char(1, "Generalist", [_skill("Laboratory Operation", 5), _skill("Science", 5, 3402)])
@@ -280,7 +281,7 @@ def test_invention_goes_to_the_pilot_with_the_items_best_skill_factor():
 
 
 def test_invention_ranking_without_an_encryption_skill_uses_the_science_skills():
-    """A3: an item whose SDE entry has no encryption skill still ranks by its
+    """An item whose SDE entry has no encryption skill still ranks by its
     two science skills. Both pilots train both science skills, so both can run it."""
     chance = {"science_skill_type_ids": [11433, 11454], "encryption_skill_type_id": None}
     encryptor = _char(1, "Encryptor", [_skill("Laboratory Operation", 5), _skill("Caldari Encryption Methods", 5, 21790),
@@ -357,7 +358,7 @@ def _every_assignment_plan():
             "t1_bpc_runs_on_hand": 1,
             "needs_me_research": True, "needs_te_research": True,
             # Built from an owned BPC, so the BPO's research does not block
-            # the manufacture (research first, Task 8c fix round 1).
+            # the manufacture (research first).
             "manufacturing_job": {"blueprint_sde": {"blueprint_type_id": 1999},
                                   "blueprint_source_kind": "owned_blueprint_copy"},
         }),
@@ -411,7 +412,7 @@ def test_an_invent_action_without_a_decryptor_names_none():
     (invent,) = [a for a in CharacterAssigner().assign(plan, [], _Chars(_research_pilot()), _AdminStub(), blueprint_data=NO_SKILL_REQUIREMENTS)
                  if a.action_type == "invent"]
     assert invent.decryptor_type_id is None and invent.decryptor_type_name is None
-    # The row carries no sized invention plan, so the note says so (A4); no decryptor is named.
+    # The row carries no sized invention plan, so the note says so; no decryptor is named.
     assert invent.notes.startswith("Invention: BPC stock below pipeline threshold; datacore need unknown")
     assert "use " not in invent.notes
 
@@ -424,3 +425,97 @@ def test_on_equal_free_slots_the_pilot_with_fewer_active_jobs_wins():
     assigner = CharacterAssigner()
     assert assigner._best_mfg_char(slots, [], qualified=frozenset({1, 2})) == (2, "Idle")
     assert assigner._best_research_char(slots, [], qualified=frozenset({1, 2})) == (2, "Idle")
+
+
+# --- copies per copy job -----------------------------------------------------------------------
+#
+# How many copies one copy job may make.
+#
+# The verified EVE rule (see character_assigner.max_copies_per_job): runs per
+# copy at most the blueprint's maxProductionLimit (CCP support, "Copying"),
+# copies per job limited by the job's duration: copies x runs per copy x the
+# copy time per run at most 30 days, at least one copy. The earlier cap
+# (copies <= maxProductionLimit) stays on top, conservatively. Fake numbers.
+
+DAY = 24 * 3600
+
+
+def test_the_30_day_job_limit_caps_the_copies_per_job():
+    # 10 runs per copy at 1 day per run: 3 copies fill 30 days.
+    assert max_copies_per_job(10, DAY, 600) == 3
+
+
+def test_the_max_production_limit_still_caps_the_copies_when_it_is_lower():
+    # 1 run per copy at 240 s: 10800 copies by duration, 600 by the old cap.
+    assert max_copies_per_job(1, 240, 600) == 600
+
+
+def test_one_copy_is_always_allowed_even_beyond_30_days():
+    assert max_copies_per_job(10, 4 * DAY, 30) == 1
+
+
+def test_an_unknown_copy_time_keeps_the_old_cap_only():
+    assert max_copies_per_job(10, None, 30) == 30
+    assert max_copies_per_job(10, None, None) is None
+
+
+def test_a_ship_blueprint_copy_job_no_longer_exceeds_30_days():
+    """The SDE's Rifter-like blueprint: max 30 runs per copy, 4800 s copy
+    time per run. 30 copies x 30 runs (900 runs) would take 50 days; 30 days
+    hold 540 copied runs, so 18 copies of 30 runs."""
+    assert MAX_JOB_SECONDS // (30 * 4800) == 18
+    (job,) = _shape_copy_jobs(30 * 30, [30] * 30, 1, 30, 4800)
+    assert job == {"copies": 18, "runs_per_copy": 30, "short": 12}
+
+
+def test_without_a_copy_time_the_shape_is_unchanged():
+    (job,) = _shape_copy_jobs(30 * 30, [30] * 30, 1, 30)
+    assert job == {"copies": 30, "runs_per_copy": 30, "short": 0}
+
+
+def test_the_copy_action_follows_the_duration_cap_and_says_what_is_left():
+    """One invent lane of 4 attempts, at most 2 runs per copy: 2 copies of 2
+    runs (the old cap allows 2 copies). A copied run takes 10 days, so one
+    copy of 2 runs is 20 days and a second would pass 30: one job makes 1
+    copy, 1 waits for a later plan."""
+    row = A._row(t1_bpo=True)
+    row["t1_max_runs_per_copy"] = 2
+    row["t1_copy_seconds_per_run"] = 10 * DAY
+    (copy_action,) = [a for a in A._assign(row, [A._best_inventor(), A._copier()]) if a.action_type == "copy"]
+    assert (copy_action.quantity, copy_action.runs) == (1, 2)
+    assert "make 1 copy × 2 runs" in copy_action.notes
+    assert "more copies are needed than one job makes: 1 more in a later plan" in copy_action.notes
+    assert "copy time is unknown" not in copy_action.notes
+
+
+def test_one_long_copy_is_still_planned():
+    """4 runs per copy allowed, 10 days a run: one copy of 4 runs is 40
+    days, which EVE allows for a single-run job."""
+    row = A._row(t1_bpo=True)
+    row["t1_max_runs_per_copy"] = 30
+    row["t1_copy_seconds_per_run"] = 10 * DAY
+    (copy_action,) = [a for a in A._assign(row, [A._best_inventor(), A._copier()]) if a.action_type == "copy"]
+    assert (copy_action.quantity, copy_action.runs) == (1, 4)
+    assert "more copies are needed" not in copy_action.notes
+
+
+def test_an_unknown_copy_time_is_said_on_the_copy_action():
+    row = A._row(t1_bpo=True)
+    row["t1_max_runs_per_copy"] = 30
+    (copy_action,) = [a for a in A._assign(row, [A._best_inventor(), A._copier()]) if a.action_type == "copy"]
+    assert "the SDE copy time is unknown: copies per job not checked against the 30-day job limit" in copy_action.notes
+
+
+def test_the_chain_planner_publishes_the_sde_copy_time():
+    bp = copy.deepcopy(L.BP_B)
+    bp[998]["copying"] = 4800
+    t2 = L._dec(L._t2_row(), 12345, "Widget II", 2.0, 2, "invention")
+    L._run([t2], {998: [L._bpo(77, 998)]}, {}, blueprints=bp)
+    assert t2.overview_row["t1_copy_seconds_per_run"] == 4800
+    assert t2.overview_row["t1_max_runs_per_copy"] == 30
+
+
+def test_the_chain_planner_leaves_an_unknown_copy_time_unknown():
+    t2 = L._dec(L._t2_row(), 12345, "Widget II", 2.0, 2, "invention")
+    L._run([t2], {998: [L._bpo(77, 998)]}, {})
+    assert t2.overview_row["t1_copy_seconds_per_run"] is None

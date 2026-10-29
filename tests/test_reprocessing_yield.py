@@ -32,6 +32,7 @@ from eve_online_industry_tracker.domain import reprocessing
 from eve_online_industry_tracker.infrastructure.sde import industry, ore
 from eve_online_industry_tracker.infrastructure.static_data import facility_repo
 from eve_online_industry_tracker.infrastructure.static_data.yield_calc import compute_yields
+from eve_online_industry_tracker.infrastructure.static_data.optimizer_service import _adjusted_prices, _reprocessing_fee
 
 ALL_FIVE = {3385: 5, 3389: 5, fakes.SKILL_SIMPLE_ORE_PROCESSING: 5}
 RX_804 = 0.04
@@ -486,7 +487,7 @@ def test_the_ores_route_without_the_ore_data_is_a_503(sde_engine):
 
 # --- the local SDE ---------------------------------------------------------------------------
 
-_LOCAL_SDE = os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
 
 
 def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers():
@@ -528,8 +529,7 @@ def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers
 
 
 def test_the_local_station_lookup_reads_the_sde():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     engine = create_engine(f"sqlite:///file:{os.path.abspath(_LOCAL_SDE)}?mode=ro&uri=true")
     try:
         with Session(engine) as session:
@@ -591,3 +591,26 @@ def test_other_float_settings_are_refused_too_not_clamped(tmp_path):
     with pytest.raises(ValueError, match="market_defaults/default_broker_fee"):
         mgr.set("market_defaults", "default_broker_fee", 0.9)
     assert mgr.get("market_defaults", "default_broker_fee") == 0.03
+
+
+# --- a non-numeric adjusted price --------------------------------------------------------------
+#
+# A non-numeric ESI adjusted_price is left out with a WARNING (not a
+# crash of the whole optimizer), so the reprocessing fee is unknown with its
+# reason. Fake values.
+
+def test_a_non_numeric_adjusted_price_is_left_out_with_a_warning(caplog):
+    esi = SimpleNamespace(get_market_prices=lambda: [
+        {"type_id": 34, "adjusted_price": 4.5},
+        {"type_id": 35, "adjusted_price": "n/a"},
+        {"type_id": 36, "adjusted_price": float("nan")},
+    ])
+    with caplog.at_level(logging.WARNING):
+        prices = _adjusted_prices(esi, [34, 35, 36])
+    assert prices == {34: 4.5}
+    assert any("35" in r.getMessage() and "36" in r.getMessage() for r in caplog.records)
+    fee, reason, _ = _reprocessing_fee(
+        tax=0.05, demand_coverage={"Tritanium": {"yielded": 10.0}, "Pyerite": {"yielded": 5.0}},
+        material_ids={"Tritanium": 34, "Pyerite": 35}, adjusted_prices=prices,
+    )
+    assert fee is None and "Pyerite" in reason

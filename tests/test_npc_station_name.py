@@ -11,7 +11,6 @@ Made-up ids and names in the fake tables; the local-SDE test reads Jita 4-4.
 from __future__ import annotations
 
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -128,7 +127,7 @@ def test_the_station_name_route_answers_with_the_name_or_the_reason(station_sde)
 def test_the_settings_page_shows_the_resolved_station_name(monkeypatch):
     from streamlit_ui.pages import admin_settings as page
 
-    # Round H3: the name is cached per station; each response here is a fresh read.
+    # The name is cached per station; each response here is a fresh read.
     page._station_name_data.clear()
     monkeypatch.setattr(page, "api_get_or_error", lambda path: (
         {"data": {"station_id": 60003760, "name": "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
@@ -148,8 +147,7 @@ def test_the_settings_page_shows_the_resolved_station_name(monkeypatch):
 
 
 def test_the_local_sde_names_jita_4_4():
-    if not os.path.exists(fakes.LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    fakes.skip_without_local_sde()
     engine = create_engine(f"sqlite:///file:{fakes.LOCAL_SDE}?mode=ro&uri=true")
     try:
         with Session(engine) as session:

@@ -1,4 +1,4 @@
-"""Rig values, security multipliers and the facility gate, from the SDE (Task 11b).
+"""Rig values, security multipliers and the facility gate, from the SDE.
 
 - Each rig effect's value is the rig attribute its SDE effect actually
   modifies with (modifierInfo.modifyingAttributeID): 2714/2713 for reactor
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 import pytest
 
@@ -25,8 +24,8 @@ import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import rig_groups as rg
 from eve_online_industry_tracker.domain import security_band as sb
 
-_LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
-_needs_sde = pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde, _producer
+_needs_sde = pytest.mark.needs_local_sde
 
 # Public SDE rig type ids.
 _REACTOR_EFFICIENCY_I, _REACTOR_EFFICIENCY_II = 46496, 46497
@@ -37,12 +36,6 @@ _EQUIPMENT_ME_M_I, _EQUIPMENT_ME_M_II = 43920, 43921
 _STANDARD = {"high": 1.0, "low": 1.9, "null": 2.1, "wormhole": 2.1}
 _THUKKER = {"high": 0.1, "low": 1.9, "null": 0.1, "wormhole": 0.1}
 _REACTOR = {"high": None, "low": 1.0, "null": 1.1, "wormhole": 1.1}
-
-
-def _producer():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-
-    return IndustryService
 
 
 def _entry(group_id, group_name, category_id, category_name):
@@ -72,8 +65,7 @@ def _fresh_warnings():
 
 @pytest.fixture(scope="module")
 def sde_session():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 

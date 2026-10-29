@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 import pytest
 from streamlit_ui.shopping_list import aggregate_shopping_list, aggregate_shopping_list_with_stale
 from eve_online_industry_tracker.application.industry.shopping_list import (
@@ -24,7 +19,7 @@ def _make_row(
         "type_id": type_id,
         "type_name": type_name,
         "max_batches_total": max_batches,
-        # A current overview row (see the fix round 2 tests for older ones).
+        # A current overview row (see the older-overview tests below for older ones).
         "manufacturing_job": {"procurement_materials": materials, "later_batch_plan_version": LATER_BATCH_PLAN_VERSION},
     }
 
@@ -254,7 +249,7 @@ def test_invention_datacore_line_follows_the_same_rule() -> None:
     assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
 
 
-# --- fix round 1: a take line without a split comes from a stale overview ------
+# --- A take line without a split comes from a stale overview -------------------
 
 
 def _stale_take_line() -> dict:
@@ -274,7 +269,7 @@ def test_stale_take_line_for_one_batch_buys_the_full_need() -> None:
 
 def test_stale_lines_log_one_debug_line_naming_the_types(caplog) -> None:
     # DEBUG, not WARNING: it runs on every UI rerun, and the UI caption is the
-    # real signal (Task I fix round 1).
+    # real signal.
     row_a = _make_row(1001, "Item A", 5, {"34": _stale_take_line()})
     row_b = _make_row(1002, "Item B", 2, {"34": _stale_take_line(), "35": {**_stale_take_line(), "type_id": 35, "type_name": "Pyerite"}})
     with caplog.at_level("DEBUG"):
@@ -293,7 +288,7 @@ def test_lines_with_a_split_log_no_warning(caplog) -> None:
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
-# --- round 3 final wave I1: datacores for batches past the owned T2 BPCs -------
+# --- Datacores for batches past the owned T2 BPCs ------------------------------
 
 
 def _invention_row(batches: int, *, batch_one: dict | None, extra: dict | None) -> dict:
@@ -330,7 +325,6 @@ def test_overview_without_an_extra_batch_list_scales_batch_one() -> None:
     assert _line(aggregate_shopping_list([row]), 204) == (20, 17)
 
 
-# --- round 3 final wave M5/M6 ---------------------------------------------------
 
 
 def test_unit_price_is_the_first_known_price_not_the_first_line_seen() -> None:
@@ -396,7 +390,7 @@ def test_tab_shows_no_stale_caption_for_current_lines(monkeypatch) -> None:
     assert not any("older overview" in c for c in captions)
 
 
-# --- round 4 Task I R3: unknown datacore need notice ----------------------------
+# --- Unknown datacore need notice -----------------------------------------------
 
 
 def _unknown_need_row(batches: int, from_batch: int) -> dict:
@@ -444,7 +438,7 @@ def test_unknown_need_rows_log_debug_not_warning(caplog) -> None:
     assert any("datacore need unknown" in r.getMessage() for r in caplog.records if r.levelname == "DEBUG")
 
 
-# --- round 5 Task 5: batches 2..N from their own plans ---------------------------
+# --- Batches 2..N from their own plans -------------------------------------------
 # A row whose later batches differ from batch 1 carries
 # manufacturing_job.extra_batch_schedule: distinct later-batch plans, and which
 # plan each of batches 2..N uses ("lead" run-length [plan, count] pairs, then
@@ -550,7 +544,7 @@ def test_a_malformed_schedule_fails_loud(schedule) -> None:
         aggregate_shopping_list([row])
 
 
-# --- round 5 Task 5 fix rounds 1-2: overviews from before the later-batch plans --
+# --- Overviews from before the later-batch plans --------------------------------
 # A build_from_bpc row without later_batch_plan_version comes from an older
 # overview whose later batches repeat batch 1, which can under-buy. Its
 # quantities are never shown: the list names it and asks for a refresh.
@@ -636,7 +630,7 @@ def test_the_tab_asks_for_a_refresh_when_every_selected_row_is_refused(monkeypat
     assert any("refresh" in str(i).lower() for i in out["info"])
 
 
-# --- round 5 Task 7: net against the published hangar stock (C8, C9) -----------
+# --- Net against the published hangar stock ------------------------------------
 # Every row of one overview is planned against the same hangar stock and
 # publishes it (manufacturing_job.owned_stock_by_type_id) for the types on its
 # buy lists, so the aggregated need is netted against the real stock once.
@@ -656,7 +650,7 @@ def test_published_stock_is_netted_exactly_once() -> None:
 
 
 def test_extra_batch_datacores_net_the_published_hangar_stock() -> None:
-    # C8: an owned BPC covers batch 1, so no row took the 3 owned datacores.
+    # An owned BPC covers batch 1, so no row took the 3 owned datacores.
     row = _with_stock(_invention_row(5, batch_one=None, extra=_datacore(4)), {204: 3})
     assert _line(aggregate_shopping_list([row]), 204) == (16, 13)
 
@@ -718,8 +712,8 @@ def test_published_stock_marks_nothing_stale() -> None:
 
 
 def test_a_row_without_published_stock_is_stale_where_the_take_may_understate_it() -> None:
-    # Took all 4 it needed: the hangar may hold more (C9). Datacores only on a
-    # later-batch list: none taken, the hangar may hold some (C8). Both may
+    # Took all 4 it needed: the hangar may hold more. Datacores only on a
+    # later-batch list: none taken, the hangar may hold some. Both may
     # over-buy, so the caption asks for a refresh.
     row = _make_row(1001, "Item A", 3, {"34": _owned_line(4, 4)})
     row["manufacturing_job"]["invention_procurement_materials_per_extra_batch"] = {"204": _datacore(4)}
@@ -747,7 +741,6 @@ def test_published_stock_on_another_row_covers_a_keyless_row() -> None:
     assert stale == {}
 
 
-# --- round 5 Task 7 fix round 1 ---------------------------------------------------
 
 
 def _pooled(row: dict, stock: dict, pool: str) -> dict:
@@ -852,7 +845,7 @@ def test_the_buy_list_keys_cover_every_line_the_list_reads() -> None:
         assert read and read <= set(IndustryService._buy_line_type_ids(mj))
 
 
-# --- Task 10 fix round 2, item 4: shared nested BPC runs without an invention model --
+# --- Shared nested BPC runs without an invention model --------------------------------
 
 def _sharing_row(type_id, name, used, owned):
     row = _make_row(type_id, name, 1, {})
@@ -881,7 +874,7 @@ def test_the_tab_warns_about_a_shared_nested_bpc_shortfall_it_cannot_size(monkey
 
 
 def test_a_row_from_before_this_plan_version_is_refused() -> None:
-    # Fix round 3: the shared-BPC netting needs keys a version-1 row lacks.
+    # The shared-BPC netting needs keys a version-1 row lacks.
     row = _make_row(1001, "Item Old", 2, {"34": _owned_line(10, 0)})
     row["manufacturing_job"]["later_batch_plan_version"] = LATER_BATCH_PLAN_VERSION - 1
     row["manufacturing_job"]["blueprint_source_kind"] = "owned_blueprint_copy"

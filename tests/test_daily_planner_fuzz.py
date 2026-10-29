@@ -1,5 +1,4 @@
-"""Task A fix round 2: a bounded property test over random small plans
-(the review's fuzz probe p11), and seed 380 pinned.
+"""A bounded property test over random small plans, and seed 380 pinned.
 
 Seed 380: a row took the higher rows' leftover T1 BPCs, then invented
 nothing and released them to the shared pool a second time, so a lower row
@@ -13,19 +12,15 @@ reason. Fake ids and pilots throughout.
 from __future__ import annotations
 
 import logging
-import os
 import random
-import sys
 from collections import Counter
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(__file__))
-
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402
-import test_task_a_character_blueprints as C  # noqa: E402
-import test_task_a_release_replan as T  # noqa: E402
+import test_daily_planner_character_blueprints as C  # noqa: E402
+import test_daily_planner_release_replan as T  # noqa: E402
 
 PILOTS = (1, 2, 3)
 _MFG = {"manufacture", "sub_manufacture"}

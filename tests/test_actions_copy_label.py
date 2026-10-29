@@ -1,4 +1,4 @@
-"""Task 14 fix round 1, M6: a copy row reads 'N copies × M runs'."""
+"""A copy row reads 'N copies × M runs'."""
 from __future__ import annotations
 
 from streamlit_ui.components.daily_planner.tab_actions import action_quantity_label

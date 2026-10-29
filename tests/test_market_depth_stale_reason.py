@@ -1,17 +1,13 @@
-"""G1 item 1: market_depth_cache.stale_reason is a model column and a schema
+"""market_depth_cache.stale_reason is a model column and a schema
 migration (no longer an ALTER inside the collector), and a stale row carries
 its reason wherever market depth is read: the daily planner's decision reason
 and plan-level unavailable inputs, and the Analytics tab. Fake values."""
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
-import sys
 from datetime import datetime
 from types import SimpleNamespace
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.service import (  # noqa: E402
     _market_depth_stale_inputs,

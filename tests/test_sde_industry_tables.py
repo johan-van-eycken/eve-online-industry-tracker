@@ -18,12 +18,11 @@ import json
 import logging
 import os
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 import yaml
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 import sde_industry_fakes as fakes
 from eve_online_industry_tracker.infrastructure.sde import industry
@@ -206,11 +205,6 @@ def test_the_producer_and_planner_raise_when_the_tables_are_missing():
 
 # --- startup ---------------------------------------------------------------------------
 
-def _state(engine):
-    return SimpleNamespace(db_sde=SimpleNamespace(Session=sessionmaker(bind=engine)), init_warnings=[],
-                           sde_warnings=[], init_state="Ready", init_error=None)
-
-
 def test_startup_on_an_old_sde_logs_an_error_and_a_health_warning(sde_without_industry_tables, caplog):
     from eve_online_industry_tracker.application.admin.service import AdminService
     from flask_app.bootstrap import check_sde_industry_data
@@ -241,7 +235,7 @@ def test_startup_on_a_current_sde_loads_the_tables(imported_fake_sde):
 
 
 def test_health_drops_the_warning_once_the_sde_is_reimported_live(tmp_path):
-    """M2: /health re-checks the SDE while it has a warning; after a re-import
+    """/health re-checks the SDE while it has a warning; after a re-import
     into the running app's SDE the industry data loads and the warning goes."""
     from eve_online_industry_tracker.application.admin.service import AdminService
     from flask_app.bootstrap import check_sde_industry_data
@@ -277,7 +271,7 @@ def test_the_hint_names_download_and_a_restart():
 
 
 def test_an_empty_industry_table_is_not_loaded(imported_fake_sde):
-    """M3: a table that exists but has no rows (an import in progress or one
+    """A table that exists but has no rows (an import in progress or one
     that failed) counts as missing; the load is not tried."""
     with imported_fake_sde.begin() as conn:
         conn.execute(text("DELETE FROM industryAssemblyLines"))
@@ -288,7 +282,7 @@ def test_an_empty_industry_table_is_not_loaded(imported_fake_sde):
 
 
 def test_a_request_that_needs_the_tables_gets_a_503_and_no_traceback(caplog):
-    """M1: SdeIndustryDataMissing is a 503 with code sde_reimport_required and
+    """SdeIndustryDataMissing is a 503 with code sde_reimport_required and
     the hint, logged without a traceback per request."""
     from flask_app.app import create_app
 
@@ -311,12 +305,11 @@ def test_a_request_that_needs_the_tables_gets_a_503_and_no_traceback(caplog):
 
 # --- the local SDE ---------------------------------------------------------------------
 
-_LOCAL_SDE = os.path.join(_ROOT, "database", "eve_sde.db")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde, _state
 
 
 def test_the_local_sde_tables_have_ccps_row_counts():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     with sqlite3.connect(f"file:{_LOCAL_SDE}?mode=ro", uri=True) as conn:
         present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         missing = [t for t in industry.INDUSTRY_TABLES if t not in present]

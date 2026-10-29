@@ -1,14 +1,10 @@
 """Wallet journal refresh: every ESI page is stored, known entries are skipped."""
 from __future__ import annotations
 
-import os
-import sys
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.characters.character import Character  # noqa: E402
 from eve_online_industry_tracker.application.corporations.corporation import Corporation  # noqa: E402

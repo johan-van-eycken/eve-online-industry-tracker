@@ -1,13 +1,9 @@
 """Tests for ProfitabilityScorer (Phase 3)."""
 from __future__ import annotations
 
-import os
-import sys
 from unittest.mock import MagicMock
 
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.models import PipelineState

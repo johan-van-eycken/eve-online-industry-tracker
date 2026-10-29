@@ -1,4 +1,4 @@
-"""Task 15 fix round 4: order-independent merged install fees, the merged
+"""Order-independent merged install fees, the merged
 decision keeps its upper-bound flag, and T1 BPCs a row cannot invent from
 today go to a lower row of the same source. Fake rows and pilots only."""
 from __future__ import annotations
@@ -151,7 +151,7 @@ def test_a_row_that_invents_keeps_its_bpcs():
     ]
 
 
-# --- Task 15 fix round 5: the release note says what happened to each BPC ----------
+# --- The release note says what happened to each BPC -------------------------------
 
 def _assign_rows(*decisions, lab_slots=1):
     return CharacterAssigner().assign(

@@ -1,4 +1,4 @@
-"""Task A item 1: blueprints in a pilot's own hangar.
+"""Blueprints in a pilot's own hangar.
 
 The producer prices rows from character blueprints too (owned_blueprints_
 scope, default "all_characters"). The planner now reads them from the same
@@ -9,16 +9,12 @@ is not planned with the reason "owner <name> has no free slot". Fake ids.
 """
 from __future__ import annotations
 
-import os
-import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(__file__))
-
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402
-import test_task_a_release_replan as T  # noqa: E402
+import test_daily_planner_release_replan as T  # noqa: E402
 
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner  # noqa: E402

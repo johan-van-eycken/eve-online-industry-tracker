@@ -1,4 +1,4 @@
-"""F1 items 3-4: a non-numeric EIV quantity, a non-numeric system cost index
+"""A non-numeric EIV quantity, a non-numeric system cost index
 and a system without the activity's cost index make the job fee unknown,
 with the reason (the job_fee_unknown_reasons path), never 0. The industry
 profile payloads carry cost_index_unknown_reason. Fake values throughout."""
@@ -11,6 +11,7 @@ import pytest
 
 from eve_online_industry_tracker.application.industry.job_cost import JobSurchargeRates, job_install_cost
 from eve_online_industry_tracker.application.industry.service import IndustryService
+from industry_service_fakes import _profile_service
 
 _RATES = JobSurchargeRates(facility_tax=0.01, scc=0.04, research_scc=0.02)
 SYSTEM = 30000001
@@ -20,7 +21,7 @@ def _profile(*entries, **extra):
     return {"system_id": SYSTEM, "system_cost_indices": list(entries), **extra}
 
 
-# --- item 3: the EIV quantity -----------------------------------------------------------------
+# --- The EIV quantity -------------------------------------------------------------------------
 
 def test_a_non_numeric_eiv_quantity_makes_the_eiv_unknown_with_the_reason(caplog):
     entries = [{"type_id": 34, "quantity": "many"}, {"type_id": 35, "quantity": 10}]
@@ -56,7 +57,7 @@ def test_the_default_eiv_reason_is_unchanged():
     assert fee["fee_unknown_reason"] == "no priced EIV for the manufacturing job (a material has no adjusted price)"
 
 
-# --- items 3-4: the system cost index --------------------------------------------------------------
+# --- The system cost index -------------------------------------------------------------------------
 
 def test_a_non_numeric_cost_index_is_unknown_with_the_reason(caplog):
     profile = _profile({"activity": "manufacturing", "cost_index": "n/a"})
@@ -112,7 +113,7 @@ def test_an_unknown_index_makes_the_fee_unknown_with_its_reason():
 
 def _overview_row(monkeypatch, profile):
     import industry_service_fakes as h
-    import test_producer_review_fixes as prf
+    import test_industry_unknown_fees_and_inventors as prf
 
     rows = h._rows_with(probability_pct=30.0, bpc_runs=10, t2_limit=10)
     prices = {**h._INVENTION_FAKE_PRICES, 5002: 2000.0}
@@ -122,7 +123,7 @@ def _overview_row(monkeypatch, profile):
 
 
 def test_a_non_numeric_manufacturing_index_makes_the_overview_fee_unknown(monkeypatch):
-    import test_producer_review_fixes as prf
+    import test_industry_unknown_fees_and_inventors as prf
 
     IndustryService._reset_once_warnings()
     profile = {**prf.PROFILE, "system_cost_indices": [
@@ -138,7 +139,7 @@ def test_a_non_numeric_manufacturing_index_makes_the_overview_fee_unknown(monkey
 
 
 def test_a_missing_index_reads_unknown_in_the_activity_cost_indices(monkeypatch):
-    import test_producer_review_fixes as prf
+    import test_industry_unknown_fees_and_inventors as prf
 
     IndustryService._reset_once_warnings()
     row = _overview_row(monkeypatch, prf._F_PROFILE)          # manufacturing only
@@ -147,7 +148,7 @@ def test_a_missing_index_reads_unknown_in_the_activity_cost_indices(monkeypatch)
     assert indices["invention"] is None and indices["copying"] is None             # unknown, not 0.00%
 
 
-# --- item 4: the profile payloads ---------------------------------------------------------------------
+# --- The profile payloads -----------------------------------------------------------------------------
 
 def _esi(systems):
     return SimpleNamespace(get_industry_systems=lambda: systems)
@@ -155,38 +156,22 @@ def _esi(systems):
 
 def test_the_system_cost_index_payload_names_a_missing_manufacturing_index():
     systems = [{"solar_system_id": SYSTEM, "cost_indices": [{"activity": "copying", "cost_index": 0.01}]}]
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(esi_service=_esi(systems))
+    svc = IndustryService(state=SimpleNamespace(esi_service=_esi(systems)))
     payload = svc.industry_system_cost_index(system_id=SYSTEM)
     assert "manufacturing cost index" in payload["cost_index_unknown_reason"]
     assert "cost_index_unknown_reason" not in systems[0]          # the ESI cache row is not mutated
 
 
 def test_the_system_cost_index_payload_names_an_unknown_system():
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(esi_service=_esi([]))
+    svc = IndustryService(state=SimpleNamespace(esi_service=_esi([])))
     payload = svc.industry_system_cost_index(system_id=SYSTEM)
     assert payload["cost_indices"] == [] and str(SYSTEM) in payload["cost_index_unknown_reason"]
 
 
 def test_the_system_cost_index_payload_has_no_reason_when_the_index_is_there():
     systems = [{"solar_system_id": SYSTEM, "cost_indices": [{"activity": "manufacturing", "cost_index": 0.05}]}]
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(esi_service=_esi(systems))
+    svc = IndustryService(state=SimpleNamespace(esi_service=_esi(systems)))
     assert svc.industry_system_cost_index(system_id=SYSTEM)["cost_index_unknown_reason"] is None
-
-
-def _profile_service(app_session, **profile):
-    from eve_online_industry_tracker.infrastructure.models import IndustryProfilesModel
-
-    row = IndustryProfilesModel(character_id=90000001, profile_name="Fake profile", is_default=True, **profile)
-    app_session.add(row)
-    app_session.commit()
-    sessions = SimpleNamespace(app_session=lambda: app_session, sde_session=lambda: None)
-    svc = IndustryService(state=SimpleNamespace(esi_service=None, admin_settings=None, db_sde=None),
-                          sessions=sessions)
-    svc.solar_systems = lambda: []
-    return svc, row.id
 
 
 def test_the_profile_context_carries_the_cost_index_unknown_reason(app_session):

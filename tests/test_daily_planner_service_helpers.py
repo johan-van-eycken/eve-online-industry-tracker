@@ -12,6 +12,7 @@ from eve_online_industry_tracker.application.daily_planner.service import (
     index_blueprint_assets,
 )
 from eve_online_industry_tracker.application.industry.type_metadata import TypeMetadataResolver
+from fakes import _RecordingLoader
 
 
 class _BlueprintsAre:
@@ -26,19 +27,6 @@ class _BlueprintsAre:
         loader, so there is nothing to warm. Real batching behavior is proved
         separately below against an actual TypeMetadataResolver."""
         return None
-
-
-class _RecordingLoader:
-    """Mirrors tests/test_type_metadata.py's _FakeLoader: records every batch of
-    type_ids it was asked to load, so callers can assert it was invoked once."""
-
-    def __init__(self, data):
-        self._data = data
-        self.calls: list[list[int]] = []
-
-    def __call__(self, session, language, type_ids):
-        self.calls.append(sorted(type_ids))
-        return {tid: self._data[tid] for tid in type_ids if tid in self._data}
 
 
 def test_bpos_and_bpcs_are_indexed_separately():
@@ -62,7 +50,7 @@ def test_non_blueprint_assets_are_excluded():
 
 
 def test_index_blueprint_assets_batches_the_sde_lookup_into_one_call():
-    """Regression for a fix-round-1 finding: is_blueprint() inside the per-asset loop
+    """Regression: is_blueprint() inside the per-asset loop
     self-heals a resolver cache miss with a single-id prefetch, so calling it without a
     prior batched prefetch would open one SDE session per distinct asset type_id (hundreds
     of sessions for the live corp_assets table's hundreds of distinct types). index_blueprint_assets

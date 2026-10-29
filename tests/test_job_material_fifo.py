@@ -15,6 +15,8 @@ from eve_online_industry_tracker.infrastructure.models import (
 import pytest
 from sqlalchemy.orm import sessionmaker
 
+from fakes import _Db, _Esi
+
 TRITANIUM, BLUEPRINT, PRODUCT = 34, 5002, 102
 
 
@@ -25,23 +27,6 @@ def sde_session(sde_engine):
         yield session
     finally:
         session.close()
-
-
-class _Db:
-    def __init__(self, session):
-        self.session = session
-
-
-class _Esi:
-    def __init__(self, jobs):
-        self._jobs = jobs
-
-    def esi_get(self, endpoint, params=None, paginate=False):
-        if endpoint.endswith("/industry/jobs"):
-            return list(self._jobs)
-        if endpoint.endswith("/markets/prices"):
-            return []
-        raise AssertionError(endpoint)
 
 
 def _buy(tx_id, date, quantity, unit_price):

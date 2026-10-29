@@ -15,7 +15,10 @@ local SDE (database/eve_sde.db) when it is present.
 from __future__ import annotations
 
 from functools import cache
+from types import SimpleNamespace
 from typing import Any, Callable
+
+from sqlalchemy.orm import sessionmaker
 
 TARGET_FILTERS: dict[int, dict[str, Any]] = {
     1: {"categoryIDs": [18, 87], "name": "Drones/Fighters"},
@@ -290,13 +293,25 @@ def fake_industry_activities():
 import os as _os
 
 LOCAL_SDE = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "database", "eve_sde.db"))
+LOCAL_SDE_MISSING = "local SDE database/eve_sde.db not present"
+OVERVIEW_FIXTURE = _os.path.join(_os.path.dirname(__file__), "fixtures", "overview_rows_real.json")
+OVERVIEW_FIXTURE_MISSING = ("tests/fixtures/overview_rows_real.json not captured yet: run the app with "
+                            "EVE_ENABLE_DEBUG_FIXTURE=1 and GET /planner/debug/overview-fixture")
+
+
+def skip_without_local_sde() -> None:
+    """For a fixture or helper that opens the local SDE; a test uses @pytest.mark.needs_local_sde."""
+    import pytest
+
+    if not _os.path.exists(LOCAL_SDE):
+        pytest.skip(LOCAL_SDE_MISSING)
 
 
 @cache
 def _local_industry_data() -> Any:
     """IndustryData from the local SDE, or the reason it cannot be read."""
     if not _os.path.exists(LOCAL_SDE):
-        return "local SDE database/eve_sde.db not present"
+        return LOCAL_SDE_MISSING
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
@@ -326,7 +341,7 @@ def local_industry_data_or_skip():
 def _local_sde_read(load: Callable[[Any], Any], tables: tuple[str, ...]) -> Any:
     """load(session) on the local SDE, or the reason it cannot be read."""
     if not _os.path.exists(LOCAL_SDE):
-        return "local SDE database/eve_sde.db not present"
+        return LOCAL_SDE_MISSING
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
@@ -374,3 +389,14 @@ def local_industry_activities_or_skip():
     if isinstance(data, str):
         pytest.skip(data)
     return data
+
+
+def _state(engine):
+    return SimpleNamespace(db_sde=SimpleNamespace(Session=sessionmaker(bind=engine)), init_warnings=[],
+                           sde_warnings=[], init_state="Ready", init_error=None)
+
+
+def _producer():
+    from eve_online_industry_tracker.application.industry.service import IndustryService
+
+    return IndustryService

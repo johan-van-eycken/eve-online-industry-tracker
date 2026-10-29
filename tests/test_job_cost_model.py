@@ -3,16 +3,11 @@
 Each test rebuilds EVE's relationship from fake values: job value x index x
 (1 - structure reduction) + job value x (facility tax + the activity's SCC),
 with the activity's own job value. The relationship was fitted on real ESI
-jobs (Task 8b); the numbers here are invented.
+jobs; the numbers here are invented.
 """
 from __future__ import annotations
 
-import os
-import sys
-
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.industry.job_cost import (  # noqa: E402
     JobSurchargeRates,
@@ -85,7 +80,7 @@ def test_research_fee_is_rank_independent_and_linear_in_levels() -> None:
     assert research_level_multiplier(5, 5) == 0.0
 
 
-# --- fix round 1: an unknown input makes the fee unknown, with its reason ---
+# --- An unknown input makes the fee unknown, with its reason ----------------
 
 from eve_online_industry_tracker.application.industry.job_cost import profile_facility_tax  # noqa: E402
 
@@ -148,7 +143,7 @@ def test_a_priced_fee_has_no_unknown_reason() -> None:
     assert result["fee_unknown_reason"] is None
 
 
-# --- fix round 1: the profile page shows the producer's two totals ---
+# --- The profile page shows the producer's two totals ----------------
 
 from eve_online_industry_tracker.application.industry.job_cost import job_fee_rates_summary  # noqa: E402
 

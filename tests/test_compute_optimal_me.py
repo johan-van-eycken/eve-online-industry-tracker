@@ -1,11 +1,6 @@
 """Tests for optimal_me_for_quantities() in blueprints.py. (TE has no optimum: it is
-always researched to the max TE setting, Task 8c fix round 1.)"""
+always researched to the max TE setting.)"""
 from __future__ import annotations
-
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.infrastructure.sde.blueprints import (
     optimal_me_for_quantities,

@@ -1,4 +1,4 @@
-"""Round H3, the Streamlit pages and the Flask routes: a failed or partial
+"""The Streamlit pages and the Flask routes: a failed or partial
 read is named (a reason, a warning, an error or "unknown"), never a silent
 0, default or overwrite. Fake values throughout."""
 from __future__ import annotations
@@ -7,6 +7,7 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+from fakes import industry_client
 
 
 @pytest.fixture
@@ -354,7 +355,7 @@ def test_the_market_orders_grid_shows_unknown_for_price_and_total():
 
 
 # =============================================================================================
-# H1 interface: liquidity_unavailable_reason / price_unavailable_reason in the Industry Builder
+# liquidity_unavailable_reason / price_unavailable_reason in the Industry Builder
 # =============================================================================================
 
 LIQ_REASON = "order book for 10000002 unavailable: fake 503"
@@ -694,16 +695,6 @@ def test_the_table_has_the_cost_columns_only_when_the_payload_has_them():
 # =============================================================================================
 
 
-@pytest.fixture
-def industry_client(monkeypatch):
-    from flask_app.app import create_app
-    import flask_app.routes.industry as routes
-
-    monkeypatch.setattr(routes, "require_ready", lambda s: None)
-    monkeypatch.setattr(routes, "require_sde_ready", lambda s: None)
-    return create_app().test_client()
-
-
 @pytest.mark.parametrize("path", [
     "/industry/blueprint_skill_qualification?blueprint_type_ids=1,x",
     "/industry/reorder_alerts?type_ids=34,,abc",
@@ -866,3 +857,29 @@ def test_a_save_of_another_setting_leaves_the_invalid_values_alone(monkeypatch):
     fake = _AdminFakeSt(click_save=True, choices={"admin_market_fees_note": "changed"})
     puts = _render_admin(monkeypatch, fake)
     assert puts == [{"market_fees": {"note": "changed"}}]
+
+
+# --- the admin settings notice -----------------------------------------------------------------
+#
+# An admin settings notice that starts with "ERROR:" (an
+# unreadable admin_settings.json) renders as st.error, the others as
+# st.warning. Fake values only.
+
+def test_an_error_notice_renders_as_an_error_and_others_as_warnings(monkeypatch):
+    from streamlit_ui.pages import admin_settings as page
+
+    shown = []
+    fake = SimpleNamespace(
+        error=lambda body, *a, **k: shown.append(("error", body)),
+        warning=lambda body, *a, **k: shown.append(("warning", body)),
+    )
+    monkeypatch.setattr(page, "st", fake)
+    monkeypatch.setattr(page, "api_get", lambda path: {"status": "success", "data": {
+        "notices": ["ERROR: admin settings file is unreadable; ...", "industry/x was out of range"],
+        "schema": {}, "values": {}, "invalid": {},
+    }})
+    page._load_settings()
+    assert shown == [
+        ("error", "ERROR: admin settings file is unreadable; ..."),
+        ("warning", "industry/x was out of range"),
+    ]

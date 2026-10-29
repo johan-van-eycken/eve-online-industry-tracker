@@ -31,3 +31,11 @@ include = [
   "config*",
   "eve_online_industry_tracker*",
 ]
+
+[tool.pytest.ini_options]
+# -rs: the summary names every skip, e.g. the git-ignored local SDE or overview fixture is missing.
+addopts = "-rs"
+markers = [
+    "needs_local_sde: skipped when database/eve_sde.db is not present",
+    "needs_overview_fixture: skipped when tests/fixtures/overview_rows_real.json is not present",
+]

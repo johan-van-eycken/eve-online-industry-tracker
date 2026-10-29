@@ -21,24 +21,11 @@ from eve_online_industry_tracker.application.daily_planner.models import ItemDec
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import (
     PipelineAnalyzer,
 )
-from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+from fakes import _AdminKeyError, _NoBlueprints, _bare_service
 
 
 def _violation(*_args, **_kwargs):
     raise PlannerInputError(type_id=12345, field="manufacturing_job.runs", detail="is missing")
-
-
-class _AdminKeyError:
-    def get(self, section, key):
-        raise KeyError(key)
-
-
-class _NoBlueprints:
-    def is_blueprint(self, type_id):
-        return False
-
-    def prefetch(self, type_ids):
-        return None
 
 
 def _decision(row):
@@ -48,19 +35,6 @@ def _decision(row):
         isk_per_hour=1.0, margin_pct=1.0, days_of_supply_current=1.0,
         effective_velocity=1.0, meta_group_id=1, pipeline_stage="manufacturing",
         overview_row=row,
-    )
-
-
-def _bare_service():
-    return DailyPlannerService(
-        industry_service=SimpleNamespace(get_cached_overview_rows=lambda: []),
-        corporations_service=SimpleNamespace(list_corporations=lambda: []),
-        characters_service=SimpleNamespace(list_characters=lambda: []),
-        sales_history_service=SimpleNamespace(),
-        market_pricing_service=SimpleNamespace(),
-        repo=SimpleNamespace(),
-        admin_settings=SimpleNamespace(),
-        session_provider=SimpleNamespace(),
     )
 
 
@@ -119,7 +93,7 @@ def test_phase_5_sub_manufacture_lets_a_contract_violation_through():
                                  blueprint_material_efficiency=10, blueprint_time_efficiency=20)
     planner._compute_optimal_me = lambda bp_data, runs=1: 10
     phase1 = {
-        # The parent is built from an owned BPO (Task 14 I3).
+        # The parent is built from an owned BPO.
         "bpo_assets_by_type_id": {888: [bpo], 999: [parent_bpo]},
         "blueprint_data": {888: {"manufacturing": {
             "products": [{"type_id": 54321, "quantity": 10}],

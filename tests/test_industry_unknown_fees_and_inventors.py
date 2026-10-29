@@ -1,8 +1,6 @@
-"""Task 15: producer fixes from the round-5 whole-branch review.
-
-Probes F (unknown job fees), G (the best inventor must be able to run the
-invention) and H (a once-only WARNING first met while warnings are quiet),
-the aggregate-only rig profile (M1), the deduplicated helpers (M2, M3, M5)
+"""The producer side of unknown job fees, the best inventor (who must be
+able to run the invention), a once-only WARNING first met while warnings
+are quiet, the aggregate-only rig profile, the deduplicated helpers
 and the composed T2 cases A, D and E pinned exactly. Fake characters, fake
 prices and fake slot data throughout; the skill and blueprint ids are the
 harness's public SDE ids.
@@ -29,6 +27,7 @@ from eve_online_industry_tracker.application.industry.invention_model import (
 )
 from eve_online_industry_tracker.application.industry.service import IndustryService
 from eve_online_industry_tracker.application.industry.shopping_list import aggregate_shopping_list
+from fakes import _fresh_once_warnings  # noqa: F401  (autouse fixture)
 
 PLUS_RUN = DecryptorOption(type_id=34203, type_name="PlusRun", probability_multiplier=0.6,
                            me_modifier=-2, te_modifier=2, max_run_modifier=9)
@@ -50,13 +49,6 @@ PROFILE = {
 }
 LV_STRONG = {11433: 5, 11454: 5, 21790: 4}
 LV_WEAK = {11433: 1, 11454: 1, 21790: 1}
-
-
-@pytest.fixture(autouse=True)
-def _fresh_once_warnings():
-    IndustryService._reset_once_warnings()
-    yield
-    IndustryService._reset_once_warnings()
 
 
 def _bpc(runs: int, me: int = 5, te: int = 10) -> SimpleNamespace:
@@ -106,7 +98,7 @@ def _lanes():
             {1: CharacterSlotCapacity(3, {"Science": 5}, None), 2: CharacterSlotCapacity(5, {"Science": 1}, None)})
 
 
-# --- I1: unknown job fees (probe F) -------------------------------------------------
+# --- Unknown job fees ---------------------------------------------------------------
 
 _F_PROFILE = {**PROFILE, "system_cost_indices": [{"activity": "manufacturing", "cost_index": 0.05}]}
 _F_INVENTION_REASON = "invention (the industry profile has no invention cost index)"
@@ -181,12 +173,12 @@ def test_a_fully_priced_row_has_no_fee_flag(monkeypatch):
     assert why is None and total == pytest.approx(mj["total_cost"])
 
 
-# A sub-build with unknown fees is bought, not built (fix round 1, minor 1):
+# A sub-build with unknown fees is bought, not built:
 # test_producer_review_fixes_round1.test_a_sub_build_with_unknown_fees_is_bought_with_the_reason.
 
 
 def test_the_decryptor_comparison_names_the_excluded_fees(monkeypatch):
-    # Probe A: no profile, so every fee is unknown in every candidate alike.
+    # No profile, so every fee is unknown in every candidate alike.
     levels, slots = _lanes()
     service = _service(monkeypatch, options=[PLUS_RUN], levels=levels, slots=slots)
     choice = _t2(_overview(service))["manufacturing_job"]["invention_decryptor"]
@@ -220,7 +212,7 @@ def test_fee_basis_is_exact_when_every_fee_is_known():
     assert IndustryService._decryptor_fee_basis([{"manufacturing_job": {}}]) == (True, None)
 
 
-# --- I3: the best inventor must be able to run the invention (probe G) --------------
+# --- The best inventor must be able to run the invention ----------------------------
 
 def test_g_a_pilot_without_the_encryption_skill_is_never_the_inventor(monkeypatch):
     levels = {1: {11433: 5, 11454: 5}, 2: {11433: 3, 11454: 3, 21790: 3}}
@@ -282,7 +274,7 @@ def test_g_planner_case_a_sizes_at_the_qualifying_pilots_chance(monkeypatch):
     assert action.whole_attempts == math.ceil(math.ceil(batch_runs / 10) / p)
 
 
-# --- I2: once-only WARNINGs survive quiet_warnings (probe H) ------------------------
+# --- Once-only WARNINGs survive quiet_warnings --------------------------------------
 
 def test_h_a_rig_security_warning_first_met_while_quiet_is_still_logged(monkeypatch, caplog):
     rows = h._rows_with(probability_pct=30.0, bpc_runs=10, t2_limit=10)
@@ -329,7 +321,7 @@ def test_once_only_warnings_are_scoped_per_refresh(monkeypatch, caplog):
     assert [r.getMessage() for r in caplog.records] == ["Rig bonus security multiplier: fake reason"]
 
 
-# --- M1: an aggregate-only rig profile applies no rig bonus -------------------------
+# --- An aggregate-only rig profile applies no rig bonus -----------------------------
 
 _AGGREGATE_ONLY = {**PROFILE, "structure_rigs": [], "structure_rig_material_bonus": 0.05,
                    "structure_rig_time_bonus": 0.2}
@@ -375,7 +367,7 @@ def test_m1_no_reason_without_an_aggregate():
         "rig bonus unknown: profile has no rig ids, only the aggregate structure rig material, time bonus")
 
 
-# --- M2 / M3 / M4 / M5: one copy of each formula ------------------------------------
+# --- One copy of each formula -------------------------------------------------------
 
 def test_m2_one_research_level_table():
     from eve_online_industry_tracker.application.industry.job_cost import RESEARCH_RANK1_LEVEL_SECONDS

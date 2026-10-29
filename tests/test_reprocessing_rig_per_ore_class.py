@@ -154,7 +154,7 @@ def test_a_rig_the_sde_does_not_give_its_class_raises_with_the_hint():
 
 @pytest.mark.parametrize("covered", [frozenset(), frozenset({"asteroid", "ice"})])
 def test_a_tatara_monitor_the_sde_gives_not_every_class_raises_with_the_hint(covered):
-    """H1: the L-Set monitor covers all three classes; dogma that gives it
+    """The L-Set monitor covers all three classes; dogma that gives it
     none, or not all, is missing SDE data, not an unrigged moon ore."""
     data = fakes.fake_ore_data()
     broken = ore.OreData(compressed_by_base={}, base_by_compressed={}, skill_by_type={},
@@ -264,8 +264,7 @@ def test_the_local_sde_ore_groups_match_the_classes():
     import sqlite3
 
     import os
-    if not os.path.exists(fakes.LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    fakes.skip_without_local_sde()
     conn = sqlite3.connect(f"file:{fakes.LOCAL_SDE}?mode=ro", uri=True)
     try:
         rows = conn.execute(
