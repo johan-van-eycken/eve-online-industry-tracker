@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eve-online-industry-tracker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python tools + Flask/Streamlit app to track EVE Online industry data"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
