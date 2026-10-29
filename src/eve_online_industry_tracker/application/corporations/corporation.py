@@ -28,6 +28,8 @@ from eve_online_industry_tracker.application.characters.asset_provenance import 
     load_owner_invention_evidence,
     resolve_industry_job_cost_snapshot,
     backfill_historical_market_costs,
+    add_consumed_input_lots,
+    subtract_consumed_input_lots,
 )
 from eve_online_industry_tracker.application.characters.asset_history import (
     backfill_wallet_buy_acquisitions,
@@ -682,6 +684,10 @@ class Corporation:
                 return
 
             new_entries: List[Dict[str, Any]] = []
+            # transaction_id is unique across corporations, so the check is too.
+            known_ids = {
+                row[0] for row in self._db_app.session.query(CorporationWalletTransactionsModel.transaction_id)
+            }
             for wallet in corp_wallets:
                 if not isinstance(wallet, dict):
                     continue
@@ -701,14 +707,7 @@ class Corporation:
                     if not isinstance(entry, dict):
                         continue
                     tx_id = entry.get("transaction_id")
-                    if tx_id is None:
-                        continue
-                    exists = (
-                        self._db_app.session.query(CorporationWalletTransactionsModel)
-                        .filter_by(transaction_id=tx_id)
-                        .first()
-                    )
-                    if exists:
+                    if tx_id is None or tx_id in known_ids:
                         continue
                     entry["division"] = division
                     new_entries.append(entry)
@@ -976,7 +975,7 @@ class Corporation:
                     continue
                 observed_at = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
                 historical_job_events.append((
-                    str(observed_at or ""),
+                    str(getattr(job, "start_date", None) or observed_at or ""),
                     job_id,
                     "existing",
                     job,
@@ -986,16 +985,19 @@ class Corporation:
                     continue
                 observed_at = job.get("completed_date") or job.get("end_date")
                 historical_job_events.append((
-                    str(observed_at or ""),
+                    str(job.get("start_date") or observed_at or ""),
                     int(job.get("job_id") or 0),
                     "fetched",
                     job,
                 ))
 
             rows: List[Dict[str, Any]] = []
+            # Jobs in start order: each takes its inputs FIFO from what earlier jobs left.
+            consumed_inputs: dict[tuple[Any, Any], int] = {}
             for _, _, entry_kind, payload in sorted(historical_job_events, key=lambda entry: (entry[0], entry[1])):
                 if entry_kind == "existing":
                     existing_job = payload
+                    add_consumed_input_lots(consumed_inputs, getattr(existing_job, "historical_input_costs", None))
                     status = str(getattr(existing_job, "status", "") or "").lower()
                     completed_at = getattr(existing_job, "completed_date", None) or getattr(existing_job, "end_date", None)
                     output_quantity = int(getattr(existing_job, "output_quantity", 0) or 0)
@@ -1035,16 +1037,16 @@ class Corporation:
                     blueprint_type_id=(blueprint_type_id if blueprint_type_id > 0 else None),
                     as_of=completed_at,
                 )
-                historical_input_costs = build_historical_input_cost_lookup(
+                historical_input_costs = subtract_consumed_input_lots(build_historical_input_cost_lookup(
                     app_session=self._db_app.session,
                     owner_kind="corporation",
                     owner_id=int(self.corporation_id),
-                    as_of=completed_at,
+                    as_of=j.get("start_date") or completed_at,
                     type_ids=industry_job_material_type_ids(
                         sde_session=self._db_sde.session,
                         blueprint_type_id=blueprint_type_id,
                     ),
-                )
+                ), consumed_inputs)
                 snapshot = resolve_industry_job_cost_snapshot(
                     job=type("IndustryJobPayload", (), j)(),
                     sde_session=self._db_sde.session,
@@ -1054,6 +1056,7 @@ class Corporation:
                     owned_input_unit_cost_by_type_id=historical_input_costs,
                     invention_refresh=invention_refresh,
                 )
+                add_consumed_input_lots(consumed_inputs, snapshot.get("historical_input_costs"))
                 rows.append(
                     {
                         "corporation_id": int(self.corporation_id),
@@ -1085,6 +1088,7 @@ class Corporation:
                         "historical_material_cost_source": snapshot.get("historical_material_cost_source"),
                         "historical_material_coverage_fraction": snapshot.get("historical_material_coverage_fraction"),
                         "historical_input_costs": snapshot.get("historical_input_costs"),
+                        "materials_cost_lower_bound_reason": snapshot.get("materials_cost_lower_bound_reason"),
                         "copy_cost": snapshot.get("copy_cost"),
                         "invention_cost": snapshot.get("invention_cost"),
                         "invention_cost_unknown_reason": snapshot.get("invention_cost_unknown_reason"),

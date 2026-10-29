@@ -312,7 +312,7 @@ def test_build_historical_input_cost_lookup_returns_historical_lots_before_job()
                 character_id=1,
                 item_id=2001,
                 observed_at="2026-01-01T00:00:00Z",
-                snapshot_source="asset_refresh",
+                snapshot_source="historical_backfill",
                 type_id=34,
                 quantity=100,
                 acquisition_source="buy_tx",
@@ -323,7 +323,7 @@ def test_build_historical_input_cost_lookup_returns_historical_lots_before_job()
                 character_id=1,
                 item_id=2002,
                 observed_at="2026-01-03T00:00:00Z",
-                snapshot_source="asset_refresh",
+                snapshot_source="historical_backfill",
                 type_id=34,
                 quantity=50,
                 acquisition_source="buy_tx",
@@ -334,7 +334,7 @@ def test_build_historical_input_cost_lookup_returns_historical_lots_before_job()
                 character_id=1,
                 item_id=2003,
                 observed_at="2026-01-05T00:00:00Z",
-                snapshot_source="asset_refresh",
+                snapshot_source="historical_backfill",
                 type_id=34,
                 quantity=50,
                 acquisition_source="buy_tx",
@@ -715,3 +715,22 @@ def test_refresh_industry_jobs_skips_active_job_output_backfill(monkeypatch) -> 
         .all()
     )
     assert history_rows == []
+
+
+def test_an_unpriced_material_makes_the_materials_cost_a_lower_bound() -> None:
+    _, sde_session = _make_sessions()
+    sde_session.add(Blueprints(blueprintTypeID=5004, maxProductionLimit=1, activities={"manufacturing": {
+        "materials": [{"typeID": 34, "quantity": 10}, {"typeID": 35, "quantity": 5}],
+        "products": [{"typeID": 104, "quantity": 1}]}}))
+    sde_session.commit()
+    job = type("IndustryJobPayload", (), {
+        "blueprint_type_id": 5004, "product_type_id": 104, "successful_runs": 1, "runs": 1, "cost": 0.0,
+        "raw": {"activity_id": 1}})()
+
+    # Type 35 has no market price and no owned lot: its cost is unknown, not 0.
+    snapshot = resolve_industry_job_cost_snapshot(
+        job=job, sde_session=sde_session, market_price_map={34: 4.0},
+        blueprint_provenance={"is_blueprint_copy": False, "blueprint_material_efficiency": 0})
+
+    assert snapshot["materials_cost"] == 40.0
+    assert "35" in (snapshot["materials_cost_lower_bound_reason"] or "")

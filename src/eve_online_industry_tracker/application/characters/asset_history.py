@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 
 from eve_online_industry_tracker.infrastructure.models import (
     CharacterAssetEventModel,
@@ -455,12 +455,25 @@ def build_historical_input_cost_lookup(
     query = app_session.query(history_model).filter(getattr(history_model, owner_field) == int(owner_id))
     query = query.filter(history_model.type_id.in_(normalized_type_ids))
     query = query.filter(history_model.acquisition_unit_cost.isnot(None))
+    # A refresh snapshot copies a cost already held by an acquisition row; only a
+    # transfer stamp lives on snapshots alone, and then once per item.
+    query = query.filter(or_(
+        history_model.snapshot_source != "asset_refresh",
+        history_model.acquisition_source.like("%transferred%"),
+    ))
     if as_of:
         query = query.filter(history_model.observed_at <= str(as_of))
     rows = query.order_by(history_model.observed_at.asc(), history_model.id.asc()).all()
 
     out: dict[int, dict[str, Any]] = {}
+    seen_snapshot_item_ids: set[int] = set()
     for row in rows:
+        if getattr(row, "snapshot_source", None) == "asset_refresh":
+            item_id = _safe_int(getattr(row, "item_id", None))
+            if item_id in seen_snapshot_item_ids:
+                continue
+            if item_id is not None:
+                seen_snapshot_item_ids.add(item_id)
         type_id = _safe_int(getattr(row, "type_id", None))
         unit_cost = _safe_float(getattr(row, "acquisition_unit_cost", None))
         quantity = _safe_int(getattr(row, "quantity", None))

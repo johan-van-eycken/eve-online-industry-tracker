@@ -162,6 +162,37 @@ def _output_quantity_per_run_for_job(*, sde_session: Any, blueprint_type_id: int
     return quantity if quantity and quantity > 0 else None
 
 
+COMPLETED_JOB_STATUSES = {"delivered", "ready", "completed"}
+
+
+def completed_job_output_lot(
+    job: Any, *, sde_session: Any, market_price_map: dict[int, float],
+) -> Optional[tuple[int, float]]:
+    """(quantity, unit cost) of a finished job's output as a cost lot, or None."""
+    status = str(getattr(job, "status", "") or "").strip().lower()
+    if status and status not in COMPLETED_JOB_STATUSES:
+        return None
+    if not (getattr(job, "completed_date", None) or getattr(job, "end_date", None)):
+        return None
+    product_type_id = _safe_int(getattr(job, "product_type_id", None))
+    blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
+    if not product_type_id or not blueprint_type_id:
+        return None
+    snapshot = resolve_industry_job_cost_snapshot(job=job, sde_session=sde_session, market_price_map=market_price_map)
+    unit_cost = _safe_float(snapshot.get("unit_cost"))
+    if unit_cost is None or unit_cost <= 0:
+        return None
+    quantity = _safe_int(snapshot.get("output_quantity")) or 0
+    if quantity <= 0:
+        per_run = _output_quantity_per_run_for_job(
+            sde_session=sde_session, blueprint_type_id=blueprint_type_id, product_type_id=product_type_id,
+        )
+        if not per_run:
+            return None
+        quantity = int(per_run) * _industry_job_runs(job)
+    return int(quantity), float(unit_cost)
+
+
 def _estimate_industry_job_materials_cost_total(
     *,
     sde_session: Any,
@@ -247,6 +278,7 @@ def _estimate_industry_job_materials_cost_total(
     total_adjusted_quantity = 0
     historical_adjusted_quantity = 0
     input_cost_details: dict[str, Any] = {}
+    unpriced_type_ids: list[int] = []
     for m in materials:
         if not isinstance(m, dict):
             continue
@@ -289,6 +321,7 @@ def _estimate_industry_job_materials_cost_total(
         if unit_price is None:
             average_historical_unit_cost = _safe_float(cost_payload.get("unit_cost"))
             if average_historical_unit_cost is None or average_historical_unit_cost <= 0:
+                unpriced_type_ids.append(int(mat_type_id))
                 continue
             unit_price = float(average_historical_unit_cost)
         material_cost_total += float(remaining_quantity) * float(unit_price)
@@ -312,7 +345,76 @@ def _estimate_industry_job_materials_cost_total(
         "historical_material_coverage_fraction": float(coverage_fraction),
         "historical_input_costs": input_cost_details,
         "material_cost_source": material_cost_source,
+        "materials_cost_lower_bound_reason": (
+            f"materials cost is a lower bound: no price for material type(s) {', '.join(map(str, unpriced_type_ids))}"
+            if unpriced_type_ids else None
+        ),
     }
+
+
+def _input_lot_key(lot: dict[str, Any]) -> tuple[Any, Any]:
+    # The acquisition, not the history row: backfill rows are rebuilt with new ids each refresh.
+    return (lot.get("reference_type"), lot.get("reference_id") or lot.get("history_id"))
+
+
+def consumed_input_lots(historical_input_costs: Any) -> dict[tuple[Any, Any], int]:
+    """Quantity a job took per acquisition lot, from its historical_input_costs."""
+    out: dict[tuple[Any, Any], int] = {}
+    if not isinstance(historical_input_costs, dict):
+        return out
+    for detail in historical_input_costs.values():
+        if not isinstance(detail, dict):
+            continue
+        for lot in detail.get("lots") or []:
+            if isinstance(lot, dict) and (quantity := _safe_int(lot.get("quantity"))):
+                key = _input_lot_key(lot)
+                out[key] = out.get(key, 0) + int(quantity)
+    return out
+
+
+def add_consumed_input_lots(total: dict[tuple[Any, Any], int], historical_input_costs: Any) -> None:
+    for key, quantity in consumed_input_lots(historical_input_costs).items():
+        total[key] = total.get(key, 0) + quantity
+
+
+def subtract_consumed_input_lots(
+    lookup: dict[int, dict[str, Any]], consumed: dict[tuple[Any, Any], int],
+) -> dict[int, dict[str, Any]]:
+    """The lookup minus what earlier jobs already took, oldest lots first (FIFO)."""
+    if not consumed:
+        return lookup
+    remaining = dict(consumed)
+    out: dict[int, dict[str, Any]] = {}
+    for type_id, payload in lookup.items():
+        lots = []
+        for lot in payload.get("lots") or []:
+            key = _input_lot_key(lot)
+            taken = min(remaining.get(key, 0), _safe_int(lot.get("quantity")) or 0)
+            if taken:
+                remaining[key] -= taken
+            if (_safe_int(lot.get("quantity")) or 0) - taken > 0:
+                lots.append({**lot, "quantity": int(lot["quantity"]) - taken})
+        out[type_id] = {**payload, "lots": lots}
+    return out
+
+
+def earlier_jobs_consumed_input_lots(
+    app_session: Any, *, job_model: Any, owner_field: str, owner_id: int, start_date: Any, job_id: int,
+) -> dict[tuple[Any, Any], int]:
+    """What the owner's stored jobs that started before (start_date, job_id) took."""
+    total: dict[tuple[Any, Any], int] = {}
+    if not start_date:
+        return total
+    rows = (
+        app_session.query(job_model)
+        .filter(getattr(job_model, owner_field) == int(owner_id))
+        .filter(job_model.start_date <= str(start_date))
+        .all()
+    )
+    for row in rows:
+        if (str(row.start_date), int(row.job_id)) < (str(start_date), int(job_id)):
+            add_consumed_input_lots(total, row.historical_input_costs)
+    return total
 
 
 def industry_job_material_type_ids(
@@ -571,12 +673,16 @@ def resnapshot_jobs_without_decryptor_choice(
                 continue
             owner_id = int(getattr(row, owner_field))
             completed_at = row.completed_date or row.end_date
-            owned_costs = build_historical_input_cost_lookup(
-                app_session=app_session, owner_kind=owner_kind, owner_id=owner_id, as_of=completed_at,
+            owned_costs = subtract_consumed_input_lots(build_historical_input_cost_lookup(
+                app_session=app_session, owner_kind=owner_kind, owner_id=owner_id,
+                as_of=row.start_date or completed_at,
                 type_ids=industry_job_material_type_ids(
                     sde_session=sde_session, blueprint_type_id=int(row.blueprint_type_id or 0),
                 ),
-            )
+            ), earlier_jobs_consumed_input_lots(
+                app_session, job_model=model, owner_field=owner_field, owner_id=owner_id,
+                start_date=row.start_date, job_id=int(row.job_id),
+            ))
             snapshot = resolve_industry_job_cost_snapshot(
                 job=type("IndustryJobPayload", (), dict(raw))(),
                 sde_session=sde_session,
@@ -600,8 +706,8 @@ def resnapshot_jobs_without_decryptor_choice(
             row.historical_material_cost_source = snapshot.get("historical_material_cost_source")
             row.historical_material_coverage_fraction = snapshot.get("historical_material_coverage_fraction")
             row.historical_input_costs = snapshot.get("historical_input_costs")
-            # The materials cost is replaced: a backfill's lower bound no longer applies.
-            row.materials_cost_lower_bound_reason = None
+            # The materials cost is replaced: the new estimate's own lower bound, not a backfill's.
+            row.materials_cost_lower_bound_reason = snapshot.get("materials_cost_lower_bound_reason")
             row.invention_cost = snapshot.get("invention_cost")
             row.invention_cost_unknown_reason = snapshot.get("invention_cost_unknown_reason")
             row.total_build_cost = snapshot.get("total_cost")
@@ -1583,6 +1689,7 @@ def resolve_industry_job_cost_snapshot(
                 "historical_material_cost_source": estimated.get("material_cost_source"),
                 "historical_material_coverage_fraction": _safe_float(estimated.get("historical_material_coverage_fraction")),
                 "historical_input_costs": estimated.get("historical_input_costs") or None,
+                "materials_cost_lower_bound_reason": estimated.get("materials_cost_lower_bound_reason"),
                 "copy_cost": copy_cost,
                 "invention_cost": invention_cost,
                 "invention_cost_unknown_reason": invention_cost_unknown_reason,
@@ -1687,78 +1794,15 @@ def build_fifo_remaining_lots_by_type(
     # Add industry-job outputs as FIFO "buy" lots (best-effort).
     # This allows FIFO valuation for items you manufactured, not only bought.
     if industry_jobs is not None and sde_session is not None and market_price_map:
-        completed_statuses = {"delivered", "ready", "completed"}
-        qty_per_run_cache: dict[tuple[int, int], Optional[int]] = {}
-
-        def _output_qty_per_run(blueprint_type_id: int, product_type_id: int) -> Optional[int]:
-            key = (int(blueprint_type_id), int(product_type_id))
-            if key in qty_per_run_cache:
-                return qty_per_run_cache[key]
-            bp = (
-                sde_session.query(Blueprints)
-                .filter_by(blueprintTypeID=int(blueprint_type_id))
-                .first()
-            )
-            if bp is None:
-                qty_per_run_cache[key] = None
-                return None
-            mfg = _get_mfg_activity(getattr(bp, "activities", None))
-            if not mfg:
-                qty_per_run_cache[key] = None
-                return None
-            products = mfg.get("products")
-            if not isinstance(products, list) or not products:
-                qty_per_run_cache[key] = None
-                return None
-            out_q: Optional[int] = None
-            for p in products:
-                if not isinstance(p, dict):
-                    continue
-                if _safe_int(p.get("typeID")) == int(product_type_id):
-                    out_q = _safe_int(p.get("quantity"))
-                    break
-            if out_q is None and products:
-                out_q = _safe_int(products[0].get("quantity")) if isinstance(products[0], dict) else None
-            if not out_q or out_q <= 0:
-                qty_per_run_cache[key] = None
-                return None
-            qty_per_run_cache[key] = int(out_q)
-            return int(out_q)
-
         for job in industry_jobs or []:
-            status = str(getattr(job, "status", "") or "").lower()
-            completed_date = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
-            if status and status not in completed_statuses:
+            lot = completed_job_output_lot(job, sde_session=sde_session, market_price_map=market_price_map)
+            if lot is None:
                 continue
-            if completed_date is None:
-                continue
-
-            product_type_id = _safe_int(getattr(job, "product_type_id", None))
-            blueprint_type_id = _safe_int(getattr(job, "blueprint_type_id", None))
-            if not product_type_id or not blueprint_type_id:
-                continue
-
-            snapshot = resolve_industry_job_cost_snapshot(
-                job=job,
-                sde_session=sde_session,
-                market_price_map=market_price_map,
-            )
-            lot_qty = _safe_int(snapshot.get("output_quantity")) or 0
-            unit_cost = _safe_float(snapshot.get("unit_cost"))
-            if unit_cost is None or unit_cost <= 0:
-                continue
-            if lot_qty <= 0:
-                qpr = _output_qty_per_run(int(blueprint_type_id), int(product_type_id))
-                if qpr is None:
-                    continue
-                lot_qty = int(qpr) * int(_industry_job_runs(job))
-                if lot_qty <= 0:
-                    continue
-
-            date_s = completed_date
+            lot_qty, unit_cost = lot
+            date_s = getattr(job, "completed_date", None) or getattr(job, "end_date", None)
             dt = _parse_date(date_s)
             job_id = _safe_int(getattr(job, "job_id", None))
-            tx_by_type[int(product_type_id)].append(
+            tx_by_type[int(getattr(job, "product_type_id"))].append(
                 {
                     "kind": "buy",
                     "quantity": int(lot_qty),
@@ -2151,7 +2195,7 @@ def build_cost_map_for_assets(
 
     # Pull completed jobs (most recent per product type).
     # ESI job statuses vary; we treat delivered/ready/completed as "completed".
-    completed_statuses = {"delivered", "ready", "completed"}
+    completed_statuses = COMPLETED_JOB_STATUSES
     job_rows = (
         app_session.query(industry_job_model)
         .filter(industry_job_model.product_type_id.in_(type_ids))
