@@ -21,6 +21,7 @@ from eve_online_industry_tracker.infrastructure.models import (  # noqa: E402
 )
 from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.models import ItemDecision  # noqa: E402
+from fakes import _FakeDb
 
 
 def _service(session_provider, admin_settings=None) -> DailyPlannerService:
@@ -79,24 +80,6 @@ def _decision(meta_group_id: int | None = None) -> ItemDecision:
 # Lightweight stubs so we can call ensure_app_schema without a full
 # DatabaseManager (which has engine kwargs incompatible with :memory: in tests)
 # ---------------------------------------------------------------------------
-
-class _FakeDb:
-    """Minimal DatabaseManager stand-in backed by sqlite3 directly."""
-
-    def __init__(self, conn: sqlite3.Connection) -> None:
-        self._conn = conn
-
-    def execute(self, query: str, params=None) -> None:
-        if params:
-            self._conn.execute(query, params)
-        else:
-            self._conn.execute(query)
-        self._conn.commit()
-
-    def query(self, query: str, params=None) -> list:
-        cur = self._conn.execute(query) if not params else self._conn.execute(query, params)
-        return cur.fetchall()
-
 
 _PLANNER_TABLES = [
     "build_plan",

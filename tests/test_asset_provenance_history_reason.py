@@ -29,7 +29,7 @@ from eve_online_industry_tracker.infrastructure.models import (
 )
 from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
 from eve_online_industry_tracker.infrastructure.esi_client import EsiRequestError
-from fakes import _ledger
+from fakes import _FakeDb, _ledger
 
 REGION = 10000002
 TRIT, PYE = 34, 35
@@ -228,18 +228,6 @@ def test_a_programming_error_in_the_backfill_propagates(app_session):
 def test_both_job_tables_have_a_nullable_lower_bound_column():
     for model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
         assert model.__table__.columns["materials_cost_lower_bound_reason"].nullable
-
-
-class _FakeDb:
-    def __init__(self, conn):
-        self._conn = conn
-
-    def execute(self, query, params=None):
-        self._conn.execute(query, params) if params else self._conn.execute(query)
-        self._conn.commit()
-
-    def query(self, query, params=None):
-        return (self._conn.execute(query, params) if params else self._conn.execute(query)).fetchall()
 
 
 def test_the_schema_migration_adds_the_column_to_legacy_job_tables():

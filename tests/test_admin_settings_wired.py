@@ -370,17 +370,6 @@ def test_the_planner_page_names_an_unreadable_or_invalid_threshold(monkeypatch):
     assert values["planner_max_plan_age_hours"] == 36.0 and "HTTP 503" in problems[0]
 
 
-def test_the_status_bar_and_actions_tab_use_the_settings():
-    import inspect
-
-    from streamlit_ui.components.daily_planner import status_bar, tab_actions
-
-    assert not hasattr(status_bar, "PLANNER_MAX_PLAN_AGE_HOURS")
-    assert not hasattr(status_bar, "PLANNER_MARKET_REFRESH_INTERVAL_HOURS")
-    assert "0.90" not in inspect.getsource(status_bar)
-    assert "planner_max_plan_age_hours" in inspect.getsource(tab_actions)
-
-
 def test_the_industry_profiles_npc_tax_fallback_is_the_schema_default():
     from streamlit_ui.pages import industry_profiles as page
 

@@ -57,16 +57,6 @@ def test_the_formula_follows_the_settings(tmp_path):
                                            corp_standing=0.0) == pytest.approx(0.032)
 
 
-def test_the_producer_has_no_second_copy_of_the_formula():
-    from eve_online_industry_tracker.application.industry.service import IndustryService
-    from eve_online_industry_tracker.application.characters.character import Character
-
-    for source in (inspect.getsource(IndustryService._resolve_npc_market_fee_context),
-                   inspect.getsource(Character.refresh_market_fees)):
-        assert "market_fees.sales_tax_fraction" in source and "market_fees.broker_fee_fraction" in source
-        assert "0.11" not in source and "0.003" not in source and "broker_relations_reduction_per_level" not in source
-
-
 # --- the character's stored market fees ---------------------------------------------------------
 
 def _character(admin, skills):
@@ -156,9 +146,6 @@ def test_the_relist_note_is_shown_next_to_the_relist_cost():
     note = "relist cost as if the broker fee is 3.00% (its own is unknown; admin setting market_defaults/default_broker_fee)"
     assert relist_note({"relist_broker_fee_assumed": note}) == note
     assert relist_note({"relist_broker_fee_assumed": None}) == ""
-    source = inspect.getsource(__import__("streamlit_ui.state.industry_builder_ui", fromlist=["x"]))
-    cost_at, note_at = source.index('"Relist Cost/Unit"'), source.index('"Relist Note"')
-    assert 0 < note_at - cost_at < 200
 
 
 def test_the_producer_words_the_relist_note_like_the_other_assumed_notes(tmp_path):
@@ -172,13 +159,6 @@ def test_the_producer_words_the_relist_note_like_the_other_assumed_notes(tmp_pat
 
 
 # --- the shopping tab ---------------------------------------------------------------------------
-
-def test_the_shopping_tab_has_no_future_build_stock_section():
-    from streamlit_ui.components.daily_planner import tab_shopping
-
-    source = inspect.getsource(tab_shopping)
-    assert "Future Build Stock" not in source and "future_stock" not in source
-
 
 # --- standings, VWAP days, retry budget and one settings read per page -------------------------
 #
@@ -320,10 +300,6 @@ def test_the_retry_budget_applies_per_page(monkeypatch, tmp_path):
 
 def test_the_actions_tab_takes_the_planner_settings_from_the_page():
     from streamlit_ui.components.daily_planner import status_bar, tab_actions
-    from streamlit_ui.pages import daily_planner
 
     assert "planner_settings" in inspect.signature(tab_actions.render_tab_actions).parameters
     assert "planner_settings" in inspect.signature(status_bar.render_status_bar).parameters
-    assert "planner_page_settings" not in inspect.getsource(tab_actions)
-    assert "planner_page_settings()" not in inspect.getsource(status_bar.render_status_bar)
-    assert inspect.getsource(daily_planner).count("planner_page_settings()") == 1

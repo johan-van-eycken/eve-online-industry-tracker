@@ -134,3 +134,17 @@ def industry_client(monkeypatch):
     monkeypatch.setattr(routes, "require_ready", lambda s: None)
     monkeypatch.setattr(routes, "require_sde_ready", lambda s: None)
     return create_app().test_client()
+
+
+class _FakeDb:
+    """The DatabaseManager calls schema_migrations makes (execute, query), on a sqlite3 connection."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, query, params=None):
+        self._conn.execute(query, params) if params else self._conn.execute(query)
+        self._conn.commit()
+
+    def query(self, query, params=None):
+        return (self._conn.execute(query, params) if params else self._conn.execute(query)).fetchall()

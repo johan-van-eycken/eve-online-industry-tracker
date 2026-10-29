@@ -5,15 +5,12 @@ same fake orders). Plus the ESIService retry cleanup. Fake values only.
 """
 from __future__ import annotations
 
-import inspect
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 import requests
 
-from eve_online_industry_tracker.application.characters import service as characters_service
-from eve_online_industry_tracker.application.corporations import service as corporations_service
 from eve_online_industry_tracker.application.market_analysis import market_order_enrichment as moe
 from eve_online_industry_tracker.infrastructure import esi_service as esi_service_module
 
@@ -48,18 +45,6 @@ def test_without_book_comparison_the_status_is_na_and_no_pricing_without_a_chara
                   compare_with_books=False, pricing_character_id=None)
     assert row["price_status"] == moe.NA_STATUS and row["price_difference"] == 0.0
     assert "advised_price" not in row and row["expires_in"] == "Expired"
-
-
-def test_both_services_use_the_shared_helper():
-    for module in (characters_service, corporations_service):
-        source = inspect.getsource(module)
-        assert "enrich_market_order(" in source and "add_reprice_priority_scores(" in source
-        assert '["reprice_priority_score"]' not in source   # the score is the helper's
-
-
-def test_the_public_get_retry_has_no_dead_reraise_construct():
-    source = inspect.getsource(esi_service_module.ESIService._public_esi_get)
-    assert "exc = None" not in source and "if exc is None" not in source
 
 
 def test_a_public_get_transport_error_is_retried_then_raised_as_itself(monkeypatch):

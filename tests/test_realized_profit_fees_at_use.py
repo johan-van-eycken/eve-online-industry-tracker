@@ -248,12 +248,17 @@ def test_reading_the_ledger_rebuilds_a_stale_character(tmp_path):
 
 
 def test_the_fee_inputs_column_is_migrated():
-    import inspect
+    import sqlite3
 
-    from eve_online_industry_tracker.infrastructure import schema_migrations
+    from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema
+    from fakes import _FakeDb
 
-    source = inspect.getsource(schema_migrations.ensure_app_schema)
-    assert 'table="character_realized_sales_ledger", column="fee_inputs"' in source
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE character_realized_sales_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, quantity INTEGER)")
+    conn.commit()
+    db = _FakeDb(conn)
+    ensure_app_schema(db)
+    assert "fee_inputs" in {row[1] for row in db.query("PRAGMA table_info(character_realized_sales_ledger)")}
 
 
 def test_concurrent_reads_rebuild_a_stale_character_once(monkeypatch):
