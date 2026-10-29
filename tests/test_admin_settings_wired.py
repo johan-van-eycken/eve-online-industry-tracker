@@ -261,8 +261,7 @@ def test_the_relist_broker_fee_assumption_is_the_setting(tmp_path):
     from eve_online_industry_tracker.application.industry.service import IndustryService
 
     mgr = _manager(tmp_path)
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(admin_settings=mgr)
+    svc = IndustryService(state=SimpleNamespace(admin_settings=mgr))
     def row(broker):
         return {"manufacturing_job": {"market_fee_context": {"broker_fee_applies": True,
                                                              "rates": {"broker_fee_fraction": broker}}}}

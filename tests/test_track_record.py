@@ -12,12 +12,13 @@ def _build_service(*, sessions, corp_ids=None) -> IndustryService:
     if corp_ids is None:
         corp_ids = [1]
     corporations = [{"corporation_id": cid} for cid in corp_ids]
-    service = object.__new__(IndustryService)
-    service._sessions = sessions  # type: ignore[attr-defined]
-    service._state = SimpleNamespace(  # type: ignore[attr-defined]
-        esi_service=None,
-        char_manager=None,
-        corp_manager=_CorpManager(corporations),
+    service = IndustryService(
+        state=SimpleNamespace(
+            esi_service=None,
+            char_manager=None,
+            corp_manager=_CorpManager(corporations),
+        ),
+        sessions=sessions,
     )
     return service
 

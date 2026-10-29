@@ -377,9 +377,7 @@ def _esi_names_failing():
 
 
 def _service(state, sessions):
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = state
-    svc._sessions = sessions
+    svc = IndustryService(state=state, sessions=sessions)
     return svc
 
 

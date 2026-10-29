@@ -156,24 +156,21 @@ def _esi(systems):
 
 def test_the_system_cost_index_payload_names_a_missing_manufacturing_index():
     systems = [{"solar_system_id": SYSTEM, "cost_indices": [{"activity": "copying", "cost_index": 0.01}]}]
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(esi_service=_esi(systems))
+    svc = IndustryService(state=SimpleNamespace(esi_service=_esi(systems)))
     payload = svc.industry_system_cost_index(system_id=SYSTEM)
     assert "manufacturing cost index" in payload["cost_index_unknown_reason"]
     assert "cost_index_unknown_reason" not in systems[0]          # the ESI cache row is not mutated
 
 
 def test_the_system_cost_index_payload_names_an_unknown_system():
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(esi_service=_esi([]))
+    svc = IndustryService(state=SimpleNamespace(esi_service=_esi([])))
     payload = svc.industry_system_cost_index(system_id=SYSTEM)
     assert payload["cost_indices"] == [] and str(SYSTEM) in payload["cost_index_unknown_reason"]
 
 
 def test_the_system_cost_index_payload_has_no_reason_when_the_index_is_there():
     systems = [{"solar_system_id": SYSTEM, "cost_indices": [{"activity": "manufacturing", "cost_index": 0.05}]}]
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(esi_service=_esi(systems))
+    svc = IndustryService(state=SimpleNamespace(esi_service=_esi(systems)))
     assert svc.industry_system_cost_index(system_id=SYSTEM)["cost_index_unknown_reason"] is None
 
 

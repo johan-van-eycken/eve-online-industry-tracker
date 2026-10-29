@@ -125,26 +125,26 @@ def test_the_admin_floor_still_applies_to_the_skilled_chance(monkeypatch) -> Non
 
 
 def test_inventor_skills_come_from_every_loaded_corp_character() -> None:
-    service = object.__new__(IndustryService)
-    service._state = SimpleNamespace(char_manager=SimpleNamespace(get_characters=lambda: [  # type: ignore[attr-defined]
-        {"character_id": 1, "skills": {"skills": [
-            {"skill_id": 11433, "trained_skill_level": 4}, {"skill_id": 21790, "trained_skill_level": 2},
-        ]}},
-        {"character_id": 2, "skills": {}},          # not fetched: unknown, left out
-        {"character_id": 3},                        # not fetched either
-        {"character_id": 4, "industry_enabled": False, "skills": {"skills": [  # excluded from industry
-            {"skill_id": 11433, "trained_skill_level": 5},
-        ]}},
-        {"character_id": 5, "industry_enabled": True, "skills": {"skills": [
-            {"skill_id": 11433, "trained_skill_level": 1},
-        ]}},
-    ]))
+    service = IndustryService(
+        state=SimpleNamespace(char_manager=SimpleNamespace(get_characters=lambda: [
+            {"character_id": 1, "skills": {"skills": [
+                {"skill_id": 11433, "trained_skill_level": 4}, {"skill_id": 21790, "trained_skill_level": 2},
+            ]}},
+            {"character_id": 2, "skills": {}},          # not fetched: unknown, left out
+            {"character_id": 3},                        # not fetched either
+            {"character_id": 4, "industry_enabled": False, "skills": {"skills": [  # excluded from industry
+                {"skill_id": 11433, "trained_skill_level": 5},
+            ]}},
+            {"character_id": 5, "industry_enabled": True, "skills": {"skills": [
+                {"skill_id": 11433, "trained_skill_level": 1},
+            ]}},
+        ])),
+    )
     assert service._get_inventor_skill_levels() == {1: {11433: 4, 21790: 2}, 5: {11433: 1}}
 
 
 def test_no_character_manager_means_no_inventor_skills() -> None:
-    service = object.__new__(IndustryService)
-    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    service = IndustryService(state=SimpleNamespace())
     assert service._get_inventor_skill_levels() == {}
 
 

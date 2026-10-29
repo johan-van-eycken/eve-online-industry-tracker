@@ -1310,8 +1310,7 @@ def test_owned_datacores_are_valued_once_across_a_rows_inventions(monkeypatch) -
 
 
 def test_fractional_source_copy_runs_carry_to_the_next_invention() -> None:
-    service = object.__new__(IndustryService)
-    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    service = IndustryService(state=SimpleNamespace())
     source_row = {"blueprint_type_id": 1001, "copying_job": {"time_seconds": 20},
                   "manufacturing_job": {"materials": [{"type_id": 34, "quantity": 3}]}}
     runs = {1001: 1}
@@ -1348,8 +1347,7 @@ def _source_copy_elapsed_seconds(service, runs: dict, attempts: float, whole_att
 
 
 def _bare_service() -> IndustryService:
-    service = object.__new__(IndustryService)
-    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    service = IndustryService(state=SimpleNamespace())
     return service
 
 

@@ -151,8 +151,7 @@ def test_the_relist_note_is_shown_next_to_the_relist_cost():
 def test_the_producer_words_the_relist_note_like_the_other_assumed_notes(tmp_path):
     from eve_online_industry_tracker.application.industry.service import IndustryService
 
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(admin_settings=AdminSettingsManager(tmp_path / "a.json"))
+    svc = IndustryService(state=SimpleNamespace(admin_settings=AdminSettingsManager(tmp_path / "a.json")))
     _, note = svc._relist_broker_fee_fraction({})
     assert note == ("relist cost as if the broker fee is 3.00% (its own is unknown; admin setting "
                     "market_defaults/default_broker_fee)")

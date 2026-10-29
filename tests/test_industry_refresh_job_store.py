@@ -28,11 +28,12 @@ def service(monkeypatch):
 
     monkeypatch.setattr(overview_jobs.threading, "Thread", _NoThread)
     monkeypatch.setattr(overview_jobs, "register_thread", lambda state, name, thread: None)
-    svc = object.__new__(IndustryService)
-    svc._state = SimpleNamespace(jobs=SimpleNamespace(  # type: ignore[attr-defined]
-        industry_overview_refresh=IndustryOverviewRefreshJobState(),
-        industry_portfolio_candidates=IndustryPortfolioCandidatesJobState(),
-    ))
+    svc = IndustryService(
+        state=SimpleNamespace(jobs=SimpleNamespace(
+            industry_overview_refresh=IndustryOverviewRefreshJobState(),
+            industry_portfolio_candidates=IndustryPortfolioCandidatesJobState(),
+        )),
+    )
     svc.started = started  # type: ignore[attr-defined]
     return svc
 

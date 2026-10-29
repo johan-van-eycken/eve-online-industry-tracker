@@ -14,11 +14,12 @@ def _build_service(
     characters: list[dict],
     skill_levels_by_char: dict[int, dict[int, int]],
 ) -> IndustryService:
-    service = object.__new__(IndustryService)
-    service._sessions = sessions  # type: ignore[attr-defined]
-    service._state = SimpleNamespace(  # type: ignore[attr-defined]
-        esi_service=None,
-        char_manager=_CharManager(characters),
+    service = IndustryService(
+        state=SimpleNamespace(
+            esi_service=None,
+            char_manager=_CharManager(characters),
+        ),
+        sessions=sessions,
     )
 
     # Mock _get_character_trained_skill_levels

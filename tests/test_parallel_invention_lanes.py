@@ -31,8 +31,7 @@ _TRAINED = {_SCI_A: 3, _SCI_B: 3, _ENC: 3}
 
 
 def _service() -> IndustryService:
-    service = object.__new__(IndustryService)
-    service._state = SimpleNamespace()  # type: ignore[attr-defined]
+    service = IndustryService(state=SimpleNamespace())
     # Each pilot's own industry payload: no skills, no implants.
     service._get_character_industry_modifier_payload = MethodType(  # type: ignore[attr-defined]
         lambda self, *, character_id: {"modifier_skills": [], "implants": []}, service,

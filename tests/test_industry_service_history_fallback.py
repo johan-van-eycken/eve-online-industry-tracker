@@ -14,12 +14,13 @@ from fakes import _CorpManager, _CharManager
 
 
 def _build_service(*, sessions, characters, corporations) -> IndustryService:
-    service = object.__new__(IndustryService)
-    service._sessions = sessions  # type: ignore[attr-defined]
-    service._state = SimpleNamespace(  # type: ignore[attr-defined]
-        esi_service=None,
-        char_manager=_CharManager(characters),
-        corp_manager=_CorpManager(corporations),
+    service = IndustryService(
+        state=SimpleNamespace(
+            esi_service=None,
+            char_manager=_CharManager(characters),
+            corp_manager=_CorpManager(corporations),
+        ),
+        sessions=sessions,
     )
     return service
 

@@ -18,8 +18,7 @@ from industry_service_fakes import _profile_service
 
 
 def _service(**state):
-    svc = IndustryService.__new__(IndustryService)
-    svc._state = SimpleNamespace(**state)
+    svc = IndustryService(state=SimpleNamespace(**state))
     return svc
 
 
