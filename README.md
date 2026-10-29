@@ -5,34 +5,58 @@ A local-first EVE Online helper app for industry and market analysis. Combines a
 ## Features
 
 - **EVE SSO OAuth** — multi-character authentication via the official EVE login flow
-- **Industry Builder** — full manufacturing cost calculator with invention support, FIFO inventory cost basis, submanufacturing chains, and live market order pricing
-- **Realised Profit** — ledger view of wallet journal and transaction history per character/corporation
-- **Market Analysis** — liquidity metrics, price anomaly detection, and manufacturing signals
-- **Corporation Support** — director-level access to corp wallet, assets, and industry jobs
+- **Characters / Corporations** — wallet journal and transactions, assets and market orders per pilot; director-level access to the corp wallets, assets and industry jobs
+- **Industry Builder** — manufacturing cost calculator with invention (decryptors, copies), sub-build chains, FIFO inventory cost basis, job fees, and market prices, liquidity, trends and price-anomaly checks per product
+- **Industry Slots** — the pilots' manufacturing, research and reaction slots and their running jobs
+- **Portfolio Planner** — ranks what to build with the pilots' skills and owned blueprints
+- **Daily Planner** — a daily action plan: what to build, research, copy, invent, sell or deliver, assigned to the pilot with the skills and a free slot
+- **Realized Profit** — FIFO ledger of the sales per character and corporation: net revenue, fees and allocated cost
+- **Market Orders** — the open orders with pricing advice
+- **Ore Calculator** — the cheapest ore mix (MILP, via PuLP) for a mineral need, with compression and the configured reprocessing facility
+- **Settings** — industry profiles (structure, rigs, system) used by the calculators
+- **Admin** — application settings, database maintenance, ESI monitoring (request rates and error budget) and a public-structures scan that resolves player-owned structure names
 - **SDE Integration** — local import of the EVE Static Data Export for offline game data lookups
-- **Public Structures Cache** — background scan to resolve player-owned structure names
-- **ESI Monitoring** — admin panel for tracking ESI request rates and error budgets
 
 ---
 
 ## Prerequisites
 
 - Python 3.10–3.12 (3.13+ not yet supported due to pinned dependencies)
-- An [EVE Online developer application](https://developers.eveonline.com/applications) with the following scopes:
+- An [EVE Online developer application](https://developers.eveonline.com/applications). Put its client id in `config/config.json` (`oauth.client_id`) and its secret in `secret.json` (see [Configuration](#configuration)). Give it the scopes the app requests (`defaults.scopes` and `defaults.scopes_corp_director` in `config/config.json`):
 
 ```
-esi-industry.read_character_jobs.v1
-esi-industry.read_corporation_jobs.v1
+# Every character
 esi-assets.read_assets.v1
-esi-assets.read_corporation_assets.v1
-esi-wallet.read_character_wallet.v1
-esi-wallet.read_corporation_wallets.v1
+esi-characters.read_blueprints.v1
+esi-characters.read_corporation_roles.v1
+esi-characters.read_standings.v1
+esi-characters.read_titles.v1
+esi-clones.read_implants.v1
+esi-industry.read_character_jobs.v1
 esi-markets.read_character_orders.v1
-esi-corporations.read_structures.v1
+esi-markets.structure_markets.v1
+esi-skills.read_skillqueue.v1
+esi-skills.read_skills.v1
 esi-universe.read_structures.v1
+esi-wallet.read_character_wallet.v1
+
+# Characters with is_corp_director: true, in addition
+esi-assets.read_corporation_assets.v1
+esi-corporations.read_blueprints.v1
+esi-corporations.read_corporation_membership.v1
+esi-corporations.read_divisions.v1
+esi-corporations.read_facilities.v1
+esi-corporations.read_standings.v1
+esi-corporations.read_starbases.v1
+esi-corporations.read_structures.v1
+esi-corporations.read_titles.v1
+esi-corporations.track_members.v1
+esi-industry.read_corporation_jobs.v1
+esi-markets.read_corporation_orders.v1
+esi-wallet.read_corporation_wallets.v1
 ```
 
-Set the callback URL to: `http://localhost:8080/callback`
+Set the callback URL to `http://localhost:8080/callback`. The login listener takes its port from `app.redirect_uri` in `config/config.json`, so change both together.
 
 ---
 
@@ -84,7 +108,7 @@ Once running, open **http://localhost:8501** in your browser.
 
 ### `config/private/secret.json`
 
-Stored in a private git submodule (`eve-online-industry-tracker-config`). Clone with `--recurse-submodules` to pull it automatically. If setting up manually, create the file at `config/private/secret.json`:
+Stored in a private git submodule (`eve-online-industry-tracker-config`); `--recurse-submodules` pulls it only if you have access to it. Otherwise create the file at `config/private/secret.json` yourself. On the first start, each listed character goes through the EVE login once in the browser:
 
 ```json
 {
@@ -106,11 +130,15 @@ Stored in a private git submodule (`eve-online-industry-tracker-config`). Clone 
 
 ### `config/config.json`
 
-Tracked in the repo. Contains app settings, database paths, and ESI configuration. Most defaults work out of the box.
+Tracked in the repo. Contains app settings, database paths, the OAuth client id, the requested scopes and the ESI configuration. Set `oauth.client_id` to your own application's.
 
 ### `config/import_sde.json`
 
 Controls which SDE tables are imported and where the SQLite file is stored.
+
+### Application settings
+
+Market defaults (such as the default broker fee and order book depth), industry and daily-planner thresholds, cache TTLs, performance, ESI resilience and the reprocessing facility are set in the UI (**Admin → Application Settings**) and stored in `database/admin_settings.json`.
 
 ### Environment variable overrides
 
@@ -118,6 +146,8 @@ Controls which SDE tables are imported and where the SQLite file is stored.
 |---|---|---|
 | `APP_CONFIG_PATH` | `config/config.json` | Path to main config |
 | `APP_SECRET_PATH` | `config/private/secret.json` | Path to secrets file |
+| `ADMIN_SETTINGS_PATH` | `database/admin_settings.json` | Path to the application settings |
+| `STREAMLIT_PREFERENCES_PATH` | `database/streamlit_preferences.json` | Path to the UI preferences |
 | `LOG_LEVEL` | `DEBUG` | Logging verbosity |
 | `FLASK_HOST` | `localhost` | Flask bind host |
 | `FLASK_PORT` | `5000` | Flask bind port |
@@ -126,6 +156,10 @@ Controls which SDE tables are imported and where the SQLite file is stored.
 | `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN` | `true` | Scan for public structures at startup |
 | `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_CAP` | `5000` | Max structures to scan |
 | `FLASK_PUBLIC_STRUCTURES_STARTUP_SCAN_TIME_BUDGET` | `60` | Max seconds for startup scan |
+| `EIT_SSL_CA_BUNDLE` | — | CA bundle file for HTTPS (e.g. a corporate proxy's) |
+| `EIT_SSL_VERIFY` | — | `0` turns HTTPS certificate checks off (last resort) |
+
+More `FLASK_*` tuning variables (timeouts, scan workers, batch size) are listed in `src/flask_app/settings.py`.
 
 ---
 
@@ -142,10 +176,13 @@ python -m eve_online_industry_tracker
 CLI options:
 
 ```bash
-python -m eve_online_industry_tracker --no-streamlit       # API only, no UI
-python -m eve_online_industry_tracker --log-level INFO     # reduce log noise
+python -m eve_online_industry_tracker --no-streamlit              # API only, no UI
+python -m eve_online_industry_tracker --log-level INFO            # reduce log noise
+python -m eve_online_industry_tracker --health-timeout-seconds 600  # wait longer for Flask
 python -m eve_online_industry_tracker --help
 ```
+
+`eve-online-industry-tracker` (installed by `pip install -e .`) and `python main.py` (no install needed) start the same launcher.
 
 ### SDE import
 
@@ -162,7 +199,22 @@ python scripts/import_sde.py --check-version
 
 # Force re-import even if version is current
 python scripts/import_sde.py --download --import --force
+
+# Show the import history, remove the temporary download folder
+python scripts/import_sde.py --version-history
+python scripts/import_sde.py --cleanup
 ```
+
+Stop the app before a re-import.
+
+### Tests
+
+```bash
+pip install pytest
+python -m pytest -q
+```
+
+About 400 tests read the local SDE (`database/eve_sde.db`), and a few read a git-ignored fixture of real overview rows (`tests/fixtures/overview_rows_real.json`). Without those files these tests are skipped, and the summary lists each skip with the missing file.
 
 ---
 
@@ -171,22 +223,26 @@ python scripts/import_sde.py --download --import --force
 ```
 .
 ├── src/
-│   ├── eve_online_industry_tracker/   # main package + CLI entrypoint
-│   ├── flask_app/                     # Flask API
-│   ├── webpages/                      # Streamlit pages
-│   ├── classes/                       # domain classes (ESI client, DB manager, etc.)
-│   ├── config/                        # config schemas and path helpers
-│   └── utils/
+│   ├── eve_online_industry_tracker/   # main package + CLI launcher (cli.py)
+│   │   ├── application/               # services: industry, daily planner, characters, market, ...
+│   │   ├── infrastructure/            # ESI client, SDE readers, persistence, DB models
+│   │   └── config/                    # config manager, admin settings schema
+│   ├── flask_app/                     # Flask API (routes, background jobs)
+│   ├── streamlit_ui/                  # Streamlit pages, components and API client
+│   ├── config/                        # config path helpers
+│   └── utils/                         # logging, SSL, ESI monitor, startup checks
 ├── config/
 │   ├── config.json
 │   ├── import_sde.json
-│   └── private/                       # private submodule — cloned via --recurse-submodules
+│   └── private/                       # private submodule
 │       └── secret.json
-├── database/                          # local SQLite databases (gitignored)
+├── database/                          # local SQLite databases and settings (gitignored)
 ├── scripts/
 │   └── import_sde.py
-├── streamlit_app.py
-└── main.py                            # alternative entrypoint
+├── tests/
+├── docs/
+├── streamlit_app.py                   # Streamlit entry (started by the launcher)
+└── main.py                            # launcher without an install
 ```
 
 ---
@@ -213,10 +269,7 @@ The SDE was imported with an older `config/import_sde.json`, so it lacks the ore
 `--force` is needed when the recorded build is already current. The importer records the build of the files it imported (their `_sde.yaml`) and warns when they are older than the latest online build.
 
 **`SSL certificate verification failed`**
-You are likely behind a corporate proxy (e.g. Zscaler). Install truststore so Python uses your system certificate store:
-```bash
-pip install truststore
-```
+You are likely behind a corporate proxy (e.g. Zscaler). The app already uses your system certificate store through `truststore` (installed with the requirements). If the proxy's certificate isn't in that store, point `EIT_SSL_CA_BUNDLE` at a CA bundle file that contains it.
 
 **Startup shows `/health` 503 for a while**
 Normal — initialization runs in the background. Wait until the log shows `Flask is ready!` or open http://localhost:8501 and it will load once ready.
