@@ -1537,6 +1537,113 @@ class IndustryService(
 
         return out
 
+    def _chain_blueprint_prerequisite_jobs(
+        self,
+        *,
+        blueprint_row: dict[str, Any],
+        blueprint_display_name: str,
+        selected_product: dict[str, Any],
+        include_copying_job: bool,
+        missing_blueprint_copy_runs: int,
+        include_sde_research_chain: bool,
+        per_run_material_eiv: Any,
+        selected_industry_profile: dict[str, Any] | None,
+        selected_character_modifiers: dict[str, Any] | None,
+        character_skill_levels_by_name: dict[str, int],
+        surcharge_rates: Any,
+    ) -> dict[str, Any]:
+        """The jobs a sub-build's blueprint needs first: the copy of the runs
+        it lacks, and the SDE-fallback research to max ME/TE. Returns them as
+        (fee label, costs) for the caller's totals, with their breakdown
+        entries and tree nodes."""
+        out: dict[str, Any] = {"jobs": [], "breakdown": {}, "tree_nodes": []}
+        if include_copying_job and missing_blueprint_copy_runs > 0:
+            base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0))
+            copy_process_value = self._copy_process_value(per_run_material_eiv, missing_blueprint_copy_runs)
+            _copy_act = self._compute_activity_job(
+                activity="copying",
+                base_time_seconds=base_copy_time_seconds,
+                runs=missing_blueprint_copy_runs,
+                process_value=copy_process_value,
+                selected_industry_profile=selected_industry_profile,
+                selected_character_modifiers=selected_character_modifiers,
+                character_skill_levels_by_name=character_skill_levels_by_name,
+                surcharge_rates=surcharge_rates,
+            )
+            copying_job_cost = _copy_act
+            copying_duration_seconds = _copy_act["duration_seconds"]
+            out["jobs"].append(("copying", copying_job_cost))
+            out["breakdown"]["copying"] = {
+                "activity": "copying",
+                "duration_seconds": copying_duration_seconds,
+                "job_cost": copying_job_cost.get("total_job_cost"),
+                "runs": missing_blueprint_copy_runs,
+            }
+            out["tree_nodes"].append(
+                self._job_tree_node(
+                    label=self._ACTIVITY_LABELS["copying"],
+                    node_type="activity",
+                    activity="copying",
+                    blueprint_name=blueprint_display_name,
+                    runs=missing_blueprint_copy_runs,
+                    quantity=1,
+                    duration_seconds=copying_duration_seconds,
+                    direct_duration_seconds=copying_duration_seconds,
+                    job_cost=copying_job_cost.get("total_job_cost"),
+                    total_job_cost=copying_job_cost.get("total_job_cost"),
+                    category_name=str(selected_product.get("category_name") or "") or None,
+                    meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
+                    recommendation_action="copy",
+                    children=[],
+                )
+            )
+
+        if include_sde_research_chain:
+            for activity_name, source_field in [
+                ("research_material", "research_material_job"),
+                ("research_time", "research_time_job"),
+            ]:
+                base_level_one_duration = int(((blueprint_row.get(source_field) or {}).get("time_seconds") or 0))
+                target_duration_seconds = self._research_target_duration_seconds(
+                    level_one_duration_seconds=base_level_one_duration,
+                    target_level=self._MAX_RESEARCH_LEVEL,
+                )
+                if target_duration_seconds <= 0:
+                    continue
+                research_process_value = self._research_process_value(per_run_material_eiv, self._MAX_RESEARCH_LEVEL)
+                _res_act = self._compute_activity_job(
+                    activity=activity_name,
+                    base_time_seconds=target_duration_seconds,
+                    runs=1,
+                    process_value=research_process_value,
+                    selected_industry_profile=selected_industry_profile,
+                    selected_character_modifiers=selected_character_modifiers,
+                    character_skill_levels_by_name=character_skill_levels_by_name,
+                    surcharge_rates=surcharge_rates,
+                )
+                research_job_cost = _res_act
+                research_duration_seconds = _res_act["duration_seconds"]
+                out["jobs"].append((self._FEE_LABELS.get(activity_name, activity_name), research_job_cost))
+                out["breakdown"][activity_name] = {
+                    "activity": activity_name,
+                    "duration_seconds": research_duration_seconds,
+                    "job_cost": research_job_cost.get("total_job_cost"),
+                }
+                out["tree_nodes"].append(
+                    self._job_tree_node(
+                        label=self._ACTIVITY_LABELS.get(activity_name, activity_name),
+                        node_type="activity",
+                        activity=activity_name,
+                        duration_seconds=research_duration_seconds,
+                        direct_duration_seconds=research_duration_seconds,
+                        job_cost=research_job_cost.get("total_job_cost"),
+                        total_job_cost=research_job_cost.get("total_job_cost"),
+                        children=[],
+                    )
+                )
+
+        return out
+
     def _plan_blueprint_chain_for_quantity(
         self,
         *,
@@ -1816,100 +1923,23 @@ class IndustryService(
                     )
                 )
 
-        if include_copying_job and missing_blueprint_copy_runs > 0:
-            base_copy_time_seconds = int(((blueprint_row.get("copying_job") or {}).get("time_seconds") or 0))
-            copy_process_value = self._copy_process_value(per_run_material_eiv, missing_blueprint_copy_runs)
-            _copy_act = self._compute_activity_job(
-                activity="copying",
-                base_time_seconds=base_copy_time_seconds,
-                runs=missing_blueprint_copy_runs,
-                process_value=copy_process_value,
-                selected_industry_profile=selected_industry_profile,
-                selected_character_modifiers=selected_character_modifiers,
-                character_skill_levels_by_name=character_skill_levels_by_name,
-                surcharge_rates=surcharge_rates,
-            )
-            copying_job_cost = _copy_act
-            copying_duration_seconds = _copy_act["duration_seconds"]
-            total_time_seconds += copying_duration_seconds
-            if copying_job_cost.get("total_job_cost") is not None:
-                total_job_cost += float(copying_job_cost.get("total_job_cost") or 0.0)
+        prerequisites = self._chain_blueprint_prerequisite_jobs(
+            blueprint_row=blueprint_row, blueprint_display_name=blueprint_display_name,
+            selected_product=selected_product, include_copying_job=include_copying_job,
+            missing_blueprint_copy_runs=missing_blueprint_copy_runs,
+            include_sde_research_chain=include_sde_research_chain, per_run_material_eiv=per_run_material_eiv,
+            selected_industry_profile=selected_industry_profile,
+            selected_character_modifiers=selected_character_modifiers,
+            character_skill_levels_by_name=character_skill_levels_by_name, surcharge_rates=surcharge_rates,
+        )
+        for fee_label, activity_costs in prerequisites["jobs"]:
+            total_time_seconds += activity_costs["duration_seconds"]
+            if activity_costs.get("total_job_cost") is not None:
+                total_job_cost += float(activity_costs.get("total_job_cost") or 0.0)
                 priced_job_count += 1
-            job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(("copying", copying_job_cost, None)))
-            recursive_activity_breakdown["copying"] = {
-                "activity": "copying",
-                "duration_seconds": copying_duration_seconds,
-                "job_cost": copying_job_cost.get("total_job_cost"),
-                "runs": missing_blueprint_copy_runs,
-            }
-            prerequisite_nodes.append(
-                self._job_tree_node(
-                    label=self._ACTIVITY_LABELS["copying"],
-                    node_type="activity",
-                    activity="copying",
-                    blueprint_name=blueprint_display_name,
-                    runs=missing_blueprint_copy_runs,
-                    quantity=1,
-                    duration_seconds=copying_duration_seconds,
-                    direct_duration_seconds=copying_duration_seconds,
-                    job_cost=copying_job_cost.get("total_job_cost"),
-                    total_job_cost=copying_job_cost.get("total_job_cost"),
-                    category_name=str(selected_product.get("category_name") or "") or None,
-                    meta_group_name=str(selected_product.get("meta_group_name") or "") or None,
-                    recommendation_action="copy",
-                    children=[],
-                )
-            )
-
-        if include_sde_research_chain:
-            for activity_name, source_field in [
-                ("research_material", "research_material_job"),
-                ("research_time", "research_time_job"),
-            ]:
-                base_level_one_duration = int(((blueprint_row.get(source_field) or {}).get("time_seconds") or 0))
-                target_duration_seconds = self._research_target_duration_seconds(
-                    level_one_duration_seconds=base_level_one_duration,
-                    target_level=self._MAX_RESEARCH_LEVEL,
-                )
-                if target_duration_seconds <= 0:
-                    continue
-                research_process_value = self._research_process_value(per_run_material_eiv, self._MAX_RESEARCH_LEVEL)
-                _res_act = self._compute_activity_job(
-                    activity=activity_name,
-                    base_time_seconds=target_duration_seconds,
-                    runs=1,
-                    process_value=research_process_value,
-                    selected_industry_profile=selected_industry_profile,
-                    selected_character_modifiers=selected_character_modifiers,
-                    character_skill_levels_by_name=character_skill_levels_by_name,
-                    surcharge_rates=surcharge_rates,
-                )
-                research_job_cost = _res_act
-                research_duration_seconds = _res_act["duration_seconds"]
-                total_time_seconds += research_duration_seconds
-                if research_job_cost.get("total_job_cost") is not None:
-                    total_job_cost += float(research_job_cost.get("total_job_cost") or 0.0)
-                    priced_job_count += 1
-                job_fee_unknown_reasons.extend(self._job_fee_unknown_entries(
-                    (self._FEE_LABELS.get(activity_name, activity_name), research_job_cost, None),
-                ))
-                recursive_activity_breakdown[activity_name] = {
-                    "activity": activity_name,
-                    "duration_seconds": research_duration_seconds,
-                    "job_cost": research_job_cost.get("total_job_cost"),
-                }
-                prerequisite_nodes.append(
-                    self._job_tree_node(
-                        label=self._ACTIVITY_LABELS.get(activity_name, activity_name),
-                        node_type="activity",
-                        activity=activity_name,
-                        duration_seconds=research_duration_seconds,
-                        direct_duration_seconds=research_duration_seconds,
-                        job_cost=research_job_cost.get("total_job_cost"),
-                        total_job_cost=research_job_cost.get("total_job_cost"),
-                        children=[],
-                    )
-                )
+            job_fee_unknown_reasons.extend(self._job_fee_unknown_entries((fee_label, activity_costs, None)))
+        recursive_activity_breakdown.update(prerequisites["breakdown"])
+        prerequisite_nodes.extend(prerequisites["tree_nodes"])
 
         # The arguments every nested build passes on unchanged.
         chain: dict[str, Any] = {
