@@ -11,7 +11,6 @@ Made-up ids and names in the fake tables; the local-SDE test reads Jita 4-4.
 from __future__ import annotations
 
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -148,8 +147,7 @@ def test_the_settings_page_shows_the_resolved_station_name(monkeypatch):
 
 
 def test_the_local_sde_names_jita_4_4():
-    if not os.path.exists(fakes.LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    fakes.skip_without_local_sde()
     engine = create_engine(f"sqlite:///file:{fakes.LOCAL_SDE}?mode=ro&uri=true")
     try:
         with Session(engine) as session:

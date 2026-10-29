@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -57,12 +56,9 @@ from eve_online_industry_tracker.config.admin_settings import AdminSettingsManag
 from eve_online_industry_tracker.infrastructure.models import CorporationIndustryJobsModel
 from planner_skill_fakes import NO_SKILL_REQUIREMENTS
 
-FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "overview_rows_real.json")
+from sde_industry_fakes import OVERVIEW_FIXTURE as FIXTURE
 
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(FIXTURE),
-    reason="tests/fixtures/overview_rows_real.json not captured yet (plan Task 3)",
-)
+pytestmark = pytest.mark.needs_overview_fixture
 
 # Units of each material per run in this test's blueprint data. Large enough
 # that ME research can save something, so BPO analysis does real arithmetic.

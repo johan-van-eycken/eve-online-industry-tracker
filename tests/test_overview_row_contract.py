@@ -7,7 +7,6 @@ docs/superpowers/plans/2026-09-17-daily-planner-remediation.md).
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
@@ -16,16 +15,9 @@ from eve_online_industry_tracker.application.daily_planner.input_row import (
     PlannerInputRow,
 )
 
-FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "overview_rows_real.json")
+from sde_industry_fakes import OVERVIEW_FIXTURE as FIXTURE
 
-pytestmark = pytest.mark.skipif(
-    not os.path.exists(FIXTURE),
-    reason=(
-        "tests/fixtures/overview_rows_real.json not captured yet — "
-        "run the app with EVE_ENABLE_DEBUG_FIXTURE=1 and GET "
-        "/planner/debug/overview-fixture"
-    ),
-)
+pytestmark = pytest.mark.needs_overview_fixture
 
 
 class _AnyMetaGroup:

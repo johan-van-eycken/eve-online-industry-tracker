@@ -14,6 +14,22 @@ from eve_online_industry_tracker.infrastructure.models import BaseApp, BaseSde  
 from eve_online_industry_tracker.infrastructure.persistence.daily_planner_repo import (  # noqa: E402
     DailyPlannerRepository,
 )
+from sde_industry_fakes import (  # noqa: E402
+    LOCAL_SDE, LOCAL_SDE_MISSING, OVERVIEW_FIXTURE, OVERVIEW_FIXTURE_MISSING,
+)
+
+# The git-ignored local data some tests read: marker -> (path, skip reason).
+_LOCAL_DATA = {
+    "needs_local_sde": (LOCAL_SDE, LOCAL_SDE_MISSING),
+    "needs_overview_fixture": (OVERVIEW_FIXTURE, OVERVIEW_FIXTURE_MISSING),
+}
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    for marker, (path, reason) in _LOCAL_DATA.items():
+        if item.get_closest_marker(marker) and not os.path.exists(path):
+            pytest.skip(reason)
 
 
 @pytest.fixture(autouse=True)

@@ -491,12 +491,11 @@ def test_startup_on_a_current_sde_loads_ore_data_and_activities(tmp_path):
 
 # --- the local SDE ---------------------------------------------------------------------
 
-_LOCAL_SDE = os.path.join(_ROOT, "database", "eve_sde.db")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
 
 
 def _local_conn_or_skip(tables):
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     conn = sqlite3.connect(f"file:{_LOCAL_SDE}?mode=ro", uri=True)
     present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     missing = [t for t in tables if t not in present]

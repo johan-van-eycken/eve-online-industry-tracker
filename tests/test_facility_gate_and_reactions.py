@@ -17,7 +17,6 @@ tables are absent.
 from __future__ import annotations
 
 import logging
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -27,8 +26,8 @@ from eve_online_industry_tracker.domain import industry_facility as fac
 from eve_online_industry_tracker.domain import security_band as sb
 from eve_online_industry_tracker.infrastructure.sde import industry
 
-_LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
-_needs_sde = pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE
+_needs_sde = pytest.mark.needs_local_sde
 
 
 def _producer():
@@ -561,8 +560,7 @@ def test_a_none_top_level_status_falls_back_to_the_industry_system():
 
 @pytest.fixture(scope="module")
 def sde_session():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    fakes.skip_without_local_sde()
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 

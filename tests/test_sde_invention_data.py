@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -16,7 +15,7 @@ from eve_online_industry_tracker.application.industry.invention_model import NO_
 from eve_online_industry_tracker.infrastructure.models import Groups, Types
 from eve_online_industry_tracker.infrastructure.sde.decryptors import get_t2_invention_decryptors
 
-_LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE
 
 
 _ACCELERANT_DOGMA = {1112: 1.2, 1113: 2.0, 1114: 10.0, 1124: 1.0}
@@ -62,7 +61,7 @@ def test_t2_decryptors_are_read_from_type_dogma_of_group_1304_only(sde_engine):
     }]
 
 
-@pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
+@pytest.mark.needs_local_sde
 def test_the_local_sde_has_the_eight_generic_decryptors():
     engine = create_engine(f"sqlite:///file:{_LOCAL_SDE}?mode=ro&uri=true")
     try:
@@ -132,7 +131,7 @@ def test_encryption_skills_are_science_skills_named_encryption_methods(sde_engin
         assert get_encryption_skill_type_ids(session) == frozenset({21790})
 
 
-@pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
+@pytest.mark.needs_local_sde
 def test_the_local_sde_has_seven_encryption_skills():
     engine = create_engine(f"sqlite:///file:{_LOCAL_SDE}?mode=ro&uri=true")
     try:

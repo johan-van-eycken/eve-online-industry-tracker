@@ -297,12 +297,11 @@ def test_the_sde_loader_carries_every_activitys_skills():
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
-    from sde_industry_fakes import LOCAL_SDE
+    from sde_industry_fakes import LOCAL_SDE, skip_without_local_sde
 
     from eve_online_industry_tracker.infrastructure.sde.blueprints import get_blueprint_manufacturing_data
 
-    if not os.path.exists(LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     engine = create_engine(f"sqlite:///file:{LOCAL_SDE}?mode=ro&uri=true")
     try:
         with Session(engine) as session:

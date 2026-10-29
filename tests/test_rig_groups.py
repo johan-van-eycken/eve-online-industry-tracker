@@ -12,7 +12,6 @@ absent). Public SDE ids only.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 
 import pytest
@@ -21,8 +20,8 @@ import sde_industry_fakes as fakes
 from eve_online_industry_tracker.domain import rig_groups as rg
 from eve_online_industry_tracker.infrastructure.sde import industry
 
-_LOCAL_SDE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db"))
-_needs_sde = pytest.mark.skipif(not os.path.exists(_LOCAL_SDE), reason="local SDE database/eve_sde.db not present")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE
+_needs_sde = pytest.mark.needs_local_sde
 
 
 @pytest.fixture(params=["fake_sde", "local_sde"])

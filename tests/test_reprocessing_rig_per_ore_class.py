@@ -264,8 +264,7 @@ def test_the_local_sde_ore_groups_match_the_classes():
     import sqlite3
 
     import os
-    if not os.path.exists(fakes.LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    fakes.skip_without_local_sde()
     conn = sqlite3.connect(f"file:{fakes.LOCAL_SDE}?mode=ro", uri=True)
     try:
         rows = conn.execute(

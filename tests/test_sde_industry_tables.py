@@ -311,12 +311,11 @@ def test_a_request_that_needs_the_tables_gets_a_503_and_no_traceback(caplog):
 
 # --- the local SDE ---------------------------------------------------------------------
 
-_LOCAL_SDE = os.path.join(_ROOT, "database", "eve_sde.db")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
 
 
 def test_the_local_sde_tables_have_ccps_row_counts():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     with sqlite3.connect(f"file:{_LOCAL_SDE}?mode=ro", uri=True) as conn:
         present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         missing = [t for t in industry.INDUSTRY_TABLES if t not in present]

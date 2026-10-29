@@ -486,7 +486,7 @@ def test_the_ores_route_without_the_ore_data_is_a_503(sde_engine):
 
 # --- the local SDE ---------------------------------------------------------------------------
 
-_LOCAL_SDE = os.path.join(os.path.dirname(__file__), "..", "database", "eve_sde.db")
+from sde_industry_fakes import LOCAL_SDE as _LOCAL_SDE, skip_without_local_sde
 
 
 def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers():
@@ -528,8 +528,7 @@ def test_the_local_sde_has_the_reprocessing_attributes_and_the_reference_numbers
 
 
 def test_the_local_station_lookup_reads_the_sde():
-    if not os.path.exists(_LOCAL_SDE):
-        pytest.skip("local SDE database/eve_sde.db not present")
+    skip_without_local_sde()
     engine = create_engine(f"sqlite:///file:{os.path.abspath(_LOCAL_SDE)}?mode=ro&uri=true")
     try:
         with Session(engine) as session:
