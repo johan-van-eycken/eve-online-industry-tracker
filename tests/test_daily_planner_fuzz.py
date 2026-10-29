@@ -20,8 +20,8 @@ import pytest
 
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402
-import test_task_a_character_blueprints as C  # noqa: E402
-import test_task_a_release_replan as T  # noqa: E402
+import test_daily_planner_character_blueprints as C  # noqa: E402
+import test_daily_planner_release_replan as T  # noqa: E402
 
 PILOTS = (1, 2, 3)
 _MFG = {"manufacture", "sub_manufacture"}

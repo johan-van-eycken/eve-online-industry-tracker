@@ -112,7 +112,7 @@ def test_an_unknown_index_makes_the_fee_unknown_with_its_reason():
 
 def _overview_row(monkeypatch, profile):
     import industry_service_fakes as h
-    import test_producer_review_fixes as prf
+    import test_industry_unknown_fees_and_inventors as prf
 
     rows = h._rows_with(probability_pct=30.0, bpc_runs=10, t2_limit=10)
     prices = {**h._INVENTION_FAKE_PRICES, 5002: 2000.0}
@@ -122,7 +122,7 @@ def _overview_row(monkeypatch, profile):
 
 
 def test_a_non_numeric_manufacturing_index_makes_the_overview_fee_unknown(monkeypatch):
-    import test_producer_review_fixes as prf
+    import test_industry_unknown_fees_and_inventors as prf
 
     IndustryService._reset_once_warnings()
     profile = {**prf.PROFILE, "system_cost_indices": [
@@ -138,7 +138,7 @@ def test_a_non_numeric_manufacturing_index_makes_the_overview_fee_unknown(monkey
 
 
 def test_a_missing_index_reads_unknown_in_the_activity_cost_indices(monkeypatch):
-    import test_producer_review_fixes as prf
+    import test_industry_unknown_fees_and_inventors as prf
 
     IndustryService._reset_once_warnings()
     row = _overview_row(monkeypatch, prf._F_PROFILE)          # manufacturing only

@@ -13,8 +13,10 @@ table with all its columns). Fake values only.
 from __future__ import annotations
 
 import sqlite3
+import logging
 
 import pytest
+from sqlalchemy.exc import OperationalError as SAOperationalError
 
 from eve_online_industry_tracker.infrastructure import schema_migrations as sm
 
@@ -74,3 +76,32 @@ def test_a_full_migration_on_a_fresh_db_still_succeeds_twice():
     db = _Db()
     sm.ensure_app_schema(db)
     sm.ensure_app_schema(db)
+
+
+# --- _ensure_index -----------------------------------------------------------------------------
+#
+# Round J1.3: schema_migrations._ensure_index logs a DB error as a WARNING
+# and lets a programming error propagate. Fake values only.
+
+class _IndexDb:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def execute(self, query, params=None):
+        raise self.exc
+
+
+@pytest.mark.parametrize("exc", [
+    sqlite3.OperationalError("database is locked"),
+    sqlite3.IntegrityError("UNIQUE constraint failed"),
+    SAOperationalError("CREATE INDEX", {}, Exception("database is locked")),
+])
+def test_a_db_error_on_an_index_is_a_warning(exc, caplog):
+    with caplog.at_level(logging.WARNING):
+        sm._ensure_index(_IndexDb(exc), ddl="CREATE INDEX IF NOT EXISTS ix ON t(a)", name="ix_test")
+    assert any(r.levelno == logging.WARNING and "ix_test" in r.getMessage() for r in caplog.records)
+
+
+def test_a_programming_error_on_an_index_propagates():
+    with pytest.raises(TypeError):
+        sm._ensure_index(_IndexDb(TypeError("execute() got an unexpected keyword")), ddl="CREATE INDEX x", name="ix_test")

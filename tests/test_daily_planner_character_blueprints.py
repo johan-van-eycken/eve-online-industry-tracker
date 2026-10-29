@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402
-import test_task_a_release_replan as T  # noqa: E402
+import test_daily_planner_release_replan as T  # noqa: E402
 
 from eve_online_industry_tracker.application.daily_planner.blueprint_ledger import BlueprintLedger  # noqa: E402
 from eve_online_industry_tracker.application.daily_planner.character_assigner import CharacterAssigner  # noqa: E402

@@ -10,7 +10,7 @@ import test_daily_planner_assigned_inventor as a4
 import test_daily_planner_decisions as dec
 import test_daily_planner_fail_loud as fl
 import industry_service_fakes as h
-import test_producer_review_fixes as r0
+import test_industry_unknown_fees_and_inventors as r0
 from eve_online_industry_tracker.application.daily_planner import character_assigner as ca
 from eve_online_industry_tracker.application.daily_planner.item_decision_engine import ItemDecisionEngine
 from eve_online_industry_tracker.application.industry import overview_row as orow
