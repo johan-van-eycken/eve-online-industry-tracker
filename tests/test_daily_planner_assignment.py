@@ -195,7 +195,7 @@ def test_a_character_installed_job_deducts_a_manufacturing_slot(session_provider
     svc = DailyPlannerService(
         industry_service=SimpleNamespace(get_cached_overview_rows=lambda: []),
         corporations_service=SimpleNamespace(list_corporations=lambda: []),
-        characters_service=SimpleNamespace(list_characters=lambda: []),
+        characters_service=SimpleNamespace(list_characters=lambda: [{"character_id": 7}]),
         sales_history_service=SimpleNamespace(),
         market_pricing_service=SimpleNamespace(),
         repo=SimpleNamespace(),

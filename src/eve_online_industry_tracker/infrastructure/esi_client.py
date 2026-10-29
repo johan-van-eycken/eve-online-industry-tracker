@@ -7,7 +7,7 @@ import json as jsonlib
 import threading
 import re
 from urllib.parse import urlencode, urlparse
-from typing import Callable, Optional, Any, Dict, Tuple, Union
+from typing import Callable, Optional, Any, Dict, List, Tuple, Union
 
 try:
     from utils.esi_monitor import get_esi_monitor
@@ -158,6 +158,34 @@ _ESI_ERROR_LIMITER = _EsiErrorRateLimiter()
 # The configured X-Compatibility-Date values whose "ignored" WARNING was logged (once per process).
 _COMPATIBILITY_DATE_WARNED: set[str] = set()
 _COMPATIBILITY_DATE_WARNED_LOCK = threading.Lock()
+
+
+def esi_get_back_to_known(
+    esi_get: Callable[..., Any], endpoint: str, known_ids: Any, *, id_key: str = "transaction_id",
+) -> List[Dict[str, Any]]:
+    """The entries of a newest-first `from_id` endpoint (wallet transactions)
+    not in `known_ids`. ESI returns only the newest batch per call, so this
+    walks back with from_id until a batch reaches a known id, is empty, or
+    brings nothing new."""
+    entries: List[Dict[str, Any]] = []
+    seen: set = set()
+    params: Optional[Dict[str, Any]] = None
+    # shortcut: at most 100 batches per refresh, a guard against an endpoint that ignores from_id.
+    for _ in range(100):
+        page = esi_get(endpoint, params=params) if params else esi_get(endpoint)
+        if isinstance(page, str):
+            page = jsonlib.loads(page)
+        if not isinstance(page, list):
+            break
+        ids = [e[id_key] for e in page if isinstance(e, dict) and e.get(id_key) is not None]
+        fresh = [e for e in page if isinstance(e, dict) and e.get(id_key) is not None
+                 and e[id_key] not in known_ids and e[id_key] not in seen]
+        entries.extend(fresh)
+        seen.update(e[id_key] for e in fresh)
+        if not fresh or any(i in known_ids for i in ids):
+            break
+        params = {"from_id": min(ids)}
+    return entries
 
 
 def esi_cache_key(endpoint_and_query: str) -> str:

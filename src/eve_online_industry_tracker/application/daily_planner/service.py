@@ -1157,8 +1157,18 @@ class DailyPlannerService:
         )
         return []
 
+    def _known_owner_ids(self) -> tuple[list[int], list[int]]:
+        """(the known pilots' character ids, their corporation ids): the
+        producer's owner rule (IndustryService._resolve_scope_owner_ids). Rows
+        of a pilot or corporation the app no longer knows are not planned from."""
+        characters = self._character_assigner._get_characters(self._characters)
+        character_ids = sorted({int(c["character_id"]) for c in characters if c.get("character_id")})
+        corporation_ids = sorted({int(c["corporation_id"]) for c in characters if c.get("corporation_id")})
+        return character_ids, corporation_ids
+
     def _get_industry_jobs(self) -> list[Any]:
-        """Active corp + character industry jobs -- delivered/cancelled/reverted jobs are not active.
+        """Active corp + character industry jobs of the known owners
+        (_known_owner_ids) -- delivered/cancelled/reverted jobs are not active.
 
         Slot capacity in EVE is per character, so a personally-installed job
         (CharacterIndustryJobsModel) occupies one of that pilot's slots exactly
@@ -1177,6 +1187,7 @@ class DailyPlannerService:
         No error handler: an empty list would mean "every slot is free and
         nothing to deliver", so a failed query must fail the compute instead.
         """
+        character_ids, corporation_ids = self._known_owner_ids()
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.models import (
@@ -1187,16 +1198,18 @@ class DailyPlannerService:
             corp_jobs = (
                 session.query(CorporationIndustryJobsModel)
                 .filter(
+                    CorporationIndustryJobsModel.corporation_id.in_(corporation_ids),
                     CorporationIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
-                    | CorporationIndustryJobsModel.status.is_(None)
+                    | CorporationIndustryJobsModel.status.is_(None),
                 )
                 .all()
             )
             char_jobs = (
                 session.query(CharacterIndustryJobsModel)
                 .filter(
+                    CharacterIndustryJobsModel.character_id.in_(character_ids),
                     CharacterIndustryJobsModel.status.notin_(_TERMINAL_JOB_STATUSES)
-                    | CharacterIndustryJobsModel.status.is_(None)
+                    | CharacterIndustryJobsModel.status.is_(None),
                 )
                 .all()
             )
@@ -1205,18 +1218,13 @@ class DailyPlannerService:
             session.close()
 
     def _get_corp_assets(self) -> list[Any]:
-        """The assets of the known pilots' corporations: the producer's rule
-        for its "all" scopes (IndustryService._resolve_scope_owner_ids). A
-        corporation no known pilot is in any more is not planned from.
+        """The assets of the known pilots' corporations (_known_owner_ids).
 
         No error handler: an empty list would mean "the corp owns no BPOs and
         no stock", and the plan would tell the user to buy both. A failed
         query must fail the compute (see _get_industry_jobs).
         """
-        corporation_ids = sorted({
-            int(c["corporation_id"]) for c in self._character_assigner._get_characters(self._characters)
-            if c.get("corporation_id")
-        })
+        _, corporation_ids = self._known_owner_ids()
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.models import CorporationAssetsModel
@@ -1227,17 +1235,13 @@ class DailyPlannerService:
             session.close()
 
     def _get_character_blueprint_assets(self) -> list[Any]:
-        """The known pilots' blueprint assets: the producer's owned-blueprint
-        source for its default scope (IndustryService._resolve_scope_owner_ids,
-        "all_characters"). A removed pilot's leftover rows are not planned.
+        """The known pilots' blueprint assets (_known_owner_ids): the
+        producer's owned-blueprint source for its default scope.
 
         No error handler (like _get_corp_assets): an empty list would plan a
         row the producer priced from a pilot's blueprint as not built, or
         tell the user to buy a blueprint a pilot owns."""
-        character_ids = [
-            int(c["character_id"]) for c in self._character_assigner._get_characters(self._characters)
-            if c.get("character_id")
-        ]
+        character_ids, _ = self._known_owner_ids()
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.persistence import blueprints_repo
@@ -1246,16 +1250,18 @@ class DailyPlannerService:
             session.close()
 
     def _get_corp_orders(self) -> list[Any]:
-        """Get corp sell orders.
+        """The known pilots' corporations' sell orders (_known_owner_ids).
 
         No error handler: an empty list would read as "nothing on the market"
         and skew days-of-supply, so a failed query fails the compute.
         """
+        _, corporation_ids = self._known_owner_ids()
         session = self._session_provider.app_session()
         try:
             from eve_online_industry_tracker.infrastructure.models import CorporationMarketOrdersModel
             return session.query(CorporationMarketOrdersModel).filter(
-                CorporationMarketOrdersModel.is_buy_order == False  # noqa: E712
+                CorporationMarketOrdersModel.corporation_id.in_(corporation_ids),
+                CorporationMarketOrdersModel.is_buy_order == False,  # noqa: E712
             ).all()
         finally:
             session.close()

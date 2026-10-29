@@ -259,6 +259,32 @@ def test_phase_1_reads_only_the_corp_assets_of_the_known_pilots_corporations(ses
     assert [row.item_id for row in svc._get_corp_assets()] == [87]
 
 
+def test_phase_1_reads_only_the_jobs_and_orders_of_the_known_pilots(session_provider):
+    """The same rule for jobs and sell orders: a corporation or pilot the app no
+    longer knows must not fill slots, deliveries or days of supply."""
+    from eve_online_industry_tracker.application.daily_planner.service import DailyPlannerService
+    from eve_online_industry_tracker.db_models import CharacterIndustryJobsModel, CorporationIndustryJobsModel
+    from eve_online_industry_tracker.infrastructure.models import CorporationMarketOrdersModel
+
+    session = session_provider.app_session()
+    session.add_all([
+        CorporationIndustryJobsModel(corporation_id=5001, job_id=1, status="active"),
+        CorporationIndustryJobsModel(corporation_id=5002, job_id=2, status="active"),
+        CharacterIndustryJobsModel(character_id=OWNER_ID, job_id=3, status="active"),
+        CharacterIndustryJobsModel(character_id=OWNER_ID + 1, job_id=4, status="active"),
+        CorporationMarketOrdersModel(corporation_id=5001, order_id=11, type_id=34, is_buy_order=False),
+        CorporationMarketOrdersModel(corporation_id=5002, order_id=12, type_id=34, is_buy_order=False),
+    ])
+    session.commit()
+    session.close()
+    svc = DailyPlannerService.__new__(DailyPlannerService)
+    svc._session_provider = session_provider
+    svc._character_assigner = CharacterAssigner()
+    svc._characters = SimpleNamespace(list_characters=lambda: [{"character_id": OWNER_ID, "corporation_id": 5001}])
+    assert sorted(job.job_id for job in svc._get_industry_jobs()) == [1, 3]
+    assert [order.order_id for order in svc._get_corp_orders()] == [11]
+
+
 def test_character_blueprints_merge_into_the_corp_index():
     from eve_online_industry_tracker.application.daily_planner.service import merge_blueprint_indexes
 

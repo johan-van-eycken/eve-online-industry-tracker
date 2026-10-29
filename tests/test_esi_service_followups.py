@@ -291,3 +291,34 @@ def test_the_esi_service_takes_admin_settings_in_its_constructor():
     admin = object()
     assert ESIService(SimpleNamespace(), admin_settings=admin)._admin_settings is admin
     assert ESIService(SimpleNamespace())._admin_settings is None
+
+
+def test_concurrent_first_esi_use_builds_one_client(monkeypatch):
+    """Building the client loads the tokens or starts the OAuth registration:
+    two threads using a fresh character at once must not both do it."""
+    import threading
+    import time
+
+    from eve_online_industry_tracker.application.characters import character as character_module
+
+    built = []
+
+    class _SlowClient:
+        character_id = 90000001
+
+        def __init__(self, *args, **kwargs):
+            built.append(self)
+            time.sleep(0.05)
+
+    monkeypatch.setattr(character_module, "ESIClient", _SlowClient)
+    char = character_module.Character.__new__(character_module.Character)
+    char._esi_client = char._esi_service = char._admin_settings = None
+    char._cfgManager = char._db_oauth = char._refresh_token = None
+    char.character_name, char.is_main, char.is_corp_director = "Fake Pilot", False, False
+
+    threads = [threading.Thread(target=char.ensure_esi) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(built) == 1

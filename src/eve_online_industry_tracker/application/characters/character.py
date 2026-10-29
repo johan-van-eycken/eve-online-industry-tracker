@@ -1,5 +1,6 @@
 import logging
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from eve_online_industry_tracker.application import market_fees
 from eve_online_industry_tracker.config.admin_settings import AdminSettingInvalid
 from eve_online_industry_tracker.infrastructure.database_manager import DatabaseManager
 from eve_online_industry_tracker.config.config_manager import ConfigManager
-from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient
+from eve_online_industry_tracker.infrastructure.esi_client import ESI_REQUEST_ERRORS, ESIClient, esi_get_back_to_known
 from eve_online_industry_tracker.infrastructure.esi_service import ESIService
 from eve_online_industry_tracker.infrastructure.sde.types import asset_volumes
 from eve_online_industry_tracker.infrastructure.models import CharacterModel, CharacterWalletJournalModel \
@@ -91,6 +92,8 @@ class CharacterSaveError(Exception):
 class Character:
     """Ingame entity of a character."""
 
+    _ESI_INIT_LOCK = threading.Lock()
+
     def __init__(self, 
                  cfgManager: ConfigManager, 
                  db_oauth: DatabaseManager,
@@ -163,17 +166,24 @@ class Character:
         if self._esi_client is not None and self._esi_service is not None:
             return
 
-        self._esi_client = ESIClient(
-            self._cfgManager,
-            self._db_oauth,
-            self.character_name,
-            self.is_main,
-            self.is_corp_director,
-            self._refresh_token,
-        )
-        # The admin ESI settings (pacing, retries, cache TTLs) from the first request on.
-        self._esi_service = ESIService(self._esi_client, admin_settings=getattr(self, "_admin_settings", None))
-        self.character_id = self._esi_client.character_id
+        # Building the client loads the tokens or runs the OAuth registration: once, not once per thread.
+        # shortcut: one lock for all characters, so a first use waits on another pilot's registration;
+        # per-character locks if registrations ever run while other pilots refresh.
+        with Character._ESI_INIT_LOCK:
+            if self._esi_client is not None and self._esi_service is not None:
+                return
+            client = ESIClient(
+                self._cfgManager,
+                self._db_oauth,
+                self.character_name,
+                self.is_main,
+                self.is_corp_director,
+                self._refresh_token,
+            )
+            # The admin ESI settings (pacing, retries, cache TTLs) from the first request on.
+            self._esi_service = ESIService(client, admin_settings=getattr(self, "_admin_settings", None))
+            self.character_id = client.character_id
+            self._esi_client = client
 
     @property
     def esi_client(self) -> ESIClient:
@@ -831,17 +841,14 @@ class Character:
     def refresh_wallet_transactions(self) -> None:
         try:
             self.ensure_esi()
-            transactions = self._esi_client.esi_get(ESI_CHAR_WALLET_TRANSACTIONS.format(character_id=self.character_id))
-
             known_ids = {
                 row[0]
                 for row in self._db_app.session.query(CharacterWalletTransactionsModel.transaction_id)
                 .filter_by(character_id=self.character_id)
             }
-            new_transaction_entries = [
-                entry for entry in transactions
-                if entry.get("transaction_id") is not None and entry.get("transaction_id") not in known_ids
-            ]
+            new_transaction_entries = esi_get_back_to_known(
+                self._esi_client.esi_get, ESI_CHAR_WALLET_TRANSACTIONS.format(character_id=self.character_id), known_ids,
+            )
 
             # Step 1: Collect unique client IDs
             client_ids = set()
