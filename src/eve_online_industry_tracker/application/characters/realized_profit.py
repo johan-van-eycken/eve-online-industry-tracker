@@ -515,11 +515,14 @@ def _normalize_untracked_payload(payload: dict[str, Any]) -> dict[str, Any]:
     priced_quantity = int(normalized.get("priced_quantity") or 0)
     unpriced_quantity = int(normalized.get("unpriced_quantity") or 0)
     allocated_cost = float(normalized.get("allocated_cost") or 0.0)
+    net_revenue = _safe_float(normalized.get("net_revenue"))
 
-    if unpriced_quantity > 0:
-        # No cost basis for every unit, no profit (rows built before this rule carry net revenue - 0).
-        normalized["realized_profit"] = None
-        normalized["realized_margin_fraction"] = None
+    if unpriced_quantity > 0 and normalized.get("realized_profit") is None and net_revenue is not None:
+        # A row built while untracked sales got no profit: read it with the cost-0 rule, no rebuild needed.
+        normalized["realized_profit"] = float(net_revenue) - allocated_cost
+        normalized["realized_margin_fraction"] = (
+            normalized["realized_profit"] / float(net_revenue) if net_revenue > 0 else None
+        )
     if source_mix or priced_quantity > 0 or unpriced_quantity <= 0:
         return normalized
 
@@ -838,13 +841,11 @@ class _BaseRealizedProfitLedgerService:
                         )
                     )
                 if allocation["unpriced_quantity"] > 0:
-                    notes.append(f"{allocation['unpriced_quantity']} unit(s) could not be matched to a historical cost basis.")
-                realized_profit = None
-                realized_margin_fraction = None
-                if allocation["unpriced_quantity"] == 0:
-                    realized_profit = float(net_revenue) - float(allocation["total_cost"])
-                    if net_revenue > 0:
-                        realized_margin_fraction = float(realized_profit) / float(net_revenue)
+                    notes.append(f"{allocation['unpriced_quantity']} unit(s) have no recorded purchase "
+                                 "(stock from before tracking, trades, loot, gifts) and are counted at cost 0.")
+                # Units without a cost basis count at cost 0; the note and Low confidence say so.
+                realized_profit = float(net_revenue) - float(allocation["total_cost"])
+                realized_margin_fraction = float(realized_profit) / float(net_revenue) if net_revenue > 0 else None
 
                 row = self.ledger_model(
                     **self._owner_fields(owner_id=int(owner_id)),

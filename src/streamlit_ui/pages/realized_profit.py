@@ -790,8 +790,9 @@ def render() -> None:
             )
             st.caption(
                 "Profit Type groups sales into Manufacturing or Trade for readability. "
-                "Sales with any unit without a historical cost (untracked inventory, older stock outside tracked "
-                "history, transfers, loot, donations) are not counted in profit; they are listed in Coverage."
+                "Units without a recorded purchase (stock from before tracking, direct trades, loot, gifts) count "
+                "at cost 0, so their whole net revenue is profit; those sales have Low confidence and are listed "
+                "in Coverage."
             )
             st.caption(
                 "Confidence indicates how complete the pricing evidence is for a sale. "
