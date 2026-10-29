@@ -113,3 +113,49 @@ def test_no_projection_without_30_days_of_history(app_session):
     row["manufacturing_job"]["manufacturing_time_seconds"] = 86400
     row = _enriched(_trend_service(app_session), row, history)
     assert row["projected_price_at_delivery"] is None and row["projected_margin_pct"] is None
+
+
+def test_pipeline_and_realized_margin_are_summed_per_type_over_character_and_corp(app_session):
+    from datetime import datetime, timedelta
+
+    from eve_online_industry_tracker.db_models import (
+        CharacterIndustryJobsModel, CharacterRealizedSalesLedgerModel, CorporationIndustryJobsModel,
+        CorporationRealizedSalesLedgerModel,
+    )
+    from eve_online_industry_tracker.infrastructure.models import (
+        CharacterMarketOrdersModel, CorporationMarketOrdersModel,
+    )
+
+    recent = (datetime.utcnow() - timedelta(days=10)).strftime("%Y-%m-%d")
+    old = (datetime.utcnow() - timedelta(days=400)).strftime("%Y-%m-%d")
+    app_session.add_all([
+        CharacterIndustryJobsModel(character_id=1, job_id=1, product_type_id=5001, output_quantity=10, status="active"),
+        CharacterIndustryJobsModel(character_id=1, job_id=2, product_type_id=5001, output_quantity=99, status="delivered"),
+        CorporationIndustryJobsModel(corporation_id=9, job_id=3, product_type_id=5001, output_quantity=5, status="ready"),
+        CharacterIndustryJobsModel(character_id=1, job_id=4, product_type_id=5002, output_quantity=7, status="active"),
+        CharacterMarketOrdersModel(character_id=1, order_id=1, type_id=5001, volume_remain=20, is_buy_order=False),
+        CharacterMarketOrdersModel(character_id=1, order_id=2, type_id=5001, volume_remain=99, is_buy_order=True),
+        CorporationMarketOrdersModel(corporation_id=9, order_id=3, type_id=5001, volume_remain=30, is_buy_order=False),
+        CharacterRealizedSalesLedgerModel(character_id=1, transaction_id=1, quantity=1, type_id=5001, date=recent,
+                                          confidence="High", realized_margin_fraction=0.10),
+        CorporationRealizedSalesLedgerModel(corporation_id=9, transaction_id=2, quantity=1, type_id=5001, date=recent,
+                                            confidence="Medium", realized_margin_fraction=0.30),
+        CharacterRealizedSalesLedgerModel(character_id=1, transaction_id=3, quantity=1, type_id=5001, date=recent,
+                                          confidence="Low", realized_margin_fraction=0.90),
+        CharacterRealizedSalesLedgerModel(character_id=1, transaction_id=4, quantity=1, type_id=5001, date=old,
+                                          confidence="High", realized_margin_fraction=0.90),
+        CharacterRealizedSalesLedgerModel(character_id=1, transaction_id=5, quantity=1, type_id=5002, date=recent,
+                                          confidence="High", realized_margin_fraction=0.50),
+    ])
+    app_session.commit()
+    rows = [{"type_id": 5001, "manufacturing_job": {}}, {"type_id": 5002, "manufacturing_job": {}},
+            {"type_id": 5001, "manufacturing_job": {}}]
+
+    _trend_service(app_session)._enrich_product_rows_with_market_trends(rows, market_history_svc=_History())
+
+    first, second, duplicate = rows
+    assert (first["pipeline_units_in_jobs"], first["pipeline_units_on_market"]) == (15, 50)
+    assert first["historical_realized_margin_pct"] == pytest.approx(20.0)
+    assert duplicate["pipeline_total_units"] == 65
+    assert (second["pipeline_units_in_jobs"], second["pipeline_units_on_market"]) == (7, 0)
+    assert second["historical_realized_margin_pct"] is None  # one sale: too few to average

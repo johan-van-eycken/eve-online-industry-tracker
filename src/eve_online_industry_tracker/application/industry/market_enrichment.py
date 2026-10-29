@@ -5,6 +5,7 @@ A mixin of IndustryService (service.py); it holds no state of its own."""
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import math
@@ -548,71 +549,49 @@ class MarketEnrichmentMixin:
                 logger.warning("Market trends: the price stats of type_id=%s cannot be read (%s); no trend for it",
                                tid, exc)
 
-        # Pipeline query — batch for all type_ids
-        pipeline_jobs: dict[int, int] = {}
-        pipeline_orders: dict[int, int] = {}
+        # Pipeline and realized margins: one grouped query per table for all product type_ids.
+        pipeline_jobs: dict[int, int] = defaultdict(int)
+        pipeline_orders: dict[int, int] = defaultdict(int)
         historical_margins: dict[int, float | None] = {}
+        unique_type_ids = sorted({int(t) for t in product_type_ids})
 
-        if product_type_ids:
-            for tid in product_type_ids:
-                # Active/ready jobs
-                char_jobs = (
-                    app_session.query(func.sum(CharacterIndustryJobsModel.output_quantity))
-                    .filter(
-                        CharacterIndustryJobsModel.product_type_id == tid,
-                        CharacterIndustryJobsModel.status.in_(["active", "ready"]),
-                    )
-                    .scalar() or 0
-                )
-                corp_jobs = (
-                    app_session.query(func.sum(CorporationIndustryJobsModel.output_quantity))
-                    .filter(
-                        CorporationIndustryJobsModel.product_type_id == tid,
-                        CorporationIndustryJobsModel.status.in_(["active", "ready"]),
-                    )
-                    .scalar() or 0
-                )
-                pipeline_jobs[tid] = int(char_jobs) + int(corp_jobs)
+        if unique_type_ids:
+            for Model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
+                for tid, units in (
+                    app_session.query(Model.product_type_id, func.sum(Model.output_quantity))
+                    .filter(Model.product_type_id.in_(unique_type_ids), Model.status.in_(["active", "ready"]))
+                    .group_by(Model.product_type_id)
+                ):
+                    pipeline_jobs[int(tid)] += int(units or 0)
+            for Model in (CharacterMarketOrdersModel, CorporationMarketOrdersModel):
+                for tid, units in (
+                    app_session.query(Model.type_id, func.sum(Model.volume_remain))
+                    .filter(Model.type_id.in_(unique_type_ids), Model.is_buy_order == False)  # noqa: E712
+                    .group_by(Model.type_id)
+                ):
+                    pipeline_orders[int(tid)] += int(units or 0)
 
-                # Market orders
-                char_orders = (
-                    app_session.query(func.sum(CharacterMarketOrdersModel.volume_remain))
-                    .filter(
-                        CharacterMarketOrdersModel.type_id == tid,
-                        CharacterMarketOrdersModel.is_buy_order == False,  # noqa: E712
-                    )
-                    .scalar() or 0
-                )
-                corp_orders = (
-                    app_session.query(func.sum(CorporationMarketOrdersModel.volume_remain))
-                    .filter(
-                        CorporationMarketOrdersModel.type_id == tid,
-                        CorporationMarketOrdersModel.is_buy_order == False,  # noqa: E712
-                    )
-                    .scalar() or 0
-                )
-                pipeline_orders[tid] = int(char_orders) + int(corp_orders)
-
-            # Historical realized margins — last 180 days
+            # Historical realized margins — last 180 days, the mean over both ledgers
             cutoff = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
-            for tid in product_type_ids:
-                records: list[float] = []
-                for Model in (CharacterRealizedSalesLedgerModel, CorporationRealizedSalesLedgerModel):
-                    rows_q = (
-                        app_session.query(Model.realized_margin_fraction)
-                        .filter(
-                            Model.type_id == tid,
-                            Model.date >= cutoff,
-                            Model.confidence != "Low",
-                            Model.realized_margin_fraction.isnot(None),
-                        )
-                        .all()
+            margin_sum: dict[int, float] = defaultdict(float)
+            margin_count: dict[int, int] = defaultdict(int)
+            for Model in (CharacterRealizedSalesLedgerModel, CorporationRealizedSalesLedgerModel):
+                for tid, total, count in (
+                    app_session.query(Model.type_id, func.sum(Model.realized_margin_fraction),
+                                      func.count(Model.realized_margin_fraction))
+                    .filter(
+                        Model.type_id.in_(unique_type_ids),
+                        Model.date >= cutoff,
+                        Model.confidence != "Low",
+                        Model.realized_margin_fraction.isnot(None),
                     )
-                    records.extend([r[0] for r in rows_q])
-                if len(records) >= 2:
-                    historical_margins[tid] = sum(records) / len(records) * 100
-                else:
-                    historical_margins[tid] = None
+                    .group_by(Model.type_id)
+                ):
+                    margin_sum[int(tid)] += float(total or 0)
+                    margin_count[int(tid)] += int(count or 0)
+            for tid in unique_type_ids:
+                count = margin_count.get(tid, 0)
+                historical_margins[tid] = margin_sum[tid] / count * 100 if count >= 2 else None
 
         ORDER_DURATION_DAYS = 90.0
 
