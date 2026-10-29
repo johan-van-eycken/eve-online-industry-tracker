@@ -1110,6 +1110,301 @@ class IndustryService(
             "missing_blueprint_copy_runs": missing_blueprint_copy_runs,
         }
 
+    def _source_chain_material(
+        self,
+        *,
+        material: dict[str, Any],
+        desired_product_type_id: int,
+        available_copy_runs: dict[int, Any],
+        available_owned_item_quantities: dict[int, int],
+        owned_item_unit_costs: dict[int, float],
+        invention_valuation_stock: dict[int, Any],
+        next_visited: set[tuple[str, int]],
+        depth: int,
+        chain: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Take, build or buy one material of a sub-build: owned stock first,
+        then a nested build when it costs no more than buying, else buy.
+        `chain`: the planner's unchanged arguments, passed on to the nested
+        build. Returns the buy-list lines and tree nodes in order, and the
+        built child plan (None when nothing is built) for the caller's totals."""
+        include_reactions = chain["include_reactions"]
+        sell_price_map = chain["sell_price_map"]
+        adjusted_market_price_map = chain["adjusted_market_price_map"]
+        reaction_row_by_product_type_id = chain["reaction_row_by_product_type_id"]
+        manufacturing_row_by_product_type_id = chain["manufacturing_row_by_product_type_id"]
+        blueprint_copy_assets_by_type_id = chain["blueprint_copy_assets_by_type_id"]
+        character_name_by_id = chain["character_name_by_id"]
+        corporation_name_by_id = chain["corporation_name_by_id"]
+        out: dict[str, Any] = {"leaf_materials": [], "material_nodes": [], "built_plan": None}
+        child_type_id = int(material.get("type_id") or 0)
+        child_quantity = int(material.get("quantity") or 0)
+        if child_type_id <= 0 or child_quantity <= 0:
+            return out
+
+        available_owned_quantity = int(available_owned_item_quantities.get(child_type_id, 0))
+        preferred_owned_unit_cost = self._as_float(owned_item_unit_costs.get(child_type_id))
+        buy_unit_price, buy_price_source = self._resolve_preferred_unit_value(
+            type_id=child_type_id,
+            type_payload=material,
+            sell_price_map=sell_price_map,
+            adjusted_price_map=adjusted_market_price_map,
+        )
+
+        owned_quantity_to_take = min(max(0, available_owned_quantity), child_quantity)
+        if owned_quantity_to_take > 0:
+            available_owned_item_quantities[child_type_id] = max(0, available_owned_quantity - owned_quantity_to_take)
+            take_unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
+            take_price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
+            line_total = (
+                float(take_unit_price) * float(owned_quantity_to_take)
+                if take_unit_price is not None and owned_quantity_to_take > 0
+                else None
+            )
+            out["leaf_materials"].append(
+                {
+                    **dict(material),
+                    "quantity": owned_quantity_to_take,
+                    # Kept through the per-type merge so the shopping list
+                    # knows how much of the merged line is owned stock.
+                    "take_quantity": owned_quantity_to_take,
+                    "buy_quantity": 0,
+                    "unit_price": take_unit_price,
+                    "price_source": take_price_source,
+                    "line_total": line_total,
+                }
+            )
+            out["material_nodes"].append(
+                self._job_tree_node(
+                    label=str(material.get("type_name") or child_type_id),
+                    node_type="material",
+                    activity="material",
+                    sourcing_strategy="take",
+                    recommendation_action="take",
+                    category_name=str(material.get("category_name") or "") or None,
+                    meta_group_name=str(material.get("meta_group_name") or "") or None,
+                    type_id=child_type_id,
+                    quantity=owned_quantity_to_take,
+                    runs=None,
+                    duration_seconds=None,
+                    job_cost=None,
+                    total_job_cost=None,
+                    material_cost=line_total,
+                    total_cost=line_total,
+                    unit_price=take_unit_price,
+                    price_source=take_price_source,
+                    children=[],
+                )
+            )
+        remaining_child_quantity = max(0, child_quantity - owned_quantity_to_take)
+        if remaining_child_quantity <= 0:
+            return out
+
+        child_row = None
+        child_activity = "manufacturing"
+        if include_reactions and child_type_id in reaction_row_by_product_type_id:
+            child_row = reaction_row_by_product_type_id.get(child_type_id)
+            child_activity = "reaction"
+        elif child_type_id in manufacturing_row_by_product_type_id:
+            child_row = manufacturing_row_by_product_type_id.get(child_type_id)
+
+        child_plan = None
+        trial_copy_runs: dict[int, Any] = {}
+        trial_stock: dict[int, Any] = {}
+        trial_valuation: dict[int, Any] = {}
+        if child_row is not None and child_type_id != int(desired_product_type_id):
+            # Evaluate the child on copies: a rejected build must not spend
+            # stock, BPC runs or invention valuation stock (FU-61).
+            trial_copy_runs = dict(available_copy_runs)
+            trial_stock = dict(available_owned_item_quantities)
+            trial_valuation = dict(invention_valuation_stock)
+            child_plan = self._plan_blueprint_chain_for_quantity(
+                blueprint_row=child_row,
+                activity=child_activity,
+                desired_product_type_id=child_type_id,
+                required_quantity=remaining_child_quantity,
+                available_blueprint_copy_runs_by_type_id=trial_copy_runs,
+                available_owned_item_quantity_by_type_id=trial_stock,
+                invention_valuation_stock=trial_valuation,
+                visited=next_visited,
+                depth=depth + 1,
+                **chain,
+            )
+        if child_plan:
+            planned_child_quantity = min(
+                remaining_child_quantity,
+                max(0, int(child_plan.get("planned_quantity") or remaining_child_quantity)),
+            )
+            uncovered_child_quantity = max(0, remaining_child_quantity - planned_child_quantity)
+            build_total_cost = self._build_total_cost_or_none(child_plan)
+            buy_total_cost = (
+                float(buy_unit_price) * float(planned_child_quantity)
+                if buy_unit_price is not None and planned_child_quantity > 0
+                else None
+            )
+            choose_build = (
+                planned_child_quantity > 0
+                and child_plan.get("tree_node") is not None
+                and
+                build_total_cost is not None
+                and (buy_total_cost is None or build_total_cost <= buy_total_cost)
+            )
+
+            if choose_build:
+                self._commit_trial(available_copy_runs, trial_copy_runs)
+                self._commit_trial(available_owned_item_quantities, trial_stock)
+                self._commit_trial(invention_valuation_stock, trial_valuation)
+                out["leaf_materials"].extend(
+                    [dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)]
+                )
+                out["built_plan"], out["built_quantity"], out["built_activity"] = (
+                    child_plan, planned_child_quantity, child_activity,
+                )
+                child_tree_node = self._normalize_nested_owned_blueprint_copy_tree(
+                    cast(dict[str, Any] | None, child_plan.get("tree_node")),
+                    blueprint_type_id=int(child_plan.get("blueprint_type_id") or 0),
+                    planned_runs=int(child_plan.get("runs") or 0),
+                    blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
+                    category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
+                    meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
+                    character_name_by_id=character_name_by_id,
+                    corporation_name_by_id=corporation_name_by_id,
+                )
+                out["material_nodes"].append(
+                    self._job_tree_node(
+                        label=str(material.get("type_name") or child_type_id),
+                        node_type="material",
+                        activity="material",
+                        sourcing_strategy="build",
+                        recommendation_action="build",
+                        category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
+                        meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
+                        type_id=child_type_id,
+                        quantity=planned_child_quantity,
+                        runs=child_plan.get("runs"),
+                        duration_seconds=child_plan.get("total_time_seconds"),
+                        job_cost=None,
+                        total_job_cost=child_plan.get("total_job_cost"),
+                        blueprint_copy=child_plan.get("blueprint_copy") or {},
+                        blueprint_original=child_plan.get("blueprint_original") or {},
+                        children=[child_tree_node] if isinstance(child_tree_node, dict) else [],
+                    )
+                )
+                if uncovered_child_quantity > 0:
+                    uncovered_buy_total_cost = (
+                        float(buy_unit_price) * float(uncovered_child_quantity)
+                        if buy_unit_price is not None and uncovered_child_quantity > 0
+                        else None
+                    )
+                    out["leaf_materials"].append(
+                        {
+                            **dict(material),
+                            "quantity": uncovered_child_quantity,
+                            "unit_price": buy_unit_price,
+                            "price_source": buy_price_source,
+                            "line_total": uncovered_buy_total_cost,
+                        }
+                    )
+                    out["material_nodes"].append(
+                        self._job_tree_node(
+                            label=str(material.get("type_name") or child_type_id),
+                            node_type="material",
+                            activity="material",
+                            sourcing_strategy="buy",
+                            recommendation_action="buy",
+                            category_name=str(material.get("category_name") or "") or None,
+                            meta_group_name=str(material.get("meta_group_name") or "") or None,
+                            type_id=child_type_id,
+                            quantity=uncovered_child_quantity,
+                            runs=None,
+                            duration_seconds=None,
+                            job_cost=None,
+                            total_job_cost=None,
+                            material_cost=uncovered_buy_total_cost,
+                            total_cost=uncovered_buy_total_cost,
+                            unit_price=buy_unit_price,
+                            price_source=buy_price_source,
+                            children=[],
+                        )
+                    )
+            else:
+                out["leaf_materials"].append(
+                    {
+                        **dict(material),
+                        "quantity": remaining_child_quantity,
+                        "unit_price": buy_unit_price,
+                        "price_source": buy_price_source,
+                        "line_total": buy_total_cost,
+                    }
+                )
+                out["material_nodes"].append(
+                    self._job_tree_node(
+                        label=str(material.get("type_name") or child_type_id),
+                        node_type="material",
+                        activity="material",
+                        sourcing_strategy="buy",
+                        recommendation_action="buy",
+                        **self._build_cost_unknown_fields(child_plan, build_total_cost),
+                        category_name=str(material.get("category_name") or "") or None,
+                        meta_group_name=str(material.get("meta_group_name") or "") or None,
+                        type_id=child_type_id,
+                        quantity=remaining_child_quantity,
+                        runs=None,
+                        duration_seconds=None,
+                        job_cost=None,
+                        total_job_cost=None,
+                        material_cost=buy_total_cost,
+                        total_cost=buy_total_cost,
+                        unit_price=buy_unit_price,
+                        price_source=buy_price_source,
+                        children=[],
+                    )
+                )
+        else:
+            buy_total_cost = (
+                float(buy_unit_price) * float(remaining_child_quantity)
+                if buy_unit_price is not None and remaining_child_quantity > 0
+                else None
+            )
+            out["leaf_materials"].append(
+                {
+                    **dict(material),
+                    "quantity": remaining_child_quantity,
+                    "unit_price": buy_unit_price,
+                    "price_source": buy_price_source,
+                    "line_total": buy_total_cost,
+                }
+            )
+            sourcing_strategy = (
+                "buy_reaction_available"
+                if not include_reactions and child_type_id in reaction_row_by_product_type_id
+                else "buy"
+            )
+            out["material_nodes"].append(
+                self._job_tree_node(
+                    label=str(material.get("type_name") or child_type_id),
+                    node_type="material",
+                    activity="material",
+                    sourcing_strategy=sourcing_strategy,
+                    recommendation_action="buy",
+                    category_name=str(material.get("category_name") or "") or None,
+                    meta_group_name=str(material.get("meta_group_name") or "") or None,
+                    type_id=child_type_id,
+                    quantity=remaining_child_quantity,
+                    runs=None,
+                    duration_seconds=None,
+                    job_cost=None,
+                    total_job_cost=None,
+                    material_cost=buy_total_cost,
+                    total_cost=buy_total_cost,
+                    unit_price=buy_unit_price,
+                    price_source=buy_price_source,
+                    children=[],
+                )
+            )
+
+        return out
+
     def _plan_blueprint_chain_for_quantity(
         self,
         *,
@@ -1484,309 +1779,63 @@ class IndustryService(
                     )
                 )
 
+        # The arguments every nested build passes on unchanged.
+        chain: dict[str, Any] = {
+            "build_from_bpc": build_from_bpc, "include_reactions": include_reactions,
+            "selected_industry_profile": selected_industry_profile,
+            "selected_character_modifiers": selected_character_modifiers,
+            "character_skill_levels_by_name": character_skill_levels_by_name,
+            "adjusted_market_price_map": adjusted_market_price_map, "sell_price_map": sell_price_map,
+            "blueprint_copy_assets_by_type_id": blueprint_copy_assets_by_type_id,
+            "owned_item_unit_cost_by_type_id": owned_item_unit_cost_by_type_id,
+            "blueprint_original_assets_by_type_id": blueprint_original_assets_by_type_id,
+            "character_name_by_id": character_name_by_id, "corporation_name_by_id": corporation_name_by_id,
+            "manufacturing_row_by_product_type_id": manufacturing_row_by_product_type_id,
+            "reaction_row_by_product_type_id": reaction_row_by_product_type_id,
+            "invention_row_by_blueprint_type_id": invention_row_by_blueprint_type_id,
+            "invention_context": invention_context,
+        }
         for material in adjusted_material_entries:
-            child_type_id = int(material.get("type_id") or 0)
-            child_quantity = int(material.get("quantity") or 0)
-            if child_type_id <= 0 or child_quantity <= 0:
-                continue
-
-            available_owned_quantity = int(available_owned_item_quantities.get(child_type_id, 0))
-            preferred_owned_unit_cost = self._as_float(owned_item_unit_costs.get(child_type_id))
-            buy_unit_price, buy_price_source = self._resolve_preferred_unit_value(
-                type_id=child_type_id,
-                type_payload=material,
-                sell_price_map=sell_price_map,
-                adjusted_price_map=adjusted_market_price_map,
+            sourced = self._source_chain_material(
+                material=material, desired_product_type_id=desired_product_type_id,
+                available_copy_runs=available_copy_runs,
+                available_owned_item_quantities=available_owned_item_quantities,
+                owned_item_unit_costs=owned_item_unit_costs, invention_valuation_stock=invention_valuation_stock,
+                next_visited=next_visited, depth=depth, chain=chain,
             )
-
-            owned_quantity_to_take = min(max(0, available_owned_quantity), child_quantity)
-            if owned_quantity_to_take > 0:
-                available_owned_item_quantities[child_type_id] = max(0, available_owned_quantity - owned_quantity_to_take)
-                take_unit_price = preferred_owned_unit_cost if preferred_owned_unit_cost is not None else buy_unit_price
-                take_price_source = "owned_asset_item_value" if preferred_owned_unit_cost is not None else buy_price_source
-                line_total = (
-                    float(take_unit_price) * float(owned_quantity_to_take)
-                    if take_unit_price is not None and owned_quantity_to_take > 0
-                    else None
-                )
-                leaf_materials.append(
-                    {
-                        **dict(material),
-                        "quantity": owned_quantity_to_take,
-                        # Kept through the per-type merge so the shopping list
-                        # knows how much of the merged line is owned stock.
-                        "take_quantity": owned_quantity_to_take,
-                        "buy_quantity": 0,
-                        "unit_price": take_unit_price,
-                        "price_source": take_price_source,
-                        "line_total": line_total,
-                    }
-                )
-                material_nodes.append(
-                    self._job_tree_node(
-                        label=str(material.get("type_name") or child_type_id),
-                        node_type="material",
-                        activity="material",
-                        sourcing_strategy="take",
-                        recommendation_action="take",
-                        category_name=str(material.get("category_name") or "") or None,
-                        meta_group_name=str(material.get("meta_group_name") or "") or None,
-                        type_id=child_type_id,
-                        quantity=owned_quantity_to_take,
-                        runs=None,
-                        duration_seconds=None,
-                        job_cost=None,
-                        total_job_cost=None,
-                        material_cost=line_total,
-                        total_cost=line_total,
-                        unit_price=take_unit_price,
-                        price_source=take_price_source,
-                        children=[],
-                    )
-                )
-            remaining_child_quantity = max(0, child_quantity - owned_quantity_to_take)
-            if remaining_child_quantity <= 0:
+            leaf_materials.extend(sourced["leaf_materials"])
+            material_nodes.extend(sourced["material_nodes"])
+            child_plan = sourced["built_plan"]
+            if child_plan is None:
                 continue
-
-            child_row = None
-            child_activity = "manufacturing"
-            if include_reactions and child_type_id in reaction_row_by_product_type_id:
-                child_row = reaction_row_by_product_type_id.get(child_type_id)
-                child_activity = "reaction"
-            elif child_type_id in manufacturing_row_by_product_type_id:
-                child_row = manufacturing_row_by_product_type_id.get(child_type_id)
-
-            child_plan = None
-            trial_copy_runs: dict[int, Any] = {}
-            trial_stock: dict[int, Any] = {}
-            trial_valuation: dict[int, Any] = {}
-            if child_row is not None and child_type_id != int(desired_product_type_id):
-                # Evaluate the child on copies: a rejected build must not spend
-                # stock, BPC runs or invention valuation stock (FU-61).
-                trial_copy_runs = dict(available_copy_runs)
-                trial_stock = dict(available_owned_item_quantities)
-                trial_valuation = dict(invention_valuation_stock)
-                child_plan = self._plan_blueprint_chain_for_quantity(
-                    blueprint_row=child_row,
-                    activity=child_activity,
-                    desired_product_type_id=child_type_id,
-                    required_quantity=remaining_child_quantity,
-                    build_from_bpc=build_from_bpc,
-                    include_reactions=include_reactions,
-                    selected_industry_profile=selected_industry_profile,
-                    selected_character_modifiers=selected_character_modifiers,
-                    character_skill_levels_by_name=character_skill_levels_by_name,
-                    adjusted_market_price_map=adjusted_market_price_map,
-                    sell_price_map=sell_price_map,
-                    blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
-                    available_blueprint_copy_runs_by_type_id=trial_copy_runs,
-                    available_owned_item_quantity_by_type_id=trial_stock,
-                    invention_valuation_stock=trial_valuation,
-                    owned_item_unit_cost_by_type_id=owned_item_unit_cost_by_type_id,
-                    blueprint_original_assets_by_type_id=blueprint_original_assets_by_type_id,
-                    character_name_by_id=character_name_by_id,
-                    corporation_name_by_id=corporation_name_by_id,
-                    manufacturing_row_by_product_type_id=manufacturing_row_by_product_type_id,
-                    reaction_row_by_product_type_id=reaction_row_by_product_type_id,
-                    invention_row_by_blueprint_type_id=invention_row_by_blueprint_type_id,
-                    invention_context=invention_context,
-                    visited=next_visited,
-                    depth=depth + 1,
-                )
-            if child_plan:
-                planned_child_quantity = min(
-                    remaining_child_quantity,
-                    max(0, int(child_plan.get("planned_quantity") or remaining_child_quantity)),
-                )
-                uncovered_child_quantity = max(0, remaining_child_quantity - planned_child_quantity)
-                build_total_cost = self._build_total_cost_or_none(child_plan)
-                buy_total_cost = (
-                    float(buy_unit_price) * float(planned_child_quantity)
-                    if buy_unit_price is not None and planned_child_quantity > 0
-                    else None
-                )
-                choose_build = (
-                    planned_child_quantity > 0
-                    and child_plan.get("tree_node") is not None
-                    and
-                    build_total_cost is not None
-                    and (buy_total_cost is None or build_total_cost <= buy_total_cost)
-                )
-
-                if choose_build:
-                    self._commit_trial(available_copy_runs, trial_copy_runs)
-                    self._commit_trial(available_owned_item_quantities, trial_stock)
-                    self._commit_trial(invention_valuation_stock, trial_valuation)
-                    total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
-                    if child_plan.get("total_job_cost") is not None:
-                        total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
-                        priced_job_count += int(child_plan.get("priced_job_count") or 0)
-                    job_fee_unknown_reasons.extend(str(r) for r in (child_plan.get("job_fee_unknown_reasons") or []))
-                    leaf_materials.extend([dict(entry) for entry in (child_plan.get("leaf_materials") or []) if isinstance(entry, dict)])
-                    elapsed_time_adjustment = self._absorb_nested_invention(
-                        child_plan, expected_invention_materials=expected_invention_materials,
-                        invention_requirements=invention_requirements,
-                        nested_invention_bpc_plans=nested_invention_bpc_plans,
-                        invention_cost_unknown_reasons=invention_cost_unknown_reasons,
-                        invention_chance_notes=invention_chance_notes,
-                        elapsed_time_adjustment=elapsed_time_adjustment,
-                    )
-                    duration_is_amortized = duration_is_amortized or bool(child_plan.get("duration_is_amortized"))
-                    recursive_activity_breakdown[f"{child_activity}:{child_type_id}"] = {
-                        "activity": child_activity,
-                        "type_id": child_type_id,
-                        "type_name": material.get("type_name"),
-                        "quantity": planned_child_quantity,
-                        "job_segments": child_plan.get("job_segments"),
-                        "material_reduction": child_plan.get("material_reduction"),
-                        **({"reduction_basis": child_plan["reduction_basis"]} if child_plan.get("reduction_basis") else {}),
-                        "time_seconds": child_plan.get("total_time_seconds"),
-                        "job_cost": child_plan.get("total_job_cost"),
-                        "direct_job_cost": child_plan.get("direct_job_cost"),
-                        "recommended_action": "build",
-                    }
-                    child_tree_node = self._normalize_nested_owned_blueprint_copy_tree(
-                        cast(dict[str, Any] | None, child_plan.get("tree_node")),
-                        blueprint_type_id=int(child_plan.get("blueprint_type_id") or 0),
-                        planned_runs=int(child_plan.get("runs") or 0),
-                        blueprint_copy_assets_by_type_id=blueprint_copy_assets_by_type_id,
-                        category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
-                        meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
-                        character_name_by_id=character_name_by_id,
-                        corporation_name_by_id=corporation_name_by_id,
-                    )
-                    material_nodes.append(
-                        self._job_tree_node(
-                            label=str(material.get("type_name") or child_type_id),
-                            node_type="material",
-                            activity="material",
-                            sourcing_strategy="build",
-                            recommendation_action="build",
-                            category_name=str(child_plan.get("category_name") or material.get("category_name") or "") or None,
-                            meta_group_name=str(child_plan.get("meta_group_name") or material.get("meta_group_name") or "") or None,
-                            type_id=child_type_id,
-                            quantity=planned_child_quantity,
-                            runs=child_plan.get("runs"),
-                            duration_seconds=child_plan.get("total_time_seconds"),
-                            job_cost=None,
-                            total_job_cost=child_plan.get("total_job_cost"),
-                            blueprint_copy=child_plan.get("blueprint_copy") or {},
-                            blueprint_original=child_plan.get("blueprint_original") or {},
-                            children=[child_tree_node] if isinstance(child_tree_node, dict) else [],
-                        )
-                    )
-                    if uncovered_child_quantity > 0:
-                        uncovered_buy_total_cost = (
-                            float(buy_unit_price) * float(uncovered_child_quantity)
-                            if buy_unit_price is not None and uncovered_child_quantity > 0
-                            else None
-                        )
-                        leaf_materials.append(
-                            {
-                                **dict(material),
-                                "quantity": uncovered_child_quantity,
-                                "unit_price": buy_unit_price,
-                                "price_source": buy_price_source,
-                                "line_total": uncovered_buy_total_cost,
-                            }
-                        )
-                        material_nodes.append(
-                            self._job_tree_node(
-                                label=str(material.get("type_name") or child_type_id),
-                                node_type="material",
-                                activity="material",
-                                sourcing_strategy="buy",
-                                recommendation_action="buy",
-                                category_name=str(material.get("category_name") or "") or None,
-                                meta_group_name=str(material.get("meta_group_name") or "") or None,
-                                type_id=child_type_id,
-                                quantity=uncovered_child_quantity,
-                                runs=None,
-                                duration_seconds=None,
-                                job_cost=None,
-                                total_job_cost=None,
-                                material_cost=uncovered_buy_total_cost,
-                                total_cost=uncovered_buy_total_cost,
-                                unit_price=buy_unit_price,
-                                price_source=buy_price_source,
-                                children=[],
-                            )
-                        )
-                else:
-                    leaf_materials.append(
-                        {
-                            **dict(material),
-                            "quantity": remaining_child_quantity,
-                            "unit_price": buy_unit_price,
-                            "price_source": buy_price_source,
-                            "line_total": buy_total_cost,
-                        }
-                    )
-                    material_nodes.append(
-                        self._job_tree_node(
-                            label=str(material.get("type_name") or child_type_id),
-                            node_type="material",
-                            activity="material",
-                            sourcing_strategy="buy",
-                            recommendation_action="buy",
-                            **self._build_cost_unknown_fields(child_plan, build_total_cost),
-                            category_name=str(material.get("category_name") or "") or None,
-                            meta_group_name=str(material.get("meta_group_name") or "") or None,
-                            type_id=child_type_id,
-                            quantity=remaining_child_quantity,
-                            runs=None,
-                            duration_seconds=None,
-                            job_cost=None,
-                            total_job_cost=None,
-                            material_cost=buy_total_cost,
-                            total_cost=buy_total_cost,
-                            unit_price=buy_unit_price,
-                            price_source=buy_price_source,
-                            children=[],
-                        )
-                    )
-            else:
-                buy_total_cost = (
-                    float(buy_unit_price) * float(remaining_child_quantity)
-                    if buy_unit_price is not None and remaining_child_quantity > 0
-                    else None
-                )
-                leaf_materials.append(
-                    {
-                        **dict(material),
-                        "quantity": remaining_child_quantity,
-                        "unit_price": buy_unit_price,
-                        "price_source": buy_price_source,
-                        "line_total": buy_total_cost,
-                    }
-                )
-                sourcing_strategy = (
-                    "buy_reaction_available"
-                    if not include_reactions and child_type_id in reaction_row_by_product_type_id
-                    else "buy"
-                )
-                material_nodes.append(
-                    self._job_tree_node(
-                        label=str(material.get("type_name") or child_type_id),
-                        node_type="material",
-                        activity="material",
-                        sourcing_strategy=sourcing_strategy,
-                        recommendation_action="buy",
-                        category_name=str(material.get("category_name") or "") or None,
-                        meta_group_name=str(material.get("meta_group_name") or "") or None,
-                        type_id=child_type_id,
-                        quantity=remaining_child_quantity,
-                        runs=None,
-                        duration_seconds=None,
-                        job_cost=None,
-                        total_job_cost=None,
-                        material_cost=buy_total_cost,
-                        total_cost=buy_total_cost,
-                        unit_price=buy_unit_price,
-                        price_source=buy_price_source,
-                        children=[],
-                    )
-                )
+            child_type_id, child_activity = int(material.get("type_id") or 0), sourced["built_activity"]
+            total_time_seconds += int(child_plan.get("total_time_seconds") or 0)
+            if child_plan.get("total_job_cost") is not None:
+                total_job_cost += float(child_plan.get("total_job_cost") or 0.0)
+                priced_job_count += int(child_plan.get("priced_job_count") or 0)
+            job_fee_unknown_reasons.extend(str(r) for r in (child_plan.get("job_fee_unknown_reasons") or []))
+            elapsed_time_adjustment = self._absorb_nested_invention(
+                child_plan, expected_invention_materials=expected_invention_materials,
+                invention_requirements=invention_requirements,
+                nested_invention_bpc_plans=nested_invention_bpc_plans,
+                invention_cost_unknown_reasons=invention_cost_unknown_reasons,
+                invention_chance_notes=invention_chance_notes,
+                elapsed_time_adjustment=elapsed_time_adjustment,
+            )
+            duration_is_amortized = duration_is_amortized or bool(child_plan.get("duration_is_amortized"))
+            recursive_activity_breakdown[f"{child_activity}:{child_type_id}"] = {
+                "activity": child_activity,
+                "type_id": child_type_id,
+                "type_name": material.get("type_name"),
+                "quantity": sourced["built_quantity"],
+                "job_segments": child_plan.get("job_segments"),
+                "material_reduction": child_plan.get("material_reduction"),
+                **({"reduction_basis": child_plan["reduction_basis"]} if child_plan.get("reduction_basis") else {}),
+                "time_seconds": child_plan.get("total_time_seconds"),
+                "job_cost": child_plan.get("total_job_cost"),
+                "direct_job_cost": child_plan.get("direct_job_cost"),
+                "recommended_action": "build",
+            }
 
         if activity == "manufacturing" and missing_blueprint_copy_runs > 0 and not matched_blueprint_originals:
             invention_source_row = invention_row_by_blueprint_type_id.get(blueprint_type_id)
