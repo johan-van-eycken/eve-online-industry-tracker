@@ -24,7 +24,7 @@ from eve_online_industry_tracker.application.industry.character_slots import (
     research_slot_capacity,
     skill_levels_by_name as _character_skill_levels_by_name,
 )
-from eve_online_industry_tracker.infrastructure.sde.blueprints import round_material_quantity
+from eve_online_industry_tracker.infrastructure.sde.blueprints import activity_skills, round_material_quantity
 from eve_online_industry_tracker.infrastructure.sde.skills import get_encryption_skill_type_ids
 
 
@@ -636,8 +636,6 @@ class PilotModifiersMixin:
                                "qualifies for no blueprint", character_id, exc)
                 char_skill_levels[character_id] = None
 
-        # The SDE's raw activities, shaped as get_blueprint_manufacturing_data's
-        # activity_skills for the shared helper.
         sde_session: Any = self._sessions.sde_session()
         try:
             blueprint_rows = (
@@ -649,16 +647,8 @@ class PilotModifiersMixin:
             close = getattr(sde_session, "close", None)
             if callable(close):
                 close()
-        blueprint_data: dict[int, dict[str, Any]] = {}
-        for bp in blueprint_rows:
-            activities = bp.activities if isinstance(bp.activities, dict) else {}
-            blueprint_data[int(bp.blueprintTypeID)] = {"activity_skills": {
-                name: [
-                    {"type_id": skill.get("typeID"), "level": skill.get("level")}
-                    for skill in (activity.get("skills") or []) if isinstance(skill, dict)
-                ]
-                for name, activity in activities.items() if isinstance(activity, dict)
-            }}
+        blueprint_data = {int(bp.blueprintTypeID): {"activity_skills": activity_skills(bp.activities)}
+                          for bp in blueprint_rows}
 
         result: dict[int, dict[int, bool]] = {}
         for bp_type_id in blueprint_type_ids:
