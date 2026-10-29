@@ -272,7 +272,7 @@ def _render_overview_grid(
         ("Hub Sell Orders", 135),
         ("Pricing Confidence", 140),
         ("Profit Margin %", 130),
-        ("Price Trend %", 120),
+        ("Price Trend 7d vs 42w %", 120),
         ("7d Avg Price", 130),
         ("42w Avg Price", 130),
         ("Price Volatility %", 130),
@@ -396,7 +396,7 @@ function(params) {
     return {color: '#ef4444', textAlign: 'right'};
 }
 """)
-    for col in ("Price Trend %", "Projected Margin %", "Historical Margin %"):
+    for col in ("Price Trend 7d vs 42w %", "Projected Margin %", "Historical Margin %"):
         if col in df.columns:
             gb.configure_column(col, type=["numericColumn", "numberColumnFilter"],
                 valueFormatter=js_eu_pct_formatter(JsCode=runtime.js_code, locale=runtime.locale, decimals=1),

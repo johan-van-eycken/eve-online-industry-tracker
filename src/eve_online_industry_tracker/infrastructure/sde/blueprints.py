@@ -331,11 +331,10 @@ def get_blueprint_manufacturing_data(
             "activity_skills": {
                 activity: [
                     enriched for enriched in (
-                        _enrich_type_entry(type_data_map, skill.get("typeID"), level=skill.get("level"))
-                        for skill in _activity_skill_list(activities, activity)
+                        _enrich_type_entry(type_data_map, skill["type_id"], level=skill["level"]) for skill in skills
                     ) if enriched is not None
                 ]
-                for activity in SDE_ACTIVITIES if isinstance(activities.get(activity), dict)
+                for activity, skills in activity_skills(activities).items()
             },
         }
 
@@ -352,6 +351,17 @@ def _activity_skill_list(activities: dict[str, Any], activity: str) -> list[dict
     entry = activities.get(activity)
     skills = entry.get("skills") if isinstance(entry, dict) else None
     return [s for s in skills if isinstance(s, dict)] if isinstance(skills, list) else []
+
+
+def activity_skills(activities: Any) -> dict[str, list[dict[str, Any]]]:
+    """A blueprint's SDE skills per activity it has, as {type_id, level}
+    entries: get_blueprint_manufacturing_data's activity_skills without the
+    type names."""
+    activities = activities if isinstance(activities, dict) else {}
+    return {
+        activity: [{"type_id": s.get("typeID"), "level": s.get("level")} for s in _activity_skill_list(activities, activity)]
+        for activity in SDE_ACTIVITIES if isinstance(activities.get(activity), dict)
+    }
 
 
 def get_invention_source_blueprint_ids(

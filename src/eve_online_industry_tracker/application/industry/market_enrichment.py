@@ -5,6 +5,7 @@ A mixin of IndustryService (service.py); it holds no state of its own."""
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import math
@@ -47,10 +48,14 @@ class MarketEnrichmentMixin:
 
     def _relist_broker_fee_fraction(self, row: dict[str, Any]) -> tuple[float, str | None]:
         """(the broker fee fraction of a relist, the note when it is assumed).
-        The product's own broker fee (market_fee_context) when known, 0.0
-        included; otherwise admin setting market_defaults/default_broker_fee,
-        with a note naming it (it was a hidden 3.5% before)."""
-        own = self._as_float((row.get("market_fee_context") or {}).get("broker_fee_fraction"))
+        0.0 when the product sells into buy orders (no order to relist); else
+        the product's own broker fee (manufacturing_job.market_fee_context)
+        when known, 0.0 included; otherwise admin setting
+        market_defaults/default_broker_fee, with a note naming it."""
+        context = (row.get("manufacturing_job") or {}).get("market_fee_context") or {}
+        if context and not context.get("broker_fee_applies"):
+            return 0.0, None
+        own = self._as_float((context.get("rates") or {}).get("broker_fee_fraction"))
         if own is not None:
             return own, None
         assumed = float(self._adm("market_defaults", "default_broker_fee"))
@@ -330,7 +335,6 @@ class MarketEnrichmentMixin:
             row["liquidity_indicator"] = self._calculate_liquidity_indicator(
                 hub_sell_liquidity=hub_sell_liquidity,
                 region_daily_volume_7d_avg=region_daily_volume_7d_avg,
-                hub_sell_orders=hub_sell_orders,
             )
             row["liquidity_score"] = self._calculate_liquidity_score(
                 hub_sell_liquidity=hub_sell_liquidity,
@@ -368,15 +372,23 @@ class MarketEnrichmentMixin:
             if isinstance(row, dict) and int(row.get("type_id") or 0) > 0
         })
 
-        # Fetch ESI history for any type_id not yet in the DB (runs once; subsequent calls hit the DB)
-        missing: list[int] = []
-        for tid in type_ids:
-            stats = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
-            if not stats.get("has_data"):
-                missing.append(tid)
-
         # Why a type has no history to compare with: shown on its row, not a silent skip.
         history_unavailable: dict[int, str] = {}
+        # Fetch ESI history for any type_id not yet in the DB (runs once; subsequent calls hit the DB)
+        price_stats: dict[int, dict[str, Any]] = {}
+        missing: list[int] = []
+        for tid in type_ids:
+            try:
+                price_stats[tid] = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
+            except SQLAlchemyError as exc:
+                logger.warning("Price anomaly: the price stats of type_id=%s cannot be read (%s); no anomaly check for "
+                               "it", tid, exc)
+                price_stats[tid] = {"has_data": False}
+                history_unavailable.setdefault(tid, f"price stats unreadable (DB error: {type(exc).__name__})")
+                continue
+            if not price_stats[tid].get("has_data"):
+                missing.append(tid)
+
         if missing:
             with ThreadPoolExecutor(max_workers=20) as pool:
                 futures = {
@@ -393,9 +405,8 @@ class MarketEnrichmentMixin:
                     if reason:
                         history_unavailable[futures[f]] = str(reason)
 
-        # Load price stats for all type_ids
-        price_stats: dict[int, dict[str, Any]] = {}
-        for tid in type_ids:
+        # Re-read only the types whose history was just fetched
+        for tid in missing:
             try:
                 price_stats[tid] = history_service.get_price_stats(type_id=tid, region_id=region_id, days=60)
             except SQLAlchemyError as exc:
@@ -544,71 +555,49 @@ class MarketEnrichmentMixin:
                 logger.warning("Market trends: the price stats of type_id=%s cannot be read (%s); no trend for it",
                                tid, exc)
 
-        # Pipeline query — batch for all type_ids
-        pipeline_jobs: dict[int, int] = {}
-        pipeline_orders: dict[int, int] = {}
+        # Pipeline and realized margins: one grouped query per table for all product type_ids.
+        pipeline_jobs: dict[int, int] = defaultdict(int)
+        pipeline_orders: dict[int, int] = defaultdict(int)
         historical_margins: dict[int, float | None] = {}
+        unique_type_ids = sorted({int(t) for t in product_type_ids})
 
-        if product_type_ids:
-            for tid in product_type_ids:
-                # Active/ready jobs
-                char_jobs = (
-                    app_session.query(func.sum(CharacterIndustryJobsModel.output_quantity))
-                    .filter(
-                        CharacterIndustryJobsModel.product_type_id == tid,
-                        CharacterIndustryJobsModel.status.in_(["active", "ready"]),
-                    )
-                    .scalar() or 0
-                )
-                corp_jobs = (
-                    app_session.query(func.sum(CorporationIndustryJobsModel.output_quantity))
-                    .filter(
-                        CorporationIndustryJobsModel.product_type_id == tid,
-                        CorporationIndustryJobsModel.status.in_(["active", "ready"]),
-                    )
-                    .scalar() or 0
-                )
-                pipeline_jobs[tid] = int(char_jobs) + int(corp_jobs)
+        if unique_type_ids:
+            for Model in (CharacterIndustryJobsModel, CorporationIndustryJobsModel):
+                for tid, units in (
+                    app_session.query(Model.product_type_id, func.sum(Model.output_quantity))
+                    .filter(Model.product_type_id.in_(unique_type_ids), Model.status.in_(["active", "ready"]))
+                    .group_by(Model.product_type_id)
+                ):
+                    pipeline_jobs[int(tid)] += int(units or 0)
+            for Model in (CharacterMarketOrdersModel, CorporationMarketOrdersModel):
+                for tid, units in (
+                    app_session.query(Model.type_id, func.sum(Model.volume_remain))
+                    .filter(Model.type_id.in_(unique_type_ids), Model.is_buy_order == False)  # noqa: E712
+                    .group_by(Model.type_id)
+                ):
+                    pipeline_orders[int(tid)] += int(units or 0)
 
-                # Market orders
-                char_orders = (
-                    app_session.query(func.sum(CharacterMarketOrdersModel.volume_remain))
-                    .filter(
-                        CharacterMarketOrdersModel.type_id == tid,
-                        CharacterMarketOrdersModel.is_buy_order == False,  # noqa: E712
-                    )
-                    .scalar() or 0
-                )
-                corp_orders = (
-                    app_session.query(func.sum(CorporationMarketOrdersModel.volume_remain))
-                    .filter(
-                        CorporationMarketOrdersModel.type_id == tid,
-                        CorporationMarketOrdersModel.is_buy_order == False,  # noqa: E712
-                    )
-                    .scalar() or 0
-                )
-                pipeline_orders[tid] = int(char_orders) + int(corp_orders)
-
-            # Historical realized margins — last 180 days
+            # Historical realized margins — last 180 days, the mean over both ledgers
             cutoff = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%d")
-            for tid in product_type_ids:
-                records: list[float] = []
-                for Model in (CharacterRealizedSalesLedgerModel, CorporationRealizedSalesLedgerModel):
-                    rows_q = (
-                        app_session.query(Model.realized_margin_fraction)
-                        .filter(
-                            Model.type_id == tid,
-                            Model.date >= cutoff,
-                            Model.confidence != "Low",
-                            Model.realized_margin_fraction.isnot(None),
-                        )
-                        .all()
+            margin_sum: dict[int, float] = defaultdict(float)
+            margin_count: dict[int, int] = defaultdict(int)
+            for Model in (CharacterRealizedSalesLedgerModel, CorporationRealizedSalesLedgerModel):
+                for tid, total, count in (
+                    app_session.query(Model.type_id, func.sum(Model.realized_margin_fraction),
+                                      func.count(Model.realized_margin_fraction))
+                    .filter(
+                        Model.type_id.in_(unique_type_ids),
+                        Model.date >= cutoff,
+                        Model.confidence != "Low",
+                        Model.realized_margin_fraction.isnot(None),
                     )
-                    records.extend([r[0] for r in rows_q])
-                if len(records) >= 2:
-                    historical_margins[tid] = sum(records) / len(records) * 100
-                else:
-                    historical_margins[tid] = None
+                    .group_by(Model.type_id)
+                ):
+                    margin_sum[int(tid)] += float(total or 0)
+                    margin_count[int(tid)] += int(count or 0)
+            for tid in unique_type_ids:
+                count = margin_count.get(tid, 0)
+                historical_margins[tid] = margin_sum[tid] / count * 100 if count >= 2 else None
 
         ORDER_DURATION_DAYS = 90.0
 
@@ -638,12 +627,13 @@ class MarketEnrichmentMixin:
                 row["margin_buffer_pct"] = None
 
             # Projected price at delivery
-            trend_pct = stats.get("trend_pct")
+            trend_30d_pct = stats.get("trend_30d_pct")
             mfg_seconds = self._as_float(mfg_job.get("manufacturing_time_seconds")) or 0
             mfg_days = mfg_seconds / 86400.0
 
-            if market_price and trend_pct is not None:
-                daily_trend = trend_pct / 100.0 / 30.0
+            if market_price and trend_30d_pct is not None:
+                # 7d vs 30d average: their midpoints (day 3.5 and day 15) are 11.5 days apart.
+                daily_trend = trend_30d_pct / 100.0 / 11.5
                 projected_price = market_price * (1.0 + daily_trend * mfg_days)
                 row["projected_price_at_delivery"] = projected_price
                 if unit_build_cost and unit_build_cost > 0 and projected_price > 0:
@@ -1415,7 +1405,7 @@ class MarketEnrichmentMixin:
             return None
 
     @staticmethod
-    def _calculate_sell_through_rate(region_daily_volume_7d_avg: float | None, hub_sell_liquidity: int) -> float | None:
+    def _calculate_sell_through_rate(region_daily_volume_7d_avg: float | None, hub_sell_liquidity: int | None) -> float | None:
         """Calculate Sell-Through Rate (%) = (Region Daily Volume 7d avg / Hub Sell Liquidity) * 100"""
         try:
             if region_daily_volume_7d_avg is None or hub_sell_liquidity is None or hub_sell_liquidity <= 0:
@@ -1425,7 +1415,7 @@ class MarketEnrichmentMixin:
             return None
 
     @staticmethod
-    def _calculate_liquidity_indicator(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None, hub_sell_orders: int | None) -> str:
+    def _calculate_liquidity_indicator(hub_sell_liquidity: int | None, region_daily_volume_7d_avg: float | None) -> str:
         """Calculate liquidity indicator based on DOS ranges: Very High, High, Medium, Low, Very Low;
         Unknown when the hub liquidity or the region volume is unknown."""
         try:
@@ -1465,10 +1455,10 @@ class MarketEnrichmentMixin:
 
             dos = float(hub_sell_liquidity) / float(region_daily_volume_7d_avg)
 
-            # DOS score: lower DOS is better (1 day = 100, 30 days = 0, linear scale)
+            # DOS score: lower DOS is better (0 days = 100, 30+ days = 0, linear)
             dos_score = max(0.0, min(100.0, 100.0 - (dos / 30.0 * 100.0)))
 
-            # Order count score: more orders is better (log scale, 100 orders = 100)
+            # Order count score: more orders is better (linear, 100+ orders = 100)
             order_count_score = min(100.0, (float(hub_sell_orders) / 100.0) * 100.0) if hub_sell_orders > 0 else 0.0
 
             # Combined score: 70% DOS, 30% order count

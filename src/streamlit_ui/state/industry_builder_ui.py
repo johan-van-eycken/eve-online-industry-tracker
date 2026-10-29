@@ -608,7 +608,7 @@ def flatten_overview_job_tree_rows(overview_rows: list[dict[str, Any]]) -> list[
                 "Meta Group": meta_group,
                 "Category": category,
                 # Tier 1 — Market trends (top-level product rows only)
-                "Price Trend %": price_trend_7d_pct,
+                "Price Trend 7d vs 42w %": price_trend_7d_pct,
                 "7d Avg Price": price_avg_7d,
                 "42w Avg Price": price_avg_42w,
                 "Price Volatility %": price_volatility_pct,

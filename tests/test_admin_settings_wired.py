@@ -261,8 +261,14 @@ def test_the_relist_broker_fee_assumption_is_the_setting(tmp_path):
     mgr = _manager(tmp_path)
     svc = IndustryService.__new__(IndustryService)
     svc._state = SimpleNamespace(admin_settings=mgr)
-    assert svc._relist_broker_fee_fraction({"market_fee_context": {"broker_fee_fraction": 0.012}}) == (0.012, None)
-    assert svc._relist_broker_fee_fraction({"market_fee_context": {"broker_fee_fraction": 0.0}}) == (0.0, None)
+    def row(broker):
+        return {"manufacturing_job": {"market_fee_context": {"broker_fee_applies": True,
+                                                             "rates": {"broker_fee_fraction": broker}}}}
+
+    assert svc._relist_broker_fee_fraction(row(0.012)) == (0.012, None)
+    assert svc._relist_broker_fee_fraction(row(0.0)) == (0.0, None)
+    fraction, assumed = svc._relist_broker_fee_fraction(row(None))
+    assert fraction == 0.03 and "market_defaults/default_broker_fee" in assumed
     fraction, assumed = svc._relist_broker_fee_fraction({})
     assert fraction == 0.03 and "market_defaults/default_broker_fee" in assumed
     mgr.set("market_defaults", "default_broker_fee", 0.05)
