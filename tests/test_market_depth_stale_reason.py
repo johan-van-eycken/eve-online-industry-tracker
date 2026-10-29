@@ -5,13 +5,9 @@ and plan-level unavailable inputs, and the Analytics tab. Fake values."""
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
-import sys
 from datetime import datetime
 from types import SimpleNamespace
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.service import (  # noqa: E402
     _market_depth_stale_inputs,

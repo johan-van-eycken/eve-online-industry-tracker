@@ -441,7 +441,6 @@ def test_an_unpriced_material_makes_capital_reserved_unknown():
     import sys
     from datetime import datetime
 
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
     from streamlit_ui.components.daily_planner import status_bar
     from eve_online_industry_tracker.application.daily_planner.action_plan_builder import ActionPlanBuilder
 

@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import os
-import sys
 from types import MethodType
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.industry.portfolio_service import (  # noqa: E402
     IndustryPortfolioService,

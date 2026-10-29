@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import json
-import os
-import sys
 from types import MethodType, SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.industry.service import IndustryService  # noqa: E402
 from eve_online_industry_tracker.db_models import BaseApp, BaseSde, Blueprints  # noqa: E402

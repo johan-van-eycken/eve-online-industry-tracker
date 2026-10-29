@@ -9,10 +9,6 @@ copy time per run at most 30 days, at least one copy. The earlier cap
 from __future__ import annotations
 
 import copy
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import test_daily_planner_assigned_inventor as A  # noqa: E402
 import test_blueprint_ledger as L  # noqa: E402

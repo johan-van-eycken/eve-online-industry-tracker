@@ -13,13 +13,9 @@ probe d pinned. Fake ids and numbers throughout.
 from __future__ import annotations
 
 import copy
-import os
-import sys
 from types import SimpleNamespace
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import test_daily_planner_assigned_inventor as A  # noqa: E402
 import test_research_first as R  # noqa: E402

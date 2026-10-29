@@ -7,12 +7,7 @@ jobs (Task 8b); the numbers here are invented.
 """
 from __future__ import annotations
 
-import os
-import sys
-
 import pytest
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.industry.job_cost import (  # noqa: E402
     JobSurchargeRates,

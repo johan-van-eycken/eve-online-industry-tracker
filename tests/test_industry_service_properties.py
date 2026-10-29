@@ -7,13 +7,9 @@ across the manufacturing cost, time, material, and pricing calculations.
 from __future__ import annotations
 
 import math
-import os
-import sys
 
 from hypothesis import given, assume, settings
 from hypothesis import strategies as st
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.industry.service import IndustryService  # noqa: E402
 from eve_online_industry_tracker.application.industry.job_cost import JobSurchargeRates  # noqa: E402

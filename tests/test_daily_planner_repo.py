@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import os
 import sqlite3
-import sys
 from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.infrastructure.models import BaseApp  # noqa: E402
 from eve_online_industry_tracker.infrastructure.schema_migrations import ensure_app_schema  # noqa: E402

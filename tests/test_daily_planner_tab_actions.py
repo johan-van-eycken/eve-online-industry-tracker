@@ -1,11 +1,6 @@
 """tab_actions must tolerate action types the planner no longer produces."""
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 import logging  # noqa: E402
 
 from streamlit_ui.components.daily_planner import tab_actions  # noqa: E402

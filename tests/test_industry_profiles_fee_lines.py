@@ -1,11 +1,6 @@
 """The industry profile page's job-fee lines (round 5 Task 10, carries 9, 11)."""
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from streamlit_ui.pages import industry_profiles as page  # noqa: E402
 
 

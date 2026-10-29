@@ -12,10 +12,6 @@ M6 the ledger indexes its keys.
 from __future__ import annotations
 
 import logging
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402

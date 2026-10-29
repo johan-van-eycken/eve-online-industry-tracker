@@ -13,14 +13,10 @@ reason. Fake ids and pilots throughout.
 from __future__ import annotations
 
 import logging
-import os
 import random
-import sys
 from collections import Counter
 
 import pytest
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402

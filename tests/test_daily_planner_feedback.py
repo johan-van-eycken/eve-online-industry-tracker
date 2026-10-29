@@ -2,21 +2,13 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from eve_online_industry_tracker.application.daily_planner.feedback_processor import FeedbackProcessor
-from eve_online_industry_tracker.infrastructure.models import (
-    PlanLearningWeightsModel,
-    PlanItemOutcomeModel,
-)
 
 
 def _utcnow() -> datetime:

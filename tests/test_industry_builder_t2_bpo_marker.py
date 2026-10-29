@@ -1,11 +1,6 @@
 """The 'costed as if a T2 BPO is owned' flag reaches the grid cell and the drilldown."""
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from streamlit_ui.pages import industry_builder  # noqa: E402,F401  (import smoke)
 from streamlit_ui.state import industry_builder_ui as ui  # noqa: E402
 

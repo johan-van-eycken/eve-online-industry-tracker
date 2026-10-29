@@ -1,13 +1,8 @@
 from __future__ import annotations
 
-import os
-import sys
-from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.characters.asset_history import (  # noqa: E402
     backfill_wallet_buy_acquisitions,

@@ -2,12 +2,8 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.input_row import PlannerInputRow
 from eve_online_industry_tracker.application.daily_planner.pipeline_analyzer import PipelineAnalyzer

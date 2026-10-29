@@ -9,12 +9,8 @@ is not planned with the reason "owner <name> has no free slot". Fake ids.
 """
 from __future__ import annotations
 
-import os
-import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402

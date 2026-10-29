@@ -13,10 +13,6 @@ Fake ids, pilots and numbers throughout.
 from __future__ import annotations
 
 import copy
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import test_blueprint_ledger as L  # noqa: E402
 import test_daily_planner_assigned_inventor as A  # noqa: E402

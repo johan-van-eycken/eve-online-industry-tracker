@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from eve_online_industry_tracker.application.market_intelligence import market_depth_collector as mdc
 from eve_online_industry_tracker.application.market_intelligence.margin_correlator import MarginCorrelator
 from eve_online_industry_tracker.application.market_intelligence.market_depth_collector import MarketDepthCollector
 

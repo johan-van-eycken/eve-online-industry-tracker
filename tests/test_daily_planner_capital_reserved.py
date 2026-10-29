@@ -1,11 +1,6 @@
 """Capital Reserved: pending purchases plus estimated job install fees (D4, A2)."""
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 from streamlit_ui.components.daily_planner import status_bar  # noqa: E402
 
 

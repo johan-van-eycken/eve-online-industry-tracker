@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 import pytest
 from streamlit_ui.shopping_list import aggregate_shopping_list, aggregate_shopping_list_with_stale
 from eve_online_industry_tracker.application.industry.shopping_list import (

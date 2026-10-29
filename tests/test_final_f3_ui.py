@@ -6,7 +6,6 @@ and the small C3 points."""
 from __future__ import annotations
 
 import logging
-import time
 from types import SimpleNamespace
 
 import pytest

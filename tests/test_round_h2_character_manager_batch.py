@@ -6,7 +6,6 @@ initialised is in init_warnings too. Fake values only.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import pytest
 

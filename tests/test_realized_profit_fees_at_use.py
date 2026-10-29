@@ -11,15 +11,11 @@ capture mode, and the realized-profit page shows it. Fake values throughout.
 from __future__ import annotations
 
 import json
-import os
-import sys
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.characters.realized_profit import (  # noqa: E402
     CharacterRealizedProfitLedgerService,

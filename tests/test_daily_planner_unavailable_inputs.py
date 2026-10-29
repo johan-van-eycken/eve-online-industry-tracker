@@ -15,15 +15,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import sys
 from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import OperationalError
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from eve_online_industry_tracker.application.daily_planner.service import (  # noqa: E402
     DailyPlannerService,
