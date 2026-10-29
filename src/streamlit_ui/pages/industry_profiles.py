@@ -264,7 +264,7 @@ def _security_band_of_system(system: dict | None) -> str | None:
 _NPC_STATION_FACILITY_TAX = float(
     ADMIN_SETTINGS_SCHEMA["industry"]["settings"]["npc_station_facility_tax"]["default"])
 
-#: Shown when /admin_settings cannot be read (Task 14 minor 3): the rates
+#: Shown when /admin_settings cannot be read: the rates
 #: on the page are then the defaults, not the stored settings.
 ADMIN_SETTINGS_UNAVAILABLE_CAPTION = (
     "Admin settings could not be read: the fee rates shown are the default rates, "

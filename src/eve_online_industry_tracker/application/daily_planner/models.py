@@ -77,7 +77,7 @@ class ItemDecision:
     bpo_analysis_skip_reason: str | None = None
     # Copied from PipelineState.velocity_unknown_reason (see there).
     velocity_unknown_reason: str | None = None
-    # Task 15 fix round 2: isk_per_hour / profit are upper bounds (job fees
+    # isk_per_hour / profit are upper bounds (job fees
     # unknown, orow.get_profit_upper_bound_reason); persisted so feedback
     # does not learn accuracy from them.
     profit_is_upper_bound: bool = False
@@ -117,7 +117,7 @@ class AssignedAction:
     # (manufacturing_job.invention_decryptor, see overview_row.get_invention_decryptor).
     decryptor_type_id: int | None = None
     decryptor_type_name: str | None = None
-    # invent only (amendment A4): the success chance of the pilot this action
+    # invent only: the success chance of the pilot this action
     # is assigned to (admin floor and cap applied), the producer's best
     # inventor's for comparison, and the expected (fractional) attempts. runs
     # holds the whole attempts the shopping list buys inputs for. A reason is
@@ -127,7 +127,7 @@ class AssignedAction:
     invention_best_probability: float | None = None
     invention_expected_attempts: float | None = None
     invention_chance_reason: str | None = None
-    # Every job action (D4, A2, Capital Reserved): the estimated install fee
+    # Every job action (Capital Reserved): the estimated install fee
     # of the job(s) this action launches, from the producer's fee estimates.
     # None = unknown (the producer could not price it), never 0.
     estimated_job_fee_isk: float | None = None
@@ -135,10 +135,10 @@ class AssignedAction:
     # unknown facility tax ...). None with an unknown fee = no recorded
     # cause: an old product overview, which a refresh fixes.
     estimated_job_fee_unknown_reason: str | None = None
-    # te_research only (Task 8c fix round 4): queued behind the ME research
+    # te_research only: queued behind the ME research
     # on the same BPO (one job per blueprint), so it cannot start today.
     queued_after_me: bool = False
-    # invent only (Task 14): the T1 BPC this invention job runs on (one job
+    # invent only: the T1 BPC this invention job runs on (one job
     # per BPC, at most its runs); None when the row does not name it.
     blueprint_item_id: int | None = None
 
@@ -151,7 +151,7 @@ class ShoppingItem:
     quantity: int
     shopping_category: str   # 'current_job' | 'invention_input'
     # None = no price (unknown, never 0): the line is still bought, and
-    # Capital Reserved reads "unknown" (Task 8 fix round 1).
+    # Capital Reserved reads "unknown".
     estimated_unit_price: float | None
     estimated_total: float | None
     notes: str | None = None
@@ -164,7 +164,7 @@ class ChainPlan:
     bpo_opportunities: list[dict[str, Any]] = field(default_factory=list)
     sub_manufacture_actions: list[AssignedAction] = field(default_factory=list)
     #: Re-plans the sub-components when research-first parents fall back to
-    #: their kept BPO row (no free research slot, Task 8c fix round 5):
+    #: their kept BPO row (no free research slot):
     #: called with those parents' type_ids, returns the new sub-component
     #: decisions. None for a hand-built plan (the plan's sizes then stand).
     resize_sub_components: Any = field(default=None, repr=False, compare=False)
@@ -172,9 +172,9 @@ class ChainPlan:
     #: research-first fallback's): the ones a re-size can drop.
     sub_request_parent_type_ids: frozenset[int] = field(default_factory=frozenset)
     #: The plan's decisions for a new set of sub-component decisions, one
-    #: ItemDecision per type_id (Task 14). None: top-level + subs as they are.
+    #: ItemDecision per type_id. None: top-level + subs as they are.
     rebuild_decisions: Any = field(default=None, repr=False, compare=False)
-    #: Task A items 2, 3 and 6: releases the blueprints the assigner found
+    #: Releases the blueprints the assigner found
     #: unused and re-plans the rows not built for them (ChainPlanner's
     #: _replan). None for a hand-built plan: nothing is re-planned.
     replan_released: Any = field(default=None, repr=False, compare=False)

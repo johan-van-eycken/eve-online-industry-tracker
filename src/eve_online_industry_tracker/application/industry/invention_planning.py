@@ -327,7 +327,7 @@ class InventionPlanningMixin:
             except (TypeError, ValueError):
                 base_probability = 0.0
         # EVE: base x (1 + (sci1 + sci2)/30 + enc/40) x decryptor, for the
-        # corp's best inventor of this blueprint (D2). Resolved only when
+        # corp's best inventor of this blueprint. Resolved only when
         # something is invented, so a row that invents nothing warns nothing.
         chance = (
             resolve_invention_chance(
@@ -380,12 +380,12 @@ class InventionPlanningMixin:
             successful_jobs = 0.0
             invention_attempts = 0.0
             whole_attempts = 0
-        # The corp's best inventor alone (A4: the daily planner's single
+        # The corp's best inventor alone (the daily planner's single
         # invent action keeps these when its pilot is that inventor).
         best_inventor_expected, best_inventor_whole = invention_attempts, whole_attempts
-        # Parallel lanes (Task 12): every qualifying corp inventor's research
+        # Parallel lanes: every qualifying corp inventor's research
         # slots, each at its own chance, sized by split_invention_attempts.
-        # Fix round 2: when they run in parallel the row's whole and expected
+        # When they run in parallel the row's whole and expected
         # attempts ARE the lanes', so the cost, the Portfolio procurement, the
         # whole-run copy budget and the elapsed time all assume one plan.
         # Unknown slots or skills: the best inventor in sequence, as before.
@@ -430,7 +430,7 @@ class InventionPlanningMixin:
         if chance is not None:
             costs["invention_chance"] = invention_chance_payload(chance, effective_probability)
             if chance.skill_set is not None:
-                # The levels a lane pilot needs (Task 12 fix round 1): the
+                # The levels a lane pilot needs: the
                 # daily planner counts the same qualifying inventors.
                 costs["invention_chance"]["required_skill_levels"] = {
                     str(type_id): level for type_id, level in required_invention_skill_levels(
@@ -444,13 +444,13 @@ class InventionPlanningMixin:
         costs["job_duration_seconds"] = compute_activity(activity="invention", base_time_seconds=invention_base_time, runs=1, process_value=None)["duration_seconds"]
         # The install fee of ONE attempt (the same EIV x index x reductions +
         # surcharge as above, at one attempt): the daily planner pays it per
-        # whole attempt it launches (D4, Capital Reserved). None = unpriced.
+        # whole attempt it launches (Capital Reserved). None = unpriced.
         per_attempt_fee = compute_activity(
             activity="invention", base_time_seconds=invention_base_time, runs=1,
             process_value=per_attempt_process_value,
         )
         costs["job_cost_per_attempt"] = per_attempt_fee.get("total_job_cost")
-        # Why an unknown fee is unknown (fix round 1): the planner names it.
+        # Why an unknown fee is unknown: the planner names it.
         costs["job_cost_per_attempt_unknown_reason"] = (
             (per_attempt_fee.get("fee_unknown_reason") or "the invention fee could not be priced")
             if costs["job_cost_per_attempt"] is None else None
@@ -492,7 +492,7 @@ class InventionPlanningMixin:
         not `enabled` or the source has no copy time, missing source runs).
 
         The whole copy runs (one per lane attempt) spread over the parallel
-        copy lanes of `invention_context` (Task 12, source_copy_lanes: per
+        copy lanes of `invention_context` (source_copy_lanes: per
         owner, min(its BPOs, its slots)); without it, or with one lane, they
         run in sequence."""
         attempts = float(invention_costs.get("runs") or 0.0)
@@ -531,14 +531,14 @@ class InventionPlanningMixin:
             process_value=self._copy_process_value(source_pv, missing_source_runs),
         )
         source_copy_costs["job_duration_seconds"] = compute_activity(activity="copying", base_time_seconds=source_base_time, runs=1, process_value=None)["duration_seconds"]
-        # The install fee of ONE source-copy run (D4): the planner's copy
+        # The install fee of ONE source-copy run: the planner's copy
         # action copies one run per whole invention attempt.
         source_copy_costs["job_cost_per_run"], source_copy_costs["job_cost_per_run_unknown_reason"] = self._source_copy_fee_per_run(
             compute_activity=compute_activity, invention_source_row=invention_source_row,
             adjusted_price_map=adjusted_price_map,
         )
         # One source run per whole attempt: the lanes' total when they run
-        # in parallel (whole_attempts is then the lanes', fix round 2), so
+        # in parallel (whole_attempts is then the lanes'), so
         # the whole-run budget and the copy elapsed time agree.
         elapsed_missing_runs = whole_missing_source_runs
         copy_lanes = (
@@ -606,8 +606,8 @@ class InventionPlanningMixin:
         base_time_seconds: int,
         whole_jobs: int,
     ) -> tuple[int, dict[str, Any] | None]:
-        """(elapsed seconds, lanes payload) for `activity` over `lanes`
-        (Task 12), `jobs_per_lane` aligned with lanes.character_ids.
+        """(elapsed seconds, lanes payload) for `activity` over `lanes`,
+        `jobs_per_lane` aligned with lanes.character_ids.
 
         Parallel: the most jobs any lane runs x one job's duration of the
         SLOWEST pilot of a used lane (never understated, whichever pilot gets
@@ -706,7 +706,7 @@ class InventionPlanningMixin:
         expected attempts for fees, slot time and the (amortized) inputs, whole
         attempts for the elapsed time, and no division by a zero probability."""
         def compute_activity(**kw: Any) -> dict[str, Any]:
-            # A parallel lane of another pilot (Task 12): its own payload.
+            # A parallel lane of another pilot: its own payload.
             pilot = kw.pop("pilot_industry_payload", None)
             return self._compute_activity_job(
                 **kw,
@@ -833,7 +833,7 @@ class InventionPlanningMixin:
         invention_context: InventionContext,
     ) -> dict[str, Any] | None:
         """One nested invention as the shopping list carries it across
-        batches (I3), on the top-level invention_bpc_plan's model: the runs
+        batches, on the top-level invention_bpc_plan's model: the runs
         invented, runs per invented BPC, whole attempts per BPC and the
         inputs of one attempt. None when nothing is invented or the odds are
         unknown (the row flags that need as unknown)."""
@@ -852,7 +852,7 @@ class InventionPlanningMixin:
             "invented_blueprint_type_id": int(blueprint_type_id),
             "invented_blueprint_name": blueprint_display_name,
             "invented_runs": invented_runs,
-            # The whole attempts batch 1 buys for it (fix round 3 netting).
+            # The whole attempts batch 1 buys for it.
             "whole_attempts": int(invention_costs.get("whole_attempts") or 0),
             "runs_per_invented_blueprint": runs_per_bpc,
             "whole_attempts_per_blueprint": int(attempts_per_bpc),
@@ -897,7 +897,7 @@ class InventionPlanningMixin:
         """A sub-build's total cost for the build-vs-buy choice, or None (buy,
         _build_cost_unknown_reason says why) when its invention cost or any
         of its job fees is unknown: its cost would leave them out, a partial
-        cost that favours building (Task 15 fix round 1)."""
+        cost that favours building."""
         if cls._build_cost_unknown_reason(child_plan) is not None:
             return None
         return cls._as_float(child_plan.get("estimated_total_cost"))
@@ -962,8 +962,8 @@ class InventionPlanningMixin:
     ) -> tuple[int, str | None]:
         """Whole attempts per invented BPC for the shopping list's later
         batches (BPCs x this): at least one BPC's attempts, and at least the
-        parallel lanes' attempts for a full batch spread over its BPCs (fix
-        round 2: weaker lanes need more per BPC as a batch grows, so one BPC's
+        parallel lanes' attempts for a full batch spread over its BPCs
+        (weaker lanes need more per BPC as a batch grows, so one BPC's
         count alone could under-buy). (0, why) when the odds are unknown."""
         one, unknown_reason, _chance = self._full_batch_invention_whole_attempts(
             invention_job=invention_job, blueprint_type_id=blueprint_type_id, runs=runs_per_bpc,
@@ -1168,7 +1168,7 @@ class InventionPlanningMixin:
             ),
             "invention_procurement_materials": keyed_requirements([*own_requirements, *nested_requirements]),
             "invention_procurement_materials_nested": keyed_requirements(nested_requirements),
-            # I3: the nested inventions, carried across batches by the shopping list.
+            # The nested inventions, carried across batches by the shopping list.
             "nested_invention_bpc_plans": self._compact_nested_invention_bpc_plans(
                 ctx, plan.get("nested_invention_bpc_plans"),
             ),
@@ -1178,7 +1178,7 @@ class InventionPlanningMixin:
     def _compact_nested_invention_bpc_plans(
         self, ctx: _ProductPlanningContext, plans: Any,
     ) -> list[dict[str, Any]]:
-        """The nested inventions' BPC plans as published on the row (I3):
+        """The nested inventions' BPC plans as published on the row:
         each one's inputs of one attempt priced like the top-level
         invention_bpc_plan's per_attempt_materials (take nothing)."""
         out: list[dict[str, Any]] = []
@@ -1319,7 +1319,7 @@ class InventionPlanningMixin:
             enabled=requires_invention_chain,
             invention_context=ctx.invention_context,
         )
-        # The planner's copy action copies one source run per attempt (D4).
+        # The planner's copy action copies one source run per attempt.
         # Computed even when batch 1 copies nothing (an owned T2 BPC covers it):
         # the later batches' plan carries it too.
         costs["source_copy_job_cost_per_run"], costs["source_copy_job_cost_per_run_unknown_reason"] = (
@@ -1375,7 +1375,7 @@ class InventionPlanningMixin:
 
     def _with_component_job_fee(self, ctx: _ProductPlanningContext, entry: dict[str, Any]) -> dict[str, Any]:
         """A parent's material entry, plus `component_job_fee_per_run` when the
-        material is itself manufactured (Task 8 fix round 1): the daily
+        material is itself manufactured: the daily
         planner's sub_manufacture fee when the component has no overview row
         of its own (e.g. owned_blueprints_scope excludes corp assets)."""
         fee, reason = self._component_job_fee_per_run(ctx, int(entry.get("type_id") or 0))
@@ -1453,7 +1453,7 @@ class InventionPlanningMixin:
         per_run_material_eiv: float | None,
     ) -> tuple[dict[str, list[float] | None], dict[str, str]]:
         """(tables, reasons). The install fee of researching this blueprint from level 0 to each
-        level 0..max (A2), per research activity: a list indexed by level,
+        level 0..max, per research activity: a list indexed by level,
         [0] = 0.0. Priced exactly like _plan_research_chain_for_variant (the
         same process value, cost index, structure/rig/implant reductions and
         surcharge). The fee is linear in the process value, so a job from
@@ -1510,7 +1510,7 @@ class InventionPlanningMixin:
     ) -> dict[str, list[int] | None]:
         """The duration in seconds of researching this blueprint from level 0
         to each level 0..max, per research activity: a list indexed by level,
-        [0] = 0. The model the research fee uses (Task 8b): the SDE rank
+        [0] = 0. The model the research fee uses: the SDE rank
         (level-1 time / 105 s) x EVE's rank-1 level table, then the skill,
         structure, rig and implant time reductions of _plan_activity_costs.
         A job from level a to b takes [b] - [a] (EVE's table is cumulative).
@@ -1601,7 +1601,7 @@ class InventionPlanningMixin:
 
     def _evaluate_decryptors(self, ctx: _ProductPlanningContext, blueprint_type_id: int) -> DecryptorChoice:
         """Build one invention cycle of the blueprint's own row per decryptor
-        option and let select_best_decryptor pick (amendment A1).
+        option and let select_best_decryptor pick.
 
         One cycle = the runs one invented BPC yields with that option (SDE
         runs + its run modifier), every run invented: the expected attempts
@@ -1650,7 +1650,7 @@ class InventionPlanningMixin:
 
     @staticmethod
     def _decryptor_fee_basis(candidate_rows: list[dict[str, Any] | None]) -> tuple[bool, str | None]:
-        """How the decryptor candidates' job fees enter the comparison (I1):
+        """How the decryptor candidates' job fees enter the comparison:
         (True, None) every fee is known; (True, note) the same fees are unknown
         in every candidate (a profile-wide gap: the decryptor changes runs and
         attempts, not which activity has an index), so the candidates compare

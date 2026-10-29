@@ -334,7 +334,7 @@ def _warnings(row: dict[str, Any]) -> list[str]:
 
     upper_bound = get_profit_upper_bound_reason(row)
     if upper_bound is not None:
-        # Task 15 fix round 1 (I2): the ranking stays on this bound, labelled.
+        # The ranking stays on this bound, labelled.
         warns.append(upper_bound)
     if anomaly == "Medium":
         reasons = row.get("price_anomaly_reasons")
@@ -860,7 +860,7 @@ def _render_recommendations_table(ranked: list[tuple[dict[str, Any], float | Non
                 anomaly_reasons = row.get("price_anomaly_reasons")
 
                 st.caption(f"**Score:** {'unknown' if score is None else score}")
-                # Task 12: the parallel invention/copy lanes the build time assumes.
+                # The parallel invention/copy lanes the build time assumes.
                 lane_notes = [str(n) for n in (mj.get("elapsed_lane_notes") or []) if n]
                 st.caption(
                     f"**Build time:** {time_secs / 3600:.1f}h" if time_secs > 0 else "**Build time:** —",
@@ -883,8 +883,8 @@ def _row_key(row: dict[str, Any]) -> tuple[Any, Any]:
 
 def confidence_capped_hint(rows: list[dict[str, Any]], *, shown_rows: list[dict[str, Any]]) -> str | None:
     """The API's "N rows capped: job fees unknown" hint (portfolio_service)
-    for this page (Task A item 4): the rows the filters or disqualifiers
-    left out of the result (not in `shown_rows`, Task A fix round 1 M2)
+    for this page: the rows the filters or disqualifiers
+    left out of the result (not in `shown_rows`)
     whose pricing confidence is held at Medium because their job fees are
     unknown (their profit is an upper bound)."""
     # By key, not identity: filter_overview_rows (st.cache_data) returns copies.

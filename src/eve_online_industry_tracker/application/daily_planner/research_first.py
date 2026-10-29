@@ -1,4 +1,4 @@
-"""Research first (Task 8c fix rounds 1-2, the user's decision).
+"""Research first (the user's decision).
 
 EVE runs one job per blueprint: a BPO in ME/TE research can neither build
 nor be copied. When ChainPlanner schedules research on an owned BPO whose
@@ -14,7 +14,7 @@ batch builds from or copies it, the item falls back, in this order, to:
 
 With several BPOs of the type, another free BPO builds instead: from its own
 producer row, else sized by the planner from the SDE at its ME in the row's
-structure (Task 8c fix round 5). A BPO installed in an active industry job
+structure. A BPO installed in an active industry job
 is unavailable the same way, but unconditionally: it is not waiting for a
 research slot.
 
@@ -37,7 +37,7 @@ OWNED_BPC_SOURCE = "owned_blueprint_copy"
 RESEARCH_KEYS = (
     "needs_me_research", "me_research_target", "me_current",
     "needs_te_research", "te_research_target", "te_current",
-    # The plan ledger's label for the research claim (Task 14 M10).
+    # The plan ledger's label for the research claim.
     "research_claim_label",
 )
 
@@ -69,7 +69,7 @@ def owned_bpc_part(row: dict[str, Any], *, exclude_item_ids: Any = frozenset()) 
     item_ids}, or None when there is none or its materials are unknown. Jobs on a BPC in `exclude_item_ids` (one in an active job, or
     claimed by another job today) are left out.
 
-    quantity is rounded UP (Task 14 minor 5): ceil(units x runs / total
+    quantity is rounded UP: ceil(units x runs / total
     runs). The batch's other part is units - quantity, so the two add up
     to the batch exactly. item_ids are the BPCs the part
     runs on; None when a segment does not name its BPC (then any of the

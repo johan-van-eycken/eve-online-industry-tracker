@@ -19,7 +19,7 @@ adjusted price, no ME):
   blueprint's rank
 
 SCC is 4% of the job value for manufacturing, copying and invention, and
-2% for ME/TE research. Fitted on real ESI jobs (Task 8b): manufacturing,
+2% for ME/TE research. Fitted on real ESI jobs: manufacturing,
 copying, invention and both research activities each reproduce ESI's cost
 to a median 0.1% with the install-time index. Reactions follow the
 manufacturing form (EVE's documented formula, not validated: no reaction

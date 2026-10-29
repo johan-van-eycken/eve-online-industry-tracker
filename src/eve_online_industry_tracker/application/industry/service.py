@@ -111,7 +111,7 @@ class _BatchRunLayout:
                 segment = _job_segment(high - low, me, te, "owned_blueprint_copy")
                 if item_id is not None:
                     # The BPC this job runs on, so the daily planner can leave
-                    # out the jobs of a BPC already in an active job (I1).
+                    # out the jobs of a BPC already in an active job.
                     segment["blueprint_item_id"] = int(item_id)
                 out.append(segment)
             cursor += owned_runs
@@ -206,12 +206,12 @@ class _ProductPlanningContext:
     # Key: (activity, base_time_seconds, runs, process_value, manufacturing_group, bp_me, bp_te)
     # Thread-safe on CPython (dict get/set are atomic under GIL).
     activity_job_cache: dict[tuple, dict[str, Any]] = dataclasses.field(default_factory=dict)
-    # Invention (round 5): the SDE decryptors (NO_DECRYPTOR first), the
+    # Invention: the SDE decryptors (NO_DECRYPTOR first), the
     # refresh's invention inputs, and the blueprint rows by blueprint type id.
     decryptor_options: tuple = (NO_DECRYPTOR,)
     invention_context: InventionContext = dataclasses.field(default_factory=InventionContext)
     blueprint_row_by_type_id: dict = dataclasses.field(default_factory=dict)
-    # Task 3: the best decryptor per invented blueprint (admin switch).
+    # The best decryptor per invented blueprint (admin switch).
     decryptor_selection_enabled: bool = True
     #: {blueprint type_id: DecryptorChoice}, filled lazily by _decryptor_choice_for.
     #: Worker threads write it with dict.setdefault (atomic under the GIL), so
@@ -772,7 +772,7 @@ class IndustryService(
             index_unknown_reason=index_unknown_reason, eiv_unknown_reason=eiv_unknown_reason,
         )
 
-    #: Row labels of the activities whose fee can be unknown (I1).
+    #: Row labels of the activities whose fee can be unknown.
     _FEE_LABELS: dict[str, str] = {"research_material": "ME research", "research_time": "TE research"}
 
     @staticmethod
@@ -1090,7 +1090,7 @@ class IndustryService(
                     blueprint_source_kind = "owned_blueprint_copy"
                     if missing_blueprint_copy_runs > 0 and bool(matched_blueprint_originals):
                         include_copying_job = True
-                        # D3: the copied runs are a second job at the BPO's ME/TE.
+                        # The copied runs are a second job at the BPO's ME/TE.
                         bpo = matched_blueprint_originals[0]
                         second_job = (
                             missing_blueprint_copy_runs,
@@ -1098,7 +1098,7 @@ class IndustryService(
                             "copied_from_owned_blueprint_original",
                         )
                     elif missing_blueprint_copy_runs > 0:
-                        # D3: the runs past the owned BPC are a second job on an
+                        # The runs past the owned BPC are a second job on an
                         # invented BPC (invented below), no longer bought. With
                         # unknown odds that job can't be costed (the parent would
                         # buy the whole child, owned runs too), so the owned runs
@@ -1168,7 +1168,7 @@ class IndustryService(
         )
 
         # The plan's jobs (see _BatchRunLayout), like the top-level row's
-        # manufacturing_job.job_segments: one per owned BPC (D3), then the
+        # manufacturing_job.job_segments: one per owned BPC, then the
         # second source, one job per invented BPC. A sub-build invents fresh
         # BPCs for each batch, so its invented runs start on a new BPC.
         if activity == "manufacturing" and bool(build_from_bpc):
@@ -1258,7 +1258,7 @@ class IndustryService(
         total_job_cost = float(job_cost.get("total_job_cost") or 0.0)
         priced_job_count = 1 if job_cost.get("total_job_cost") is not None else 0
         # Every fee of this plan (and its built children) that is unknown,
-        # carried up to the product row (I1): never read as 0 silently.
+        # carried up to the product row: never read as 0 silently.
         job_fee_unknown_reasons: list[str] = self._job_fee_unknown_entries(
             (activity, job_cost, runs > 0),
         )
@@ -1272,7 +1272,7 @@ class IndustryService(
         # up through every parent plan into the product row.
         expected_invention_materials: list[dict[str, Any]] = []
         invention_requirements: list[dict[str, Any]] = []
-        # One per nested invention (Task 10 fix round 1, I3): what the
+        # One per nested invention: what the
         # shopping list needs to carry an invented BPC's spare runs across
         # batches (_plan_nested_invention's "bpc_plan").
         nested_invention_bpc_plans: list[dict[str, Any]] = []
@@ -1929,8 +1929,7 @@ class IndustryService(
             "estimated_item_value_priced_material_count": priced_material_count,
             "estimated_item_value_material_count": eiv_material_count,
             "estimated_material_cost": estimated_material_cost,
-            # Unknown (not a partial sum) when any job fee is unknown (Task 15
-            # fix round 1, minor 1).
+            # Unknown (not a partial sum) when any job fee is unknown.
             "estimated_total_cost": (
                 float(total_job_cost or 0.0) + float(estimated_material_cost or 0.0)
                 if (total_job_cost is not None or estimated_material_cost is not None)
@@ -1982,7 +1981,7 @@ class IndustryService(
         # Nested invention results (see _plan_blueprint_chain_for_quantity).
         expected_invention_materials: list[dict[str, Any]] = []
         invention_requirements: list[dict[str, Any]] = []
-        # One per nested invention (Task 10 fix round 1, I3): what the
+        # One per nested invention: what the
         # shopping list needs to carry an invented BPC's spare runs across
         # batches (_plan_nested_invention's "bpc_plan").
         nested_invention_bpc_plans: list[dict[str, Any]] = []
@@ -2695,7 +2694,7 @@ class IndustryService(
         """Unified activity cost calculator — delegates to _compute_activity_job with per-refresh caching.
 
         `pilot_industry_payload`: time the job for another corp pilot (a
-        parallel invention or copy lane, Task 12) with that pilot's own
+        parallel invention or copy lane) with that pilot's own
         industry payload, skills and implants (the one convention for
         "another pilot", _get_character_industry_modifier_payload)."""
         # The required skills' trained levels change the time reduction
@@ -2840,7 +2839,7 @@ class IndustryService(
         # A BPC installed in an active job (the snapshot can still list it,
         # and the history adds job-locked blueprints back in) has no runs to
         # plan with: it is left out of every owned-BPC allocation and BPC
-        # run pool, top level and nested (Task 10 fix round 2).
+        # run pool, top level and nested.
         busy_blueprint_item_ids = self._active_job_blueprint_item_ids() if bool(build_from_bpc) else set()
         busy_copies_left_out: list[int] = []
         for asset in [*character_blueprint_assets, *corporation_blueprint_assets]:
@@ -2896,7 +2895,7 @@ class IndustryService(
                 inventor_skill_levels_by_character_id=inventor_skill_levels,
                 encryption_skill_type_ids=self._load_encryption_skill_type_ids(),
                 no_inventor_reason=NO_CHARACTER_SKILLS if inventor_skill_levels else self._no_inventor_reason(),
-                # Parallel invention and copy lanes (Task 12).
+                # Parallel invention and copy lanes.
                 slot_capacity_by_character_id=self._get_corp_slot_capacity(),
                 selected_character_id=int(character_id) if character_id else None,
                 source_originals_by_type_id=self._source_originals_by_owner(blueprint_original_assets_by_type_id),
@@ -3152,7 +3151,7 @@ class IndustryService(
         manufacturing_group = self._infer_manufacturing_group(compact_product)
         rig_groups = self._manufacturing_rig_groups(compact_product)
         # Where each run comes from (see _BatchRunLayout): one job per owned
-        # BPC (D3), then the next source, one job per BPC when invented.
+        # BPC, then the next source, one job per BPC when invented.
         batch_run_layout = self._top_level_batch_run_layout(
             ctx, blueprint_copy_assets=blueprint_copy_assets, owned_copy_runs=available_target_copy_runs,
             blueprint_source_kind=blueprint_source_kind, matched_blueprint_originals=matched_blueprint_originals,
@@ -3204,7 +3203,7 @@ class IndustryService(
         total_time_seconds = direct_manufacturing_time_seconds
         total_job_cost = float(manufacturing_job_cost.get("total_job_cost") or 0.0)
         priced_job_count = 1 if manufacturing_job_cost.get("total_job_cost") is not None else 0
-        # I1: every fee of the row (its own activities and the built
+        # Every fee of the row (its own activities and the built
         # sub-components) that could not be priced; never counted as 0 silently.
         job_fee_unknown_reasons: list[str] = self._job_fee_unknown_entries(
             ("manufacturing", manufacturing_job_cost, effective_runs > 0),
@@ -3428,7 +3427,7 @@ class IndustryService(
         batch_one_nested_requirements = [
             dict(e) for e in (recursive_prerequisite_plan.get("invention_requirements") or []) if isinstance(e, dict)
         ]
-        # I2: later batches share invented BPCs. One BPC's runs can outlast a
+        # Later batches share invented BPCs. One BPC's runs can outlast a
         # batch (a +run decryptor, or batches shorter than a BPC), so the
         # shopping list sizes the row's own invention over ALL batches from
         # this plan: BPCs needed = ceil(runs past the owned BPC runs / runs
@@ -3462,12 +3461,12 @@ class IndustryService(
                     "batch_one_invented_blueprints": (
                         int(math.ceil(missing_top_level_copy_runs / runs_per_bpc)) if batch_one_invents else 0
                     ),
-                    # The whole attempts batch 1's own invention buys (fix round 3).
+                    # The whole attempts batch 1's own invention buys.
                     "batch_one_whole_attempts": (
                         int(inv_costs.get("whole_attempts") or 0) if requires_invention_chain else 0
                     ),
                     "per_attempt_materials": self._overview_keyed_entries(per_attempt_lines, compactor=lambda e: e),
-                    # Install fees per attempt and per source-copy run (D4):
+                    # Install fees per attempt and per source-copy run:
                     # the planner's invent / copy actions when batch 1 does
                     # not invent (activity_breakdown.invention is then absent).
                     "job_cost_per_attempt": inv_costs.get("job_cost_per_attempt"),
@@ -3719,7 +3718,7 @@ class IndustryService(
             )
         if matched_blueprint_originals:
             # An owned BPO, the only blueprint the daily planner researches:
-            # its ME/TE research fee per level (A2, Capital Reserved). Also on
+            # its ME/TE research fee per level (Capital Reserved). Also on
             # a row that builds from an owned BPC of it: the planner schedules
             # the research whenever the BPO is owned, and the fee depends on
             # the blueprint, not on the variant.
@@ -3731,7 +3730,7 @@ class IndustryService(
             row_out["manufacturing_job"]["research_duration_seconds_by_level_unskilled"] = self._research_duration_by_level(
                 ctx, row=row, skilled=False,
             )
-            # Task 12 fix round 1: one convention for "another pilot". The
+            # One convention for "another pilot". The
             # planner times a research action with the ASSIGNED pilot's own
             # skills and implants: this table has neither (structure and rigs
             # only), and each corp pilot's implant multiplier is beside it.
@@ -3755,7 +3754,7 @@ class IndustryService(
             row_out["manufacturing_job"]["invention_chance_notes"] = nested_chance_notes
         lane_notes = self._elapsed_lane_notes(row_out["manufacturing_job"])
         if lane_notes:
-            # Task 12 fix round 1: the build time's parallel lanes (capacity),
+            # The build time's parallel lanes (capacity),
             # or why an invention is timed in one slot. Informational.
             row_out["manufacturing_job"]["elapsed_lane_notes"] = lane_notes
         if datacore_need_unknown_reasons:
@@ -3801,7 +3800,7 @@ class IndustryService(
             # Read by the shopping list: a row without it is from an older
             # overview whose later batches repeat batch 1.
             row_out["manufacturing_job"]["later_batch_plan_version"] = LATER_BATCH_PLAN_VERSION
-            # I3: batch 1's nested inventions and the owned BPC runs left of
+            # Batch 1's nested inventions and the owned BPC runs left of
             # every nested blueprint after batch 1, so the shopping list
             # carries invented and owned spare runs across batches.
             batch_one_nested_bpc_plans = self._compact_nested_invention_bpc_plans(
@@ -3818,7 +3817,7 @@ class IndustryService(
             }
             nested_blueprint_ids.discard(int(blueprint_type_id))
             row_out["manufacturing_job"]["nested_invention_bpc_plans"] = batch_one_nested_bpc_plans
-            # Fix round 2, item 4: each row is planned on its own copy of the
+            # Each row is planned on its own copy of the
             # owned BPC runs, so the shopping list nets the nested BPC runs
             # batch 1 spent once across the selected rows.
             used_nested_runs = {
@@ -3832,7 +3831,7 @@ class IndustryService(
                 for t in used_nested_runs
             }
             if owned_target_copy_runs_used > 0:
-                # Fix round 3: the row's own top-level BPC runs too, so a
+                # The row's own top-level BPC runs too, so a
                 # top-level user of a BPC another row nests counts as well.
                 used_nested_runs[int(blueprint_type_id)] = int(owned_target_copy_runs_used)
                 owned_runs_before[int(blueprint_type_id)] = max(0, int(available_target_copy_runs))
@@ -3875,7 +3874,7 @@ class IndustryService(
         # The hangar stock this row was planned against, for every type on its
         # buy lists (batch 1 and every later batch). Every row of one overview
         # is planned against a copy of the same stock, so the shopping list
-        # nets its aggregated need against it once (C8, C9).
+        # nets its aggregated need against it once.
         row_out["manufacturing_job"][_shopping_list.OWNED_STOCK_KEY] = {
             str(type_id): max(0, int(ctx.available_owned_item_quantity_by_type_id_base.get(type_id, 0) or 0))
             for type_id in self._buy_line_type_ids(row_out["manufacturing_job"])
@@ -4004,7 +4003,7 @@ class IndustryService(
                         progress_callback(1.0, "Returned cached overview (no input changes)", {"stage": "cached"})
                     return [dict(row) for row in cached_rows]
 
-        # One refresh = one scope for the once-only WARNINGs (I2): a missing
+        # One refresh = one scope for the once-only WARNINGs: a missing
         # input still missing is logged again by the next refresh.
         self._reset_once_warnings()
         self.__dict__.pop("_facility_tax_warned", None)

@@ -1104,7 +1104,7 @@ class BuildPlanItemModel(BaseApp):
     effective_velocity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     snapshot_sell_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bpo_analysis_skip_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # Task 15 fix round 2: isk_per_hour is an upper bound (job fees unknown):
+    # isk_per_hour is an upper bound (job fees unknown):
     # FeedbackProcessor learns no accuracy from it. NULL on older rows.
     isk_per_hour_is_upper_bound: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
@@ -1132,21 +1132,21 @@ class DailyActionLogModel(BaseApp):
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     processed_for_feedback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # invent only (A4): the assigned pilot's effective chance, the producer's
+    # invent only: the assigned pilot's effective chance, the producer's
     # best inventor's, the expected (fractional) attempts, and the decryptor
-    # the producer chose (Task 3). None = unknown / not an invent action.
+    # the producer chose. None = unknown / not an invent action.
     invention_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     invention_best_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     invention_expected_attempts: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     decryptor_type_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     decryptor_type_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    # Every job action (D4, A2): the job's estimated install fee, summed into
+    # Every job action: the job's estimated install fee, summed into
     # Capital Reserved. NULL = unknown (or a row from before the column).
     estimated_job_fee_isk: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     # Why an unknown fee is unknown; NULL with a NULL fee = no recorded cause
     # (an old plan or overview: a refresh / recompute fixes it).
     estimated_job_fee_unknown_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    # te_research only (Task 8c fix round 4): queued behind the ME research
+    # te_research only: queued behind the ME research
     # on the same BPO; the actions tab shows it as queued, not startable today.
     queued_after_me: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 

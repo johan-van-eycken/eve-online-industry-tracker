@@ -8,7 +8,7 @@ not the values, so keys and structure are preserved while magnitudes are
 replaced with deterministic synthetic numbers and identity information is
 removed.
 
-Fix round 1 (2026-09-18): a substring key deny-list was defeated twice by
+A substring key deny-list was defeated twice by
 free-text string fields that no key-name pattern predicted — `profile_name`
 (owner-authored, nested under `manufacturing_job["industry_profile"]`) and
 `ship_name` (EVE's default ship name is literally `"<Character Name>'s

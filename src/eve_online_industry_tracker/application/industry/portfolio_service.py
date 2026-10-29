@@ -49,7 +49,7 @@ class IndustryPortfolioService:
     @classmethod
     def confidence_capped_hint(cls, count: int) -> str | None:
         """ "N rows capped: job fees unknown", or None for none. Shared by the
-        API result and the Streamlit Portfolio page (Task A item 4)."""
+        API result and the Streamlit Portfolio page."""
         if not count:
             return None
         return f"{int(count)} {'row' if int(count) == 1 else 'rows'} {cls._CONFIDENCE_CAPPED_NOTE}"
@@ -291,7 +291,7 @@ class IndustryPortfolioService:
                 reasons.append("Below minimum owned input coverage")
             if not bypass_scope and cls._confidence_rank_value(candidate.get("pricing_confidence")) < minimum_confidence_rank:
                 if candidate.get("profit_is_upper_bound") and candidate_confidence == "medium":
-                    # Task 15 fix round 1 (minor 3): Medium may be the cap below
+                    # Medium may be the cap below
                     # High for unknown job fees (the market alone may be High).
                     reasons.append(f"Below minimum pricing confidence ({cls._CONFIDENCE_CAPPED_NOTE})")
                     capped_by_confidence += 1

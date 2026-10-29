@@ -148,8 +148,8 @@ class ChainPlanner:
 
         bpo_strong_buy_days = float(_adm(self._admin, "planner_bpo_strong_buy_days"))
         bpo_consider_days = float(_adm(self._admin, "planner_bpo_consider_days"))
-        # TE is always researched to the max (the user's decision, Task 8c fix
-        # round 1): EVE's percentage, 0..20 in steps of 2.
+        # TE is always researched to the max (the user's decision):
+        # EVE's percentage, 0..20 in steps of 2.
         te_research_target = int(admin_setting(self._admin, "industry", "max_blueprint_time_efficiency"))
         invention_min_attempts = int(_adm(self._admin, "planner_invention_min_attempts"))
 
@@ -170,8 +170,8 @@ class ChainPlanner:
         # BPO ownership and blueprint_data are keyed by blueprint type_id.
         product_to_blueprint = build_product_to_blueprint_index(blueprint_data)
         invention_source = build_invention_source_index(blueprint_data)
-        # Blueprints installed in an active industry job (Task 8c fix round
-        # 5): EVE runs one job per blueprint, so they neither research nor
+        # Blueprints installed in an active industry job:
+        # EVE runs one job per blueprint, so they neither research nor
         # build. The asset snapshot can predate the job (ESI caches assets
         # longer than jobs), so they are excluded here, not trusted to have
         # dropped out of the assets.
@@ -180,14 +180,14 @@ class ChainPlanner:
             type_id: [a for a in assets if research_first.item_id(a) not in busy_item_ids]
             for type_id, assets in bpo_assets_by_type_id.items()
         } if busy_item_ids else bpo_assets_by_type_id
-        # The same for BPCs (Task 10 carry 12), and the blueprint types with a
+        # The same for BPCs, and the blueprint types with a
         # BPO / BPC in a job, which covers a blueprint the snapshot dropped.
         free_bpc_assets_by_type_id = {
             type_id: [a for a in assets if research_first.item_id(a) not in busy_item_ids]
             for type_id, assets in bpc_assets_by_type_id.items()
         } if busy_item_ids else bpc_assets_by_type_id
         industry_jobs = phase1_data.get("industry_jobs") or []
-        # A job's NULL copy flag is resolved through the assets (minor 3).
+        # A job's NULL copy flag is resolved through the assets.
         is_copy_by_item_id: dict[int, bool] = {
             **{int(k): bool(v) for k, v in (phase1_data.get("blueprint_copy_flags") or {}).items()},
             **{research_first.item_id(a): False for assets in bpo_assets_by_type_id.values() for a in assets
@@ -212,7 +212,7 @@ class ChainPlanner:
             # A research-first variant is used whole: any busy BPC rules it out.
             return self._busy_bpc_plan(candidate, busy_item_ids, busy_bpc_type_ids) is not None
 
-        # The plan-wide blueprint reservation (Task 14): every BPO and BPC
+        # The plan-wide blueprint reservation: every BPO and BPC
         # the plan uses is booked once, in plan order (see blueprint_ledger).
         ledger = BlueprintLedger(free_bpo_assets_by_type_id, free_bpc_assets_by_type_id)
         build_decisions = [d for d in top_level_decisions if d.decision == "build"]
@@ -277,7 +277,7 @@ class ChainPlanner:
             if bpo_plan["research"] is not None and label is not None:
                 claim_label = f"{label} for {decision.type_name} ({decision.type_id})"
                 ledger.claim(ctx["bpo_keys"][bpo_plan["research"]], decision.type_id, claim_label)
-                # CharacterAssigner rewords it when the research gets no slot (M10).
+                # CharacterAssigner rewords it when the research gets no slot.
                 decision.overview_row["research_claim_label"] = claim_label
 
         def _phase_b(decision: ItemDecision) -> None:
@@ -317,7 +317,7 @@ class ChainPlanner:
             t1_bp_type_id = invention_source.get(bp_type_id)
             if t1_bp_type_id is None or bp_type_id in busy_bpo_type_ids:
                 return
-            # Fix rounds 1-2, I2: copy only when the BPCs this row will get in
+            # Copy only when the BPCs this row will get in
             # phase C do not cover its attempts. Phase C claims WHOLE BPCs
             # (best fit, _pick_bpcs), so the same picks are simulated here
             # over the free BPCs no T1 row builds on and no higher row picked.
@@ -354,7 +354,7 @@ class ChainPlanner:
                 _t2_chain(decision, ctx.get("copy") or [])
             # The chains set the stage from the blueprints owned; a row
             # this plan does not build at all (unconditionally) is
-            # "blocked" whatever they set (fix round 2, item 2).
+            # "blocked" whatever they set.
             first = decision.overview_row.get("research_first")
             if isinstance(first, dict) and first.get("unconditional") and first.get("mode") == "none":
                 decision.pipeline_stage = NOT_BUILT_STAGE
@@ -395,7 +395,7 @@ class ChainPlanner:
 
         def _annotate(decision: ItemDecision) -> None:
             # The blueprints this row holds, by job kind (named items only):
-            # CharacterAssigner releases the ones no action used (Task A).
+            # CharacterAssigner releases the ones no action used.
             claims: dict[str, list[int]] = {"manufacture": [], "copy": [], "invention": [], "research": []}
             owners: dict[int, int] = {}
             for key, label in ledger.claims_of(decision.type_id):
@@ -405,7 +405,7 @@ class ChainPlanner:
                     if owner is not None:
                         owners[key] = owner
             decision.overview_row["ledger_claims"] = claims
-            # Task A item 1: the pilot each owner-bound blueprint belongs to.
+            # The pilot each owner-bound blueprint belongs to.
             decision.overview_row["blueprint_owner_by_item"] = owners
 
         for decision in ordered:
@@ -414,14 +414,14 @@ class ChainPlanner:
 
         names = {int(d.type_id): f"{d.type_name} ({d.type_id})" for d in build_decisions}
         by_type = {int(d.type_id): d for d in build_decisions}
-        # Task A fix round 1 (M4): every release of the compute, across the
+        # Every release of the compute, across the
         # assigner's passes: {key: (the releasing job's label, its row)}.
         release_history: dict[Any, tuple[str, int]] = {}
         undo_state: dict[int, tuple[Any, ...]] = {}
 
         def _reword_blocked(decision: ItemDecision) -> None:
             """A row still not built names its blueprint's holder from the
-            current ledger; with none (fix round 1, I3), it says the
+            current ledger; with none, it says the
             blueprint is free and why the row still does nothing (the
             assigner's cause of an undone re-plan)."""
             row = decision.overview_row
@@ -468,7 +468,7 @@ class ChainPlanner:
         def _replan(
             release: dict[int, list[int]], used_by: dict[int, int], eligible: set[int],
         ) -> list[ItemDecision]:
-            """Task A items 2, 3 and 6: CharacterAssigner's report after a
+            """CharacterAssigner's report after a
             pass. `release`: {row type_id: blueprint item_ids it claimed but
             no action of it used}; `used_by`: {item_id: row type_id} of the
             blueprints its actions use (a released BPC another row invents
@@ -509,7 +509,7 @@ class ChainPlanner:
                 gained = [k for k, _l in ledger.claims_of(decision.type_id) if k not in before]
                 labels = {k: release_history[k][0] for k in gained if k in release_history}
                 _append_reason(decision, _released_wording(decision, ledger, gained, labels))
-                # M3: the releasing row says where its blueprint went (a
+                # The releasing row says where its blueprint went (a
                 # released BPC of an invention is worded by the assigner).
                 handed: list[tuple[ItemDecision, str]] = []
                 for key in gained:
@@ -533,7 +533,7 @@ class ChainPlanner:
         def _undo_replan(decision: ItemDecision, cause: str | None = None) -> None:
             """A re-planned row that still got no action: back to its
             not-built plan, the blueprints it gained are free, and its reason
-            says so with the assigner's `cause` (fix round 1, I3)."""
+            says so with the assigner's `cause`."""
             saved = undo_state.pop(id(decision), None)
             if saved is None:
                 return
@@ -554,7 +554,7 @@ class ChainPlanner:
         # use only the component BPOs no job above claimed.
         requests_by_parent: list[tuple[int, list[dict[str, Any]]]] = []
         fallback_requests: dict[int, list[dict[str, Any]]] = {}
-        # Task A item 1: a sub job goes to whichever pilot has a slot, so
+        # A sub job goes to whichever pilot has a slot, so
         # only corp BPOs sub-build; a component with only a pilot's BPO is
         # bought (never under-bought).
         corp_bpo_assets_by_type_id = {
@@ -566,8 +566,8 @@ class ChainPlanner:
             # Which of this batch's materials the corp could build itself.
             # Collected across every parent first, so one material needed
             # by several builds becomes ONE sub-manufacture decision.
-            # M8: the bought need per component, the larger of the batch's
-            # and its research-first fallback's (fix round 3: either may run).
+            # The bought need per component, the larger of the batch's
+            # and its research-first fallback's (either may run).
             primary_need: dict[int, int] = {}
             fallback_need: dict[int, int] = {}
             requests = self._collect_sub_manufacture_requests(
@@ -604,13 +604,13 @@ class ChainPlanner:
                 for type_id in [t for t in reasons if bought_need.get(t, 0) <= max(0, int(stock.get(t, 0)))]:
                     del reasons[type_id]
         # The phase D buy reasons, which every sizing keeps; a sizing's own
-        # (an unknown-fee component) are replaced on each re-size (H1).
+        # (an unknown-fee component) are replaced on each re-size.
         phase_d_buy_reasons = {
             id(d): dict(d.overview_row.get("component_buy_reasons") or {}) for d in build_decisions
         }
 
         def _sub_decisions(fallen: set[int], dropped: set[int] | frozenset[int] = frozenset()) -> list[ItemDecision]:
-            # `dropped` (Task A fix round 1, I2): parents CharacterAssigner
+            # `dropped`: parents CharacterAssigner
             # gives no manufacture (e.g. owner binding): no sub-builds for them.
             for decision in build_decisions:
                 if id(decision) in phase_d_buy_reasons and (
@@ -627,7 +627,7 @@ class ChainPlanner:
                 self._merge_sub_requests(per_parent), market_depth_cache, phase1_data,
                 buy_reasons=buy_reasons,
             )
-            # Fix rounds 3-4 (Task 15): a component bought for an unknown fee
+            # A component bought for an unknown fee
             # says why on every parent that requested it, each in its own words.
             parents = {int(d.type_id): d for d in build_decisions}
             for mat_type_id, by_parent in buy_reasons.items():
@@ -735,7 +735,7 @@ class ChainPlanner:
 
         One sub job serves every requester, so the parents' published fee
         per run (the fallback when the component has no row of its own) is
-        merged independently of their order (Task 15 fix round 4): unknown
+        merged independently of their order: unknown
         when ANY requester's is unknown (the job's cost is then a lower
         bound, so the component is bought), else the highest, so no parent's
         share is under-priced. `parent_fee_unknown_by_parent` names the
@@ -902,7 +902,7 @@ class ChainPlanner:
             if index is not None and index not in set(bpo_plan.get("busy") or ()):
                 ledger.claim(keys[index], decision.type_id, label)
             self._claim_row_bpcs(ledger, row, decision, label)
-        # Fix round 1, I1: when its research gets no slot the row builds from
+        # When its research gets no slot the row builds from
         # its kept row instead (CharacterAssigner), so that row's BPO and
         # BPCs are booked too: the union, so nothing can double-book them.
         kept = self._research_first_fallback_row(row)
@@ -921,12 +921,12 @@ class ChainPlanner:
             "sized_note": "its components were not sub-built in this plan",
             "unconditional": True,
         }
-        # Not "manufacturing": nothing is built from this row (minor 5).
+        # Not "manufacturing": nothing is built from this row.
         decision.pipeline_stage = NOT_BUILT_STAGE
-        # Persisted and shown in the Build Plan's Reason column (Task 12 fix
-        # round 4): the row keeps decision="build", so say why it is not.
+        # Persisted and shown in the Build Plan's Reason column:
+        # the row keeps decision="build", so say why it is not.
         decision.decision_reason = f"{decision.decision_reason}; not built: {reason}"
-        # Task A item 2: what a re-plan strips when the row is built after all.
+        # What a re-plan strips when the row is built after all.
         decision.overview_row["not_built_suffix"] = f"; not built: {reason}"
         logger.info("ChainPlanner: type_id=%s: %s: not built from it in this plan", decision.type_id, reason)
 
@@ -983,7 +983,7 @@ class ChainPlanner:
             optimal_te = te_research_target
 
             # The producer's BPO order, so the choice is deterministic. The
-            # BPO researched (Task 8c fix round 4): the one the row is priced
+            # BPO researched: the one the row is priced
             # from when it needs research, else the first other BPO that
             # does; the row then builds from the priced BPO as usual.
             bpo_assets = research_first.producer_bpo_order(bpo_assets_by_type_id[bp_type_id])
@@ -1013,7 +1013,7 @@ class ChainPlanner:
             current_me = _blueprint_efficiency(subject, "material")
             current_te = _blueprint_efficiency(subject, "time")
             # A busy BPO is not researched anyway, and the busy state is the
-            # reason (carry 16): no WARNING about its unknown levels.
+            # reason: no WARNING about its unknown levels.
             subject_busy = research_first.item_id(subject) in busy_item_ids
             if (current_me is None or current_te is None) and not subject_busy:
                 logger.warning(
@@ -1087,8 +1087,8 @@ class ChainPlanner:
         market_depth_cache: dict[int, Any], bpo_opportunities: list[dict[str, Any]],
         bpo_strong_buy_days: float, bpo_consider_days: float, busy_blueprint_type_ids: Any,
     ) -> None:
-        """A T1 row with no free owned BPO or BPC in the corp hangar (I3, fix
-        round 1). Nothing it could build from is free, so it is not built
+        """A T1 row with no free owned BPO or BPC in the corp hangar.
+        Nothing it could build from is free, so it is not built
         (no manufacture, nothing bought, no fee). Why, in this order:
 
         - already not built (a busy BPC, research first "none"): kept as is;
@@ -1098,7 +1098,7 @@ class ChainPlanner:
           nor a pilot holds in the planner's assets (another
           owned_blueprints_scope, or its asset history): not planned, not a
           purchase (the planner reads the corp's and every pilot's
-          blueprints, Task A item 1);
+          blueprints);
         - else (blueprint_sde_fallback, or no source): truly unowned, so the
           BPO analysis says whether to buy it, and "buy the BPO first"."""
         first = decision.overview_row.get("research_first")
@@ -1125,7 +1125,7 @@ class ChainPlanner:
             bpo_strong_buy_days=bpo_strong_buy_days,
             bpo_consider_days=bpo_consider_days,
         )
-        # Nothing owned to build from (I3, Task 14): the producer priced the
+        # Nothing owned to build from: the producer priced the
         # row on an assumed blueprint (blueprint_sde_fallback). A manufacture
         # would buy materials and reserve a fee for a job that cannot run.
         self._mark_not_built(decision, "no owned BPO or BPC: buy the BPO first")
@@ -1156,11 +1156,11 @@ class ChainPlanner:
         (`busy_bpo_type_ids`, also when the snapshot dropped it) gets no copy
         and is not flagged for purchase: it is owned, only busy.
 
-        The plan's ledger (Task 14): `copy_claims` are the T1 BPOs this row
+        The plan's ledger: `copy_claims` are the T1 BPOs this row
         claimed to copy ((key, asset), score order, never one in research,
         manufacture or another row's copy); the free T1 BPCs it invents from
         are claimed here, after every manufacture took its own. Without a
-        copy BPO but with T1 BPCs the row invents from them (I4); a T1 BPO
+        copy BPO but with T1 BPCs the row invents from them; a T1 BPO
         that is owned but claimed by another job is not a purchase. A
         direct call without a ledger books on a fresh one."""
         if ledger is None:
@@ -1174,7 +1174,7 @@ class ChainPlanner:
             )
             return
         if bpo_assets_by_type_id.get(bp_type_id):
-            # A free owned T2 BPO builds the item: no invention (I2).
+            # A free owned T2 BPO builds the item: no invention.
             decision.pipeline_stage = "manufacturing"
             return
         if bp_type_id in busy_bpo_type_ids:
@@ -1188,7 +1188,7 @@ class ChainPlanner:
         bpcs = self._claim_invention_bpcs(ledger, decision, t1_bp_type_id) if t1_bp_type_id is not None else []
         need = _whole_attempts(decision.overview_row)
         if copies and need is not None and sum(runs for _k, _i, runs in bpcs) >= need:
-            # Fix round 3: phase B counted a BPC as used by a T1 row (its
+            # Phase B counted a BPC as used by a T1 row (its
             # variant names it) that in the end built from something else;
             # the BPCs claimed here cover the attempts, so the copy is not
             # needed: release it, and the stage follows what happens.
@@ -1196,7 +1196,7 @@ class ChainPlanner:
                 ledger.release(key, decision.type_id)
             copies = []
         if not copies and not bpcs and t1_bp_type_id is not None:
-            # Fix round 2: phase B planned no copy, yet no BPC was left in the
+            # Phase B planned no copy, yet no BPC was left in the
             # end: a free unclaimed T1 BPO copies instead.
             free = ledger.free_bpos_to_copy(t1_bp_type_id)
             if free:
@@ -1216,21 +1216,21 @@ class ChainPlanner:
             t1_invention = (blueprint_data.get(t1_bp_type_id) or {}).get("invention") or {}
             row = decision.overview_row
             # Copy first when a T1 BPO is claimed; else invent from the T1
-            # BPCs on hand only (I4).
+            # BPCs on hand only.
             decision.pipeline_stage = "copying" if copies else "invention"
             row["needs_invention"] = True
             # "We own the T1 BPO, so copy it" — the gate CharacterAssigner reads.
             row["has_t1_bpo"] = bool(copies)
-            # The T1 BPOs this row copies: one copy action each (Task 12).
+            # The T1 BPOs this row copies: one copy action each.
             row["t1_bpo_count"] = len(copies)
             row["t1_bpo_item_ids"] = [research_first.item_id(a) for _k, a in copies]
-            # One invention job per BPC, of at most its runs (I2): the free
+            # One invention job per BPC, of at most its runs: the free
             # BPCs this row claimed, as [item_id, runs], most runs first.
             row["t1_bpc_runs_by_item"] = [[item, runs] for _k, item, runs in bpcs]
             row["t1_bpc_runs_on_hand"] = sum(runs for _k, _item, runs in bpcs)
             # Runs per copy are capped at the SDE maxProductionLimit (None: unknown).
             row["t1_max_runs_per_copy"] = _max_runs_per_job(blueprint_data.get(t1_bp_type_id) or {})
-            # The SDE copy time per run (Task A item 5): with the runs per
+            # The SDE copy time per run: with the runs per
             # copy it caps the copies per job (30-day job limit).
             row["t1_copy_seconds_per_run"] = _copy_seconds(blueprint_data.get(t1_bp_type_id) or {})
             row["invention_materials"] = list(t1_invention.get("materials") or [])
@@ -1252,7 +1252,7 @@ class ChainPlanner:
             decision.overview_row["replan_on"] = {"kind": "t2", "t1": t1_bp_type_id, "blocked": "bpo"}
         elif t1_bp_type_id is not None and ledger.bpc_claim_labels(t1_bp_type_id):
             # Owned T1 BPCs, all taken by other jobs today, and no BPO: not
-            # a purchase either (fix round 2).
+            # a purchase either.
             holders = _holders(ledger.bpc_claim_labels(t1_bp_type_id))
             self._skip_bpo_analysis(decision, f"the T1 BPCs ({t1_bp_type_id}) are used by {holders} today: owned")
             self._mark_not_built(decision, _t2_blocked_reason("bpcs", t1_bp_type_id, holders))
@@ -1281,7 +1281,7 @@ class ChainPlanner:
                 as_invention_enabler=True,
             )
             # Nothing can build it in this plan: a manufacture action would
-            # buy its materials for a job that cannot run (I2).
+            # buy its materials for a job that cannot run.
             t1_name = str((blueprint_data.get(t1_bp_type_id) or {}).get("type_name") or "") if t1_bp_type_id else ""
             purchase = (
                 f"buy a T1 BPO ({f'{t1_name}, ' if t1_name else ''}{t1_bp_type_id}) first to copy and invent"
@@ -1341,20 +1341,20 @@ class ChainPlanner:
         from the kept BPO row (`kept_row` for a variant; the row itself
         otherwise).
 
-        Several BPOs of the type (Task 8c fix round 4): when the researched
+        Several BPOs of the type: when the researched
         BPO is not the one the row is priced from, the row builds as usual
         (mode other_bpo). When it is, the batch builds from another BPO: at
         the same ME/TE from the row itself, else from that BPO's own variant
-        row (its materials, cost and profit), else (fix round 5: the producer
+        row (its materials, cost and profit), else (the producer
         emits no per-BPO row with build-from-BPC on) sized by the planner
         from the SDE at that BPO's ME (_size_on_other_bpo); never at the
         priced BPO's ME.
 
-        A priced BPO installed in an active industry job (fix round 5) is
+        A priced BPO installed in an active industry job is
         unavailable the same way, but unconditionally (`unconditional`): it
         does not wait for a research slot.
 
-        `taken` (Task 14): {BPO index: the job} for the BPOs another row's
+        `taken`: {BPO index: the job} for the BPOs another row's
         job has claimed in the plan's ledger (a copy). Unavailable like a
         busy BPO, with that job in the reason; research_first records the
         BPO index it builds from (`build_index`) for the ledger."""
@@ -1489,8 +1489,8 @@ class ChainPlanner:
                 if priced_busy:
                     # A fact of this plan, not a research slot's outcome.
                     decision.pipeline_stage = NOT_BUILT_STAGE
-                    # The same persisted suffix as _mark_not_built (Task 13
-                    # carry 2); its note is f"{reason}: not built from it in
+                    # The same persisted suffix as _mark_not_built;
+                    # its note is f"{reason}: not built from it in
                     # this plan". Not routed through _mark_not_built, which
                     # would drop the unsized note and the shopping-list note.
                     decision.decision_reason = (
@@ -1498,7 +1498,7 @@ class ChainPlanner:
                     )
                     row["not_built_suffix"] = f"; not built: {cause}{unsized_note}"
                     if priced in taken:
-                        # Task A item 6: another row's job holds the BPO; when
+                        # Another row's job holds the BPO; when
                         # that job gets no slot the row is re-planned.
                         row["replan_on"] = {"kind": "t1_bpo", "cause": cause}
             note = row["research_first"]["note"]
@@ -1512,7 +1512,7 @@ class ChainPlanner:
         market_depth_cache: dict[int, Any],
     ) -> tuple[dict[str, Any] | None, str | None, str | None]:
         """The kept row rebuilt on another owned BPO that has no producer row
-        of its own (Task 8c fix round 5): (row, None, which bonuses were
+        of its own: (row, None, which bonuses were
         applied, for the note), or (None, why, None).
 
         The row's owned-BPC job segments keep their own materials; the runs
@@ -1653,14 +1653,14 @@ class ChainPlanner:
         quantity the batch actually consumes. `row` is the parent row to
         size from (default: the decision's).
 
-        The plan's ledger (Task 14): a component is requested only when a
+        The plan's ledger: a component is requested only when a
         BPO of it is unclaimed (not in research, a copy or a manufacture
         today), and never when the component is a top-level build row
         itself (one ItemDecision per type_id). Otherwise the parent buys
         its full need and its persisted reason says why. A request carries
         the unclaimed BPOs: as many of its jobs run in parallel.
 
-        The "component bought" reason (M8) is kept on the row
+        The "component bought" reason is kept on the row
         (`component_buy_reasons`, {type_id: reason}) and only when corp
         stock does not cover the need; CharacterAssigner adds it to the
         persisted reason only when a manufacture action actually buys it.
@@ -1678,7 +1678,7 @@ class ChainPlanner:
         """
         row = decision.overview_row if row is None else row
         if decision.pipeline_stage in ("copying", "invention"):
-            # No T2 BPC yet (Task 12 fix round 4): the parent gets no
+            # No T2 BPC yet: the parent gets no
             # manufacture action, so its components are not sub-built either.
             logger.info(
                 "ChainPlanner: type_id=%s: stage %s, no sub-builds until a T2 BPC exists",
@@ -1729,7 +1729,7 @@ class ChainPlanner:
             else:
                 unclaimed = list(bpo_assets_by_type_id[mat_blueprint_type_id])
             # Whether the plan buys it is judged on the need pooled across
-            # every parent (fix round 2, M8): plan_chain drops the reasons
+            # every parent: plan_chain drops the reasons
             # of the components the pooled corp stock covers.
             reasons = decision.overview_row.setdefault("component_buy_reasons", {})
             if not unclaimed or int(mat_type_id) in top_level_build_types:
@@ -1751,16 +1751,16 @@ class ChainPlanner:
                 "blueprint_type_id": mat_blueprint_type_id,
                 # Lowest known ME of the unclaimed BPOs; None = none known, so resolution buys.
                 "blueprint_me": _lowest_known_me(unclaimed),
-                # Its jobs run in parallel on at most this many BPOs (minor 4).
+                # Its jobs run in parallel on at most this many BPOs.
                 "bpo_count": len(unclaimed),
                 "quantity": quantity,
                 # The component's fee per run as the parent's producer row
-                # priced it (fix round 1): used when the component has no
+                # priced it: used when the component has no
                 # overview row of its own.
                 "parent_fee_per_run": _non_negative((entries.get(mat_type_id) or {}).get("component_job_fee_per_run")),
-                # Why the parent's producer could not price it (8b fix round 1).
+                # Why the parent's producer could not price it.
                 "parent_fee_unknown_reason": (entries.get(mat_type_id) or {}).get("component_job_fee_per_run_unknown_reason"),
-                # Named in the buy reason when this parent's fee is unknown (Task 15 fix round 4).
+                # Named in the buy reason when this parent's fee is unknown.
                 "parent_type_name": str(decision.type_name),
                 **facility_bonus.sub_job_facility_reductions(profile, entries.get(mat_type_id)),
             })
@@ -1821,7 +1821,7 @@ class ChainPlanner:
         if sub_cost is None or market_cost is None:
             return None  # Can't compare -> default to buy
         # The install fee per run: the component's own overview row, else the
-        # figure its parent published (D4, fix round 1). Building pays it, so
+        # figure its parent published. Building pays it, so
         # build-vs-buy counts it. Unknown: compared on materials alone, as
         # before, and the fee shows unknown in Capital Reserved.
         fee_per_run = self._component_fee_per_run(mat_type_id, phase1_data)
@@ -1836,7 +1836,7 @@ class ChainPlanner:
             if install_fee is None else None
         )
         if install_fee is None:
-            # Task 15 fix round 3: a build cost without its fee is a lower
+            # A build cost without its fee is a lower
             # bound, so the component is bought, the producer's rule
             # (IndustryService._build_cost_unknown_reason).
             why = fee_unknown_reason or "no fee published; refresh the product overview"
@@ -1853,7 +1853,7 @@ class ChainPlanner:
             return None
         # Linear pricing, so the per-job costs sum to sub_cost exactly.
         # One job per unclaimed BPO runs today; the rest wait on the same
-        # BPOs, one after the other (minor 4): job i follows job i - bpos.
+        # BPOs, one after the other: job i follows job i - bpos.
         bpos = max(1, int(request.get("bpo_count") or 1))
         job_batches = [
             {
@@ -2314,7 +2314,7 @@ class _NoMetaGroups:
 
 def _whole_attempts(row: dict[str, Any]) -> int | None:
     """The producer's whole invention attempts for the row: whole_attempts,
-    its parallel lanes' total when they run (Task 12 fix round 2), else the
+    its parallel lanes' total when they run, else the
     best inventor's; None unknown."""
     value = (orow.get_invention_costs(row) or {}).get("whole_attempts")
     if not isinstance(value, bool) and isinstance(value, (int, float)) and value > 0:
@@ -2323,10 +2323,10 @@ def _whole_attempts(row: dict[str, Any]) -> int | None:
 
 
 def _pick_bpcs(free: list[tuple[Any, int | None, int]], need: int | None) -> list[tuple[Any, int | None, int]]:
-    """The whole BPCs an invention claims, best fit (M7): while attempts are
+    """The whole BPCs an invention claims, best fit: while attempts are
     still needed, the smallest BPC that covers the rest, else the largest.
     All of them when the need is unknown. One function for phase B's copy
-    decision and phase C's claim (fix round 2), so both pick the same."""
+    decision and phase C's claim, so both pick the same."""
     left_bpcs = sorted((e for e in free if e[2] > 0), key=lambda e: (-e[2], str(e[0])))
     if need is None:
         return left_bpcs
@@ -2447,7 +2447,7 @@ def _append_reason(decision: ItemDecision, reason: str) -> None:
 def _one_decision_per_type(
     top_level: list[ItemDecision], subs: list[ItemDecision],
 ) -> list[ItemDecision]:
-    """The plan's decisions with one ItemDecision per type_id (Task 14).
+    """The plan's decisions with one ItemDecision per type_id.
 
     A component that is a top-level BUILD row is never sub-built (its parent
     buys it: _collect_sub_manufacture_requests), so a collision here is a
@@ -2461,8 +2461,8 @@ def _one_decision_per_type(
         sub = sub_by_type.get(int(decision.type_id))
         if sub is not None and decision.decision != "build":
             _append_reason(sub, f"as a product: {decision.decision} ({decision.decision_reason})")
-            # M4: the persisted item keeps the product's own figures, and
-            # whether its ISK/h is an upper bound (Task 15 fix round 4), so
+            # The persisted item keeps the product's own figures, and
+            # whether its ISK/h is an upper bound, so
             # isk_per_hour_is_upper_bound is persisted with that ISK/h.
             for name in ("adjusted_score", "isk_per_hour", "margin_pct", "days_of_supply_current",
                          "effective_velocity", "velocity_unknown_reason", "meta_group_id",
@@ -2613,7 +2613,7 @@ def _blueprint_efficiency(asset: Any, kind: str) -> int | None:
 
 def _unknown_fee_buy_reasons(request: dict[str, Any], own_row_reason: str | None) -> dict[int, str]:
     """{parent type_id: reason} for a component bought because the merged
-    sub job's install fee is unknown (Task 15 fix round 4). Only a parent
+    sub job's install fee is unknown. Only a parent
     whose own published fee is unknown is told so; the others learn that
     the one sub job they share is unpriced. The component's own row reason
     wins over a parent's, as for the fee itself."""
